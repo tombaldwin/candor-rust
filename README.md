@@ -1,8 +1,27 @@
 # candor
 
-A type-aware **capability/effect checker for Rust**, built as a [dylint](https://github.com/trailofbits/dylint) lint.
+**A cheap, honest map of what every function in a Rust codebase actually does** — which functions
+reach the network, the filesystem, a database, the clock, the environment; and, crucially, where it
+*can't* tell. A type-aware capability/effect checker built as a
+[dylint](https://github.com/trailofbits/dylint) lint.
 
-It answers two questions about a Rust codebase:
+## Why it's built for AI coding agents
+
+An AI agent has no memory between sessions and pays per token to read code, so it re-derives "what
+does this do?" from scratch every time it touches a codebase — slowly, and sometimes wrongly. candor
+precompiles that into a structured report it can read in seconds instead of tracing call chains
+across thousands of lines. In a controlled pilot ([EVAL.md](EVAL.md)) a JSON-only agent scoped a
+cross-cutting refactor **~3× cheaper and ~6.5× faster** than one reading source. Two properties make
+it safe for an agent to *rely* on:
+
+- **It's transitive.** A handler that does no I/O itself still reports `{ Net, Fs }` if something
+  five calls deep does — so the agent sees an edit's real blast radius without following the chain.
+- **It's honest about its blind spots.** A call candor can't resolve is marked `Unknown`, never
+  silently assumed pure — so the agent knows exactly where the report is authoritative and where it
+  must read source. The same report is also a deterministic guard on agent-*written* code: it catches
+  a change that makes a previously-pure function start hitting the network.
+
+Concretely, it answers two questions about a codebase:
 
 1. **What effects does each function actually perform?** — network (AWS SDK, `reqwest`/`ureq`/`isahc`
    HTTP, raw `std`/`tokio` sockets), databases (`sqlx`/`rusqlite`/`postgres`/…), local IPC
@@ -32,10 +51,10 @@ cargo build                              # builds the lint; first build download
 
 The build produces `target/debug/libcandor@<toolchain>-<platform>.dylib` (`.so` on Linux).
 
-## Use
+## Quick start (humans)
 
-The easy way — put this repo on `PATH` (or symlink `cargo-candor` into one) and use the wrapper,
-which finds/builds the dylib for you:
+Put this repo on `PATH` (or symlink `cargo-candor` into one) and use the wrapper, which finds and
+builds the dylib for you:
 
 ```sh
 cargo candor audit                      # report each function's effect set
@@ -45,7 +64,39 @@ cargo candor strict   my_module         # conformance, scoped to a module
 cargo candor no-ambient my_module       # flag direct ambient-authority use
 ```
 
-The explicit way — from any Rust project root, with `LINT` set to the dylib's absolute path:
+## Quick start (AI agents)
+
+Generate a machine-readable report, then *query it* instead of reading source. One JSON file is
+written per crate, named `<prefix>.<crate>.<type>.json`:
+
+```sh
+cargo candor snapshot /tmp/candor
+# or explicitly:  CANDOR_JSON=/tmp/candor cargo dylint --lib-path "$LINT"
+```
+
+Each entry:
+
+```json
+{ "fn": "app::App::handle_key", "loc": "src/app.rs:2987:5",
+  "inferred": ["Fs", "Net", "Unknown"],   // full TRANSITIVE effect set
+  "direct":   ["Log"],                      // effects in this function's own body
+  "declared": [], "undeclared": [], "overdeclared": [],
+  "unresolved": true }                      // true => some calls could not be resolved
+```
+
+How to use it — the agent contract:
+
+- **Blast radius of editing a function** → read its `inferred`.
+- **Which functions touch the network?** → `inferred` contains `"Net"`:
+  `jq '.[] | select(.inferred | index("Net")) | .fn' /tmp/candor.*.json`
+- **Safe to treat as pure (e.g. test without mocks)?** → `inferred == []` *and* `unresolved == false`.
+- **Trust boundary (read this):** `inferred` is authoritative for what candor resolved. When
+  `unresolved` is `true` (or `"Unknown"` is in the set), the list may be incomplete — read the source
+  for *those* functions. candor never claims certainty it doesn't have; lean on that honesty.
+
+## All modes (explicit invocation)
+
+From any Rust project root, with `LINT` set to the dylib's absolute path:
 
 ```sh
 # AUDIT (default): every function's transitive effect set. No code changes needed.
@@ -120,8 +171,9 @@ guard: snapshot the effect report, commit it, and fail CI when a function's effe
 # once, on a known-good commit — then `git add .candor/`
 CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LINT"
 
-# in CI (deny warnings so AS-EFF-005 fails the build):
-CANDOR_BASELINE=.candor/baseline RUSTFLAGS="-D warnings" cargo dylint --lib-path "$LINT"
+# in CI: fail only on AS-EFF-005 (a function gained an effect) — see examples/candor-guard.yml
+out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LINT" 2>&1); echo "$out"
+echo "$out" | grep -q AS-EFF-005 && { echo "effect surface grew"; exit 1; } || true
 ```
 
 Now a PR that makes a parser suddenly open a socket, or a render function start reading the
@@ -129,22 +181,14 @@ filesystem, fails review automatically — no tokens, no rewrite. Refresh the ba
 (re-run the snapshot command) when a new effect is intended. This is equally useful to a human
 reviewer and to an AI agent reviewing a diff.
 
-## Machine-readable for agents
+## How well does it actually help an agent? (the honest version)
 
-The JSON report is meant to be consumed by tools and AI agents, not just read. In one test, an agent
-given **only** the JSON for an 8k-line codebase (and forbidden from reading source) scoped a
-cross-cutting "add retry + logging to every network call" refactor — locating all 66 direct-network
-functions by `file:line`, finding 66/66 unlogged, and — using the `unresolved` flag — correctly
-listing the functions where source review is still required. It did this in ~22k tokens without
-opening a single `.rs` file. That is the point of `Unknown`/`unresolved`: it lets a consumer be
-honest about the report's own blind spots. (Exact counts from that early run predate the `reqwest`
-and CHA work below, so they no longer match current output — treat them as illustrative.)
-
-A follow-up controlled pilot (**[EVAL.md](EVAL.md)**) pitted a JSON-only agent against a
-source-only one on the same task: the JSON was ~3× cheaper and ~6.5× faster — but the source-only
-agent was more *accurate*, catching `reqwest` HTTP calls candor had silently missed. That found a
-real classifier gap (since fixed). Honest takeaway: the report is cheap and useful, but only as
-correct as its classifier.
+A controlled pilot ([EVAL.md](EVAL.md)) pitted a JSON-only agent against a source-only one on the
+same scoping task. The JSON was ~3× cheaper and ~6.5× faster — *and* it surfaced a real lesson: the
+source-only agent was more **accurate** in one spot, because candor had silently misclassified some
+`reqwest` HTTP calls (a classifier gap, since fixed). So: the report is cheap and genuinely useful,
+but **only as correct as its classifier** — which is exactly why `Unknown`/`unresolved` exists, and
+why an agent should treat flagged-uncertain functions as "go read the source," not "trust me."
 
 ## Unresolved calls (honest soundness)
 
