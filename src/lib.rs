@@ -34,8 +34,9 @@ use rustc_middle::ty::TyCtxt;
 dylint_linting::impl_late_lint! {
     /// ### What it does
     /// Reports, for each function, the transitive set of capabilities/effects it
-    /// exercises (network, filesystem, process spawn, env, clock, logging, clipboard),
-    /// resolved from callee `DefId`s and propagated through local calls.
+    /// exercises — Net, Fs, Exec, Env, Clock, Log, Clipboard, Rand, Db, Ipc, plus
+    /// `Unknown` for calls it can't resolve — by classifying callee `DefId`s and
+    /// propagating along local calls.
     ///
     /// ### Why is this bad?
     /// It isn't — it's an audit. It makes a function's effect surface legible from its
@@ -214,6 +215,8 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     }
     // Database clients. Like the AWS/HTTP builders, only the execution verbs are I/O;
     // query *construction* is pure. Best-effort across crates (tune via CANDOR_CONFIG).
+    // Note: bare `::query` is deliberately omitted — it executes in postgres/rusqlite but
+    // only *builds* in sqlx, so including it would false-positive sqlx's `query()` builder.
     const DB_CRATES: [&str; 11] = [
         "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
         "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
