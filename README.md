@@ -46,9 +46,11 @@ cargo candor no-ambient my_module       # flag direct ambient-authority use
 
 ## Quick start (AI agents)
 
-One paste, from nothing — tell your coding agent (Claude Code, Cursor, …):
+One paste, from nothing — give your coding agent (Claude Code, Cursor, …) this:
 
-> **Read https://github.com/tombaldwin/candor/blob/main/AGENTS.md and follow it to map this repo's effects.**
+```text
+Read https://github.com/tombaldwin/candor/blob/main/AGENTS.md and follow it to map this repo's effects.
+```
 
 **[AGENTS.md](AGENTS.md)** is the single source of truth for agents: a self-contained block that
 installs candor, runs it on the current project, and explains how to read the report — including the
