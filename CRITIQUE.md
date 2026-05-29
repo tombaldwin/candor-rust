@@ -48,7 +48,9 @@ That is the part worth keeping.
    hand-maintained.)*
 
 4. **Effect granularity is coarse.** `Net` lumps all network; `Fs` doesn't split read vs write.
-   Too blunt for real capability security. *(Not fixed.)*
+   Too blunt for real capability security. *(Partially addressed: effect *classes* broadened —
+   `Db` and `Ipc` are now distinct from `Net`. The intra-class split (`Fs` read vs write) is still
+   deferred — it breaks committed baselines and the `&Fs` token model; see `BACKLOG.md`.)*
 
 5. **Adoption is viral.** Threading tokens to honour the discipline cascades up the whole call graph
    (measured on ebman). High churn for an advisory, partially-sound guarantee. *(Sidestepped:

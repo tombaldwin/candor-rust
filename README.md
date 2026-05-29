@@ -5,8 +5,9 @@ A type-aware **capability/effect checker for Rust**, built as a [dylint](https:/
 It answers two questions about a Rust codebase:
 
 1. **What effects does each function actually perform?** — network (AWS SDK, `reqwest`/`ureq`/`isahc`
-   HTTP, raw `std`/`tokio` sockets), filesystem, process spawn, env reads, clock reads, randomness,
-   logging, clipboard — including effects inherited transitively through the functions it calls.
+   HTTP, raw `std`/`tokio` sockets), databases (`sqlx`/`rusqlite`/`postgres`/…), local IPC
+   (Unix-domain sockets), filesystem, process spawn, env reads, clock reads, randomness, logging,
+   clipboard — including effects inherited transitively through the functions it calls.
 2. **Are the signatures honest?** — once you thread explicit capability tokens through a module,
    it flags any function that performs an effect it does not declare.
 

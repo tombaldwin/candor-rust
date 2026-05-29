@@ -63,7 +63,8 @@ pub struct Candor {
 /// Effects that represent *ambient authority* — a global resource reachable just by
 /// naming it (vs. a capability you must be handed). These are what `CANDOR_NO_AMBIENT`
 /// and cap-std care about. `Log` is intentionally excluded (not an authority).
-const AMBIENT: [&str; 7] = ["Net", "Fs", "Exec", "Env", "Clock", "Clipboard", "Rand"];
+const AMBIENT: [&str; 9] =
+    ["Net", "Fs", "Exec", "Env", "Clock", "Clipboard", "Rand", "Db", "Ipc"];
 
 impl Candor {
     pub fn new() -> Self {
@@ -197,6 +198,11 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "ureq" && path.ends_with("::call") {
         return Some("Net");
     }
+    // Local IPC (Unix-domain sockets) is I/O but not *network* — keep it distinct so
+    // CANDOR_NO_AMBIENT and audits don't conflate it with internet access.
+    if path.starts_with("tokio::net::Unix") || path.starts_with("std::os::unix::net") {
+        return Some("Ipc");
+    }
     // Raw sockets. Match the I/O *types* only — `std::net` also holds pure data types
     // (SocketAddr, IpAddr, …) whose construction must NOT be flagged.
     if path.starts_with("std::net::TcpStream")
@@ -206,7 +212,24 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     {
         return Some("Net");
     }
-    if path.starts_with("std::fs::") || path.starts_with("tokio::fs::") {
+    // Database clients. Like the AWS/HTTP builders, only the execution verbs are I/O;
+    // query *construction* is pure. Best-effort across crates (tune via CANDOR_CONFIG).
+    const DB_CRATES: [&str; 11] = [
+        "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
+        "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
+    ];
+    if DB_CRATES.contains(&crate_name) {
+        const VERBS: [&str; 16] = [
+            "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
+            "::fetch_all", "::fetch_optional", "::fetch", "::connect", "::acquire",
+            "::begin", "::commit", "::rollback", "::load", "::get_result", "::get_results",
+        ];
+        if VERBS.iter().any(|v| path.ends_with(v)) {
+            return Some("Db");
+        }
+        return None;
+    }
+    if path.starts_with("std::fs::") || path.starts_with("tokio::fs::") || crate_name == "memmap2" {
         return Some("Fs");
     }
     // Randomness / entropy. getrandom + fastrand are effectful end-to-end; `rand` also
@@ -235,7 +258,8 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     None
 }
 
-const EFFECTS: [&str; 8] = ["Net", "Fs", "Exec", "Env", "Clock", "Log", "Clipboard", "Rand"];
+const EFFECTS: [&str; 10] =
+    ["Net", "Fs", "Exec", "Env", "Clock", "Log", "Clipboard", "Rand", "Db", "Ipc"];
 
 fn cap_from_name(name: &str) -> Option<&'static str> {
     EFFECTS.iter().copied().find(|e| *e == name)
@@ -262,22 +286,37 @@ fn declared_caps(tcx: TyCtxt<'_>, def_id: LocalDefId) -> BTreeSet<&'static str> 
     out
 }
 
-/// Nearest enclosing *named* function of `hir_id`, walking up out of closures so that
-/// effects performed inside an inline closure are charged to the function that owns it.
+/// Items we attribute effects to and report on: functions, plus const/static
+/// initializers (a `static X: T = effectful();` performs its effect at init).
+fn is_reportable_item(dk: DefKind) -> bool {
+    matches!(
+        dk,
+        DefKind::Fn
+            | DefKind::AssocFn
+            | DefKind::Const { .. }
+            | DefKind::AssocConst { .. }
+            | DefKind::Static { .. }
+    )
+}
+
+/// Nearest enclosing reportable item of `hir_id`, walking up out of closures so that
+/// effects performed inside an inline closure are charged to the item that owns it.
 fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
     let mut owner = tcx.hir_enclosing_body_owner(hir_id);
     loop {
-        match tcx.def_kind(owner.to_def_id()) {
-            DefKind::Fn | DefKind::AssocFn => return Some(owner),
-            DefKind::Closure => {
-                let closure_hir = tcx.local_def_id_to_hir_id(owner);
-                let parent = tcx.hir_enclosing_body_owner(closure_hir);
-                if parent == owner {
-                    return None;
-                }
-                owner = parent;
+        let dk = tcx.def_kind(owner.to_def_id());
+        if is_reportable_item(dk) {
+            return Some(owner);
+        }
+        if matches!(dk, DefKind::Closure) {
+            let closure_hir = tcx.local_def_id_to_hir_id(owner);
+            let parent = tcx.hir_enclosing_body_owner(closure_hir);
+            if parent == owner {
+                return None;
             }
-            _ => return None,
+            owner = parent;
+        } else {
+            return None;
         }
     }
 }
@@ -330,9 +369,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         for f in self.calls.keys() {
             eff.entry(*f).or_default();
         }
-        // Seed every function so over-declaration (declared-but-unused) is covered too.
+        // Seed every reportable item so over-declaration (declared-but-unused) is covered.
         for owner in cx.tcx.hir_body_owners() {
-            if matches!(cx.tcx.def_kind(owner.to_def_id()), DefKind::Fn | DefKind::AssocFn) {
+            if is_reportable_item(cx.tcx.def_kind(owner.to_def_id())) {
                 eff.entry(owner).or_default();
             }
         }
@@ -395,9 +434,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let mut json_entries: Vec<String> = Vec::new();
 
         for f in items {
+            let span = cx.tcx.def_span(f);
+            // Skip macro-generated items (e.g. tracing's `__CALLSITE` statics): they're
+            // not code the developer wrote or can edit, and would flood the report.
+            if span.from_expansion() {
+                continue;
+            }
             let effs = &eff[&f];
             let name = cx.tcx.def_path_str(f.to_def_id());
-            let span = cx.tcx.def_span(f);
             let declared = declared_caps(cx.tcx, f);
             let direct = self.direct.get(&f).cloned().unwrap_or_default();
             let has_unknown = effs.contains(UNKNOWN);
@@ -476,8 +520,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
             // Conformance (CANDOR_STRICT): inferred ⊆ declared.
             if in_scope(strict_var.as_deref(), &name) {
-                // AS-EFF-001: performs an effect it does not declare.
-                if !undeclared.is_empty() {
+                // AS-EFF-001: performs an effect it does not declare. `main` is exempt —
+                // it's the entry point that legitimately mints/holds the whole bundle.
+                if !undeclared.is_empty() && name != "main" {
                     let have = if declared.is_empty() {
                         "no capabilities".to_string()
                     } else {
@@ -610,6 +655,23 @@ mod tests {
         // ...but the pure data types living alongside them must NOT be flagged.
         assert_eq!(classify("std", "std::net::SocketAddr::new"), None);
         assert_eq!(classify("std", "std::net::Ipv4Addr::new"), None);
+        // Unix-domain sockets are local IPC, not network.
+        assert_eq!(classify("tokio", "tokio::net::UnixStream::connect"), Some("Ipc"));
+        assert_eq!(classify("std", "std::os::unix::net::UnixStream::connect"), Some("Ipc"));
+    }
+
+    #[test]
+    fn classify_databases() {
+        // Execution verbs are Db I/O...
+        assert_eq!(classify("sqlx", "sqlx::Pool::acquire"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::execute"), Some("Db"));
+        assert_eq!(classify("postgres", "postgres::Client::query_one"), Some("Db"));
+        assert_eq!(classify("diesel", "diesel::RunQueryDsl::get_results"), Some("Db"));
+        // ...but pure row/value accessors in the same crate are not.
+        assert_eq!(classify("rusqlite", "rusqlite::Row::get"), None);
+        assert_eq!(classify("sqlx", "sqlx::Column::name"), None);
+        // memmap2 is filesystem-backed.
+        assert_eq!(classify("memmap2", "memmap2::MmapOptions::map"), Some("Fs"));
     }
 
     #[test]
