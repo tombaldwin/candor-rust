@@ -5,6 +5,10 @@ authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
 description = "A type-aware capability/effect checker for Rust, as a dylint lint."
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/tombaldwin/candor"
+readme = "README.md"
+keywords = ["lint", "dylint", "effects", "capabilities", "audit"]
+categories = ["development-tools"]
 publish = false
 
 [lib]

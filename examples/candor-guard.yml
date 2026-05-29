@@ -23,10 +23,8 @@ jobs:
         run: cargo install cargo-dylint dylint-link
 
       - name: Fetch + build candor
-        # candor is currently a private repo: provide a token with read access.
-        # For a public mirror, drop the token line.
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.CANDOR_TOKEN }}@github.com/tombaldwin/candor ~/candor
+          git clone --depth 1 https://github.com/tombaldwin/candor ~/candor
           ( cd ~/candor && cargo build )
 
       - name: Effect regression guard

@@ -194,8 +194,13 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
   through *local* traits); `CANDOR_PARANOID` flags the rest at the cost of noise.
 - Logging via macros is deduped per function but counts every function that logs.
 
-See **[CRITIQUE.md](CRITIQUE.md)** for an honest, critical assessment and comparison to prior art
-(Cackle, cap-std, the Rust effects initiative).
+## Documentation
+
+- **[PRINCIPLES.md](PRINCIPLES.md)** — the ideas candor (and its development) are built on.
+- **[CRITIQUE.md](CRITIQUE.md)** — an honest, critical self-assessment + comparison to prior art
+  (Cackle, cap-std, the Rust effects initiative).
+- **[EVAL.md](EVAL.md)** — a controlled pilot of whether the report actually helps an AI agent.
+- **[BACKLOG.md](BACKLOG.md)** — what's done, what's deferred, and the concrete reason for each.
 
 ## Tests
 
@@ -218,3 +223,7 @@ existing effectful functions (config/baseline reads + the report write, all `Env
 *regressions in existing functions*, not brand-new functions (those are reviewed as new code), so a
 newly-added effectful function wouldn't trip it. Refresh with `cargo candor snapshot .candor/baseline`
 when a new effect is intended.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
