@@ -1,38 +1,18 @@
 # candor
 
 **A cheap, honest map of what every function in a Rust codebase actually does** — which functions
-reach the network, the filesystem, a database, the clock, the environment; and, crucially, where it
-*can't* tell. A type-aware capability/effect checker built as a
+reach the network, filesystem, a database, subprocesses, the clock, the environment; *transitively*;
+and where it honestly *can't* tell. A capability/effect checker built as a
 [dylint](https://github.com/trailofbits/dylint) lint.
 
-## Why it's built for AI coding agents
+**Built for AI coding agents.** An agent re-derives "what does this do?" every session and pays per
+token to read code. candor precompiles it into a report read in seconds — and marks calls it can't
+resolve `Unknown` rather than guessing. In a pilot ([EVAL.md](EVAL.md)) a JSON-only agent scoped a
+refactor ~3× cheaper and ~6.5× faster than one reading source.
 
-An AI agent has no memory between sessions and pays per token to read code, so it re-derives "what
-does this do?" from scratch every time it touches a codebase — slowly, and sometimes wrongly. candor
-precompiles that into a structured report it can read in seconds instead of tracing call chains
-across thousands of lines. In a controlled pilot ([EVAL.md](EVAL.md)) a JSON-only agent scoped a
-cross-cutting refactor **~3× cheaper and ~6.5× faster** than one reading source. Two properties make
-it safe for an agent to *rely* on:
-
-- **It's transitive.** A handler that does no I/O itself still reports `{ Net, Fs }` if something
-  five calls deep does — so the agent sees an edit's real blast radius without following the chain.
-- **It's honest about its blind spots.** A call candor can't resolve is marked `Unknown`, never
-  silently assumed pure — so the agent knows exactly where the report is authoritative and where it
-  must read source. The same report is also a deterministic guard on agent-*written* code: it catches
-  a change that makes a previously-pure function start hitting the network.
-
-Concretely, it answers two questions about a codebase:
-
-1. **What effects does each function actually perform?** — network (AWS SDK, `reqwest`/`ureq`/`isahc`
-   HTTP, raw `std`/`tokio` sockets), databases (`sqlx`/`rusqlite`/`postgres`/…), local IPC
-   (Unix-domain sockets), filesystem, process spawn, env reads, clock reads, randomness, logging,
-   clipboard — including effects inherited transitively through the functions it calls.
-2. **Are the signatures honest?** — once you thread explicit capability tokens through a module,
-   it flags any function that performs an effect it does not declare.
-
-It works by resolving every call's `DefId` and classifying the crate/path it lands in. That type
-resolution is the whole point: a bare `.send()` is meaningless syntactically, but the resolved
-method tells us it belongs to `aws_sdk_*` → a network effect. A purely syntactic tool can't do this.
+- 🤖 **Agents → [AGENTS.md](AGENTS.md)** — one paste; installs candor and runs it on this project.
+- 🧑 **Humans → [Quick start](#quick-start-humans).**
+- Depth → [what it detects](#what-it-detects) · [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md).
 
 ## Layout
 
@@ -66,55 +46,14 @@ cargo candor no-ambient my_module       # flag direct ambient-authority use
 
 ## Quick start (AI agents)
 
-**The fastest way: tell your coding agent to use it.** Paste this into your agent (Claude Code,
-Cursor, …) once candor is set up in the repo:
+One paste, from nothing — tell your coding agent (Claude Code, Cursor, …):
 
-```text
-This repo has candor, a Rust effect checker. Use it instead of guessing what code does.
+> **Read https://github.com/tombaldwin/candor/blob/main/AGENTS.md and follow it to map this repo's effects.**
 
-1. Run:  cargo candor snapshot /tmp/candor
-   (writes one JSON file per crate: /tmp/candor.<crate>.<type>.json)
-2. Read those files. Each function entry has:
-   - "inferred":   its full TRANSITIVE effect set — any of
-                   Net, Fs, Db, Exec, Env, Clock, Ipc, Log, Rand, Clipboard
-   - "unresolved": true if some calls couldn't be traced (so the list may be incomplete)
-3. Answer "what does this function touch?" and "what's the blast radius of changing it?"
-   from "inferred" — don't trace call chains by hand.
-4. TRUST RULE: "inferred" is authoritative for what candor resolved. If "unresolved" is
-   true (or "Unknown" is in the set), READ THE SOURCE for that function before relying on
-   its effects — never assume it's pure.
-5. After you edit code, re-run step 1 and confirm no function unexpectedly gained an
-   effect (e.g. a previously-pure helper now shows "Net"). If one did, that's a bug to
-   explain or fix.
-```
-
-Under the hood — generate the report, then *query it* instead of reading source. One JSON file is
-written per crate, named `<prefix>.<crate>.<type>.json`:
-
-```sh
-cargo candor snapshot /tmp/candor
-# or explicitly:  CANDOR_JSON=/tmp/candor cargo dylint --lib-path "$LINT"
-```
-
-Each entry:
-
-```json
-{ "fn": "app::App::handle_key", "loc": "src/app.rs:2987:5",
-  "inferred": ["Fs", "Net", "Unknown"],   // full TRANSITIVE effect set
-  "direct":   ["Log"],                      // effects in this function's own body
-  "declared": [], "undeclared": [], "overdeclared": [],
-  "unresolved": true }                      // true => some calls could not be resolved
-```
-
-How to use it — the agent contract:
-
-- **Blast radius of editing a function** → read its `inferred`.
-- **Which functions touch the network?** → `inferred` contains `"Net"`:
-  `jq '.[] | select(.inferred | index("Net")) | .fn' /tmp/candor.*.json`
-- **Safe to treat as pure (e.g. test without mocks)?** → `inferred == []` *and* `unresolved == false`.
-- **Trust boundary (read this):** `inferred` is authoritative for what candor resolved. When
-  `unresolved` is `true` (or `"Unknown"` is in the set), the list may be incomplete — read the source
-  for *those* functions. candor never claims certainty it doesn't have; lean on that honesty.
+**[AGENTS.md](AGENTS.md)** is the single source of truth for agents: a self-contained block that
+installs candor, runs it on the current project, and explains how to read the report — including the
+trust rule (`inferred` is authoritative; `unresolved`/`Unknown` means *read the source*). It takes an
+agent from nothing to a queryable effect map in one go.
 
 ## All modes (explicit invocation)
 
@@ -149,6 +88,21 @@ Or register it in a project's `Cargo.toml` so plain `cargo dylint` finds it:
 [workspace.metadata.dylint]
 libraries = [{ path = "/abs/path/to/candor" }]
 ```
+
+## What it detects
+
+candor answers two questions about a codebase:
+
+1. **What effects does each function perform?** — network (AWS SDK, `reqwest`/`ureq`/`isahc`, raw
+   `std`/`tokio` sockets), databases (`sqlx`/`rusqlite`/`postgres`/…), local IPC (Unix sockets),
+   filesystem, process spawn, env, clock, randomness, logging, clipboard — including effects
+   inherited transitively through the functions it calls.
+2. **Are the signatures honest?** — once you thread capability tokens (or use cap-std) through a
+   module, it flags any function performing an effect it doesn't declare.
+
+It resolves every call's `DefId` and classifies the crate/path it lands in. That type resolution is
+the point: a bare `.send()` is meaningless syntactically, but the resolved method tells us it belongs
+to `aws_sdk_*` → a network effect.
 
 ## The capability discipline (conformance mode)
 
@@ -262,6 +216,7 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 
 ## Documentation
 
+- **[AGENTS.md](AGENTS.md)** — self-contained instructions for an AI agent (install → run → read).
 - **[PRINCIPLES.md](PRINCIPLES.md)** — the ideas candor (and its development) are built on.
 - **[CRITIQUE.md](CRITIQUE.md)** — an honest, critical self-assessment + comparison to prior art
   (Cackle, cap-std, the Rust effects initiative).
