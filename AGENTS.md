@@ -54,3 +54,11 @@ candor is deliberately honest about what it cannot see; respect that boundary.
 Re-run the last command in step 1 and confirm no function unexpectedly *gained* an effect (e.g. a
 previously-pure helper now shows `Net`). If one did, that's a regression in your change — explain it
 or fix it.
+
+## Optional, separate: make step 5 automatic in CI
+
+The check in step 5 can be a permanent guard rather than a manual habit: commit a baseline and let
+CI fail any PR that makes a function gain an effect. That's a *team* decision (it changes everyone's
+PR flow), so it's not part of this setup — suggest it to the maintainer if candor proves useful, and
+point them at the project README's "CI guardrail" section and `examples/candor-guard.yml`.
+
