@@ -1,7 +1,7 @@
 [
   {
     "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-    "loc": "src/lib.rs:327:5: 327:59",
+    "loc": "src/lib.rs:473:5: 473:59",
     "inferred": [
       "Env",
       "Fs"
@@ -20,7 +20,7 @@
   },
   {
     "fn": "Candor::new",
-    "loc": "src/lib.rs:69:5: 69:25",
+    "loc": "src/lib.rs:71:5: 71:25",
     "inferred": [
       "Env",
       "Fs"
@@ -39,7 +39,7 @@
   },
   {
     "fn": "load_baseline",
-    "loc": "src/lib.rs:115:1: 115:74",
+    "loc": "src/lib.rs:139:1: 139:74",
     "inferred": [
       "Fs"
     ],

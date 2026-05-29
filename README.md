@@ -135,9 +135,10 @@ The JSON report is meant to be consumed by tools and AI agents, not just read. I
 given **only** the JSON for an 8k-line codebase (and forbidden from reading source) scoped a
 cross-cutting "add retry + logging to every network call" refactor — locating all 66 direct-network
 functions by `file:line`, finding 66/66 unlogged, and — using the `unresolved` flag — correctly
-listing the 18 functions where source review is still required. It did this in ~22k tokens without
+listing the functions where source review is still required. It did this in ~22k tokens without
 opening a single `.rs` file. That is the point of `Unknown`/`unresolved`: it lets a consumer be
-honest about the report's own blind spots.
+honest about the report's own blind spots. (Exact counts from that early run predate the `reqwest`
+and CHA work below, so they no longer match current output — treat them as illustrative.)
 
 A follow-up controlled pilot (**[EVAL.md](EVAL.md)**) pitted a JSON-only agent against a
 source-only one on the same task: the JSON was ~3× cheaper and ~6.5× faster — but the source-only
@@ -181,6 +182,16 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
   deliberate residual unsoundness to keep the report readable (see `CRITIQUE.md`).
 - **Advisory, not enforced**: a `&Fs` token doesn't actually gate `std::fs`; candor only reports.
   For real enforcement use [cap-std](https://github.com/bytecodealliance/cap-std).
+- **Macro-generated functions are invisible.** Items whose span is from a macro expansion are
+  skipped (to drop noise like tracing's `__CALLSITE` statics) — so a function *generated* by a macro
+  (`async_trait`, derive, a declarative macro) is not analyzed in any mode. Code you wrote by hand is
+  unaffected.
+- **Capabilities must be direct parameters.** `declared_caps` recognizes a capability (`&Fs`, a
+  cap-std `&Dir`) only as a top-level parameter. A capability reached *through* a struct field
+  (`fn f(ctx: &AppContext)` where `ctx` holds the `Dir`) is not counted as declared — that function
+  would be flagged in strict mode despite holding the capability.
+- **Generic static dispatch over non-local traits** is assumed to honour its bound (CHA only sees
+  through *local* traits); `CANDOR_PARANOID` flags the rest at the cost of noise.
 - Logging via macros is deduped per function but counts every function that logs.
 
 See **[CRITIQUE.md](CRITIQUE.md)** for an honest, critical assessment and comparison to prior art
@@ -188,9 +199,11 @@ See **[CRITIQUE.md](CRITIQUE.md)** for an honest, critical assessment and compar
 
 ## Tests
 
-`cargo test` runs unit tests over the classifier's precision rules (the part most prone to
-over/under-reporting — e.g. `std::net::TcpStream` is `Net` but `std::net::SocketAddr` is not), plus
-a smoke test that the lint loads and an effect-free program yields no diagnostics. The lint also
+`cargo test` runs unit tests over the *classifier* precision rules (e.g. `std::net::TcpStream` is
+`Net` but `std::net::SocketAddr` is not) plus a load smoke-test. The **stateful core** (call-graph
+fixpoint, CHA, conformance) isn't unit-tested — it needs the dylint harness, which has no bless
+support — so it's covered instead by the `sample/`+`sample-capstd/` crates and a CI *behavioural*
+check that asserts real audit output (so a "candor emits nothing" regression fails CI). The lint also
 fails *gracefully* (never an ICE) on expressions outside a typechecked body.
 
 ## Status
@@ -199,7 +212,9 @@ Prototype. Validated on a real ~8k-line codebase (the `ebman` AWS Elastic Beanst
 audit tagged ~445 functions; a leaf module was converted to the capability discipline and brought to
 zero conformance violations while still building on stable.
 
-candor also **guards itself**: CI runs candor over candor against `.candor/baseline`, so candor's own
-effect surface (just `Env` + `Fs`, in three functions: config/baseline reads and the report write)
-can't grow unnoticed. Refresh with `cargo candor snapshot .candor/baseline` when a new effect is
-intended.
+candor also **guards itself**: CI runs candor over candor against `.candor/baseline`, so its three
+existing effectful functions (config/baseline reads + the report write, all `Env`/`Fs`) can't gain a
+*new* effect unnoticed. Note the guard's scope, honestly: per AS-EFF-005's design it flags
+*regressions in existing functions*, not brand-new functions (those are reviewed as new code), so a
+newly-added effectful function wouldn't trip it. Refresh with `cargo candor snapshot .candor/baseline`
+when a new effect is intended.

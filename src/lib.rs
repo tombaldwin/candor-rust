@@ -69,11 +69,18 @@ const AMBIENT: [&str; 9] =
 
 impl Candor {
     pub fn new() -> Self {
-        let extra = std::env::var("CANDOR_CONFIG")
-            .ok()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| parse_config(&s))
-            .unwrap_or_default();
+        // A *set-but-unreadable* CANDOR_CONFIG must be loud: silently ignoring it would
+        // make the user believe their crates are covered when they aren't.
+        let extra = match std::env::var("CANDOR_CONFIG") {
+            Ok(p) => match std::fs::read_to_string(&p) {
+                Ok(s) => parse_config(&s),
+                Err(e) => {
+                    eprintln!("candor: CANDOR_CONFIG={p:?} could not be read ({e}); ignoring it");
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        };
         let paranoid = std::env::var("CANDOR_PARANOID").is_ok();
         Self { direct: HashMap::new(), calls: HashMap::new(), extra, paranoid }
     }
@@ -111,6 +118,21 @@ struct BaselineEntry {
     #[serde(rename = "fn")]
     func: String,
     inferred: Vec<String>,
+}
+
+/// One entry of the JSON report (output). Serialized with serde so escaping is correct
+/// for any path/loc — the hand-rolled escaper missed control characters.
+#[derive(serde::Serialize)]
+struct ReportEntry {
+    #[serde(rename = "fn")]
+    func: String,
+    loc: String,
+    inferred: Vec<String>,
+    direct: Vec<String>,
+    declared: Vec<String>,
+    undeclared: Vec<String>,
+    overdeclared: Vec<String>,
+    unresolved: bool,
 }
 
 /// Load a baseline candor JSON into `fn name -> inferred effect set`.
@@ -294,7 +316,9 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if path.starts_with("std::env::") {
         return Some("Env");
     }
-    if (crate_name == "chrono" || path.starts_with("std::time::")) && path.contains("now") {
+    // Wall-clock reads. Match the `now` accessor precisely (ends_with), not any path
+    // containing the substring "now".
+    if (crate_name == "chrono" || path.starts_with("std::time::")) && path.ends_with("::now") {
         return Some("Clock");
     }
     if crate_name == "tracing" {
@@ -492,6 +516,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         //                            vs. a previously-saved report (a CANDOR_JSON snapshot).
         // Per-crate file naming, shared by JSON output, baseline input. A package emits
         // several crates SHARING a name (rlib + bin), so disambiguate by crate type too.
+        let entry_fn = cx.tcx.entry_fn(()).map(|(did, _)| did);
         let krate = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
         let kinds: String = cx
             .tcx
@@ -504,9 +529,22 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let strict_var = std::env::var("CANDOR_STRICT").ok();
         let no_ambient_var = std::env::var("CANDOR_NO_AMBIENT").ok();
         let json_path = std::env::var("CANDOR_JSON").ok();
-        let baseline = std::env::var("CANDOR_BASELINE")
-            .ok()
-            .and_then(|prefix| load_baseline(&format!("{prefix}.{krate}.{kinds}.json")));
+        // A set-but-unloadable CANDOR_BASELINE is the dangerous case: the guard would
+        // silently pass (no AS-EFF-005 ever fires). Make that loud.
+        let baseline = match std::env::var("CANDOR_BASELINE") {
+            Ok(prefix) => {
+                let file = format!("{prefix}.{krate}.{kinds}.json");
+                let loaded = load_baseline(&file);
+                if loaded.is_none() {
+                    eprintln!(
+                        "candor: CANDOR_BASELINE set but {file:?} could not be loaded — \
+                         the regression guard is NOT active"
+                    );
+                }
+                loaded
+            }
+            Err(_) => None,
+        };
         let any_enforce =
             strict_var.is_some() || no_ambient_var.is_some() || baseline.is_some();
 
@@ -514,7 +552,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let mut items: Vec<LocalDefId> = eff.keys().copied().collect();
         items.sort_by_cached_key(|f| cx.tcx.def_path_str(f.to_def_id()));
 
-        let mut json_entries: Vec<String> = Vec::new();
+        let mut json_entries: Vec<ReportEntry> = Vec::new();
+        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let owned_set = |s: &BTreeSet<&str>| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
 
         for f in items {
             let span = cx.tcx.def_span(f);
@@ -542,19 +582,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     continue;
                 }
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(span);
-                json_entries.push(format!(
-                    "  {{\"fn\": {}, \"loc\": {}, \"inferred\": {}, \"direct\": {}, \
-                     \"declared\": {}, \"undeclared\": {}, \"overdeclared\": {}, \
-                     \"unresolved\": {}}}",
-                    json_str(&name),
-                    json_str(&loc),
-                    json_set(effs),
-                    json_set(&direct),
-                    json_set(&declared),
-                    json_vec(&undeclared),
-                    json_vec(&unused),
-                    has_unknown,
-                ));
+                json_entries.push(ReportEntry {
+                    func: name,
+                    loc,
+                    inferred: owned_set(effs),
+                    direct: owned_set(&direct),
+                    declared: owned_set(&declared),
+                    undeclared: owned(&undeclared),
+                    overdeclared: owned(&unused),
+                    unresolved: has_unknown,
+                });
                 continue;
             }
 
@@ -603,9 +640,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
             // Conformance (CANDOR_STRICT): inferred ⊆ declared.
             if in_scope(strict_var.as_deref(), &name) {
-                // AS-EFF-001: performs an effect it does not declare. `main` is exempt —
-                // it's the entry point that legitimately mints/holds the whole bundle.
-                if !undeclared.is_empty() && name != "main" {
+                // AS-EFF-001: performs an effect it does not declare. The real entry
+                // point (per tcx.entry_fn) is exempt — it legitimately holds the bundle.
+                if !undeclared.is_empty() && Some(f.to_def_id()) != entry_fn {
                     let have = if declared.is_empty() {
                         "no capabilities".to_string()
                     } else {
@@ -677,9 +714,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
         if let Some(prefix) = &json_path {
             let file = format!("{prefix}.{krate}.{kinds}.json");
-            let body = format!("[\n{}\n]\n", json_entries.join(",\n"));
-            if std::fs::write(&file, body).is_ok() {
-                eprintln!("candor: wrote {} entries to {file}", json_entries.len());
+            match serde_json::to_string_pretty(&json_entries) {
+                Ok(body) => match std::fs::write(&file, body) {
+                    Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
+                    Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),
+                },
+                Err(e) => eprintln!("candor: failed to serialize report ({e})"),
             }
         }
     }
@@ -697,20 +737,6 @@ fn in_scope(var: Option<&str>, name: &str) -> bool {
         Some("1") | Some("") => true,
         Some(prefix) => name.starts_with(prefix),
     }
-}
-
-fn json_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-fn json_set(set: &BTreeSet<&str>) -> String {
-    let inner: Vec<String> = set.iter().map(|s| json_str(s)).collect();
-    format!("[{}]", inner.join(", "))
-}
-
-fn json_vec(v: &[&str]) -> String {
-    let inner: Vec<String> = v.iter().map(|s| json_str(s)).collect();
-    format!("[{}]", inner.join(", "))
 }
 
 #[test]
@@ -784,6 +810,10 @@ mod tests {
         assert_eq!(classify("std", "std::env::var"), Some("Env"));
         assert_eq!(classify("chrono", "chrono::Utc::now"), Some("Clock"));
         assert_eq!(classify("std", "std::time::SystemTime::now"), Some("Clock"));
+        assert_eq!(classify("std", "std::time::Instant::now"), Some("Clock"));
+        // ...but only the `now` accessor — not any path containing "now" / other clock fns.
+        assert_eq!(classify("chrono", "chrono::Duration::num_days"), None);
+        assert_eq!(classify("std", "std::time::Instant::elapsed"), None);
         assert_eq!(classify("getrandom", "getrandom::getrandom"), Some("Rand"));
         assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
         assert_eq!(classify("arboard", "arboard::Clipboard::set_text"), Some("Clipboard"));

@@ -34,6 +34,17 @@ jobs:
       - name: Test (unit + smoke)
         run: cargo test
 
+      # Behavioural check: the stateful core (audit + propagation) has no unit test
+      # (it needs the dylint harness), so assert real output here — this also catches a
+      # regression that makes candor emit nothing at all.
+      - name: Behavioural audit check
+        run: |
+          LIB=$(ls target/debug/libcandor@*.so)
+          out=$(cd sample && cargo dylint --lib-path "$LIB" 2>&1)
+          echo "$out"
+          echo "$out" | grep -q '`read_config` effects: { Fs }' \
+            || { echo "::error::audit output regressed (expected read_config -> Fs)"; exit 1; }
+
       # Dogfood: candor guards its OWN effect surface against regressions.
       # If candor starts performing a new effect, this fails until .candor/baseline
       # is refreshed deliberately (`cargo candor snapshot .candor/baseline`).
