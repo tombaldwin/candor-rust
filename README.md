@@ -196,8 +196,10 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 ## Known limitations
 
 - **Dynamic dispatch / fn-pointers / callbacks** can't be resolved to a concrete callee. These are
-  now surfaced honestly as `Unknown` (→ AS-EFF-003) rather than silently dropped, but candor still
-  can't tell you *which* effects hide behind them.
+  surfaced honestly as `Unknown` (→ AS-EFF-003) rather than silently dropped, but candor still can't
+  tell you *which* effects hide behind them. Exception: `dyn` over conventionally-pure std traits
+  (`Display`, `Debug`, `Error`, `ToString`, `Clone`, …) is treated as pure, not `Unknown` —
+  otherwise ubiquitous patterns like `dyn Error` formatting would flood reports with false positives.
 - **Generic static dispatch** (`t.method()` for `t: T: Trait`) is assumed to honour its bound — a
   deliberate residual unsoundness to keep the report readable (see `CRITIQUE.md`).
 - **Advisory, not enforced**: a `&Fs` token doesn't actually gate `std::fs`; candor only reports.
