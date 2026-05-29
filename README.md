@@ -201,6 +201,9 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
   (Cackle, cap-std, the Rust effects initiative).
 - **[EVAL.md](EVAL.md)** — a controlled pilot of whether the report actually helps an AI agent.
 - **[BACKLOG.md](BACKLOG.md)** — what's done, what's deferred, and the concrete reason for each.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — build/test, and how to teach the classifier a new crate.
+- **[SECURITY.md](SECURITY.md)** — why candor is *not* a security boundary, and how to report a
+  false-negative (the bug class that matters most).
 
 ## Tests
 
