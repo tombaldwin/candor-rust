@@ -41,9 +41,11 @@ That is the part worth keeping.
 
 3. **The classifier is a curated allowlist.** It only knows hard-coded crates; an unrecognised
    effectful crate is a silent false negative. *(Partially fixed: `CANDOR_CONFIG` lets a project add
-   its own rules; the built-in list was broadened to raw `std`/`tokio` sockets and randomness (Net
-   detection was previously AWS-only — a real hole) and is now covered by unit tests that pin the
-   precision rules. The core list is still hand-maintained.)*
+   its own rules; the built-in list was broadened to raw `std`/`tokio` sockets, HTTP clients
+   (`reqwest`/`ureq`/`isahc`), and randomness — Net was previously AWS-only, and the `reqwest` gap
+   was caught empirically by the eval (`EVAL.md`) misreporting real Anthropic-API calls as
+   network-free. Now covered by unit tests that pin the precision rules. The core list is still
+   hand-maintained.)*
 
 4. **Effect granularity is coarse.** `Net` lumps all network; `Fs` doesn't split read vs write.
    Too blunt for real capability security. *(Not fixed.)*
@@ -58,11 +60,11 @@ That is the part worth keeping.
    nothing here has been shown to make an AI agent's edits better. The JSON mode is a gesture toward
    it, untested with a real agent. The project conflated three goals (AI legibility, developer
    documentation, capability security) and is middling at all three rather than excellent at one.
-   *(Update: demonstrated, not yet proven. An agent given only the JSON for an 8k-line codebase
-   scoped a cross-cutting refactor — all 66 network sites, the logging gap, and the 18 `unresolved`
-   functions needing source review — in ~22k tokens without reading source. That shows the artifact
-   is consumable and useful; it is NOT a controlled eval of whether edits improve, which remains the
-   honest open question.)*
+   *(Update: a controlled pilot was run — see `EVAL.md`. JSON-only vs source-only on the same
+   scoping task: the JSON was ~3× cheaper in tokens, ~8× fewer tool calls, ~6.5× faster. BUT the
+   source-only agent was more *correct* — it caught `reqwest` HTTP calls candor silently
+   misclassified as network-free, exposing a real classifier gap (since fixed). So: efficiency
+   supported; accuracy only as good as the classifier; "do edits improve" still unproven.)*
 
 7. **Nightly fragility.** dylint pins a nightly and uses `rustc_private`; it will break across
    toolchain bumps and is a maintenance tax.

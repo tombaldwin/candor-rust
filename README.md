@@ -4,9 +4,9 @@ A type-aware **capability/effect checker for Rust**, built as a [dylint](https:/
 
 It answers two questions about a Rust codebase:
 
-1. **What effects does each function actually perform?** — network (AWS SDK *and* raw
-   `std`/`tokio` sockets), filesystem, process spawn, env reads, clock reads, randomness, logging,
-   clipboard — including effects inherited transitively through the functions it calls.
+1. **What effects does each function actually perform?** — network (AWS SDK, `reqwest`/`ureq`/`isahc`
+   HTTP, raw `std`/`tokio` sockets), filesystem, process spawn, env reads, clock reads, randomness,
+   logging, clipboard — including effects inherited transitively through the functions it calls.
 2. **Are the signatures honest?** — once you thread explicit capability tokens through a module,
    it flags any function that performs an effect it does not declare.
 
@@ -127,6 +127,12 @@ functions by `file:line`, finding 66/66 unlogged, and — using the `unresolved`
 listing the 18 functions where source review is still required. It did this in ~22k tokens without
 opening a single `.rs` file. That is the point of `Unknown`/`unresolved`: it lets a consumer be
 honest about the report's own blind spots.
+
+A follow-up controlled pilot (**[EVAL.md](EVAL.md)**) pitted a JSON-only agent against a
+source-only one on the same task: the JSON was ~3× cheaper and ~6.5× faster — but the source-only
+agent was more *accurate*, catching `reqwest` HTTP calls candor had silently missed. That found a
+real classifier gap (since fixed). Honest takeaway: the report is cheap and useful, but only as
+correct as its classifier.
 
 ## Unresolved calls (honest soundness)
 

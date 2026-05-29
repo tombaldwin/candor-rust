@@ -185,6 +185,18 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // HTTP clients use the same builder pattern as the AWS SDK: only the dispatch is
+    // I/O. (Found by the eval: ebman's reqwest calls to the Anthropic API + webhooks
+    // were silently classified network-free because reqwest wasn't recognized.)
+    if crate_name == "reqwest" || crate_name == "isahc" {
+        if path.ends_with("::send") || path.ends_with("::execute") {
+            return Some("Net");
+        }
+        return None;
+    }
+    if crate_name == "ureq" && path.ends_with("::call") {
+        return Some("Net");
+    }
     // Raw sockets. Match the I/O *types* only — `std::net` also holds pure data types
     // (SocketAddr, IpAddr, …) whose construction must NOT be flagged.
     if path.starts_with("std::net::TcpStream")
@@ -587,6 +599,10 @@ mod tests {
         // AWS: only request dispatch, never the builder setters/accessors.
         assert_eq!(classify("aws_sdk_ec2", "aws_sdk_ec2::op::run::send"), Some("Net"));
         assert_eq!(classify("aws_sdk_ec2", "aws_sdk_ec2::op::run::instance_id"), None);
+        // HTTP clients: dispatch only, not the builder chain (found by the eval).
+        assert_eq!(classify("reqwest", "reqwest::RequestBuilder::send"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::RequestBuilder::json"), None);
+        assert_eq!(classify("reqwest", "reqwest::Client::execute"), Some("Net"));
         // Raw sockets are network — the regression guard against AWS-only detection.
         assert_eq!(classify("std", "std::net::TcpStream::connect"), Some("Net"));
         assert_eq!(classify("std", "std::net::UdpSocket::bind"), Some("Net"));
