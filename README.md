@@ -66,7 +66,29 @@ cargo candor no-ambient my_module       # flag direct ambient-authority use
 
 ## Quick start (AI agents)
 
-Generate a machine-readable report, then *query it* instead of reading source. One JSON file is
+**The fastest way: tell your coding agent to use it.** Paste this into your agent (Claude Code,
+Cursor, …) once candor is set up in the repo:
+
+```text
+This repo has candor, a Rust effect checker. Use it instead of guessing what code does.
+
+1. Run:  cargo candor snapshot /tmp/candor
+   (writes one JSON file per crate: /tmp/candor.<crate>.<type>.json)
+2. Read those files. Each function entry has:
+   - "inferred":   its full TRANSITIVE effect set — any of
+                   Net, Fs, Db, Exec, Env, Clock, Ipc, Log, Rand, Clipboard
+   - "unresolved": true if some calls couldn't be traced (so the list may be incomplete)
+3. Answer "what does this function touch?" and "what's the blast radius of changing it?"
+   from "inferred" — don't trace call chains by hand.
+4. TRUST RULE: "inferred" is authoritative for what candor resolved. If "unresolved" is
+   true (or "Unknown" is in the set), READ THE SOURCE for that function before relying on
+   its effects — never assume it's pure.
+5. After you edit code, re-run step 1 and confirm no function unexpectedly gained an
+   effect (e.g. a previously-pure helper now shows "Net"). If one did, that's a bug to
+   explain or fix.
+```
+
+Under the hood — generate the report, then *query it* instead of reading source. One JSON file is
 written per crate, named `<prefix>.<crate>.<type>.json`:
 
 ```sh
