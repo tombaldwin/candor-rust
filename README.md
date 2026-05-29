@@ -101,6 +101,16 @@ point. See `sample/src/main.rs` for the pattern. The checker then flags:
 Adopt incrementally: scope `CANDOR_STRICT` / `CANDOR_NO_AMBIENT` to one module, fix until it reports
 zero, then move to the next.
 
+### Or use real capabilities: cap-std
+
+candor recognises [cap-std](https://github.com/bytecodealliance/cap-std) capability *types* as
+declarations and its operations as the matching effect. A function that takes a `&Dir` and reads
+through it (`dir.read_to_string(..)`) is conformant — its declared `Fs` matches its inferred `Fs` —
+while a sibling that reaches for ambient `std::fs` is flagged. Unlike candor's own advisory tokens,
+cap-std capabilities are unforgeable and compile-enforced; candor just makes the effect surface
+*visible* on top. See `sample-capstd/`. Mapped today: `Dir`→Fs, `Pool`/`TcpStream`→Net,
+`SystemClock`→Clock, `UnixStream`→Ipc.
+
 ## CI guardrail (lowest-friction adoption)
 
 You don't have to adopt the capability discipline to get value. The cheapest win is the regression

@@ -225,6 +225,25 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "ureq" && path.ends_with("::call") {
         return Some("Net");
     }
+    // cap-std: capability-oriented std. I/O goes *through* a held capability handle
+    // (Dir/Pool/Clock/...), so these calls ARE the effect. Recognising them means a
+    // cap-std project's real I/O is detected and matches the capability it declared
+    // (via `declared_caps`/`capstd_cap`) — conformance against unforgeable capabilities.
+    if crate_name.starts_with("cap_") {
+        if path.contains("::net::Unix") || path.contains("::os::") {
+            return Some("Ipc");
+        }
+        if path.contains("::net") {
+            return Some("Net");
+        }
+        if path.contains("::time") {
+            return Some("Clock");
+        }
+        if path.contains("::fs") || crate_name == "cap_tempfile" || crate_name == "cap_directories" {
+            return Some("Fs");
+        }
+        return None;
+    }
     // Local IPC (Unix-domain sockets) is I/O but not *network* — keep it distinct so
     // CANDOR_NO_AMBIENT and audits don't conflate it with internet access.
     if path.starts_with("tokio::net::Unix") || path.starts_with("std::os::unix::net") {
@@ -294,6 +313,22 @@ fn cap_from_name(name: &str) -> Option<&'static str> {
     EFFECTS.iter().copied().find(|e| *e == name)
 }
 
+/// Map a cap-std capability *type* to the effect it authorises. Holding one of these
+/// (e.g. `&Dir`) is the real, unforgeable right to perform that effect — so candor
+/// treats it as a declared capability, exactly like its own `&Fs` token.
+fn capstd_cap(crate_name: &str, type_name: &str) -> Option<&'static str> {
+    if !crate_name.starts_with("cap_") {
+        return None;
+    }
+    Some(match type_name {
+        "Dir" => "Fs",
+        "TcpListener" | "TcpStream" | "UdpSocket" | "Pool" => "Net",
+        "UnixListener" | "UnixStream" | "UnixDatagram" => "Ipc",
+        "SystemClock" | "MonotonicClock" => "Clock",
+        _ => return None,
+    })
+}
+
 /// Capabilities a function declares by taking the matching token as a parameter
 /// (e.g. `&Fs` declares the right to perform `Fs`). This is the Rust expression of
 /// the spec's "capabilities as typed parameters" pillar.
@@ -307,7 +342,11 @@ fn declared_caps(tcx: TyCtxt<'_>, def_id: LocalDefId) -> BTreeSet<&'static str> 
     for input in sig.inputs().iter() {
         let ty = input.peel_refs();
         if let Some(adt) = ty.ty_adt_def() {
-            if let Some(c) = cap_from_name(tcx.item_name(adt.did()).as_str()) {
+            let name = tcx.item_name(adt.did());
+            let krate = tcx.crate_name(adt.did().krate);
+            if let Some(c) = cap_from_name(name.as_str())
+                .or_else(|| capstd_cap(krate.as_str(), name.as_str()))
+            {
                 out.insert(c);
             }
         }
@@ -716,6 +755,22 @@ mod tests {
         assert_eq!(classify("sqlx", "sqlx::Column::name"), None);
         // memmap2 is filesystem-backed.
         assert_eq!(classify("memmap2", "memmap2::MmapOptions::map"), Some("Fs"));
+    }
+
+    #[test]
+    fn capstd_capabilities_and_ops() {
+        // Capability TYPES (declared by holding them).
+        assert_eq!(capstd_cap("cap_std", "Dir"), Some("Fs"));
+        assert_eq!(capstd_cap("cap_primitives", "Dir"), Some("Fs"));
+        assert_eq!(capstd_cap("cap_std", "Pool"), Some("Net"));
+        assert_eq!(capstd_cap("cap_std", "SystemClock"), Some("Clock"));
+        assert_eq!(capstd_cap("cap_std", "UnixStream"), Some("Ipc"));
+        assert_eq!(capstd_cap("std", "Dir"), None); // only cap-std types count
+        // Capability OPERATIONS (the effect, via classify).
+        assert_eq!(classify("cap_std", "cap_std::fs::Dir::open"), Some("Fs"));
+        assert_eq!(classify("cap_primitives", "cap_primitives::fs::Dir::read_to_string"), Some("Fs"));
+        assert_eq!(classify("cap_std", "cap_std::net::Pool::connect"), Some("Net"));
+        assert_eq!(classify("cap_std", "cap_std::time::SystemClock::now"), Some("Clock"));
     }
 
     #[test]

@@ -1,0 +1,12 @@
+[package]
+name = "capstd_sample"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "capstd_sample"
+path = "src/main.rs"
+
+[dependencies]
+cap-std = "3"

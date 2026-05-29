@@ -42,9 +42,11 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
 
 ## P3 — real enforcement
 
-- [ ] Recognise cap-std capability types in `declared_caps` (conformance against real, unforgeable
-      capabilities). Compile-time enforcement stays out of scope — that's cap-std's job; candor is
-      the visibility layer.
+- [x] **Recognise cap-std capability types** in `declared_caps` (and its operations in `classify`):
+      a project on cap-std now gets conformance against real, unforgeable capabilities for free,
+      with candor as the visibility layer. Validated in `sample-capstd/`. Compile-time enforcement
+      stays cap-std's job. (Mapped: Dir→Fs, Pool/TcpStream→Net, SystemClock→Clock, UnixStream→Ipc;
+      extend the small `capstd_cap` table for more.)
 
 ## P4 — packaging / maintenance
 

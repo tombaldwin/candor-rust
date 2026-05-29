@@ -34,10 +34,13 @@ That is the part worth keeping.
 
 2. **The tokens are not capabilities.** `&Fs` does not gate `std::fs`; you can still call it without
    the token and candor only complains afterward. cap-std makes the bad call impossible to write.
-   candor's discipline is advisory, enforced by a lint, bypassed by any soundness hole. *(Partially
-   addressed: `CANDOR_NO_AMBIENT` now flags any direct reach for ambient authority — AS-EFF-004 —
-   which is the enforceable, cap-std-aligned discipline. It still can't make the call fail to
-   compile the way cap-std does.)*
+   candor's discipline is advisory, enforced by a lint, bypassed by any soundness hole. *(Largely
+   addressed two ways: (1) `CANDOR_NO_AMBIENT` (AS-EFF-004) flags any direct reach for ambient
+   authority; (2) candor now recognises **cap-std's** capability types (`Dir`/`Pool`/`SystemClock`/…)
+   as declarations and its operations as the matching effect — so a project built on cap-std gets
+   conformance against *real, unforgeable, compile-enforced* capabilities for free, with candor as
+   the visibility layer on top. candor itself still can't make the bad call fail to compile — that's
+   cap-std's job — but it no longer needs its own advisory tokens to be the whole story.)*
 
 3. **The classifier is a curated allowlist.** It only knows hard-coded crates; an unrecognised
    effectful crate is a silent false negative. *(Partially fixed: `CANDOR_CONFIG` lets a project add
