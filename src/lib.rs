@@ -289,6 +289,21 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
     ];
     if DB_CRATES.contains(&crate_name) {
+        // Postgres / SQLite-family clients: `query`/`batch_execute`/`prepare`/etc. ARE the
+        // execution (round-trips to the server). sqlx is the outlier where bare `query()`
+        // only BUILDS — it keeps the narrow set below. (Found by running on a real
+        // tokio-postgres app, pgman: candor had reported only 4 of ~20 DB call sites.)
+        if matches!(crate_name, "postgres" | "tokio_postgres" | "deadpool_postgres" | "rusqlite") {
+            const PG: [&str; 13] = [
+                "::query", "::query_one", "::query_opt", "::query_raw", "::execute",
+                "::batch_execute", "::simple_query", "::prepare", "::prepare_typed",
+                "::copy_in", "::copy_out", "::transaction", "::connect",
+            ];
+            if PG.iter().any(|v| path.ends_with(v)) {
+                return Some("Db");
+            }
+            return None;
+        }
         const VERBS: [&str; 16] = [
             "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
             "::fetch_all", "::fetch_optional", "::fetch", "::connect", "::acquire",
@@ -809,6 +824,12 @@ mod tests {
         // ...but pure row/value accessors in the same crate are not.
         assert_eq!(classify("rusqlite", "rusqlite::Row::get"), None);
         assert_eq!(classify("sqlx", "sqlx::Column::name"), None);
+        // Postgres-family: `query`/`batch_execute`/etc. ARE execution (found on pgman).
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Client::query"), Some("Db"));
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Client::batch_execute"), Some("Db"));
+        assert_eq!(classify("postgres", "postgres::Client::query_opt"), Some("Db"));
+        // ...but sqlx's bare `query()` is a builder, still excluded.
+        assert_eq!(classify("sqlx", "sqlx::query"), None);
         // memmap2 is filesystem-backed.
         assert_eq!(classify("memmap2", "memmap2::MmapOptions::map"), Some("Fs"));
     }
