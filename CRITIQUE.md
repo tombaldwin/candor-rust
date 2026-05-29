@@ -34,7 +34,10 @@ That is the part worth keeping.
 
 2. **The tokens are not capabilities.** `&Fs` does not gate `std::fs`; you can still call it without
    the token and candor only complains afterward. cap-std makes the bad call impossible to write.
-   candor's discipline is advisory, enforced by a lint, bypassed by any soundness hole.
+   candor's discipline is advisory, enforced by a lint, bypassed by any soundness hole. *(Partially
+   addressed: `CANDOR_NO_AMBIENT` now flags any direct reach for ambient authority — AS-EFF-004 —
+   which is the enforceable, cap-std-aligned discipline. It still can't make the call fail to
+   compile the way cap-std does.)*
 
 3. **The classifier is a curated allowlist.** It only knows hard-coded crates; an unrecognised
    effectful crate is a silent false negative. *(Partially fixed: `CANDOR_CONFIG` lets a project add
@@ -50,6 +53,11 @@ That is the part worth keeping.
    nothing here has been shown to make an AI agent's edits better. The JSON mode is a gesture toward
    it, untested with a real agent. The project conflated three goals (AI legibility, developer
    documentation, capability security) and is middling at all three rather than excellent at one.
+   *(Update: demonstrated, not yet proven. An agent given only the JSON for an 8k-line codebase
+   scoped a cross-cutting refactor — all 66 network sites, the logging gap, and the 18 `unresolved`
+   functions needing source review — in ~22k tokens without reading source. That shows the artifact
+   is consumable and useful; it is NOT a controlled eval of whether edits improve, which remains the
+   honest open question.)*
 
 7. **Nightly fragility.** dylint pins a nightly and uses `rustc_private`; it will break across
    toolchain bumps and is a maintenance tax.
@@ -66,6 +74,20 @@ That is the part worth keeping.
     documented trade, not an oversight.
 - **Project-extensible classifier** via `CANDOR_CONFIG` (crate/path → effect rules).
 - **JSON reports an `unresolved` flag** per function for machine consumption.
+- **Enforcement mode** `CANDOR_NO_AMBIENT` (AS-EFF-004): flags any *direct* reach for ambient
+  authority, the cap-std-aligned discipline that has actual teeth (it fires even on token-holders).
+- **Opt-in max soundness** `CANDOR_PARANOID`: also marks generic static trait dispatch `Unknown`,
+  closing the residual gap for users who accept the noise.
+
+## Deliberately still deferred
+
+- **Finer effect granularity** (Fs read vs write, net-by-host). Net-by-host is not statically
+  knowable (the host is runtime data) — claiming it would be dishonest. Fs read/write *is* doable
+  but requires expanding the effect vocabulary AND the capability-token types with a sub-typing
+  relation (`Fs ⊇ FsRead, FsWrite`) so existing `&Fs` declarations still satisfy them; that ripple
+  outweighs the payoff for now. Left undone on purpose rather than half-built.
+- **Compile-time enforcement** (vs lint-time). Only a cap-std-style API can make the bad call fail
+  to compile; candor stays a checker.
 
 ## Recommendations
 

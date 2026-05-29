@@ -46,8 +46,12 @@ CANDOR_JSON=/tmp/report cargo dylint --lib-path "$LINT"
 CANDOR_STRICT=1            cargo dylint --lib-path "$LINT"   # whole crate
 CANDOR_STRICT=mymod::sub   cargo dylint --lib-path "$LINT"   # one module (incremental adoption)
 
-# Extend the classifier with your own crates (combine with any mode):
-CANDOR_CONFIG=candor.rules cargo dylint --lib-path "$LINT"
+# ENFORCEMENT (cap-std-aligned): flag any DIRECT reach for ambient authority.
+CANDOR_NO_AMBIENT=mymod    cargo dylint --lib-path "$LINT"   # AS-EFF-004 per direct ambient call
+
+# Flags that combine with any mode:
+CANDOR_CONFIG=candor.rules cargo dylint --lib-path "$LINT"   # extra classifier rules
+CANDOR_PARANOID=1          cargo dylint --lib-path "$LINT"   # treat generic trait dispatch as Unknown
 ```
 
 Or register it in a project's `Cargo.toml` so plain `cargo dylint` finds it:
@@ -68,9 +72,24 @@ point. See `sample/src/main.rs` for the pattern. The checker then flags:
 - **AS-EFF-002** — a function declares a capability it never uses.
 - **AS-EFF-003** — a function makes a call candor cannot resolve (dynamic dispatch, fn-pointer, or
   callback through `impl Fn`), so its effect set is not provably complete and cannot be certified.
+- **AS-EFF-004** (`CANDOR_NO_AMBIENT`) — a function reaches for *ambient authority* directly
+  (`std::fs`, `std::net`, `std::env`, `std::process`, the clock, …) instead of receiving a
+  capability. This is the cap-std-aligned, *enforceable* alternative to the advisory tokens: it
+  fires even on functions that hold a token, because holding `&Fs` doesn't stop you calling
+  `std::fs`. The fix is to route the call through an injected capability (e.g. a cap-std handle).
 
-Adopt incrementally: scope `CANDOR_STRICT` to one module, thread tokens until it reports zero
-violations, then move to the next.
+Adopt incrementally: scope `CANDOR_STRICT` / `CANDOR_NO_AMBIENT` to one module, fix until it reports
+zero, then move to the next.
+
+## Machine-readable for agents
+
+The JSON report is meant to be consumed by tools and AI agents, not just read. In one test, an agent
+given **only** the JSON for an 8k-line codebase (and forbidden from reading source) scoped a
+cross-cutting "add retry + logging to every network call" refactor — locating all 66 direct-network
+functions by `file:line`, finding 66/66 unlogged, and — using the `unresolved` flag — correctly
+listing the 18 functions where source review is still required. It did this in ~22k tokens without
+opening a single `.rs` file. That is the point of `Unknown`/`unresolved`: it lets a consumer be
+honest about the report's own blind spots.
 
 ## Unresolved calls (honest soundness)
 

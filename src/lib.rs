@@ -56,7 +56,14 @@ pub struct Candor {
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
     /// Project-supplied classifier rules: (effect, is_crate_prefix, prefix).
     extra: Vec<(&'static str, bool, String)>,
+    /// CANDOR_PARANOID: also treat generic static trait dispatch as Unknown.
+    paranoid: bool,
 }
+
+/// Effects that represent *ambient authority* — a global resource reachable just by
+/// naming it (vs. a capability you must be handed). These are what `CANDOR_NO_AMBIENT`
+/// and cap-std care about. `Log` is intentionally excluded (not an authority).
+const AMBIENT: [&str; 6] = ["Net", "Fs", "Exec", "Env", "Clock", "Clipboard"];
 
 impl Candor {
     pub fn new() -> Self {
@@ -65,7 +72,8 @@ impl Candor {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|s| parse_config(&s))
             .unwrap_or_default();
-        Self { direct: HashMap::new(), calls: HashMap::new(), extra }
+        let paranoid = std::env::var("CANDOR_PARANOID").is_ok();
+        Self { direct: HashMap::new(), calls: HashMap::new(), extra, paranoid }
     }
 }
 
@@ -243,6 +251,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             Callee::Def(def_id) => def_id,
         };
 
+        // Paranoid: a call resolving to a *trait-declared* method is statically
+        // dispatched over a generic bound — the concrete impl (and its effects) are
+        // unknown here. Off by default because it would flag every .clone()/.fmt()/etc.
+        if self.paranoid && cx.tcx.trait_of_assoc(def_id).is_some() {
+            self.direct.entry(caller).or_default().insert(UNKNOWN);
+        }
+
         // Record a local call edge for transitive propagation.
         if let Some(local) = def_id.as_local() {
             if matches!(cx.tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
@@ -295,19 +310,17 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         }
 
-        // Three modes, selected by environment:
-        //   (default)               audit — report each function's inferred effect set.
-        //   CANDOR_STRICT=1   conformance over the whole crate (inferred ⊆ declared).
-        //   CANDOR_STRICT=<p> conformance scoped to functions whose path starts <p>
-        //                           (incremental adoption — check one module at a time).
-        //   CANDOR_JSON=<f>   write a machine-readable report to <f>, suppress warnings.
+        // Modes, selected by environment:
+        //   (default)            audit — report each function's inferred effect set.
+        //   CANDOR_JSON=<f>      write a machine-readable report; suppress warnings.
+        //   CANDOR_STRICT=1|<p>  conformance: inferred ⊆ declared (whole crate or scoped to <p>).
+        //   CANDOR_NO_AMBIENT=1|<p>  enforcement: flag any DIRECT use of ambient authority
+        //                            (the cap-std-aligned answer to advisory tokens — route
+        //                            those calls through an injected capability instead).
         let strict_var = std::env::var("CANDOR_STRICT").ok();
+        let no_ambient_var = std::env::var("CANDOR_NO_AMBIENT").ok();
         let json_path = std::env::var("CANDOR_JSON").ok();
-        let in_scope = |name: &str| match strict_var.as_deref() {
-            None => false,
-            Some("1") | Some("") => true,
-            Some(prefix) => name.starts_with(prefix),
-        };
+        let any_enforce = strict_var.is_some() || no_ambient_var.is_some();
 
         // Stable ordering for reproducible output.
         let mut items: Vec<LocalDefId> = eff.keys().copied().collect();
@@ -352,10 +365,51 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 continue;
             }
 
-            if strict_var.is_some() {
-                if !in_scope(&name) {
+            // Audit mode (no enforcement env set): report the inferred set.
+            if !any_enforce {
+                if effs.is_empty() {
                     continue;
                 }
+                let parts: Vec<String> = effs
+                    .iter()
+                    .map(|e| {
+                        if direct.contains(e) {
+                            (*e).to_string()
+                        } else {
+                            format!("{e}*")
+                        }
+                    })
+                    .collect();
+                clippy_utils::diagnostics::span_lint(
+                    cx,
+                    CANDOR,
+                    span,
+                    format!("`{name}` effects: {{ {} }}   (* = via callee)", parts.join(", ")),
+                );
+                continue;
+            }
+
+            // AS-EFF-004 (CANDOR_NO_AMBIENT): this function reaches for ambient authority
+            // directly. cap-std's lesson: don't — receive a capability and route through it.
+            if in_scope(no_ambient_var.as_deref(), &name) {
+                let ambient: Vec<&str> =
+                    direct.iter().copied().filter(|e| AMBIENT.contains(e)).collect();
+                if !ambient.is_empty() {
+                    clippy_utils::diagnostics::span_lint(
+                        cx,
+                        CANDOR,
+                        span,
+                        format!(
+                            "[AS-EFF-004] `{name}` uses ambient authority {{ {} }} directly; \
+                             route it through an injected capability (e.g. cap-std) instead",
+                            ambient.join(", ")
+                        ),
+                    );
+                }
+            }
+
+            // Conformance (CANDOR_STRICT): inferred ⊆ declared.
+            if in_scope(strict_var.as_deref(), &name) {
                 // AS-EFF-001: performs an effect it does not declare.
                 if !undeclared.is_empty() {
                     let have = if declared.is_empty() {
@@ -375,8 +429,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     );
                 }
                 // AS-EFF-003: performs effects candor cannot resolve, so its declared
-                // capabilities cannot be verified complete (this is the honest answer to
-                // dynamic dispatch / fn-pointers / callbacks — never a silent pass).
+                // capabilities cannot be verified complete (the honest answer to dynamic
+                // dispatch / fn-pointers / callbacks — never a silent pass).
                 if has_unknown {
                     clippy_utils::diagnostics::span_lint(
                         cx,
@@ -402,27 +456,6 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         ),
                     );
                 }
-            } else {
-                // Audit mode: report the inferred set, marking inherited effects with `*`.
-                if effs.is_empty() {
-                    continue;
-                }
-                let parts: Vec<String> = effs
-                    .iter()
-                    .map(|e| {
-                        if direct.contains(e) {
-                            (*e).to_string()
-                        } else {
-                            format!("{e}*")
-                        }
-                    })
-                    .collect();
-                clippy_utils::diagnostics::span_lint(
-                    cx,
-                    CANDOR,
-                    span,
-                    format!("`{name}` effects: {{ {} }}   (* = via callee)", parts.join(", ")),
-                );
             }
         }
 
@@ -449,6 +482,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
 fn join(set: &BTreeSet<&str>) -> String {
     set.iter().copied().collect::<Vec<_>>().join(", ")
+}
+
+/// Is `name` covered by an enforcement scope env var? Unset → no; `1`/empty → whole
+/// crate; otherwise a path prefix (incremental, one module at a time).
+fn in_scope(var: Option<&str>, name: &str) -> bool {
+    match var {
+        None => false,
+        Some("1") | Some("") => true,
+        Some(prefix) => name.starts_with(prefix),
+    }
 }
 
 fn json_str(s: &str) -> String {
