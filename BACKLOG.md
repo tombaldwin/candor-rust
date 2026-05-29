@@ -50,7 +50,10 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
 
 ## P4 — packaging / maintenance
 
-- [ ] Distribution: repo is private, path-referenced. Decide public mirror / crates.io / installable.
+- [x] Distribution: repo is **public** (git is the channel — `--git` / `git clone`, as AGENTS.md
+      uses). Note: crates.io is **not** an option for the lint itself — it depends on `clippy_utils`
+      via a git dependency, which crates.io forbids (true of every dylint lint). A separate, non-lint
+      helper crate *could* be published, but the lint can't.
 - [ ] Nightly fragility (`rustc_private` pins `nightly-2026-04-16`); document the bump process.
 - [ ] Behavioural (UI) test coverage — compiletest_rs 0.11.2 has no bless; coverage is unit tests
       on pure logic only. Revisit if dylint_testing gains bless.
