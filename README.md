@@ -4,9 +4,9 @@ A type-aware **capability/effect checker for Rust**, built as a [dylint](https:/
 
 It answers two questions about a Rust codebase:
 
-1. **What effects does each function actually perform?** — network, filesystem, process spawn,
-   env reads, clock reads, logging, clipboard — including effects inherited transitively through
-   the functions it calls.
+1. **What effects does each function actually perform?** — network (AWS SDK *and* raw
+   `std`/`tokio` sockets), filesystem, process spawn, env reads, clock reads, randomness, logging,
+   clipboard — including effects inherited transitively through the functions it calls.
 2. **Are the signatures honest?** — once you thread explicit capability tokens through a module,
    it flags any function that performs an effect it does not declare.
 
@@ -132,8 +132,15 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 See **[CRITIQUE.md](CRITIQUE.md)** for an honest, critical assessment and comparison to prior art
 (Cackle, cap-std, the Rust effects initiative).
 
+## Tests
+
+`cargo test` runs unit tests over the classifier's precision rules (the part most prone to
+over/under-reporting — e.g. `std::net::TcpStream` is `Net` but `std::net::SocketAddr` is not), plus
+a smoke test that the lint loads and an effect-free program yields no diagnostics. The lint also
+fails *gracefully* (never an ICE) on expressions outside a typechecked body.
+
 ## Status
 
 Prototype. Validated on a real ~8k-line codebase (the `ebman` AWS Elastic Beanstalk TUI):
-audit tagged 444 functions; a leaf module was converted to the capability discipline and brought to
+audit tagged ~445 functions; a leaf module was converted to the capability discipline and brought to
 zero conformance violations while still building on stable.

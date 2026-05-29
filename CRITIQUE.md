@@ -41,7 +41,9 @@ That is the part worth keeping.
 
 3. **The classifier is a curated allowlist.** It only knows hard-coded crates; an unrecognised
    effectful crate is a silent false negative. *(Partially fixed: `CANDOR_CONFIG` lets a project add
-   its own rules — but the core list is still hand-maintained.)*
+   its own rules; the built-in list was broadened to raw `std`/`tokio` sockets and randomness (Net
+   detection was previously AWS-only — a real hole) and is now covered by unit tests that pin the
+   precision rules. The core list is still hand-maintained.)*
 
 4. **Effect granularity is coarse.** `Net` lumps all network; `Fs` doesn't split read vs write.
    Too blunt for real capability security. *(Not fixed.)*
@@ -78,6 +80,15 @@ That is the part worth keeping.
   authority, the cap-std-aligned discipline that has actual teeth (it fires even on token-holders).
 - **Opt-in max soundness** `CANDOR_PARANOID`: also marks generic static trait dispatch `Unknown`,
   closing the residual gap for users who accept the noise.
+
+### Robustness pass
+
+- **No more ICEs.** `resolve_callee` uses `maybe_typeck_results()` and bails gracefully instead of
+  panicking on expressions outside a typechecked body — an effect checker must never abort a build.
+- **Broader, tested classifier.** Net now covers raw `std::net`/`tokio::net` sockets (not just the
+  AWS SDK), and randomness (`getrandom`/`fastrand`/`rand`) is detected. Unit tests pin the precision
+  rules (e.g. `std::net::TcpStream` ⇒ Net, `std::net::SocketAddr` ⇒ not). Regression-checked against
+  ebman: identical totals except +3 newly-found raw-socket network functions.
 
 ## Deliberately still deferred
 

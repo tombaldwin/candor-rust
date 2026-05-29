@@ -63,7 +63,7 @@ pub struct Candor {
 /// Effects that represent *ambient authority* — a global resource reachable just by
 /// naming it (vs. a capability you must be handed). These are what `CANDOR_NO_AMBIENT`
 /// and cap-std care about. `Log` is intentionally excluded (not an authority).
-const AMBIENT: [&str; 6] = ["Net", "Fs", "Exec", "Env", "Clock", "Clipboard"];
+const AMBIENT: [&str; 7] = ["Net", "Fs", "Exec", "Env", "Clock", "Clipboard", "Rand"];
 
 impl Candor {
     pub fn new() -> Self {
@@ -131,18 +131,21 @@ enum Callee {
 /// `Unresolved` instead of being silently dropped.
 fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Callee> {
     use rustc_middle::ty::TyKind;
+    // Defensive: `typeck_results()` panics (ICE) for an expr outside a typechecked
+    // body. An effect checker must never abort the build, so bail gracefully instead.
+    let typeck = cx.maybe_typeck_results()?;
     match expr.kind {
         ExprKind::MethodCall(_, receiver, _, _) => {
-            let recv_ty = cx.typeck_results().expr_ty_adjusted(receiver).peel_refs();
+            let recv_ty = typeck.expr_ty_adjusted(receiver).peel_refs();
             if matches!(recv_ty.kind(), TyKind::Dynamic(..)) {
                 return Some(Callee::Unresolved); // dyn dispatch
             }
-            match cx.typeck_results().type_dependent_def_id(expr.hir_id) {
+            match typeck.type_dependent_def_id(expr.hir_id) {
                 Some(did) => Some(Callee::Def(did)),
                 None => Some(Callee::Unresolved),
             }
         }
-        ExprKind::Call(callee, _) => match cx.typeck_results().expr_ty(callee).kind() {
+        ExprKind::Call(callee, _) => match typeck.expr_ty(callee).kind() {
             TyKind::FnDef(did, _) => Some(Callee::Def(*did)),
             TyKind::FnPtr(..) => Some(Callee::Unresolved), // function pointer
             TyKind::Closure(..) => None,                   // inline closure body counted lexically
@@ -162,8 +165,22 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // Raw sockets. Match the I/O *types* only — `std::net` also holds pure data types
+    // (SocketAddr, IpAddr, …) whose construction must NOT be flagged.
+    if path.starts_with("std::net::TcpStream")
+        || path.starts_with("std::net::TcpListener")
+        || path.starts_with("std::net::UdpSocket")
+        || path.starts_with("tokio::net::")
+    {
+        return Some("Net");
+    }
     if path.starts_with("std::fs::") || path.starts_with("tokio::fs::") {
         return Some("Fs");
+    }
+    // Randomness / entropy. getrandom + fastrand are effectful end-to-end; `rand` also
+    // contains pure distribution constructors, so this slightly over-reports there.
+    if crate_name == "rand" || crate_name == "getrandom" || crate_name == "fastrand" {
+        return Some("Rand");
     }
     if path.starts_with("std::process::Command")
         || path.starts_with("std::process::Child")
@@ -186,7 +203,7 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     None
 }
 
-const EFFECTS: [&str; 7] = ["Net", "Fs", "Exec", "Env", "Clock", "Log", "Clipboard"];
+const EFFECTS: [&str; 8] = ["Net", "Fs", "Exec", "Env", "Clock", "Log", "Clipboard", "Rand"];
 
 fn cap_from_name(name: &str) -> Option<&'static str> {
     EFFECTS.iter().copied().find(|e| *e == name)
@@ -511,4 +528,73 @@ fn json_vec(v: &[&str]) -> String {
 #[test]
 fn ui() {
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_network_precisely() {
+        // AWS: only request dispatch, never the builder setters/accessors.
+        assert_eq!(classify("aws_sdk_ec2", "aws_sdk_ec2::op::run::send"), Some("Net"));
+        assert_eq!(classify("aws_sdk_ec2", "aws_sdk_ec2::op::run::instance_id"), None);
+        // Raw sockets are network — the regression guard against AWS-only detection.
+        assert_eq!(classify("std", "std::net::TcpStream::connect"), Some("Net"));
+        assert_eq!(classify("std", "std::net::UdpSocket::bind"), Some("Net"));
+        assert_eq!(classify("tokio", "tokio::net::TcpStream::connect"), Some("Net"));
+        // ...but the pure data types living alongside them must NOT be flagged.
+        assert_eq!(classify("std", "std::net::SocketAddr::new"), None);
+        assert_eq!(classify("std", "std::net::Ipv4Addr::new"), None);
+    }
+
+    #[test]
+    fn classify_other_effects_precisely() {
+        assert_eq!(classify("std", "std::fs::read_to_string"), Some("Fs"));
+        assert_eq!(classify("tokio", "tokio::fs::read"), Some("Fs"));
+        // Exec is subprocess spawning — not std::process::exit / Stdio / ExitStatus.
+        assert_eq!(classify("std", "std::process::Command::new"), Some("Exec"));
+        assert_eq!(classify("std", "std::process::Child::wait"), Some("Exec"));
+        assert_eq!(classify("std", "std::process::exit"), None);
+        assert_eq!(classify("std", "std::env::var"), Some("Env"));
+        assert_eq!(classify("chrono", "chrono::Utc::now"), Some("Clock"));
+        assert_eq!(classify("std", "std::time::SystemTime::now"), Some("Clock"));
+        assert_eq!(classify("getrandom", "getrandom::getrandom"), Some("Rand"));
+        assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
+        assert_eq!(classify("arboard", "arboard::Clipboard::set_text"), Some("Clipboard"));
+        // Unrelated crates are pure.
+        assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
+        assert_eq!(classify("std", "std::vec::Vec::push"), None);
+    }
+
+    #[test]
+    fn config_parsing_and_extra_rules() {
+        let rules = parse_config(
+            "# a comment\n\nNet  crate  reqwest\nFs   path   mycrate::io::\nBogus crate x\n",
+        );
+        assert_eq!(rules.len(), 2); // the unknown-effect line is dropped
+        assert_eq!(classify_extra("reqwest", "reqwest::Client::new", &rules), Some("Net"));
+        assert_eq!(classify_extra("other", "mycrate::io::read", &rules), Some("Fs"));
+        assert_eq!(classify_extra("other", "elsewhere::thing", &rules), None);
+    }
+
+    #[test]
+    fn scope_matching() {
+        assert!(!in_scope(None, "anything"));
+        assert!(in_scope(Some("1"), "anything"));
+        assert!(in_scope(Some(""), "anything"));
+        assert!(in_scope(Some("app::config"), "app::config::load"));
+        assert!(!in_scope(Some("app::config"), "app::other::load"));
+    }
+
+    #[test]
+    fn cap_names_match_effects() {
+        assert_eq!(cap_from_name("Net"), Some("Net"));
+        assert_eq!(cap_from_name("Rand"), Some("Rand"));
+        assert_eq!(cap_from_name("Nonsense"), None);
+        // Every ambient authority must be a known effect name.
+        for a in AMBIENT {
+            assert!(cap_from_name(a).is_some(), "ambient {a} not in EFFECTS");
+        }
+    }
 }
