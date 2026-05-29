@@ -34,8 +34,15 @@ jobs:
       - name: Test (unit + smoke)
         run: cargo test
 
-      # Dogfood: candor auditing itself must not ICE and must produce output.
-      - name: Self-audit
+      # Dogfood: candor guards its OWN effect surface against regressions.
+      # If candor starts performing a new effect, this fails until .candor/baseline
+      # is refreshed deliberately (`cargo candor snapshot .candor/baseline`).
+      - name: Self-guard
         run: |
           LIB=$(ls target/debug/libcandor@*.so)
-          cargo dylint --lib-path "$LIB"
+          out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1)
+          echo "$out"
+          if echo "$out" | grep -q "AS-EFF-005"; then
+            echo "::error::candor's effect surface grew vs .candor/baseline; refresh it if intended"
+            exit 1
+          fi

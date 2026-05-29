@@ -187,3 +187,8 @@ fails *gracefully* (never an ICE) on expressions outside a typechecked body.
 Prototype. Validated on a real ~8k-line codebase (the `ebman` AWS Elastic Beanstalk TUI):
 audit tagged ~445 functions; a leaf module was converted to the capability discipline and brought to
 zero conformance violations while still building on stable.
+
+candor also **guards itself**: CI runs candor over candor against `.candor/baseline`, so candor's own
+effect surface (just `Env` + `Fs`, in three functions: config/baseline reads and the report write)
+can't grow unnoticed. Refresh with `cargo candor snapshot .candor/baseline` when a new effect is
+intended.
