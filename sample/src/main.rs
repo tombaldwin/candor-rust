@@ -66,12 +66,21 @@ fn home(_env: &Env) -> Option<String> {
     std::env::var("HOME").ok()
 }
 
-// ── UNRESOLVED (dynamic dispatch): candor cannot see which impl runs. ─────────
+// ── CHA (dynamic dispatch over a LOCAL trait): candor enumerates the impls. ───
+// `Action` is defined here, so candor resolves `a.run()` to the union of all impls'
+// effects. One impl performs Fs, so `dispatch` correctly infers { Fs } (over-
+// approximated but sound) — not `Unknown`.
 trait Action {
     fn run(&self);
 }
+struct Writer;
+impl Action for Writer {
+    fn run(&self) {
+        let _ = std::fs::write("/tmp/x", "y"); // Fs — propagates through the dyn call
+    }
+}
 fn dispatch(a: &dyn Action) {
-    a.run(); // dyn call -> Unknown -> AS-EFF-003 (the impl could do anything)
+    a.run();
 }
 
 // ── UNRESOLVED (callback): closure reached through a generic parameter. ───────

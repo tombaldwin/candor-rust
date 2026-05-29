@@ -88,6 +88,32 @@ That is the part worth keeping.
 - **Opt-in max soundness** `CANDOR_PARANOID`: also marks generic static trait dispatch `Unknown`,
   closing the residual gap for users who accept the noise.
 
+### Call-graph pass (CHA) — seeing through dynamic dispatch
+
+The root limitation behind "unsound conformance" and "can't do reachability" was a call
+graph that only contained statically-resolvable calls; `dyn`/generic dispatch fell into
+`Unknown`. Class Hierarchy Analysis now resolves calls to **locally-defined** trait
+methods to *all* their impls (edges → union of impl effects), seeing through both `dyn`
+and generic dispatch soundly. Non-local trait objects (std/deps, whose impl bodies we
+can't see) stay honestly `Unknown`.
+
+What this revealed, measured on ebman, is more reassuring than the old "100 `Unknown`
+(22%)" headline suggested. After CHA:
+
+- 100 → 92 `Unknown` (CHA resolved the local-trait cases — e.g. the whole LLM
+  `explain`/`lint` feature, now correctly `Net`).
+- Of the 92, **86 are *additive*** — the function's real effects are captured and
+  `Unknown` only flags "also calls something opaque." No effect is lost.
+- Only **6 functions (1.3%)** are *purely* `Unknown` — and they're event/detail handlers
+  (closure/std-`dyn` dispatchers). That is the true residual blind spot, and it is small
+  and well-delimited, not pervasive.
+
+The deep remainder — closures passed as `impl Fn`/`dyn Fn` — needs interprocedural
+closure-flow (effects riding function types), which HIR can't give; that's a MIR-level
+engine, deliberately not attempted. Note the residue is partly *not even a hole*: an
+effectful closure is attributed to the function that *defines* it (lexically), so the
+effect usually lands on the concrete caller, not lost.
+
 ### Usefulness pass
 
 - **Regression guard** `CANDOR_BASELINE` (AS-EFF-005): diff the current effect report against a

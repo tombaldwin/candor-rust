@@ -11,12 +11,16 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
       with macro-generated items (e.g. tracing `__CALLSITE` statics) filtered out via
       `span.from_expansion()` — that filter was needed; without it the report flooded.
 - [x] **memmap2** → `Fs`.
-- [ ] **Generic static trait dispatch is assumed pure.** `CANDOR_PARANOID` flags *all* trait
-      dispatch (too noisy for default). A precise default needs whole-crate impl analysis ("does any
-      in-crate impl of this trait have effects?") — real design work, not a patch. **Deferred.**
-- [ ] **Escaping closures.** A capability captured into a returned closure / stored handler isn't
-      propagated across function boundaries. This needs effects to ride in *function types*
-      (interprocedural) — a capability candor fundamentally lacks; can't be patched in. **Deferred.**
+- [x] **Trait dispatch (dyn + generic) over local traits** — broke through with Class Hierarchy
+      Analysis: a call to a locally-defined trait method now adds edges to all impls, so effects
+      propagate through `dyn` and generic dispatch (sound over-approximation). On ebman this resolved
+      the LLM feature and dropped `Unknown` 100→92, of which only 6 are now *purely* Unknown.
+      `CANDOR_PARANOID` remains the opt-in for the residual *non-local* generic-dispatch gap.
+- [ ] **Escaping closures / `impl Fn` callbacks** — the deep residue (the 6 purely-`Unknown` fns on
+      ebman are mostly this). Needs effects to ride in *function types* (interprocedural closure
+      flow) — a MIR-level engine, not an HIR patch. Partly *not a hole*: an effectful closure's
+      effect is attributed to the function that lexically defines it, so it usually lands on the
+      caller anyway. **Deferred** (small, characterized residue).
 - [~] **stdio / println.** Decided *against* for now: `std::io::stdout`/`println!` is pervasive and
       low-signal (especially for TUIs); would add noise without authority-level value. Reconsider if
       a use case appears. `stdin` (real input) could be added later as its own effect.
@@ -25,11 +29,10 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
 
 - [x] **Entry-point handling in strict mode.** `main` no longer raises AS-EFF-001 (it's the root
       that legitimately holds the whole capability bundle).
-- [ ] **Reachability / dead-code elimination.** **Deferred for a concrete reason:** candor's call
-      graph is *intentionally incomplete* — dynamic dispatch / fn-pointers / callbacks produce no
-      edges (they're `Unknown`). A reachability pass over that graph would mislabel dyn-reached code
-      (event handlers, trait-object callbacks) as dead — actively misleading, which violates the
-      "no lying" principle. Would only be sound atop a complete call graph.
+- [ ] **Reachability / dead-code elimination.** CHA made the call graph much more complete (it now
+      has edges through local trait-object/generic dispatch), but it's still missing closure/std-`dyn`
+      edges, so reachability would *still* mislabel some closure-reached code as dead. Closer to
+      soundness than before, but not there yet — **deferred** until the closure-flow gap closes.
 - [ ] **Finer `Fs` granularity (read vs write).** **Deferred — high cost, breaking:** needs an
       expanded effect vocabulary *and* a capability-token subtyping relation (`Fs ⊇ FsRead, FsWrite`)
       so existing `&Fs` declarations still satisfy them, AND it breaks every committed baseline
@@ -63,4 +66,5 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
 Unknown/AS-EFF-003 · CANDOR_CONFIG · CANDOR_NO_AMBIENT/AS-EFF-004 · CANDOR_PARANOID ·
 CANDOR_BASELINE/AS-EFF-005 · ICE hardening · raw-socket + HTTP + Rand + **Db + Ipc** classification ·
 **const/static initializers (macro-filtered)** · **main entry-point exemption** · unit tests ·
-`cargo-candor` wrapper · CI + downstream guard workflow · self-guard.
+`cargo-candor` wrapper · CI + downstream guard workflow · self-guard ·
+**CHA: see through dyn/generic dispatch over local traits**.

@@ -142,15 +142,16 @@ fn classify_extra(
 
 /// What a call expression resolves to.
 enum Callee {
-    /// A concrete function/method we can classify and (if local) follow.
-    Def(DefId),
-    /// A call candor cannot see through — its effects are unknowable here.
+    /// A resolved callee `DefId`. `dynamic` = reached via `dyn Trait` dispatch (the
+    /// `DefId` is then the *trait* method; CHA finds the concrete impls).
+    Def { did: DefId, dynamic: bool },
+    /// A call candor cannot see through at all (fn pointer, `impl Fn` callback).
     Unresolved,
 }
 
-/// Classify a call site. Crucially, calls that cannot be resolved to a concrete callee
-/// (dynamic dispatch, fn pointers, calls through `impl Fn` parameters) return
-/// `Unresolved` instead of being silently dropped.
+/// Classify a call site. We still resolve `dyn Trait` method calls to the trait method
+/// `DefId` (flagged `dynamic`) so CHA can enumerate impls; only genuinely opaque calls
+/// (fn pointers, closures through generic params) are `Unresolved`.
 fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Callee> {
     use rustc_middle::ty::TyKind;
     // Defensive: `typeck_results()` panics (ICE) for an expr outside a typechecked
@@ -159,16 +160,14 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
     match expr.kind {
         ExprKind::MethodCall(_, receiver, _, _) => {
             let recv_ty = typeck.expr_ty_adjusted(receiver).peel_refs();
-            if matches!(recv_ty.kind(), TyKind::Dynamic(..)) {
-                return Some(Callee::Unresolved); // dyn dispatch
-            }
+            let dynamic = matches!(recv_ty.kind(), TyKind::Dynamic(..));
             match typeck.type_dependent_def_id(expr.hir_id) {
-                Some(did) => Some(Callee::Def(did)),
+                Some(did) => Some(Callee::Def { did, dynamic }),
                 None => Some(Callee::Unresolved),
             }
         }
         ExprKind::Call(callee, _) => match typeck.expr_ty(callee).kind() {
-            TyKind::FnDef(did, _) => Some(Callee::Def(*did)),
+            TyKind::FnDef(did, _) => Some(Callee::Def { did: *did, dynamic: false }),
             TyKind::FnPtr(..) => Some(Callee::Unresolved), // function pointer
             TyKind::Closure(..) => None,                   // inline closure body counted lexically
             TyKind::Param(..) | TyKind::Alias(..) | TyKind::Dynamic(..) => Some(Callee::Unresolved),
@@ -176,6 +175,33 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
         },
         _ => None,
     }
+}
+
+/// Class Hierarchy Analysis: the impl methods a (trait) call could dispatch to. Scoped
+/// to traits defined in THIS crate — we can enumerate their impls and see the bodies,
+/// and they're the project's own effectful traits. For non-local traits (std/deps) we
+/// can't see impl bodies, so the caller keeps an honest `Unknown` for `dyn` over them.
+fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
+    let Some(trait_did) = tcx.trait_of_assoc(method_did) else {
+        return Vec::new();
+    };
+    if !trait_did.is_local() {
+        return Vec::new();
+    }
+    let impls = tcx.trait_impls_of(trait_did);
+    let impl_dids = impls
+        .non_blanket_impls()
+        .values()
+        .flatten()
+        .copied()
+        .chain(impls.blanket_impls().iter().copied());
+    let mut out = Vec::new();
+    for impl_did in impl_dids {
+        if let Some(&impl_method) = tcx.impl_item_implementor_ids(impl_did).get(&method_did) {
+            out.push(impl_method);
+        }
+    }
+    out
 }
 
 /// Classify a resolved callee by the crate it belongs to and its full path.
@@ -333,27 +359,42 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             return;
         };
 
-        let def_id = match callee {
-            // A call we cannot see through could do anything — record it honestly.
+        let (def_id, dynamic) = match callee {
+            // A call we cannot see through at all (fn pointer / `impl Fn` callback).
             Callee::Unresolved => {
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
                 return;
             }
-            Callee::Def(def_id) => def_id,
+            Callee::Def { did, dynamic } => (did, dynamic),
         };
 
-        // Paranoid: a call resolving to a *trait-declared* method is statically
-        // dispatched over a generic bound — the concrete impl (and its effects) are
-        // unknown here. Off by default because it would flag every .clone()/.fmt()/etc.
-        if self.paranoid && cx.tcx.trait_of_assoc(def_id).is_some() {
-            self.direct.entry(caller).or_default().insert(UNKNOWN);
+        // Record a local call edge for transitive propagation.
+        let add_edge = |this: &mut Self, target: DefId| {
+            if let Some(local) = target.as_local() {
+                if matches!(cx.tcx.def_kind(target), DefKind::Fn | DefKind::AssocFn) {
+                    this.calls.entry(caller).or_default().insert(local);
+                }
+            }
+        };
+        add_edge(self, def_id);
+
+        // Class Hierarchy Analysis: if this is a (local) trait method — whether reached
+        // by `dyn` dispatch or a generic bound — add edges to every impl so their effects
+        // propagate. This is what lets candor see through trait objects soundly.
+        let is_trait_method = cx.tcx.trait_of_assoc(def_id).is_some();
+        let mut cha_resolved = false;
+        if is_trait_method {
+            for target in cha_targets(cx.tcx, def_id) {
+                cha_resolved = true;
+                add_edge(self, target);
+            }
         }
 
-        // Record a local call edge for transitive propagation.
-        if let Some(local) = def_id.as_local() {
-            if matches!(cx.tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
-                self.calls.entry(caller).or_default().insert(local);
-            }
+        // Honest `Unknown` only when dispatch is genuinely unresolvable here:
+        //  - a `dyn` call over a NON-local trait (we can't see its impl bodies), or
+        //  - (paranoid) any trait dispatch CHA couldn't pin to local impls.
+        if is_trait_method && !cha_resolved && (dynamic || self.paranoid) {
+            self.direct.entry(caller).or_default().insert(UNKNOWN);
         }
 
         // Record a directly-performed effect (built-in classifier, then project rules).
