@@ -1,7 +1,7 @@
-//! Conformance sample for effect_audit, written in the capability discipline.
+//! Conformance sample for candor, written in the capability discipline.
 //!
 //! Run the conformance check with:
-//!   EFFECT_AUDIT_STRICT=1 cargo dylint --lib-path <…/libeffect_audit@…dylib>
+//!   CANDOR_STRICT=1 cargo dylint --lib-path <…/libcandor@…dylib>
 //!
 //! A function declares the effects it may perform by taking the matching capability
 //! token as a parameter (`&Fs`, `&Env`, …). The checker flags any function whose

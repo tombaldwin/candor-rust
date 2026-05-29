@@ -1,5 +1,5 @@
 [package]
-name = "effect_audit"
+name = "candor"
 version = "0.1.0"
 authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
 description = "A type-aware capability/effect checker for Rust, as a dylint lint."

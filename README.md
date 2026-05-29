@@ -1,4 +1,4 @@
-# effect_audit
+# candor
 
 A type-aware **capability/effect checker for Rust**, built as a [dylint](https://github.com/trailofbits/dylint) lint.
 
@@ -29,7 +29,7 @@ cargo install cargo-dylint dylint-link   # once per machine
 cargo build                              # builds the lint; first build downloads the nightly + rustc-dev
 ```
 
-The build produces `target/debug/libeffect_audit@<toolchain>-<platform>.dylib` (`.so` on Linux).
+The build produces `target/debug/libcandor@<toolchain>-<platform>.dylib` (`.so` on Linux).
 
 ## Use
 
@@ -40,18 +40,18 @@ From any Rust project root, with `LINT` set to that dylib's absolute path:
 cargo dylint --lib-path "$LINT"
 
 # JSON: machine-readable report, one file per crate+type: <prefix>.<crate>.<type>.json
-EFFECT_AUDIT_JSON=/tmp/report cargo dylint --lib-path "$LINT"
+CANDOR_JSON=/tmp/report cargo dylint --lib-path "$LINT"
 
 # CONFORMANCE: enforce inferred ⊆ declared.
-EFFECT_AUDIT_STRICT=1            cargo dylint --lib-path "$LINT"   # whole crate
-EFFECT_AUDIT_STRICT=mymod::sub   cargo dylint --lib-path "$LINT"   # one module (incremental adoption)
+CANDOR_STRICT=1            cargo dylint --lib-path "$LINT"   # whole crate
+CANDOR_STRICT=mymod::sub   cargo dylint --lib-path "$LINT"   # one module (incremental adoption)
 ```
 
 Or register it in a project's `Cargo.toml` so plain `cargo dylint` finds it:
 
 ```toml
 [workspace.metadata.dylint]
-libraries = [{ path = "/abs/path/to/effect-audit" }]
+libraries = [{ path = "/abs/path/to/candor" }]
 ```
 
 ## The capability discipline (conformance mode)
@@ -64,7 +64,7 @@ point. See `sample/src/main.rs` for the pattern. The checker then flags:
 - **AS-EFF-001** — a function performs an effect it does not declare.
 - **AS-EFF-002** — a function declares a capability it never uses.
 
-Adopt incrementally: scope `EFFECT_AUDIT_STRICT` to one module, thread tokens until it reports zero
+Adopt incrementally: scope `CANDOR_STRICT` to one module, thread tokens until it reports zero
 violations, then move to the next.
 
 ## Extending the classifier

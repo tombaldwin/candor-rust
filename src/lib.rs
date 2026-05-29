@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 #![warn(unused_extern_crates)]
 
-// effect_audit — a type-aware capability/effect detector for Rust.
+// candor — a type-aware capability/effect detector for Rust.
 //
 // v1.1: stateful. We record, per function, (a) the effects it performs DIRECTLY and
 // (b) the local functions it calls. After the whole crate is seen, we compute a
@@ -31,20 +31,20 @@ dylint_linting::impl_late_lint! {
     /// ### Why is this bad?
     /// It isn't — it's an audit. It makes a function's effect surface legible from its
     /// definition, the way an explicit effect annotation would.
-    pub EFFECT_AUDIT,
+    pub CANDOR,
     Warn,
     "aggregates each function's transitive capability/effect set",
-    EffectAudit::new()
+    Candor::new()
 }
 
-pub struct EffectAudit {
+pub struct Candor {
     /// Effects performed directly in a function's own body (and its inline closures).
     direct: HashMap<LocalDefId, BTreeSet<&'static str>>,
     /// Local-crate functions each function calls, for transitive propagation.
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
 }
 
-impl EffectAudit {
+impl Candor {
     pub fn new() -> Self {
         Self { direct: HashMap::new(), calls: HashMap::new() }
     }
@@ -130,7 +130,7 @@ fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
     }
 }
 
-impl<'tcx> LateLintPass<'tcx> for EffectAudit {
+impl<'tcx> LateLintPass<'tcx> for Candor {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         let Some(def_id) = clippy_utils::fn_def_id(cx, expr) else {
             return;
@@ -191,12 +191,12 @@ impl<'tcx> LateLintPass<'tcx> for EffectAudit {
 
         // Three modes, selected by environment:
         //   (default)               audit — report each function's inferred effect set.
-        //   EFFECT_AUDIT_STRICT=1   conformance over the whole crate (inferred ⊆ declared).
-        //   EFFECT_AUDIT_STRICT=<p> conformance scoped to functions whose path starts <p>
+        //   CANDOR_STRICT=1   conformance over the whole crate (inferred ⊆ declared).
+        //   CANDOR_STRICT=<p> conformance scoped to functions whose path starts <p>
         //                           (incremental adoption — check one module at a time).
-        //   EFFECT_AUDIT_JSON=<f>   write a machine-readable report to <f>, suppress warnings.
-        let strict_var = std::env::var("EFFECT_AUDIT_STRICT").ok();
-        let json_path = std::env::var("EFFECT_AUDIT_JSON").ok();
+        //   CANDOR_JSON=<f>   write a machine-readable report to <f>, suppress warnings.
+        let strict_var = std::env::var("CANDOR_STRICT").ok();
+        let json_path = std::env::var("CANDOR_JSON").ok();
         let in_scope = |name: &str| match strict_var.as_deref() {
             None => false,
             Some("1") | Some("") => true,
@@ -252,7 +252,7 @@ impl<'tcx> LateLintPass<'tcx> for EffectAudit {
                     };
                     clippy_utils::diagnostics::span_lint(
                         cx,
-                        EFFECT_AUDIT,
+                        CANDOR,
                         span,
                         format!(
                             "[AS-EFF-001] `{name}` performs {{ {} }} but declares {have}; \
@@ -265,7 +265,7 @@ impl<'tcx> LateLintPass<'tcx> for EffectAudit {
                 if !unused.is_empty() {
                     clippy_utils::diagnostics::span_lint(
                         cx,
-                        EFFECT_AUDIT,
+                        CANDOR,
                         span,
                         format!(
                             "[AS-EFF-002] `{name}` declares {{ {} }} but never uses it; \
@@ -291,7 +291,7 @@ impl<'tcx> LateLintPass<'tcx> for EffectAudit {
                     .collect();
                 clippy_utils::diagnostics::span_lint(
                     cx,
-                    EFFECT_AUDIT,
+                    CANDOR,
                     span,
                     format!("`{name}` effects: {{ {} }}   (* = via callee)", parts.join(", ")),
                 );
@@ -313,7 +313,7 @@ impl<'tcx> LateLintPass<'tcx> for EffectAudit {
             let file = format!("{prefix}.{krate}.{kinds}.json");
             let body = format!("[\n{}\n]\n", json_entries.join(",\n"));
             if std::fs::write(&file, body).is_ok() {
-                eprintln!("effect_audit: wrote {} entries to {file}", json_entries.len());
+                eprintln!("candor: wrote {} entries to {file}", json_entries.len());
             }
         }
     }
