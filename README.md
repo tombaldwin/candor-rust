@@ -10,9 +10,20 @@ token to read code. candor precompiles it into a report read in seconds — and 
 resolve `Unknown` rather than guessing. In a pilot ([EVAL.md](EVAL.md)) a JSON-only agent scoped a
 refactor ~3× cheaper and ~6.5× faster than one reading source.
 
-- 🤖 **Agents → [AGENTS.md](AGENTS.md)** — one paste; installs candor and runs it on this project.
-- 🧑 **Humans → [Quick start](#quick-start-humans).**
-- Depth → [what it detects](#what-it-detects) · [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md).
+### Get an agent using it — one paste, from nothing
+
+Give your coding agent (Claude Code, Cursor, …) this:
+
+```text
+Read https://github.com/tombaldwin/candor/blob/main/AGENTS.md and follow it to map this repo's effects.
+```
+
+[AGENTS.md](AGENTS.md) is self-contained — it installs candor, runs it on this project, and explains
+the report and the trust rule (`inferred` is authoritative; `unresolved`/`Unknown` → read the
+source). Single source of truth for agents.
+
+*Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
+[PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md)
 
 ## Layout
 
@@ -43,19 +54,6 @@ cargo candor guard    .candor/baseline  # fail on functions that gained an effec
 cargo candor strict   my_module         # conformance, scoped to a module
 cargo candor no-ambient my_module       # flag direct ambient-authority use
 ```
-
-## Quick start (AI agents)
-
-One paste, from nothing — give your coding agent (Claude Code, Cursor, …) this:
-
-```text
-Read https://github.com/tombaldwin/candor/blob/main/AGENTS.md and follow it to map this repo's effects.
-```
-
-**[AGENTS.md](AGENTS.md)** is the single source of truth for agents: a self-contained block that
-installs candor, runs it on the current project, and explains how to read the report — including the
-trust rule (`inferred` is authoritative; `unresolved`/`Unknown` means *read the source*). It takes an
-agent from nothing to a queryable effect map in one go.
 
 ## All modes (explicit invocation)
 
