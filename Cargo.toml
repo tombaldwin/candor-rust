@@ -1,0 +1,21 @@
+[package]
+name = "effect_audit"
+version = "0.1.0"
+authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
+description = "A type-aware capability/effect checker for Rust, as a dylint lint."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
