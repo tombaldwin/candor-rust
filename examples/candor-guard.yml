@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install dylint
-        run: cargo install cargo-dylint dylint-link
+        run: cargo +stable install cargo-dylint dylint-link
 
       - name: Fetch + build candor
         run: |
@@ -28,7 +28,13 @@ jobs:
           ( cd ~/candor && cargo build )
 
       - name: Effect regression guard
+        # Fail only on AS-EFF-005 (an existing fn gained an effect) — not on unrelated
+        # warnings, which `-D warnings` would also trip on.
         run: |
           LIB=$(ls ~/candor/target/debug/libcandor@*.so)
-          CANDOR_BASELINE=.candor/baseline RUSTFLAGS="-D warnings" \
-            cargo dylint --lib-path "$LIB"
+          out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1)
+          echo "$out"
+          if echo "$out" | grep -q "AS-EFF-005"; then
+            echo "::error::a function gained an effect vs .candor/baseline (refresh if intended)"
+            exit 1
+          fi

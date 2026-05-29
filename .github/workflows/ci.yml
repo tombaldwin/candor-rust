@@ -26,7 +26,8 @@ jobs:
           key: ${{ runner.os }}-candor-${{ hashFiles('Cargo.lock') }}
 
       - name: Install dylint
-        run: cargo install cargo-dylint dylint-link
+        # +stable: build the runner with stable, not the nightly pinned for the lint.
+        run: cargo +stable install cargo-dylint dylint-link
 
       - name: Build lint
         run: cargo build
@@ -39,7 +40,7 @@ jobs:
       # regression that makes candor emit nothing at all.
       - name: Behavioural audit check
         run: |
-          LIB=$(ls target/debug/libcandor@*.so)
+          LIB=$(ls "$PWD"/target/debug/libcandor@*.so)   # absolute: we cd into sample/
           out=$(cd sample && cargo dylint --lib-path "$LIB" 2>&1)
           echo "$out"
           echo "$out" | grep -q '`read_config` effects: { Fs }' \
@@ -50,7 +51,7 @@ jobs:
       # is refreshed deliberately (`cargo candor snapshot .candor/baseline`).
       - name: Self-guard
         run: |
-          LIB=$(ls target/debug/libcandor@*.so)
+          LIB=$(ls "$PWD"/target/debug/libcandor@*.so)
           out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1)
           echo "$out"
           if echo "$out" | grep -q "AS-EFF-005"; then
