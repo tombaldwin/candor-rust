@@ -353,6 +353,31 @@ fn capstd_cap(crate_name: &str, type_name: &str) -> Option<&'static str> {
     })
 }
 
+/// Conventionally-pure std/core/alloc traits. Dynamic dispatch over these (e.g.
+/// `.to_string()` / `.source()` on a `&dyn std::error::Error`) is overwhelmingly
+/// side-effect-free, so we DON'T stamp it `Unknown` — doing so floods reports with
+/// false positives (found in the wild: `dyn Error` error-formatting taints whole call
+/// trees). This only matters for NON-local impls; a project's own effectful impl of
+/// these is local and resolved precisely by CHA. Traits where dispatch genuinely hides
+/// I/O (Iterator, Fn*, Drop, io::Write, …) are deliberately excluded.
+fn is_pure_std_trait(crate_name: &str, trait_name: &str) -> bool {
+    matches!(crate_name, "core" | "std" | "alloc")
+        && matches!(
+            trait_name,
+            "Display"
+                | "Debug"
+                | "Error"
+                | "ToString"
+                | "Clone"
+                | "PartialEq"
+                | "Eq"
+                | "PartialOrd"
+                | "Ord"
+                | "Hash"
+                | "Default"
+        )
+}
+
 /// Capabilities a function declares by taking the matching token as a parameter
 /// (e.g. `&Fs` declares the right to perform `Fs`). This is the Rust expression of
 /// the spec's "capabilities as typed parameters" pillar.
@@ -444,9 +469,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // Class Hierarchy Analysis: if this is a (local) trait method — whether reached
         // by `dyn` dispatch or a generic bound — add edges to every impl so their effects
         // propagate. This is what lets candor see through trait objects soundly.
-        let is_trait_method = cx.tcx.trait_of_assoc(def_id).is_some();
+        let trait_did = cx.tcx.trait_of_assoc(def_id);
         let mut cha_resolved = false;
-        if is_trait_method {
+        if trait_did.is_some() {
             for target in cha_targets(cx.tcx, def_id) {
                 cha_resolved = true;
                 add_edge(self, target);
@@ -456,8 +481,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // Honest `Unknown` only when dispatch is genuinely unresolvable here:
         //  - a `dyn` call over a NON-local trait (we can't see its impl bodies), or
         //  - (paranoid) any trait dispatch CHA couldn't pin to local impls.
-        if is_trait_method && !cha_resolved && (dynamic || self.paranoid) {
-            self.direct.entry(caller).or_default().insert(UNKNOWN);
+        // ...but NOT for conventionally-pure std traits (Display/Error/…), where the
+        // overwhelmingly-pure dispatch would otherwise flood reports with false Unknowns.
+        if let Some(td) = trait_did {
+            let pure = is_pure_std_trait(cx.tcx.crate_name(td.krate).as_str(), cx.tcx.item_name(td).as_str());
+            if !cha_resolved && !pure && (dynamic || self.paranoid) {
+                self.direct.entry(caller).or_default().insert(UNKNOWN);
+            }
         }
 
         // Record a directly-performed effect (built-in classifier, then project rules).
@@ -831,6 +861,22 @@ mod tests {
         assert_eq!(classify_extra("reqwest", "reqwest::Client::new", &rules), Some("Net"));
         assert_eq!(classify_extra("other", "mycrate::io::read", &rules), Some("Fs"));
         assert_eq!(classify_extra("other", "elsewhere::thing", &rules), None);
+    }
+
+    #[test]
+    fn pure_std_traits() {
+        // dyn dispatch over these is treated as pure (no Unknown flood) — found in the
+        // wild: `dyn Error` formatting was tainting whole call trees.
+        assert!(is_pure_std_trait("std", "Error"));
+        assert!(is_pure_std_trait("core", "Display"));
+        assert!(is_pure_std_trait("alloc", "ToString"));
+        assert!(is_pure_std_trait("core", "Clone"));
+        // ...but traits where dispatch can genuinely hide I/O stay Unknown.
+        assert!(!is_pure_std_trait("std", "Iterator"));
+        assert!(!is_pure_std_trait("std", "Write"));
+        assert!(!is_pure_std_trait("std", "Drop"));
+        // ...and a same-named trait from a non-std crate is not whitelisted.
+        assert!(!is_pure_std_trait("mycrate", "Display"));
     }
 
     #[test]
