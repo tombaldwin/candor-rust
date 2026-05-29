@@ -66,6 +66,19 @@ fn home(_env: &Env) -> Option<String> {
     std::env::var("HOME").ok()
 }
 
+// ── UNRESOLVED (dynamic dispatch): candor cannot see which impl runs. ─────────
+trait Action {
+    fn run(&self);
+}
+fn dispatch(a: &dyn Action) {
+    a.run(); // dyn call -> Unknown -> AS-EFF-003 (the impl could do anything)
+}
+
+// ── UNRESOLVED (callback): closure reached through a generic parameter. ───────
+fn run_callback(f: impl Fn()) {
+    f(); // call through `impl Fn` -> Unknown -> AS-EFF-003
+}
+
 fn main() {
     // Capabilities are minted exactly once, here, then threaded down by reference.
     let (fs, env, clock, exec) = caps::acquire();
@@ -76,6 +89,13 @@ fn main() {
     let _ = greet(&clock, "world");
     run_tool(&exec, &fs);
     let _ = home(&env);
+
+    struct Noop;
+    impl Action for Noop {
+        fn run(&self) {}
+    }
+    dispatch(&Noop); // candor sees a dyn call here, not the (empty) Noop impl
+    run_callback(|| {});
 
     // The point of unforgeable tokens: the line below does NOT compile, because `Fs`'s
     // field is private to `caps` — no code outside that module can mint a capability.

@@ -3,13 +3,22 @@
 
 // candor — a type-aware capability/effect detector for Rust.
 //
-// v1.1: stateful. We record, per function, (a) the effects it performs DIRECTLY and
-// (b) the local functions it calls. After the whole crate is seen, we compute a
-// transitive fixpoint so each function reports its FULL effect set — including effects
-// inherited through helpers it calls. This is the "trust the signature" payoff: a
-// high-level handler that does no I/O itself still surfaces { Net, Fs, ... } if its
-// callees do. Aggregating into a set also dedups the per-call-site noise (e.g. one
-// `tracing` statement no longer counts as several Log effects).
+// Stateful. We record, per function, (a) the effects it performs DIRECTLY and (b) the
+// local functions it calls. After the whole crate is seen, we compute a transitive
+// fixpoint so each function reports its FULL effect set — including effects inherited
+// through helpers it calls. A high-level handler that does no I/O itself still surfaces
+// { Net, Fs, ... } if its callees do.
+//
+// SOUNDNESS / honesty: a call we cannot statically resolve to a callee — dynamic
+// dispatch (`dyn Trait`), a function pointer, or a closure reached through a generic
+// `impl Fn` parameter — could perform ANY effect. Rather than silently assume such a
+// call is pure (the original sin: "lying by omission"), we record an `Unknown` effect.
+// In conformance mode a function carrying `Unknown` cannot be certified honest
+// (AS-EFF-003). Statically-dispatched generic trait calls are still assumed to honour
+// their bound (a documented residual gap), to keep the audit from drowning in Unknown.
+//
+// The built-in classifier (`classify`) knows a fixed set of crates; a project can add
+// its own crate/path → effect rules via a CANDOR_CONFIG file (see `parse_config`).
 
 extern crate rustc_hir;
 extern crate rustc_middle;
@@ -17,8 +26,8 @@ extern crate rustc_middle;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::LocalDefId;
-use rustc_hir::{Expr, HirId};
+use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_hir::{Expr, ExprKind, HirId};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::TyCtxt;
 
@@ -37,16 +46,102 @@ dylint_linting::impl_late_lint! {
     Candor::new()
 }
 
+/// The effect recorded for a call candor cannot resolve to a concrete callee.
+const UNKNOWN: &str = "Unknown";
+
 pub struct Candor {
     /// Effects performed directly in a function's own body (and its inline closures).
     direct: HashMap<LocalDefId, BTreeSet<&'static str>>,
     /// Local-crate functions each function calls, for transitive propagation.
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
+    /// Project-supplied classifier rules: (effect, is_crate_prefix, prefix).
+    extra: Vec<(&'static str, bool, String)>,
 }
 
 impl Candor {
     pub fn new() -> Self {
-        Self { direct: HashMap::new(), calls: HashMap::new() }
+        let extra = std::env::var("CANDOR_CONFIG")
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| parse_config(&s))
+            .unwrap_or_default();
+        Self { direct: HashMap::new(), calls: HashMap::new(), extra }
+    }
+}
+
+/// Parse a CANDOR_CONFIG file: one rule per line, `<Effect> <crate|path> <prefix>`,
+/// blank lines and `#` comments ignored. The effect must be one of the known names.
+///
+///     # extend the classifier with this project's own effectful crates
+///     Net   crate  reqwest
+///     Fs    path   mycrate::storage::
+fn parse_config(text: &str) -> Vec<(&'static str, bool, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        match (it.next(), it.next(), it.next()) {
+            (Some(eff), Some(kind), Some(prefix)) => {
+                if let Some(e) = cap_from_name(eff) {
+                    out.push((e, kind == "crate", prefix.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Project-supplied rules, consulted only when the built-in `classify` returns None.
+fn classify_extra(
+    crate_name: &str,
+    path: &str,
+    extra: &[(&'static str, bool, String)],
+) -> Option<&'static str> {
+    for (eff, is_crate, prefix) in extra {
+        let hit = if *is_crate { crate_name.starts_with(prefix.as_str()) } else { path.starts_with(prefix.as_str()) };
+        if hit {
+            return Some(eff);
+        }
+    }
+    None
+}
+
+/// What a call expression resolves to.
+enum Callee {
+    /// A concrete function/method we can classify and (if local) follow.
+    Def(DefId),
+    /// A call candor cannot see through — its effects are unknowable here.
+    Unresolved,
+}
+
+/// Classify a call site. Crucially, calls that cannot be resolved to a concrete callee
+/// (dynamic dispatch, fn pointers, calls through `impl Fn` parameters) return
+/// `Unresolved` instead of being silently dropped.
+fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Callee> {
+    use rustc_middle::ty::TyKind;
+    match expr.kind {
+        ExprKind::MethodCall(_, receiver, _, _) => {
+            let recv_ty = cx.typeck_results().expr_ty_adjusted(receiver).peel_refs();
+            if matches!(recv_ty.kind(), TyKind::Dynamic(..)) {
+                return Some(Callee::Unresolved); // dyn dispatch
+            }
+            match cx.typeck_results().type_dependent_def_id(expr.hir_id) {
+                Some(did) => Some(Callee::Def(did)),
+                None => Some(Callee::Unresolved),
+            }
+        }
+        ExprKind::Call(callee, _) => match cx.typeck_results().expr_ty(callee).kind() {
+            TyKind::FnDef(did, _) => Some(Callee::Def(*did)),
+            TyKind::FnPtr(..) => Some(Callee::Unresolved), // function pointer
+            TyKind::Closure(..) => None,                   // inline closure body counted lexically
+            TyKind::Param(..) | TyKind::Alias(..) | TyKind::Dynamic(..) => Some(Callee::Unresolved),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -132,11 +227,20 @@ fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
 
 impl<'tcx> LateLintPass<'tcx> for Candor {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        let Some(def_id) = clippy_utils::fn_def_id(cx, expr) else {
+        let Some(callee) = resolve_callee(cx, expr) else {
             return;
         };
         let Some(caller) = enclosing_named_fn(cx.tcx, expr.hir_id) else {
             return;
+        };
+
+        let def_id = match callee {
+            // A call we cannot see through could do anything — record it honestly.
+            Callee::Unresolved => {
+                self.direct.entry(caller).or_default().insert(UNKNOWN);
+                return;
+            }
+            Callee::Def(def_id) => def_id,
         };
 
         // Record a local call edge for transitive propagation.
@@ -146,10 +250,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         }
 
-        // Record a directly-performed effect.
+        // Record a directly-performed effect (built-in classifier, then project rules).
         let crate_name = cx.tcx.crate_name(def_id.krate);
         let path = cx.tcx.def_path_str(def_id);
-        if let Some(effect) = classify(crate_name.as_str(), &path) {
+        let effect = classify(crate_name.as_str(), &path)
+            .or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
+        if let Some(effect) = effect {
             self.direct.entry(caller).or_default().insert(effect);
         }
     }
@@ -215,8 +321,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             let span = cx.tcx.def_span(f);
             let declared = declared_caps(cx.tcx, f);
             let direct = self.direct.get(&f).cloned().unwrap_or_default();
-            let undeclared: Vec<&str> =
-                effs.iter().copied().filter(|e| !declared.contains(e)).collect();
+            let has_unknown = effs.contains(UNKNOWN);
+            // `Unknown` is not a declarable capability — it's handled by AS-EFF-003.
+            let undeclared: Vec<&str> = effs
+                .iter()
+                .copied()
+                .filter(|e| *e != UNKNOWN && !declared.contains(e))
+                .collect();
             let unused: Vec<&str> =
                 declared.iter().copied().filter(|c| !effs.contains(c)).collect();
 
@@ -227,7 +338,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(span);
                 json_entries.push(format!(
                     "  {{\"fn\": {}, \"loc\": {}, \"inferred\": {}, \"direct\": {}, \
-                     \"declared\": {}, \"undeclared\": {}, \"overdeclared\": {}}}",
+                     \"declared\": {}, \"undeclared\": {}, \"overdeclared\": {}, \
+                     \"unresolved\": {}}}",
                     json_str(&name),
                     json_str(&loc),
                     json_set(effs),
@@ -235,6 +347,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     json_set(&declared),
                     json_vec(&undeclared),
                     json_vec(&unused),
+                    has_unknown,
                 ));
                 continue;
             }
@@ -258,6 +371,21 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             "[AS-EFF-001] `{name}` performs {{ {} }} but declares {have}; \
                              add the missing capability parameter(s)",
                             undeclared.join(", ")
+                        ),
+                    );
+                }
+                // AS-EFF-003: performs effects candor cannot resolve, so its declared
+                // capabilities cannot be verified complete (this is the honest answer to
+                // dynamic dispatch / fn-pointers / callbacks — never a silent pass).
+                if has_unknown {
+                    clippy_utils::diagnostics::span_lint(
+                        cx,
+                        CANDOR,
+                        span,
+                        format!(
+                            "[AS-EFF-003] `{name}` makes calls candor cannot resolve \
+                             (dynamic dispatch, fn-pointer, or callback); its effect set is \
+                             not provably complete and conformance cannot be certified"
                         ),
                     );
                 }
