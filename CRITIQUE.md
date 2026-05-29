@@ -49,7 +49,10 @@ That is the part worth keeping.
    Too blunt for real capability security. *(Not fixed.)*
 
 5. **Adoption is viral.** Threading tokens to honour the discipline cascades up the whole call graph
-   (measured on ebman). High churn for an advisory, partially-sound guarantee.
+   (measured on ebman). High churn for an advisory, partially-sound guarantee. *(Sidestepped:
+   `CANDOR_BASELINE` (AS-EFF-005) gives most of the value — catching a function that newly gains an
+   effect — with zero token threading and zero rewrite. This, not token migration, is the realistic
+   adoption path for an existing codebase.)*
 
 6. **The "for AI agents" thesis is unproven.** candor is a useful effect auditor for *humans*;
    nothing here has been shown to make an AI agent's edits better. The JSON mode is a gesture toward
@@ -80,6 +83,13 @@ That is the part worth keeping.
   authority, the cap-std-aligned discipline that has actual teeth (it fires even on token-holders).
 - **Opt-in max soundness** `CANDOR_PARANOID`: also marks generic static trait dispatch `Unknown`,
   closing the residual gap for users who accept the noise.
+
+### Usefulness pass
+
+- **Regression guard** `CANDOR_BASELINE` (AS-EFF-005): diff the current effect report against a
+  committed snapshot; fail CI when an existing function gains an effect. Zero-friction adoption — no
+  tokens, no rewrite — and the strongest answer to "is this actually useful day-to-day." Baseline
+  JSON parsed with serde; loader returns None (never panics) on a missing/garbled file.
 
 ### Robustness pass
 

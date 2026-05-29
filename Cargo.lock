@@ -95,6 +95,8 @@ dependencies = [
  "clippy_utils",
  "dylint_linting",
  "dylint_testing",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

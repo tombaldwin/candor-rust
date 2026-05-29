@@ -103,6 +103,26 @@ fn parse_config(text: &str) -> Vec<(&'static str, bool, String)> {
     out
 }
 
+/// One entry of a saved candor JSON report, for baseline diffing.
+#[derive(serde::Deserialize)]
+struct BaselineEntry {
+    #[serde(rename = "fn")]
+    func: String,
+    inferred: Vec<String>,
+}
+
+/// Load a baseline candor JSON into `fn name -> inferred effect set`.
+fn load_baseline(path: &str) -> Option<HashMap<String, BTreeSet<String>>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let entries: Vec<BaselineEntry> = serde_json::from_str(&text).ok()?;
+    Some(
+        entries
+            .into_iter()
+            .map(|e| (e.func, e.inferred.into_iter().collect()))
+            .collect(),
+    )
+}
+
 /// Project-supplied rules, consulted only when the built-in `classify` returns None.
 fn classify_extra(
     crate_name: &str,
@@ -334,10 +354,27 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         //   CANDOR_NO_AMBIENT=1|<p>  enforcement: flag any DIRECT use of ambient authority
         //                            (the cap-std-aligned answer to advisory tokens — route
         //                            those calls through an injected capability instead).
+        //   CANDOR_BASELINE=<prefix> regression guard: flag any function that GAINED an effect
+        //                            vs. a previously-saved report (a CANDOR_JSON snapshot).
+        // Per-crate file naming, shared by JSON output, baseline input. A package emits
+        // several crates SHARING a name (rlib + bin), so disambiguate by crate type too.
+        let krate = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
+        let kinds: String = cx
+            .tcx
+            .crate_types()
+            .iter()
+            .map(|t| format!("{t:?}"))
+            .collect::<Vec<_>>()
+            .join("-");
+
         let strict_var = std::env::var("CANDOR_STRICT").ok();
         let no_ambient_var = std::env::var("CANDOR_NO_AMBIENT").ok();
         let json_path = std::env::var("CANDOR_JSON").ok();
-        let any_enforce = strict_var.is_some() || no_ambient_var.is_some();
+        let baseline = std::env::var("CANDOR_BASELINE")
+            .ok()
+            .and_then(|prefix| load_baseline(&format!("{prefix}.{krate}.{kinds}.json")));
+        let any_enforce =
+            strict_var.is_some() || no_ambient_var.is_some() || baseline.is_some();
 
         // Stable ordering for reproducible output.
         let mut items: Vec<LocalDefId> = eff.keys().copied().collect();
@@ -474,20 +511,31 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     );
                 }
             }
+
+            // AS-EFF-005 (CANDOR_BASELINE): a function gained an effect since the saved
+            // report. New functions (absent from the baseline) are not flagged — they're
+            // new code, reviewed normally; the guard is for *regressions* in existing fns.
+            if let Some(base) = &baseline {
+                if let Some(prior) = base.get(&name) {
+                    let gained: Vec<&str> =
+                        effs.iter().copied().filter(|e| !prior.contains(*e)).collect();
+                    if !gained.is_empty() {
+                        clippy_utils::diagnostics::span_lint(
+                            cx,
+                            CANDOR,
+                            span,
+                            format!(
+                                "[AS-EFF-005] `{name}` gained effect {{ {} }} not present in the \
+                                 baseline; an existing function started performing a new effect",
+                                gained.join(", ")
+                            ),
+                        );
+                    }
+                }
+            }
         }
 
         if let Some(prefix) = &json_path {
-            // One file per compiled crate. A single package emits several crates that
-            // SHARE a crate name (e.g. the `ebman` rlib from lib.rs and the `ebman` bin
-            // from main.rs), so we disambiguate by crate type too, else they overwrite.
-            let krate = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
-            let kinds: String = cx
-                .tcx
-                .crate_types()
-                .iter()
-                .map(|t| format!("{t:?}"))
-                .collect::<Vec<_>>()
-                .join("-");
             let file = format!("{prefix}.{krate}.{kinds}.json");
             let body = format!("[\n{}\n]\n", json_entries.join(",\n"));
             if std::fs::write(&file, body).is_ok() {
@@ -585,6 +633,22 @@ mod tests {
         assert!(in_scope(Some(""), "anything"));
         assert!(in_scope(Some("app::config"), "app::config::load"));
         assert!(!in_scope(Some("app::config"), "app::other::load"));
+    }
+
+    #[test]
+    fn baseline_round_trips() {
+        let path = std::env::temp_dir().join("candor_unit_baseline.json");
+        std::fs::write(
+            &path,
+            r#"[{"fn":"a::b","inferred":["Net","Log"]},{"fn":"c","inferred":[]}]"#,
+        )
+        .unwrap();
+        let m = load_baseline(path.to_str().unwrap()).unwrap();
+        assert_eq!(m.len(), 2);
+        assert!(m["a::b"].contains("Net") && m["a::b"].contains("Log"));
+        assert!(m["c"].is_empty());
+        // A missing or unreadable baseline yields None (never panics).
+        assert!(load_baseline("/no/such/candor/baseline.json").is_none());
     }
 
     #[test]

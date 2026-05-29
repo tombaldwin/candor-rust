@@ -49,6 +49,10 @@ CANDOR_STRICT=mymod::sub   cargo dylint --lib-path "$LINT"   # one module (incre
 # ENFORCEMENT (cap-std-aligned): flag any DIRECT reach for ambient authority.
 CANDOR_NO_AMBIENT=mymod    cargo dylint --lib-path "$LINT"   # AS-EFF-004 per direct ambient call
 
+# REGRESSION GUARD: fail if any function gained an effect since a saved snapshot.
+CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LINT"      # 1. snapshot (commit it)
+CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LINT"  # 2. in CI: AS-EFF-005 on regressions
+
 # Flags that combine with any mode:
 CANDOR_CONFIG=candor.rules cargo dylint --lib-path "$LINT"   # extra classifier rules
 CANDOR_PARANOID=1          cargo dylint --lib-path "$LINT"   # treat generic trait dispatch as Unknown
@@ -77,9 +81,31 @@ point. See `sample/src/main.rs` for the pattern. The checker then flags:
   capability. This is the cap-std-aligned, *enforceable* alternative to the advisory tokens: it
   fires even on functions that hold a token, because holding `&Fs` doesn't stop you calling
   `std::fs`. The fix is to route the call through an injected capability (e.g. a cap-std handle).
+- **AS-EFF-005** (`CANDOR_BASELINE`) — an existing function *gained* an effect it didn't have in a
+  saved snapshot. The lowest-friction adoption path: no token threading, no rewrite — just catch the
+  PR that makes a previously-pure function start doing network/disk/etc. I/O. (New functions are not
+  flagged; they're reviewed as new code.)
 
 Adopt incrementally: scope `CANDOR_STRICT` / `CANDOR_NO_AMBIENT` to one module, fix until it reports
 zero, then move to the next.
+
+## CI guardrail (lowest-friction adoption)
+
+You don't have to adopt the capability discipline to get value. The cheapest win is the regression
+guard: snapshot the effect report, commit it, and fail CI when a function's effect surface grows.
+
+```sh
+# once, on a known-good commit — then `git add .candor/`
+CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LINT"
+
+# in CI (deny warnings so AS-EFF-005 fails the build):
+CANDOR_BASELINE=.candor/baseline RUSTFLAGS="-D warnings" cargo dylint --lib-path "$LINT"
+```
+
+Now a PR that makes a parser suddenly open a socket, or a render function start reading the
+filesystem, fails review automatically — no tokens, no rewrite. Refresh the baseline deliberately
+(re-run the snapshot command) when a new effect is intended. This is equally useful to a human
+reviewer and to an AI agent reviewing a diff.
 
 ## Machine-readable for agents
 
