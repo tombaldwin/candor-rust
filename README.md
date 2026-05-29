@@ -3,7 +3,8 @@
 **A cheap, honest map of what every function in a Rust codebase actually does** — which functions
 reach the network, filesystem, a database, subprocesses, the clock, the environment; *transitively*;
 and where it honestly *can't* tell. A capability/effect checker built as a
-[dylint](https://github.com/trailofbits/dylint) lint.
+[dylint](https://github.com/trailofbits/dylint) lint — the Rust reference implementation of
+[candor-spec](https://github.com/tombaldwin/candor-spec) (the same idea, specified across languages).
 
 **Built for AI coding agents.** An agent re-derives "what does this do?" every session and pays per
 token to read code. candor precompiles it into a report read in seconds — and marks calls it can't
@@ -218,6 +219,8 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 
 ## Documentation
 
+- **[candor-spec](https://github.com/tombaldwin/candor-spec)** — the language-agnostic spec candor
+  implements (effect vocabulary, report schema, trust contract; the Java/C#/Go ports share it).
 - **[AGENTS.md](AGENTS.md)** — self-contained instructions for an AI agent (install → run → read).
 - **[PRINCIPLES.md](PRINCIPLES.md)** — the ideas candor (and its development) are built on.
 - **[CRITIQUE.md](CRITIQUE.md)** — an honest, critical self-assessment + comparison to prior art
