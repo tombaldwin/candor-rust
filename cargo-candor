@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# cargo-candor — ergonomic wrapper around `cargo dylint` for the candor lint.
+#
+# Put this file's directory on PATH (or symlink this file into one), then run e.g.
+#   cargo candor audit
+#   cargo candor snapshot .candor/baseline
+#   cargo candor guard    .candor/baseline
+#   cargo candor strict   my_module
+#   cargo candor no-ambient my_module
+#
+# It locates (building on first use) the toolchain-suffixed candor dylib and invokes
+# `cargo dylint --lib-path <dylib>` with the right environment for the chosen command.
+set -euo pipefail
+
+# Resolve the candor repo — this script lives at its root (follow symlinks).
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do SELF="$(cd "$(dirname "$SELF")" && pwd)/$(readlink "$SELF")"; done
+CANDOR_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+
+find_lib() {
+  ls "$CANDOR_DIR"/target/debug/libcandor@*.dylib \
+     "$CANDOR_DIR"/target/debug/libcandor@*.so 2>/dev/null | head -1
+}
+
+LIB="$(find_lib || true)"
+if [ -z "${LIB:-}" ]; then
+  echo "candor: building the lint (first run)…" >&2
+  ( cd "$CANDOR_DIR" && cargo build >&2 )
+  LIB="$(find_lib || true)"
+fi
+[ -n "${LIB:-}" ] || {
+  echo "candor: could not build/find the lint dylib under $CANDOR_DIR/target/debug" >&2
+  exit 1
+}
+
+# Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
+[ "${1:-}" = "candor" ] && shift
+cmd="${1:-audit}"; shift || true
+
+case "$cmd" in
+  audit)      ;;                                              # default: report effects
+  snapshot)   export CANDOR_JSON="${1:-.candor/baseline}" ;;
+  guard)      export CANDOR_BASELINE="${1:-.candor/baseline}" ;;
+  strict)     export CANDOR_STRICT="${1:-1}" ;;
+  no-ambient) export CANDOR_NO_AMBIENT="${1:-1}" ;;
+  -h|--help|help)
+    sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+  *)
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|strict|no-ambient)" >&2
+    exit 2 ;;
+esac
+
+exec cargo dylint --lib-path "$LIB"

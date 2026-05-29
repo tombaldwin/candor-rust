@@ -1,0 +1,36 @@
+# Copy this into YOUR project as .github/workflows/candor-guard.yml
+#
+# It fails a PR when an existing function GAINS an effect it didn't have in the
+# committed baseline (AS-EFF-005) — e.g. a parser that starts opening a socket.
+# No capability tokens, no rewrite required.
+#
+# One-time setup in your repo:
+#   1. build candor locally and run:  cargo candor snapshot .candor/baseline
+#   2. commit the .candor/ directory.
+#   3. refresh the baseline deliberately whenever a new effect is intended.
+
+name: candor guard
+on: [pull_request]
+
+jobs:
+  candor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dylint
+        run: cargo install cargo-dylint dylint-link
+
+      - name: Fetch + build candor
+        # candor is currently a private repo: provide a token with read access.
+        # For a public mirror, drop the token line.
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.CANDOR_TOKEN }}@github.com/tombaldwin/candor ~/candor
+          ( cd ~/candor && cargo build )
+
+      - name: Effect regression guard
+        run: |
+          LIB=$(ls ~/candor/target/debug/libcandor@*.so)
+          CANDOR_BASELINE=.candor/baseline RUSTFLAGS="-D warnings" \
+            cargo dylint --lib-path "$LIB"

@@ -33,7 +33,18 @@ The build produces `target/debug/libcandor@<toolchain>-<platform>.dylib` (`.so` 
 
 ## Use
 
-From any Rust project root, with `LINT` set to that dylib's absolute path:
+The easy way — put this repo on `PATH` (or symlink `cargo-candor` into one) and use the wrapper,
+which finds/builds the dylib for you:
+
+```sh
+cargo candor audit                      # report each function's effect set
+cargo candor snapshot .candor/baseline  # write a JSON report
+cargo candor guard    .candor/baseline  # fail on functions that gained an effect
+cargo candor strict   my_module         # conformance, scoped to a module
+cargo candor no-ambient my_module       # flag direct ambient-authority use
+```
+
+The explicit way — from any Rust project root, with `LINT` set to the dylib's absolute path:
 
 ```sh
 # AUDIT (default): every function's transitive effect set. No code changes needed.
