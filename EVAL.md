@@ -141,3 +141,33 @@ in the per-crate reports closed the boundary. Re-run on mcfly, every bin entry p
 inherits the lib's `Db` (e.g. `handle_addition` → `[Clock, Db, Env, Fs]`); transitive count 36 → 43,
 vs the source agent's 48 — the ~10% residual is a couple of debatable classifications, not the hole.
 So the generalization trial both falsified the easy claim *and* drove the fix that restored it.
+
+## Fourth trial — the EDIT task (conclusion #3, finally tested)
+
+Every trial so far measured *answering*. This one measures *changing code*. Two agents annotate 8
+ebman functions (chosen for diverse effect profiles) with each function's transitive effect set — A
+from the candor report, B from source only — then a blind judge establishes ground truth from source
+and grades.
+
+Cost held the usual shape: **A 22.7k tokens / 22 calls / 77 s; B 84.3k / 61 calls / 306 s** (~3.7×
+cheaper, ~4× faster). Accuracy is where it gets honest — and it is **not** a candor win:
+
+- **Agreed and correct on 5/8** (1,2,5,6,8) — including candor faithfully writing `Unknown` on two
+  unresolvable-callback functions (honest, and B agreed).
+- **candor was WRONG on 3 annotations, all false positives from classifier imprecision**, and the
+  agent confidently wrote them into the code:
+  - 2× false `Clock` on pure lint `fix` methods — **CHA over-approximation**: `self.applies()` on a
+    *concrete* type was expanded to ALL `Rule` impls, inheriting a sibling rule's `chrono::now`
+    (`direct=[]`, `inferred=[Clock]`, `unresolved=false` — a confident false positive).
+  - 1× false `Env` on `advance_action_flow` — candor classifies `std::env::current_dir` as Env; the
+    spec's Env is `var`/`vars` only.
+- The source agent was wrong on **1** (a false `Exec` from a reachability slip).
+
+**Verdict on conclusion #3:** candor made the agent ~4× cheaper but **less accurate** — it propagated
+its own imprecisions into the edits, and the slower source-reading agent was more precise. This is
+conclusion #2's lesson, now shown on edits: *the agent is only as right as the report.* Nuance worth
+keeping: candor's errors were all **over-reporting** (sound-but-imprecise), the safe direction for an
+audit/"what might this touch" use, but wrong for a precision task like exact annotation. So candor
+helps edits as a **fast, recall-biased first pass to verify**, not a precise oracle — and the gap is
+concrete and fixable (devirtualize concrete-receiver trait calls instead of CHA-expanding them; tighten
+`std::env`). The most useful output of the trial was, once again, bugs.

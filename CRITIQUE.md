@@ -96,6 +96,19 @@ That is the part worth keeping.
    debatable classifications, not the boundary). Scope: active in JSON/snapshot mode, where the
    per-crate reports exist; audit/guard modes remain within-crate.)*
 
+9. **CHA over-approximates statically-resolvable trait calls — confident false positives.** candor's
+   Class Hierarchy Analysis is sound (it expands a trait-method call to every impl so no effect is
+   missed), but it fires even when the receiver type is *concrete* and the call is statically
+   resolvable — so `self.applies()` on a concrete type inherits the effects of *every other* impl of
+   that trait. *(Found by the edit-task eval (EVAL.md, 4th trial): two pure lint `fix` methods were
+   confidently annotated `Clock` — `direct=[]`, `inferred=[Clock]`, `unresolved=false` — because CHA
+   pulled in a sibling rule's `chrono::now`, and the candor-equipped agent wrote the wrong annotation
+   into the code. Fix: devirtualize via instance resolution when the receiver type is known, falling
+   back to CHA only for genuinely dynamic/generic dispatch. Related: `std::env` is classified `Env`
+   whole, including `current_dir`, which reads no variable — over-broad. Both are precision, not
+   soundness, issues — candor errs toward over-reporting, the safe direction for audit but wrong for
+   exact annotation. Not yet fixed.)*
+
 ## Status of fixes (this pass)
 
 - **Unresolved calls are now first-class.** Dynamic dispatch, fn-pointers, and `impl Fn` callbacks
