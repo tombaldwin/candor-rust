@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# candor-run.sh — deterministic core of the candor Claude Code integration.
+#
+# Prints ONE human-readable "receipt" line to stdout describing the current effect
+# map, its freshness, and any coverage gaps. Re-runs candor only when Rust sources
+# changed since the last run (content hash), so it's cheap to call every turn.
+#
+# Usage:  candor-run.sh [--force] [PROJECT_DIR]
+#   PROJECT_DIR defaults to $CLAUDE_PROJECT_DIR, else the git toplevel, else cwd.
+#
+# Exit code is a SURFACE HINT for the Stop hook (slash command ignores it):
+#   0  quiet  — nothing changed; report already current (don't nag the user)
+#   10 surface — re-ran this call (fresh map) OR stale warning OR first run
+# Always exits 0/10 and always prints the receipt; status is in the text.
+set -uo pipefail
+
+FORCE=0
+[ "${1:-}" = "--force" ] && { FORCE=1; shift; }
+DIR="${1:-${CLAUDE_PROJECT_DIR:-}}"
+[ -z "$DIR" ] && DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$DIR" 2>/dev/null || { echo "candor: cannot enter project dir"; exit 0; }
+[ -f Cargo.toml ] || exit 0   # not a Rust project; say nothing
+
+STATE_DIR="$DIR/.candor"
+STATE="$STATE_DIR/state"
+REPORT_PREFIX="$STATE_DIR/report"
+CONFIG="$STATE_DIR/config"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+# Optional per-project config can pin CANDOR_LIB (written by install.sh).
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+# ---- content hash of all Rust sources (path + content, target/.git excluded) ----
+src_hash() {
+  find "$DIR" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
+    | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1
+}
+CUR="$(src_hash)"; SHORT="${CUR:0:8}"
+PREV=""; [ -f "$STATE" ] && PREV="$(cat "$STATE" 2>/dev/null)"
+
+# ---- locate the candor dylib ----
+find_lib() {
+  local c
+  for c in "${CANDOR_LIB:-}" \
+           "$DIR"/../candor/target/debug/libcandor@*.dylib "$DIR"/../candor/target/debug/libcandor@*.so \
+           /tmp/candor/target/debug/libcandor@*.dylib /tmp/candor/target/debug/libcandor@*.so; do
+    [ -n "$c" ] && [ -e "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+# ---- decide whether to (re)run candor ----
+# Report is current iff it exists AND the source hash hasn't moved since we wrote it.
+report_exists() { ls "$REPORT_PREFIX".*.json >/dev/null 2>&1; }
+need_run=$FORCE
+[ "$CUR" != "$PREV" ] && need_run=1
+report_exists || need_run=1
+
+# Touch every workspace member's crate root (mtime only) to force `cargo dylint` to
+# recompile — dylint emits the report ONLY on recompilation, so an already-built
+# project would otherwise produce nothing.
+touch_roots() {
+  if command -v cargo >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
+import sys, json, os
+try: m = json.load(sys.stdin)
+except Exception: sys.exit(0)
+for p in m.get("packages", []):
+    d = os.path.dirname(p["manifest_path"])
+    for f in ("src/lib.rs", "src/main.rs"):
+        fp = os.path.join(d, f)
+        if os.path.exists(fp): print(fp)
+' | while IFS= read -r f; do touch "$f"; done
+  else
+    for r in src/lib.rs src/main.rs; do [ -f "$DIR/$r" ] && touch "$DIR/$r"; done
+  fi
+}
+run_lint() { CANDOR_JSON="$REPORT_PREFIX" cargo dylint --lib-path "$LIB" >/dev/null 2>"$STATE_DIR/last-error.log"; }
+
+ran_ok=1; surfaced=0
+if [ "$need_run" = 1 ]; then
+  surfaced=10
+  LIB="$(find_lib)" || {
+    echo "candor ⚠ not installed — no dylib found. Build it (see integrations/claude-code/README.md) or set CANDOR_LIB."
+    exit 10
+  }
+  MARK="$STATE_DIR/.mark"; : > "$MARK"
+  emitted() { [ -n "$(find "$STATE_DIR" -name 'report.*.json' -newer "$MARK" 2>/dev/null)" ]; }
+  if run_lint && emitted; then
+    echo "$CUR" > "$STATE"; ran_ok=1
+  else
+    # dylint produced no fresh report — either the crate didn't recompile (already
+    # built) or it failed to compile. Force a recompile and retry once.
+    touch_roots
+    : > "$MARK"
+    if run_lint && emitted; then
+      echo "$CUR" > "$STATE"; ran_ok=1
+    else
+      ran_ok=0   # genuine build error: keep last good report (if any), flag STALE
+    fi
+  fi
+fi
+
+# ---- aggregate the report (python3 preferred; degrade gracefully) ----
+read_summary() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$REPORT_PREFIX" <<'PY' 2>/dev/null
+import sys, glob, json
+pre = sys.argv[1]
+fns = 0; eff = {}; unres = 0
+for f in glob.glob(pre + '.*.json'):
+    try:
+        data = json.load(open(f))
+    except Exception:
+        continue
+    for e in data:
+        fns += 1
+        inf = e.get('inferred', []) or []
+        for x in inf:
+            eff[x] = eff.get(x, 0) + 1
+        if e.get('unresolved') or 'Unknown' in inf:
+            unres += 1
+order = ['Db', 'Net', 'Fs', 'Exec', 'Env', 'Clock', 'Ipc', 'Rand', 'Clipboard', 'Log']
+parts = [f"{eff[k]} {k}" for k in order if eff.get(k)]
+print(f"{fns}\t{', '.join(parts)}\t{unres}")
+PY
+  else
+    # crude fallback: count "fn" keys across report files
+    local n
+    n=$(grep -ho '"fn"' "$REPORT_PREFIX".*.json 2>/dev/null | wc -l | tr -d ' ')
+    printf '%s\t(install python3 for the effect breakdown)\t?\n' "$n"
+  fi
+}
+SUM="$(read_summary)"
+FNS="$(printf '%s' "$SUM" | cut -f1)"
+EFFS="$(printf '%s' "$SUM" | cut -f2)"
+UNRES="$(printf '%s' "$SUM" | cut -f3)"
+[ -z "$FNS" ] && FNS=0
+[ -z "$EFFS" ] && EFFS="no effects detected"
+
+# ---- coverage: dependencies that LOOK effectful but candor has no rule for ----
+# Calibrated set is derived from candor/src/lib.rs (keep in sync). The SUSPECT
+# pattern is a deliberately-curated heuristic — it nudges, it does not certify.
+CALIBRATED="reqwest isahc ureq sqlx rusqlite postgres tokio_postgres diesel redis mongodb mysql mysql_async sea_orm deadpool_postgres memmap2 rand getrandom fastrand chrono tracing arboard portable_pty"
+SUSPECT='sql|sqlite|postgres|mysql|mariadb|mongo|redis|cassandra|scylla|cockroach|dynamo|surreal|diesel|sea_?orm|tiberius|oracle|clickhouse|influx|neo4j|hyper|surf|curl|reqwest|isahc|ureq|http|grpc|tonic|websocket|tungstenite|smtp|lettre|imap|ftp|ssh|nats|kafka|rdkafka|pulsar|amqp|lapin|rabbit|mqtt|rumqtt|zmq|etcd|consul|elastic|meili|minio|^s3|aws|azure|gcp|google_?cloud'
+is_calibrated() {
+  case "$1" in aws_sdk_*|aws_smithy*|cap_*) return 0;; esac
+  local c
+  for c in $CALIBRATED; do
+    # exact, or an adapter/extension of a known crate (tokio_postgres_rustls, sqlx_*…)
+    [ "$1" = "$c" ] && return 0
+    case "$1" in "${c}_"*) return 0;; esac
+  done
+  return 1
+}
+deps=$(awk '
+  /^\[(dependencies|build-dependencies)\]/{f=1;next}
+  /^\[/{f=0}
+  f && /^[A-Za-z0-9_-]+[[:space:]]*[=.]/{ gsub(/[=.[:space:]].*/,"",$0); print }
+' Cargo.toml 2>/dev/null | sort -u)
+gaps=""
+for d in $deps; do
+  nd="${d//-/_}"
+  is_calibrated "$nd" && continue
+  if printf '%s' "$nd" | grep -Eiq "$SUSPECT"; then
+    gaps="$gaps $d"
+  fi
+done
+gaps="$(echo "$gaps" | xargs 2>/dev/null)"
+
+# ---- freshness label ----
+if [ "$need_run" = 1 ] && [ "$ran_ok" = 0 ]; then
+  FRESH="⚠ STALE — sources changed but the crate did not compile; map is from the last good build"
+elif [ "$need_run" = 1 ]; then
+  FRESH="fresh @$SHORT"
+elif [ "$CUR" = "$PREV" ]; then
+  FRESH="current @$SHORT (no Rust change since last run)"
+else
+  FRESH="⚠ stale @$SHORT — run /candor to refresh"
+fi
+
+# ---- coverage label ----
+if [ -n "$gaps" ]; then
+  COV="⚠ coverage: $(echo "$gaps" | tr ' ' ',') uncalibrated — Db/Net may be incomplete for code using them"
+else
+  COV="coverage ✓ (all effectful-looking deps recognized)"
+fi
+
+# ---- emit the single-line receipt ----
+if [ "$need_run" = 1 ] && [ "$ran_ok" = 0 ]; then
+  echo "candor $FRESH. Fix the build, then /candor."
+else
+  echo "candor · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json"
+fi
+exit "${surfaced:-0}"

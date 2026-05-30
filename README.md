@@ -23,6 +23,21 @@ Read https://github.com/tombaldwin/candor/blob/main/AGENTS.md and follow it to m
 the report and the trust rule (`inferred` is authoritative; `unresolved`/`Unknown` → read the
 source). Single source of truth for agents.
 
+### Claude Code: see it work, automatically
+
+The paste above asks the agent to use candor — but you can't *see* whether it did. The
+[Claude Code integration](integrations/claude-code/) gives you a deterministic, un-fakeable
+**receipt** in your transcript whenever your Rust changes — function count, effect breakdown, a
+freshness hash, and a coverage warning when a dependency looks effectful but isn't calibrated:
+
+```text
+candor · 143 fns · 54 Db, 16 Net, 27 Fs · 0 unresolved · fresh @8c4c9053 · coverage ✓
+```
+
+A `Stop` hook auto-refreshes it on every turn that touches Rust (silent otherwise); `/candor` shows
+it on demand. Install: `integrations/claude-code/install.sh` from your project. See its
+[README](integrations/claude-code/README.md) for the trust model and honest limits.
+
 *Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
 [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md)
 
