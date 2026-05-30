@@ -417,6 +417,41 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         {
             return Some("Db");
         }
+        // mongodb: a document-store API with none of the SQL verbs — the user calls
+        // `coll.find_one`/`insert_one`/`aggregate`/… and `Client::with_uri_str`. Without
+        // these a mongodb user's calls classify PURE. (Found hardening: a fn doing
+        // `find_one`+`insert_one` reported no effects.) Handle accessors (name/namespace)
+        // and option/doc builders don't match these verbs, so they stay pure.
+        if crate_name == "mongodb" {
+            const MONGO: [&str; 27] = [
+                "::with_uri_str", "::connect", "::find", "::find_one", "::insert_one",
+                "::insert_many", "::update_one", "::update_many", "::delete_one",
+                "::delete_many", "::replace_one", "::aggregate", "::count_documents",
+                "::estimated_document_count", "::count", "::distinct", "::run_command",
+                "::find_one_and_update", "::find_one_and_delete", "::find_one_and_replace",
+                "::list_collections", "::list_collection_names", "::list_databases",
+                "::list_database_names", "::create_collection", "::create_index", "::watch",
+            ];
+            if MONGO.iter().any(|v| path.ends_with(v)) {
+                return Some("Db");
+            }
+            return None;
+        }
+        // mysql / mysql_async: the `query`/`exec` families + `get_conn`/`ping` execute
+        // immediately — no build-then-execute split like sqlx, so matching `::query` is safe
+        // here. Same DB-verb-dialect gap class as redis/mongodb; calibrated from the Queryable
+        // API (unit-tested; a real-app repro is the remaining confirmation).
+        if matches!(crate_name, "mysql" | "mysql_async") {
+            const MY: [&str; 16] = [
+                "::query", "::query_first", "::query_iter", "::query_map", "::query_fold",
+                "::query_drop", "::exec", "::exec_first", "::exec_iter", "::exec_map",
+                "::exec_fold", "::exec_drop", "::exec_batch", "::prep", "::ping", "::get_conn",
+            ];
+            if MY.iter().any(|v| path.ends_with(v)) {
+                return Some("Db");
+            }
+            return None;
+        }
         const VERBS: [&str; 16] = [
             "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
             "::fetch_all", "::fetch_optional", "::fetch", "::connect", "::acquire",
@@ -987,6 +1022,17 @@ mod tests {
         assert_eq!(classify("redis", "redis::Client::get_connection"), Some("Db"));
         assert_eq!(classify("redis", "redis::cmd::Cmd::query"), Some("Db"));
         assert_eq!(classify("redis", "redis::Value::as_sequence"), None);
+        // mongodb: document-store verbs are Db (found on a consumer app); handles/builders pure.
+        assert_eq!(classify("mongodb", "mongodb::Client::with_uri_str"), Some("Db"));
+        assert_eq!(classify("mongodb", "mongodb::Collection::find_one"), Some("Db"));
+        assert_eq!(classify("mongodb", "mongodb::Collection::insert_one"), Some("Db"));
+        assert_eq!(classify("mongodb", "mongodb::Collection::aggregate"), Some("Db"));
+        assert_eq!(classify("mongodb", "mongodb::Collection::name"), None);
+        assert_eq!(classify("mongodb", "mongodb::Database::collection"), None);
+        // mysql/mysql_async: query/exec families execute immediately; accessors stay pure.
+        assert_eq!(classify("mysql", "mysql::Conn::query_drop"), Some("Db"));
+        assert_eq!(classify("mysql_async", "mysql_async::Conn::exec_drop"), Some("Db"));
+        assert_eq!(classify("mysql", "mysql::Row::get"), None);
     }
 
     #[test]
