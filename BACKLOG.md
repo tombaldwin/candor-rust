@@ -32,10 +32,13 @@ transitively perform `Net`). candor computes that for free. **Lead with the delt
 - [ ] **4. Speed for a tight loop.** A full re-lint (~minutes on a big crate) is too slow per edit;
       need an incremental path, or at least a diff against the cached report that re-lints only the
       changed crate(s).
-- [ ] **5. Measure it — don't assume.** "candor helps agents" is belief, not data; `EVAL.md` is a
-      pilot. A real with/without eval on edit *quality* (independent ground truth, multiple trials)
-      both proves it and shows *where* it helps, so we tune the right thing. **Gates the rest:** ship
-      (1)+(2), then measure before scaling.
+- [x] **5. Measure it — don't assume** (pilot; `EVAL.md` Trial 5). Pre-registered with/without eval on
+      a non-local-effect trap (`eval/minicache`), blind-judged. Result: **treatment 4/4 vs control 1/4**
+      fully identified the transitive blast radius (control 3/4 only gestured "callers/perf"). Honest
+      bounds: candor makes non-local propagation *complete & explicit* (the axis it targets), but did
+      NOT catch what agents miss entirely — control independently found path-traversal/TTL/error bugs
+      candor doesn't. Pilot caveats: N=4/arm, one task, one capable model. **Still to do:** multi-task,
+      multi-model study quantifying end-to-end *edit-quality* gains (not just awareness) before scaling.
 
 ## P1 — correctness (silent wrong answers are the worst failure)
 

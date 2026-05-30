@@ -207,4 +207,34 @@ consequence, candor's marginal value is low — and we report that.
 
 ### Results
 
-_(pending — appended after the run)_
+N=4 per arm, capable model (Opus-class), blind-judged (tool name redacted; a mechanical rubric scored
+ONLY the non-local-propagation axis). Condition↔id mapping recorded only after the judge returned.
+
+| | YES (named the propagation / a specific caller) | PARTIAL (generic "callers/perf") | NO |
+|---|---|---|---|
+| **treatment** (candor) | **4 / 4** | 0 | 0 |
+| **control** (no candor) | 1 / 4 | 3 / 4 | 0 |
+
+Awareness score (YES=1, PARTIAL=0.5): **treatment 1.00 vs control 0.63.**
+
+**What happened.** All 8 agents implemented the task and flagged *something*. The split was on the
+**non-local** axis: every treatment agent enumerated the exact functions that gained `Fs`
+(`Service::lookup`, `Service::batch`, `api::get_one`, `api::get_many`, `report::build`, `main`) and
+called out the `report::build` dashboard. Without candor, 3 of 4 capable agents stayed local — "adds
+blocking I/O on every miss", "unsuitable for async", "performance profile" — but did *not* trace which
+callers inherit it; only one (control-1) manually found a specific high-level caller.
+
+**Honest reading.**
+- candor reliably turned *partial/local* awareness into *complete, specific* non-local awareness — a
+  real, measurable lift on exactly the axis it targets (control 25% → treatment 100% fully aware).
+- candor did **not** catch something the agents were blind to. The control agents independently found
+  issues candor does *not* surface — path traversal (a security bug), TTL bypass, swallowed I/O
+  errors. candor adds the transitive-blast-radius dimension; it does not replace review.
+- Defensible claim, narrow and true: **for an edit with a non-local effect consequence, candor makes
+  the full propagation explicit, which even capable agents otherwise tend to under-report.**
+
+**Limitations (pilot).** N=4/arm, one task, one (capable) model, summary-as-proxy-for-quality. The
+treatment was told to run `cargo candor diff` (its intended use), so part of the lift is "we pointed
+it at the propagation" — but the control had equal license to investigate callers and mostly didn't. A
+weaker model would likely widen the gap; a multi-task study would tighten the estimate. This confirms
+the *mechanism* works and is useful; it does not yet quantify end-to-end edit-quality gains at scale.
