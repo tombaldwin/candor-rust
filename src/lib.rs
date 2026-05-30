@@ -1545,6 +1545,18 @@ mod tests {
     }
 
     #[test]
+    fn reportable_items() {
+        // Functions and consts/statics are reported; type/module/closure defs are not.
+        assert!(is_reportable_item(DefKind::Fn));
+        assert!(is_reportable_item(DefKind::AssocFn));
+        assert!(!is_reportable_item(DefKind::Struct));
+        assert!(!is_reportable_item(DefKind::Enum));
+        assert!(!is_reportable_item(DefKind::Trait));
+        assert!(!is_reportable_item(DefKind::Mod));
+        assert!(!is_reportable_item(DefKind::Closure));
+    }
+
+    #[test]
     fn load_cross_reports_filters_and_maps() {
         let dir = std::env::temp_dir().join("candor_cross_unit");
         let _ = std::fs::remove_dir_all(&dir);

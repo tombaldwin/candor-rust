@@ -1,0 +1,28 @@
+warning: `caller` effects: { Exec*, Fs* }   (* = via callee)
+  --> $DIR/effects.rs:16:1
+   |
+LL | fn caller() {
+   | ^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `read_env` effects: { Env }   (* = via callee)
+  --> $DIR/effects.rs:12:1
+   |
+LL | fn read_env() -> Result<String, std::env::VarError> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `read_file` effects: { Fs }   (* = via callee)
+  --> $DIR/effects.rs:4:1
+   |
+LL | fn read_file() -> std::io::Result<String> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `run_cmd` effects: { Exec }   (* = via callee)
+  --> $DIR/effects.rs:8:1
+   |
+LL | fn run_cmd() {
+   | ^^^^^^^^^^^^
+
+warning: 4 warnings emitted
+

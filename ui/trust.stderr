@@ -1,0 +1,22 @@
+warning: `via_callback` effects: { Unknown }   (* = via callee)
+  --> $DIR/trust.rs:6:1
+   |
+LL | fn via_callback(f: impl Fn()) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `via_dyn_iter` effects: { Unknown }   (* = via callee)
+  --> $DIR/trust.rs:16:1
+   |
+LL | fn via_dyn_iter(it: &mut dyn Iterator<Item = u8>) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_fn_ptr` effects: { Unknown }   (* = via callee)
+  --> $DIR/trust.rs:11:1
+   |
+LL | fn via_fn_ptr(f: fn()) {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 3 warnings emitted
+
