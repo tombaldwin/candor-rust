@@ -365,6 +365,25 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             }
             return None;
         }
+        // redis: the way redis is ACTUALLY used is the high-level `Commands`/`AsyncCommands`
+        // traits (`con.get`/`set`/`hset`/`lpush`/…) — every method is a round-trip — plus
+        // connection establishment. The shared VERBS below only catch the low-level
+        // `cmd("GET").query(con)`, so without this a normal redis user's calls classify as
+        // PURE. (Found hardening on redis-rs: a fn doing `con.get`/`set` reported no effects.)
+        if crate_name == "redis"
+            && (path.contains("Commands::")
+                || path.contains("::get_connection")
+                || path.contains("::get_async_connection")
+                || path.contains("::get_multiplexed_async_connection")
+                || path.contains("ConnectionManager")
+                || path.ends_with("::query")
+                || path.ends_with("::query_async")
+                || path.ends_with("::req_command")
+                || path.ends_with("::req_packed_command")
+                || path.ends_with("::req_packed_commands"))
+        {
+            return Some("Db");
+        }
         const VERBS: [&str; 16] = [
             "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
             "::fetch_all", "::fetch_optional", "::fetch", "::connect", "::acquire",
@@ -928,6 +947,13 @@ mod tests {
         assert_eq!(classify("sqlx", "sqlx::query"), None);
         // memmap2 is filesystem-backed.
         assert_eq!(classify("memmap2", "memmap2::MmapOptions::map"), Some("Fs"));
+        // redis: the high-level Commands API + connection setup are Db (found on redis-rs);
+        // the low-level cmd().query() too. Pure value accessors are not.
+        assert_eq!(classify("redis", "redis::Commands::get"), Some("Db"));
+        assert_eq!(classify("redis", "redis::AsyncCommands::set"), Some("Db"));
+        assert_eq!(classify("redis", "redis::Client::get_connection"), Some("Db"));
+        assert_eq!(classify("redis", "redis::cmd::Cmd::query"), Some("Db"));
+        assert_eq!(classify("redis", "redis::Value::as_sequence"), None);
     }
 
     #[test]
