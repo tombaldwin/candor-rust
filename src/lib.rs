@@ -232,14 +232,14 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-const CALIBRATED_CRATES: [&str; 22] = [
-    // network
-    "reqwest", "isahc", "ureq",
+const CALIBRATED_CRATES: [&str; 24] = [
+    // network (aws_config resolves credentials over the network on `.load()`)
+    "reqwest", "isahc", "ureq", "aws_config",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
     // filesystem / entropy / subprocess / clock / log / clipboard
-    "memmap2", "rand", "getrandom", "fastrand", "portable_pty", "chrono", "tracing", "arboard",
+    "memmap2", "rand", "getrandom", "fastrand", "portable_pty", "chrono", "tracing", "log", "arboard",
 ];
 const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
 
@@ -255,6 +255,16 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name.starts_with("aws_sdk_") || crate_name.starts_with("aws_smithy") {
         // Only request dispatch is network I/O; builder setters/accessors are pure.
         if path.ends_with("::send") || path.ends_with("::send_with") {
+            return Some("Net");
+        }
+        return None;
+    }
+    // aws-config resolves credentials/region on `.load()` — it reaches the IMDS metadata
+    // endpoint / STS over the network (and reads ~/.aws + env). Builders (`defaults()`,
+    // `SdkConfig::builder()`, `BehaviorVersion::latest()`) are pure; the `load` is the I/O.
+    // (Found hardening on a real app, ebman: `builder.load().await` was classified pure.)
+    if crate_name == "aws_config" {
+        if path.ends_with("::load") || path.ends_with("::load_defaults") {
             return Some("Net");
         }
         return None;
@@ -357,6 +367,11 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         return Some("Clock");
     }
     if crate_name == "tracing" {
+        return Some("Log");
+    }
+    // The `log` facade: its macros route through `log::__private_api`; the crate's types
+    // (`Level`, `LevelFilter`) are pure, so match the logging entry, not the whole crate.
+    if crate_name == "log" && path.contains("::__private_api") {
         return Some("Log");
     }
     if crate_name == "arboard" {
@@ -865,6 +880,19 @@ mod tests {
     }
 
     #[test]
+    fn classify_aws_config_and_log() {
+        // aws-config: `.load()` resolves credentials (Net); builders/types are pure.
+        // (Found hardening on ebman: `aws_config::defaults(..).load()` was missed.)
+        assert_eq!(classify("aws_config", "aws_config::loader::ConfigLoader::load"), Some("Net"));
+        assert_eq!(classify("aws_config", "aws_config::load_defaults"), Some("Net"));
+        assert_eq!(classify("aws_config", "aws_config::SdkConfig::builder"), None);
+        assert_eq!(classify("aws_config", "aws_config::BehaviorVersion::latest"), None);
+        // `log` facade: macros route through `__private_api`; Level/LevelFilter are pure.
+        assert_eq!(classify("log", "log::__private_api::log"), Some("Log"));
+        assert_eq!(classify("log", "log::LevelFilter::Info"), None);
+    }
+
+    #[test]
     fn db_crates_are_calibrated() {
         // The emitted calibrated set must cover every DB client the classifier knows,
         // or the receipt's coverage check would flag a recognized crate as a blind spot.
@@ -889,6 +917,8 @@ mod tests {
                 format!("{c}::X::query"),
                 format!("{c}::X::fetch_one"),
                 format!("{c}::Utc::now"),
+                format!("{c}::X::load"),
+                format!("{c}::__private_api::log"),
                 format!("{c}::X::anything"),
             ];
             assert!(

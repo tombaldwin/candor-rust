@@ -74,7 +74,9 @@ VERSTAMP=""; [ -n "$VER" ] && VERSTAMP=" @$VER"
 
 # ---- decide whether to (re)run candor ----
 # Report is current iff it exists AND the source hash hasn't moved since we wrote it.
-report_exists() { ls "$REPORT_PREFIX".*.json >/dev/null 2>&1; }
+# Reports are `<prefix>.<crate>.<type>.json` (two middle segments); the `.*.*.json` glob
+# matches those but NOT the single-segment `<prefix>.calibrated.json` coverage sidecar.
+report_exists() { ls "$REPORT_PREFIX".*.*.json >/dev/null 2>&1; }
 need_run=$FORCE
 [ "$CUR" != "$PREV" ] && need_run=1
 report_exists || need_run=1
@@ -109,7 +111,7 @@ if [ "$need_run" = 1 ]; then
   fi
   LIB="$LIBP"
   MARK="$STATE_DIR/.mark"; : > "$MARK"
-  emitted() { [ -n "$(find "$STATE_DIR" -name 'report.*.json' -newer "$MARK" 2>/dev/null)" ]; }
+  emitted() { [ -n "$(find "$STATE_DIR" -name 'report.*.*.json' -newer "$MARK" 2>/dev/null)" ]; }
   if run_lint && emitted; then
     echo "$CUR" > "$STATE"; ran_ok=1
   else
@@ -132,10 +134,12 @@ read_summary() {
 import sys, glob, json
 pre = sys.argv[1]
 fns = 0; eff = {}; unres = 0
-for f in glob.glob(pre + '.*.json'):
+for f in glob.glob(pre + '.*.*.json'):
     try:
         data = json.load(open(f))
     except Exception:
+        continue
+    if not isinstance(data, list):   # skip the calibrated.json sidecar, etc.
         continue
     for e in data:
         fns += 1
@@ -151,7 +155,7 @@ PY
   else
     # crude fallback: count "fn" keys across report files
     local n
-    n=$(grep -ho '"fn"' "$REPORT_PREFIX".*.json 2>/dev/null | wc -l | tr -d ' ')
+    n=$(grep -ho '"fn"' "$REPORT_PREFIX".*.*.json 2>/dev/null | wc -l | tr -d ' ')
     printf '%s\t(install python3 for the effect breakdown)\t?\n' "$n"
   fi
 }
