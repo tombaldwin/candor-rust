@@ -235,10 +235,11 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-const CALIBRATED_CRATES: [&str; 27] = [
+const CALIBRATED_CRATES: [&str; 29] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp",
+    "async_nats", "lapin",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
@@ -302,6 +303,38 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     }
     if crate_name == "ureq" && path.ends_with("::call") {
         return Some("Net");
+    }
+    // Message-queue clients fully encapsulate the socket (the underlying tokio::net lives
+    // inside the crate, unseen), so a user's connect/publish/consume calls ARE the I/O
+    // boundary — to a remote broker, hence Net. Match the broker round-trip verbs (snake_case
+    // methods); the CamelCase option/property builders stay pure. (Found hardening on consumer
+    // apps: lapin `basic_publish`/`queue_declare` and async-nats `publish`/`subscribe` were
+    // classified pure — a message-queue client reporting no I/O.)
+    if crate_name == "async_nats" {
+        if path.ends_with("::connect")
+            || path.contains("::publish")
+            || path.ends_with("::subscribe")
+            || path.ends_with("::queue_subscribe")
+            || path.contains("::request")
+            || path.ends_with("::flush")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    if crate_name == "lapin" {
+        if path.ends_with("::connect")
+            || path.ends_with("::create_channel")
+            || path.contains("::basic_")
+            || path.contains("::queue_")
+            || path.contains("::exchange_")
+            || path.contains("::tx_")
+            || path.ends_with("::confirm_select")
+            || path.ends_with("::close")
+        {
+            return Some("Net");
+        }
+        return None;
     }
     // cap-std: capability-oriented std. I/O goes *through* a held capability handle
     // (Dir/Pool/Clock/...), so these calls ARE the effect. Recognising them means a
@@ -970,6 +1003,21 @@ mod tests {
     }
 
     #[test]
+    fn classify_message_queues() {
+        // Broker round-trip verbs are Net (found hardening on consumer apps).
+        assert_eq!(classify("async_nats", "async_nats::connect"), Some("Net"));
+        assert_eq!(classify("async_nats", "async_nats::Client::publish"), Some("Net"));
+        assert_eq!(classify("async_nats", "async_nats::Client::subscribe"), Some("Net"));
+        assert_eq!(classify("lapin", "lapin::Connection::connect"), Some("Net"));
+        assert_eq!(classify("lapin", "lapin::Channel::basic_publish"), Some("Net"));
+        assert_eq!(classify("lapin", "lapin::Channel::queue_declare"), Some("Net"));
+        // CamelCase option/property builders stay pure.
+        assert_eq!(classify("lapin", "lapin::BasicProperties::default"), None);
+        assert_eq!(classify("lapin", "lapin::options::BasicPublishOptions::default"), None);
+        assert_eq!(classify("async_nats", "async_nats::Subject::from"), None);
+    }
+
+    #[test]
     fn classify_git2_remote_network() {
         // Remote operations contact the network. (Found hardening on gitui: fetch/push
         // were classified network-free — a git client reporting no network calls.)
@@ -1007,6 +1055,7 @@ mod tests {
                 format!("{c}::X::query"),
                 format!("{c}::X::fetch_one"),
                 format!("{c}::Remote::fetch"),
+                format!("{c}::X::connect"),
                 format!("{c}::Utc::now"),
                 format!("{c}::X::load"),
                 format!("{c}::__private_api::log"),
