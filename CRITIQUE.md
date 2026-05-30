@@ -108,7 +108,13 @@ That is the part worth keeping.
    (and that one impl's body analyzed), instead of CHA-expanding to every impl; CHA remains the sound
    fallback for genuine `dyn`/generic dispatch. Re-validated on ebman: the two lint `fix` methods are
    now pure (no `Clock`), while `EnvRedForExtendedPeriod::applies` and the `dyn Rule`-dispatching
-   `run_rules` still correctly carry `Clock`. Remaining (minor, left as a definitional choice): `Env`
+   `run_rules` still correctly carry `Clock`. A **controlled** regression test on gitui (its whole UI
+   is trait-object `Component`s) confirmed it's sound *and* a much bigger win than the two ebman
+   methods that surfaced it: same checkout, pre-devirt vs post, devirt removed false effects from 104
+   functions (~59 became correctly pure) — gitui's CHA had been giving *every* component the union of
+   *all* components' effects — while **every** genuine network function (`sync::remotes::fetch`,
+   `push_raw`, `AsyncFetchJob::run`, …) kept its `Net`. Sound at the real `dyn` boundary, precise at
+   concrete calls. Remaining (minor, left as a definitional choice): `Env`
    is the whole `std::env`, so `current_dir`/`args` count as Env, not just `var`/`vars` — defensible
    as "ambient process state," but broader than some readers expect.)*
 
