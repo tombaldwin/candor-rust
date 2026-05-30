@@ -1528,4 +1528,57 @@ mod tests {
             assert!(cap_from_name(a).is_some(), "ambient {a} not in EFFECTS");
         }
     }
+
+    #[test]
+    fn dph_hex_round_trips_and_rejects_garbage() {
+        // The 32-hex on-disk form (`{a:016x}{b:016x}`, the body of dph_hex) must round-trip
+        // through parse_dph — this is the cross-crate key contract between writer and reader.
+        for (a, b) in [(0u64, 0u64), (1, 2), (0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210), (u64::MAX, u64::MAX)] {
+            let hex = format!("{a:016x}{b:016x}");
+            assert_eq!(hex.len(), 32);
+            assert_eq!(parse_dph(&hex), Some((a, b)));
+        }
+        assert_eq!(parse_dph(""), None);
+        assert_eq!(parse_dph("tooshort"), None);
+        assert_eq!(parse_dph(&"0".repeat(33)), None); // wrong length
+        assert_eq!(parse_dph("zz234567_89abcdef0123456789abcde"), None); // 32 chars, non-hex
+    }
+
+    #[test]
+    fn load_cross_reports_filters_and_maps() {
+        let dir = std::env::temp_dir().join("candor_cross_unit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("r");
+        let prefix = prefix.to_str().unwrap();
+        let h_lib = "0123456789abcdef0123456789abcdef";
+        let h_own = "1111111111111111aaaaaaaaaaaaaaaa";
+        let w = |name: &str, body: String| std::fs::write(dir.join(name), body).unwrap();
+
+        // A dependency report — SHOULD load (only the entry with a valid hash + non-empty effects).
+        w(
+            "r.dep.Rlib.json",
+            format!(
+                r#"[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h_lib}"}},
+                    {{"fn":"dep::pure","inferred":[],"hash":"{h_lib}"}},
+                    {{"fn":"dep::old","inferred":["Db"]}}]"#
+            ),
+        );
+        // Our OWN report (me = mybin/Executable) — MUST be skipped (same crate name, our type).
+        w("r.mybin.Executable.json", format!(r#"[{{"fn":"own","inferred":["Exec"],"hash":"{h_own}"}}]"#));
+        // Sidecars (one middle segment, or a dotted token) — MUST be skipped.
+        w("r.calibrated.json", r#"{"crates":[]}"#.to_string());
+        w("r.encountered-dep-Rlib.json", r#"["serde"]"#.to_string());
+
+        let m = load_cross_reports(prefix, "mybin", "Executable");
+
+        // dep::f loaded under its parsed-hash key with both effects.
+        let mut got = m.get(&parse_dph(h_lib).unwrap()).cloned().unwrap_or_default();
+        got.sort();
+        assert_eq!(got, vec!["Fs", "Net"]);
+        // dep::pure (empty effects) and dep::old (no hash) are dropped; own report is skipped.
+        assert!(m.get(&parse_dph(h_own).unwrap()).is_none(), "own report must be skipped");
+        assert_eq!(m.len(), 1, "only the one dependency entry with hash + effects should load");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
