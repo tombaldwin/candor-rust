@@ -235,11 +235,11 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-const CALIBRATED_CRATES: [&str; 29] = [
+const CALIBRATED_CRATES: [&str; 32] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp",
-    "async_nats", "lapin",
+    "async_nats", "lapin", "lettre", "tungstenite", "elasticsearch",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
@@ -335,6 +335,36 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             return Some("Net");
         }
         return None;
+    }
+    // SMTP email — lettre's `Transport::send` is the network dispatch; Message building is
+    // pure. (Found hardening on a lettre consumer: `mailer.send(&email)` classified pure.)
+    if crate_name == "lettre" {
+        if path.ends_with("::send") || path.ends_with("::send_raw") {
+            return Some("Net");
+        }
+        return None;
+    }
+    // WebSockets — tungstenite (the modern successor to the old `websocket` crate). connect
+    // and the socket read/write/send are network; Message constructors are pure. (Found on a
+    // tungstenite consumer: connect + send + read classified pure.)
+    if crate_name == "tungstenite" {
+        if path.ends_with("::connect")
+            || path.ends_with("::read")
+            || path.ends_with("::write")
+            || path.ends_with("::send")
+            || path.ends_with("::close")
+            || path.ends_with("::flush")
+            || path.ends_with("::read_message")
+            || path.ends_with("::write_message")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    // elasticsearch: request builders are pure; only the `.send()` dispatch is HTTP I/O
+    // (same shape as reqwest / the AWS SDK). (Found on an elasticsearch consumer.)
+    if crate_name == "elasticsearch" && path.ends_with("::send") {
+        return Some("Net");
     }
     // cap-std: capability-oriented std. I/O goes *through* a held capability handle
     // (Dir/Pool/Clock/...), so these calls ARE the effect. Recognising them means a
@@ -1087,6 +1117,19 @@ mod tests {
         // …but the query/insert BUILDERS stay pure — the ambiguity that made this tricky.
         assert_eq!(classify("sea_orm", "sea_orm::EntityTrait::find"), None);
         assert_eq!(classify("sea_orm", "sea_orm::EntityTrait::insert"), None);
+    }
+
+    #[test]
+    fn classify_network_client_libs() {
+        // SMTP, websockets, search — client libs that encapsulate the socket (found on
+        // consumer apps). The executor verb is Net; builders/constructors stay pure.
+        assert_eq!(classify("lettre", "lettre::SmtpTransport::send"), Some("Net"));
+        assert_eq!(classify("lettre", "lettre::Message::builder"), None);
+        assert_eq!(classify("tungstenite", "tungstenite::connect"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::WebSocket::read"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::Message::into_text"), None);
+        assert_eq!(classify("elasticsearch", "elasticsearch::Search::send"), Some("Net"));
+        assert_eq!(classify("elasticsearch", "elasticsearch::SearchParts::Index"), None);
     }
 
     #[test]
