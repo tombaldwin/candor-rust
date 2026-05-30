@@ -90,14 +90,23 @@ case "$cmd" in
     # upgrade. Force a recompile (dylint emits only on recompile), regenerate, re-stamp.
     if ls .candor/baseline.*.json >/dev/null 2>&1; then
       pre=".candor/baseline"
+      old="$(cat "$pre".*.json 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
       find . -path ./target -prune -o -name '*.rs' -print0 2>/dev/null | xargs -0 touch 2>/dev/null || true
       if CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 && ls "$pre".*.json >/dev/null 2>&1; then
         echo "$ev" > "$pre.candor-version"
-        echo "candor: re-baselined this project for @$ev — review the .candor/baseline diff and commit it." >&2
+        new="$(cat "$pre".*.json 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
+        if [ "$old" = "$new" ]; then
+          echo "candor: baseline content UNCHANGED (this engine classifies it identically) — re-stamped @$ev, nothing to review." >&2
+        else
+          echo "candor: baseline CHANGED under @$ev — the new engine detects different effects here." >&2
+          echo "candor: review 'git diff .candor/' and commit it (this is the upgrade's doing, not a code change)." >&2
+        fi
       else
-        echo "candor: this project didn't compile — baseline NOT refreshed; the guard will skip" >&2
-        echo "candor: enforcement until it builds and you re-run this." >&2
+        echo "candor: this project didn't compile — baseline NOT refreshed; the guard stays fail-open" >&2
+        echo "candor: (and says so at push) until it builds and you re-run this." >&2
       fi
+    else
+      echo "candor: (no guard baseline in $PWD — run from a project dir to refresh that project's baseline)" >&2
     fi
     exit 0 ;;
 
