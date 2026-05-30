@@ -100,10 +100,16 @@ CANDOR_CONFIG=candor.rules cargo dylint --lib-path "$LINT"   # extra classifier 
 CANDOR_PARANOID=1          cargo dylint --lib-path "$LINT"   # treat generic trait dispatch as Unknown
 ```
 
-Or register it in a project's `Cargo.toml` so plain `cargo dylint` finds it:
+Or register it in a project's `Cargo.toml` so plain `cargo dylint` finds it — by local path,
+or **straight from git with no clone** (dylint fetches and builds it against candor's pinned
+toolchain). This is dylint's equivalent of a dependency; dylint loads libraries only from `git` or
+`path` sources, not crates.io, so candor is **not** (and need not be) published there.
 
 ```toml
 [workspace.metadata.dylint]
+# clone-free — pin a tag/rev for reproducibility:
+libraries = [{ git = "https://github.com/tombaldwin/candor", tag = "v0.1.0" }]
+# …or a local checkout:
 libraries = [{ path = "/abs/path/to/candor" }]
 ```
 
