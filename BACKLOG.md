@@ -16,16 +16,19 @@ transitively perform `Net`). candor computes that for free. **Lead with the delt
 - [x] **1. Agent-facing effect diff — `cargo candor diff`.** v1 ships: describes the per-function
       delta vs a baseline (`+ worker { +Net }`) *including the transitive blast radius* (a network
       call added in `worker` also shows `+Net` on its caller `main`), flags a new `Unknown`, and has
-      `--json` for the agent. Still v2: the *call-site* "why" (`+Net via reqwest::get @ foo.rs:12`),
-      which rides on `explain` (§3) — the engine has the leaf + location, just not yet surfaced here.
+      `--json` for the agent. Remaining v2: fold the *call-site* "why" (`+Net via reqwest::get @
+      foo.rs:12`) into the diff — `explain` (§3) now provides exactly that, so it's a wiring step.
 - [x] **2. Close the loop in the agent's edit cycle.** Opt-in `CANDOR_REVIEW=1`: the Stop hook diffs
       the fresh report vs the baseline and, on a newly-introduced effect, feeds the delta *back to the
       agent* (`decision:block` + `additionalContext`) as a self-review checkpoint; `AGENTS.md` §5 tells
       the agent how to respond. Triple loop-guard: a once-per-effect `review-seen` marker,
       `stop_hook_active`, and Claude's 8-block cap; off by default. This is what makes candor *change
       behaviour*, not just inform. (Tested: candor-run exit-11 + stop-hook block/no-block.)
-- [ ] **3. `explain <fn>` for the scoping phase** (the P2 item below). Before editing `run_query` the
-      agent asks "what flows through here / who calls this" to gauge blast radius.
+- [x] **3. `explain <fn>` — effect provenance** (the P2 item below). `cargo candor explain <fn>` traces
+      the call path to where each effect originates: `main → middle → leaf` with `leaf via
+      std::net::TcpStream::connect at main.rs:1`. For scoping (what flows through here before I edit)
+      and to answer the diff's "why". Engine records effect *sites* (callee + location) under
+      `CANDOR_EXPLAIN`; a BFS finds the nearest source.
 - [ ] **4. Speed for a tight loop.** A full re-lint (~minutes on a big crate) is too slow per edit;
       need an incremental path, or at least a diff against the cached report that re-lints only the
       changed crate(s).
@@ -79,12 +82,12 @@ transitively perform `Net`). candor computes that for free. **Lead with the delt
       (non-`dyn`) receiver resolves to its single impl instead of CHA-expanding to *every* impl —
       removing the over-report where a pure `self.applies()` inherited a sibling rule's effect
       (104 fns de-over-reported on gitui, no soundness loss).
-- [ ] **`cargo candor explain <fn>` — effect provenance.** Trace the call path that gives a function
-      each effect: `main` has `Db` *because* `main → App::run → conn::run_query` [Db @ conn.rs:42].
-      Turns an effect *set* into a story you can follow to its source — the natural complement to the
-      at-a-glance audit (which hands you the function to drill into). The data already exists (the call
-      graph + per-fn `direct` effects); needs a shortest-path-to-an-effectful-leaf walk and an
-      `explain` CLI verb/mode. **The next UX play.**
+- [x] **`cargo candor explain <fn>` — effect provenance.** Traces the call path that gives a function
+      each effect: `main` has `Net` *because* `main → middle → leaf`, and `leaf` calls
+      `std::net::TcpStream::connect` at `main.rs:1`. Turns an effect *set* into a story you can follow
+      to its source. Engine records effect *sites* (callee + span) under `CANDOR_EXPLAIN`; a BFS over
+      the call graph finds the nearest source per effect. (Cross-crate and unresolvable calls are
+      labelled as such — the path stops at the boundary.) Used by P0 §3.
 
 ## P3 — real enforcement
 

@@ -73,6 +73,19 @@ pub struct Candor {
     /// Effects a function inherits via a cross-crate call. Kept separate from `direct` (so the
     /// report's `direct` stays "own body") and folded into the fixpoint in check_crate_post.
     via_cross: HashMap<LocalDefId, BTreeSet<&'static str>>,
+    /// CANDOR_EXPLAIN=<query>: when set, record where each effect enters (the call + location) so
+    /// `cargo candor explain` can trace the path from a function to the source of each effect.
+    explain: Option<String>,
+    /// Per-function effect *sites*: the calls in a body that introduce an effect (a classified leaf,
+    /// a cross-crate inheritance, or an unresolvable call). Populated only in explain mode.
+    sites: HashMap<LocalDefId, Vec<EffectSite>>,
+}
+
+/// Where an effect enters a function's body — the callee that produced it and the source location.
+struct EffectSite {
+    eff: &'static str,
+    via: String,
+    loc: String,
 }
 
 /// Effects that represent *ambient authority* — a global resource reachable just by
@@ -109,6 +122,7 @@ impl Candor {
             Err(_) => Vec::new(),
         };
         let paranoid = std::env::var("CANDOR_PARANOID").is_ok();
+        let explain = std::env::var("CANDOR_EXPLAIN").ok().filter(|s| !s.is_empty());
         Self {
             direct: HashMap::new(),
             calls: HashMap::new(),
@@ -117,7 +131,40 @@ impl Candor {
             encountered: BTreeSet::new(),
             cross: HashMap::new(),
             via_cross: HashMap::new(), // (cross map keyed by structured DefPathHash, not a string)
+            explain,
+            sites: HashMap::new(),
         }
+    }
+
+    /// BFS the call graph from `start` to the nearest function whose body directly produces
+    /// `effect` (a classified leaf, a cross-crate call, or an unresolvable call) — the shortest
+    /// path explaining *why* `start` has `effect`. Used by `CANDOR_EXPLAIN`.
+    fn find_source(&self, start: LocalDefId, effect: &str) -> Option<Vec<LocalDefId>> {
+        use std::collections::VecDeque;
+        let mut queue = VecDeque::from([start]);
+        let mut seen: HashSet<LocalDefId> = HashSet::from([start]);
+        let mut prev: HashMap<LocalDefId, LocalDefId> = HashMap::new();
+        while let Some(n) = queue.pop_front() {
+            if self.sites.get(&n).is_some_and(|v| v.iter().any(|s| s.eff == effect)) {
+                let mut path = vec![n];
+                let mut cur = n;
+                while cur != start {
+                    cur = prev[&cur];
+                    path.push(cur);
+                }
+                path.reverse();
+                return Some(path);
+            }
+            if let Some(callees) = self.calls.get(&n) {
+                for &c in callees {
+                    if seen.insert(c) {
+                        prev.insert(c, n);
+                        queue.push_back(c);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -923,6 +970,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // A call we cannot see through at all (fn pointer / `impl Fn` callback).
             Callee::Unresolved => {
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
+                if self.explain.is_some() {
+                    let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                    self.sites.entry(caller).or_default().push(EffectSite {
+                        eff: UNKNOWN,
+                        via: "unresolvable call (fn-pointer / closure)".to_string(),
+                        loc,
+                    });
+                }
                 return;
             }
             Callee::Def { did, dynamic } => (did, dynamic),
@@ -981,6 +1036,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             let pure = is_pure_std_trait(cx.tcx.crate_name(td.krate).as_str(), cx.tcx.item_name(td).as_str());
             if !cha_resolved && !pure && (dynamic || self.paranoid) {
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
+                if self.explain.is_some() {
+                    let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                    let via = format!("unresolvable dispatch over `{}`", cx.tcx.def_path_str(td));
+                    self.sites.entry(caller).or_default().push(EffectSite { eff: UNKNOWN, via, loc });
+                }
             }
         }
 
@@ -999,6 +1059,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             .or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
         if let Some(effect) = effect {
             self.direct.entry(caller).or_default().insert(effect);
+            if self.explain.is_some() {
+                let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                self.sites.entry(caller).or_default().push(EffectSite { eff: effect, via: path.clone(), loc });
+            }
         } else if !def_id.is_local() && !self.cross.is_empty() {
             // Cross-crate: a call into one of THIS project's other crates (its lib, a sibling
             // workspace member). Inherit the callee's already-transitive effects, looked up by its
@@ -1007,10 +1071,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // dependency keyed its report by the concrete IMPL method — so devirtualize to that
             // impl first (when the receiver is concrete), else the lookup would always miss.
             let key_did = devirtualize(cx, expr, def_id).unwrap_or(def_id);
-            if let Some(effs) = self.cross.get(&dph(cx.tcx, key_did)) {
-                let set = self.via_cross.entry(caller).or_default();
-                for e in effs {
-                    set.insert(*e);
+            if let Some(effs) = self.cross.get(&dph(cx.tcx, key_did)).cloned() {
+                for e in &effs {
+                    self.via_cross.entry(caller).or_default().insert(*e);
+                }
+                if self.explain.is_some() {
+                    let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                    let via = format!("cross-crate call to `{}`", cx.tcx.def_path_str(key_did));
+                    for e in &effs {
+                        self.sites.entry(caller).or_default().push(EffectSite { eff: e, via: via.clone(), loc: loc.clone() });
+                    }
                 }
             }
         }
@@ -1054,6 +1124,43 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     changed = true;
                 }
             }
+        }
+
+        // CANDOR_EXPLAIN=<query>: for each matching function, trace the call path to where each of
+        // its effects originates (the leaf call + location). A dedicated query mode — print and
+        // return without the normal report/diagnostics.
+        if let Some(query) = self.explain.clone() {
+            let mut targets: Vec<LocalDefId> = eff
+                .iter()
+                .filter(|(_, e)| !e.is_empty())
+                .map(|(f, _)| *f)
+                .filter(|f| cx.tcx.def_path_str(f.to_def_id()).contains(&query))
+                .collect();
+            targets.sort_by_cached_key(|f| cx.tcx.def_path_str(f.to_def_id()));
+            if targets.is_empty() {
+                eprintln!("candor explain: no effectful function matching `{query}`.");
+            }
+            for f in &targets {
+                eprintln!("\ncandor explain — {}", cx.tcx.def_path_str(f.to_def_id()));
+                for &e in eff[f].iter() {
+                    match self.find_source(*f, e) {
+                        Some(path) => {
+                            let leaf = *path.last().unwrap();
+                            let chain = path
+                                .iter()
+                                .map(|d| cx.tcx.def_path_str(d.to_def_id()))
+                                .collect::<Vec<_>>()
+                                .join(" → ");
+                            eprintln!("  {e:<9} {chain}");
+                            if let Some(s) = self.sites.get(&leaf).and_then(|v| v.iter().find(|s| s.eff == e)) {
+                                eprintln!("            └ {} via {} at {}", cx.tcx.def_path_str(leaf.to_def_id()), s.via, s.loc);
+                            }
+                        }
+                        None => eprintln!("  {e:<9} (origin not localizable — inherited or via an unresolved path)"),
+                    }
+                }
+            }
+            return;
         }
 
         // Modes, selected by environment:

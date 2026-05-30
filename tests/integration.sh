@@ -119,6 +119,17 @@ want "diff --json: machine-readable for the agent"         "$djson" '"gained"'
 want "diff --json: carries the gained Net"                 "$djson" 'Net'
 rm -rf "$(dirname "$D")"
 
+# ── 8. explain: trace the call path to each effect's source (P0 §3) ──
+echo "== explain (cargo candor explain) =="
+P=$(mktemp -d)/p; mkdir -p "$P/src"
+printf '[package]\nname="p"\nversion="0.1.0"\nedition="2021"\n' > "$P/Cargo.toml"
+printf 'fn leaf(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn middle(){ leaf(); }\nfn main(){ middle(); }\n' > "$P/src/main.rs"
+xout=$( cd "$P"; "$ROOT/cargo-candor" explain main 2>/dev/null )
+want "explain: header for the queried function"   "$xout" "candor explain — main"
+want "explain: traces the multi-hop call path"    "$xout" "main → middle → leaf"
+want "explain: names the leaf effectful call"     "$xout" "TcpStream::connect"
+rm -rf "$(dirname "$P")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

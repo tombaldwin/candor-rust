@@ -78,6 +78,7 @@ cargo candor audit --all                # the full per-function lint (spans in c
 cargo candor snapshot .candor/baseline  # write a JSON report
 cargo candor guard    .candor/baseline  # fail on functions that gained an effect
 cargo candor diff     .candor/baseline  # describe the per-function effect delta (--json)
+cargo candor explain  my_function       # trace WHY a function has each effect (the call path)
 cargo candor strict   my_module         # conformance, scoped to a module
 cargo candor no-ambient my_module       # flag direct ambient-authority use
 ```

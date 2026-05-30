@@ -39,6 +39,10 @@ Effects: `Net`, `Fs`, `Db`, `Exec` (subprocess), `Env`, `Clock`, `Ipc`, `Log`, `
 ## 3. Use it
 
 - **Blast radius of editing a function** → read its `inferred`.
+- **Why does a function have an effect?** → `cargo candor explain <fn>` traces the call path to the
+  source (`main → middle → leaf`, and `leaf` calls `std::net::TcpStream::connect`). Use it before
+  editing to see what flows through a function, and to act on the trust rule (§4) — it shows you
+  exactly which call is the `Unknown`.
 - **Which functions touch the network?** → `jq '.[]|select(.inferred|index("Net"))|.fn' /tmp/candor-report.*.json`
 - **Safe to treat as pure (e.g. unit-test without mocks)?** → `inferred == []` *and* `unresolved == false`.
 

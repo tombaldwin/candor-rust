@@ -7,6 +7,7 @@
 #   cargo candor snapshot .candor/baseline
 #   cargo candor guard    .candor/baseline   # CI gate: fail on a gained effect
 #   cargo candor diff     .candor/baseline   # describe the per-function effect delta (--json)
+#   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
 #   cargo candor update
 #   cargo candor strict   my_module
 #   cargo candor no-ambient my_module
@@ -257,6 +258,18 @@ if any("Unknown" in c["gained"] for c in changes):
 PY
     exit 0 ;;
 
+  explain)
+    # Trace WHY a function has each effect: the call path from it to the source of each effect (the
+    # leaf call + location). `<query>` is a substring of the fully-qualified function name.
+    q="${1:-}"
+    [ -n "$q" ] || { echo "usage: cargo candor explain <function-name-substring>" >&2; exit 2; }
+    rm -rf target/dylint 2>/dev/null || true   # force a fresh lint so explain has the full call graph
+    CANDOR_EXPLAIN="$q" cargo dylint --lib-path "$LIB" 2>&1 \
+      | grep -vaE '^ *(Checking|Compiling|Finished|Building|Blocking|Locking|Updating|Downloading|Downloaded|Fresh) ' \
+      | grep -vaE '^(warning|error)[:[]' \
+      | grep -vaE 'generated [0-9]+ warning'
+    exit 0 ;;
+
   update)
     # The clone is the single source of truth for the engine, the Claude Code integration
     # scripts, and AGENTS.md — pull + rebuild updates all three at one commit.
@@ -293,6 +306,6 @@ PY
     sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|explain|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac
