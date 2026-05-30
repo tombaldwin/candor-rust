@@ -5,6 +5,7 @@
 #   cargo candor audit
 #   cargo candor snapshot .candor/baseline
 #   cargo candor guard    .candor/baseline
+#   cargo candor update
 #   cargo candor strict   my_module
 #   cargo candor no-ambient my_module
 #
@@ -37,25 +38,73 @@ fi
 [ "${1:-}" = "candor" ] && shift
 cmd="${1:-audit}"; shift || true
 
+# The candor commit that produced (or is checking) a baseline. A baseline is only
+# comparable to itself — see `guard` and `update` below.
+engine_ver() { git -C "$CANDOR_DIR" rev-parse --short HEAD 2>/dev/null; }
+
 case "$cmd" in
-  audit)      ;;                                              # default: report effects
-  snapshot)   export CANDOR_JSON="${1:-.candor/baseline}" ;;
-  guard)      export CANDOR_BASELINE="${1:-.candor/baseline}" ;;
-  strict)     export CANDOR_STRICT="${1:-1}" ;;
-  no-ambient) export CANDOR_NO_AMBIENT="${1:-1}" ;;
+  audit)      exec cargo dylint --lib-path "$LIB" ;;          # default: report effects
+  strict)     export CANDOR_STRICT="${1:-1}";      exec cargo dylint --lib-path "$LIB" ;;
+  no-ambient) export CANDOR_NO_AMBIENT="${1:-1}";  exec cargo dylint --lib-path "$LIB" ;;
+
+  snapshot)
+    # Write the baseline AND stamp the engine version beside it, so the guard later
+    # knows which candor produced it.
+    pre="${1:-.candor/baseline}"
+    mkdir -p "$(dirname "$pre")"
+    CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB"
+    engine_ver > "$pre.candor-version"
+    echo "candor: baseline written and stamped @$(cat "$pre.candor-version" 2>/dev/null)." >&2
+    exit 0 ;;
+
+  guard)
+    # A baseline is only valid for the candor version that made it. If the engine has
+    # moved on, a richer classifier would report effects the old snapshot never saw —
+    # which is NOT a code regression. So on a version mismatch we SKIP enforcement (never
+    # false-fire) and tell the user how to refresh; `cargo candor update` does it for them.
+    pre="${1:-.candor/baseline}"
+    ev="$(engine_ver)"; bv=""
+    [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
+    if [ -n "$bv" ] && [ "$bv" != "$ev" ]; then
+      echo "candor: baseline is @$bv but the engine is @$ev — a tool upgrade is not a code" >&2
+      echo "candor: regression, so effect enforcement is SKIPPED this run. Refresh it with" >&2
+      echo "candor: 'cargo candor update' (or 'cargo candor snapshot $pre') here, then commit." >&2
+      exit 0
+    fi
+    out="$(CANDOR_BASELINE="$pre" cargo dylint --lib-path "$LIB" 2>&1 || true)"
+    printf '%s\n' "$out" >&2
+    if printf '%s' "$out" | grep -q 'AS-EFF-005'; then
+      echo "candor: a function GAINED an effect vs the baseline (AS-EFF-005) — blocked. Bypass: git push --no-verify" >&2
+      exit 1
+    fi
+    exit 0 ;;
+
   update)
-    # One step to update everything: the clone is the single source of truth for the
-    # engine, the Claude Code integration scripts, and AGENTS.md.
+    # The clone is the single source of truth for the engine, the Claude Code integration
+    # scripts, and AGENTS.md — pull + rebuild updates all three at one commit.
     echo "candor: updating $CANDOR_DIR …" >&2
     ( cd "$CANDOR_DIR" && git pull --ff-only && cargo build ) >&2
-    echo "candor: now at $(git -C "$CANDOR_DIR" rev-parse --short HEAD 2>/dev/null) — engine, scripts, and AGENTS.md all current." >&2
+    LIB="$(find_lib || true)"; ev="$(engine_ver)"
+    echo "candor: engine now @$ev — scripts and AGENTS.md current too." >&2
+    # Auto-refresh a baseline in THIS project so the guard never false-fires after an
+    # upgrade. Force a recompile (dylint emits only on recompile), regenerate, re-stamp.
+    if ls .candor/baseline.*.json >/dev/null 2>&1; then
+      pre=".candor/baseline"
+      find . -path ./target -prune -o -name '*.rs' -print0 2>/dev/null | xargs -0 touch 2>/dev/null || true
+      if CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 && ls "$pre".*.json >/dev/null 2>&1; then
+        echo "$ev" > "$pre.candor-version"
+        echo "candor: re-baselined this project for @$ev — review the .candor/baseline diff and commit it." >&2
+      else
+        echo "candor: this project didn't compile — baseline NOT refreshed; the guard will skip" >&2
+        echo "candor: enforcement until it builds and you re-run this." >&2
+      fi
+    fi
     exit 0 ;;
+
   -h|--help|help)
-    sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
     echo "candor: unknown command '$cmd' (audit|snapshot|guard|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac
-
-exec cargo dylint --lib-path "$LIB"
