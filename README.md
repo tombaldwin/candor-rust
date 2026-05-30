@@ -35,8 +35,10 @@ candor · 143 fns · 54 Db, 16 Net, 27 Fs · 0 unresolved · fresh @8c4c9053 · 
 ```
 
 A `Stop` hook auto-refreshes it on every turn that touches Rust (silent otherwise); `/candor` shows
-it on demand. Install: `integrations/claude-code/install.sh` from your project. See its
-[README](integrations/claude-code/README.md) for the trust model and honest limits.
+it on demand. Install: `integrations/claude-code/install.sh` from your project — it installs thin
+stubs that delegate to this clone, so `cargo candor update` refreshes the engine, the scripts, and
+`AGENTS.md` together (every receipt is stamped with the engine commit, so they can't silently
+desync). See its [README](integrations/claude-code/README.md) for the trust model and honest limits.
 
 *Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
 [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md)

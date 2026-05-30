@@ -68,10 +68,38 @@ It installs the scripts under `.claude/candor/`, the `/candor` command under `.c
 merges a `Stop` hook into `.claude/settings.json` (non-destructively — existing hooks are kept), and
 pins the candor dylib path in `.candor/config`. Re-running is safe and idempotent.
 
-**Prerequisite:** a built candor dylib. Either build candor and place/clone it at `/tmp/candor` or a
-sibling `../candor`, or set `CANDOR_LIB` to the `libcandor@*.dylib` path (the installer pins whatever
-it finds). `python3` is used for JSON handling and recommended; without it the receipt degrades to a
-plain function count.
+**Prerequisite:** a built candor dylib in the clone. Either build candor (`cargo build` / `cargo
+candor update` in the clone) or set `CANDOR_HOME`/`CANDOR_LIB` in `.candor/config`. `python3` is used
+for JSON handling and recommended; without it the receipt degrades to a plain function count.
+
+## Updates — the clone is the single source of truth
+
+The install does **not** copy the scripts into your project — it installs thin **stubs** that delegate
+to the clone (`$CANDOR_HOME/integrations/claude-code/…`, pinned in `.candor/config`). So updating
+everything is one step in the clone:
+
+```sh
+cargo candor update           # = git pull --ff-only + cargo build, in the clone
+```
+
+That pulls the **engine, these scripts, and `AGENTS.md` at the same commit** — nothing in your
+project drifts independently. Because candor isn't on crates.io (it depends on `clippy_utils` via
+git), the clone *is* the distribution; this just makes refreshing it atomic.
+
+The receipt is honest about its own version, the same way it's honest about freshness and coverage:
+
+- every line is stamped `candor @<sha>` — the exact engine commit that produced this map;
+- if the **dylib is older than the engine source** (you pulled but didn't rebuild), it appends
+  `⚠ dylib older than source — rebuild: cargo candor update` (cheap mtime check, every run);
+- `/candor` additionally does a network check and appends `⚠ candor update available` when the clone
+  is behind its remote (the per-turn Stop hook stays offline and fast, so it never blocks on git).
+
+So the doc, the binary, and the report you're reading all declare the same version — they can't
+silently desync.
+
+After install, the clone's local `AGENTS.md` is your copy of the agent instructions (auditable,
+offline, versioned by the same `cargo candor update`). Point your project's `CLAUDE.md` at it instead
+of the GitHub URL if you want the instructions to update in lockstep with the engine.
 
 ## Honest limits
 
@@ -84,9 +112,12 @@ plain function count.
 - **Auto-refresh adds latency** to turns that changed Rust (a `cargo dylint` run — seconds to tens of
   seconds on a real crate). Turns that didn't touch Rust cost nothing. To make it asynchronous
   instead, run the hook in the background and read the prior turn's receipt — a future option.
-- **Coverage is heuristic.** The authoritative version (candor emitting the set of crates it
-  encountered-but-couldn't-classify) is a planned upgrade to candor itself; until then the receipt's
-  `Cargo.toml`-based check is a best-effort nudge.
+- **Coverage is heuristic.** The receipt's `Cargo.toml`-based check is a best-effort nudge, not a
+  certificate. Its calibrated crate list lives in `candor-run.sh` alongside the engine in the same
+  clone, so the two no longer drift *across installations* (one `cargo candor update` moves both) —
+  but keeping the two lists in sync within the repo is still a maintainer chore. The fully
+  authoritative version (candor emitting the crates it encountered-but-couldn't-classify) is a
+  planned engine upgrade.
 
 ## Uninstall
 

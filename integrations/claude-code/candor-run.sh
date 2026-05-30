@@ -26,7 +26,9 @@ STATE="$STATE_DIR/state"
 REPORT_PREFIX="$STATE_DIR/report"
 CONFIG="$STATE_DIR/config"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
-# Optional per-project config can pin CANDOR_LIB (written by install.sh).
+# Per-project config (written by install.sh) pins CANDOR_HOME (the candor clone) and
+# CANDOR_LIB (the dylib). The clone is the single source of truth for the engine, these
+# scripts, and AGENTS.md — `git pull` / `cargo candor update` updates all three together.
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 # ---- content hash of all Rust sources (path + content, target/.git excluded) ----
@@ -41,12 +43,34 @@ PREV=""; [ -f "$STATE" ] && PREV="$(cat "$STATE" 2>/dev/null)"
 find_lib() {
   local c
   for c in "${CANDOR_LIB:-}" \
+           "${CANDOR_HOME:-}"/target/debug/libcandor@*.dylib "${CANDOR_HOME:-}"/target/debug/libcandor@*.so \
            "$DIR"/../candor/target/debug/libcandor@*.dylib "$DIR"/../candor/target/debug/libcandor@*.so \
            /tmp/candor/target/debug/libcandor@*.dylib /tmp/candor/target/debug/libcandor@*.so; do
     [ -n "$c" ] && [ -e "$c" ] && { echo "$c"; return 0; }
   done
   return 1
 }
+
+# ---- version stamp + update/rebuild nudges (the clone is the single source of truth) ----
+LIBP="$(find_lib 2>/dev/null || true)"
+VER=""; NUDGE=""
+if [ -n "${CANDOR_HOME:-}" ] && git -C "$CANDOR_HOME" rev-parse --git-dir >/dev/null 2>&1; then
+  VER="$(git -C "$CANDOR_HOME" rev-parse --short HEAD 2>/dev/null)"
+  # Dylib older than engine source → the running binary lags the clone (e.g. you pulled
+  # but didn't rebuild). Cheap mtime check, every run.
+  if [ -n "$LIBP" ] && [ -f "$CANDOR_HOME/src/lib.rs" ] && [ "$LIBP" -ot "$CANDOR_HOME/src/lib.rs" ]; then
+    NUDGE="$NUDGE · ⚠ dylib older than source — rebuild: cargo candor update"
+  fi
+  # Upstream check hits the network, so only the explicit /candor (--force) does it;
+  # the per-turn Stop hook stays offline and fast.
+  if [ "$FORCE" = 1 ]; then
+    git -C "$CANDOR_HOME" fetch -q origin 2>/dev/null || true
+    up="$(git -C "$CANDOR_HOME" rev-parse '@{u}' 2>/dev/null || git -C "$CANDOR_HOME" rev-parse origin/main 2>/dev/null || true)"
+    head="$(git -C "$CANDOR_HOME" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$up" ] && [ -n "$head" ] && [ "$up" != "$head" ] && NUDGE="$NUDGE · ⚠ candor update available — run: cargo candor update"
+  fi
+fi
+VERSTAMP=""; [ -n "$VER" ] && VERSTAMP=" @$VER"
 
 # ---- decide whether to (re)run candor ----
 # Report is current iff it exists AND the source hash hasn't moved since we wrote it.
@@ -79,10 +103,11 @@ run_lint() { CANDOR_JSON="$REPORT_PREFIX" cargo dylint --lib-path "$LIB" >/dev/n
 ran_ok=1; surfaced=0
 if [ "$need_run" = 1 ]; then
   surfaced=10
-  LIB="$(find_lib)" || {
-    echo "candor ⚠ not installed — no dylib found. Build it (see integrations/claude-code/README.md) or set CANDOR_LIB."
+  if [ -z "$LIBP" ]; then
+    echo "candor$VERSTAMP ⚠ not installed — no dylib found. Build candor (cargo build in the clone) or set CANDOR_HOME/CANDOR_LIB in .candor/config.$NUDGE"
     exit 10
-  }
+  fi
+  LIB="$LIBP"
   MARK="$STATE_DIR/.mark"; : > "$MARK"
   emitted() { [ -n "$(find "$STATE_DIR" -name 'report.*.json' -newer "$MARK" 2>/dev/null)" ]; }
   if run_lint && emitted; then
@@ -187,8 +212,8 @@ fi
 
 # ---- emit the single-line receipt ----
 if [ "$need_run" = 1 ] && [ "$ran_ok" = 0 ]; then
-  echo "candor $FRESH. Fix the build, then /candor."
+  echo "candor$VERSTAMP $FRESH. Fix the build, then /candor.$NUDGE"
 else
-  echo "candor · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json"
+  echo "candor$VERSTAMP · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json$NUDGE"
 fi
 exit "${surfaced:-0}"

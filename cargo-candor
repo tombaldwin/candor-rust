@@ -43,11 +43,18 @@ case "$cmd" in
   guard)      export CANDOR_BASELINE="${1:-.candor/baseline}" ;;
   strict)     export CANDOR_STRICT="${1:-1}" ;;
   no-ambient) export CANDOR_NO_AMBIENT="${1:-1}" ;;
+  update)
+    # One step to update everything: the clone is the single source of truth for the
+    # engine, the Claude Code integration scripts, and AGENTS.md.
+    echo "candor: updating $CANDOR_DIR …" >&2
+    ( cd "$CANDOR_DIR" && git pull --ff-only && cargo build ) >&2
+    echo "candor: now at $(git -C "$CANDOR_DIR" rev-parse --short HEAD 2>/dev/null) — engine, scripts, and AGENTS.md all current." >&2
+    exit 0 ;;
   -h|--help|help)
     sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|strict|no-ambient)" >&2
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac
 
