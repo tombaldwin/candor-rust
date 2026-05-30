@@ -232,9 +232,10 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-const CALIBRATED_CRATES: [&str; 24] = [
-    // network (aws_config resolves credentials over the network on `.load()`)
-    "reqwest", "isahc", "ureq", "aws_config",
+const CALIBRATED_CRATES: [&str; 25] = [
+    // network (aws_config resolves credentials over the network on `.load()`;
+    // git2 remote ops — fetch/push/connect — contact the network)
+    "reqwest", "isahc", "ureq", "aws_config", "git2",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
@@ -265,6 +266,24 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // (Found hardening on a real app, ebman: `builder.load().await` was classified pure.)
     if crate_name == "aws_config" {
         if path.ends_with("::load") || path.ends_with("::load_defaults") {
+            return Some("Net");
+        }
+        return None;
+    }
+    // git2 (libgit2 FFI): remote operations contact the network; everything else is local
+    // to the .git directory. Match the remote verbs precisely — NOT bare `::clone`, which is
+    // the `Clone`-trait dup of a `Remote` handle (pure), not `Repository::clone`. (Found
+    // hardening on gitui: `remote.fetch`/`remote.push` were classified network-free — a git
+    // client reporting it makes no network calls.)
+    if crate_name == "git2" {
+        if path.ends_with("::fetch")
+            || path.ends_with("::push")
+            || path.ends_with("::download")
+            || path.ends_with("::connect")
+            || path.ends_with("::connect_auth")
+            || path.ends_with("::ls")
+            || path.ends_with("::upload")
+        {
             return Some("Net");
         }
         return None;
@@ -893,6 +912,19 @@ mod tests {
     }
 
     #[test]
+    fn classify_git2_remote_network() {
+        // Remote operations contact the network. (Found hardening on gitui: fetch/push
+        // were classified network-free — a git client reporting no network calls.)
+        assert_eq!(classify("git2", "git2::Remote::fetch"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Remote::push"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Remote::connect"), Some("Net"));
+        // Local ops, and the Clone-trait dup of a Remote handle, are NOT network.
+        assert_eq!(classify("git2", "git2::Repository::statuses"), None);
+        assert_eq!(classify("git2", "git2::Remote::clone"), None);
+        assert_eq!(classify("git2", "git2::Oid::from_str"), None);
+    }
+
+    #[test]
     fn db_crates_are_calibrated() {
         // The emitted calibrated set must cover every DB client the classifier knows,
         // or the receipt's coverage check would flag a recognized crate as a blind spot.
@@ -916,6 +948,7 @@ mod tests {
                 format!("{c}::X::call"),
                 format!("{c}::X::query"),
                 format!("{c}::X::fetch_one"),
+                format!("{c}::Remote::fetch"),
                 format!("{c}::Utc::now"),
                 format!("{c}::X::load"),
                 format!("{c}::__private_api::log"),
