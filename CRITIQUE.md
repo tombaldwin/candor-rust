@@ -87,9 +87,14 @@ That is the part worth keeping.
    `History::*` lib methods that do the DB I/O. The earlier `ebman` eval **masked** this — its
    network lives in its lib, which that A/B's question counted, so 298≈305 looked clean. This is the
    most consequential blind spot found: it affects the common `lib`+`bin` and workspace layouts, i.e.
-   most real Rust projects. Plausibly fixable by **cross-crate resolution**: when linting a dependent
-   crate, load the dependency crates' already-emitted candor reports and treat their functions'
-   effects as a classifier extension. Not yet built — see `BACKLOG.md`.)*
+   most real Rust projects. **Fixed (JSON mode):** each report entry now carries the function's
+   stable `DefPathHash`, and when candor lints a dependent crate it loads the dependency crates'
+   already-emitted reports (dylint lints deps before dependents) and inherits a cross-crate callee's
+   effects by hash — robust to the `def_path_str` reexport-shortening that a naive string match
+   tripped on. Re-validated on `mcfly`: the bin's entry points went from effect-free to correctly
+   carrying `Db` (transitive count 36 → 43, vs the source agent's 48 — the residual is a couple of
+   debatable classifications, not the boundary). Scope: active in JSON/snapshot mode, where the
+   per-crate reports exist; audit/guard modes remain within-crate.)*
 
 ## Status of fixes (this pass)
 

@@ -134,5 +134,10 @@ A *confident* false negative (not `unresolved`) on exactly the entry points you'
 `ebman` masked this — its network lives in its lib, which that question counted. mcfly, with entry
 points in the bin, exposed it. **This is the generalization trial doing its job:** the "fast and
 accurate" claim holds *within a crate*, but candor's transitive guarantee has a hole at crate
-boundaries (`lib`+`bin`, workspaces) — the common shape of real Rust projects. See CRITIQUE.md §8;
-the candidate fix is cross-crate resolution via the emitted per-crate reports.
+boundaries (`lib`+`bin`, workspaces) — the common shape of real Rust projects. See CRITIQUE.md §8.
+
+**Now fixed (the experiment paid for itself):** cross-crate resolution via stable `DefPathHash` keys
+in the per-crate reports closed the boundary. Re-run on mcfly, every bin entry point now correctly
+inherits the lib's `Db` (e.g. `handle_addition` → `[Clock, Db, Env, Fs]`); transitive count 36 → 43,
+vs the source agent's 48 — the ~10% residual is a couple of debatable classifications, not the hole.
+So the generalization trial both falsified the easy claim *and* drove the fix that restored it.
