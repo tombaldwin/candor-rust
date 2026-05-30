@@ -146,9 +146,14 @@ for f in glob.glob(pre + '.*.*.json'):
         data = json.load(open(f))
     except Exception:
         continue
-    if not isinstance(data, list):   # skip the calibrated.json sidecar, etc.
+    # v0.2 self-describing envelope {candor, functions} OR legacy v0.1 bare array.
+    if isinstance(data, dict) and isinstance(data.get('functions'), list):
+        entries = data['functions']
+    elif isinstance(data, list):
+        entries = data
+    else:                            # the calibrated.json sidecar, etc.
         continue
-    for e in data:
+    for e in entries:
         fns += 1
         inf = e.get('inferred', []) or []
         for x in inf:

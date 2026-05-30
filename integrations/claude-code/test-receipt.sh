@@ -65,6 +65,23 @@ if [ -n "$tag" ]; then
 else
   echo "  skip version-stamp check (no built dylib / no strings)"
 fi
+
+# The receipt must summarize the v0.2 self-describing envelope, not just the legacy bare array.
+E=$(mktemp -d)/e; mkdir -p "$E/src" "$E/.candor"
+printf '[package]\nname="e"\nversion="0.1.0"\nedition="2021"\n[dependencies]\n' > "$E/Cargo.toml"
+printf 'fn a(){}\n' > "$E/src/lib.rs"
+cat > "$E/.candor/report.e.Rlib.json" <<'JSON'
+{"candor":{"version":"deadbee","toolchain":"nightly-x"},
+ "functions":[{"fn":"a","loc":"src/lib.rs:1","inferred":["Db"],"direct":["Db"],"unresolved":false},
+              {"fn":"b","loc":"src/lib.rs:2","inferred":["Net","Unknown"],"direct":["Net"],"unresolved":true}]}
+JSON
+eh=$(find "$E" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1)
+echo "$eh" > "$E/.candor/state"
+oute=$("$RUN" "$E" 2>/dev/null)
+chk  "receipt summarizes the v0.2 envelope (2 fns from {candor,functions})"  "$oute" '2 fns'
+chk  "envelope: effect breakdown + unresolved counted through .functions"    "$oute" '1 unresolved'
+rm -rf "$(dirname "$E")"
+
 echo
 echo "receipt tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

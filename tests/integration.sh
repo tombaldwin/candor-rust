@@ -47,8 +47,10 @@ for f in glob.glob(sys.argv[1] + '/base.*.json'):
     if '.calibrated' in f or '.encountered' in f: continue
     try: d = json.load(open(f))
     except Exception: continue
-    if not isinstance(d, list): continue
-    for e in d:
+    # v0.2 envelope {candor, functions} or legacy bare array; edit in place, preserve structure.
+    funcs = d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else None
+    if funcs is None: continue
+    for e in funcs:
         if e['fn'] == 'touches_net': e['inferred'] = []; e['direct'] = []
     json.dump(d, open(f, 'w'))
 PY
@@ -65,7 +67,9 @@ dl "$X" env CANDOR_JSON="$X/.candor/r" >/dev/null
 caller_eff=$(python3 - "$X/.candor" <<'PY'
 import json, glob, sys
 for f in glob.glob(sys.argv[1] + '/r.xc.Executable.json'):
-    for e in json.load(open(f)):
+    d = json.load(open(f))
+    funcs = d['functions'] if isinstance(d, dict) else d   # v0.2 envelope or v0.1 array
+    for e in funcs:
         if e['fn'] == 'caller':
             print(','.join(e['inferred']))
 PY

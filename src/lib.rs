@@ -183,6 +183,21 @@ fn parse_dph(s: &str) -> Option<(u64, u64)> {
     Some((u64::from_str_radix(&s[..16], 16).ok()?, u64::from_str_radix(&s[16..], 16).ok()?))
 }
 
+/// Parse a report's function entries, accepting BOTH the v0.2 self-describing envelope
+/// `{ "candor": {…}, "functions": [...] }` and the legacy v0.1 bare array `[...]` — the migration
+/// contract (candor-spec §2). An envelope is a JSON object, so a bare array fails that parse and
+/// falls through to the array parse; the two forms are unambiguous.
+fn report_entries(text: &str) -> Option<Vec<BaselineEntry>> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        functions: Vec<BaselineEntry>,
+    }
+    if let Ok(env) = serde_json::from_str::<Envelope>(text) {
+        return Some(env.functions);
+    }
+    serde_json::from_str::<Vec<BaselineEntry>>(text).ok()
+}
+
 /// Load the per-crate reports of this project's OTHER crates (`<prefix>.<crate>.<type>.json`, all
 /// but our own `<me>.<me_kind>` — a package's lib and bin share the crate name but differ by type,
 /// so the bin must still load the lib's report) into a `DefPathHash -> effects` map for
@@ -213,7 +228,7 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str) -> HashMap<(u64, u6
             continue;
         }
         let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
-        let Ok(arr) = serde_json::from_str::<Vec<BaselineEntry>>(&text) else { continue };
+        let Some(arr) = report_entries(&text) else { continue };
         for e in arr {
             let Some(key) = parse_dph(&e.hash) else { continue };
             let effs: Vec<&'static str> = e
@@ -247,10 +262,26 @@ struct ReportEntry {
     hash: String,
 }
 
+/// The engine's build identity, written into every report's envelope header (v0.2) so a report is
+/// self-describing — a consumer in any language can tell which candor produced it.
+#[derive(serde::Serialize)]
+struct ReportMeta {
+    version: &'static str,
+    toolchain: &'static str,
+}
+
+/// The v0.2 self-describing report: a provenance header plus the function entries. Readers also
+/// accept the legacy v0.1 bare array (see `report_entries`).
+#[derive(serde::Serialize)]
+struct Report<'a> {
+    candor: ReportMeta,
+    functions: &'a [ReportEntry],
+}
+
 /// Load a baseline candor JSON into `fn name -> inferred effect set`.
 fn load_baseline(path: &str) -> Option<HashMap<String, BTreeSet<String>>> {
     let text = std::fs::read_to_string(path).ok()?;
-    let entries: Vec<BaselineEntry> = serde_json::from_str(&text).ok()?;
+    let entries = report_entries(&text)?;
     Some(
         entries
             .into_iter()
@@ -1227,7 +1258,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
         if let Some(prefix) = &json_path {
             let file = format!("{prefix}.{krate}.{kinds}.json");
-            match serde_json::to_string_pretty(&json_entries) {
+            // v0.2: a self-describing envelope { candor: {version, toolchain}, functions: [...] }.
+            let report = Report {
+                candor: ReportMeta { version: CANDOR_VERSION, toolchain: CANDOR_TOOLCHAIN },
+                functions: &json_entries,
+            };
+            match serde_json::to_string_pretty(&report) {
                 Ok(body) => match std::fs::write(&file, body) {
                     Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
                     Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),
@@ -1554,6 +1590,46 @@ mod tests {
         std::fs::write(&path, "not valid json {[").unwrap();
         assert!(load_baseline(path.to_str().unwrap()).is_none());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn report_entries_accepts_envelope_and_bare_array() {
+        // v0.2 self-describing envelope.
+        let env = r#"{"candor":{"version":"abc1234","toolchain":"nightly-x"},
+                      "functions":[{"fn":"a","inferred":["Net"],"hash":""},
+                                   {"fn":"b","inferred":["Fs"]}]}"#;
+        let e = report_entries(env).expect("envelope parses");
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0].func, "a");
+        assert_eq!(e[0].inferred, ["Net"]);
+
+        // v0.1 legacy bare array still parses (the migration contract).
+        let bare = r#"[{"fn":"a","inferred":["Net"]}]"#;
+        assert_eq!(report_entries(bare).expect("bare array parses").len(), 1);
+
+        // Empty envelope and empty array both yield an empty Vec, not None.
+        assert!(report_entries(r#"{"candor":{},"functions":[]}"#).unwrap().is_empty());
+        assert!(report_entries("[]").unwrap().is_empty());
+
+        // Garbage and non-report objects yield None (never panic).
+        assert!(report_entries("not json").is_none());
+        assert!(report_entries(r#"{"candor":{}}"#).is_none()); // object without `functions`
+
+        // A full round-trip: what the engine writes, the reader reads back.
+        let written = serde_json::to_string(&Report {
+            candor: ReportMeta { version: "v9", toolchain: "tc" },
+            functions: &[ReportEntry {
+                func: "f".into(), loc: "l".into(),
+                inferred: vec!["Db".into()], direct: vec!["Db".into()],
+                declared: vec![], undeclared: vec![], overdeclared: vec![],
+                unresolved: false, hash: "00".repeat(16),
+            }],
+        })
+        .unwrap();
+        let back = report_entries(&written).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].func, "f");
+        assert_eq!(back[0].hash, "00".repeat(16));
     }
 
     #[test]
