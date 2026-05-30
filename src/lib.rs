@@ -797,6 +797,30 @@ fn is_reportable_item(dk: DefKind) -> bool {
     )
 }
 
+// --- Conformance-mode decisions: the set arithmetic behind the AS-EFF diagnostics, factored
+// out of check_crate_post so they can be unit-tested without a compiler. ---
+
+/// AS-EFF-001 surface: effects performed but not declared. `Unknown` is excluded — it isn't a
+/// declarable capability (it's handled by AS-EFF-003).
+fn undeclared_effects<'a>(inferred: &BTreeSet<&'a str>, declared: &BTreeSet<&'a str>) -> Vec<&'a str> {
+    inferred.iter().copied().filter(|e| *e != UNKNOWN && !declared.contains(e)).collect()
+}
+
+/// AS-EFF-002 surface: capabilities declared but never performed.
+fn overdeclared_effects<'a>(declared: &BTreeSet<&'a str>, inferred: &BTreeSet<&'a str>) -> Vec<&'a str> {
+    declared.iter().copied().filter(|c| !inferred.contains(c)).collect()
+}
+
+/// AS-EFF-004 surface: direct reaches for ambient authority (vs. a received capability).
+fn ambient_effects<'a>(direct: &BTreeSet<&'a str>) -> Vec<&'a str> {
+    direct.iter().copied().filter(|e| AMBIENT.contains(e)).collect()
+}
+
+/// AS-EFF-005 surface: effects gained versus a saved baseline.
+fn gained_effects<'a>(inferred: &BTreeSet<&'a str>, baseline: &BTreeSet<String>) -> Vec<&'a str> {
+    inferred.iter().copied().filter(|e| !baseline.contains(*e)).collect()
+}
+
 /// Nearest enclosing reportable item of `hir_id`, walking up out of closures so that
 /// effects performed inside an inline closure are charged to the item that owns it.
 fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
@@ -1051,14 +1075,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             let declared = declared_caps(cx.tcx, f);
             let direct = self.direct.get(&f).cloned().unwrap_or_default();
             let has_unknown = effs.contains(UNKNOWN);
-            // `Unknown` is not a declarable capability — it's handled by AS-EFF-003.
-            let undeclared: Vec<&str> = effs
-                .iter()
-                .copied()
-                .filter(|e| *e != UNKNOWN && !declared.contains(e))
-                .collect();
-            let unused: Vec<&str> =
-                declared.iter().copied().filter(|c| !effs.contains(c)).collect();
+            let undeclared = undeclared_effects(effs, &declared);
+            let unused = overdeclared_effects(&declared, effs);
 
             if json_path.is_some() {
                 if effs.is_empty() && declared.is_empty() {
@@ -1106,8 +1124,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // AS-EFF-004 (CANDOR_NO_AMBIENT): this function reaches for ambient authority
             // directly. cap-std's lesson: don't — receive a capability and route through it.
             if in_scope(no_ambient_var.as_deref(), &name) {
-                let ambient: Vec<&str> =
-                    direct.iter().copied().filter(|e| AMBIENT.contains(e)).collect();
+                let ambient = ambient_effects(&direct);
                 if !ambient.is_empty() {
                     clippy_utils::diagnostics::span_lint(
                         cx,
@@ -1178,8 +1195,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // new code, reviewed normally; the guard is for *regressions* in existing fns.
             if let Some(base) = &baseline {
                 if let Some(prior) = base.get(&name) {
-                    let gained: Vec<&str> =
-                        effs.iter().copied().filter(|e| !prior.contains(*e)).collect();
+                    let gained = gained_effects(effs, prior);
                     if !gained.is_empty() {
                         clippy_utils::diagnostics::span_lint(
                             cx,
@@ -1542,6 +1558,31 @@ mod tests {
         assert_eq!(parse_dph("tooshort"), None);
         assert_eq!(parse_dph(&"0".repeat(33)), None); // wrong length
         assert_eq!(parse_dph("zz234567_89abcdef0123456789abcde"), None); // 32 chars, non-hex
+    }
+
+    #[test]
+    fn conformance_decisions() {
+        let set = |xs: &[&'static str]| xs.iter().copied().collect::<BTreeSet<&str>>();
+
+        // AS-EFF-001 (undeclared): performs Net+Fs, declares only Net -> {Fs}; Unknown never counts.
+        assert_eq!(undeclared_effects(&set(&["Net", "Fs", "Unknown"]), &set(&["Net"])), vec!["Fs"]);
+        assert!(undeclared_effects(&set(&["Net"]), &set(&["Net", "Fs"])).is_empty());
+        // Unknown alone is never an AS-EFF-001 (it's AS-EFF-003).
+        assert!(undeclared_effects(&set(&["Unknown"]), &set(&[])).is_empty());
+
+        // AS-EFF-002 (overdeclared): declares Fs but never performs it -> {Fs}.
+        assert_eq!(overdeclared_effects(&set(&["Net", "Fs"]), &set(&["Net"])), vec!["Fs"]);
+        assert!(overdeclared_effects(&set(&["Net"]), &set(&["Net", "Db"])).is_empty());
+
+        // AS-EFF-004 (ambient): direct Net/Fs are ambient authority; Log is NOT (not in AMBIENT).
+        assert_eq!(ambient_effects(&set(&["Net", "Log", "Fs"])), vec!["Fs", "Net"]);
+        assert!(ambient_effects(&set(&["Log"])).is_empty());
+
+        // AS-EFF-005 (gained vs baseline): only NEW effects fire; fewer effects never "gains".
+        let baseline: BTreeSet<String> = ["Net".to_string()].into_iter().collect();
+        assert_eq!(gained_effects(&set(&["Net", "Db"]), &baseline), vec!["Db"]);
+        assert!(gained_effects(&set(&["Net"]), &baseline).is_empty());
+        assert!(gained_effects(&set(&[]), &baseline).is_empty());
     }
 
     #[test]
