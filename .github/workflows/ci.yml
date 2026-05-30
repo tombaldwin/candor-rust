@@ -52,6 +52,11 @@ jobs:
       - name: Integration tests (AS-EFF modes + cross-crate)
         run: bash tests/integration.sh
 
+      # The Claude Code receipt is plain bash (no Rust test reaches it) and has shipped real
+      # bugs (the sidecar/report glob collision). Guard its coverage/freshness/count logic.
+      - name: Receipt logic tests (Claude Code integration)
+        run: bash integrations/claude-code/test-receipt.sh
+
       # Dogfood: candor guards its OWN effect surface against regressions.
       # If candor starts performing a new effect, this fails until .candor/baseline
       # is refreshed deliberately (`cargo candor snapshot .candor/baseline`).
