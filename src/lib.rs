@@ -452,6 +452,33 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             }
             return None;
         }
+        // sea_orm: an ORM whose execution is split from building (like sqlx). The query
+        // BUILDERS (`Entity::find`, `Entity::insert`) are pure; execution happens at `.all`/
+        // `.one`/`.count`/`.stream` and `Insert/Update/Delete::exec`. The write path via an
+        // ActiveModel (`model.insert(db)`) executes too — distinguished from the `EntityTrait`
+        // builder by the trait in the path (`ActiveModelTrait::`). (Found hardening on a
+        // sea_orm consumer app: `.all(db)` reads and `ActiveModel::insert` writes were pure.)
+        if crate_name == "sea_orm" {
+            if path.ends_with("::all")
+                || path.ends_with("::one")
+                || path.ends_with("::count")
+                || path.ends_with("::stream")
+                || path.ends_with("::exec")
+                || path.ends_with("::exec_with_returning")
+                || path.ends_with("::exec_without_returning")
+                || path.ends_with("::connect")
+                || path.ends_with("::execute")
+                || path.ends_with("::execute_unprepared")
+                || path.ends_with("::query_one")
+                || path.ends_with("::query_all")
+                || path.ends_with("::fetch_page")
+                || path.ends_with("::num_items")
+                || path.contains("ActiveModelTrait::")
+            {
+                return Some("Db");
+            }
+            return None;
+        }
         const VERBS: [&str; 16] = [
             "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
             "::fetch_all", "::fetch_optional", "::fetch", "::connect", "::acquire",
@@ -1046,6 +1073,20 @@ mod tests {
         // `log` facade: macros route through `__private_api`; Level/LevelFilter are pure.
         assert_eq!(classify("log", "log::__private_api::log"), Some("Log"));
         assert_eq!(classify("log", "log::LevelFilter::Info"), None);
+    }
+
+    #[test]
+    fn classify_sea_orm() {
+        // Executors are Db (found + validated on a sea_orm consumer app)…
+        assert_eq!(classify("sea_orm", "sea_orm::Select::all"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Selector::one"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Insert::exec"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Database::connect"), Some("Db"));
+        // …including the ActiveModel write path…
+        assert_eq!(classify("sea_orm", "sea_orm::ActiveModelTrait::insert"), Some("Db"));
+        // …but the query/insert BUILDERS stay pure — the ambiguity that made this tricky.
+        assert_eq!(classify("sea_orm", "sea_orm::EntityTrait::find"), None);
+        assert_eq!(classify("sea_orm", "sea_orm::EntityTrait::insert"), None);
     }
 
     #[test]
