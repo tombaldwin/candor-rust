@@ -89,6 +89,19 @@ PY
 want "calibrated sidecar carries candor_version (self-describing report)" "$sidecar_ver" "${tag#candor-build-version=}"
 absent "sidecar version is not the 'unknown' fallback"                    "$sidecar_ver" "unknown unknown"
 
+# ── 6. At-a-glance audit: `cargo candor audit` aggregates the project into a profile ──
+echo "== at-a-glance audit (cargo candor audit) =="
+A=$(mktemp -d)/aud; mkdir -p "$A/src"
+printf '[package]\nname="aud"\nversion="0.1.0"\nedition="2021"\n' > "$A/Cargo.toml"
+printf 'fn reads(){ let _=std::fs::read("/tmp/x"); }\nfn runs(){ let _=std::process::Command::new("x").status(); }\nfn main(){ reads(); runs(); }\n' > "$A/src/main.rs"
+aud=$( cd "$A"; "$ROOT/cargo-candor" audit 2>/dev/null )
+want "audit: header carries the engine version"      "$aud" "candor @"
+want "audit: effectful-function count line"          "$aud" "effectful functions"
+want "audit: effect tally rendered"                  "$aud" "effects"
+want "audit: broadest-surface section"               "$aud" "broadest effect surface"
+want "audit: main shows its transitive { Exec Fs }"  "$aud" "Exec Fs"
+rm -rf "$(dirname "$A")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

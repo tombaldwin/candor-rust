@@ -66,11 +66,29 @@ Put this repo on `PATH` (or symlink `cargo-candor` into one) and use the wrapper
 builds the dylib for you:
 
 ```sh
-cargo candor audit                      # report each function's effect set
+cargo candor audit                      # at-a-glance effect profile of the whole project
+cargo candor audit --all                # the full per-function lint (spans in context)
 cargo candor snapshot .candor/baseline  # write a JSON report
 cargo candor guard    .candor/baseline  # fail on functions that gained an effect
 cargo candor strict   my_module         # conformance, scoped to a module
 cargo candor no-ambient my_module       # flag direct ambient-authority use
+```
+
+`cargo candor audit` aggregates the project's crates into a one-screen profile — how many
+functions perform each effect, which make calls candor can't resolve, any uncalibrated
+dependencies, and the functions with the broadest reach into the outside world:
+
+```text
+candor @62a9383
+143 effectful functions  ·  7 pgman.Executable · 136 pgman.Rlib
+
+  effects   56 Db · 53 Clock · 47 Log · 37 Env · 27 Fs · 23 Exec · 21 Clipboard · 18 Net
+
+  broadest effect surface
+    app::App::run   { Clipboard Clock Db Env Exec Fs Log Net }
+    main            { Clipboard Clock Db Env Exec Fs Log Net }
+    run_batch       { Clock Db Env Exec Fs Log Net }
+    …
 ```
 
 ## All modes (explicit invocation)

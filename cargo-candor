@@ -2,7 +2,8 @@
 # cargo-candor — ergonomic wrapper around `cargo dylint` for the candor lint.
 #
 # Put this file's directory on PATH (or symlink this file into one), then run e.g.
-#   cargo candor audit
+#   cargo candor audit              # at-a-glance effect profile of the whole project
+#   cargo candor audit --all        # the full per-function lint (spans in context)
 #   cargo candor snapshot .candor/baseline
 #   cargo candor guard    .candor/baseline
 #   cargo candor update
@@ -51,7 +52,101 @@ engine_ver() {
 }
 
 case "$cmd" in
-  audit)      exec cargo dylint --lib-path "$LIB" ;;          # default: report effects
+  audit)
+    # `--all`/`-a` (or no python3) → the full per-function lint: the dylint-native view, spans in
+    # context. Default → an at-a-glance profile, aggregated across the project's crates.
+    if [ "${1:-}" = "--all" ] || [ "${1:-}" = "-a" ] || ! command -v python3 >/dev/null 2>&1; then
+      exec cargo dylint --lib-path "$LIB"
+    fi
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    echo "candor: analyzing…" >&2
+    run_json() { CANDOR_JSON="$tmp/a" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
+    run_json
+    # dylint emits only on recompile; if nothing was written the build was cached — force it once.
+    ls "$tmp"/a.*.*.json >/dev/null 2>&1 || { rm -rf target/dylint 2>/dev/null || true; run_json; }
+    if ! ls "$tmp"/a.*.*.json >/dev/null 2>&1; then
+      echo "candor: no report produced — did the crate build? Try 'cargo candor audit --all' to see errors." >&2
+      exit 1
+    fi
+    python3 - "$tmp/a" "$(engine_ver)" <<'PY'
+import sys, os, glob, json, re
+pre, ver = sys.argv[1], sys.argv[2]
+base = os.path.basename(pre)
+
+def entries(path):
+    try: d = json.load(open(path))
+    except Exception: return []
+    if isinstance(d, dict) and isinstance(d.get('functions'), list): return d['functions']   # v0.2 envelope
+    return d if isinstance(d, list) else []                                                   # v0.1 bare array
+
+fns, percrate = [], []
+for f in sorted(glob.glob(pre + '.*.*.json')):
+    es = entries(f); fns += es
+    percrate.append((os.path.basename(f)[len(base)+1:-5], len(es)))   # <crate>.<type>
+
+if not fns:
+    print("candor: no effectful functions found (everything candor can see is pure)."); sys.exit(0)
+
+EFFS = ['Net','Db','Fs','Exec','Ipc','Env','Clock','Rand','Clipboard','Log']
+tally = {e: 0 for e in EFFS}; unresolved = []
+for e in fns:
+    inf = e.get('inferred', [])
+    for x in inf:
+        if x in tally: tally[x] += 1
+    if e.get('unresolved') or 'Unknown' in inf: unresolved.append(e['fn'])
+
+print(f"candor @{ver}")
+print(f"{len(fns)} effectful functions  ·  " + ' · '.join(f"{n} {k}" for k, n in percrate))
+print()
+ranked = sorted(((tally[e], e) for e in EFFS if tally[e]), reverse=True)
+print("  effects   " + ' · '.join(f"{n} {e}" for n, e in ranked))
+print()
+
+if unresolved:
+    u = sorted(set(unresolved))
+    extra = f"  (+{len(u)-5} more)" if len(u) > 5 else ""
+    print(f"  ⚠ {len(u)} make calls candor can't resolve — their effect set may be incomplete (read these):")
+    print("      " + ", ".join(u[:5]) + extra)
+    print()
+
+# coverage: external crates candor saw called but does not calibrate, that LOOK effectful.
+# (SUSPECT mirrors integrations/claude-code/candor-run.sh — a nudge heuristic, not a guarantee.)
+calib_c, calib_p = set(), set()
+try:
+    cj = json.load(open(os.path.join(os.path.dirname(pre) or ".", base + ".calibrated.json")))
+    calib_c, calib_p = set(cj.get("crates", [])), set(cj.get("prefixes", []))
+except Exception: pass
+seen = set()
+for f in glob.glob(pre + '.encountered-*.json'):
+    try: seen |= set(json.load(open(f)))
+    except Exception: pass
+SUSPECT = re.compile(r'sql|sqlite|postgres|mysql|mariadb|mongo|redis|cassandra|scylla|cockroach|dynamo'
+                     r'|surreal|diesel|sea_?orm|tiberius|oracle|clickhouse|influx|neo4j|hyper|surf|curl'
+                     r'|reqwest|isahc|ureq|http|grpc|tonic|websocket|tungstenite|smtp|lettre|imap|ftp|ssh'
+                     r'|nats|kafka|rdkafka|pulsar|amqp|lapin|rabbit|mqtt|rumqtt|zmq|etcd|consul|elastic'
+                     r'|meili|minio|^s3|aws|azure|gcp|google_?cloud')
+def calibrated(c):
+    return c in calib_c or any(c == k or c.startswith(k + "_") for k in calib_c) or any(c.startswith(p) for p in calib_p)
+gaps = sorted(c for c in seen if SUSPECT.search(c) and not calibrated(c))
+if gaps:
+    print(f"  ⚠ coverage: {', '.join(gaps)} uncalibrated — effects through them may be under-counted")
+    print()
+
+# the functions with the widest reach into the outside world — the ones worth knowing about.
+def width(e): return len([x for x in e.get('inferred', []) if x != 'Unknown'])
+top = sorted((e for e in fns if width(e) > 0), key=lambda e: (-width(e), e['fn']))[:8]
+if top:
+    w = max(len(e['fn']) for e in top)
+    print("  broadest effect surface")
+    for e in top:
+        effs = sorted(x for x in e['inferred'] if x != 'Unknown')
+        print(f"    {e['fn']:<{w}}  {{ {' '.join(effs)} }}")
+    print()
+
+print("  full per-function view:  cargo candor audit --all")
+print("  guard against new effects:  cargo candor snapshot .candor/baseline")
+PY
+    exit 0 ;;
   strict)     export CANDOR_STRICT="${1:-1}";      exec cargo dylint --lib-path "$LIB" ;;
   no-ambient) export CANDOR_NO_AMBIENT="${1:-1}";  exec cargo dylint --lib-path "$LIB" ;;
 
