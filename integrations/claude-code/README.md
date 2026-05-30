@@ -112,13 +112,15 @@ of the GitHub URL if you want the instructions to update in lockstep with the en
 - **Auto-refresh adds latency** to turns that changed Rust (a `cargo dylint` run — seconds to tens of
   seconds on a real crate). Turns that didn't touch Rust cost nothing. To make it asynchronous
   instead, run the hook in the background and read the prior turn's receipt — a future option.
-- **Coverage is heuristic.** The receipt's `Cargo.toml`-based check is a best-effort nudge, not a
-  certificate. Its calibrated crate set is now read from what the **engine emits** beside the report
-  (`report.calibrated.json`) — the single source of truth — so it can't drift from the classifier (a
-  `DB_CRATES ⊆ CALIBRATED_CRATES` unit test enforces the rest in-engine). What stays heuristic is the
-  `SUSPECT` pattern that decides which *unrecognized* deps look effectful enough to warn about. The
-  further upgrade (candor emitting the crates it actually **encountered-but-couldn't-classify** in
-  your code, vs. guessing from dependency names) is still planned.
+- **Coverage is heuristic, but now ground-truthed.** The check runs over the external crates candor
+  **actually saw called** (the engine emits them per crate+kind as `report.encountered-*.json`), not
+  the root `Cargo.toml`'s declarations — so it reflects real usage and catches deps declared in
+  **workspace members** (the gap that hid `git2` in gitui's `asyncgit` from an earlier root-only
+  scan). The calibrated set it's compared against is likewise emitted by the engine
+  (`report.calibrated.json`), so neither can drift from the classifier (a `DB_CRATES ⊆
+  CALIBRATED_CRATES` unit test enforces the rest in-engine). What stays heuristic is only the
+  `SUSPECT` pattern deciding which *unrecognized, actually-called* crates look effectful enough to
+  warn about.
 
 ## Uninstall
 

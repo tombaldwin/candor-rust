@@ -59,6 +59,9 @@ pub struct Candor {
     extra: Vec<(&'static str, bool, String)>,
     /// CANDOR_PARANOID: also treat generic static trait dispatch as Unknown.
     paranoid: bool,
+    /// External (non-std, non-local) crates we actually saw resolved calls into.
+    /// Ground truth for the coverage blind-spot check — emitted beside the report.
+    encountered: BTreeSet<String>,
 }
 
 /// Effects that represent *ambient authority* — a global resource reachable just by
@@ -82,7 +85,7 @@ impl Candor {
             Err(_) => Vec::new(),
         };
         let paranoid = std::env::var("CANDOR_PARANOID").is_ok();
-        Self { direct: HashMap::new(), calls: HashMap::new(), extra, paranoid }
+        Self { direct: HashMap::new(), calls: HashMap::new(), extra, paranoid, encountered: BTreeSet::new() }
     }
 }
 
@@ -561,6 +564,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
         // Record a directly-performed effect (built-in classifier, then project rules).
         let crate_name = cx.tcx.crate_name(def_id.krate);
+        // Note every EXTERNAL crate we actually saw a resolved call into — ground truth for
+        // the coverage blind-spot check (catches deps declared in workspace members, which a
+        // root-manifest scan misses). std/local are excluded; the consumer filters the rest.
+        if !def_id.is_local()
+            && !matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
+        {
+            self.encountered.insert(crate_name.to_string());
+        }
         let path = cx.tcx.def_path_str(def_id);
         let effect = classify(crate_name.as_str(), &path)
             .or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
@@ -829,6 +840,15 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             let cfile = format!("{prefix}.calibrated.json");
             if let Err(e) = std::fs::write(&cfile, calib.to_string()) {
                 eprintln!("candor: failed to write {cfile:?} ({e})");
+            }
+            // Emit the external crates we actually saw called, one file per crate+kind (a
+            // package emits the same crate name as both rlib and bin — they must NOT share a
+            // file or the sparser one overwrites the other). Named `encountered-<krate>-<kind>`
+            // (a single middle segment) so it does NOT match the `.*.*.json` report glob.
+            let efile = format!("{prefix}.encountered-{krate}-{kinds}.json");
+            let seen: Vec<&str> = self.encountered.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = std::fs::write(&efile, serde_json::to_string(&seen).unwrap_or_default()) {
+                eprintln!("candor: failed to write {efile:?} ({e})");
             }
         }
     }

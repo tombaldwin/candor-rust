@@ -198,11 +198,29 @@ is_calibrated() {
   done
   return 1
 }
-deps=$(awk '
-  /^\[(dependencies|build-dependencies)\]/{f=1;next}
-  /^\[/{f=0}
-  f && /^[A-Za-z0-9_-]+[[:space:]]*[=.]/{ gsub(/[=.[:space:]].*/,"",$0); print }
-' Cargo.toml 2>/dev/null | sort -u)
+# Prefer GROUND TRUTH: the external crates candor actually saw resolved calls into
+# (emitted per crate as `<prefix>.encountered-<crate>.json`). This reflects real usage
+# and catches deps declared in workspace MEMBERS — which a root-Cargo.toml scan misses
+# (e.g. git2 in gitui's asyncgit member). Fall back to the manifest when absent.
+deps=""
+if ls "$REPORT_PREFIX".encountered-*.json >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  deps=$(python3 - "$REPORT_PREFIX" <<'PY' 2>/dev/null
+import sys, glob, json
+seen = set()
+for f in glob.glob(sys.argv[1] + '.encountered-*.json'):
+    try: seen |= set(json.load(open(f)))
+    except Exception: pass
+print(" ".join(sorted(seen)))
+PY
+)
+fi
+if [ -z "$deps" ]; then
+  deps=$(awk '
+    /^\[(dependencies|build-dependencies)\]/{f=1;next}
+    /^\[/{f=0}
+    f && /^[A-Za-z0-9_-]+[[:space:]]*[=.]/{ gsub(/[=.[:space:]].*/,"",$0); print }
+  ' Cargo.toml 2>/dev/null | sort -u)
+fi
 gaps=""
 for d in $deps; do
   nd="${d//-/_}"
