@@ -54,11 +54,18 @@ find_lib() {
 # ---- version stamp + update/rebuild nudges (the clone is the single source of truth) ----
 LIBP="$(find_lib 2>/dev/null || true)"
 VER=""; NUDGE=""
+# The TRUE version of the running dylib — the tag build.rs embedded — NOT CANDOR_HOME's git HEAD,
+# which races ahead of an un-rebuilt dylib. The receipt must not claim a version the loaded binary
+# isn't; this is the engine that actually produced the report below.
+[ -n "$LIBP" ] && VER="$(strings -a "$LIBP" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-fA-F]+' | head -1 | cut -d= -f2)"
 if [ -n "${CANDOR_HOME:-}" ] && git -C "$CANDOR_HOME" rev-parse --git-dir >/dev/null 2>&1; then
-  VER="$(git -C "$CANDOR_HOME" rev-parse --short HEAD 2>/dev/null)"
-  # Dylib older than engine source → the running binary lags the clone (e.g. you pulled
-  # but didn't rebuild). Cheap mtime check, every run.
-  if [ -n "$LIBP" ] && [ -f "$CANDOR_HOME/src/lib.rs" ] && [ "$LIBP" -ot "$CANDOR_HOME/src/lib.rs" ]; then
+  head="$(git -C "$CANDOR_HOME" rev-parse --short HEAD 2>/dev/null)"
+  [ -z "$VER" ] && VER="$head"   # fall back to clone HEAD only if the tag is unreadable
+  # Running binary lags the clone (e.g. pulled but didn't rebuild) → exact version comparison,
+  # which beats the old mtime heuristic; fall back to mtime for *uncommitted* source edits.
+  if [ -n "$VER" ] && [ -n "$head" ] && [ "$VER" != "$head" ]; then
+    NUDGE="$NUDGE · ⚠ engine @$VER but clone @$head — rebuild: cargo candor update"
+  elif [ -n "$LIBP" ] && [ -f "$CANDOR_HOME/src/lib.rs" ] && [ "$LIBP" -ot "$CANDOR_HOME/src/lib.rs" ]; then
     NUDGE="$NUDGE · ⚠ dylib older than source — rebuild: cargo candor update"
   fi
   # Upstream check hits the network, so only the explicit /candor (--force) does it;
@@ -66,8 +73,8 @@ if [ -n "${CANDOR_HOME:-}" ] && git -C "$CANDOR_HOME" rev-parse --git-dir >/dev/
   if [ "$FORCE" = 1 ]; then
     git -C "$CANDOR_HOME" fetch -q origin 2>/dev/null || true
     up="$(git -C "$CANDOR_HOME" rev-parse '@{u}' 2>/dev/null || git -C "$CANDOR_HOME" rev-parse origin/main 2>/dev/null || true)"
-    head="$(git -C "$CANDOR_HOME" rev-parse HEAD 2>/dev/null || true)"
-    [ -n "$up" ] && [ -n "$head" ] && [ "$up" != "$head" ] && NUDGE="$NUDGE · ⚠ candor update available — run: cargo candor update"
+    fullhead="$(git -C "$CANDOR_HOME" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$up" ] && [ -n "$fullhead" ] && [ "$up" != "$fullhead" ] && NUDGE="$NUDGE · ⚠ candor update available — run: cargo candor update"
   fi
 fi
 VERSTAMP=""; [ -n "$VER" ] && VERSTAMP=" @$VER"
