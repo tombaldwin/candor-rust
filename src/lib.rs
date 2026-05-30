@@ -1532,6 +1532,10 @@ mod tests {
         assert!(m["c"].is_empty());
         // A missing or unreadable baseline yields None (never panics).
         assert!(load_baseline("/no/such/candor/baseline.json").is_none());
+        // Malformed JSON yields None too — a corrupt baseline must never crash the build.
+        std::fs::write(&path, "not valid json {[").unwrap();
+        assert!(load_baseline(path.to_str().unwrap()).is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1558,6 +1562,24 @@ mod tests {
         assert_eq!(parse_dph("tooshort"), None);
         assert_eq!(parse_dph(&"0".repeat(33)), None); // wrong length
         assert_eq!(parse_dph("zz234567_89abcdef0123456789abcde"), None); // 32 chars, non-hex
+    }
+
+    #[test]
+    fn classify_precision_residuals() {
+        // `Env` is the WHOLE `std::env` (a documented breadth, CRITIQUE §9) — current_dir counts.
+        assert_eq!(classify("std", "std::env::current_dir"), Some("Env"));
+        assert_eq!(classify("std", "std::env::vars"), Some("Env"));
+        // HTTP clients beyond reqwest: only the dispatch, not builders.
+        assert_eq!(classify("isahc", "isahc::Request::send"), Some("Net"));
+        assert_eq!(classify("ureq", "ureq::Request::call"), Some("Net"));
+        assert_eq!(classify("ureq", "ureq::Request::set"), None);
+        // Randomness family + pty subprocess + mmap.
+        assert_eq!(classify("rand", "rand::random"), Some("Rand"));
+        assert_eq!(classify("fastrand", "fastrand::u32"), Some("Rand"));
+        assert_eq!(classify("portable_pty", "portable_pty::native_pty_system"), Some("Exec"));
+        assert_eq!(classify("memmap2", "memmap2::Mmap::flush"), Some("Fs"));
+        // The honest default: an unrecognized crate is pure (the coverage net warns separately).
+        assert_eq!(classify("some_random_crate", "some_random_crate::foo::bar"), None);
     }
 
     #[test]

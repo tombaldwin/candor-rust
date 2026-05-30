@@ -1,0 +1,16 @@
+warning: `in_closure` effects: { Fs }   (* = via callee)
+  --> $DIR/closures.rs:5:1
+   |
+LL | fn in_closure() {
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `in_nested_closure` effects: { Exec }   (* = via callee)
+  --> $DIR/closures.rs:11:1
+   |
+LL | fn in_nested_closure() {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 2 warnings emitted
+
