@@ -47,6 +47,11 @@ jobs:
           echo "$out" | grep -q '`read_config` effects: { Fs }' \
             || { echo "::error::audit output regressed (expected read_config -> Fs)"; exit 1; }
 
+      # End-to-end coverage the in-process unit/ui tests can't reach: the AS-EFF mode
+      # diagnostics (env-driven) and cross-crate propagation across a real lib+bin build.
+      - name: Integration tests (AS-EFF modes + cross-crate)
+        run: bash tests/integration.sh
+
       # Dogfood: candor guards its OWN effect surface against regressions.
       # If candor starts performing a new effect, this fails until .candor/baseline
       # is refreshed deliberately (`cargo candor snapshot .candor/baseline`).
