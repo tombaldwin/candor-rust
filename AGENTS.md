@@ -51,9 +51,23 @@ candor is deliberately honest about what it cannot see; respect that boundary.
 
 ## 5. After you change code
 
-Re-run the last command in step 1 and confirm no function unexpectedly *gained* an effect (e.g. a
-previously-pure helper now shows `Net`). If one did, that's a regression in your change — explain it
-or fix it.
+Run `cargo candor diff .candor/baseline` (add `--json` to parse it). It lists, per function, the
+effects your change *gained* or *lost* vs the baseline — including the **non-local** consequence: a
+network call you add deep in a helper shows `+Net` on every function that calls it. For each `+`:
+
+- **Was it intended?** If a function gained `Net`/`Db`/`Exec`/`Fs`/`Env`/`Ipc` it didn't have,
+  confirm it's necessary, and prefer threading a capability over reaching for ambient authority.
+- **A gained `Unknown`** means candor can no longer prove that function's effect set is complete —
+  read it (you likely added a callback or dynamic dispatch it can't see through).
+
+An unintended gain is a regression in your change — fix it. If intended, say so.
+
+### If candor prompts you (the opt-in `CANDOR_REVIEW` self-review)
+
+When the maintainer has set `CANDOR_REVIEW=1`, candor's Stop hook hands you this delta automatically
+after any turn that introduced a new effect ("your edits gave functions NEW effects: …"). Treat it as
+a checkpoint, not a blocker: review each gained effect as above, fix anything unintended, then finish.
+Each effect is surfaced once — you won't be re-prompted for the same one.
 
 ## Optional, separate: make step 5 automatic in CI
 

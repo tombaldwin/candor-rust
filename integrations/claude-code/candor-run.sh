@@ -261,10 +261,55 @@ else
   COV="coverage ✓ (all effectful-looking deps recognized)"
 fi
 
-# ---- emit the single-line receipt ----
+# ---- §2 edit-time self-review (opt-in: CANDOR_REVIEW=1 in .candor/config or env) ----
+# When enabled, diff the fresh report against the committed baseline; if THIS turn introduced an
+# effect not surfaced before, emit a self-review PROMPT (exit 11) that the Stop hook feeds back to
+# the agent. Conservative: needs CANDOR_REVIEW, a good current report (ran_ok), a baseline, a
+# matching engine version (else the delta is reclassification noise, not the agent's edit), and
+# python3. `.candor/review-seen` makes each gained effect prompt at most once. Default OFF.
+REVIEW=""
+BASELINE_PREFIX="$STATE_DIR/baseline"
+if [ "${CANDOR_REVIEW:-0}" != 0 ] && [ "$ran_ok" = 1 ] \
+   && ls "$BASELINE_PREFIX".*.*.json >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  bver=""; [ -f "$BASELINE_PREFIX.candor-version" ] && bver="$(cat "$BASELINE_PREFIX.candor-version" 2>/dev/null)"
+  if [ -z "$bver" ] || [ -z "$VER" ] || [ "$bver" = "$VER" ]; then
+    REVIEW="$(python3 - "$REPORT_PREFIX" "$BASELINE_PREFIX" "$STATE_DIR/review-seen" <<'PY' 2>/dev/null
+import sys, glob, json
+cur_pre, base_pre, seen_path = sys.argv[1], sys.argv[2], sys.argv[3]
+def load(pre):
+    out = {}
+    for f in glob.glob(pre + '.*.*.json'):
+        try: d = json.load(open(f))
+        except Exception: continue
+        fns = d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
+        for e in fns: out[e['fn']] = set(e.get('inferred', []))
+    return out
+cur, base = load(cur_pre), load(base_pre)
+gains = sorted({(fn, e) for fn, effs in cur.items() for e in (effs - base.get(fn, set()))})
+try: seen = set(open(seen_path).read().split('\n'))
+except Exception: seen = set()
+fresh = [(fn, e) for fn, e in gains if (fn + '\t' + e) not in seen]
+if not fresh: sys.exit(0)
+open(seen_path, 'w').write('\n'.join(fn + '\t' + e for fn, e in gains))   # each gain prompts once
+byfn = {}
+for fn, e in fresh: byfn.setdefault(fn, []).append(e)
+for fn in sorted(byfn):
+    es = sorted(byfn[fn])
+    flag = '  (Unknown — effect set no longer provably complete)' if 'Unknown' in es else ''
+    print('  + ' + fn + '  gained { ' + ' '.join(es) + ' }' + flag)
+PY
+)"
+  fi
+fi
+
+# ---- emit ----
 if [ "$need_run" = 1 ] && [ "$ran_ok" = 0 ]; then
   echo "candor$VERSTAMP $FRESH. Fix the build, then /candor.$NUDGE"
-else
-  echo "candor$VERSTAMP · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json$NUDGE"
+  exit "${surfaced:-0}"
 fi
+if [ -n "$REVIEW" ]; then
+  printf 'candor — your edits this turn gave functions NEW effects (vs the committed .candor baseline):\n%s\n\nA local edit can change the effect surface non-locally — a new effect propagates to every caller. For each: was it intended? If a function gained Net/Db/Exec/Fs/Env/Ipc it lacked, confirm it is necessary, and prefer threading a capability over reaching for ambient authority. A gained `Unknown` means candor can no longer prove that function complete — read it. If all are intended, just finish; this will not re-prompt for these.\n' "$REVIEW"
+  exit 11
+fi
+echo "candor$VERSTAMP · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json$NUDGE"
 exit "${surfaced:-0}"

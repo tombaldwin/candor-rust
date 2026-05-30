@@ -18,10 +18,12 @@ transitively perform `Net`). candor computes that for free. **Lead with the delt
       call added in `worker` also shows `+Net` on its caller `main`), flags a new `Unknown`, and has
       `--json` for the agent. Still v2: the *call-site* "why" (`+Net via reqwest::get @ foo.rs:12`),
       which rides on `explain` (§3) — the engine has the leaf + location, just not yet surfaced here.
-- [ ] **2. Close the loop in the agent's edit cycle.** The Claude Code Stop hook feeds a
-      newly-introduced effect (or `Unknown`) back to the agent as a self-review prompt, and `AGENTS.md`
-      tells the agent to treat `+effect` / `+Unknown` as "stop and confirm this was intended." Edit →
-      candor → self-correct. This is what makes candor *change behaviour*, not just inform.
+- [x] **2. Close the loop in the agent's edit cycle.** Opt-in `CANDOR_REVIEW=1`: the Stop hook diffs
+      the fresh report vs the baseline and, on a newly-introduced effect, feeds the delta *back to the
+      agent* (`decision:block` + `additionalContext`) as a self-review checkpoint; `AGENTS.md` §5 tells
+      the agent how to respond. Triple loop-guard: a once-per-effect `review-seen` marker,
+      `stop_hook_active`, and Claude's 8-block cap; off by default. This is what makes candor *change
+      behaviour*, not just inform. (Tested: candor-run exit-11 + stop-hook block/no-block.)
 - [ ] **3. `explain <fn>` for the scoping phase** (the P2 item below). Before editing `run_query` the
       agent asks "what flows through here / who calls this" to gauge blast radius.
 - [ ] **4. Speed for a tight loop.** A full re-lint (~minutes on a big crate) is too slow per edit;

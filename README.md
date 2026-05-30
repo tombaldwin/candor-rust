@@ -40,6 +40,13 @@ stubs that delegate to this clone, so `cargo candor update` refreshes the engine
 `AGENTS.md` together (every receipt is stamped with the engine commit, so they can't silently
 desync). See its [README](integrations/claude-code/README.md) for the trust model and honest limits.
 
+**Opt-in edit-time self-review.** Set `CANDOR_REVIEW=1` (in `.candor/config`) and the Stop hook does
+more than inform the human: when the agent's edits give a function a *new* effect vs your committed
+baseline, it hands that delta *back to the agent* as a self-review checkpoint — "your edits gave
+`foo` a new `Net` (which propagates to its callers); intended?". Each effect prompts once, it never
+loops, and it's off by default. This is the difference between candor *informing* an agent and
+*changing what it does* — see [BACKLOG.md](BACKLOG.md) P0.
+
 *Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
 [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md)
 

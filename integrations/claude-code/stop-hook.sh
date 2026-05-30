@@ -1,29 +1,46 @@
 #!/usr/bin/env bash
 # stop-hook.sh — Claude Code Stop hook for candor.
 #
-# Fires when Claude finishes a turn. Runs candor-run.sh; if (and only if) the run
-# re-analyzed because Rust sources changed — or produced a STALE warning — it
-# surfaces the receipt to the HUMAN via the `systemMessage` JSON field. On turns
-# with no Rust change it stays silent. It never blocks and never forces a continue,
-# so there is no risk of a Stop-hook loop.
+# Fires when Claude finishes a turn. Runs candor-run.sh, then:
+#   exit 11  (CANDOR_REVIEW, opt-in): the agent's edits introduced a NEW effect. Feed the
+#            self-review prompt BACK TO THE AGENT (decision:block + additionalContext) so it
+#            reviews — UNLESS we're already in a stop→continue loop (stop_hook_active true), in
+#            which case we only tell the human. `.candor/review-seen` already makes each effect
+#            prompt at most once; stop_hook_active and Claude's 8-block cap are the backstops.
+#   exit 10  a normal re-analysis receipt → surface to the HUMAN (systemMessage); never blocks.
+#   else     silent.
 set -uo pipefail
 
 IN="$(cat)"   # Stop-hook input JSON on stdin
 
-# Extract cwd from the input JSON (python3 if available, else a flat-field sed).
-if command -v python3 >/dev/null 2>&1; then
-  DIR="$(printf '%s' "$IN" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("cwd",""))' 2>/dev/null)"
-else
-  DIR="$(printf '%s' "$IN" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-fi
+# Pull a field from the input JSON (python3 preferred; sed fallback for `cwd`).
+field() { command -v python3 >/dev/null 2>&1 && printf '%s' "$IN" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);print($1)" 2>/dev/null; }
+DIR="$(field 'd.get("cwd","")')"
+[ -z "$DIR" ] && DIR="$(printf '%s' "$IN" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 [ -z "$DIR" ] && DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
+ACTIVE="$(field 'str(d.get("stop_hook_active", False)).lower()')"
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$("$SELF_DIR/candor-run.sh" "$DIR" 2>/dev/null)"; CODE=$?
 
-# Surface only when candor-run asked us to (exit 10). Quiet otherwise.
-if [ "$CODE" = 10 ] && [ -n "$OUT" ]; then
-  MSG="$(printf '%s' "$OUT" | tail -1 | sed 's/\\/\\\\/g; s/"/\\"/g')"
-  printf '{"systemMessage": "%s", "suppressOutput": true}\n' "$MSG"
+emit_human() {   # surface the last line to the human only (never reaches the model)
+  local msg; msg="$(printf '%s' "$OUT" | tail -1 | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  [ -n "$msg" ] && printf '{"systemMessage": "%s", "suppressOutput": true}\n' "$msg"
+}
+
+if [ "$CODE" = 11 ] && [ "$ACTIVE" != true ] && command -v python3 >/dev/null 2>&1 && [ -n "$OUT" ]; then
+  # Feed the agent: `decision:block` continues the turn; `additionalContext` is what Claude acts on.
+  # (`reason` is human-facing; we send the same text both ways so the signal lands regardless.)
+  printf '%s' "$OUT" | python3 -c '
+import sys, json
+p = sys.stdin.read().strip()
+print(json.dumps({
+  "decision": "block",
+  "reason": p,
+  "hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": p},
+}))'
+elif [ "$CODE" = 11 ] || [ "$CODE" = 10 ]; then
+  emit_human   # already looping (stop_hook_active), or a plain receipt → human only
 fi
 exit 0

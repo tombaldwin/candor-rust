@@ -82,6 +82,31 @@ chk  "receipt summarizes the v0.2 envelope (2 fns from {candor,functions})"  "$o
 chk  "envelope: effect breakdown + unresolved counted through .functions"    "$oute" '1 unresolved'
 rm -rf "$(dirname "$E")"
 
+# §2 edit-time self-review (CANDOR_REVIEW): a newly-introduced effect → prompt + exit 11, once.
+R=$(mktemp -d)/r; mkdir -p "$R/src" "$R/.candor"
+printf '[package]\nname="r"\nversion="0.1.0"\nedition="2021"\n[dependencies]\n' > "$R/Cargo.toml"
+printf 'fn worker(){}\n' > "$R/src/lib.rs"
+echo "CANDOR_REVIEW=1" > "$R/.candor/config"
+# baseline: worker performs Fs only.  current report: worker gained Net.  (no version file → gate open)
+echo '{"candor":{"version":"v1"},"functions":[{"fn":"worker","inferred":["Fs"],"direct":["Fs"],"unresolved":false}]}' > "$R/.candor/baseline.r.Rlib.json"
+echo '{"candor":{"version":"v1"},"functions":[{"fn":"worker","inferred":["Fs","Net"],"direct":["Fs","Net"],"unresolved":false}]}' > "$R/.candor/report.r.Rlib.json"
+rh=$(find "$R" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1)
+echo "$rh" > "$R/.candor/state"
+outr="$("$RUN" "$R" 2>/dev/null)"; codr=$?
+chk  "review: candor-run exits 11 on a newly-introduced effect"  "$codr" '^11$'
+chk  "review: the prompt names the gained Net"                   "$outr" 'gained \{ Net'
+outr2="$("$RUN" "$R" 2>/dev/null)"; codr2=$?
+nchk "review: the same effect is NOT re-surfaced (exit ≠ 11)"    "$codr2" '^11$'
+# stop-hook feeds the agent only when not already looping.
+rm -f "$R/.candor/review-seen"
+hb=$(printf '{"cwd":"%s","stop_hook_active":false}' "$R" | bash "$HERE/stop-hook.sh" 2>/dev/null)
+chk  "stop-hook: blocks + feeds the agent on a new effect"       "$hb" '"decision": ?"block"'
+chk  "stop-hook: routes the prompt via additionalContext"        "$hb" 'additionalContext'
+rm -f "$R/.candor/review-seen"
+hl=$(printf '{"cwd":"%s","stop_hook_active":true}' "$R" | bash "$HERE/stop-hook.sh" 2>/dev/null)
+nchk "stop-hook: does NOT block when already looping (loop guard)" "$hl" '"decision"'
+rm -rf "$(dirname "$R")"
+
 echo
 echo "receipt tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

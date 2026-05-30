@@ -158,6 +158,7 @@ PY
     mkdir -p "$(dirname "$pre")"
     CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB"
     engine_ver > "$pre.candor-version"
+    rm -f "$(dirname "$pre")/review-seen" 2>/dev/null || true   # new baseline → reset §2 self-review
     echo "candor: baseline written and stamped @$(cat "$pre.candor-version" 2>/dev/null)." >&2
     exit 0 ;;
 
@@ -271,6 +272,7 @@ PY
       find . -path ./target -prune -o -name '*.rs' -print0 2>/dev/null | xargs -0 touch 2>/dev/null || true
       if CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 && ls "$pre".*.json >/dev/null 2>&1; then
         echo "$ev" > "$pre.candor-version"
+        rm -f "$(dirname "$pre")/review-seen" 2>/dev/null || true   # new baseline → reset §2 self-review
         new="$(cat "$pre".*.json 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
         if [ "$old" = "$new" ]; then
           echo "candor: baseline content UNCHANGED (this engine classifies it identically) — re-stamped @$ev, nothing to review." >&2
