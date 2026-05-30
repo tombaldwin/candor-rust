@@ -13,10 +13,11 @@ of its own edit** across the call graph and crate boundaries — exactly the fai
 transitively perform `Net`). candor computes that for free. **Lead with the delta, not the dump.**
 (Rests on the P1 correctness foundation — a feedback signal is only worth acting on if it's right.)
 
-- [ ] **1. Agent-facing effect diff — `cargo candor diff`.** Turn the guard from pass/fail into a
-      description: "since the baseline — `+Net` on `foo` (new `reqwest::get` @ foo.rs:12) → propagates
-      to `bar`, `baz`; `+Unknown` on `qux` (added a callback candor can't see through)." Both human-
-      and machine-readable (JSON for the agent). The core deliverable.
+- [x] **1. Agent-facing effect diff — `cargo candor diff`.** v1 ships: describes the per-function
+      delta vs a baseline (`+ worker { +Net }`) *including the transitive blast radius* (a network
+      call added in `worker` also shows `+Net` on its caller `main`), flags a new `Unknown`, and has
+      `--json` for the agent. Still v2: the *call-site* "why" (`+Net via reqwest::get @ foo.rs:12`),
+      which rides on `explain` (§3) — the engine has the leaf + location, just not yet surfaced here.
 - [ ] **2. Close the loop in the agent's edit cycle.** The Claude Code Stop hook feeds a
       newly-introduced effect (or `Unknown`) back to the agent as a self-review prompt, and `AGENTS.md`
       tells the agent to treat `+effect` / `+Unknown` as "stop and confirm this was intended." Edit →

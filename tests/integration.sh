@@ -102,6 +102,23 @@ want "audit: broadest-surface section"               "$aud" "broadest effect sur
 want "audit: main shows its transitive { Exec Fs }"  "$aud" "Exec Fs"
 rm -rf "$(dirname "$A")"
 
+# ── 7. Agent-facing effect diff: `cargo candor diff` describes the per-function delta (P0 §1) ──
+echo "== effect diff (cargo candor diff) =="
+D=$(mktemp -d)/d; mkdir -p "$D/src"
+printf '[package]\nname="d"\nversion="0.1.0"\nedition="2021"\n' > "$D/Cargo.toml"
+printf 'fn worker(){ let _=std::fs::read("/tmp/x"); }\nfn main(){ worker(); }\n' > "$D/src/main.rs"
+( cd "$D"; "$ROOT/cargo-candor" snapshot .candor/baseline >/dev/null 2>&1 )
+# an agent adds a network call deep in `worker` — a LOCAL edit with a NON-LOCAL consequence.
+printf 'fn worker(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn main(){ worker(); }\n' > "$D/src/main.rs"
+dout=$( cd "$D"; "$ROOT/cargo-candor" diff 2>/dev/null )
+djson=$( cd "$D"; "$ROOT/cargo-candor" diff --json 2>/dev/null )
+want "diff: the edited fn (worker) is flagged"             "$dout" "worker"
+want "diff: +Net rendered"                                 "$dout" "+Net"
+want "diff: the caller (main) inherits the gain — blast radius" "$dout" "main"
+want "diff --json: machine-readable for the agent"         "$djson" '"gained"'
+want "diff --json: carries the gained Net"                 "$djson" 'Net'
+rm -rf "$(dirname "$D")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

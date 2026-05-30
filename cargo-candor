@@ -5,7 +5,8 @@
 #   cargo candor audit              # at-a-glance effect profile of the whole project
 #   cargo candor audit --all        # the full per-function lint (spans in context)
 #   cargo candor snapshot .candor/baseline
-#   cargo candor guard    .candor/baseline
+#   cargo candor guard    .candor/baseline   # CI gate: fail on a gained effect
+#   cargo candor diff     .candor/baseline   # describe the per-function effect delta (--json)
 #   cargo candor update
 #   cargo candor strict   my_module
 #   cargo candor no-ambient my_module
@@ -182,6 +183,79 @@ PY
     fi
     exit 0 ;;
 
+  diff)
+    # The agent-facing sibling of `guard`: instead of pass/fail, DESCRIBE the per-function effect
+    # delta vs the baseline — what each function gained or lost. This is the signal an agent can't
+    # cheaply self-compute (transitive effects across the call graph). `--json` for machine reading.
+    json=0; pre=".candor/baseline"
+    for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) pre="$a" ;; esac; done
+    command -v python3 >/dev/null 2>&1 || { echo "candor: diff needs python3" >&2; exit 2; }
+    if ! ls "$pre".*.*.json >/dev/null 2>&1; then
+      echo "candor: no baseline at '$pre.*' — create one with 'cargo candor snapshot $pre'." >&2
+      exit 2
+    fi
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    [ "$json" = 1 ] || echo "candor: analyzing…" >&2
+    run_json() { CANDOR_JSON="$tmp/cur" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
+    run_json
+    ls "$tmp"/cur.*.*.json >/dev/null 2>&1 || { rm -rf target/dylint 2>/dev/null || true; run_json; }
+    if ! ls "$tmp"/cur.*.*.json >/dev/null 2>&1; then
+      echo "candor: no current report produced — did the crate build? Try 'cargo candor audit --all'." >&2
+      exit 1
+    fi
+    bv=""; [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
+    python3 - "$tmp/cur" "$pre" "$json" "$bv" "$(engine_ver)" <<'PY'
+import sys, glob, json as J
+cur_pre, base_pre, want_json, bver, ever = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4], sys.argv[5]
+
+def load(pre):
+    out = {}
+    for f in glob.glob(pre + '.*.*.json'):
+        try: d = J.load(open(f))
+        except Exception: continue
+        fns = d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
+        for e in fns: out[e['fn']] = set(e.get('inferred', []))
+    return out
+
+cur, base = load(cur_pre), load(base_pre)
+changes = []
+for fn in set(cur) | set(base):
+    c, b = cur.get(fn), base.get(fn)
+    if c is None:        # function gone (was in baseline)
+        if b: changes.append({"fn": fn, "gained": [], "lost": sorted(b), "status": "removed"})
+    elif b is None:      # new function
+        if c: changes.append({"fn": fn, "gained": sorted(c), "lost": [], "status": "new"})
+    else:
+        g, l = sorted(c - b), sorted(b - c)
+        if g or l: changes.append({"fn": fn, "gained": g, "lost": l, "status": "changed"})
+
+if want_json:
+    print(J.dumps({"baseline_version": bver, "engine_version": ever, "changes": changes}, indent=2))
+    sys.exit(0)
+
+if not changes:
+    print(f"candor: no effect changes vs {base_pre} (@{bver or '?'})."); sys.exit(0)
+
+print(f"candor diff — current (@{ever}) vs {base_pre} (@{bver or '?'})")
+if bver and ever and bver != ever:
+    print(f"  ⚠ baseline @{bver} ≠ engine @{ever} — some changes may be the engine reclassifying, not your code.")
+print()
+# gained-something first — that's the direction an agent must review.
+changes.sort(key=lambda c: (0 if c["gained"] else 1, c["fn"]))
+for c in changes:
+    delta = ' '.join([f"+{e}" for e in c["gained"]] + [f"-{e}" for e in c["lost"]])
+    mark = "+" if c["gained"] else "-"
+    note = {"new": "  (new fn)", "removed": "  (removed fn)"}.get(c["status"], "")
+    if "Unknown" in c["gained"]: note += "  ⚠ now unresolvable"
+    print(f"  {mark} {c['fn']}{note}   {{ {delta} }}")
+print()
+ng = sum(1 for c in changes if c["gained"])
+print(f"  {ng} function(s) gained effects, {sum(1 for c in changes if c['lost'] and not c['gained'])} only dropped.")
+if any("Unknown" in c["gained"] for c in changes):
+    print("  ⚠ a new Unknown means candor can no longer prove that function's effect set is complete — review it.")
+PY
+    exit 0 ;;
+
   update)
     # The clone is the single source of truth for the engine, the Claude Code integration
     # scripts, and AGENTS.md — pull + rebuild updates all three at one commit.
@@ -217,6 +291,6 @@ PY
     sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac
