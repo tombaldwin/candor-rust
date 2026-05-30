@@ -235,11 +235,11 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-const CALIBRATED_CRATES: [&str; 32] = [
+const CALIBRATED_CRATES: [&str; 34] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp",
-    "async_nats", "lapin", "lettre", "tungstenite", "elasticsearch",
+    "async_nats", "lapin", "lettre", "tungstenite", "elasticsearch", "tonic", "rdkafka",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
@@ -365,6 +365,42 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // (same shape as reqwest / the AWS SDK). (Found on an elasticsearch consumer.)
     if crate_name == "elasticsearch" && path.ends_with("::send") {
         return Some("Net");
+    }
+    // gRPC — tonic. The transport connect and the Grpc client RPC dispatch are network;
+    // codecs and request/response wrappers are pure. (connect repro-confirmed on a consumer;
+    // the unary/streaming RPC verbs are from the tonic::client::Grpc API.)
+    if crate_name == "tonic" {
+        if path.ends_with("::connect")
+            || path.ends_with("::unary")
+            || path.ends_with("::server_streaming")
+            || path.ends_with("::client_streaming")
+            || path.ends_with("::streaming")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    // Kafka — rdkafka (FFI to librdkafka). Producer send + consumer poll/recv/subscribe/
+    // commit are network round-trips to the brokers. (API-calibrated + unit-tested; a real
+    // repro needs librdkafka/cmake, deferred.)
+    if crate_name == "rdkafka" {
+        if path.ends_with("::send")
+            || path.ends_with("::send_result")
+            || path.ends_with("::recv")
+            || path.ends_with("::poll")
+            || path.ends_with("::subscribe")
+            || path.ends_with("::commit")
+            || path.ends_with("::commit_message")
+            || path.ends_with("::commit_consumer_state")
+            || path.ends_with("::store_offset")
+            || path.ends_with("::seek")
+            || path.ends_with("::fetch_metadata")
+            || path.ends_with("::fetch_watermarks")
+            || path.ends_with("::flush")
+        {
+            return Some("Net");
+        }
+        return None;
     }
     // cap-std: capability-oriented std. I/O goes *through* a held capability handle
     // (Dir/Pool/Clock/...), so these calls ARE the effect. Recognising them means a
@@ -987,8 +1023,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // Emit candor's calibrated crate set alongside the report, so downstream
             // coverage checks read it from the engine rather than a duplicated copy.
             let calib = serde_json::json!({
-                "crates": CALIBRATED_CRATES,
-                "prefixes": CALIBRATED_PREFIXES,
+                // `.as_slice()`: serde only derives Serialize for arrays up to length 32.
+                "crates": CALIBRATED_CRATES.as_slice(),
+                "prefixes": CALIBRATED_PREFIXES.as_slice(),
             });
             let cfile = format!("{prefix}.calibrated.json");
             if let Err(e) = std::fs::write(&cfile, calib.to_string()) {
@@ -1130,6 +1167,13 @@ mod tests {
         assert_eq!(classify("tungstenite", "tungstenite::Message::into_text"), None);
         assert_eq!(classify("elasticsearch", "elasticsearch::Search::send"), Some("Net"));
         assert_eq!(classify("elasticsearch", "elasticsearch::SearchParts::Index"), None);
+        // gRPC + Kafka
+        assert_eq!(classify("tonic", "tonic::transport::Endpoint::connect"), Some("Net"));
+        assert_eq!(classify("tonic", "tonic::client::Grpc::unary"), Some("Net"));
+        assert_eq!(classify("tonic", "tonic::Request::new"), None);
+        assert_eq!(classify("rdkafka", "rdkafka::producer::FutureProducer::send"), Some("Net"));
+        assert_eq!(classify("rdkafka", "rdkafka::consumer::StreamConsumer::recv"), Some("Net"));
+        assert_eq!(classify("rdkafka", "rdkafka::message::BorrowedMessage::payload"), None);
     }
 
     #[test]
