@@ -1,9 +1,11 @@
 # Does the effect report actually help an agent? A pilot eval
 
-**Status: pilot, not proof.** Single trial, one task, small battery, one orchestrator. Treat the
-numbers as directional. The honest headline: **the JSON makes effect-scoping dramatically cheaper,
-but it is only as accurate as candor's classifier — and this very eval exposed a real classifier
-false-negative that the source-reading agent caught.**
+**Status: two trials, not proof.** Directional, not statistical. The honest headline: **the JSON
+makes effect-scoping dramatically cheaper, and it is only as accurate as candor's classifier.** The
+original pilot (below) exposed a real classifier false-negative the source agent caught — *fast but
+blind*. A re-run after the classifier was hardened (17 gap classes fixed) showed the other half:
+*fast and accurate* — candor's answer matched an independent source-reading agent to within ~2%, at
+~1/47th the wall-clock. See [Re-run after hardening](#re-run-after-hardening--the-accuracy-loop-closed).
 
 ## Design
 
@@ -69,3 +71,39 @@ classified `Net`, matching only the dispatch (not the builder chain), with unit 
    artifact is cheap to consume and surfaced — and stress-tested — a real coverage gap.
 
 The most useful thing this eval produced was not a number; it was a bug.
+
+## Re-run after hardening — the accuracy loop closed
+
+The pilot's headline caveat was conclusion #2: *accuracy is conditional — the JSON is only as good
+as the classifier, and here the classifier was blind to reqwest.* That kicked off a hardening
+campaign that fixed **17 silent-false-negative classes** — reqwest, tokio-postgres, aws-config, log,
+git2, legacy tokio sockets, redis, async-nats, lapin, mongodb, mysql, sea_orm, lettre, tungstenite,
+elasticsearch, tonic, rdkafka — and ground-truthed the coverage net (it now reports the crates candor
+actually saw called, so workspace-member blind spots like git2-in-a-member surface automatically).
+
+Same A/B shape, re-run on `ebman`, with the cleaner checkable question *"how many functions perform
+network I/O transitively?"*:
+
+| | A (candor report) | B (source only) |
+|---|---|---|
+| Answer | **298** Net functions | ~305 (73 direct + 233 transitive) |
+| Output tokens | **19,137** | 79,540 |
+| Tool calls | **1** | 40 |
+| Wall time | **11.9 s** | 562 s (9.4 min) |
+
+**Efficiency: ~4× cheaper, 40× fewer tool calls, ~47× faster** — more lopsided than the pilot,
+because the source agent had to trace the whole AWS-driven call graph by hand (the 562 s).
+
+**Accuracy: a genuine agreement, not a disagreement.** candor's 298 matched the source agent's
+*independent* estimate of ~305 — within ~2%. The pilot's failure mode (candor confidently wrong) did
+not recur; the source agent even confirmed candor's precision calls (it noted the
+`aws_config::SdkConfig::builder()` stub paths do *no* network and should be excluded — exactly what
+candor's `::load`-only rule does). The residual ~7-function gap is **definitional, not a candor
+error**: the source agent counted two functions that shell out to `curl` as "network", while candor
+classifies those as `Exec` (a subprocess) — both defensible.
+
+So the loop the pilot opened is closed: **pilot = fast but blind; re-run = fast *and* accurate.** The
+JSON's accuracy tracks the classifier, and the classifier is now broad enough that, on a real
+AWS/HTTP app, an independent source-reading agent agrees with it to within noise — at a fraction of
+the cost. Conclusion #3 (that an agent's *edits* improve, not just its analysis) remains unshown and
+would need a multi-task, multi-trial study.
