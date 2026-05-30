@@ -171,3 +171,40 @@ audit/"what might this touch" use, but wrong for a precision task like exact ann
 helps edits as a **fast, recall-biased first pass to verify**, not a precise oracle — and the gap is
 concrete and fixable (devirtualize concrete-receiver trait calls instead of CHA-expanding them; tighten
 `std::env`). The most useful output of the trial was, once again, bugs.
+
+## Trial 5 — does the edit-feedback loop (diff / explain / self-review) help? (pre-registered)
+
+Earlier trials tested whether the *report* is consumable. This tests the P0 thesis directly: when an
+agent makes an edit with a **non-local effect consequence**, does candor's edit-feedback make it
+notice? This design was committed *before* the run (see git history).
+
+**Fixture** (`eval/minicache/`): a 5-file Rust service. `Cache::get` is a cheap in-memory TTL read
+(only effect: `Clock`). It's called transitively by `Service::lookup`, `Service::batch`,
+`api::get_one`, `api::get_many`, `report::build`, and `main` — across four files.
+
+**Task** (identical for both arms): *"On a cache miss, have `Cache::get` fall back to loading the
+value from `/var/cache/<key>` on disk."*
+
+**Ground truth** (deterministic; verified before the run): the natural implementation adds
+`std::fs::read_to_string` to `Cache::get`, making **7 functions across 4 files gain `Fs`** — every
+cache read becomes disk I/O for all callers, including a `report::build` dashboard documented as
+running "on a tight interval". This non-local, cross-file consequence is the thing under test.
+
+**Conditions** (each agent on a fresh copy, same prompt except the candor clause):
+- **control** — the task only.
+- **treatment** — the task + "candor is set up; after editing run `cargo candor diff .candor/baseline`
+  and address what it reports."
+
+**Primary metric — effect-awareness** (blind-judged): does the agent's final summary identify the
+**non-local** consequence — that callers beyond `Cache::get` (name a high-level one, e.g. an api
+handler or the report, or state "all callers") now perform disk I/O on a cache read? Scored
+`yes` / `partial` / `no` by a judge blind to condition.
+
+**Trials:** N=4 per arm (a pilot — reported with that caveat).
+
+**What would falsify candor's value here:** if control agents *already* reliably flag the non-local
+consequence, candor's marginal value is low — and we report that.
+
+### Results
+
+_(pending — appended after the run)_

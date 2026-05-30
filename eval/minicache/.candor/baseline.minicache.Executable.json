@@ -1,0 +1,147 @@
+{
+  "candor": {
+    "version": "818773e",
+    "toolchain": "nightly-2026-04-16"
+  },
+  "functions": [
+    {
+      "fn": "api::get_many",
+      "loc": "src/api.rs:12:1: 12:55",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c871c9c427f54fefc90b"
+    },
+    {
+      "fn": "api::get_one",
+      "loc": "src/api.rs:4:1: 4:50",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c871be647e4fb94be694"
+    },
+    {
+      "fn": "cache::Cache::get",
+      "loc": "src/cache.rs:16:5: 16:51",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [
+        "Clock"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c8711ff521ef2d3b216d"
+    },
+    {
+      "fn": "cache::Cache::put",
+      "loc": "src/cache.rs:26:5: 26:50",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [
+        "Clock"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c8719a86bfac352a398e"
+    },
+    {
+      "fn": "main",
+      "loc": "src/main.rs:8:1: 8:10",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c871f55d3e3f5faabcbe"
+    },
+    {
+      "fn": "report::build",
+      "loc": "src/report.rs:5:1: 5:38",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c871f9edffb5c967c906"
+    },
+    {
+      "fn": "service::Service::batch",
+      "loc": "src/service.rs:22:5: 22:61",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c8711313dafd599cb19c"
+    },
+    {
+      "fn": "service::Service::lookup",
+      "loc": "src/service.rs:17:5: 17:53",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c87192d045270243ff22"
+    },
+    {
+      "fn": "service::Service::new",
+      "loc": "src/service.rs:9:5: 9:25",
+      "inferred": [
+        "Clock"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [
+        "Clock"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f744b52ed0f5c871c35dcef6f2081950"
+    }
+  ]
+}
