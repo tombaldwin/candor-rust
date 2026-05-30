@@ -38,9 +38,17 @@ fi
 [ "${1:-}" = "candor" ] && shift
 cmd="${1:-audit}"; shift || true
 
-# The candor commit that produced (or is checking) a baseline. A baseline is only
-# comparable to itself — see `guard` and `update` below.
-engine_ver() { git -C "$CANDOR_DIR" rev-parse --short HEAD 2>/dev/null; }
+# The candor commit that produced (or is checking) a baseline. A baseline is only comparable to
+# itself — see `guard` and `update` below. Read the version the DYLIB was actually built at (the
+# tag build.rs embedded), NOT the source tree's git HEAD: those diverge after `git pull` without a
+# rebuild, and a HEAD-based check would then call a stale engine "current" and mask a stale
+# baseline. Fall back to HEAD only if the tag can't be read (e.g. no `strings`).
+engine_ver() {
+  local v
+  v="$(strings -a "$LIB" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-fA-F]+' | head -1 | cut -d= -f2)"
+  [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+  git -C "$CANDOR_DIR" rev-parse --short HEAD 2>/dev/null
+}
 
 case "$cmd" in
   audit)      exec cargo dylint --lib-path "$LIB" ;;          # default: report effects

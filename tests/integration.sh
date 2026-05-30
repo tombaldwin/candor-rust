@@ -72,6 +72,19 @@ PY
 )
 want "bin 'caller' inherits lib Fs across the crate boundary" "$caller_eff" "Fs"
 
+# ── 5. Version provenance: the dylib self-reports its build version, and reports are self-describing ──
+echo "== version stamping (build tag + self-describing sidecar) =="
+tag=$(strings -a "$LIB" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-fA-F]+' | head -1)
+want "dylib embeds a build-version tag readable without running it" "$tag" "candor-build-version="
+sidecar_ver=$(python3 - "$X/.candor" <<'PY'
+import json, glob, sys
+for f in glob.glob(sys.argv[1] + '/r.calibrated.json'):
+    d = json.load(open(f)); print(d.get('candor_version',''), d.get('toolchain',''))
+PY
+)
+want "calibrated sidecar carries candor_version (self-describing report)" "$sidecar_ver" "${tag#candor-build-version=}"
+absent "sidecar version is not the 'unknown' fallback"                    "$sidecar_ver" "unknown unknown"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

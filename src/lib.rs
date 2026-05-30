@@ -81,6 +81,19 @@ pub struct Candor {
 const AMBIENT: [&str; 9] =
     ["Net", "Fs", "Exec", "Env", "Clock", "Clipboard", "Rand", "Db", "Ipc"];
 
+/// The engine's build identity, stamped by build.rs. `CANDOR_VERSION` is the source commit the
+/// dylib was built from (not the source tree's current HEAD — see build.rs). Emitted into every
+/// report's sidecar so a report is self-describing, and embedded verbatim in `CANDOR_BUILD_TAG`
+/// so `cargo-candor` can read the *true* engine version with `strings`, without running it.
+const CANDOR_VERSION: &str = env!("CANDOR_VERSION");
+const CANDOR_TOOLCHAIN: &str = env!("CANDOR_TOOLCHAIN");
+
+/// A contiguous ASCII tag retained in the dylib (`#[used]` blocks dead-strip) so a build tool can
+/// recover the engine's true build version without loading or running it:
+///   strings -a libcandor@*.dylib | grep candor-build-version=
+#[used]
+static CANDOR_BUILD_TAG: &str = concat!("candor-build-version=", env!("CANDOR_VERSION"));
+
 impl Candor {
     pub fn new() -> Self {
         // A *set-but-unreadable* CANDOR_CONFIG must be loud: silently ignoring it would
@@ -1222,8 +1235,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 Err(e) => eprintln!("candor: failed to serialize report ({e})"),
             }
             // Emit candor's calibrated crate set alongside the report, so downstream
-            // coverage checks read it from the engine rather than a duplicated copy.
+            // coverage checks read it from the engine rather than a duplicated copy. Also stamp
+            // the engine's build identity here so the report is self-describing (a consumer in any
+            // language, or the guard, can tell which candor produced it — and a newer engine can
+            // refuse to silently trust a sibling crate's report from a different version).
             let calib = serde_json::json!({
+                "candor_version": CANDOR_VERSION,
+                "toolchain": CANDOR_TOOLCHAIN,
                 // `.as_slice()`: serde only derives Serialize for arrays up to length 32.
                 "crates": CALIBRATED_CRATES.as_slice(),
                 "prefixes": CALIBRATED_PREFIXES.as_slice(),
