@@ -74,6 +74,23 @@ That is the part worth keeping.
 7. **Nightly fragility.** dylint pins a nightly and uses `rustc_private`; it will break across
    toolchain bumps and is a maintenance tax.
 
+8. **Effects don't propagate across crate boundaries — the transitive guarantee has a hole exactly
+   at a project's entry points.** candor runs per-crate (dylint), and builds its call graph from the
+   *local* crate's HIR only. A call into another crate — including the project's **own `lib` from its
+   `bin`**, or a sibling **workspace member** — resolves to an external `DefId` candor has no rule for
+   and whose body it cannot see, so the callee's effects do not flow to the caller. The result: a thin
+   `main.rs`/bin whose real work lives in the lib reports its entry points as *effect-free* — a
+   **confident** false negative (`['Clock']`, not `unresolved`) on the very functions a reviewer or
+   agent most wants to check. *(Found by a generalization A/B on `mcfly` — a `lib`+`bin` SQLite tool
+   candor had never seen: candor counted 36 DB functions, an independent source-reading agent found
+   48; the ~12-function gap was almost entirely the bin's `handle_*` entry points calling
+   `History::*` lib methods that do the DB I/O. The earlier `ebman` eval **masked** this — its
+   network lives in its lib, which that A/B's question counted, so 298≈305 looked clean. This is the
+   most consequential blind spot found: it affects the common `lib`+`bin` and workspace layouts, i.e.
+   most real Rust projects. Plausibly fixable by **cross-crate resolution**: when linting a dependent
+   crate, load the dependency crates' already-emitted candor reports and treat their functions'
+   effects as a classifier extension. Not yet built — see `BACKLOG.md`.)*
+
 ## Status of fixes (this pass)
 
 - **Unresolved calls are now first-class.** Dynamic dispatch, fn-pointers, and `impl Fn` callbacks

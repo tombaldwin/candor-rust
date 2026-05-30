@@ -107,3 +107,32 @@ JSON's accuracy tracks the classifier, and the classifier is now broad enough th
 AWS/HTTP app, an independent source-reading agent agrees with it to within noise — at a fraction of
 the cost. Conclusion #3 (that an agent's *edits* improve, not just its analysis) remains unshown and
 would need a multi-task, multi-trial study.
+
+## Generalization trial — a repo candor never trained on (and what it found)
+
+Both trials above were on `ebman` — part of candor's *calibration corpus* (reqwest and aws-config
+were added because of it). So "accurate" might be an artifact of home turf. The honest test: A/B on a
+repo candor has **never seen**. Chosen: `mcfly`, a `lib`+`bin` shell-history tool on `rusqlite`
+(calibrated, but mcfly never trained it). Question: *"how many functions perform DB I/O
+transitively?"*
+
+| | A (candor report) | B (source only) |
+|---|---|---|
+| Answer | **36** | **48** |
+| Output tokens | **14,501** | 71,116 |
+| Tool calls | **2** | 21 |
+| Wall time | **17.8 s** | 108 s |
+
+Efficiency held (~5× cheaper, ~6× faster). **Accuracy did not** — a 25% disagreement, and the source
+agent was right. Root cause is **not** a classifier gap (coverage was clean) but an **architectural**
+one: candor propagates effects only *within* a crate. mcfly's bin (`main.rs`) calls its own lib
+(`use mcfly::history::History`); the lib report correctly shows `History::add` → `[Db, Env]`, but the
+bin report shows `handle_addition` → `[Clock]` — the Db did **not** cross the crate boundary. The
+~12-function gap is almost entirely the bin's `handle_*` entry points whose DB work lives in the lib.
+A *confident* false negative (not `unresolved`) on exactly the entry points you'd most want to trust.
+
+`ebman` masked this — its network lives in its lib, which that question counted. mcfly, with entry
+points in the bin, exposed it. **This is the generalization trial doing its job:** the "fast and
+accurate" claim holds *within a crate*, but candor's transitive guarantee has a hole at crate
+boundaries (`lib`+`bin`, workspaces) — the common shape of real Rust projects. See CRITIQUE.md §8;
+the candidate fix is cross-crate resolution via the emitted per-crate reports.
