@@ -39,6 +39,20 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
       (`Fs` → `FsRead`/`FsWrite` reads as a gained effect → spurious AS-EFF-005). A non-breaking
       JSON-only refinement (report read/write detail, keep the `Fs` effect) is possible if wanted.
       (Net-by-host is *not* statically knowable — won't do.)
+- [x] **Cross-crate effect propagation** (CRITIQUE §8 — closed). Each report entry carries a stable
+      `DefPathHash`; a dependent crate loads its dependencies' reports keyed by it (surviving
+      reexport-shortened paths) and inherits their *already-transitive* effects. Fixed a real consumer
+      whose `bin` under-reported the `Db`/`Net`/`Exec` it performs through its `lib`.
+- [x] **Devirtualize concrete trait calls** (CRITIQUE §9 — closed). A method call on a concrete
+      (non-`dyn`) receiver resolves to its single impl instead of CHA-expanding to *every* impl —
+      removing the over-report where a pure `self.applies()` inherited a sibling rule's effect
+      (104 fns de-over-reported on gitui, no soundness loss).
+- [ ] **`cargo candor explain <fn>` — effect provenance.** Trace the call path that gives a function
+      each effect: `main` has `Db` *because* `main → App::run → conn::run_query` [Db @ conn.rs:42].
+      Turns an effect *set* into a story you can follow to its source — the natural complement to the
+      at-a-glance audit (which hands you the function to drill into). The data already exists (the call
+      graph + per-fn `direct` effects); needs a shortest-path-to-an-effectful-leaf walk and an
+      `explain` CLI verb/mode. **The next UX play.**
 
 ## P3 — real enforcement
 
@@ -55,9 +69,28 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
       via a git dependency, which crates.io forbids (true of every dylint lint). A separate, non-lint
       helper crate *could* be published, but the lint can't.
 - [ ] Nightly fragility (`rustc_private` pins `nightly-2026-04-16`); document the bump process.
-- [ ] Behavioural (UI) test coverage — compiletest_rs 0.11.2 has no bless; coverage is unit tests
-      on pure logic only. Revisit if dylint_testing gains bless.
+- [x] Test coverage — unit (pure logic) + `ui_test` fixtures with blessed `.stderr` (copied from the
+      framework-saved file, since compiletest has no bless) + scripted `tests/integration.sh`
+      (AS-EFF modes, cross-crate, version stamping, audit) + `test-receipt.sh` (the bash receipt).
+      **23 unit · 5 ui · 15 integration · 10 receipt**, all gated in CI.
 - [x] JSON output via serde (correct escaping for any path/loc; replaced the hand-rolled escaper).
+- [x] **Report provenance / versioning.** `build.rs` stamps the source commit + toolchain into the
+      dylib (a `#[used]` `candor-build-version=` tag), the report envelope, and the calibrated sidecar;
+      `cargo-candor` and the receipt read the *true* dylib version (not the source tree's HEAD), so a
+      pulled-but-not-rebuilt engine can no longer masquerade as current and mask a stale baseline.
+- [x] **v0.2 self-describing report envelope** `{ candor: {version, toolchain}, functions: [...] }`.
+      All readers accept the legacy v0.1 bare array during migration (candor-spec §2).
+- [x] **`cargo candor audit` at-a-glance profile** — effect tally, unresolvable-call list, coverage
+      gaps, broadest-surface functions; `--all` keeps the full per-function lint.
+- [ ] **candor-java: adopt the v0.2 envelope + first tests/CI.** It still emits v0.1 bare arrays
+      (accepted by readers, but it should self-describe), and has *no* automated tests — its
+      `sample/`, `conf-sample/`, `spring-sample/`, `cha-sample/` dirs are ready-made fixtures.
+- [ ] **Engine-level version-aware cross-crate trust** (candor-spec §2.1 SHOULD): when a sibling
+      report's version differs from the running engine, downgrade its inherited effects to `Unknown`
+      rather than trust them. Low priority — within one run all crates share a dylib so versions match,
+      and `cargo candor guard` already skips on a baseline/engine mismatch; defense-in-depth.
+- [ ] **De-duplicate the coverage `SUSPECT` heuristic** — currently copied in `candor-run.sh` and
+      `cargo-candor`; factor into one sourced snippet so they can't drift.
 
 ## P5 — research (the thesis)
 
@@ -65,6 +98,10 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
       multiple trials. The pilot (`EVAL.md`) only showed consumability + efficiency — and that a
       source-only agent can beat the report where the classifier has a gap.
 - [ ] Effect-aware PR-review agent fed by the baseline diff (AS-EFF-005).
+- [x] **Formal semantics** — `candor-spec/SEMANTICS.md`: the effect lattice, call-site resolution
+      rules (CLASSIFY/CROSS/DEVIRT/CHA/EXEMPT/UNKNOWN), the transitive least-fixpoint, cross-crate
+      composition, the conformance predicates, and the conditional-soundness properties (with the two
+      honesty caveats). The implementation was then verified against it clause-by-clause.
 
 ## Done (recent, for context)
 
@@ -73,6 +110,10 @@ CANDOR_BASELINE/AS-EFF-005 · ICE hardening · raw-socket + HTTP + Rand + **Db +
 **const/static initializers (macro-filtered)** · **main entry-point exemption** · unit tests ·
 `cargo-candor` wrapper · CI + downstream guard workflow · self-guard ·
 **CHA: see through dyn/generic dispatch over local traits**.
+
+_Latest pass:_ cross-crate propagation (DefPathHash) · devirtualization · report provenance &
+versioning · v0.2 self-describing envelope · `cargo candor audit` at-a-glance profile · formal
+`SEMANTICS.md` + a clause-by-clause code↔spec audit · remediated a real consumer's stale baseline.
 
 ## Known limitations (confirmed by review 2026-05-29; documented, not all worth fixing)
 
