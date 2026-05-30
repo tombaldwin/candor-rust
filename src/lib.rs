@@ -298,6 +298,24 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
     out
 }
 
+/// Resolve a (non-`dyn`) trait-method call to the single concrete impl it dispatches to, when
+/// the receiver type is known — so candor can use the ONE real target instead of CHA-expanding
+/// to every impl (the over-approximation that yields confident false positives, CRITIQUE §9).
+/// Returns None for `dyn`/generic receivers that can't be pinned down here, so the caller falls
+/// back to CHA. Only method calls carry the receiver substs on the call expr.
+fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: DefId) -> Option<DefId> {
+    if !matches!(expr.kind, ExprKind::MethodCall(..)) {
+        return None;
+    }
+    let typeck = cx.maybe_typeck_results()?;
+    let args = typeck.node_args(expr.hir_id);
+    let instance =
+        rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), method_did, args)
+            .ok()
+            .flatten()?;
+    Some(instance.def_id())
+}
+
 /// The exact third-party crates `classify` has effect rules for, and the crate-name
 /// PREFIXES it recognizes. This is the single source of truth for "what candor knows":
 /// it is emitted beside the JSON report (`<prefix>.calibrated.json`) so the Claude Code
@@ -769,7 +787,7 @@ fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
 }
 
 impl<'tcx> LateLintPass<'tcx> for Candor {
-    fn check_crate(&mut self, cx: &LateContext<'tcx>) {
+    fn check_crate(&mut self, _cx: &LateContext<'tcx>) {
         // Cross-crate resolution (JSON mode): load THIS project's other crates' reports so
         // calls into them resolve transitively. dylint lints dependencies before dependents,
         // so a dependency crate's report is already on disk when we get here.
@@ -805,15 +823,32 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         };
         add_edge(self, def_id);
 
-        // Class Hierarchy Analysis: if this is a (local) trait method — whether reached
-        // by `dyn` dispatch or a generic bound — add edges to every impl so their effects
-        // propagate. This is what lets candor see through trait objects soundly.
+        // Resolve a trait-method call to the impls whose effects it could perform. PREFER
+        // devirtualization: a call on a CONCRETE (non-`dyn`) receiver of a LOCAL trait
+        // dispatches to exactly ONE impl, and we can see its body — so use it instead of
+        // CHA-expanding to every impl (the over-approximation that made a pure `self.applies()`
+        // inherit a sibling rule's effect — CRITIQUE §9). CHA remains the sound fallback for
+        // `dyn`/generic dispatch we can't pin down. (Non-local traits: neither sees the body;
+        // left to the `Unknown` logic below.)
         let trait_did = cx.tcx.trait_of_assoc(def_id);
         let mut cha_resolved = false;
-        if trait_did.is_some() {
-            for target in cha_targets(cx.tcx, def_id) {
-                cha_resolved = true;
-                add_edge(self, target);
+        if let Some(td) = trait_did {
+            let devirt = if !dynamic && td.is_local() {
+                devirtualize(cx, expr, def_id)
+            } else {
+                None
+            };
+            match devirt {
+                Some(target) => {
+                    add_edge(self, target);
+                    cha_resolved = true;
+                }
+                None => {
+                    for target in cha_targets(cx.tcx, def_id) {
+                        cha_resolved = true;
+                        add_edge(self, target);
+                    }
+                }
             }
         }
 

@@ -103,11 +103,14 @@ That is the part worth keeping.
    that trait. *(Found by the edit-task eval (EVAL.md, 4th trial): two pure lint `fix` methods were
    confidently annotated `Clock` — `direct=[]`, `inferred=[Clock]`, `unresolved=false` — because CHA
    pulled in a sibling rule's `chrono::now`, and the candor-equipped agent wrote the wrong annotation
-   into the code. Fix: devirtualize via instance resolution when the receiver type is known, falling
-   back to CHA only for genuinely dynamic/generic dispatch. Related: `std::env` is classified `Env`
-   whole, including `current_dir`, which reads no variable — over-broad. Both are precision, not
-   soundness, issues — candor errs toward over-reporting, the safe direction for audit but wrong for
-   exact annotation. Not yet fixed.)*
+   into the code. **Fixed:** candor now *devirtualizes* — a concrete (non-`dyn`) call to a local
+   trait method is resolved via `Instance::try_resolve` to the single impl it actually dispatches to
+   (and that one impl's body analyzed), instead of CHA-expanding to every impl; CHA remains the sound
+   fallback for genuine `dyn`/generic dispatch. Re-validated on ebman: the two lint `fix` methods are
+   now pure (no `Clock`), while `EnvRedForExtendedPeriod::applies` and the `dyn Rule`-dispatching
+   `run_rules` still correctly carry `Clock`. Remaining (minor, left as a definitional choice): `Env`
+   is the whole `std::env`, so `current_dir`/`args` count as Env, not just `var`/`vars` — defensible
+   as "ambient process state," but broader than some readers expect.)*
 
 ## Status of fixes (this pass)
 
