@@ -163,13 +163,30 @@ UNRES="$(printf '%s' "$SUM" | cut -f3)"
 [ -z "$EFFS" ] && EFFS="no effects detected"
 
 # ---- coverage: dependencies that LOOK effectful but candor has no rule for ----
-# Calibrated set is derived from candor/src/lib.rs (keep in sync). The SUSPECT
-# pattern is a deliberately-curated heuristic — it nudges, it does not certify.
+# The calibrated set is read from what the ENGINE emitted beside the report
+# (<prefix>.calibrated.json) — the single source of truth. The hardcoded list is only
+# a fallback for when that sidecar isn't present (e.g. report not yet generated). The
+# SUSPECT pattern is a deliberately-curated heuristic — it nudges, it does not certify.
 CALIBRATED="reqwest isahc ureq sqlx rusqlite postgres tokio_postgres diesel redis mongodb mysql mysql_async sea_orm deadpool_postgres memmap2 rand getrandom fastrand chrono tracing arboard portable_pty"
+CALIB_PREFIXES="aws_sdk_ aws_smithy cap_"
+if [ -f "$REPORT_PREFIX.calibrated.json" ] && command -v python3 >/dev/null 2>&1; then
+  line="$(python3 - "$REPORT_PREFIX.calibrated.json" <<'PY' 2>/dev/null
+import sys, json
+d = json.load(open(sys.argv[1]))
+print(" ".join(d.get("crates", [])) + "|" + " ".join(d.get("prefixes", [])))
+PY
+)"
+  if [ -n "$line" ]; then
+    CALIBRATED="${line%%|*}"
+    CALIB_PREFIXES="${line##*|}"
+  fi
+fi
 SUSPECT='sql|sqlite|postgres|mysql|mariadb|mongo|redis|cassandra|scylla|cockroach|dynamo|surreal|diesel|sea_?orm|tiberius|oracle|clickhouse|influx|neo4j|hyper|surf|curl|reqwest|isahc|ureq|http|grpc|tonic|websocket|tungstenite|smtp|lettre|imap|ftp|ssh|nats|kafka|rdkafka|pulsar|amqp|lapin|rabbit|mqtt|rumqtt|zmq|etcd|consul|elastic|meili|minio|^s3|aws|azure|gcp|google_?cloud'
 is_calibrated() {
-  case "$1" in aws_sdk_*|aws_smithy*|cap_*) return 0;; esac
   local c
+  for c in $CALIB_PREFIXES; do
+    case "$1" in "$c"*) return 0;; esac
+  done
   for c in $CALIBRATED; do
     # exact, or an adapter/extension of a known crate (tokio_postgres_rustls, sqlx_*…)
     [ "$1" = "$c" ] && return 0

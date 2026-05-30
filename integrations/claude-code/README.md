@@ -113,11 +113,12 @@ of the GitHub URL if you want the instructions to update in lockstep with the en
   seconds on a real crate). Turns that didn't touch Rust cost nothing. To make it asynchronous
   instead, run the hook in the background and read the prior turn's receipt — a future option.
 - **Coverage is heuristic.** The receipt's `Cargo.toml`-based check is a best-effort nudge, not a
-  certificate. Its calibrated crate list lives in `candor-run.sh` alongside the engine in the same
-  clone, so the two no longer drift *across installations* (one `cargo candor update` moves both) —
-  but keeping the two lists in sync within the repo is still a maintainer chore. The fully
-  authoritative version (candor emitting the crates it encountered-but-couldn't-classify) is a
-  planned engine upgrade.
+  certificate. Its calibrated crate set is now read from what the **engine emits** beside the report
+  (`report.calibrated.json`) — the single source of truth — so it can't drift from the classifier (a
+  `DB_CRATES ⊆ CALIBRATED_CRATES` unit test enforces the rest in-engine). What stays heuristic is the
+  `SUSPECT` pattern that decides which *unrecognized* deps look effectful enough to warn about. The
+  further upgrade (candor emitting the crates it actually **encountered-but-couldn't-classify** in
+  your code, vs. guessing from dependency names) is still planned.
 
 ## Uninstall
 

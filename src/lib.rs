@@ -226,6 +226,30 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
     out
 }
 
+/// The exact third-party crates `classify` has effect rules for, and the crate-name
+/// PREFIXES it recognizes. This is the single source of truth for "what candor knows":
+/// it is emitted beside the JSON report (`<prefix>.calibrated.json`) so the Claude Code
+/// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
+/// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
+/// enforces that every named crate the classifier matches appears here.
+const CALIBRATED_CRATES: [&str; 22] = [
+    // network
+    "reqwest", "isahc", "ureq",
+    // database (see DB_CRATES in classify)
+    "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
+    "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
+    // filesystem / entropy / subprocess / clock / log / clipboard
+    "memmap2", "rand", "getrandom", "fastrand", "portable_pty", "chrono", "tracing", "arboard",
+];
+const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
+
+/// Database client crates whose execution verbs are I/O (see the DB branch in `classify`).
+/// Module-level so `db_crates_are_calibrated` can enforce `DB_CRATES ⊆ CALIBRATED_CRATES`.
+const DB_CRATES: [&str; 11] = [
+    "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
+    "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
+];
+
 /// Classify a resolved callee by the crate it belongs to and its full path.
 fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name.starts_with("aws_sdk_") || crate_name.starts_with("aws_smithy") {
@@ -284,10 +308,6 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // query *construction* is pure. Best-effort across crates (tune via CANDOR_CONFIG).
     // Note: bare `::query` is deliberately omitted — it executes in postgres/rusqlite but
     // only *builds* in sqlx, so including it would false-positive sqlx's `query()` builder.
-    const DB_CRATES: [&str; 11] = [
-        "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
-        "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
-    ];
     if DB_CRATES.contains(&crate_name) {
         // Postgres / SQLite-family clients: `query`/`batch_execute`/`prepare`/etc. ARE the
         // execution (round-trips to the server). sqlx is the outlier where bare `query()`
@@ -766,6 +786,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 },
                 Err(e) => eprintln!("candor: failed to serialize report ({e})"),
             }
+            // Emit candor's calibrated crate set alongside the report, so downstream
+            // coverage checks read it from the engine rather than a duplicated copy.
+            let calib = serde_json::json!({
+                "crates": CALIBRATED_CRATES,
+                "prefixes": CALIBRATED_PREFIXES,
+            });
+            let cfile = format!("{prefix}.calibrated.json");
+            if let Err(e) = std::fs::write(&cfile, calib.to_string()) {
+                eprintln!("candor: failed to write {cfile:?} ({e})");
+            }
         }
     }
 }
@@ -832,6 +862,40 @@ mod tests {
         assert_eq!(classify("sqlx", "sqlx::query"), None);
         // memmap2 is filesystem-backed.
         assert_eq!(classify("memmap2", "memmap2::MmapOptions::map"), Some("Fs"));
+    }
+
+    #[test]
+    fn db_crates_are_calibrated() {
+        // The emitted calibrated set must cover every DB client the classifier knows,
+        // or the receipt's coverage check would flag a recognized crate as a blind spot.
+        for c in DB_CRATES {
+            assert!(
+                CALIBRATED_CRATES.contains(&c),
+                "DB crate `{c}` is matched by classify() but missing from CALIBRATED_CRATES"
+            );
+        }
+    }
+
+    #[test]
+    fn calibrated_crates_are_live() {
+        // Conversely, every crate we advertise as calibrated must actually be matched by
+        // classify() for some representative path — a dead entry would silently suppress a
+        // real coverage warning.
+        for c in CALIBRATED_CRATES {
+            let probes = [
+                format!("{c}::X::send"),
+                format!("{c}::X::execute"),
+                format!("{c}::X::call"),
+                format!("{c}::X::query"),
+                format!("{c}::X::fetch_one"),
+                format!("{c}::Utc::now"),
+                format!("{c}::X::anything"),
+            ];
+            assert!(
+                probes.iter().any(|p| classify(c, p).is_some()),
+                "calibrated crate `{c}` is matched by no path in classify() — dead list entry"
+            );
+        }
     }
 
     #[test]
