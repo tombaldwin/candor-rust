@@ -235,10 +235,10 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-const CALIBRATED_CRATES: [&str; 25] = [
+const CALIBRATED_CRATES: [&str; 27] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network)
-    "reqwest", "isahc", "ureq", "aws_config", "git2",
+    "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
@@ -334,6 +334,15 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         || path.starts_with("std::net::UdpSocket")
         || path.starts_with("tokio::net::")
     {
+        return Some("Net");
+    }
+    // Legacy tokio 0.1 socket crates — `tokio_tcp`/`tokio_udp` are *entirely* networking
+    // (no pure types to over-flag), so the whole crate is Net. (Found hardening on websocat,
+    // which is still on tokio 0.1: its `tokio_tcp::TcpStream::connect` was classified
+    // network-free — a network tool confidently reporting 0 Net. NOTE: detection is keyed to
+    // specific socket crates; async-std/smol/mio nets are the same gap class, not yet
+    // calibrated for lack of a real repro.)
+    if matches!(crate_name, "tokio_tcp" | "tokio_udp") {
         return Some("Net");
     }
     // Database clients. Like the AWS/HTTP builders, only the execution verbs are I/O;
@@ -890,6 +899,9 @@ mod tests {
         assert_eq!(classify("std", "std::net::TcpStream::connect"), Some("Net"));
         assert_eq!(classify("std", "std::net::UdpSocket::bind"), Some("Net"));
         assert_eq!(classify("tokio", "tokio::net::TcpStream::connect"), Some("Net"));
+        // Legacy tokio 0.1 socket crates (found on websocat) — entire crate is networking.
+        assert_eq!(classify("tokio_tcp", "tokio_tcp::TcpStream::connect"), Some("Net"));
+        assert_eq!(classify("tokio_udp", "tokio_udp::UdpSocket::bind"), Some("Net"));
         // ...but the pure data types living alongside them must NOT be flagged.
         assert_eq!(classify("std", "std::net::SocketAddr::new"), None);
         assert_eq!(classify("std", "std::net::Ipv4Addr::new"), None);
