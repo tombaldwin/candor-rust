@@ -62,13 +62,14 @@ pub struct Candor {
     /// External (non-std, non-local) crates we actually saw resolved calls into.
     /// Ground truth for the coverage blind-spot check — emitted beside the report.
     encountered: BTreeSet<String>,
-    /// Cross-crate effect oracle (JSON mode only): a map from a function's stable `DefPathHash`
-    /// to its already-transitive effect set, loaded from this project's OTHER crates' reports.
-    /// Lets a call into the project's own lib (from its bin) or a sibling workspace member
-    /// inherit the callee's effects — closing the within-crate-only propagation hole (CRITIQUE
-    /// §8). Keyed by DefPathHash because it is stable across crates, unlike `def_path_str`
-    /// (which shortens via reexports for external defs but not for local ones).
-    cross: HashMap<String, Vec<&'static str>>,
+    /// Cross-crate effect oracle: a map from a function's stable `DefPathHash` (as a `(u64, u64)`
+    /// `(StableCrateId, local-hash)` pair) to its already-transitive effect set, loaded from this
+    /// project's OTHER crates' reports. Lets a call into the project's own lib (from its bin) or a
+    /// sibling workspace member inherit the callee's effects — closing the within-crate-only
+    /// propagation hole (CRITIQUE §8). Keyed by `DefPathHash` because it's stable across crates
+    /// (unlike `def_path_str`, which reexport-shortens external defs); the structured pair is a
+    /// zero-alloc `Copy` key, vs. the old `format!("{:?}", …)` which allocated on every call.
+    cross: HashMap<(u64, u64), Vec<&'static str>>,
     /// Effects a function inherits via a cross-crate call. Kept separate from `direct` (so the
     /// report's `direct` stays "own body") and folded into the fixpoint in check_crate_post.
     via_cross: HashMap<LocalDefId, BTreeSet<&'static str>>,
@@ -102,7 +103,7 @@ impl Candor {
             paranoid,
             encountered: BTreeSet::new(),
             cross: HashMap::new(),
-            via_cross: HashMap::new(),
+            via_cross: HashMap::new(), // (cross map keyed by structured DefPathHash, not a string)
         }
     }
 }
@@ -139,25 +140,43 @@ struct BaselineEntry {
     #[serde(rename = "fn")]
     func: String,
     inferred: Vec<String>,
-    /// Stable cross-crate identity (DefPathHash); present in reports that support cross-crate
-    /// resolution. Optional so older reports still deserialize.
+    /// Stable cross-crate identity (hex `DefPathHash`); empty in older reports (`serde(default)`),
+    /// in which case the entry can't participate in cross-crate resolution.
     #[serde(default)]
-    hash: Option<String>,
+    hash: String,
 }
 
-/// A function's stable cross-crate identity. `DefPathHash`'s Debug is a deterministic function
-/// of the hash value, identical whether the item is viewed from its home crate or externally —
-/// which `def_path_str` is not. Used only as an opaque equality key.
-fn def_hash(tcx: TyCtxt<'_>, did: DefId) -> String {
-    format!("{:?}", tcx.def_path_hash(did))
+/// A function's stable cross-crate identity: the `DefPathHash` as a `(StableCrateId, local-hash)`
+/// pair of `u64`s. This value is identical whether the def is viewed from its home crate (a
+/// `LocalDefId`) or from a dependent (an external `DefId`) — unlike `def_path_str`, which
+/// reexport-shortens external paths. `Copy`, so it's a zero-alloc map key on the hot path.
+fn dph(tcx: TyCtxt<'_>, did: DefId) -> (u64, u64) {
+    let h = tcx.def_path_hash(did);
+    (h.stable_crate_id().as_u64(), h.local_hash().as_u64())
 }
 
-/// Load the per-crate reports of this project's OTHER crates (`<prefix>.<crate>.<type>.json`,
-/// crate != `me`) into a `crate -> (relative-fn -> effects)` map for cross-crate resolution.
-/// Each function's *inferred* (already-transitive) set is what a caller in another crate
-/// inherits. Skips the `<prefix>.calibrated.json` / `encountered-*` sidecars (single segment).
-fn load_cross_reports(prefix: &str) -> HashMap<String, Vec<&'static str>> {
-    let mut out: HashMap<String, Vec<&'static str>> = HashMap::new();
+/// The on-disk string form of `dph`, written to a report entry's `hash` field. Hex of the two
+/// `u64`s — a stable representation (unlike `DefPathHash`'s internal `Debug`).
+fn dph_hex(tcx: TyCtxt<'_>, did: DefId) -> String {
+    let (a, b) = dph(tcx, did);
+    format!("{a:016x}{b:016x}")
+}
+
+/// Parse the 32-hex `hash` field back into the structured key. None for malformed/absent hashes.
+fn parse_dph(s: &str) -> Option<(u64, u64)> {
+    if s.len() != 32 {
+        return None;
+    }
+    Some((u64::from_str_radix(&s[..16], 16).ok()?, u64::from_str_radix(&s[16..], 16).ok()?))
+}
+
+/// Load the per-crate reports of this project's OTHER crates (`<prefix>.<crate>.<type>.json`, all
+/// but our own `<me>.<me_kind>` — a package's lib and bin share the crate name but differ by type,
+/// so the bin must still load the lib's report) into a `DefPathHash -> effects` map for
+/// cross-crate resolution. Each function's *inferred* (already-transitive) set is what a caller in
+/// another crate inherits. Skips `<prefix>.calibrated.json` / `encountered-*` sidecars (one segment).
+fn load_cross_reports(prefix: &str, me: &str, me_kind: &str) -> HashMap<(u64, u64), Vec<&'static str>> {
+    let mut out: HashMap<(u64, u64), Vec<&'static str>> = HashMap::new();
     let path = std::path::Path::new(prefix);
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = parent.unwrap_or_else(|| std::path::Path::new("."));
@@ -169,20 +188,28 @@ fn load_cross_reports(prefix: &str) -> HashMap<String, Vec<&'static str>> {
         let Some(rest) = fname.strip_prefix(&format!("{base}.")) else { continue };
         let Some(rest) = rest.strip_suffix(".json") else { continue };
         // Report files are `<crate>.<type>` (two segments); sidecars are one — skip those.
-        if rest.split('.').count() != 2 { continue }
-        // DefPathHash keys are globally unique, so all crates merge into one map. Loading our
-        // own report too is harmless: its entries are local defs, never hit by the cross path.
+        let mut segs = rest.splitn(2, '.');
+        let (Some(krate), Some(kind)) = (segs.next(), segs.next()) else { continue };
+        if kind.contains('.') {
+            continue; // a third segment → a sidecar like `encountered-x` slipped the prefix check
+        }
+        // Skip our OWN report (by crate name AND type); DefPathHash keys are globally unique so
+        // all other crates merge into one map. (Own entries are local defs and the cross path is
+        // guarded by `!def_id.is_local()`, so loading them would be harmless — just wasteful.)
+        if krate == me && kind == me_kind {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
         let Ok(arr) = serde_json::from_str::<Vec<BaselineEntry>>(&text) else { continue };
         for e in arr {
-            let Some(hash) = e.hash else { continue };
+            let Some(key) = parse_dph(&e.hash) else { continue };
             let effs: Vec<&'static str> = e
                 .inferred
                 .iter()
                 .filter_map(|s| if s.as_str() == UNKNOWN { Some(UNKNOWN) } else { cap_from_name(s.as_str()) })
                 .collect();
             if !effs.is_empty() {
-                out.insert(hash, effs);
+                out.insert(key, effs);
             }
         }
     }
@@ -305,6 +332,12 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 /// back to CHA. Only method calls carry the receiver substs on the call expr.
 fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: DefId) -> Option<DefId> {
     if !matches!(expr.kind, ExprKind::MethodCall(..)) {
+        return None;
+    }
+    // `Instance::try_resolve` asserts the def is a Fn/AssocFn/Const; method calls are always
+    // AssocFn today, but guard explicitly so an unexpected DefKind can never ICE the build (an
+    // effect checker must degrade to Unknown, never abort compilation).
+    if !matches!(cx.tcx.def_kind(method_did), DefKind::Fn | DefKind::AssocFn) {
         return None;
     }
     let typeck = cx.maybe_typeck_results()?;
@@ -787,12 +820,26 @@ fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
 }
 
 impl<'tcx> LateLintPass<'tcx> for Candor {
-    fn check_crate(&mut self, _cx: &LateContext<'tcx>) {
-        // Cross-crate resolution (JSON mode): load THIS project's other crates' reports so
-        // calls into them resolve transitively. dylint lints dependencies before dependents,
-        // so a dependency crate's report is already on disk when we get here.
-        if let Ok(prefix) = std::env::var("CANDOR_JSON") {
-            self.cross = load_cross_reports(&prefix);
+    fn check_crate(&mut self, cx: &LateContext<'tcx>) {
+        // Cross-crate resolution: load THIS project's other crates' reports so calls into them
+        // resolve transitively. dylint lints dependencies before dependents, so a dependency
+        // crate's report is on disk when we get here. Load from CANDOR_JSON (snapshot/audit) OR
+        // CANDOR_BASELINE (the guard) — so the guard computes the SAME cross-inclusive effect set
+        // the baseline was snapshotted with, instead of a within-crate-only set (which would make
+        // the AS-EFF-005 diff compare two different effect models).
+        let prefix = std::env::var("CANDOR_JSON")
+            .ok()
+            .or_else(|| std::env::var("CANDOR_BASELINE").ok());
+        if let Some(prefix) = prefix {
+            let me = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).to_string();
+            let me_kind = cx
+                .tcx
+                .crate_types()
+                .iter()
+                .map(|t| format!("{t:?}"))
+                .collect::<Vec<_>>()
+                .join("-");
+            self.cross = load_cross_reports(&prefix, &me, &me_kind);
         }
     }
 
@@ -833,8 +880,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let trait_did = cx.tcx.trait_of_assoc(def_id);
         let mut cha_resolved = false;
         if let Some(td) = trait_did {
+            // Only accept a devirtualized target we can actually analyze: a LOCAL fn/method whose
+            // body we'll see. If resolution lands on a non-local target (would be silently dropped
+            // by `add_edge`, leaving `cha_resolved = true` to suppress the honest `Unknown`), fall
+            // back to CHA instead. (Defensive: orphan rules make a local trait's impls local, so
+            // this rarely fires — but it keeps the soundness invariant explicit.)
             let devirt = if !dynamic && td.is_local() {
-                devirtualize(cx, expr, def_id)
+                devirtualize(cx, expr, def_id).filter(|t| t.is_local())
             } else {
                 None
             };
@@ -881,10 +933,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             self.direct.entry(caller).or_default().insert(effect);
         } else if !def_id.is_local() && !self.cross.is_empty() {
             // Cross-crate: a call into one of THIS project's other crates (its lib, a sibling
-            // workspace member). Inherit the callee's already-transitive effects, looked up by
-            // its stable DefPathHash (matches whether the lib emitted it locally or we see it
-            // externally — unlike def_path_str, which reexport-shortens external paths).
-            if let Some(effs) = self.cross.get(&def_hash(cx.tcx, def_id)) {
+            // workspace member). Inherit the callee's already-transitive effects, looked up by its
+            // stable DefPathHash (matches whether the dependency emitted it locally or we see it
+            // externally). For a TRAIT-method call the callee `def_id` is the trait method, but the
+            // dependency keyed its report by the concrete IMPL method — so devirtualize to that
+            // impl first (when the receiver is concrete), else the lookup would always miss.
+            let key_did = devirtualize(cx, expr, def_id).unwrap_or(def_id);
+            if let Some(effs) = self.cross.get(&dph(cx.tcx, key_did)) {
                 let set = self.via_cross.entry(caller).or_default();
                 for e in effs {
                     set.insert(*e);
@@ -1019,7 +1074,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     undeclared: owned(&undeclared),
                     overdeclared: owned(&unused),
                     unresolved: has_unknown,
-                    hash: def_hash(cx.tcx, f.to_def_id()),
+                    hash: dph_hex(cx.tcx, f.to_def_id()),
                 });
                 continue;
             }
