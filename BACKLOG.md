@@ -2,6 +2,35 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+## P0 — agent coding: make candor change what an agent *does* (the north star)
+
+This is the point of the rest. The bet: candor's value to a coding agent is **verification, not
+context**. An agent can read source and infer most effects itself — the A/B eval (`EVAL.md`) showed a
+source-only agent matching/beating the report wherever the classifier has a gap, and over-trusting a
+blind spot makes it *worse*. What an agent *cannot* cheaply compute is the **transitive effect delta
+of its own edit** across the call graph and crate boundaries — exactly the failure mode agents have: a
+*local* edit with a *non-local* consequence (add a `reqwest::get` in a helper → twelve callers now
+transitively perform `Net`). candor computes that for free. **Lead with the delta, not the dump.**
+(Rests on the P1 correctness foundation — a feedback signal is only worth acting on if it's right.)
+
+- [ ] **1. Agent-facing effect diff — `cargo candor diff`.** Turn the guard from pass/fail into a
+      description: "since the baseline — `+Net` on `foo` (new `reqwest::get` @ foo.rs:12) → propagates
+      to `bar`, `baz`; `+Unknown` on `qux` (added a callback candor can't see through)." Both human-
+      and machine-readable (JSON for the agent). The core deliverable.
+- [ ] **2. Close the loop in the agent's edit cycle.** The Claude Code Stop hook feeds a
+      newly-introduced effect (or `Unknown`) back to the agent as a self-review prompt, and `AGENTS.md`
+      tells the agent to treat `+effect` / `+Unknown` as "stop and confirm this was intended." Edit →
+      candor → self-correct. This is what makes candor *change behaviour*, not just inform.
+- [ ] **3. `explain <fn>` for the scoping phase** (the P2 item below). Before editing `run_query` the
+      agent asks "what flows through here / who calls this" to gauge blast radius.
+- [ ] **4. Speed for a tight loop.** A full re-lint (~minutes on a big crate) is too slow per edit;
+      need an incremental path, or at least a diff against the cached report that re-lints only the
+      changed crate(s).
+- [ ] **5. Measure it — don't assume.** "candor helps agents" is belief, not data; `EVAL.md` is a
+      pilot. A real with/without eval on edit *quality* (independent ground truth, multiple trials)
+      both proves it and shows *where* it helps, so we tune the right thing. **Gates the rest:** ship
+      (1)+(2), then measure before scaling.
+
 ## P1 — correctness (silent wrong answers are the worst failure)
 
 - [x] **Database clients.** `sqlx`/`rusqlite`/`postgres`/`tokio_postgres`/`diesel`/`redis`/… now
@@ -95,9 +124,10 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
 ## P5 — research (the thesis)
 
 - [ ] Controlled eval of *edit quality* (not just analysis cost) with independent ground truth and
-      multiple trials. The pilot (`EVAL.md`) only showed consumability + efficiency — and that a
-      source-only agent can beat the report where the classifier has a gap.
-- [ ] Effect-aware PR-review agent fed by the baseline diff (AS-EFF-005).
+      multiple trials — **the gate on P0** (see P0 §5). The pilot (`EVAL.md`) only showed consumability
+      + efficiency, and that a source-only agent can beat the report where the classifier has a gap.
+- [ ] Effect-aware PR-review agent fed by the baseline diff (AS-EFF-005) — the *review-time* sibling of
+      P0's *edit-time* loop; both are powered by `cargo candor diff` (P0 §1).
 - [x] **Formal semantics** — `candor-spec/SEMANTICS.md`: the effect lattice, call-site resolution
       rules (CLASSIFY/CROSS/DEVIRT/CHA/EXEMPT/UNKNOWN), the transitive least-fixpoint, cross-crate
       composition, the conformance predicates, and the conditional-soundness properties (with the two
