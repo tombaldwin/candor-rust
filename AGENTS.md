@@ -61,7 +61,9 @@ candor is deliberately honest about what it cannot see; respect that boundary.
 
 Run `cargo candor diff .candor/baseline` (add `--json` to parse it). It lists, per function, the
 effects your change *gained* or *lost* vs the baseline — including the **non-local** consequence: a
-network call you add deep in a helper shows `+Net` on every function that calls it. For each `+`:
+network call you add deep in a helper shows `+Net` on every function that calls it. (For a tight loop,
+run `cargo candor watch &` once at the start of your session — it keeps the report fresh in the
+background so `diff` reads it instantly instead of recompiling.) For each `+`:
 
 - **Was it intended?** If a function gained `Net`/`Db`/`Exec`/`Fs`/`Env`/`Ipc` it didn't have,
   confirm it's necessary, and prefer threading a capability over reaching for ambient authority.

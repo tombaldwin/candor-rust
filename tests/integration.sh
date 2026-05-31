@@ -169,6 +169,20 @@ want   "fast-path diff still computes the delta (worker +Net)"  "$fpout" "+Net"
 absent "fast path did NOT recompile (no 'analyzing…')"          "$fpout" "analyzing"
 rm -rf "$(dirname "$FP")"
 
+# ── 12. watch: keep the report fresh in the background, off the critical path (P0′ §8 / speed) ──
+echo "== watch (background report freshness) =="
+WV=$(mktemp -d)/wv; mkdir -p "$WV/src"
+printf '[package]\nname="wv"\nversion="0.1.0"\nedition="2021"\n' > "$WV/Cargo.toml"
+printf 'fn worker(){ let _=std::fs::read("/tmp/x"); }\nfn main(){ worker(); }\n' > "$WV/src/main.rs"
+( cd "$WV"; CANDOR_WATCH_INTERVAL=1 "$ROOT/cargo-candor" watch >/dev/null 2>&1 ) & WPID=$!
+for _ in $(seq 1 90); do ls "$WV"/.candor/report.*.*.json >/dev/null 2>&1 && break; sleep 1; done   # initial report
+printf 'fn worker(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn main(){ worker(); }\n' > "$WV/src/main.rs"
+seen=no
+for _ in $(seq 1 90); do grep -q Net "$WV"/.candor/report.*.*.json 2>/dev/null && { seen=yes; break; }; sleep 1; done
+kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null
+want "watch auto-refreshed the report after an edit (worker gained Net)" "$seen" "yes"
+rm -rf "$(dirname "$WV")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

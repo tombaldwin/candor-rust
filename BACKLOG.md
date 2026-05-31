@@ -70,11 +70,13 @@ security/correctness bugs that often matter most, and that its value scales with
       and serve queries from the cached report. **Done:** `cargo candor diff` now reads the kept-fresh
       `.candor/report.*` (when its source-hash matches `.candor/state`, maintained by the Stop hook)
       instead of recompiling — ~30s → **0.26s** in the common case; falls back to a re-lint when stale
-      (content-hash, so never wrong). **Next:** (a) `cargo candor watch` — a background re-linter that
-      keeps the report fresh on file save, hiding the compile off the critical path even without the
-      hook; (b) instant read-only queries (`show <fn>`, `where <effect>`) served from the report, so
-      the agent answers effect questions in one instant call instead of grepping source; (c) drop the
-      `rm -rf target/dylint` full-clear in explain/policy/audit so a re-lint is incremental.
+      (content-hash, so never wrong). Also **done:** `cargo candor watch` — a background poller that
+      re-lints on a real source change and stamps `.candor/state` only on a successful build, keeping
+      the report fresh off the critical path so `diff` is instant even without the Stop hook (the
+      compile runs concurrently with editing). **Next:** (b) instant read-only queries (`show <fn>`,
+      `where <effect>`) served from the report — one instant call instead of grepping source, the move
+      that makes candor a net speed *win*; (c) drop the `rm -rf target/dylint` full-clear in
+      explain/policy/audit so a forced re-lint is incremental.
 - [ ] **9. Selectivity — surface only the *consequential* propagation.** Make `diff`/self-review lead
       with "an effect reached an entry point / a should-be-pure fn / a hot path" rather than listing
       every inheritor. Less noise, focuses the agent on the propagation that *matters*. Cheap; builds

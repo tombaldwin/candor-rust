@@ -78,6 +78,7 @@ cargo candor audit --all                # the full per-function lint (spans in c
 cargo candor snapshot .candor/baseline  # write a JSON report
 cargo candor guard    .candor/baseline  # fail on functions that gained an effect
 cargo candor diff     .candor/baseline  # describe the per-function effect delta (--json)
+cargo candor watch                      # keep the report fresh in the background → instant `diff`
 cargo candor explain  my_function       # trace WHY a function has each effect (the call path)
 cargo candor policy   .candor/policy     # enforce effect boundaries (deny/pure rules)
 cargo candor risk                       # heuristic: effects on caller-derived input (advisory)
