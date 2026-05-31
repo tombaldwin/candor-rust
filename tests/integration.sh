@@ -106,16 +106,19 @@ rm -rf "$(dirname "$A")"
 echo "== effect diff (cargo candor diff) =="
 D=$(mktemp -d)/d; mkdir -p "$D/src"
 printf '[package]\nname="d"\nversion="0.1.0"\nedition="2021"\n' > "$D/Cargo.toml"
-printf 'fn worker(){ let _=std::fs::read("/tmp/x"); }\nfn main(){ worker(); }\n' > "$D/src/main.rs"
+printf 'fn worker(){ let _=std::fs::read("/tmp/x"); }\nfn mid(){ worker(); }\nfn main(){ mid(); }\n' > "$D/src/main.rs"
 ( cd "$D"; "$ROOT/cargo-candor" snapshot .candor/baseline >/dev/null 2>&1 )
-# an agent adds a network call deep in `worker` — a LOCAL edit with a NON-LOCAL consequence.
-printf 'fn worker(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn main(){ worker(); }\n' > "$D/src/main.rs"
+# an agent adds a network call deep in `worker` — a LOCAL edit with a NON-LOCAL consequence; it
+# propagates worker → mid → main, so `main` is the top-level surface and `mid` is plumbing.
+printf 'fn worker(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn mid(){ worker(); }\nfn main(){ mid(); }\n' > "$D/src/main.rs"
 dout=$( cd "$D"; "$ROOT/cargo-candor" diff 2>/dev/null )
 djson=$( cd "$D"; "$ROOT/cargo-candor" diff --json 2>/dev/null )
 want "diff: the edited fn (worker) is flagged"             "$dout" "worker"
 want "diff: marks the source with * (worker introduced Net)" "$dout" "+Net*"
 want "diff: per-effect headline names the source"          "$dout" "introduced in"
-want "diff: the caller (main) inherits the gain — blast radius" "$dout" "main"
+want "diff (§9): headline names where it surfaces (reaches main)" "$dout" "reaches main"
+want "diff (§9): the top-level endpoint is tagged"         "$dout" "top-level"
+want "diff (§9): the intermediate plumbing (mid) is collapsed" "$dout" "intermediate caller"
 want "diff --json: machine-readable for the agent"         "$djson" '"gained"'
 want "diff --json: classifies introduced vs inherited"     "$djson" '"introduced"'
 rm -rf "$(dirname "$D")"

@@ -81,10 +81,14 @@ security/correctness bugs that often matter most, and that its value scales with
       (explain/policy/risk) is now incremental — `lint_fresh` tries an incremental build and only
       clears `target/dylint` on a pure cache hit (detected via cargo's "Checking"/"Compiling" line),
       so a re-lint recompiles just the changed crate instead of the whole tree.
-- [ ] **9. Selectivity — surface only the *consequential* propagation.** Make `diff`/self-review lead
-      with "an effect reached an entry point / a should-be-pure fn / a hot path" rather than listing
-      every inheritor. Less noise, focuses the agent on the propagation that *matters*. Cheap; builds
-      on the introduced/inherited split.
+- [x] **9. Selectivity — surface only the *consequential* propagation.** `cargo candor diff` no longer
+      lists every inheritor: it computes, per effect, the **top-level** gainers (those not called by any
+      other gainer — the entry point / public API where the effect actually surfaces) from the report's
+      `calls` graph, and leads with `Fs: introduced in Cache::get → reaches main (+5 intermediate)`. The
+      list shows the source and the top-level endpoints; the in-between plumbing is collapsed to a count.
+      `--json` still carries everything. Cuts the noise on a wide blast radius to the functions that
+      matter. (Could extend to flag "reaches a policy-forbidden fn" — ties to §6.) Tested (3-hop chain:
+      source shown, `main` tagged top-level, `mid` collapsed).
 
 - [~] **10. Realize the speed/cost savings — make the agent *use* the fast queries.** §8 made queries
       instant; this is about the agent reflexively reaching for them instead of grepping/reading.
