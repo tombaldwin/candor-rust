@@ -43,8 +43,24 @@ entries do. "We didn't do X, here's exactly why" is the house style.
 ## Toolchain bumps
 
 `rust-toolchain` (the nightly) and the `clippy_utils` git `rev` in `Cargo.toml` are coupled — bump
-them together. Expect `rustc_private` API breakage; fix, then make sure `cargo test`, the CI
-behavioural check, and the self-guard all pass.
+them together. Step by step:
+
+1. **Pick a nightly + matching `clippy_utils` rev.** They must agree: open the rust-clippy repo at the
+   candidate `rev` and read *its* `rust-toolchain` — that's the nightly this rev expects. Use that
+   nightly. (`dylint_linting`'s release notes also state the nightly each version targets.)
+2. **Update both pins:** `channel = "nightly-YYYY-MM-DD"` in `rust-toolchain`, and the `rev = "…"` for
+   `clippy_utils` in `Cargo.toml`. `rustup toolchain install nightly-YYYY-MM-DD --component rustc-dev llvm-tools-preview`.
+3. **`cargo build`, fix the `rustc_private` breakage.** HIR/`TyCtxt`/`LateContext` APIs drift between
+   nightlies — function renames, signature changes, moved items. The compiler errors are the to-do list.
+4. **The dylib name changes** (`libcandor@<toolchain>-<triple>.dylib`). Nothing to do in-repo (build.rs
+   reads `rust-toolchain` and re-stamps automatically), but a consuming project's `.candor/config`
+   `CANDOR_LIB` path must be repointed at the new filename (or just rebuilt).
+5. **Re-bless the `ui_test` fixtures** if diagnostics shifted: run the ui tests, copy each framework-saved
+   `.stderr` over the committed one (compiletest has no `--bless`).
+6. **Re-baseline the self-guard:** the engine version changed, so `cargo candor snapshot .candor/baseline`
+   here (and in any consuming project) — the version-aware guard otherwise (correctly) refuses to
+   compare across engines.
+7. **Verify:** `cargo test`, `bash tests/integration.sh`, and the CI self-guard all green.
 
 ## Before you open a PR
 

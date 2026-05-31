@@ -197,7 +197,10 @@ PY
     CALIB_PREFIXES="${line##*|}"
   fi
 fi
-SUSPECT='sql|sqlite|postgres|mysql|mariadb|mongo|redis|cassandra|scylla|cockroach|dynamo|surreal|diesel|sea_?orm|tiberius|oracle|clickhouse|influx|neo4j|hyper|surf|curl|reqwest|isahc|ureq|http|grpc|tonic|websocket|tungstenite|smtp|lettre|imap|ftp|ssh|nats|kafka|rdkafka|pulsar|amqp|lapin|rabbit|mqtt|rumqtt|zmq|etcd|consul|elastic|meili|minio|^s3|aws|azure|gcp|google_?cloud'
+# Coverage heuristic: crates that LOOK effectful but aren't calibrated. Single source of truth —
+# `candor-suspect` in the clone (also read by cargo-candor). Empty if not found → the nudge is skipped.
+_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+SUSPECT="$(cat "${CANDOR_HOME:-/dev/null}/candor-suspect" "${_self:-/dev/null}/../../candor-suspect" 2>/dev/null | head -1)"
 is_calibrated() {
   local c
   for c in $CALIB_PREFIXES; do
@@ -234,13 +237,15 @@ if [ -z "$deps" ]; then
   ' Cargo.toml 2>/dev/null | sort -u)
 fi
 gaps=""
-for d in $deps; do
-  nd="${d//-/_}"
-  is_calibrated "$nd" && continue
-  if printf '%s' "$nd" | grep -Eiq "$SUSPECT"; then
-    gaps="$gaps $d"
-  fi
-done
+if [ -n "$SUSPECT" ]; then
+  for d in $deps; do
+    nd="${d//-/_}"
+    is_calibrated "$nd" && continue
+    if printf '%s' "$nd" | grep -Eiq "$SUSPECT"; then
+      gaps="$gaps $d"
+    fi
+  done
+fi
 gaps="$(echo "$gaps" | xargs 2>/dev/null)"
 
 # ---- freshness label ----

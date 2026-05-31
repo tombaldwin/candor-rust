@@ -11,6 +11,7 @@
 #   cargo candor show     my_function         # a function's effects, INSTANT (read from the report)
 #   cargo candor where    Net                 # which functions perform an effect, INSTANT
 #   cargo candor callers  my_function         # which functions call this one, INSTANT (who depends on it)
+#   cargo candor map                          # a module -> effects overview of the project, INSTANT
 #   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
 #   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure rules)
 #   cargo candor risk                         # heuristic: effects on caller-derived input (advisory)
@@ -110,7 +111,7 @@ case "$cmd" in
       echo "candor: no report produced — did the crate build? Try 'cargo candor audit --all' to see errors." >&2
       exit 1
     fi
-    python3 - "$tmp/a" "$(engine_ver)" <<'PY'
+    python3 - "$tmp/a" "$(engine_ver)" "$CANDOR_DIR/candor-suspect" <<'PY'
 import sys, os, glob, json, re
 pre, ver = sys.argv[1], sys.argv[2]
 base = os.path.basename(pre)
@@ -152,7 +153,8 @@ if unresolved:
     print()
 
 # coverage: external crates candor saw called but does not calibrate, that LOOK effectful.
-# (SUSPECT mirrors integrations/claude-code/candor-run.sh — a nudge heuristic, not a guarantee.)
+# (SUSPECT pattern: the shared `candor-suspect` file, also read by candor-run.sh — a nudge, not a
+# guarantee. Empty/missing → the coverage check is skipped.)
 calib_c, calib_p = set(), set()
 try:
     cj = json.load(open(os.path.join(os.path.dirname(pre) or ".", base + ".calibrated.json")))
@@ -162,14 +164,12 @@ seen = set()
 for f in glob.glob(pre + '.encountered-*.json'):
     try: seen |= set(json.load(open(f)))
     except Exception: pass
-SUSPECT = re.compile(r'sql|sqlite|postgres|mysql|mariadb|mongo|redis|cassandra|scylla|cockroach|dynamo'
-                     r'|surreal|diesel|sea_?orm|tiberius|oracle|clickhouse|influx|neo4j|hyper|surf|curl'
-                     r'|reqwest|isahc|ureq|http|grpc|tonic|websocket|tungstenite|smtp|lettre|imap|ftp|ssh'
-                     r'|nats|kafka|rdkafka|pulsar|amqp|lapin|rabbit|mqtt|rumqtt|zmq|etcd|consul|elastic'
-                     r'|meili|minio|^s3|aws|azure|gcp|google_?cloud')
+try: sp = open(sys.argv[3]).read().strip()
+except Exception: sp = ''
+SUSPECT = re.compile(sp) if sp else None
 def calibrated(c):
     return c in calib_c or any(c == k or c.startswith(k + "_") for k in calib_c) or any(c.startswith(p) for p in calib_p)
-gaps = sorted(c for c in seen if SUSPECT.search(c) and not calibrated(c))
+gaps = sorted(c for c in seen if SUSPECT and SUSPECT.search(c) and not calibrated(c)) if SUSPECT else []
 if gaps:
     print(f"  ⚠ coverage: {', '.join(gaps)} uncalibrated — effects through them may be under-counted")
     print()
@@ -491,6 +491,40 @@ for callee in sorted(hits):
 PY
     exit 0 ;;
 
+  map)
+    # INSTANT: a compact module -> effects overview of the whole project, read from the report. Load
+    # it once at the start of a session to understand the codebase's effect structure without grepping.
+    json=0; for a in "$@"; do [ "$a" = "--json" ] && json=1; done
+    command -v python3 >/dev/null 2>&1 || { echo "candor: map needs python3" >&2; exit 2; }
+    ensure_report || exit 1
+    python3 - .candor/report "$json" <<'PY'
+import sys, glob, json as J, re
+pre, want_json = sys.argv[1], sys.argv[2] == "1"
+fns = []
+for f in glob.glob(pre + '.*.*.json'):
+    try: d = J.load(open(f))
+    except Exception: continue
+    fns += d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
+mods = {}
+for e in fns:
+    m = re.sub(r'^<', '', e.get('fn', '')).split('::')[0] or '(root)'
+    v = mods.setdefault(m, {"effects": set(), "n": 0})
+    v["effects"] |= {x for x in e.get('inferred', []) if x != 'Unknown'}
+    v["n"] += 1
+if want_json:
+    print(J.dumps({m: {"effects": sorted(v["effects"]), "functions": v["n"]} for m, v in sorted(mods.items())}, indent=2)); sys.exit(0)
+if not mods:
+    print("candor: no effectful functions in the report."); sys.exit(0)
+total = sum(v["n"] for v in mods.values())
+print(f"candor map — {total} effectful functions across {len(mods)} module(s)")
+print()
+w = max(len(m) for m in mods)
+for m in sorted(mods, key=lambda m: (-mods[m]["n"], m)):
+    v = mods[m]
+    print(f"  {m:<{w}}  {{ {' '.join(sorted(v['effects']))} }}  ({v['n']} fn{'s' if v['n'] != 1 else ''})")
+PY
+    exit 0 ;;
+
   explain)
     # Trace WHY a function has each effect: the call path from it to the source of each effect (the
     # leaf call + location). `<query>` is a substring of the fully-qualified function name.
@@ -567,6 +601,6 @@ PY
     sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|watch|show|where|callers|explain|policy|risk|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|watch|show|where|callers|map|explain|policy|risk|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac

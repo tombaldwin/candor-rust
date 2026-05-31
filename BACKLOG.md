@@ -31,7 +31,8 @@ transitively perform `Net`). candor computes that for free. **Lead with the delt
       std::net::TcpStream::connect at main.rs:1`. For scoping (what flows through here before I edit)
       and to answer the diff's "why". Engine records effect *sites* (callee + location) under
       `CANDOR_EXPLAIN`; a BFS finds the nearest source.
-- [ ] **4. Speed for a tight loop.** A full re-lint (~minutes on a big crate) is too slow per edit;
+- [x] **4. Speed for a tight loop** — done as P0′ §8 (fast `diff`, `watch`, instant queries,
+      incremental re-lint). A full re-lint (~minutes on a big crate) is too slow per edit;
       need an incremental path, or at least a diff against the cached report that re-lints only the
       changed crate(s).
 - [x] **5. Measure it — don't assume** (pilot; `EVAL.md` Trial 5). Pre-registered with/without eval on
@@ -90,16 +91,16 @@ security/correctness bugs that often matter most, and that its value scales with
       matter. (Could extend to flag "reaches a policy-forbidden fn" — ties to §6.) Tested (3-hop chain:
       source shown, `main` tagged top-level, `mid` collapsed).
 
-- [~] **10. Realize the speed/cost savings — make the agent *use* the fast queries.** §8 made queries
+- [x] **10. Realize the speed/cost savings — make the agent *use* the fast queries.** §8 made queries
       instant; this is about the agent reflexively reaching for them instead of grepping/reading.
       **Done:** `cargo candor callers <fn>` — instant reverse-dependency lookup ("who calls this?", the
       most common pre-edit grep), served from a new effect-relevant `calls` field in the report. Also
       **done:** an **MCP server** (`integrations/mcp/candor-mcp.py`, no SDK) exposing the query set
       (`candor_effects`/`where`/`callers`/`diff`) as native tools, so an MCP agent calls candor
       reflexively in one cheap call (CLI is the fallback) — the leverage point converting "candor *can*
-      answer fast" into "the agent *skips* reading files". **Next:** a compact `cargo candor map`
-      (module→effects overview) to front-load understanding at session start. Caveat: keep the tool
-      surface small — over-querying adds round-trips.
+      answer fast" into "the agent *skips* reading files". Also **done:** `cargo candor map` — a
+      compact module→effects overview (`app { … } (80 fns)`) to front-load understanding at session
+      start without grepping. Caveat: keep the tool surface small — over-querying adds round-trips.
 
 **Not worth doing:** more interactive-loop polish (call-site line, prettier output) — the eval says
 that's the narrow, modest-value axis. Diminishing returns.
@@ -170,7 +171,9 @@ that's the narrow, modest-value axis. Diminishing returns.
       uses). Note: crates.io is **not** an option for the lint itself — it depends on `clippy_utils`
       via a git dependency, which crates.io forbids (true of every dylint lint). A separate, non-lint
       helper crate *could* be published, but the lint can't.
-- [ ] Nightly fragility (`rustc_private` pins `nightly-2026-04-16`); document the bump process.
+- [x] Nightly fragility (`rustc_private` pins `nightly-2026-04-16`) — the bump process is now a
+      step-by-step in `CONTRIBUTING.md` (pick matching nightly+clippy_utils rev, fix rustc_private
+      breakage, re-bless ui, re-baseline the self-guard).
 - [x] Test coverage — unit (pure logic) + `ui_test` fixtures with blessed `.stderr` (copied from the
       framework-saved file, since compiletest has no bless) + scripted `tests/integration.sh`
       (AS-EFF modes, cross-crate, version stamping, audit) + `test-receipt.sh` (the bash receipt).
@@ -191,9 +194,9 @@ that's the narrow, modest-value axis. Diminishing returns.
       report's version differs from the running engine, downgrade its inherited effects to `Unknown`
       rather than trust them. Low priority — within one run all crates share a dylib so versions match,
       and `cargo candor guard` already skips on a baseline/engine mismatch; defense-in-depth.
-- [ ] **De-duplicate the coverage `SUSPECT` heuristic** — currently copied in `candor-run.sh` and
-      `cargo-candor`; factor into one sourced snippet so they can't drift. (Subsumed by the Rust-port
-      item below if that happens.)
+- [x] **De-duplicated the coverage `SUSPECT` heuristic** — now a single `candor-suspect` file at the
+      clone root, read by both `candor-run.sh` (via `CANDOR_HOME` / its own location) and `cargo-candor`
+      (via `CANDOR_DIR`), with a graceful skip if missing. No more two-copy drift.
 - [ ] **Port the tooling/query layer from bash+Python to a Rust CLI binary.** The engine (`lib.rs`)
       *must* be Rust (a `rustc_private` dylint lint), but the wrapper — `cargo-candor`'s diff /
       show / where / callers / audit / policy / risk logic, the receipt aggregation, the MCP server —

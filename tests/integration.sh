@@ -204,6 +204,9 @@ want   "where: splits the direct source out"          "$whout" "directly"
 want   "where: names the source (leaf)"               "$whout" "leaf"
 want   "where --json: machine-readable"               "$whj" '"directly"'
 want   "callers: leaf's caller (handler) found from the report" "$clout" "handler"
+mapout=$( cd "$Q"; "$ROOT/cargo-candor" map 2>&1 )
+want   "map: module/effects overview rendered"        "$mapout" "candor map"
+want   "map: surfaces the Net effect"                 "$mapout" "Net"
 rm -rf "$(dirname "$Q")"
 
 # ── 14. MCP server: candor's queries as native agent tools (P0′ §10) ──
