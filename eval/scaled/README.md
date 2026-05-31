@@ -93,7 +93,35 @@ was produced by making the canonical edit and running `cargo candor diff` — no
 non-scriptable part); it prepares each trial's fresh fixture copy + the exact prompt, and provides the
 judge prompt and the scoring aggregation. See `harness.sh --help`. The first batch's prompts, raw
 summaries, judgements, and the condition mapping are recorded under `runs/` and summarised in
-`RESULTS.md`.
+`RESULTS.md`. `CANDOR_EVAL_TASKS` / `CANDOR_EVAL_RUNS` point the runner at a fixture set + run dir.
+
+## Batch 2 — pre-registered amendments (committed before batch 2 runs)
+
+Batch 1 ([RESULTS.md](RESULTS.md)) falsified the *binary* metric (capable control already 0.83) but
+found the load-bearing signal in a *post-hoc* completeness count. Batch 2 fixes the three confounds it
+exposed. Pre-registered here before any batch-2 trial:
+
+1. **Completeness is the PRIMARY metric.** For each task, the denominator is its **6 non-local
+   functions** (the propagation set minus the edited fn — `harness.sh nonlocal_of <task>`). The blind
+   judge marks, per function, whether the summary identifies it as now performing the effect (named, or
+   covered by an explicit "all callers" statement) and reports `COMPLETENESS: n/6`. Primary outcome =
+   mean completeness per arm. The binary yes/partial/no is kept as a SECONDARY cross-check.
+2. **De-leaked fixtures** (`tasks-v2/`): the doc comments that telegraphed a non-local caller ("a
+   periodic dashboard refresh… assumes it's cheap") are removed, so an agent must trace the call graph
+   to know the propagation rather than read it off a comment. Source structure / ground truth are
+   otherwise identical to `tasks/` (comments don't affect candor).
+3. **Weaker agent model:** the agent under test is **Sonnet** (batch 1 used an Opus-class model). Batch
+   1's binary ceiling was partly a strong-model artifact; the prediction (Trial 5) is that a weaker
+   model widens the gap. Judge model unchanged (Haiku).
+4. **N=3 per arm** (vs 2), 3 tasks → 18 trials, to tighten the estimate.
+
+**Falsification clause (batch 2):** if **control completeness ≥ 0.80**, candor's marginal value on the
+completeness axis is low and we report that. If **treatment − control < 0.20** (completeness), the
+effect is weak even on de-leaked fixtures with a weaker model, and we say so. (Batch-1's post-hoc
+completeness was control 0.42 / treatment 0.92; batch 2 tests whether that survives de-leaking, a
+weaker model, and pre-registration.)
+
+Batch-2 records live under `runs-v2/`, summarised in `RESULTS-v2.md`.
 
 ## Honesty constraints carried from EVAL.md
 

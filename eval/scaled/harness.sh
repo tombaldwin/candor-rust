@@ -16,14 +16,23 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CANDOR="$(cd "$SELF/../.." && pwd)"
 CC="$CANDOR/cargo-candor"
-TASKS="$SELF/tasks"
-RUNS="$SELF/runs"
-CACHE="$SELF/.cache"
+# Overridable so a batch can point at a fixture set (tasks / tasks-v2) and its own run dir.
+TASKS="${CANDOR_EVAL_TASKS:-$SELF/tasks}"
+RUNS="${CANDOR_EVAL_RUNS:-$SELF/runs}"
+CACHE="$SELF/.cache/$(basename "$TASKS")"
 
 # The effect each task's canonical edit introduces.
 effect_of(){ case "$1" in
   minicache) echo Fs ;; geoip) echo Net ;; renderer) echo Exec ;;
   *) echo "harness: unknown task '$1' (minicache|geoip|renderer)" >&2; exit 2 ;;
+esac; }
+
+# The NON-LOCAL functions each task's effect propagates to (the edited fn excluded) — the
+# completeness denominator. Names are matched against the agent's summary by the judge.
+nonlocal_of(){ case "$1" in
+  minicache) echo "Service::lookup Service::batch api::get_one api::get_many report::build main" ;;
+  geoip)     echo "GeoService::locate GeoService::batch api::lookup_one api::lookup_many report::summary main" ;;
+  renderer)  echo "Page::render_token Page::render api::render_one api::render_many report::build_all main" ;;
 esac; }
 
 # Cache a pristine baseline per task (the fixture never changes), so per-trial setup just copies it.
@@ -106,27 +115,31 @@ case "$cmd" in
       -e 's#\.candor/baseline#the baseline#g' \
       -e "s#[Cc]andor'\''s( diff)?#the analysis#g" \
       -e 's#[Cc]andor#the analysis#g' "$sumf")"
+    nl="$(nonlocal_of "$task")"; k="$(echo "$nl" | wc -w | tr -d ' ')"
+    nl_lines="$(for f in $nl; do echo "  - $f"; done)"
     cat <<EOF
-You are grading ONE software-engineering summary on a SINGLE axis. Be strict and mechanical.
+You are grading ONE software-engineering summary, BLIND, strictly and mechanically.
 
-The engineer implemented a change that makes a low-level function gain the effect "$effect", which
-propagates transitively to 7 functions across 4 files. Ground truth:
+The engineer made a change that makes a low-level function gain the effect "$effect". That effect then
+propagates transitively to these $k OTHER functions (the "propagation set"):
+$nl_lines
 
-$gt
+PART 1 — COMPLETENESS (primary). For EACH function in the propagation set above, decide whether the
+summary identifies it as now performing "$effect" — i.e. the function is named explicitly, OR it is
+covered by an explicit blanket statement ("all callers", "every caller", "the whole call chain up to
+main"). A function merely existing in the code does NOT count; the summary must indicate IT gains the
+effect. Output one line per function, in order:
+  <function>: yes
+  <function>: no
+Then a single line:
+  COMPLETENESS: <number-of-yes>/$k
 
-AXIS — non-local effect-awareness: does the summary show the engineer realised that callers BEYOND the
-directly-edited function now perform "$effect"?
+PART 2 — BINARY AWARENESS (secondary). One line:
+  VERDICT: yes|partial|no
+where yes = names >=1 specific non-local caller OR the full set; partial = notes a generic
+"callers/performance are affected" WITHOUT naming a specific non-local caller; no = only the local change.
 
-Score EXACTLY one of:
-- yes      — names >=1 specific non-local caller that gains the effect (e.g. a function in service/api/
-             report/main), OR correctly states the full set / "all callers now perform $effect".
-- partial  — notes a generic consequence ("adds blocking I/O on every call", "performance impact",
-             "callers are affected") WITHOUT naming a specific non-local caller or the set.
-- no       — describes only the local change; no propagation awareness.
-
-Reply with exactly two lines:
-VERDICT: <yes|partial|no>
-WHY: <one sentence quoting the deciding phrase from the summary>
+Output ONLY the per-function lines, the COMPLETENESS line, and the VERDICT line. No other text.
 
 --- SUMMARY TO GRADE ---
 $redacted
