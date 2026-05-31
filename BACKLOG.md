@@ -136,12 +136,19 @@ that's the narrow, modest-value axis. Diminishing returns.
       has edges through local trait-object/generic dispatch), but it's still missing closure/std-`dyn`
       edges, so reachability would *still* mislabel some closure-reached code as dead. Closer to
       soundness than before, but not there yet — **deferred** until the closure-flow gap closes.
-- [ ] **Finer `Fs` granularity (read vs write).** **Deferred — high cost, breaking:** needs an
-      expanded effect vocabulary *and* a capability-token subtyping relation (`Fs ⊇ FsRead, FsWrite`)
-      so existing `&Fs` declarations still satisfy them, AND it breaks every committed baseline
-      (`Fs` → `FsRead`/`FsWrite` reads as a gained effect → spurious AS-EFF-005). A non-breaking
-      JSON-only refinement (report read/write detail, keep the `Fs` effect) is possible if wanted.
-      (Net-by-host is *not* statically knowable — won't do.)
+- [~] **Finer `Fs` granularity (read vs write).** **Non-breaking refinement shipped:** each report
+      entry now carries an optional `fs: ["read"|"write"]`, derived from the verb of every
+      directly-classified `Fs` call (`fs::write`→write, `File::open`→read, `fs::copy`→both;
+      `OpenOptions::open` left unannotated since its direction is runtime-flag-decided) and propagated
+      through the call graph in a separate fixpoint that never touches the effect set. The `Fs` effect
+      itself is unchanged, so **no baseline regresses** (verified: the self-guard stays clean) and the
+      field is omitted when unknown. `cargo candor show` renders it (`Fs*(write)`, `Fs(read,write)`)
+      and `show --json` exposes it. **Still deferred (the breaking part):** splitting `Fs` into
+      first-class `FsRead`/`FsWrite` *effects* with a capability-subtyping relation (`Fs ⊇ FsRead,
+      FsWrite`) — that needs the vocabulary + token-subtyping work and *does* break committed baselines
+      (`Fs`→`FsWrite` reads as a gained effect → spurious AS-EFF-005). Cross-crate `Fs` carries no
+      detail (the dependency's report doesn't record it). (Net-by-host is *not* statically knowable —
+      won't do.)
 - [x] **Cross-crate effect propagation** (CRITIQUE §8 — closed). Each report entry carries a stable
       `DefPathHash`; a dependent crate loads its dependencies' reports keyed by it (surviving
       reexport-shortened paths) and inherits their *already-transitive* effects. Fixed a real consumer

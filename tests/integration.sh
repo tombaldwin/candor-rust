@@ -192,7 +192,7 @@ rm -rf "$(dirname "$WV")"
 echo "== instant queries (show / where) =="
 Q=$(mktemp -d)/q; mkdir -p "$Q/src" "$Q/.candor"
 printf '[package]\nname="q"\nversion="0.1.0"\nedition="2021"\n' > "$Q/Cargo.toml"
-printf 'fn leaf(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn handler(){ leaf(); }\nfn main(){ handler(); }\n' > "$Q/src/main.rs"
+printf 'fn leaf(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn handler(){ leaf(); }\nfn reader(){ let _=std::fs::read_to_string("/tmp/cq_x"); }\nfn writer(){ let _=std::fs::write("/tmp/cq_x","y"); }\nfn both(){ reader(); writer(); }\nfn main(){ handler(); both(); }\n' > "$Q/src/main.rs"
 # a fresh report (as watch/the hook would maintain) → the queries serve instantly, no recompile
 ( cd "$Q"; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
 ( cd "$Q"; find "$PWD" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1 > .candor/state )
@@ -206,6 +206,13 @@ want   "where: splits the direct source out"          "$whout" "directly"
 want   "where: names the source (leaf)"               "$whout" "leaf"
 want   "where --json: machine-readable"               "$whj" '"directly"'
 want   "callers: leaf's caller (handler) found from the report" "$clout" "handler"
+# Non-breaking Fs read/write refinement (P2): show annotates Fs with its access kind, transitively.
+fsr=$( cd "$Q"; "$ROOT/cargo-candor" show reader 2>&1 )
+fsb=$( cd "$Q"; "$ROOT/cargo-candor" show both 2>&1 )
+fsj=$( cd "$Q"; "$ROOT/cargo-candor" show both --json 2>&1 )
+want   "show: Fs read detail on a direct reader"      "$fsr" "Fs*(read)"
+want   "show: Fs read+write propagates transitively"  "$fsb" "Fs(read,write)"
+want   "show --json: fs detail is machine-readable"   "$fsj" '"fs"'
 mapout=$( cd "$Q"; "$ROOT/cargo-candor" map 2>&1 )
 want   "map: module/effects overview rendered"        "$mapout" "candor map"
 want   "map: surfaces the Net effect"                 "$mapout" "Net"

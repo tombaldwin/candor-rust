@@ -30,11 +30,14 @@ Each entry:
 { "fn": "app::App::handle_key", "loc": "src/app.rs:2987:5",
   "inferred":   ["Fs", "Net", "Unknown"],   // full TRANSITIVE effect set
   "direct":     ["Log"],                      // effects in this function's own body
+  "fs":         ["read", "write"],            // (optional) Fs access kind, when the verbs reveal it
   "declared": [], "undeclared": [], "overdeclared": [],
   "unresolved": true }                        // true => some calls could not be traced
 ```
 
 Effects: `Net`, `Fs`, `Db`, `Exec` (subprocess), `Env`, `Clock`, `Ipc`, `Log`, `Rand`, `Clipboard`.
+`fs` refines `Fs` (read vs write) when statically knowable; `cargo candor show` renders it as
+`Fs(write)` / `Fs(read,write)`. Absent when unknown or no `Fs` — it never changes the `Fs` effect.
 
 ## 3. Use it
 

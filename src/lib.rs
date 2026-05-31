@@ -55,6 +55,11 @@ const UNKNOWN: &str = "Unknown";
 pub struct Candor {
     /// Effects performed directly in a function's own body (and its inline closures).
     direct: HashMap<LocalDefId, BTreeSet<&'static str>>,
+    /// Filesystem access *kind* ("read"/"write") performed directly, when a directly-classified `Fs`
+    /// call's verb tells us which (e.g. `fs::write` → write, `File::open` → read). Propagated through
+    /// the call graph like effects and surfaced as the report's optional `fs` detail — a NON-breaking
+    /// refinement of `Fs` (the effect itself is unchanged, so no baseline regresses).
+    fs_direct: HashMap<LocalDefId, BTreeSet<&'static str>>,
     /// Local-crate functions each function calls, for transitive propagation.
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
     /// Project-supplied classifier rules: (effect, is_crate_prefix, prefix).
@@ -145,6 +150,7 @@ impl Candor {
         };
         Self {
             direct: HashMap::new(),
+            fs_direct: HashMap::new(),
             calls: HashMap::new(),
             extra,
             paranoid,
@@ -495,6 +501,41 @@ const DB_CRATES: [&str; 11] = [
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
 ];
+
+/// For a call already classified as `Fs`, the access *kind* its leaf verb implies: `["read"]`,
+/// `["write"]`, `["read","write"]` (e.g. `fs::copy`), or `&[]` when the verb doesn't say (so we make
+/// no claim). Keyed off the std::fs / `File` / `OpenOptions` verb vocabulary — a syntactic refinement
+/// of an effect candor already proved, NOT a soundness claim. `OpenOptions::open`'s direction is set
+/// by runtime flags, so it's deliberately left unannotated.
+fn fs_kind(path: &str) -> &'static [&'static str] {
+    if path.contains("OpenOptions") {
+        return &[];
+    }
+    // The leaf method/function name (strip any trailing generics / parens).
+    let leaf = path.rsplit("::").next().unwrap_or(path);
+    let leaf = leaf.split('<').next().unwrap_or(leaf).trim_matches(|c| c == '(' || c == ')');
+    const WRITE: [&str; 26] = [
+        "write", "write_all", "write_at", "write_vectored", "write_fmt", "create", "create_new",
+        "create_dir", "create_dir_all", "remove_file", "remove_dir", "remove_dir_all", "rename",
+        "set_permissions", "set_len", "set_modified", "set_times", "hard_link", "soft_link",
+        "symlink", "symlink_file", "symlink_dir", "truncate", "append", "sync_all", "sync_data",
+    ];
+    const READ: [&str; 16] = [
+        "read", "read_to_string", "read_to_end", "read_at", "read_dir", "read_link", "read_exact",
+        "read_vectored", "metadata", "symlink_metadata", "open", "canonicalize", "try_exists",
+        "exists", "file_type", "read_to",
+    ];
+    if leaf == "copy" {
+        return &["read", "write"];
+    }
+    if WRITE.contains(&leaf) {
+        return &["write"];
+    }
+    if READ.contains(&leaf) {
+        return &["read"];
+    }
+    &[]
+}
 
 /// Classify a resolved callee by the crate it belongs to and its full path.
 fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
@@ -1157,6 +1198,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             .or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
         if let Some(effect) = effect {
             self.direct.entry(caller).or_default().insert(effect);
+            // Non-breaking Fs refinement: when the verb tells us read vs write, record it (propagated
+            // like effects below, surfaced as the report's `fs` detail). The `Fs` effect is unchanged.
+            if effect == "Fs" {
+                let kinds = fs_kind(&path);
+                if !kinds.is_empty() {
+                    self.fs_direct.entry(caller).or_default().extend(kinds.iter().copied());
+                }
+            }
             if self.explain.is_some() {
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                 self.sites.entry(caller).or_default().push(EffectSite { eff: effect, via: path.clone(), loc });
@@ -1227,6 +1276,37 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 entry.extend(add);
                 if entry.len() != before {
                     changed = true;
+                }
+            }
+        }
+
+        // Filesystem read/write detail rides the SAME call graph in a separate, additive fixpoint that
+        // never touches `eff`:  fs[f] = fs_direct[f] ∪ ⋃ { fs[g] : g ∈ calls[f] }.  Cross-crate `Fs`
+        // carries no detail (a dependency's report doesn't record it), so a function that reaches the
+        // filesystem only across a crate boundary gets `Fs` with an empty `fs` — honestly "read vs
+        // write unknown here".
+        let mut fsacc: HashMap<LocalDefId, BTreeSet<&'static str>> = self.fs_direct.clone();
+        let mut fs_changed = true;
+        while fs_changed {
+            fs_changed = false;
+            let callers: Vec<LocalDefId> = self.calls.keys().copied().collect();
+            for f in callers {
+                let mut add: BTreeSet<&'static str> = BTreeSet::new();
+                if let Some(callees) = self.calls.get(&f) {
+                    for g in callees {
+                        if let Some(gk) = fsacc.get(g) {
+                            add.extend(gk.iter().copied());
+                        }
+                    }
+                }
+                if add.is_empty() {
+                    continue;
+                }
+                let entry = fsacc.entry(f).or_default();
+                let before = entry.len();
+                entry.extend(add);
+                if entry.len() != before {
+                    fs_changed = true;
                 }
             }
         }
@@ -1365,6 +1445,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     overdeclared: owned(&unused),
                     unresolved: has_unknown,
                     hash: dph_hex(cx.tcx, f.to_def_id()),
+                    fs: fsacc.get(&f).map(|s| owned_set(s)).unwrap_or_default(),
                 });
                 continue;
             }
@@ -1806,6 +1887,26 @@ mod tests {
         // Unrelated crates are pure.
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
         assert_eq!(classify("std", "std::vec::Vec::push"), None);
+    }
+
+    #[test]
+    fn fs_kind_classifies_read_write() {
+        // reads
+        assert_eq!(fs_kind("std::fs::read_to_string"), &["read"][..]);
+        assert_eq!(fs_kind("std::fs::File::open"), &["read"][..]);
+        assert_eq!(fs_kind("std::fs::metadata"), &["read"][..]);
+        assert_eq!(fs_kind("std::fs::read_dir"), &["read"][..]);
+        // writes
+        assert_eq!(fs_kind("std::fs::write"), &["write"][..]);
+        assert_eq!(fs_kind("std::fs::File::create"), &["write"][..]);
+        assert_eq!(fs_kind("std::fs::remove_dir_all"), &["write"][..]);
+        assert_eq!(fs_kind("std::fs::rename"), &["write"][..]);
+        // copy touches both ends
+        assert_eq!(fs_kind("std::fs::copy"), &["read", "write"][..]);
+        // direction we can't know from the verb → no claim (honest), even though classify says Fs.
+        assert!(fs_kind("std::fs::OpenOptions::open").is_empty());
+        assert!(fs_kind("memmap2::MmapOptions::map").is_empty());
+        assert!(fs_kind("cap_std::fs::Dir::entries").is_empty());
     }
 
     #[test]

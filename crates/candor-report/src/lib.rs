@@ -27,6 +27,11 @@ pub struct ReportEntry {
     /// Stable cross-crate identity (hex `DefPathHash`); empty in older reports.
     #[serde(default)]
     pub hash: String,
+    /// Filesystem access detail when the `Fs` effect's verbs revealed it: `["read"]`, `["write"]`, or
+    /// both. A non-breaking refinement (the `Fs` effect itself is unchanged); omitted when unknown or
+    /// when the function performs no `Fs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fs: Vec<String>,
     /// Effectful local functions this one calls — the effect-relevant call graph ("who calls X?").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,

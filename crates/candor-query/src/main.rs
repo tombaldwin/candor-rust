@@ -252,6 +252,9 @@ struct ShowJson {
     func: String,
     inferred: Vec<String>,
     direct: Vec<String>,
+    /// Fs read/write detail, omitted when absent — see `ReportEntry::fs`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fs: Vec<String>,
     unresolved: bool,
 }
 
@@ -273,6 +276,7 @@ fn cmd_show(args: &[String]) -> i32 {
                 func: e.func.clone(),
                 inferred: sorted(&e.inferred),
                 direct: sorted(&e.direct),
+                fs: e.fs.clone(),
                 unresolved: e.unresolved,
             })
             .collect();
@@ -284,16 +288,26 @@ fn cmd_show(args: &[String]) -> i32 {
         return 0;
     }
     let w = fns.iter().map(|e| e.func.chars().count()).max().unwrap_or(0);
+    let any_fs = fns.iter().any(|e| !e.fs.is_empty());
     for e in &fns {
         let direct: BTreeSet<&String> = e.direct.iter().collect();
         let parts: Vec<String> = sorted(&e.inferred)
             .into_iter()
-            .map(|x| if direct.contains(&x) { format!("{x}*") } else { x })
+            .map(|x| {
+                let star = if direct.contains(&x) { "*" } else { "" };
+                // Refine Fs with its read/write detail when known: `Fs*(write)`.
+                if x == "Fs" && !e.fs.is_empty() {
+                    format!("Fs{star}({})", e.fs.join(","))
+                } else {
+                    format!("{x}{star}")
+                }
+            })
             .collect();
         let unk = if e.unresolved { "  ⚠ unresolved (set may be incomplete)" } else { "" };
         println!("  {:<w$}  {{ {} }}{}", e.func, parts.join(" "), unk, w = w);
     }
-    println!("  (* = performed in the function's own body; unmarked = via a callee)");
+    let fs_note = if any_fs { ";  Fs(read/write) = the filesystem access seen" } else { "" };
+    println!("  (* = performed in the function's own body; unmarked = via a callee{fs_note})");
     0
 }
 
