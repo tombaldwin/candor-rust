@@ -188,7 +188,21 @@ that's the narrow, modest-value axis. Diminishing returns.
       rather than trust them. Low priority — within one run all crates share a dylib so versions match,
       and `cargo candor guard` already skips on a baseline/engine mismatch; defense-in-depth.
 - [ ] **De-duplicate the coverage `SUSPECT` heuristic** — currently copied in `candor-run.sh` and
-      `cargo-candor`; factor into one sourced snippet so they can't drift.
+      `cargo-candor`; factor into one sourced snippet so they can't drift. (Subsumed by the Rust-port
+      item below if that happens.)
+- [ ] **Port the tooling/query layer from bash+Python to a Rust CLI binary.** The engine (`lib.rs`)
+      *must* be Rust (a `rustc_private` dylint lint), but the wrapper — `cargo-candor`'s diff /
+      show / where / callers / audit / policy / risk logic, the receipt aggregation, the MCP server —
+      is bash with embedded Python for JSON. That was the fast, zero-install, no-build-step choice
+      (Python is everywhere; the scripts stay transparent for the user-facing hook), and it works —
+      but it's been a recurring *glue*-bug source (the sidecar/report glob collision, quoting, the
+      state-hash matching) and carries **duplicated logic** (report-reading re-implemented in nearly
+      every Python snippet; the `SUSPECT` heuristic copy-pasted). The robust fix: extract the report
+      structs into a tiny shared crate with **no** `rustc_private` dep, build a `cargo-candor` **Rust
+      binary** for the query/diff/JSON logic that shares those structs with the engine (DRY +
+      type-safe; could even be crates.io-publishable, unlike the lint), and keep thin bash only for
+      genuine shell glue (the Stop hook, orchestrating `cargo dylint`). **When:** if the tooling keeps
+      growing or the glue bugs recur — not urgent, but it's the real end state, not the current one.
 
 ## P5 — research (the thesis)
 
