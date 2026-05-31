@@ -232,12 +232,15 @@ that's the narrow, modest-value axis. Diminishing returns.
       5) that candor's edit-feedback lifts non-local awareness on one task.
       **Now scaled — first batch shipped:** `eval/scaled/` is a pre-registered, reproducible 3-task ×
       2-arm × 2-trial harness (fixtures with candor-verified ground truth, blind judge, falsification
-      clause). Batch-1 result (`eval/scaled/RESULTS.md`): the pre-registered *binary* awareness metric
-      falsifies the easy "big lift" claim (capable control already 0.83), but the real signal is a
-      *completeness* gap — control names **42%** of the propagation set vs treatment **92%**. The pilot
-      also surfaced its own metric mis-specification + a fixture-leakage confound. **Remaining:**
-      pre-register completeness as primary; de-leak/enlarge fixtures; more tasks/trials and a weaker
-      model to tighten the estimate.
+      clause). Batch 1 (`eval/scaled/RESULTS.md`) found a *completeness* gap but was confounded — it also
+      exposed its own metric mis-spec, fixture leakage, and an answer-key contamination bug (all fixed).
+      **Batch 2 (`eval/scaled/RESULTS-v2.md`) — clean, pre-registered:** completeness as primary,
+      de-leaked fixtures, weaker model (Sonnet), N≈9/arm, contamination fixed and fully re-run. Result:
+      **control completeness 7% vs treatment 100%** (binary 0.17 vs 1.00); neither falsification
+      condition triggered — candor's edit-feedback takes a realistic agent from naming ~0 of the
+      non-local callers to all of them, for ~5% extra tokens, a large lift consistent across 3 tasks.
+      **Remaining (batch 3):** a *large* fixture + a frontier model (the one untested cell), more trials,
+      and edit-quality-beyond-summary measures.
 - [x] Effect-aware PR review — `examples/candor-pr-review.yml`: a workflow that POSTS the per-function
       effect delta vs the baseline as a PR comment + step summary (the *review-time* sibling of P0's
       *edit-time* loop; both powered by `cargo candor diff`). It informs rather than blocks (pair with

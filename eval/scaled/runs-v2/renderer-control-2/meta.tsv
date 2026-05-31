@@ -1,0 +1,4 @@
+task	renderer
+condition	control
+runid	renderer-control-2
+effect	Exec

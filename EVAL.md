@@ -256,3 +256,13 @@ renderer/Exec; each a 5-file crate with candor-verified ground truth). See
 - The pilot exposed its own metric mis-specification and a fixture-leakage confound (doc comments that
   telegraph one caller). The next batch pre-registers *completeness* as primary and needs fixtures
   that don't telegraph their callers (and are larger than one screen).
+
+**Batch 2** ([eval/scaled/RESULTS-v2.md](eval/scaled/RESULTS-v2.md)) fixed three confounds — pre-registered
+*completeness* as primary, **de-leaked** the fixtures, used a **weaker model** (Sonnet), and (found
+mid-batch) a **contamination bug** where the harness had been copying the answer key into the agent's
+dir; the whole batch was re-run clean. Result: **control completeness 7% vs treatment 100%** (binary
+0.17 vs 1.00), neither falsification condition triggered. So batch 1's "small lift" was an artifact of
+the leaked answer key, telegraphing comments, and a frontier model; the clean, pre-registered number is
+a **large, consistent lift across all three tasks** — candor's edit-feedback takes a realistic agent
+from naming ~0 of the non-local callers to all of them, for ~5% extra tokens. (Open cell: a frontier
+model on a *large* un-leaky codebase.)

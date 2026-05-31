@@ -1,0 +1,4 @@
+task	minicache
+condition	control
+runid	minicache-control-3
+effect	Fs

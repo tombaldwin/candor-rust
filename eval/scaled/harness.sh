@@ -39,7 +39,7 @@ esac; }
 baseline_for(){ # <task> → echoes a baseline prefix with <prefix>.*.*.json files
   local task="$1" d="$CACHE/$task"
   if ! ls "$d"/baseline.*.*.json >/dev/null 2>&1; then
-    rm -rf "$d"; mkdir -p "$d"; cp -r "$TASKS/$task/." "$d/"; rm -rf "$d/.candor" "$d/target"
+    rm -rf "$d"; mkdir -p "$d/src"; cp "$TASKS/$task/Cargo.toml" "$d/"; cp -r "$TASKS/$task/src/." "$d/src/"
     ( cd "$d"; "$CC" snapshot baseline >/dev/null 2>&1 )
   fi
   echo "$d/baseline"
@@ -53,8 +53,10 @@ case "$cmd" in
   setup) # setup <task> <condition> <runid>
     task="$1"; cond="$2"; runid="$3"; effect="$(effect_of "$task")"
     work="$RUNS/$runid/work"
-    rm -rf "$RUNS/$runid"; mkdir -p "$work"
-    cp -r "$TASKS/$task/." "$work/"; rm -rf "$work/.candor" "$work/target"
+    rm -rf "$RUNS/$runid"; mkdir -p "$work/src"
+    # Copy ONLY the crate (Cargo.toml + src) into the agent's working dir — never GROUND_TRUTH.md /
+    # TASK.md, which would hand the agent the answer. The task reaches the agent via the prompt only.
+    cp "$TASKS/$task/Cargo.toml" "$work/"; cp -r "$TASKS/$task/src/." "$work/src/"
     # External pristine baseline for the objective completion check (BOTH arms), kept OUT of work/
     # so a control agent never sees a .candor/ dir that would hint candor exists.
     bl="$(baseline_for "$task")"; cp "$bl".*.*.json "$RUNS/$runid/" 2>/dev/null || true

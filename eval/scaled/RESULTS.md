@@ -1,5 +1,13 @@
 # Scaled eval — batch 1 results
 
+> **⚠ Caveat (found during batch 2): these numbers are confounded.** The batch-1 harness copied each
+> task's `GROUND_TRUTH.md` — the answer key listing the full propagation set — into the agent's working
+> directory, so agents *could* read the answer. The bug is fixed (work dirs now get `Cargo.toml` + `src/`
+> only) and **batch 2 ([RESULTS-v2.md](RESULTS-v2.md)) was run clean**. The contamination *inflates*
+> completeness, so batch-1's control completeness (42%) is an **upper bound**; the clean batch-2 control
+> is **7%**. Read batch 1 as directional only — its real value was exposing the metric mis-specification
+> and (with batch 2) the confounds. The conclusions below stand only with this caveat.
+
 **Batch:** 3 tasks (minicache/Fs, geoip/Net, renderer/Exec) × 2 conditions × 2 trials = **12 trials**,
 pooled **N=6 per arm**. One capable model (Opus-class) as the agent under test; a separate model
 (Haiku) as the blind judge. Run with the pre-registered `harness.sh` + protocol in
