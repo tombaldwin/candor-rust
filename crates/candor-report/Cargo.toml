@@ -1,0 +1,10 @@
+[package]
+name = "candor-report"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Shared candor report types + parsing (no rustc_private) — used by the lint and the CLI."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

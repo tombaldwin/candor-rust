@@ -92,9 +92,26 @@ dependencies = [
 name = "candor"
 version = "0.1.0"
 dependencies = [
+ "candor-report",
  "clippy_utils",
  "dylint_linting",
  "dylint_testing",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "candor-query"
+version = "0.1.0"
+dependencies = [
+ "candor-report",
+ "serde_json",
+]
+
+[[package]]
+name = "candor-report"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
 ]

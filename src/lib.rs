@@ -25,6 +25,8 @@ extern crate rustc_middle;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use candor_report::{report_entries, report_version, to_report_json, ReportEntry, ReportMeta};
+
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{Expr, ExprKind, HirId};
@@ -274,18 +276,6 @@ fn parse_policy(text: &str) -> Vec<PolicyRule> {
     rules
 }
 
-/// One entry of a saved candor JSON report, for baseline diffing and cross-crate loading.
-#[derive(serde::Deserialize)]
-struct BaselineEntry {
-    #[serde(rename = "fn")]
-    func: String,
-    inferred: Vec<String>,
-    /// Stable cross-crate identity (hex `DefPathHash`); empty in older reports (`serde(default)`),
-    /// in which case the entry can't participate in cross-crate resolution.
-    #[serde(default)]
-    hash: String,
-}
-
 /// A function's stable cross-crate identity: the `DefPathHash` as a `(StableCrateId, local-hash)`
 /// pair of `u64`s. This value is identical whether the def is viewed from its home crate (a
 /// `LocalDefId`) or from a dependent (an external `DefId`) — unlike `def_path_str`, which
@@ -308,35 +298,6 @@ fn parse_dph(s: &str) -> Option<(u64, u64)> {
         return None;
     }
     Some((u64::from_str_radix(&s[..16], 16).ok()?, u64::from_str_radix(&s[16..], 16).ok()?))
-}
-
-/// Parse a report's function entries, accepting BOTH the v0.2 self-describing envelope
-/// `{ "candor": {…}, "functions": [...] }` and the legacy v0.1 bare array `[...]` — the migration
-/// contract (candor-spec §2). An envelope is a JSON object, so a bare array fails that parse and
-/// falls through to the array parse; the two forms are unambiguous.
-fn report_entries(text: &str) -> Option<Vec<BaselineEntry>> {
-    #[derive(serde::Deserialize)]
-    struct Envelope {
-        functions: Vec<BaselineEntry>,
-    }
-    if let Ok(env) = serde_json::from_str::<Envelope>(text) {
-        return Some(env.functions);
-    }
-    serde_json::from_str::<Vec<BaselineEntry>>(text).ok()
-}
-
-/// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy
-/// v0.1 bare array (no header) — which we then can't version-check.
-fn report_version(text: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Meta {
-        version: Option<String>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Env {
-        candor: Option<Meta>,
-    }
-    serde_json::from_str::<Env>(text).ok().and_then(|e| e.candor).and_then(|m| m.version)
 }
 
 /// Load the per-crate reports of this project's OTHER crates (`<prefix>.<crate>.<type>.json`, all
@@ -393,43 +354,6 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str) -> HashMap<(u64, u6
     out
 }
 
-/// One entry of the JSON report (output). Serialized with serde so escaping is correct
-/// for any path/loc — the hand-rolled escaper missed control characters.
-#[derive(serde::Serialize)]
-struct ReportEntry {
-    #[serde(rename = "fn")]
-    func: String,
-    loc: String,
-    inferred: Vec<String>,
-    direct: Vec<String>,
-    declared: Vec<String>,
-    undeclared: Vec<String>,
-    overdeclared: Vec<String>,
-    unresolved: bool,
-    /// Stable cross-crate identity (DefPathHash, Debug form) — lets a dependent crate's analysis
-    /// inherit this function's effects across the crate boundary (CRITIQUE §8).
-    hash: String,
-    /// Effectful local functions this one calls — the (effect-relevant) call graph, so a consumer
-    /// can answer "who calls X?" (`cargo candor callers`) from the report without re-analysis.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    calls: Vec<String>,
-}
-
-/// The engine's build identity, written into every report's envelope header (v0.2) so a report is
-/// self-describing — a consumer in any language can tell which candor produced it.
-#[derive(serde::Serialize)]
-struct ReportMeta {
-    version: &'static str,
-    toolchain: &'static str,
-}
-
-/// The v0.2 self-describing report: a provenance header plus the function entries. Readers also
-/// accept the legacy v0.1 bare array (see `report_entries`).
-#[derive(serde::Serialize)]
-struct Report<'a> {
-    candor: ReportMeta,
-    functions: &'a [ReportEntry],
-}
 
 /// Load a baseline candor JSON into `fn name -> inferred effect set`.
 fn load_baseline(path: &str) -> Option<HashMap<String, BTreeSet<String>>> {
@@ -1610,11 +1534,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         if let Some(prefix) = &json_path {
             let file = format!("{prefix}.{krate}.{kinds}.json");
             // v0.2: a self-describing envelope { candor: {version, toolchain}, functions: [...] }.
-            let report = Report {
-                candor: ReportMeta { version: CANDOR_VERSION, toolchain: CANDOR_TOOLCHAIN },
-                functions: &json_entries,
-            };
-            match serde_json::to_string_pretty(&report) {
+            let meta = ReportMeta { version: CANDOR_VERSION.into(), toolchain: CANDOR_TOOLCHAIN.into() };
+            match to_report_json(&meta, &json_entries) {
                 Ok(body) => match std::fs::write(&file, body) {
                     Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
                     Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),
@@ -1943,45 +1864,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn report_entries_accepts_envelope_and_bare_array() {
-        // v0.2 self-describing envelope.
-        let env = r#"{"candor":{"version":"abc1234","toolchain":"nightly-x"},
-                      "functions":[{"fn":"a","inferred":["Net"],"hash":""},
-                                   {"fn":"b","inferred":["Fs"]}]}"#;
-        let e = report_entries(env).expect("envelope parses");
-        assert_eq!(e.len(), 2);
-        assert_eq!(e[0].func, "a");
-        assert_eq!(e[0].inferred, ["Net"]);
-
-        // v0.1 legacy bare array still parses (the migration contract).
-        let bare = r#"[{"fn":"a","inferred":["Net"]}]"#;
-        assert_eq!(report_entries(bare).expect("bare array parses").len(), 1);
-
-        // Empty envelope and empty array both yield an empty Vec, not None.
-        assert!(report_entries(r#"{"candor":{},"functions":[]}"#).unwrap().is_empty());
-        assert!(report_entries("[]").unwrap().is_empty());
-
-        // Garbage and non-report objects yield None (never panic).
-        assert!(report_entries("not json").is_none());
-        assert!(report_entries(r#"{"candor":{}}"#).is_none()); // object without `functions`
-
-        // A full round-trip: what the engine writes, the reader reads back.
-        let written = serde_json::to_string(&Report {
-            candor: ReportMeta { version: "v9", toolchain: "tc" },
-            functions: &[ReportEntry {
-                func: "f".into(), loc: "l".into(),
-                inferred: vec!["Db".into()], direct: vec!["Db".into()],
-                declared: vec![], undeclared: vec![], overdeclared: vec![],
-                unresolved: false, hash: "00".repeat(16), calls: vec![],
-            }],
-        })
-        .unwrap();
-        let back = report_entries(&written).unwrap();
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0].func, "f");
-        assert_eq!(back[0].hash, "00".repeat(16));
-    }
+    // (report_entries / report_version / round-trip are tested in the `candor-report` crate.)
 
     #[test]
     fn cap_names_match_effects() {

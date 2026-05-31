@@ -1,0 +1,14 @@
+[package]
+name = "candor-query"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "candor's read-only report queries (show/where/callers/map/diff) in Rust — used by cargo-candor."
+
+[[bin]]
+name = "candor-query"
+path = "src/main.rs"
+
+[dependencies]
+candor-report = { path = "../candor-report" }
+serde_json = "1"
