@@ -154,6 +154,21 @@ want   "AS-EFF-007 flags Fs on a parameter-derived path (read_user)" "$out" '[AS
 absent "a literal-path Fs is NOT flagged (read_fixed)"               "$out" '[AS-EFF-007] `read_fixed`'
 rm -rf "$(dirname "$TZ")"
 
+# ── 11. diff FAST PATH: read the kept-fresh report instead of recompiling (P0′ §8 / speed) ──
+echo "== diff fast path (no recompile when .candor/report is fresh) =="
+FP=$(mktemp -d)/fp; mkdir -p "$FP/src" "$FP/.candor"
+printf '[package]\nname="fp"\nversion="0.1.0"\nedition="2021"\n' > "$FP/Cargo.toml"
+printf 'fn worker(){ let _=std::fs::read("/tmp/x"); }\nfn main(){ worker(); }\n' > "$FP/src/main.rs"
+( cd "$FP"; "$ROOT/cargo-candor" snapshot .candor/baseline >/dev/null 2>&1 )
+printf 'fn worker(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn main(){ worker(); }\n' > "$FP/src/main.rs"
+# simulate the Stop hook: a fresh report + matching state hash for the edited source
+( cd "$FP"; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
+( cd "$FP"; find "$PWD" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1 > .candor/state )
+fpout=$( cd "$FP"; "$ROOT/cargo-candor" diff 2>&1 )
+want   "fast-path diff still computes the delta (worker +Net)"  "$fpout" "+Net"
+absent "fast path did NOT recompile (no 'analyzing…')"          "$fpout" "analyzing"
+rm -rf "$(dirname "$FP")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

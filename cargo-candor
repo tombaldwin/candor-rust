@@ -198,17 +198,31 @@ PY
       echo "candor: no baseline at '$pre.*' — create one with 'cargo candor snapshot $pre'." >&2
       exit 2
     fi
-    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-    [ "$json" = 1 ] || echo "candor: analyzing…" >&2
-    run_json() { CANDOR_JSON="$tmp/cur" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
-    run_json
-    ls "$tmp"/cur.*.*.json >/dev/null 2>&1 || { rm -rf target/dylint 2>/dev/null || true; run_json; }
-    if ! ls "$tmp"/cur.*.*.json >/dev/null 2>&1; then
-      echo "candor: no current report produced — did the crate build? Try 'cargo candor audit --all'." >&2
-      exit 1
+    # FAST PATH: if the Stop hook (or `cargo candor watch`) already kept .candor/report.* fresh for
+    # the CURRENT source, diff it directly — no recompile. The freshness test matches candor-run.sh's
+    # src_hash exactly (find *.rs under $PWD, content-hash, compare to .candor/state). Content-based,
+    # so a stale report can never be mistaken for fresh; a mismatch just falls back to the slow path.
+    cur=""; rp=".candor/report"
+    if ls "$rp".*.*.json >/dev/null 2>&1 && [ -f .candor/state ]; then
+      cur_hash="$(find "$PWD" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
+                  | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
+      [ -n "$cur_hash" ] && [ "$cur_hash" = "$(cat .candor/state 2>/dev/null)" ] && cur="$rp"
+    fi
+    if [ -z "$cur" ]; then
+      # SLOW PATH: re-lint to a temp prefix (no fresh report available).
+      tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+      [ "$json" = 1 ] || echo "candor: analyzing…" >&2
+      run_json() { CANDOR_JSON="$tmp/cur" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
+      run_json
+      ls "$tmp"/cur.*.*.json >/dev/null 2>&1 || { rm -rf target/dylint 2>/dev/null || true; run_json; }
+      if ! ls "$tmp"/cur.*.*.json >/dev/null 2>&1; then
+        echo "candor: no current report produced — did the crate build? Try 'cargo candor audit --all'." >&2
+        exit 1
+      fi
+      cur="$tmp/cur"
     fi
     bv=""; [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
-    python3 - "$tmp/cur" "$pre" "$json" "$bv" "$(engine_ver)" <<'PY'
+    python3 - "$cur" "$pre" "$json" "$bv" "$(engine_ver)" <<'PY'
 import sys, glob, json as J
 cur_pre, base_pre, want_json, bver, ever = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4], sys.argv[5]
 

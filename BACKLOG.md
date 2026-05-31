@@ -65,10 +65,16 @@ security/correctness bugs that often matter most, and that its value scales with
       misses flow through struct fields and across functions, and over-flags a validated parameter; it's
       advisory (exit 0), never a gate. Tested (param-derived fires, literal doesn't). **The real frontier
       remains:** interprocedural, field-sensitive data flow (a MIR-level pass) for sound taint.
-- [ ] **8. Speed for large codebases — the enabler, re-prioritized up.** candor is most valuable
-      exactly where it's slowest (big repos). A persistent-report / changed-crate-only path (or a
-      background daemon) makes the valuable case practical. Without it, 6 and 7 don't get used where
-      they'd matter most.
+- [~] **8. Speed — separate the slow analysis (one compile per change) from instant queries.** The
+      principle: the analysis only changes when the code does, so compile once off the critical path
+      and serve queries from the cached report. **Done:** `cargo candor diff` now reads the kept-fresh
+      `.candor/report.*` (when its source-hash matches `.candor/state`, maintained by the Stop hook)
+      instead of recompiling — ~30s → **0.26s** in the common case; falls back to a re-lint when stale
+      (content-hash, so never wrong). **Next:** (a) `cargo candor watch` — a background re-linter that
+      keeps the report fresh on file save, hiding the compile off the critical path even without the
+      hook; (b) instant read-only queries (`show <fn>`, `where <effect>`) served from the report, so
+      the agent answers effect questions in one instant call instead of grepping source; (c) drop the
+      `rm -rf target/dylint` full-clear in explain/policy/audit so a re-lint is incremental.
 - [ ] **9. Selectivity — surface only the *consequential* propagation.** Make `diff`/self-review lead
       with "an effect reached an entry point / a should-be-pure fn / a hot path" rather than listing
       every inheritor. Less noise, focuses the agent on the propagation that *matters*. Cheap; builds
