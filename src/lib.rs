@@ -325,6 +325,20 @@ fn report_entries(text: &str) -> Option<Vec<BaselineEntry>> {
     serde_json::from_str::<Vec<BaselineEntry>>(text).ok()
 }
 
+/// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy
+/// v0.1 bare array (no header) — which we then can't version-check.
+fn report_version(text: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Meta {
+        version: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Env {
+        candor: Option<Meta>,
+    }
+    serde_json::from_str::<Env>(text).ok().and_then(|e| e.candor).and_then(|m| m.version)
+}
+
 /// Load the per-crate reports of this project's OTHER crates (`<prefix>.<crate>.<type>.json`, all
 /// but our own `<me>.<me_kind>` — a package's lib and bin share the crate name but differ by type,
 /// so the bin must still load the lib's report) into a `DefPathHash -> effects` map for
@@ -355,14 +369,22 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str) -> HashMap<(u64, u6
             continue;
         }
         let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
+        // Version-aware trust (candor-spec §2.1): a sibling report produced by a DIFFERENT engine
+        // was computed by rules this engine may have changed, so we must not silently trust its
+        // effects — downgrade everything inherited from it to `Unknown`. (A legacy v0.1 report has no
+        // version; we can't check it, so it's trusted as before.)
+        let stale = report_version(&text).is_some_and(|v| v != CANDOR_VERSION);
         let Some(arr) = report_entries(&text) else { continue };
         for e in arr {
             let Some(key) = parse_dph(&e.hash) else { continue };
-            let effs: Vec<&'static str> = e
-                .inferred
-                .iter()
-                .filter_map(|s| if s.as_str() == UNKNOWN { Some(UNKNOWN) } else { cap_from_name(s.as_str()) })
-                .collect();
+            let effs: Vec<&'static str> = if stale {
+                vec![UNKNOWN]
+            } else {
+                e.inferred
+                    .iter()
+                    .filter_map(|s| if s.as_str() == UNKNOWN { Some(UNKNOWN) } else { cap_from_name(s.as_str()) })
+                    .collect()
+            };
             if !effs.is_empty() {
                 out.insert(key, effs);
             }
@@ -2101,6 +2123,34 @@ mod tests {
         // dep::pure (empty effects) and dep::old (no hash) are dropped; own report is skipped.
         assert!(m.get(&parse_dph(h_own).unwrap()).is_none(), "own report must be skipped");
         assert_eq!(m.len(), 1, "only the one dependency entry with hash + effects should load");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cross_report_version_mismatch_downgrades_to_unknown() {
+        // report_version reads the v0.2 envelope header; a legacy bare array has none.
+        assert_eq!(report_version(r#"{"candor":{"version":"v9"},"functions":[]}"#).as_deref(), Some("v9"));
+        assert!(report_version("[]").is_none());
+
+        let dir = std::env::temp_dir().join("candor_cross_ver_unit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("r");
+        let prefix = prefix.to_str().unwrap();
+        let h = "0123456789abcdef0123456789abcdef";
+        let w = |body: String| std::fs::write(dir.join("r.dep.Rlib.json"), body).unwrap();
+
+        // A v0.2 report from a DIFFERENT engine → inherited effects downgraded to Unknown (§2.1).
+        w(format!(r#"{{"candor":{{"version":"OTHER"}},"functions":[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h}"}}]}}"#));
+        let m = load_cross_reports(prefix, "mybin", "Executable");
+        assert_eq!(m.get(&parse_dph(h).unwrap()).cloned().unwrap_or_default(), vec![UNKNOWN]);
+
+        // The SAME engine version → trusted as-is.
+        w(format!(r#"{{"candor":{{"version":"{CANDOR_VERSION}"}},"functions":[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h}"}}]}}"#));
+        let m = load_cross_reports(prefix, "mybin", "Executable");
+        let mut got = m.get(&parse_dph(h).unwrap()).cloned().unwrap_or_default();
+        got.sort();
+        assert_eq!(got, vec!["Fs", "Net"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

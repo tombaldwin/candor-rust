@@ -190,10 +190,11 @@ that's the narrow, modest-value axis. Diminishing returns.
 - [ ] **candor-java: adopt the v0.2 envelope + first tests/CI.** It still emits v0.1 bare arrays
       (accepted by readers, but it should self-describe), and has *no* automated tests — its
       `sample/`, `conf-sample/`, `spring-sample/`, `cha-sample/` dirs are ready-made fixtures.
-- [ ] **Engine-level version-aware cross-crate trust** (candor-spec §2.1 SHOULD): when a sibling
-      report's version differs from the running engine, downgrade its inherited effects to `Unknown`
-      rather than trust them. Low priority — within one run all crates share a dylib so versions match,
-      and `cargo candor guard` already skips on a baseline/engine mismatch; defense-in-depth.
+- [x] **Engine-level version-aware cross-crate trust** (candor-spec §2.1 SHOULD): `load_cross_reports`
+      now reads each sibling report's `candor.version`; on a mismatch with the running engine it
+      downgrades the inherited effects to `Unknown` (can't trust analysis by rules this engine may have
+      changed). Legacy v0.1 reports have no version → trusted as before. Tested (mismatch → Unknown,
+      match → effects as-is).
 - [x] **De-duplicated the coverage `SUSPECT` heuristic** — now a single `candor-suspect` file at the
       clone root, read by both `candor-run.sh` (via `CANDOR_HOME` / its own location) and `cargo-candor`
       (via `CANDOR_DIR`), with a graceful skip if missing. No more two-copy drift.
