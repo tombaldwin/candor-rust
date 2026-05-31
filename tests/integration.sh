@@ -194,11 +194,13 @@ printf 'fn leaf(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn hand
 shout=$( cd "$Q"; "$ROOT/cargo-candor" show handler 2>&1 )
 whout=$( cd "$Q"; "$ROOT/cargo-candor" where Net 2>&1 )
 whj=$(   cd "$Q"; "$ROOT/cargo-candor" where Net --json 2>&1 )
+clout=$(  cd "$Q"; "$ROOT/cargo-candor" callers leaf 2>&1 )
 want   "show: handler's transitive Net is reported"   "$shout" "Net"
 absent "show served from the report (did NOT recompile)" "$shout" "generating one"
 want   "where: splits the direct source out"          "$whout" "directly"
 want   "where: names the source (leaf)"               "$whout" "leaf"
 want   "where --json: machine-readable"               "$whj" '"directly"'
+want   "callers: leaf's caller (handler) found from the report" "$clout" "handler"
 rm -rf "$(dirname "$Q")"
 
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null

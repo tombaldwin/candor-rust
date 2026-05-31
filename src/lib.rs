@@ -387,6 +387,10 @@ struct ReportEntry {
     /// Stable cross-crate identity (DefPathHash, Debug form) — lets a dependent crate's analysis
     /// inherit this function's effects across the crate boundary (CRITIQUE §8).
     hash: String,
+    /// Effectful local functions this one calls — the (effect-relevant) call graph, so a consumer
+    /// can answer "who calls X?" (`cargo candor callers`) from the report without re-analysis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    calls: Vec<String>,
 }
 
 /// The engine's build identity, written into every report's envelope header (v0.2) so a report is
@@ -1392,9 +1396,22 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     continue;
                 }
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(span);
+                // The effect-relevant call graph: local callees that are themselves effectful.
+                let mut calls: Vec<String> = self
+                    .calls
+                    .get(&f)
+                    .map(|cs| {
+                        cs.iter()
+                            .filter(|c| eff.get(c).is_some_and(|e| !e.is_empty()))
+                            .map(|c| cx.tcx.def_path_str(c.to_def_id()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                calls.sort();
                 json_entries.push(ReportEntry {
                     func: name,
                     loc,
+                    calls,
                     inferred: owned_set(effs),
                     direct: owned_set(&direct),
                     declared: owned_set(&declared),
@@ -1934,7 +1951,7 @@ mod tests {
                 func: "f".into(), loc: "l".into(),
                 inferred: vec!["Db".into()], direct: vec!["Db".into()],
                 declared: vec![], undeclared: vec![], overdeclared: vec![],
-                unresolved: false, hash: "00".repeat(16),
+                unresolved: false, hash: "00".repeat(16), calls: vec![],
             }],
         })
         .unwrap();

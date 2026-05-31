@@ -81,6 +81,7 @@ cargo candor diff     .candor/baseline  # describe the per-function effect delta
 cargo candor watch                      # keep the report fresh in the background → instant `diff`
 cargo candor show     my_function       # a function's effects, instant (read from the report)
 cargo candor where    Net               # which functions perform an effect, instant
+cargo candor callers  my_function       # which functions call this one, instant (who depends on it)
 cargo candor explain  my_function       # trace WHY a function has each effect (the call path)
 cargo candor policy   .candor/policy     # enforce effect boundaries (deny/pure rules)
 cargo candor risk                       # heuristic: effects on caller-derived input (advisory)

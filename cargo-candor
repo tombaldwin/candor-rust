@@ -10,6 +10,7 @@
 #   cargo candor watch                        # keep the report fresh in the background (fast `diff`)
 #   cargo candor show     my_function         # a function's effects, INSTANT (read from the report)
 #   cargo candor where    Net                 # which functions perform an effect, INSTANT
+#   cargo candor callers  my_function         # which functions call this one, INSTANT (who depends on it)
 #   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
 #   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure rules)
 #   cargo candor risk                         # heuristic: effects on caller-derived input (advisory)
@@ -429,6 +430,38 @@ if inherit:
 PY
     exit 0 ;;
 
+  callers)
+    # INSTANT: which functions directly call <fn>, read from the report's (effect-relevant) call
+    # graph — replaces grepping the codebase for callers before you edit. Substring match on the name.
+    json=0; q=""
+    for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$q" ] && q="$a" ;; esac; done
+    [ -n "$q" ] || { echo "usage: cargo candor callers <function-name-substring> [--json]" >&2; exit 2; }
+    command -v python3 >/dev/null 2>&1 || { echo "candor: callers needs python3" >&2; exit 2; }
+    ensure_report || exit 1
+    python3 - .candor/report "$q" "$json" <<'PY'
+import sys, glob, json as J
+pre, q, want_json = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+entries = []
+for f in glob.glob(pre + '.*.*.json'):
+    try: d = J.load(open(f))
+    except Exception: continue
+    entries += d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
+hits = {}                                   # callee (matching q) -> set of its callers
+for e in entries:
+    for callee in e.get('calls', []):
+        if q in callee:
+            hits.setdefault(callee, set()).add(e['fn'])
+if want_json:
+    print(J.dumps({c: sorted(cs) for c, cs in sorted(hits.items())}, indent=2)); sys.exit(0)
+if not hits:
+    print(f"candor: nothing matching `{q}` is called by an effectful function (callers of pure functions aren't tracked)."); sys.exit(0)
+for callee in sorted(hits):
+    cs = sorted(hits[callee])
+    print(f"  {callee}  ← called by {len(cs)}:")
+    for c in cs: print(f"      {c}")
+PY
+    exit 0 ;;
+
   explain)
     # Trace WHY a function has each effect: the call path from it to the source of each effect (the
     # leaf call + location). `<query>` is a substring of the fully-qualified function name.
@@ -505,6 +538,6 @@ PY
     sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|watch|show|where|explain|policy|risk|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|watch|show|where|callers|explain|policy|risk|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac

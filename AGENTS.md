@@ -50,6 +50,8 @@ Effects: `Net`, `Fs`, `Db`, `Exec` (subprocess), `Env`, `Clock`, `Ipc`, `Log`, `
   its source is trusted," not as proof of a bug.
 - **Which functions touch the network (or any effect)?** → `cargo candor where Net` (instant — splits
   the direct sources from the functions that inherit it). Faster than grepping the codebase.
+- **Who calls this function? (before editing it)** → `cargo candor callers <fn>` (instant — its direct
+  callers, from the report's call graph). Faster than grepping for call sites.
 - **Safe to treat as pure (e.g. unit-test without mocks)?** → `inferred == []` *and* `unresolved == false`.
 
 ## 4. The trust rule — do not skip this
