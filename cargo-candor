@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cargo-candor — ergonomic wrapper around `cargo dylint` for the candor lint.
 #
-# Put this file's directory on PATH (or symlink this file into one), then run e.g.
+# One-time:  ./install.sh  (or `cargo candor setup`) — builds + puts `cargo candor` on PATH. Then e.g.
 #   cargo candor audit              # at-a-glance effect profile of the whole project
 #   cargo candor audit --all        # the full per-function lint (spans in context)
 #   cargo candor snapshot .candor/baseline
@@ -23,22 +23,43 @@
 # `cargo dylint --lib-path <dylib>` with the right environment for the chosen command.
 set -euo pipefail
 
-# Resolve the candor repo — this script lives at its root (follow symlinks).
+# Resolve the candor clone — this script lives at its root (follow symlinks, e.g. from ~/.cargo/bin).
+# Handle BOTH absolute and relative symlink targets (an absolute `ln -s` target must NOT be prefixed
+# with the link's directory).
 SELF="${BASH_SOURCE[0]}"
-while [ -L "$SELF" ]; do SELF="$(cd "$(dirname "$SELF")" && pwd)/$(readlink "$SELF")"; done
+while [ -L "$SELF" ]; do
+  link="$(readlink "$SELF")"
+  case "$link" in
+    /*) SELF="$link" ;;
+    *)  SELF="$(cd "$(dirname "$SELF")" && pwd)/$link" ;;
+  esac
+done
 CANDOR_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# Stable runtime home — the dylib + query binary are kept here so a `cargo clean` in the clone (or a
+# toolchain bump that wipes target/) can't strand the tool. `install.sh` populates it.
+CANDOR_CACHE="${CANDOR_CACHE:-$HOME/.candor}"
+# Fallback if the wrapper was COPIED (not symlinked) somewhere with no clone alongside it.
+if [ ! -f "$CANDOR_DIR/Cargo.toml" ] && [ -f "$CANDOR_CACHE/clone" ]; then
+  CANDOR_DIR="$(cat "$CANDOR_CACHE/clone" 2>/dev/null || echo "$CANDOR_DIR")"
+fi
 
+# Locate the lint dylib: a fresh build in the clone wins (for candor's own development); otherwise the
+# stable installed copy under ~/.candor/lib, which survives a clone `cargo clean`.
 find_lib() {
-  ls "$CANDOR_DIR"/target/debug/libcandor@*.dylib \
-     "$CANDOR_DIR"/target/debug/libcandor@*.so 2>/dev/null | head -1
+  ls "$CANDOR_DIR"/target/release/libcandor@*.dylib "$CANDOR_DIR"/target/release/libcandor@*.so \
+     "$CANDOR_DIR"/target/debug/libcandor@*.dylib   "$CANDOR_DIR"/target/debug/libcandor@*.so \
+     "$CANDOR_CACHE"/lib/libcandor@*.dylib          "$CANDOR_CACHE"/lib/libcandor@*.so 2>/dev/null | head -1
+}
+# Copy the active artifact into the stable home so a later `cargo clean` can't strand it.
+stash() { # <file> <subdir>
+  case "$1" in "$CANDOR_CACHE"/*) return 0 ;; esac
+  [ -n "$1" ] && mkdir -p "$CANDOR_CACHE/$2" && cp -f "$1" "$CANDOR_CACHE/$2/" 2>/dev/null || true
 }
 
-# The read-only report queries (show/where/callers/map/diff) live in the candor-query binary — one
-# typed program over the shared report types, replacing the per-command inline Python. Locate it
-# (release first, then debug), building on first use. `query <subcmd> <args…>` runs it.
+# The read-only report queries (show/where/callers/map/diff/audit) live in the candor-query binary.
 find_query() {
-  ls "$CANDOR_DIR"/target/release/candor-query \
-     "$CANDOR_DIR"/target/debug/candor-query 2>/dev/null | head -1
+  ls "$CANDOR_DIR"/target/release/candor-query "$CANDOR_DIR"/target/debug/candor-query \
+     "$CANDOR_CACHE"/bin/candor-query 2>/dev/null | head -1
 }
 query() {
   local q; q="$(find_query || true)"
@@ -47,24 +68,33 @@ query() {
     ( cd "$CANDOR_DIR" && cargo build -p candor-query >&2 )
     q="$(find_query || true)"
   fi
-  [ -n "$q" ] || { echo "candor: could not build/find candor-query under $CANDOR_DIR/target" >&2; exit 1; }
+  [ -n "$q" ] || { echo "candor: could not build/find candor-query (run: $CANDOR_DIR/install.sh)" >&2; exit 1; }
+  stash "$q" bin
   "$q" "$@"
-}
-
-LIB="$(find_lib || true)"
-if [ -z "${LIB:-}" ]; then
-  echo "candor: building the lint (first run)…" >&2
-  ( cd "$CANDOR_DIR" && cargo build >&2 )
-  LIB="$(find_lib || true)"
-fi
-[ -n "${LIB:-}" ] || {
-  echo "candor: could not build/find the lint dylib under $CANDOR_DIR/target/debug" >&2
-  exit 1
 }
 
 # Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
 [ "${1:-}" = "candor" ] && shift
 cmd="${1:-audit}"; shift || true
+
+# Resolve (building on first use) the lint dylib — UNLESS the command doesn't need it. `setup` is the
+# recovery path (it builds cleanly via install.sh), and help is free; neither should fail on a missing
+# or broken dylib first.
+case "$cmd" in
+  setup|install|-h|--help|help) LIB="" ;;
+  *)
+    LIB="$(find_lib || true)"
+    if [ -z "${LIB:-}" ]; then
+      echo "candor: building the lint (first run; rustup may fetch the pinned toolchain once)…" >&2
+      ( cd "$CANDOR_DIR" && cargo build >&2 )
+      LIB="$(find_lib || true)"
+    fi
+    [ -n "${LIB:-}" ] || {
+      echo "candor: could not build/find the lint dylib — run: $CANDOR_DIR/install.sh" >&2
+      exit 1
+    }
+    stash "$LIB" lib ;;
+esac
 
 # The candor commit that produced (or is checking) a baseline. A baseline is only comparable to
 # itself — see `guard` and `update` below. Read the version the DYLIB was actually built at (the
@@ -84,6 +114,7 @@ engine_ver() {
 ensure_report() {
   if ! ls .candor/report.*.*.json >/dev/null 2>&1; then
     echo "candor: no report yet — generating one (run 'cargo candor watch &' to keep it fresh)…" >&2
+    mkdir -p .candor                                   # fresh project: the lint can't create its output dir
     rm -rf target/dylint 2>/dev/null || true
     CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
     ls .candor/report.*.*.json >/dev/null 2>&1 || { echo "candor: could not produce a report (build failed?)." >&2; return 1; }
@@ -318,8 +349,9 @@ case "$cmd" in
     # The clone is the single source of truth for the engine, the Claude Code integration
     # scripts, and AGENTS.md — pull + rebuild updates all three at one commit.
     echo "candor: updating $CANDOR_DIR …" >&2
-    ( cd "$CANDOR_DIR" && git pull --ff-only && cargo build ) >&2
+    ( cd "$CANDOR_DIR" && git pull --ff-only && cargo build -p candor-query && cargo build ) >&2
     LIB="$(find_lib || true)"; ev="$(engine_ver)"
+    stash "$LIB" lib; stash "$(find_query || true)" bin   # refresh the stable ~/.candor home
     echo "candor: engine now @$ev — scripts and AGENTS.md current too." >&2
     # Auto-refresh a baseline in THIS project so the guard never false-fires after an
     # upgrade. Force a recompile (dylint emits only on recompile), regenerate, re-stamp.
@@ -346,10 +378,15 @@ case "$cmd" in
     fi
     exit 0 ;;
 
+  setup|install)
+    # One-shot: build, stash the dylib + query binary in ~/.candor (survives `cargo clean`), and put
+    # `cargo candor` on PATH via ~/.cargo/bin. Re-run any time to refresh.
+    exec "$CANDOR_DIR/install.sh" "$@" ;;
+
   -h|--help|help)
     sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|watch|show|where|callers|map|explain|policy|risk|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (setup|audit|snapshot|guard|diff|watch|show|where|callers|map|explain|policy|risk|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac

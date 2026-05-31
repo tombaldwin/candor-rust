@@ -70,15 +70,21 @@ with `cargo candor watch` so every call serves from a fresh report.
 
 ```sh
 cargo install cargo-dylint dylint-link   # once per machine
-cargo build                              # builds the lint; first build downloads the nightly + rustc-dev
+./install.sh                             # build + install — then `cargo candor` works in any project
 ```
 
-The build produces `target/debug/libcandor@<toolchain>-<platform>.dylib` (`.so` on Linux).
+`install.sh` is one-shot and idempotent: it builds the lint (rustup auto-fetches the pinned nightly +
+`rustc-dev` from `rust-toolchain.toml` — you never manage the toolchain by hand), stashes the dylib +
+the `candor-query` binary under `~/.candor` (a stable home that survives a `cargo clean` in this
+clone), and symlinks `cargo-candor` into `~/.cargo/bin` so `cargo candor …` resolves everywhere. Re-run
+it (or `cargo candor setup`) any time to refresh; `cargo candor update` pulls + rebuilds + refreshes.
+The pinned nightly is inherent to dylint (it links rustc internals) and runs only for the lint — it
+does not touch your projects' toolchains.
 
 ## Quick start (humans)
 
-Put this repo on `PATH` (or symlink `cargo-candor` into one) and use the wrapper, which finds and
-builds the dylib for you:
+After `install.sh`, use the wrapper from any Rust project (it self-heals — rebuilding the dylib if it
+ever goes missing):
 
 ```sh
 cargo candor audit                      # at-a-glance effect profile of the whole project
