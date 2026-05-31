@@ -226,9 +226,18 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P5 — research (the thesis)
 
-- [ ] Controlled eval of *edit quality* (not just analysis cost) with independent ground truth and
-      multiple trials — **the gate on P0** (see P0 §5). The pilot (`EVAL.md`) only showed consumability
-      + efficiency, and that a source-only agent can beat the report where the classifier has a gap.
+- [~] Controlled eval of *edit quality* (not just analysis cost) with independent ground truth and
+      multiple trials — **the gate on P0** (see P0 §5). The pilot (`EVAL.md`) showed consumability +
+      efficiency, that a source-only agent can beat the report where the classifier has a gap, and (Trial
+      5) that candor's edit-feedback lifts non-local awareness on one task.
+      **Now scaled — first batch shipped:** `eval/scaled/` is a pre-registered, reproducible 3-task ×
+      2-arm × 2-trial harness (fixtures with candor-verified ground truth, blind judge, falsification
+      clause). Batch-1 result (`eval/scaled/RESULTS.md`): the pre-registered *binary* awareness metric
+      falsifies the easy "big lift" claim (capable control already 0.83), but the real signal is a
+      *completeness* gap — control names **42%** of the propagation set vs treatment **92%**. The pilot
+      also surfaced its own metric mis-specification + a fixture-leakage confound. **Remaining:**
+      pre-register completeness as primary; de-leak/enlarge fixtures; more tasks/trials and a weaker
+      model to tighten the estimate.
 - [x] Effect-aware PR review — `examples/candor-pr-review.yml`: a workflow that POSTS the per-function
       effect delta vs the baseline as a PR comment + step summary (the *review-time* sibling of P0's
       *edit-time* loop; both powered by `cargo candor diff`). It informs rather than blocks (pair with

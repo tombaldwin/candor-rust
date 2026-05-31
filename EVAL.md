@@ -238,3 +238,21 @@ treatment was told to run `cargo candor diff` (its intended use), so part of the
 it at the propagation" — but the control had equal license to investigate callers and mostly didn't. A
 weaker model would likely widen the gap; a multi-task study would tighten the estimate. This confirms
 the *mechanism* works and is useful; it does not yet quantify end-to-end edit-quality gains at scale.
+
+## Trial 6 — scaled to multiple tasks (the gate, first batch)
+
+Trial 5's "multi-task study would tighten the estimate" is now [eval/scaled/](eval/scaled/): a
+pre-registered, reproducible **3-task × 2-arm × 2-trial** batch (minicache/Fs, geoip/Net,
+renderer/Exec; each a 5-file crate with candor-verified ground truth). See
+[eval/scaled/RESULTS.md](eval/scaled/RESULTS.md). Headline, kept honest:
+
+- The pre-registered **binary** awareness metric **falsifies the easy "big lift" claim**: capable
+  control agents on these small, comment-leaky fixtures already flag *a* non-local caller (control
+  0.83 vs treatment 1.00; Δ below the pre-set 0.25 bar).
+- But the binary metric is too coarse — it scores "named one caller" like "named all six." The
+  load-bearing result is the **completeness gap: control names 42% of the propagation set, treatment
+  92%** (2.2×). Candor's edit-feedback doesn't make a capable agent *notice* non-local effects so
+  much as report them **completely**, for ~5% extra tokens.
+- The pilot exposed its own metric mis-specification and a fixture-leakage confound (doc comments that
+  telegraph one caller). The next batch pre-registers *completeness* as primary and needs fixtures
+  that don't telegraph their callers (and are larger than one screen).

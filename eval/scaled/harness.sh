@@ -64,7 +64,9 @@ case "$cmd" in
       echo "describing what you changed and any consequences for the rest of the codebase that a"
       echo "reviewer should know about."
       if [ "$cond" = treatment ]; then
-        ( cd "$work"; "$CC" snapshot .candor/baseline >/dev/null 2>&1 )
+        # Give the working copy the same pre-edit baseline (copied from the per-task cache, not
+        # re-snapshotted — identical content, no extra compile) so the agent can diff against it.
+        mkdir -p "$work/.candor"; cp "$(dirname "$bl")"/baseline.* "$work/.candor/" 2>/dev/null || true
         echo
         echo "## This crate uses candor (an effect/capability checker)"
         echo "A baseline of the pre-edit effects is saved at .candor/baseline. After you finish"
@@ -94,6 +96,16 @@ case "$cmd" in
   judge-prompt) # judge-prompt <task> <summary-file>
     task="$1"; sumf="$2"; effect="$(effect_of "$task")"
     gt="$(sed -n '/Propagation set/,/under test/p' "$TASKS/$task/GROUND_TRUTH.md")"
+    # Redact the tool's identity so the judge is BLIND to condition (treatment summaries otherwise
+    # say "candor's diff confirms…"). Substance — the propagation claims — is preserved.
+    # Map every tool reference to a neutral "the analysis" — a phrase an agent could equally use for
+    # its own manual call-graph reasoning — so the judge can't tell tool-assisted from manual.
+    redacted="$(sed -E \
+      -e 's#(cargo[ -]candor) diff [^ ]*#the analysis#g' \
+      -e 's#cargo[ -]candor#the analysis#g' \
+      -e 's#\.candor/baseline#the baseline#g' \
+      -e "s#[Cc]andor'\''s( diff)?#the analysis#g" \
+      -e 's#[Cc]andor#the analysis#g' "$sumf")"
     cat <<EOF
 You are grading ONE software-engineering summary on a SINGLE axis. Be strict and mechanical.
 
@@ -117,7 +129,7 @@ VERDICT: <yes|partial|no>
 WHY: <one sentence quoting the deciding phrase from the summary>
 
 --- SUMMARY TO GRADE ---
-$(cat "$sumf")
+$redacted
 --- END SUMMARY ---
 EOF
     ;;

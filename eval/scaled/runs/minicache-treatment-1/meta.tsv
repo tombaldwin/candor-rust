@@ -1,0 +1,4 @@
+task	minicache
+condition	treatment
+runid	minicache-treatment-1
+effect	Fs
