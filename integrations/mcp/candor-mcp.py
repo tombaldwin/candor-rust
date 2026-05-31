@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# candor-mcp.py — a minimal MCP (Model Context Protocol) stdio server that exposes candor's INSTANT
+# read-only queries as native agent tools. No SDK: newline-delimited JSON-RPC 2.0 over stdio.
+#
+# Why: candor's queries are fast (they read the kept-fresh report — run `cargo candor watch &`), but
+# an agent only saves time if it reaches for them reflexively instead of grepping and reading source.
+# As MCP tools the agent calls them in one cheap call, like it already calls grep.
+#
+# Register (project-scoped, committed) by adding to your project's .mcp.json:
+#   { "mcpServers": { "candor": { "type": "stdio", "command": "python3",
+#                                  "args": ["/abs/path/to/candor/integrations/mcp/candor-mcp.py"] } } }
+# or:  claude mcp add --transport stdio candor -- python3 /abs/path/.../candor-mcp.py
+#
+# The server runs `cargo candor <q> --json` in the project (its cwd); each query reads the report and
+# returns instantly when it's fresh. Output goes to the agent; all logging stays on stderr.
+import json
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CARGO_CANDOR = os.path.normpath(os.path.join(HERE, "..", "..", "cargo-candor"))  # the candor clone root
+
+TOOLS = [
+    {
+        "name": "candor_effects",
+        "description": "The effect set of a Rust function (INSTANT, from candor's report). Use before "
+                       "editing to see what it does to the outside world without reading its source. "
+                       "Returns its transitive `inferred` effects and the `direct` ones it performs itself.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"function": {"type": "string", "description": "function name (a substring of the fully-qualified path)"}},
+            "required": ["function"],
+        },
+    },
+    {
+        "name": "candor_where",
+        "description": "Which functions perform a given effect (INSTANT), split into the direct sources "
+                       "and the functions that inherit it transitively. Faster than grepping the codebase. "
+                       "Effects: Net Fs Db Exec Env Clock Ipc Log Rand Clipboard Unknown.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"effect": {"type": "string", "description": "an effect name, e.g. Net"}},
+            "required": ["effect"],
+        },
+    },
+    {
+        "name": "candor_callers",
+        "description": "Which functions call a given function (INSTANT) — who depends on it. Use before "
+                       "changing a function's behaviour or signature. Faster than grepping for call sites.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"function": {"type": "string", "description": "function name (a substring of the fully-qualified path)"}},
+            "required": ["function"],
+        },
+    },
+    {
+        "name": "candor_diff",
+        "description": "How your recent edits changed each function's effect surface vs the committed "
+                       "baseline (INSTANT) — what gained or lost an effect, INCLUDING the non-local blast "
+                       "radius (a network call you add deep in a helper shows +Net on every caller). Use "
+                       "after editing to check you didn't change the effect surface unintentionally.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+
+def run_query(args):
+    try:
+        r = subprocess.run([CARGO_CANDOR, *args], capture_output=True, text=True, timeout=300)
+        return r.stdout.strip() or r.stderr.strip() or "(no output)"
+    except Exception as e:  # noqa: BLE001 — surface any failure to the agent as text
+        return f"candor: query failed ({e})"
+
+
+def dispatch(name, args):
+    if name == "candor_effects":
+        return run_query(["show", args.get("function", ""), "--json"])
+    if name == "candor_where":
+        return run_query(["where", args.get("effect", ""), "--json"])
+    if name == "candor_callers":
+        return run_query(["callers", args.get("function", ""), "--json"])
+    if name == "candor_diff":
+        return run_query(["diff", "--json"])
+    return None
+
+
+def send(mid, result=None, error=None):
+    msg = {"jsonrpc": "2.0", "id": mid}
+    if error is not None:
+        msg["error"] = error
+    else:
+        msg["result"] = result
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except Exception:
+            continue  # not parseable; nothing we can reply to without an id
+        mid = req.get("id")
+        method = req.get("method")
+        if mid is None:
+            continue  # a notification (e.g. notifications/initialized) — no response
+        if method == "initialize":
+            send(mid, result={
+                "protocolVersion": req.get("params", {}).get("protocolVersion", "2025-06-18"),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "candor", "version": "1.0.0"},
+            })
+        elif method == "tools/list":
+            send(mid, result={"tools": TOOLS})
+        elif method == "tools/call":
+            params = req.get("params", {})
+            text = dispatch(params.get("name"), params.get("arguments", {}))
+            if text is None:
+                send(mid, result={"content": [{"type": "text", "text": f"unknown tool: {params.get('name')}"}], "isError": True})
+            else:
+                send(mid, result={"content": [{"type": "text", "text": text}]})
+        else:
+            send(mid, error={"code": -32601, "message": "Method not found"})
+
+
+if __name__ == "__main__":
+    main()

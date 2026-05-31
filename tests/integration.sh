@@ -203,6 +203,25 @@ want   "where --json: machine-readable"               "$whj" '"directly"'
 want   "callers: leaf's caller (handler) found from the report" "$clout" "handler"
 rm -rf "$(dirname "$Q")"
 
+# ── 14. MCP server: candor's queries as native agent tools (P0′ §10) ──
+echo "== MCP server (candor-mcp.py) =="
+MCP="$ROOT/integrations/mcp/candor-mcp.py"
+mout=$(printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | python3 "$MCP" 2>/dev/null)
+want "MCP: initialize returns serverInfo"        "$mout" '"serverInfo"'
+want "MCP: tools/list exposes candor_where"      "$mout" 'candor_where'
+want "MCP: tools/list exposes candor_callers"    "$mout" 'candor_callers'
+M=$(mktemp -d)/m; mkdir -p "$M/src" "$M/.candor"
+printf '[package]\nname="m"\nversion="0.1.0"\nedition="2021"\n' > "$M/Cargo.toml"
+printf 'fn leaf(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn handler(){ leaf(); }\nfn main(){ handler(); }\n' > "$M/src/main.rs"
+( cd "$M"; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
+( cd "$M"; find "$PWD" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1 > .candor/state )
+cout=$( cd "$M"; printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"candor_where","arguments":{"effect":"Net"}}}' | python3 "$MCP" 2>/dev/null )
+want "MCP: tools/call candor_where returns the live result" "$cout" 'leaf'
+rm -rf "$(dirname "$M")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

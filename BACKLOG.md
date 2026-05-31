@@ -88,13 +88,14 @@ security/correctness bugs that often matter most, and that its value scales with
 
 - [~] **10. Realize the speed/cost savings — make the agent *use* the fast queries.** §8 made queries
       instant; this is about the agent reflexively reaching for them instead of grepping/reading.
-      **Done:** `cargo candor callers <fn>` — instant reverse-dependency lookup ("who calls this?",
-      the most common pre-edit grep), served from a new effect-relevant `calls` field in the report.
-      **Next:** (a) an **MCP server** exposing the query set (`effects`/`where`/`callers`/`diff`) as
-      native tools, so an MCP agent calls candor reflexively in one cheap call (the CLI is the
-      fallback) — the leverage point that converts "candor *can* answer fast" into "the agent *skips*
-      reading files"; (b) a compact `cargo candor map` (module→effects overview) to front-load
-      understanding at session start. Caveat: keep the surface small — over-querying adds round-trips.
+      **Done:** `cargo candor callers <fn>` — instant reverse-dependency lookup ("who calls this?", the
+      most common pre-edit grep), served from a new effect-relevant `calls` field in the report. Also
+      **done:** an **MCP server** (`integrations/mcp/candor-mcp.py`, no SDK) exposing the query set
+      (`candor_effects`/`where`/`callers`/`diff`) as native tools, so an MCP agent calls candor
+      reflexively in one cheap call (CLI is the fallback) — the leverage point converting "candor *can*
+      answer fast" into "the agent *skips* reading files". **Next:** a compact `cargo candor map`
+      (module→effects overview) to front-load understanding at session start. Caveat: keep the tool
+      surface small — over-querying adds round-trips.
 
 **Not worth doing:** more interactive-loop polish (call-site line, prettier output) — the eval says
 that's the narrow, modest-value axis. Diminishing returns.

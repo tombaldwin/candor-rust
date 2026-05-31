@@ -47,6 +47,11 @@ baseline, it hands that delta *back to the agent* as a self-review checkpoint �
 loops, and it's off by default. This is the difference between candor *informing* an agent and
 *changing what it does* — see [BACKLOG.md](BACKLOG.md) P0.
 
+**MCP server.** [`integrations/mcp/`](integrations/mcp/) exposes candor's instant queries
+(`candor_effects` / `candor_where` / `candor_callers` / `candor_diff`) as native MCP tools, so an
+agent calls candor reflexively — in one cheap call instead of grepping and reading source. Pair it
+with `cargo candor watch` so every call serves from a fresh report.
+
 *Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
 [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md)
 
