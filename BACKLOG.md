@@ -42,6 +42,40 @@ transitively perform `Net`). candor computes that for free. **Lead with the delt
       candor doesn't. Pilot caveats: N=4/arm, one task, one capable model. **Still to do:** multi-task,
       multi-model study quantifying end-to-end *edit-quality* gains (not just awareness) before scaling.
 
+### P0′ — where to take it next (post-eval reassessment)
+
+The eval reframed the goal. AI agents fail at code in a way candor is positioned for: they **don't
+hold the global architecture in their head**, so they put I/O in the wrong layer, break a purity
+boundary, or give a function an effect it was never meant to have. candor sees the whole effect graph;
+the agent doesn't. Lean into *that* asymmetry — not into restating effects the agent already sees
+locally. (The eval also showed the *guard* is the dependable value, that candor misses the
+security/correctness bugs that often matter most, and that its value scales with codebase size.)
+
+- [ ] **6. Effect policy / architectural invariants — the highest-leverage cheap win.** Today the
+      guard flags *any* function gaining *any* effect vs a baseline — noisy, and it knows only
+      "changed", not "wrong". Add a declarative policy: `domain::* must perform no Db/Net`, `only
+      infra::* may do Exec`, `module parse must stay pure`, `nothing may gain Ipc`. candor enforces
+      them as *violations*. Turns effect *accounting* into boundary *enforcement* — exactly the
+      architectural mistake agents make and can't self-catch — with fewer false alarms, and it scales
+      (declare once). Builds on the existing guard. **Starting now.**
+- [ ] **7. Effects → *risk* (argument provenance / taint-lite) — the high-value frontier.** The eval's
+      real bug was an `Fs` effect whose path came from an untrusted parameter; candor knows the effect
+      but not that its argument is attacker-derivable. Even a crude "this effect's key argument flows
+      from a fn parameter, not a literal/validated value" moves candor from "you do Fs" to "you do Fs
+      on caller-controlled input" — where the dangerous class lives. Biggest value, biggest effort
+      (real data-flow); scope as a bet, not a quick win.
+- [ ] **8. Speed for large codebases — the enabler, re-prioritized up.** candor is most valuable
+      exactly where it's slowest (big repos). A persistent-report / changed-crate-only path (or a
+      background daemon) makes the valuable case practical. Without it, 6 and 7 don't get used where
+      they'd matter most.
+- [ ] **9. Selectivity — surface only the *consequential* propagation.** Make `diff`/self-review lead
+      with "an effect reached an entry point / a should-be-pure fn / a hot path" rather than listing
+      every inheritor. Less noise, focuses the agent on the propagation that *matters*. Cheap; builds
+      on the introduced/inherited split.
+
+**Not worth doing:** more interactive-loop polish (call-site line, prettier output) — the eval says
+that's the narrow, modest-value axis. Diminishing returns.
+
 ## P1 — correctness (silent wrong answers are the worst failure)
 
 - [x] **Database clients.** `sqlx`/`rusqlite`/`postgres`/`tokio_postgres`/`diesel`/`redis`/… now
