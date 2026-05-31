@@ -8,6 +8,8 @@
 #   cargo candor guard    .candor/baseline   # CI gate: fail on a gained effect
 #   cargo candor diff     .candor/baseline   # describe the per-function effect delta (--json)
 #   cargo candor watch                        # keep the report fresh in the background (fast `diff`)
+#   cargo candor show     my_function         # a function's effects, INSTANT (read from the report)
+#   cargo candor where    Net                 # which functions perform an effect, INSTANT
 #   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
 #   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure rules)
 #   cargo candor risk                         # heuristic: effects on caller-derived input (advisory)
@@ -54,6 +56,25 @@ engine_ver() {
   v="$(strings -a "$LIB" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-fA-F]+' | head -1 | cut -d= -f2)"
   [ -n "$v" ] && { printf '%s' "$v"; return 0; }
   git -C "$CANDOR_DIR" rev-parse --short HEAD 2>/dev/null
+}
+
+# Ensure `.candor/report.*` exists for a read-only query, INSTANTLY when possible: serve whatever is
+# there (kept fresh by `cargo candor watch` or the Stop hook), generating one only if none exists.
+# Warns when the report is behind the current source — the answer is still served, just flagged.
+ensure_report() {
+  if ! ls .candor/report.*.*.json >/dev/null 2>&1; then
+    echo "candor: no report yet — generating one (run 'cargo candor watch &' to keep it fresh)…" >&2
+    rm -rf target/dylint 2>/dev/null || true
+    CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
+    ls .candor/report.*.*.json >/dev/null 2>&1 || { echo "candor: could not produce a report (build failed?)." >&2; return 1; }
+  elif [ -f .candor/state ]; then
+    local cur
+    cur="$(find "$PWD" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
+           | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
+    [ -n "$cur" ] && [ "$cur" != "$(cat .candor/state 2>/dev/null)" ] && \
+      echo "candor: ⚠ report may be behind your edits — 'cargo candor watch &' (or /candor) to refresh." >&2
+  fi
+  return 0
 }
 
 case "$cmd" in
@@ -327,6 +348,72 @@ PY
       sleep "${CANDOR_WATCH_INTERVAL:-2}"
     done ;;
 
+  show)
+    # INSTANT: a function's effect surface, read from the fresh report (no recompile). Replaces the
+    # agent reading source to answer "what does this function do?". `--json` for machine reading.
+    json=0; q=""
+    for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$q" ] && q="$a" ;; esac; done
+    [ -n "$q" ] || { echo "usage: cargo candor show <function-name-substring> [--json]" >&2; exit 2; }
+    command -v python3 >/dev/null 2>&1 || { echo "candor: show needs python3" >&2; exit 2; }
+    ensure_report || exit 1
+    python3 - .candor/report "$q" "$json" <<'PY'
+import sys, glob, json as J
+pre, q, want_json = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+fns = []
+for f in glob.glob(pre + '.*.*.json'):
+    try: d = J.load(open(f))
+    except Exception: continue
+    es = d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
+    fns += [e for e in es if q in e.get('fn', '')]
+fns.sort(key=lambda e: e['fn'])
+if want_json:
+    print(J.dumps([{ "fn": e['fn'], "inferred": sorted(e.get('inferred', [])),
+                     "direct": sorted(e.get('direct', [])), "unresolved": e.get('unresolved', False) }
+                   for e in fns], indent=2)); sys.exit(0)
+if not fns:
+    print(f"candor: no effectful function matching `{q}` (pure functions are omitted from the report)."); sys.exit(0)
+w = max(len(e['fn']) for e in fns)
+for e in fns:
+    direct = set(e.get('direct', []))
+    parts = ' '.join((x + '*' if x in direct else x) for x in sorted(e.get('inferred', [])))
+    unk = '  ⚠ unresolved (set may be incomplete)' if e.get('unresolved') else ''
+    print(f"  {e['fn']:<{w}}  {{ {parts} }}{unk}")
+print("  (* = performed in the function's own body; unmarked = via a callee)")
+PY
+    exit 0 ;;
+
+  where)
+    # INSTANT: which functions perform an effect, read from the fresh report (no recompile). Replaces
+    # grepping the codebase for "what touches the network/DB/…". Splits sources from inheritors.
+    json=0; eff=""
+    for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$eff" ] && eff="$a" ;; esac; done
+    [ -n "$eff" ] || { echo "usage: cargo candor where <Effect> [--json]   (Net|Fs|Db|Exec|Env|Clock|Ipc|Log|Rand|Clipboard|Unknown)" >&2; exit 2; }
+    command -v python3 >/dev/null 2>&1 || { echo "candor: where needs python3" >&2; exit 2; }
+    ensure_report || exit 1
+    python3 - .candor/report "$eff" "$json" <<'PY'
+import sys, glob, json as J
+pre, eff, want_json = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+allf = []
+for f in glob.glob(pre + '.*.*.json'):
+    try: d = J.load(open(f))
+    except Exception: continue
+    allf += d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
+direct = sorted(e['fn'] for e in allf if eff in e.get('direct', []))
+inherit = sorted(e['fn'] for e in allf if eff in e.get('inferred', []) and eff not in e.get('direct', []))
+if want_json:
+    print(J.dumps({"effect": eff, "directly": direct, "inherited": inherit}, indent=2)); sys.exit(0)
+if not direct and not inherit:
+    print(f"candor: no function performs {eff} in the report."); sys.exit(0)
+print(f"{len(direct) + len(inherit)} function(s) perform {eff}:")
+if direct:
+    print(f"  directly ({len(direct)}):")
+    for fn in direct: print(f"    {fn}")
+if inherit:
+    print(f"  inherit it via a callee ({len(inherit)}):")
+    for fn in inherit: print(f"    {fn}")
+PY
+    exit 0 ;;
+
   explain)
     # Trace WHY a function has each effect: the call path from it to the source of each effect (the
     # leaf call + location). `<query>` is a substring of the fully-qualified function name.
@@ -406,6 +493,6 @@ PY
     sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|watch|explain|policy|risk|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|watch|show|where|explain|policy|risk|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac

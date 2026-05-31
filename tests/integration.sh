@@ -183,6 +183,24 @@ kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null
 want "watch auto-refreshed the report after an edit (worker gained Net)" "$seen" "yes"
 rm -rf "$(dirname "$WV")"
 
+# ── 13. Instant read-only queries served from the report: show / where (P0′ §8 / speed) ──
+echo "== instant queries (show / where) =="
+Q=$(mktemp -d)/q; mkdir -p "$Q/src" "$Q/.candor"
+printf '[package]\nname="q"\nversion="0.1.0"\nedition="2021"\n' > "$Q/Cargo.toml"
+printf 'fn leaf(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn handler(){ leaf(); }\nfn main(){ handler(); }\n' > "$Q/src/main.rs"
+# a fresh report (as watch/the hook would maintain) → the queries serve instantly, no recompile
+( cd "$Q"; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
+( cd "$Q"; find "$PWD" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1 > .candor/state )
+shout=$( cd "$Q"; "$ROOT/cargo-candor" show handler 2>&1 )
+whout=$( cd "$Q"; "$ROOT/cargo-candor" where Net 2>&1 )
+whj=$(   cd "$Q"; "$ROOT/cargo-candor" where Net --json 2>&1 )
+want   "show: handler's transitive Net is reported"   "$shout" "Net"
+absent "show served from the report (did NOT recompile)" "$shout" "generating one"
+want   "where: splits the direct source out"          "$whout" "directly"
+want   "where: names the source (leaf)"               "$whout" "leaf"
+want   "where --json: machine-readable"               "$whj" '"directly"'
+rm -rf "$(dirname "$Q")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

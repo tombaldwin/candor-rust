@@ -38,7 +38,8 @@ Effects: `Net`, `Fs`, `Db`, `Exec` (subprocess), `Env`, `Clock`, `Ipc`, `Log`, `
 
 ## 3. Use it
 
-- **Blast radius of editing a function** → read its `inferred`.
+- **What effects does a function have? / blast radius of editing it** → `cargo candor show <fn>`
+  (instant — its full effect set; `*` = performed directly).
 - **Why does a function have an effect?** → `cargo candor explain <fn>` traces the call path to the
   source (`main → middle → leaf`, and `leaf` calls `std::net::TcpStream::connect`). Use it before
   editing to see what flows through a function, and to act on the trust rule (§4) — it shows you
@@ -47,7 +48,8 @@ Effects: `Net`, `Fs`, `Db`, `Exec` (subprocess), `Env`, `Clock`, `Ipc`, `Log`, `
   comes from a function parameter (`fs::read(path_from_param)`, `Command::new(name)`) — the injection
   class. A *heuristic* nudge (it over- and under-flags): treat a hit as "validate this input or confirm
   its source is trusted," not as proof of a bug.
-- **Which functions touch the network?** → `jq '.[]|select(.inferred|index("Net"))|.fn' /tmp/candor-report.*.json`
+- **Which functions touch the network (or any effect)?** → `cargo candor where Net` (instant — splits
+  the direct sources from the functions that inherit it). Faster than grepping the codebase.
 - **Safe to treat as pure (e.g. unit-test without mocks)?** → `inferred == []` *and* `unresolved == false`.
 
 ## 4. The trust rule — do not skip this
