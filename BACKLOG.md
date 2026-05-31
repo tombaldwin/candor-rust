@@ -16,8 +16,10 @@ transitively perform `Net`). candor computes that for free. **Lead with the delt
 - [x] **1. Agent-facing effect diff — `cargo candor diff`.** v1 ships: describes the per-function
       delta vs a baseline (`+ worker { +Net }`) *including the transitive blast radius* (a network
       call added in `worker` also shows `+Net` on its caller `main`), flags a new `Unknown`, and has
-      `--json` for the agent. Remaining v2: fold the *call-site* "why" (`+Net via reqwest::get @
-      foo.rs:12`) into the diff — `explain` (§3) now provides exactly that, so it's a wiring step.
+      `--json` for the agent. v2 ships too: the diff now separates **introduced** (the new effect is
+      in the function's own `direct` set — the source) from **inherited** (transitive), with a
+      headline `Fs: introduced in Cache::get → inherited by 6 caller(s)`. Remaining polish: the exact
+      call-site location (`@ foo.rs:12`) — `explain` (§3) has it; emitting it in the report is the step.
 - [x] **2. Close the loop in the agent's edit cycle.** Opt-in `CANDOR_REVIEW=1`: the Stop hook diffs
       the fresh report vs the baseline and, on a newly-introduced effect, feeds the delta *back to the
       agent* (`decision:block` + `additionalContext`) as a self-review checkpoint; `AGENTS.md` §5 tells

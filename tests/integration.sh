@@ -113,10 +113,11 @@ printf 'fn worker(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::c
 dout=$( cd "$D"; "$ROOT/cargo-candor" diff 2>/dev/null )
 djson=$( cd "$D"; "$ROOT/cargo-candor" diff --json 2>/dev/null )
 want "diff: the edited fn (worker) is flagged"             "$dout" "worker"
-want "diff: +Net rendered"                                 "$dout" "+Net"
+want "diff: marks the source with * (worker introduced Net)" "$dout" "+Net*"
+want "diff: per-effect headline names the source"          "$dout" "introduced in"
 want "diff: the caller (main) inherits the gain — blast radius" "$dout" "main"
 want "diff --json: machine-readable for the agent"         "$djson" '"gained"'
-want "diff --json: carries the gained Net"                 "$djson" 'Net'
+want "diff --json: classifies introduced vs inherited"     "$djson" '"introduced"'
 rm -rf "$(dirname "$D")"
 
 # ── 8. explain: trace the call path to each effect's source (P0 §3) ──
