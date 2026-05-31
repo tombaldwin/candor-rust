@@ -105,6 +105,8 @@ name = "candor-query"
 version = "0.1.0"
 dependencies = [
  "candor-report",
+ "regex",
+ "serde",
  "serde_json",
 ]
 

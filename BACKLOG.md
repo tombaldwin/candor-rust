@@ -198,19 +198,24 @@ that's the narrow, modest-value axis. Diminishing returns.
 - [x] **De-duplicated the coverage `SUSPECT` heuristic** — now a single `candor-suspect` file at the
       clone root, read by both `candor-run.sh` (via `CANDOR_HOME` / its own location) and `cargo-candor`
       (via `CANDOR_DIR`), with a graceful skip if missing. No more two-copy drift.
-- [ ] **Port the tooling/query layer from bash+Python to a Rust CLI binary.** The engine (`lib.rs`)
+- [x] **Ported the tooling/query layer from bash+Python to a Rust CLI binary.** The engine (`lib.rs`)
       *must* be Rust (a `rustc_private` dylint lint), but the wrapper — `cargo-candor`'s diff /
-      show / where / callers / audit / policy / risk logic, the receipt aggregation, the MCP server —
-      is bash with embedded Python for JSON. That was the fast, zero-install, no-build-step choice
-      (Python is everywhere; the scripts stay transparent for the user-facing hook), and it works —
-      but it's been a recurring *glue*-bug source (the sidecar/report glob collision, quoting, the
-      state-hash matching) and carries **duplicated logic** (report-reading re-implemented in nearly
-      every Python snippet; the `SUSPECT` heuristic copy-pasted). The robust fix: extract the report
-      structs into a tiny shared crate with **no** `rustc_private` dep, build a `cargo-candor` **Rust
-      binary** for the query/diff/JSON logic that shares those structs with the engine (DRY +
-      type-safe; could even be crates.io-publishable, unlike the lint), and keep thin bash only for
-      genuine shell glue (the Stop hook, orchestrating `cargo dylint`). **When:** if the tooling keeps
-      growing or the glue bugs recur — not urgent, but it's the real end state, not the current one.
+      show / where / callers / audit logic — was bash with embedded Python for JSON. That was the
+      fast, zero-install choice, but a recurring *glue*-bug source (the sidecar/report glob collision,
+      quoting, state-hash matching) with **duplicated logic** (report-reading re-implemented in nearly
+      every Python snippet; the `SUSPECT` heuristic copy-pasted).
+      **Done:** a Cargo **workspace** now holds the lint plus two no-`rustc_private` crates —
+      `crates/candor-report` (the report structs + envelope-or-bare-array parsing, the single source
+      of truth the lint and CLI both depend on) and `crates/candor-query` (the read-only
+      `audit`/`show`/`where`/`callers`/`map`/`diff` commands, one typed binary over those structs).
+      `cargo-candor` dispatches to it and is now **python-free** (606 → 355 lines, 251 lines of inline
+      Python deleted). The port was verified **byte-for-byte** against the Python it replaced
+      (identical human output for every command; `diff --json` identical content, now deterministically
+      ordered instead of Python's hash-order). Thin bash remains only for genuine shell glue
+      (orchestrating `cargo dylint`, the fast-path freshness check, `watch`). *(The Stop-hook receipt
+      `candor-run.sh` and the MCP stdio server stay in Python — they're hook orchestration / a
+      protocol server that already delegates report logic to `cargo-candor`, not duplicated query
+      logic; folding them onto `candor-query` is a possible follow-up, not required for DRY.)*
 
 ## P5 — research (the thesis)
 

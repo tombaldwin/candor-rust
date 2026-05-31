@@ -60,6 +60,9 @@ with `cargo candor watch` so every call serves from a fresh report.
 | Path | What |
 |---|---|
 | `src/lib.rs` | the entire lint — classifier, per-function call-graph fixpoint, the three modes |
+| `crates/candor-report` | the report types + parsing, shared by the lint and the CLI (no `rustc_private`) |
+| `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`) as one typed binary |
+| `cargo-candor` | the CLI wrapper — thin bash that orchestrates `cargo dylint` and dispatches queries to `candor-query` |
 | `sample/` | a small crate written in the capability discipline, for trying conformance mode |
 | `rust-toolchain` | pins the nightly the lint links against (`rustc-dev`) |
 

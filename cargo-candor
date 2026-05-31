@@ -33,6 +33,24 @@ find_lib() {
      "$CANDOR_DIR"/target/debug/libcandor@*.so 2>/dev/null | head -1
 }
 
+# The read-only report queries (show/where/callers/map/diff) live in the candor-query binary — one
+# typed program over the shared report types, replacing the per-command inline Python. Locate it
+# (release first, then debug), building on first use. `query <subcmd> <args…>` runs it.
+find_query() {
+  ls "$CANDOR_DIR"/target/release/candor-query \
+     "$CANDOR_DIR"/target/debug/candor-query 2>/dev/null | head -1
+}
+query() {
+  local q; q="$(find_query || true)"
+  if [ -z "$q" ]; then
+    echo "candor: building candor-query (first run)…" >&2
+    ( cd "$CANDOR_DIR" && cargo build -p candor-query >&2 )
+    q="$(find_query || true)"
+  fi
+  [ -n "$q" ] || { echo "candor: could not build/find candor-query under $CANDOR_DIR/target" >&2; exit 1; }
+  "$q" "$@"
+}
+
 LIB="$(find_lib || true)"
 if [ -z "${LIB:-}" ]; then
   echo "candor: building the lint (first run)…" >&2
@@ -96,9 +114,9 @@ lint_fresh() {
 
 case "$cmd" in
   audit)
-    # `--all`/`-a` (or no python3) → the full per-function lint: the dylint-native view, spans in
-    # context. Default → an at-a-glance profile, aggregated across the project's crates.
-    if [ "${1:-}" = "--all" ] || [ "${1:-}" = "-a" ] || ! command -v python3 >/dev/null 2>&1; then
+    # `--all`/`-a` → the full per-function lint: the dylint-native view, spans in context.
+    # Default → an at-a-glance profile (candor-query), aggregated across the project's crates.
+    if [ "${1:-}" = "--all" ] || [ "${1:-}" = "-a" ]; then
       exec cargo dylint --lib-path "$LIB"
     fi
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
@@ -111,83 +129,7 @@ case "$cmd" in
       echo "candor: no report produced — did the crate build? Try 'cargo candor audit --all' to see errors." >&2
       exit 1
     fi
-    python3 - "$tmp/a" "$(engine_ver)" "$CANDOR_DIR/candor-suspect" <<'PY'
-import sys, os, glob, json, re
-pre, ver = sys.argv[1], sys.argv[2]
-base = os.path.basename(pre)
-
-def entries(path):
-    try: d = json.load(open(path))
-    except Exception: return []
-    if isinstance(d, dict) and isinstance(d.get('functions'), list): return d['functions']   # v0.2 envelope
-    return d if isinstance(d, list) else []                                                   # v0.1 bare array
-
-fns, percrate = [], []
-for f in sorted(glob.glob(pre + '.*.*.json')):
-    es = entries(f); fns += es
-    percrate.append((os.path.basename(f)[len(base)+1:-5], len(es)))   # <crate>.<type>
-
-if not fns:
-    print("candor: no effectful functions found (everything candor can see is pure)."); sys.exit(0)
-
-EFFS = ['Net','Db','Fs','Exec','Ipc','Env','Clock','Rand','Clipboard','Log']
-tally = {e: 0 for e in EFFS}; unresolved = []
-for e in fns:
-    inf = e.get('inferred', [])
-    for x in inf:
-        if x in tally: tally[x] += 1
-    if e.get('unresolved') or 'Unknown' in inf: unresolved.append(e['fn'])
-
-print(f"candor @{ver}")
-print(f"{len(fns)} effectful functions  ·  " + ' · '.join(f"{n} {k}" for k, n in percrate))
-print()
-ranked = sorted(((tally[e], e) for e in EFFS if tally[e]), reverse=True)
-print("  effects   " + ' · '.join(f"{n} {e}" for n, e in ranked))
-print()
-
-if unresolved:
-    u = sorted(set(unresolved))
-    extra = f"  (+{len(u)-5} more)" if len(u) > 5 else ""
-    print(f"  ⚠ {len(u)} make calls candor can't resolve — their effect set may be incomplete (read these):")
-    print("      " + ", ".join(u[:5]) + extra)
-    print()
-
-# coverage: external crates candor saw called but does not calibrate, that LOOK effectful.
-# (SUSPECT pattern: the shared `candor-suspect` file, also read by candor-run.sh — a nudge, not a
-# guarantee. Empty/missing → the coverage check is skipped.)
-calib_c, calib_p = set(), set()
-try:
-    cj = json.load(open(os.path.join(os.path.dirname(pre) or ".", base + ".calibrated.json")))
-    calib_c, calib_p = set(cj.get("crates", [])), set(cj.get("prefixes", []))
-except Exception: pass
-seen = set()
-for f in glob.glob(pre + '.encountered-*.json'):
-    try: seen |= set(json.load(open(f)))
-    except Exception: pass
-try: sp = open(sys.argv[3]).read().strip()
-except Exception: sp = ''
-SUSPECT = re.compile(sp) if sp else None
-def calibrated(c):
-    return c in calib_c or any(c == k or c.startswith(k + "_") for k in calib_c) or any(c.startswith(p) for p in calib_p)
-gaps = sorted(c for c in seen if SUSPECT and SUSPECT.search(c) and not calibrated(c)) if SUSPECT else []
-if gaps:
-    print(f"  ⚠ coverage: {', '.join(gaps)} uncalibrated — effects through them may be under-counted")
-    print()
-
-# the functions with the widest reach into the outside world — the ones worth knowing about.
-def width(e): return len([x for x in e.get('inferred', []) if x != 'Unknown'])
-top = sorted((e for e in fns if width(e) > 0), key=lambda e: (-width(e), e['fn']))[:8]
-if top:
-    w = max(len(e['fn']) for e in top)
-    print("  broadest effect surface")
-    for e in top:
-        effs = sorted(x for x in e['inferred'] if x != 'Unknown')
-        print(f"    {e['fn']:<{w}}  {{ {' '.join(effs)} }}")
-    print()
-
-print("  full per-function view:  cargo candor audit --all")
-print("  guard against new effects:  cargo candor snapshot .candor/baseline")
-PY
+    query audit "$tmp/a" "$(engine_ver)" "$CANDOR_DIR/candor-suspect"
     exit 0 ;;
   strict)     export CANDOR_STRICT="${1:-1}";      exec cargo dylint --lib-path "$LIB" ;;
   no-ambient) export CANDOR_NO_AMBIENT="${1:-1}";  exec cargo dylint --lib-path "$LIB" ;;
@@ -231,7 +173,6 @@ PY
     # cheaply self-compute (transitive effects across the call graph). `--json` for machine reading.
     json=0; pre=".candor/baseline"
     for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) pre="$a" ;; esac; done
-    command -v python3 >/dev/null 2>&1 || { echo "candor: diff needs python3" >&2; exit 2; }
     if ! ls "$pre".*.*.json >/dev/null 2>&1; then
       echo "candor: no baseline at '$pre.*' — create one with 'cargo candor snapshot $pre'." >&2
       exit 2
@@ -260,105 +201,7 @@ PY
       cur="$tmp/cur"
     fi
     bv=""; [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
-    python3 - "$cur" "$pre" "$json" "$bv" "$(engine_ver)" <<'PY'
-import sys, glob, json as J
-cur_pre, base_pre, want_json, bver, ever = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4], sys.argv[5]
-
-def load(pre):
-    out = {}
-    for f in glob.glob(pre + '.*.*.json'):
-        try: d = J.load(open(f))
-        except Exception: continue
-        fns = d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
-        for e in fns:
-            out[e['fn']] = {"inferred": set(e.get('inferred', [])), "direct": set(e.get('direct', [])),
-                            "calls": set(e.get('calls', []))}
-    return out
-
-def inferred(m, fn): return m.get(fn, {}).get("inferred", set())
-cur, base = load(cur_pre), load(base_pre)
-changes = []
-for fn in set(cur) | set(base):
-    ci, bi = inferred(cur, fn), inferred(base, fn)
-    if fn not in cur:                       # function gone (was in baseline)
-        if bi: changes.append({"fn": fn, "gained": [], "introduced": [], "inherited": [], "lost": sorted(bi), "status": "removed"})
-        continue
-    gained = sorted(ci - bi)
-    lost = sorted(bi - ci) if fn in base else []
-    if not gained and not lost: continue
-    # A gained effect is INTRODUCED here if it's in this function's own `direct` set; otherwise it's
-    # INHERITED from a callee. That tells the agent the source vs. the blast radius.
-    cd = cur[fn]["direct"]
-    changes.append({
-        "fn": fn, "gained": gained,
-        "introduced": [e for e in gained if e in cd],
-        "inherited":  [e for e in gained if e not in cd],
-        "lost": lost,
-        "status": "new" if fn not in base else "changed",
-    })
-
-if want_json:
-    print(J.dumps({"baseline_version": bver, "engine_version": ever, "changes": changes}, indent=2))
-    sys.exit(0)
-
-if not changes:
-    print(f"candor: no effect changes vs {base_pre} (@{bver or '?'})."); sys.exit(0)
-
-print(f"candor diff — current (@{ever}) vs {base_pre} (@{bver or '?'})")
-if bver and ever and bver != ever:
-    print(f"  ⚠ baseline @{bver} ≠ engine @{ever} — some changes may be the engine reclassifying, not your code.")
-print()
-# Selectivity (§9): a gained effect SURFACES at its "top-level" gainers — those not called by any
-# other gainer, i.e. the entry point / public API where it's actually exercised. The chain between
-# the source and there is plumbing. Lead with the source + the endpoints; collapse the intermediates.
-calls_of = {fn: v.get("calls", set()) for fn, v in cur.items()}
-sources = {c["fn"] for c in changes if c["introduced"]}
-top_level, endpoints_of = set(), {}
-for e in sorted({x for c in changes for x in c["gained"]}):
-    gainers = {c["fn"] for c in changes if e in c["gained"]}
-    called = set()
-    for g in gainers:
-        called |= (calls_of.get(g, set()) & gainers)
-    tl = gainers - called
-    top_level |= tl
-    endpoints_of[e] = sorted(tl - sources)
-consequential = sources | top_level
-
-changes.sort(key=lambda c: (0 if c["introduced"] else (1 if c["fn"] in top_level else (2 if c["gained"] else 3)), c["fn"]))
-shown = set()
-for c in changes:
-    if c["fn"] not in consequential and not c["lost"]:
-        continue                                   # pure intermediate plumbing — collapsed below
-    shown.add(c["fn"])
-    parts = [f"+{e}*" for e in c["introduced"]] + [f"+{e}" for e in c["inherited"]] + [f"-{e}" for e in c["lost"]]
-    mark = "+" if c["gained"] else "-"
-    tags = []
-    if c["status"] == "new": tags.append("new fn")
-    if c["status"] == "removed": tags.append("removed fn")
-    if c["fn"] in top_level and c["fn"] not in sources: tags.append("top-level")
-    if "Unknown" in c["gained"]: tags.append("⚠ now unresolvable")
-    tag = ("  (" + ", ".join(tags) + ")") if tags else ""
-    print(f"  {mark} {c['fn']}{tag}   {{ {' '.join(parts)} }}")
-hidden = sorted(c["fn"] for c in changes if c["fn"] not in shown)
-if hidden:
-    names = ', '.join(hidden[:4]) + (f", +{len(hidden) - 4} more" if len(hidden) > 4 else "")
-    print(f"  … {len(hidden)} intermediate caller(s) also inherit it: {names}")
-print()
-print("  * = introduced here;  (top-level) = where the effect surfaces (an entry point / public API).")
-for e in sorted({x for c in changes for x in c["gained"]}):
-    srcs = sorted(c["fn"] for c in changes if e in c["introduced"])
-    gainers = {c["fn"] for c in changes if e in c["gained"]}
-    eps = endpoints_of.get(e, [])
-    if srcs:
-        reach = f" → reaches {', '.join(eps)}" if eps else ""
-        extra = len(gainers) - len(set(srcs)) - len(eps)
-        tail = f"  (+{extra} intermediate)" if extra > 0 else ("" if eps else "  (stays local)")
-        print(f"  {e}: introduced in {', '.join(srcs)}{reach}{tail}")
-    elif gainers:
-        print(f"  {e}: reaches {', '.join(eps or sorted(gainers))} (source outside this crate/baseline)")
-if any("Unknown" in c["gained"] for c in changes):
-    print("  ⚠ a new Unknown means candor can no longer prove that function's effect set is complete — review it.")
-PY
+    query diff "$cur" "$pre" "$json" "$bv" "$(engine_ver)"
     exit 0 ;;
 
   watch)
@@ -399,32 +242,8 @@ PY
     json=0; q=""
     for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$q" ] && q="$a" ;; esac; done
     [ -n "$q" ] || { echo "usage: cargo candor show <function-name-substring> [--json]" >&2; exit 2; }
-    command -v python3 >/dev/null 2>&1 || { echo "candor: show needs python3" >&2; exit 2; }
     ensure_report || exit 1
-    python3 - .candor/report "$q" "$json" <<'PY'
-import sys, glob, json as J
-pre, q, want_json = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-fns = []
-for f in glob.glob(pre + '.*.*.json'):
-    try: d = J.load(open(f))
-    except Exception: continue
-    es = d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
-    fns += [e for e in es if q in e.get('fn', '')]
-fns.sort(key=lambda e: e['fn'])
-if want_json:
-    print(J.dumps([{ "fn": e['fn'], "inferred": sorted(e.get('inferred', [])),
-                     "direct": sorted(e.get('direct', [])), "unresolved": e.get('unresolved', False) }
-                   for e in fns], indent=2)); sys.exit(0)
-if not fns:
-    print(f"candor: no effectful function matching `{q}` (pure functions are omitted from the report)."); sys.exit(0)
-w = max(len(e['fn']) for e in fns)
-for e in fns:
-    direct = set(e.get('direct', []))
-    parts = ' '.join((x + '*' if x in direct else x) for x in sorted(e.get('inferred', [])))
-    unk = '  ⚠ unresolved (set may be incomplete)' if e.get('unresolved') else ''
-    print(f"  {e['fn']:<{w}}  {{ {parts} }}{unk}")
-print("  (* = performed in the function's own body; unmarked = via a callee)")
-PY
+    query show .candor/report "$q" "$json"
     exit 0 ;;
 
   where)
@@ -433,30 +252,8 @@ PY
     json=0; eff=""
     for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$eff" ] && eff="$a" ;; esac; done
     [ -n "$eff" ] || { echo "usage: cargo candor where <Effect> [--json]   (Net|Fs|Db|Exec|Env|Clock|Ipc|Log|Rand|Clipboard|Unknown)" >&2; exit 2; }
-    command -v python3 >/dev/null 2>&1 || { echo "candor: where needs python3" >&2; exit 2; }
     ensure_report || exit 1
-    python3 - .candor/report "$eff" "$json" <<'PY'
-import sys, glob, json as J
-pre, eff, want_json = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-allf = []
-for f in glob.glob(pre + '.*.*.json'):
-    try: d = J.load(open(f))
-    except Exception: continue
-    allf += d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
-direct = sorted(e['fn'] for e in allf if eff in e.get('direct', []))
-inherit = sorted(e['fn'] for e in allf if eff in e.get('inferred', []) and eff not in e.get('direct', []))
-if want_json:
-    print(J.dumps({"effect": eff, "directly": direct, "inherited": inherit}, indent=2)); sys.exit(0)
-if not direct and not inherit:
-    print(f"candor: no function performs {eff} in the report."); sys.exit(0)
-print(f"{len(direct) + len(inherit)} function(s) perform {eff}:")
-if direct:
-    print(f"  directly ({len(direct)}):")
-    for fn in direct: print(f"    {fn}")
-if inherit:
-    print(f"  inherit it via a callee ({len(inherit)}):")
-    for fn in inherit: print(f"    {fn}")
-PY
+    query where .candor/report "$eff" "$json"
     exit 0 ;;
 
   callers)
@@ -465,64 +262,16 @@ PY
     json=0; q=""
     for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$q" ] && q="$a" ;; esac; done
     [ -n "$q" ] || { echo "usage: cargo candor callers <function-name-substring> [--json]" >&2; exit 2; }
-    command -v python3 >/dev/null 2>&1 || { echo "candor: callers needs python3" >&2; exit 2; }
     ensure_report || exit 1
-    python3 - .candor/report "$q" "$json" <<'PY'
-import sys, glob, json as J
-pre, q, want_json = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-entries = []
-for f in glob.glob(pre + '.*.*.json'):
-    try: d = J.load(open(f))
-    except Exception: continue
-    entries += d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
-hits = {}                                   # callee (matching q) -> set of its callers
-for e in entries:
-    for callee in e.get('calls', []):
-        if q in callee:
-            hits.setdefault(callee, set()).add(e['fn'])
-if want_json:
-    print(J.dumps({c: sorted(cs) for c, cs in sorted(hits.items())}, indent=2)); sys.exit(0)
-if not hits:
-    print(f"candor: nothing matching `{q}` is called by an effectful function (callers of pure functions aren't tracked)."); sys.exit(0)
-for callee in sorted(hits):
-    cs = sorted(hits[callee])
-    print(f"  {callee}  ← called by {len(cs)}:")
-    for c in cs: print(f"      {c}")
-PY
+    query callers .candor/report "$q" "$json"
     exit 0 ;;
 
   map)
     # INSTANT: a compact module -> effects overview of the whole project, read from the report. Load
     # it once at the start of a session to understand the codebase's effect structure without grepping.
     json=0; for a in "$@"; do [ "$a" = "--json" ] && json=1; done
-    command -v python3 >/dev/null 2>&1 || { echo "candor: map needs python3" >&2; exit 2; }
     ensure_report || exit 1
-    python3 - .candor/report "$json" <<'PY'
-import sys, glob, json as J, re
-pre, want_json = sys.argv[1], sys.argv[2] == "1"
-fns = []
-for f in glob.glob(pre + '.*.*.json'):
-    try: d = J.load(open(f))
-    except Exception: continue
-    fns += d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
-mods = {}
-for e in fns:
-    m = re.sub(r'^<', '', e.get('fn', '')).split('::')[0] or '(root)'
-    v = mods.setdefault(m, {"effects": set(), "n": 0})
-    v["effects"] |= {x for x in e.get('inferred', []) if x != 'Unknown'}
-    v["n"] += 1
-if want_json:
-    print(J.dumps({m: {"effects": sorted(v["effects"]), "functions": v["n"]} for m, v in sorted(mods.items())}, indent=2)); sys.exit(0)
-if not mods:
-    print("candor: no effectful functions in the report."); sys.exit(0)
-total = sum(v["n"] for v in mods.values())
-print(f"candor map — {total} effectful functions across {len(mods)} module(s)")
-print()
-w = max(len(m) for m in mods)
-for m in sorted(mods, key=lambda m: (-mods[m]["n"], m)):
-    v = mods[m]
-    print(f"  {m:<{w}}  {{ {' '.join(sorted(v['effects']))} }}  ({v['n']} fn{'s' if v['n'] != 1 else ''})")
-PY
+    query map .candor/report "$json"
     exit 0 ;;
 
   explain)

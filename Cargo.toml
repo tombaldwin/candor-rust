@@ -29,5 +29,8 @@ rustc_private = true
 
 # The lint (this crate, a cdylib using rustc_private) plus the no-rustc_private crates that share its
 # report types: `candor-report` (the structs) and `candor-query` (the CLI's read-only query logic).
+# The in-tree sample/fixture crates are standalone (each its own build target) — exclude them so
+# cargo doesn't try to fold them into this workspace.
 [workspace]
 members = ["crates/candor-report", "crates/candor-query"]
+exclude = ["sample", "sample-capstd", "eval/minicache"]

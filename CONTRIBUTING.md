@@ -8,9 +8,11 @@ candor silently wrong.** A change that adds a false "this is pure" is worse than
 
 ```sh
 cargo install cargo-dylint dylint-link   # once
-cargo build                              # builds the lint; the pinned nightly (rust-toolchain)
-                                         # + rustc-dev are fetched automatically by rustup
-cargo test                               # unit tests over the classifier + a load smoke-test
+cargo build --workspace                  # the lint + the tooling crates (candor-report, candor-query);
+                                         # the pinned nightly (rust-toolchain) + rustc-dev are fetched
+                                         # automatically by rustup. `--workspace` because candor-query
+                                         # is a member, not a dependency of the lint.
+cargo test --workspace                   # classifier unit tests + a load smoke-test + the tooling crates
 ```
 
 Try it on a real project with the wrapper (put this repo on `PATH`): `cargo candor audit`.
@@ -60,11 +62,11 @@ them together. Step by step:
 6. **Re-baseline the self-guard:** the engine version changed, so `cargo candor snapshot .candor/baseline`
    here (and in any consuming project) — the version-aware guard otherwise (correctly) refuses to
    compare across engines.
-7. **Verify:** `cargo test`, `bash tests/integration.sh`, and the CI self-guard all green.
+7. **Verify:** `cargo test --workspace`, `bash tests/integration.sh`, and the CI self-guard all green.
 
 ## Before you open a PR
 
-- `cargo test` is green, and you added a test for new classification behavior.
+- `cargo test --workspace` is green, and you added a test for new classification behavior.
 - If your change alters **candor's own** effect surface, refresh its baseline:
   `cargo candor snapshot .candor/baseline` (CI runs candor on candor and will fail otherwise).
 - Diagnostics stay actionable and quiet — no new noise in audit output.

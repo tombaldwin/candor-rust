@@ -8,8 +8,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "building candor lint…"
-cargo build -q || { echo "FAIL: candor build"; exit 1; }
+echo "building candor lint + tooling…"
+# --workspace builds candor-query too (a member, not a lint dependency), so the query commands
+# below exercise the CURRENT binary rather than a possibly-stale pre-built one.
+cargo build -q --workspace || { echo "FAIL: candor build"; exit 1; }
 # Absolute path — the scenarios `cd` into fixture dirs, so a relative lib path would break.
 LIB=$(ls "$ROOT"/target/debug/libcandor@*.dylib "$ROOT"/target/debug/libcandor@*.so 2>/dev/null | head -1)
 [ -n "$LIB" ] || { echo "FAIL: no dylib under target/debug"; exit 1; }
