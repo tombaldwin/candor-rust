@@ -81,6 +81,10 @@ pub struct Candor {
     sites: HashMap<LocalDefId, Vec<EffectSite>>,
     /// CANDOR_POLICY: declared effect-boundary rules to enforce (AS-EFF-006).
     policy: Vec<PolicyRule>,
+    /// CANDOR_TAINT: flag effects whose argument derives from a function parameter (AS-EFF-007).
+    taint: bool,
+    /// Per-function effects performed on a parameter-derived (caller-controlled) argument.
+    tainted: HashMap<LocalDefId, BTreeSet<&'static str>>,
 }
 
 /// Where an effect enters a function's body — the callee that produced it and the source location.
@@ -148,6 +152,8 @@ impl Candor {
             explain,
             sites: HashMap::new(),
             policy,
+            taint: std::env::var("CANDOR_TAINT").is_ok(),
+            tainted: HashMap::new(),
         }
     }
 
@@ -1008,6 +1014,74 @@ fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
     }
 }
 
+// --- Taint heuristic (CANDOR_TAINT): flag an effect whose argument derives from a function
+// parameter — e.g. `fs::read(format!("/var/cache/{key}"))` where `key` is a param. This is the
+// injection class (path traversal / command injection / SSRF). It is an INTRAPROCEDURAL, SYNTACTIC
+// heuristic — a review nudge, NOT sound taint analysis. It misses cross-function flow, flow through
+// struct fields, and builder chains; it over-flags a param that is actually validated. Honest signal,
+// stated limits. ---
+
+/// HirIds of the binding patterns in a function's parameters (the "untrusted input" surface).
+fn param_bindings(tcx: TyCtxt<'_>, def_id: LocalDefId) -> std::collections::HashSet<HirId> {
+    let mut out = std::collections::HashSet::new();
+    if !matches!(tcx.def_kind(def_id.to_def_id()), DefKind::Fn | DefKind::AssocFn) {
+        return out;
+    }
+    let body = tcx.hir_body_owned_by(def_id);
+    for p in body.params {
+        p.pat.walk(|pat| {
+            if let rustc_hir::PatKind::Binding(_, hir_id, _, _) = pat.kind {
+                out.insert(hir_id);
+            }
+            true
+        });
+    }
+    out
+}
+
+/// True if `e` (or any sub-expression, including inside macro expansions like `format!`) references
+/// one of `locals` — the syntactic core of the taint heuristic.
+fn expr_uses_local(e: &Expr<'_>, locals: &std::collections::HashSet<HirId>) -> bool {
+    use rustc_hir::intravisit::Visitor;
+    struct V<'a> {
+        locals: &'a std::collections::HashSet<HirId>,
+        found: bool,
+    }
+    impl<'v, 'a> Visitor<'v> for V<'a> {
+        fn visit_expr(&mut self, e: &'v Expr<'v>) {
+            if self.found {
+                return;
+            }
+            if let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = e.kind {
+                if let rustc_hir::def::Res::Local(id) = path.res {
+                    if self.locals.contains(&id) {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+            rustc_hir::intravisit::walk_expr(self, e);
+        }
+    }
+    let mut v = V { locals, found: false };
+    v.visit_expr(e);
+    v.found
+}
+
+/// True if the effect call's argument(s)/receiver derive from a parameter of the enclosing function.
+fn effect_arg_from_param(tcx: TyCtxt<'_>, call: &Expr<'_>, caller: LocalDefId) -> bool {
+    let params = param_bindings(tcx, caller);
+    if params.is_empty() {
+        return false;
+    }
+    let operands: Vec<&Expr<'_>> = match call.kind {
+        ExprKind::Call(_, args) => args.iter().collect(),
+        ExprKind::MethodCall(_, recv, args, _) => std::iter::once(recv).chain(args.iter()).collect(),
+        _ => return false,
+    };
+    operands.iter().any(|a| expr_uses_local(a, &params))
+}
+
 impl<'tcx> LateLintPass<'tcx> for Candor {
     fn check_crate(&mut self, cx: &LateContext<'tcx>) {
         // Cross-crate resolution: load THIS project's other crates' reports so calls into them
@@ -1136,6 +1210,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             if self.explain.is_some() {
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                 self.sites.entry(caller).or_default().push(EffectSite { eff: effect, via: path.clone(), loc });
+            }
+            // Taint heuristic: an injection-class effect on a parameter-derived argument.
+            if self.taint
+                && matches!(effect, "Fs" | "Exec" | "Db" | "Net" | "Env" | "Ipc")
+                && effect_arg_from_param(cx.tcx, expr, caller)
+            {
+                self.tainted.entry(caller).or_default().insert(effect);
             }
         } else if !def_id.is_local() && !self.cross.is_empty() {
             // Cross-crate: a call into one of THIS project's other crates (its lib, a sibling
@@ -1280,7 +1361,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let any_enforce = strict_var.is_some()
             || no_ambient_var.is_some()
             || baseline.is_some()
-            || !self.policy.is_empty();
+            || !self.policy.is_empty()
+            || self.taint;
 
         // Stable ordering for reproducible output.
         let mut items: Vec<LocalDefId> = eff.keys().copied().collect();
@@ -1462,6 +1544,24 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             "[AS-EFF-006] `{name}` performs {{ {} }}, forbidden by policy{scope}: `{}`",
                             bad.join(", "),
                             rule.raw
+                        ),
+                    );
+                }
+            }
+
+            // AS-EFF-007 (CANDOR_TAINT): performs an injection-class effect on a parameter-derived
+            // argument — a heuristic review nudge (see the taint helpers for its honest limits).
+            if self.taint {
+                if let Some(t) = self.tainted.get(&f).filter(|t| !t.is_empty()) {
+                    clippy_utils::diagnostics::span_lint(
+                        cx,
+                        CANDOR,
+                        span,
+                        format!(
+                            "[AS-EFF-007] `{name}` performs {{ {} }} on caller-derived input \
+                             (an injection surface — validate/sanitize it, or confirm the source is \
+                             trusted); heuristic, may over- or under-flag",
+                            t.iter().copied().collect::<Vec<_>>().join(", ")
                         ),
                     );
                 }

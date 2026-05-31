@@ -80,6 +80,7 @@ cargo candor guard    .candor/baseline  # fail on functions that gained an effec
 cargo candor diff     .candor/baseline  # describe the per-function effect delta (--json)
 cargo candor explain  my_function       # trace WHY a function has each effect (the call path)
 cargo candor policy   .candor/policy     # enforce effect boundaries (deny/pure rules)
+cargo candor risk                       # heuristic: effects on caller-derived input (advisory)
 cargo candor strict   my_module         # conformance, scoped to a module
 cargo candor no-ambient my_module       # flag direct ambient-authority use
 ```
@@ -118,6 +119,17 @@ deny Exec                  # nothing may spawn a subprocess
 
 `checkout` need not touch the database *directly* — candor catches it reaching `Db` through any callee,
 the boundary break a local diff would hide. See [examples/candor-policy](examples/candor-policy).
+
+`cargo candor risk` is an **advisory, heuristic** nudge toward the injection class — an effect whose
+argument derives from a function parameter (`fs::read(format!("/var/cache/{key}"))`, `Command::new(name)`):
+
+```text
+[AS-EFF-007] `read_user_file` performs { Fs } on caller-derived input (an injection surface — …)
+```
+
+It is *not* sound taint analysis: a syntactic, intra-procedural check that over- and under-flags
+(it misses flow through struct fields and across functions, and flags a parameter that's actually
+validated). Use it to find surfaces worth reviewing — never as a gate.
 
 ## All modes (explicit invocation)
 

@@ -9,6 +9,7 @@
 #   cargo candor diff     .candor/baseline   # describe the per-function effect delta (--json)
 #   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
 #   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure rules)
+#   cargo candor risk                         # heuristic: effects on caller-derived input (advisory)
 #   cargo candor update
 #   cargo candor strict   my_module
 #   cargo candor no-ambient my_module
@@ -308,6 +309,20 @@ PY
     echo "candor: policy OK — no boundary violations." >&2
     exit 0 ;;
 
+  risk)
+    # Heuristic: flag injection-class effects (Fs/Exec/Db/Net/Env/Ipc) performed on a PARAMETER-derived
+    # argument — path traversal / command injection / SSRF. ADVISORY (exit 0): an intraprocedural,
+    # syntactic nudge, NOT sound taint analysis — it over- and under-flags. Review it, don't gate on it.
+    rm -rf target/dylint 2>/dev/null || true
+    out="$(CANDOR_TAINT=1 cargo dylint --lib-path "$LIB" 2>&1 || true)"
+    if printf '%s' "$out" | grep -q 'AS-EFF-007'; then
+      printf '%s\n' "$out" | grep -aE '\[AS-EFF-007\]' >&2
+      echo "candor: ^ heuristic review nudges (caller-derived effect arguments) — not a gate." >&2
+    else
+      echo "candor: no caller-derived effect arguments found (heuristic)." >&2
+    fi
+    exit 0 ;;
+
   update)
     # The clone is the single source of truth for the engine, the Claude Code integration
     # scripts, and AGENTS.md — pull + rebuild updates all three at one commit.
@@ -344,6 +359,6 @@ PY
     sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|explain|policy|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|explain|policy|risk|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac

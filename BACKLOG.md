@@ -57,12 +57,14 @@ security/correctness bugs that often matter most, and that its value scales with
       reaching an effect *through a helper* (`AS-EFF-006`) — the architectural violation an agent
       can't see from a local edit. Tested: parser unit test + integration (transitive violation fires,
       genuinely-pure fn doesn't). Spec'd (AS-EFF-006 in SPEC/SEMANTICS); `examples/candor-policy`.
-- [ ] **7. Effects → *risk* (argument provenance / taint-lite) — the high-value frontier.** The eval's
-      real bug was an `Fs` effect whose path came from an untrusted parameter; candor knows the effect
-      but not that its argument is attacker-derivable. Even a crude "this effect's key argument flows
-      from a fn parameter, not a literal/validated value" moves candor from "you do Fs" to "you do Fs
-      on caller-controlled input" — where the dangerous class lives. Biggest value, biggest effort
-      (real data-flow); scope as a bet, not a quick win.
+- [~] **7. Effects → *risk* (argument provenance) — v1 shipped (heuristic).** `CANDOR_TAINT` /
+      `cargo candor risk` flags `AS-EFF-007`: an injection-class effect (Fs/Exec/Db/Net/Env/Ipc) whose
+      argument *syntactically derives from a function parameter* — `fs::read(format!("/x/{key}"))`,
+      `Command::new(name)`. Catches the path-traversal/command-injection class the eval exposed; a
+      literal-arg effect is not flagged. **Honest limits (the `~`):** intraprocedural + syntactic — it
+      misses flow through struct fields and across functions, and over-flags a validated parameter; it's
+      advisory (exit 0), never a gate. Tested (param-derived fires, literal doesn't). **The real frontier
+      remains:** interprocedural, field-sensitive data flow (a MIR-level pass) for sound taint.
 - [ ] **8. Speed for large codebases — the enabler, re-prioritized up.** candor is most valuable
       exactly where it's slowest (big repos). A persistent-report / changed-crate-only path (or a
       background daemon) makes the valuable case practical. Without it, 6 and 7 don't get used where

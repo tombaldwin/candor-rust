@@ -143,6 +143,17 @@ want   "AS-EFF-006 flags the TRANSITIVE boundary violation (domain_logic reaches
 absent "the genuinely-pure domain fn is NOT flagged"                                               "$out" '[AS-EFF-006] `domain_pure`'
 rm -rf "$(dirname "$PL")"
 
+# ── 10. Taint heuristic: an effect on caller-derived input (AS-EFF-007, P0′ §7) ──
+echo "== taint heuristic / AS-EFF-007 (CANDOR_TAINT) =="
+TZ=$(mktemp -d)/tz; mkdir -p "$TZ/src"
+printf '[package]\nname="tz"\nversion="0.1.0"\nedition="2021"\n' > "$TZ/Cargo.toml"
+# read_user builds the path from a parameter (injection class); read_fixed uses a literal (safe).
+printf 'fn read_user(key:&str)->Option<String>{ std::fs::read_to_string(format!("/var/cache/{key}")).ok() }\nfn read_fixed()->Option<String>{ std::fs::read_to_string("/etc/app.conf").ok() }\nfn main(){ let _=read_user("x"); let _=read_fixed(); }\n' > "$TZ/src/main.rs"
+out=$(dl "$TZ" env CANDOR_TAINT=1)
+want   "AS-EFF-007 flags Fs on a parameter-derived path (read_user)" "$out" '[AS-EFF-007] `read_user`'
+absent "a literal-path Fs is NOT flagged (read_fixed)"               "$out" '[AS-EFF-007] `read_fixed`'
+rm -rf "$(dirname "$TZ")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

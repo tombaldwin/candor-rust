@@ -43,6 +43,10 @@ Effects: `Net`, `Fs`, `Db`, `Exec` (subprocess), `Env`, `Clock`, `Ipc`, `Log`, `
   source (`main → middle → leaf`, and `leaf` calls `std::net::TcpStream::connect`). Use it before
   editing to see what flows through a function, and to act on the trust rule (§4) — it shows you
   exactly which call is the `Unknown`.
+- **Did I build an effect on untrusted input?** → `cargo candor risk` flags an effect whose argument
+  comes from a function parameter (`fs::read(path_from_param)`, `Command::new(name)`) — the injection
+  class. A *heuristic* nudge (it over- and under-flags): treat a hit as "validate this input or confirm
+  its source is trusted," not as proof of a bug.
 - **Which functions touch the network?** → `jq '.[]|select(.inferred|index("Net"))|.fn' /tmp/candor-report.*.json`
 - **Safe to treat as pure (e.g. unit-test without mocks)?** → `inferred == []` *and* `unresolved == false`.
 
