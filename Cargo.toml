@@ -33,4 +33,6 @@ rustc_private = true
 # cargo doesn't try to fold them into this workspace.
 [workspace]
 members = ["crates/candor-report", "crates/candor-query"]
-exclude = ["sample", "sample-capstd", "eval/minicache"]
+# `eval` holds standalone fixture crates (and the scaled-eval harness generates more under it at
+# runtime) — exclude the whole subtree so cargo never tries to fold them into this workspace.
+exclude = ["sample", "sample-capstd", "eval"]
