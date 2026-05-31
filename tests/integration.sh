@@ -131,6 +131,18 @@ want "explain: traces the multi-hop call path"    "$xout" "main → middle → l
 want "explain: names the leaf effectful call"     "$xout" "TcpStream::connect"
 rm -rf "$(dirname "$P")"
 
+# ── 9. Effect policy: enforce architectural boundaries (AS-EFF-006, P0′ §6) ──
+echo "== effect policy / AS-EFF-006 (CANDOR_POLICY) =="
+PL=$(mktemp -d)/pl; mkdir -p "$PL/src"
+printf '[package]\nname="pl"\nversion="0.1.0"\nedition="2021"\n' > "$PL/Cargo.toml"
+# domain_logic is pure-LOOKING but reaches the filesystem transitively via leaf(); domain_pure doesn't.
+printf 'fn leaf(){ let _=std::fs::read("/tmp/x"); }\nfn domain_logic(){ leaf(); }\nfn domain_pure(){ let _=1+1; }\nfn main(){ domain_logic(); domain_pure(); }\n' > "$PL/src/main.rs"
+echo "deny Fs Net  domain" > "$PL/policy"
+out=$(dl "$PL" env CANDOR_POLICY="$PL/policy")
+want   "AS-EFF-006 flags the TRANSITIVE boundary violation (domain_logic reaches Fs via a helper)" "$out" '[AS-EFF-006] `domain_logic`'
+absent "the genuinely-pure domain fn is NOT flagged"                                               "$out" '[AS-EFF-006] `domain_pure`'
+rm -rf "$(dirname "$PL")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

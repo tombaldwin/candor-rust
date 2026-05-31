@@ -8,6 +8,7 @@
 #   cargo candor guard    .candor/baseline   # CI gate: fail on a gained effect
 #   cargo candor diff     .candor/baseline   # describe the per-function effect delta (--json)
 #   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
+#   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure rules)
 #   cargo candor update
 #   cargo candor strict   my_module
 #   cargo candor no-ambient my_module
@@ -290,6 +291,23 @@ PY
       | grep -vaE 'generated [0-9]+ warning'
     exit 0 ;;
 
+  policy)
+    # Enforce declared effect boundaries (default .candor/policy). Fails (exit 1) on any AS-EFF-006 —
+    # a function that *transitively* performs an effect a rule forbids (e.g. domain code reaching the
+    # network through a helper). Rules: `deny <Effects...> [scope]`, `pure [scope]`; scope = a path
+    # substring. This is the architectural-invariant gate an agent can't self-check.
+    pol="${1:-.candor/policy}"
+    [ -f "$pol" ] || { echo "candor: no policy at '$pol'. Write rules like 'deny Net Db domain' or 'pure parse'." >&2; exit 2; }
+    rm -rf target/dylint 2>/dev/null || true   # force a fresh lint so the gate can't pass on a cache hit
+    out="$(CANDOR_POLICY="$pol" cargo dylint --lib-path "$LIB" 2>&1 || true)"
+    printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]' >&2 || true
+    if printf '%s' "$out" | grep -q 'AS-EFF-006'; then
+      echo "candor: effect-policy violation (AS-EFF-006) — blocked. Bypass: git push --no-verify" >&2
+      exit 1
+    fi
+    echo "candor: policy OK — no boundary violations." >&2
+    exit 0 ;;
+
   update)
     # The clone is the single source of truth for the engine, the Claude Code integration
     # scripts, and AGENTS.md — pull + rebuild updates all three at one commit.
@@ -326,6 +344,6 @@ PY
     sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|explain|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (audit|snapshot|guard|diff|explain|policy|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac

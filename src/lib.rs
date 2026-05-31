@@ -79,6 +79,8 @@ pub struct Candor {
     /// Per-function effect *sites*: the calls in a body that introduce an effect (a classified leaf,
     /// a cross-crate inheritance, or an unresolvable call). Populated only in explain mode.
     sites: HashMap<LocalDefId, Vec<EffectSite>>,
+    /// CANDOR_POLICY: declared effect-boundary rules to enforce (AS-EFF-006).
+    policy: Vec<PolicyRule>,
 }
 
 /// Where an effect enters a function's body — the callee that produced it and the source location.
@@ -123,6 +125,18 @@ impl Candor {
         };
         let paranoid = std::env::var("CANDOR_PARANOID").is_ok();
         let explain = std::env::var("CANDOR_EXPLAIN").ok().filter(|s| !s.is_empty());
+        // A set-but-unreadable CANDOR_POLICY must be loud — silently passing would let a violation
+        // through while the user believes the boundary is enforced.
+        let policy = match std::env::var("CANDOR_POLICY") {
+            Ok(p) => match std::fs::read_to_string(&p) {
+                Ok(s) => parse_policy(&s),
+                Err(e) => {
+                    eprintln!("candor: CANDOR_POLICY={p:?} could not be read ({e}); policy NOT enforced");
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        };
         Self {
             direct: HashMap::new(),
             calls: HashMap::new(),
@@ -133,6 +147,7 @@ impl Candor {
             via_cross: HashMap::new(), // (cross map keyed by structured DefPathHash, not a string)
             explain,
             sites: HashMap::new(),
+            policy,
         }
     }
 
@@ -192,6 +207,65 @@ fn parse_config(text: &str) -> Vec<(&'static str, bool, String)> {
         }
     }
     out
+}
+
+/// One declared effect-boundary rule (`CANDOR_POLICY`). `effects` empty ⇒ a `pure` rule (ANY effect
+/// is forbidden). `scope` is a path substring the rule applies to (None = the whole crate). Checked
+/// against a function's *transitive* (inferred) effects — so "domain must not do Net" catches domain
+/// code that reaches the network through a helper, the boundary violation an agent can't see.
+struct PolicyRule {
+    effects: BTreeSet<&'static str>,
+    scope: Option<String>,
+    raw: String,
+}
+
+/// Parse a `CANDOR_POLICY` file. One rule per line; `#` comments and blanks ignored:
+///
+///     deny Net Db  domain     # functions whose path contains "domain" must not perform Net or Db
+///     deny Exec               # no function anywhere may perform Exec
+///     pure         parse      # functions whose path contains "parse" must be effect-free
+///
+/// In a `deny` rule, leading tokens that name a known effect are forbidden; the first non-effect
+/// token (if any) is the scope. `pure <scope>` forbids all effects in scope.
+fn parse_policy(text: &str) -> Vec<PolicyRule> {
+    let mut rules = Vec::new();
+    for raw_line in text.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        match toks.next().unwrap_or("") {
+            "deny" => {
+                let mut effects = BTreeSet::new();
+                let mut scope = None;
+                for t in toks {
+                    let e = if t == UNKNOWN { Some(UNKNOWN) } else { cap_from_name(t) };
+                    match e {
+                        Some(e) => {
+                            effects.insert(e);
+                        }
+                        None => {
+                            scope = Some(t.to_string());
+                            break;
+                        }
+                    }
+                }
+                if effects.is_empty() {
+                    eprintln!("candor: ignoring policy rule (no known effect named): {line}");
+                    continue;
+                }
+                rules.push(PolicyRule { effects, scope, raw: line.to_string() });
+            }
+            "pure" => rules.push(PolicyRule {
+                effects: BTreeSet::new(),
+                scope: toks.next().map(str::to_string),
+                raw: line.to_string(),
+            }),
+            other => eprintln!("candor: ignoring policy rule (unknown kind `{other}`): {line}"),
+        }
+    }
+    rules
 }
 
 /// One entry of a saved candor JSON report, for baseline diffing and cross-crate loading.
@@ -1203,8 +1277,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
             Err(_) => None,
         };
-        let any_enforce =
-            strict_var.is_some() || no_ambient_var.is_some() || baseline.is_some();
+        let any_enforce = strict_var.is_some()
+            || no_ambient_var.is_some()
+            || baseline.is_some()
+            || !self.policy.is_empty();
 
         // Stable ordering for reproducible output.
         let mut items: Vec<LocalDefId> = eff.keys().copied().collect();
@@ -1359,6 +1435,35 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             ),
                         );
                     }
+                }
+            }
+
+            // AS-EFF-006 (CANDOR_POLICY): the function transitively performs an effect a declared
+            // boundary forbids. This is the architectural-invariant check — it catches an agent
+            // putting I/O in a layer that's meant to be pure, which it can't see from a local edit.
+            for rule in &self.policy {
+                if let Some(scope) = &rule.scope {
+                    if !name.contains(scope.as_str()) {
+                        continue;
+                    }
+                }
+                let bad: Vec<&str> = if rule.effects.is_empty() {
+                    effs.iter().copied().collect() // `pure` rule: any effect is a violation
+                } else {
+                    effs.iter().copied().filter(|e| rule.effects.contains(e)).collect()
+                };
+                if !bad.is_empty() {
+                    let scope = rule.scope.as_deref().map(|s| format!(" (scope `{s}`)")).unwrap_or_default();
+                    clippy_utils::diagnostics::span_lint(
+                        cx,
+                        CANDOR,
+                        span,
+                        format!(
+                            "[AS-EFF-006] `{name}` performs {{ {} }}, forbidden by policy{scope}: `{}`",
+                            bad.join(", "),
+                            rule.raw
+                        ),
+                    );
                 }
             }
         }
@@ -1806,6 +1911,30 @@ mod tests {
         assert_eq!(gained_effects(&set(&["Net", "Db"]), &baseline), vec!["Db"]);
         assert!(gained_effects(&set(&["Net"]), &baseline).is_empty());
         assert!(gained_effects(&set(&[]), &baseline).is_empty());
+    }
+
+    #[test]
+    fn policy_parses() {
+        let rules = parse_policy(
+            "# the domain layer must stay pure of I/O\n\
+             deny Net Db  domain\n\
+             deny Exec\n\
+             pure  parse\n\
+             nonsense line\n\
+             deny notaneffect\n",
+        );
+        // 3 valid rules; the unknown-kind line and the no-known-effect `deny` are dropped.
+        assert_eq!(rules.len(), 3);
+        // `deny Net Db domain` → {Db, Net} scoped to "domain"
+        assert_eq!(rules[0].effects, ["Db", "Net"].into_iter().collect::<BTreeSet<_>>());
+        assert_eq!(rules[0].scope.as_deref(), Some("domain"));
+        // `deny Exec` → {Exec}, whole crate
+        assert!(rules[1].effects.contains("Exec") && rules[1].scope.is_none());
+        // `pure parse` → empty effect set (means "any effect"), scoped to "parse"
+        assert!(rules[2].effects.is_empty() && rules[2].scope.as_deref() == Some("parse"));
+        // `Unknown` is a denyable token; a bare `deny` with no effect is ignored.
+        assert_eq!(parse_policy("deny Unknown core")[0].effects, ["Unknown"].into_iter().collect());
+        assert!(parse_policy("deny\ndeny   \n").is_empty());
     }
 
     #[test]

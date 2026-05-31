@@ -51,13 +51,12 @@ the agent doesn't. Lean into *that* asymmetry — not into restating effects the
 locally. (The eval also showed the *guard* is the dependable value, that candor misses the
 security/correctness bugs that often matter most, and that its value scales with codebase size.)
 
-- [ ] **6. Effect policy / architectural invariants — the highest-leverage cheap win.** Today the
-      guard flags *any* function gaining *any* effect vs a baseline — noisy, and it knows only
-      "changed", not "wrong". Add a declarative policy: `domain::* must perform no Db/Net`, `only
-      infra::* may do Exec`, `module parse must stay pure`, `nothing may gain Ipc`. candor enforces
-      them as *violations*. Turns effect *accounting* into boundary *enforcement* — exactly the
-      architectural mistake agents make and can't self-catch — with fewer false alarms, and it scales
-      (declare once). Builds on the existing guard. **Starting now.**
+- [x] **6. Effect policy / architectural invariants — shipped.** `CANDOR_POLICY` / `cargo candor
+      policy` enforces a declarative `.candor/policy`: `deny Net Db Fs domain`, `pure parse`,
+      `deny Exec`. Each rule checks a function's **transitive** effect set, so it catches a layer
+      reaching an effect *through a helper* (`AS-EFF-006`) — the architectural violation an agent
+      can't see from a local edit. Tested: parser unit test + integration (transitive violation fires,
+      genuinely-pure fn doesn't). Spec'd (AS-EFF-006 in SPEC/SEMANTICS); `examples/candor-policy`.
 - [ ] **7. Effects → *risk* (argument provenance / taint-lite) — the high-value frontier.** The eval's
       real bug was an `Fs` effect whose path came from an untrusted parameter; candor knows the effect
       but not that its argument is attacker-derivable. Even a crude "this effect's key argument flows

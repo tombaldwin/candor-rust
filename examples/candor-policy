@@ -1,0 +1,23 @@
+# Example candor effect policy.  Run with:  cargo candor policy examples/candor-policy
+# (or drop it at .candor/policy and run `cargo candor policy`).
+#
+# Each rule constrains the effects a function may *transitively* perform — so it catches a layer that
+# reaches an effect through a helper, not just a direct call. That's the architectural invariant an
+# AI agent can't see from a local edit: it edits one function; candor sees the whole effect graph.
+#
+# Scope = a substring of the fully-qualified function path (module / type / fn); omit it for crate-wide.
+#
+#   deny <Effects...> [scope]    forbid those effects in scope   (effects: Net Fs Db Exec Env Clock
+#                                                                  Ipc Log Rand Clipboard Unknown)
+#   pure [scope]                 forbid ALL effects in scope (must be side-effect-free)
+#
+# `#` comments and blank lines are ignored.
+
+# The domain / business-logic layer must not reach the network, a database, or the filesystem.
+deny Net Db Fs   domain
+
+# Parsing and validation must be pure — no I/O, clock, or randomness.
+pure             parse
+
+# Nothing in this crate should ever spawn a subprocess.
+deny Exec

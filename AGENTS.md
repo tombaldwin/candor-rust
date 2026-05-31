@@ -66,6 +66,10 @@ network call you add deep in a helper shows `+Net` on every function that calls 
 
 An unintended gain is a regression in your change — fix it. If intended, say so.
 
+If the project has a `.candor/policy`, an **`AS-EFF-006`** means your change made a function cross a
+declared architectural boundary (e.g. domain logic now reaches the database, even through a helper).
+Move the I/O to the layer that's allowed to perform it — do not just delete the rule.
+
 ### If candor prompts you (the opt-in `CANDOR_REVIEW` self-review)
 
 When the maintainer has set `CANDOR_REVIEW=1`, candor's Stop hook hands you this delta automatically

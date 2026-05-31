@@ -79,6 +79,7 @@ cargo candor snapshot .candor/baseline  # write a JSON report
 cargo candor guard    .candor/baseline  # fail on functions that gained an effect
 cargo candor diff     .candor/baseline  # describe the per-function effect delta (--json)
 cargo candor explain  my_function       # trace WHY a function has each effect (the call path)
+cargo candor policy   .candor/policy     # enforce effect boundaries (deny/pure rules)
 cargo candor strict   my_module         # conformance, scoped to a module
 cargo candor no-ambient my_module       # flag direct ambient-authority use
 ```
@@ -99,6 +100,24 @@ candor @62a9383
     run_batch       { Clock Db Env Exec Fs Log Net }
     …
 ```
+
+`cargo candor policy` enforces **architectural effect boundaries** — the failure mode AI agents have
+most, because they edit one function without seeing the whole effect graph. A policy file declares
+invariants and candor flags any *transitive* violation:
+
+```text
+# .candor/policy
+deny Net Db Fs  domain     # the domain layer must reach no I/O — even through a helper
+pure            parse      # parsing must be side-effect-free
+deny Exec                  # nothing may spawn a subprocess
+```
+
+```text
+[AS-EFF-006] `domain::checkout` performs { Db }, forbidden by policy (scope `domain`): `deny Net Db Fs domain`
+```
+
+`checkout` need not touch the database *directly* — candor catches it reaching `Db` through any callee,
+the boundary break a local diff would hide. See [examples/candor-policy](examples/candor-policy).
 
 ## All modes (explicit invocation)
 
