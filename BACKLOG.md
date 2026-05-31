@@ -217,8 +217,10 @@ that's the narrow, modest-value axis. Diminishing returns.
 - [ ] Controlled eval of *edit quality* (not just analysis cost) with independent ground truth and
       multiple trials — **the gate on P0** (see P0 §5). The pilot (`EVAL.md`) only showed consumability
       + efficiency, and that a source-only agent can beat the report where the classifier has a gap.
-- [ ] Effect-aware PR-review agent fed by the baseline diff (AS-EFF-005) — the *review-time* sibling of
-      P0's *edit-time* loop; both are powered by `cargo candor diff` (P0 §1).
+- [x] Effect-aware PR review — `examples/candor-pr-review.yml`: a workflow that POSTS the per-function
+      effect delta vs the baseline as a PR comment + step summary (the *review-time* sibling of P0's
+      *edit-time* loop; both powered by `cargo candor diff`). It informs rather than blocks (pair with
+      `candor-guard.yml` to also fail); an AI reviewer can consume the same via `diff --json`.
 - [x] **Formal semantics** — `candor-spec/SEMANTICS.md`: the effect lattice, call-site resolution
       rules (CLASSIFY/CROSS/DEVIRT/CHA/EXEMPT/UNKNOWN), the transitive least-fixpoint, cross-crate
       composition, the conformance predicates, and the conditional-soundness properties (with the two

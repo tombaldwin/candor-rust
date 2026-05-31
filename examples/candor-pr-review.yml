@@ -1,0 +1,47 @@
+# Copy this into YOUR project as .github/workflows/candor-pr-review.yml
+#
+# The review-time sibling of candor-guard.yml. It does NOT fail the PR — it POSTS the per-function
+# EFFECT DELTA vs the committed .candor/baseline as a PR comment + a step summary, so a reviewer
+# (human or an AI agent) sees "this PR gave `Cache::get` a new `Fs` that reaches `main`" without
+# tracing the call graph by hand. For an automated reviewer, `cargo candor diff --json` feeds it the
+# same data structured.
+#
+# One-time setup in your repo (same as the guard):
+#   1. build candor and run:  cargo candor snapshot .candor/baseline
+#   2. commit the .candor/ directory.
+
+name: candor effect review
+on: [pull_request]
+
+permissions:
+  contents: read
+  pull-requests: write   # to post the review comment
+
+jobs:
+  candor-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dylint
+        run: cargo +stable install cargo-dylint dylint-link
+
+      - name: Fetch + build candor
+        run: |
+          git clone --depth 1 https://github.com/tombaldwin/candor ~/candor
+          ( cd ~/candor && cargo build )
+
+      - name: Effect delta vs baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out="$(~/candor/cargo-candor diff .candor/baseline 2>&1 || true)"
+          printf '%s\n' "$out"
+          if printf '%s' "$out" | grep -q 'no effect changes'; then
+            echo "candor: no effect changes vs the baseline." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          { echo '## 🔎 candor — effect changes in this PR'; echo '```'; printf '%s\n' "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '🔎 **candor — effect changes vs `.candor/baseline`**'; echo; echo '```'; printf '%s\n' "$out"; echo '```'; } > /tmp/candor-review.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/candor-review.md || true
