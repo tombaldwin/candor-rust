@@ -77,6 +77,21 @@ ensure_report() {
   return 0
 }
 
+# Run the lint with the given env, INCREMENTALLY: a forced re-lint only recompiles the changed
+# crate. dylint emits only when the lint runs, so if cargo had nothing to recompile (a pure cache
+# hit — no "Checking"/"Compiling" line) the diagnostics would be missing; in that case, and only
+# then, clear target/dylint and re-run. Avoids the full-tree rebuild a blind `rm -rf` forces.
+#   usage: out="$(lint_fresh CANDOR_POLICY="$pol")"
+lint_fresh() {
+  local out
+  out="$(env "$@" cargo dylint --lib-path "$LIB" 2>&1 || true)"
+  if ! printf '%s' "$out" | grep -qE '^ *(Compiling|Checking) '; then
+    rm -rf target/dylint 2>/dev/null || true
+    out="$(env "$@" cargo dylint --lib-path "$LIB" 2>&1 || true)"
+  fi
+  printf '%s' "$out"
+}
+
 case "$cmd" in
   audit)
     # `--all`/`-a` (or no python3) → the full per-function lint: the dylint-native view, spans in
@@ -419,8 +434,7 @@ PY
     # leaf call + location). `<query>` is a substring of the fully-qualified function name.
     q="${1:-}"
     [ -n "$q" ] || { echo "usage: cargo candor explain <function-name-substring>" >&2; exit 2; }
-    rm -rf target/dylint 2>/dev/null || true   # force a fresh lint so explain has the full call graph
-    CANDOR_EXPLAIN="$q" cargo dylint --lib-path "$LIB" 2>&1 \
+    lint_fresh CANDOR_EXPLAIN="$q" \
       | grep -vaE '^ *(Checking|Compiling|Finished|Building|Blocking|Locking|Updating|Downloading|Downloaded|Fresh) ' \
       | grep -vaE '^(warning|error)[:[]' \
       | grep -vaE 'generated [0-9]+ warning'
@@ -433,8 +447,7 @@ PY
     # substring. This is the architectural-invariant gate an agent can't self-check.
     pol="${1:-.candor/policy}"
     [ -f "$pol" ] || { echo "candor: no policy at '$pol'. Write rules like 'deny Net Db domain' or 'pure parse'." >&2; exit 2; }
-    rm -rf target/dylint 2>/dev/null || true   # force a fresh lint so the gate can't pass on a cache hit
-    out="$(CANDOR_POLICY="$pol" cargo dylint --lib-path "$LIB" 2>&1 || true)"
+    out="$(lint_fresh CANDOR_POLICY="$pol")"
     printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]' >&2 || true
     if printf '%s' "$out" | grep -q 'AS-EFF-006'; then
       echo "candor: effect-policy violation (AS-EFF-006) — blocked. Bypass: git push --no-verify" >&2
@@ -447,8 +460,7 @@ PY
     # Heuristic: flag injection-class effects (Fs/Exec/Db/Net/Env/Ipc) performed on a PARAMETER-derived
     # argument — path traversal / command injection / SSRF. ADVISORY (exit 0): an intraprocedural,
     # syntactic nudge, NOT sound taint analysis — it over- and under-flags. Review it, don't gate on it.
-    rm -rf target/dylint 2>/dev/null || true
-    out="$(CANDOR_TAINT=1 cargo dylint --lib-path "$LIB" 2>&1 || true)"
+    out="$(lint_fresh CANDOR_TAINT=1)"
     if printf '%s' "$out" | grep -q 'AS-EFF-007'; then
       printf '%s\n' "$out" | grep -aE '\[AS-EFF-007\]' >&2
       echo "candor: ^ heuristic review nudges (caller-derived effect arguments) — not a gate." >&2

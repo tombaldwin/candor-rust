@@ -65,7 +65,7 @@ security/correctness bugs that often matter most, and that its value scales with
       misses flow through struct fields and across functions, and over-flags a validated parameter; it's
       advisory (exit 0), never a gate. Tested (param-derived fires, literal doesn't). **The real frontier
       remains:** interprocedural, field-sensitive data flow (a MIR-level pass) for sound taint.
-- [~] **8. Speed — separate the slow analysis (one compile per change) from instant queries.** The
+- [x] **8. Speed — separate the slow analysis (one compile per change) from instant queries.** The
       principle: the analysis only changes when the code does, so compile once off the critical path
       and serve queries from the cached report. **Done:** `cargo candor diff` now reads the kept-fresh
       `.candor/report.*` (when its source-hash matches `.candor/state`, maintained by the Stop hook)
@@ -77,8 +77,10 @@ security/correctness bugs that often matter most, and that its value scales with
       the fresh report (no recompile) — `cargo candor show <fn>` (its effect set, `*`=direct) and
       `cargo candor where <Effect>` (functions performing it, split direct-source vs inheritor),
       both `--json`. This is the net speed *win*: the agent answers "what does X do / what touches
-      Net" in one ~0.5s call instead of grepping and tracing source. **Remaining:** (c) drop the
-      `rm -rf target/dylint` full-clear in explain/policy/audit so a forced re-lint is incremental.
+      Net" in one ~0.5s call instead of grepping and tracing source. Also **done:** a forced re-lint
+      (explain/policy/risk) is now incremental — `lint_fresh` tries an incremental build and only
+      clears `target/dylint` on a pure cache hit (detected via cargo's "Checking"/"Compiling" line),
+      so a re-lint recompiles just the changed crate instead of the whole tree.
 - [ ] **9. Selectivity — surface only the *consequential* propagation.** Make `diff`/self-review lead
       with "an effect reached an entry point / a should-be-pure fn / a hot path" rather than listing
       every inheritor. Less noise, focuses the agent on the propagation that *matters*. Cheap; builds
