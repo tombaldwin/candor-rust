@@ -177,4 +177,40 @@ mod tests {
         // empty `calls` is omitted on write.
         assert!(!s.contains("\"calls\""));
     }
+
+    /// The ONE discrimination rule shared by the lint's cross-crate loader and the CLI: a report is
+    /// `<base>.<crate>.<type>.json` (exactly two segments after the base); sidecars (one segment) and
+    /// any 3+-segment name are NOT reports. Real reports always have a dot-free crate name and type,
+    /// so two segments is exact. Sorted by path, with krate/kind parsed from the filename.
+    #[test]
+    fn report_files_discriminates_and_parses() {
+        let dir = std::env::temp_dir().join("candor-report-files-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in [
+            "r.mycrate.lib.json",          // report ✓ → (mycrate, lib)
+            "r.mycrate.Executable.json",   // report ✓ → (mycrate, Executable)
+            "r.calibrated.json",           // sidecar ✗ (one segment)
+            "r.encountered-mycrate.json",  // sidecar ✗ (one segment)
+            "r.a.b.c.json",                // ✗ 3 segments (kind "b.c" has a dot)
+            "other.x.y.json",              // ✗ different base
+        ] {
+            std::fs::write(dir.join(f), "[]").unwrap();
+        }
+        let prefix = dir.join("r");
+        let got: Vec<(String, String, String)> = report_files(prefix.to_str().unwrap())
+            .into_iter()
+            .map(|r| {
+                (r.path.file_name().unwrap().to_str().unwrap().to_string(), r.krate, r.kind)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("r.mycrate.Executable.json".into(), "mycrate".into(), "Executable".into()),
+                ("r.mycrate.lib.json".into(), "mycrate".into(), "lib".into()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

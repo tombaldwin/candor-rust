@@ -95,11 +95,15 @@ case "$cmd" in
   verify) # verify <runid> — objective: did the agent's edit introduce the task's effect?
     runid="$1"; work="$RUNS/$runid/work"
     effect="$(awk -F'\t' '$1=="effect"{print $2}' "$RUNS/$runid/meta.tsv")"
-    # `|| true` so a missing jq / absent baseline / non-zero diff degrades to empty (→ INCOMPLETE via
-    # ${gained:-0}) instead of aborting the whole script under `set -euo pipefail`.
-    gained="$( cd "$work"; "$CC" diff "$RUNS/$runid/baseline" --json 2>/dev/null \
-               | jq -r --arg e "$effect" '[.changes[]|select(.gained|index($e))|.fn]|length' 2>/dev/null || true )"
-    if [ "${gained:-0}" -gt 0 ]; then
+    # Capture the diff JSON separately (|| true so a tool failure doesn't abort under set -e). An empty
+    # result, or jq failing, means the check itself couldn't run — report ERROR, distinct from a genuine
+    # INCOMPLETE (diff ran, no function gained the effect), so a scaled batch never scores infra
+    # breakage as a model false-negative.
+    dj="$( cd "$work"; "$CC" diff "$RUNS/$runid/baseline" --json 2>/dev/null || true )"
+    gained="$(printf '%s' "$dj" | jq -r --arg e "$effect" '[.changes[]|select(.gained|index($e))|.fn]|length' 2>/dev/null || true)"
+    if [ -z "$dj" ] || [ -z "$gained" ]; then
+      echo "ERROR: could not evaluate (no baseline, build failure, or jq missing)"
+    elif [ "$gained" -gt 0 ]; then
       echo "COMPLETED: $gained function(s) gained $effect (task implemented)"
     else
       echo "INCOMPLETE: no function gained $effect (task not implemented as expected)"
