@@ -1,0 +1,10 @@
+# candor dogfoods itself: CI's Self-guard step compares candor's current effect surface against the
+# committed baseline here. Track the per-crate report baselines + the engine-version stamp; everything
+# else under .candor/ (live reports, state, the calibrated/encountered coverage sidecars) is
+# regenerated on every run and stays untracked.
+*
+!.gitignore
+!baseline.candor-version
+!baseline.candor.Cdylib.json
+!baseline.candor_report.Rlib.json
+!baseline.build_script_build.Executable.json

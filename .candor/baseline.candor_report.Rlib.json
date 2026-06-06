@@ -1,0 +1,28 @@
+{
+  "candor": {
+    "version": "136b082",
+    "toolchain": "nightly-2026-04-16"
+  },
+  "functions": [
+    {
+      "fn": "report_files",
+      "loc": "crates/candor-report/src/lib.rs:31:1: 31:53",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "54dc920076948b6208611a9b2c79d28a",
+      "fs": [
+        "read"
+      ]
+    }
+  ]
+}

@@ -1,56 +1,117 @@
-[
-  {
-    "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-    "loc": "src/lib.rs:473:5: 473:59",
-    "inferred": [
-      "Env",
-      "Fs"
-    ],
-    "direct": [
-      "Env",
-      "Fs"
-    ],
-    "declared": [],
-    "undeclared": [
-      "Env",
-      "Fs"
-    ],
-    "overdeclared": [],
-    "unresolved": false
+{
+  "candor": {
+    "version": "136b082",
+    "toolchain": "nightly-2026-04-16"
   },
-  {
-    "fn": "Candor::new",
-    "loc": "src/lib.rs:71:5: 71:25",
-    "inferred": [
-      "Env",
-      "Fs"
-    ],
-    "direct": [
-      "Env",
-      "Fs"
-    ],
-    "declared": [],
-    "undeclared": [
-      "Env",
-      "Fs"
-    ],
-    "overdeclared": [],
-    "unresolved": false
-  },
-  {
-    "fn": "load_baseline",
-    "loc": "src/lib.rs:139:1: 139:74",
-    "inferred": [
-      "Fs"
-    ],
-    "direct": [
-      "Fs"
-    ],
-    "declared": [],
-    "undeclared": [
-      "Fs"
-    ],
-    "overdeclared": [],
-    "unresolved": false
-  }
-]
+  "functions": [
+    {
+      "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
+      "loc": "src/lib.rs:1101:5: 1101:54",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "91903e397ba112fba9a775e90f84673a",
+      "calls": [
+        "load_cross_reports"
+      ]
+    },
+    {
+      "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
+      "loc": "src/lib.rs:1270:5: 1270:59",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "91903e397ba112fb356b2e2928bda8f3",
+      "fs": [
+        "read",
+        "write"
+      ],
+      "calls": [
+        "load_baseline"
+      ]
+    },
+    {
+      "fn": "Candor::new",
+      "loc": "src/lib.rs:166:5: 166:25",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "91903e397ba112fbca21d9b1e659f12a",
+      "fs": [
+        "read"
+      ]
+    },
+    {
+      "fn": "load_baseline",
+      "loc": "src/lib.rs:392:1: 392:74",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "91903e397ba112fb9a6603f15a89fcf1",
+      "fs": [
+        "read"
+      ]
+    },
+    {
+      "fn": "load_cross_reports",
+      "loc": "src/lib.rs:356:1: 356:103",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "91903e397ba112fb1324e3ed22c7863b"
+    }
+  ]
+}

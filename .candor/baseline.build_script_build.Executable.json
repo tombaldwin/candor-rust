@@ -1,0 +1,31 @@
+{
+  "candor": {
+    "version": "136b082",
+    "toolchain": "nightly-2026-04-16"
+  },
+  "functions": [
+    {
+      "fn": "main",
+      "loc": "build.rs:10:1: 10:10",
+      "inferred": [
+        "Exec",
+        "Fs"
+      ],
+      "direct": [
+        "Exec",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Exec",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "62504ec9278343ea7be5e5be4e2b9ead",
+      "fs": [
+        "read"
+      ]
+    }
+  ]
+}

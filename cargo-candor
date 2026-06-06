@@ -43,14 +43,21 @@ if [ ! -f "$CANDOR_DIR/Cargo.toml" ] && [ -f "$CANDOR_CACHE/clone" ]; then
   CANDOR_DIR="$(cat "$CANDOR_CACHE/clone" 2>/dev/null || echo "$CANDOR_DIR")"
 fi
 
-# Locate the lint dylib among the clone's target/ and the stable ~/.candor/lib. `ls -t` so the NEWEST
-# wins — a fresh clone build (candor's own development) beats a stale cache, and after a `cargo clean`
-# the cache copy is all that's left. (Plain `ls` SORTS its operands alphabetically, which would let
-# ~/.candor — `.candor` < `git`/`code`/… — shadow a fresh build; `-t` sorts by mtime instead.)
+# Locate the lint dylib among the clone's target/ and the stable ~/.candor/lib, preferring the NEWEST:
+# a fresh clone build (candor's own development) must beat a stale cache, and after a `cargo clean` the
+# cache copy is all that's left. Explicit mtime scan, NOT `ls … | head`: plain `ls` sorts operands
+# alphabetically (so ~/.candor — `.candor` < `git`/`code`/… — would shadow a fresh build), and `ls -t`
+# silently drops its time-sort once any operand doesn't exist (no release build, no `.so` on macOS —
+# the usual case), returning the OLDEST. Non-matching globs stay literal under bash; `[ -e ]` skips them.
 find_lib() {
-  ls -t "$CANDOR_DIR"/target/release/libcandor@*.dylib "$CANDOR_DIR"/target/release/libcandor@*.so \
-        "$CANDOR_DIR"/target/debug/libcandor@*.dylib   "$CANDOR_DIR"/target/debug/libcandor@*.so \
-        "$CANDOR_CACHE"/lib/libcandor@*.dylib          "$CANDOR_CACHE"/lib/libcandor@*.so 2>/dev/null | head -1
+  local newest="" f
+  for f in "$CANDOR_DIR"/target/release/libcandor@*.dylib "$CANDOR_DIR"/target/release/libcandor@*.so \
+           "$CANDOR_DIR"/target/debug/libcandor@*.dylib   "$CANDOR_DIR"/target/debug/libcandor@*.so \
+           "$CANDOR_CACHE"/lib/libcandor@*.dylib          "$CANDOR_CACHE"/lib/libcandor@*.so; do
+    [ -e "$f" ] || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
+  done
+  [ -n "$newest" ] && printf '%s\n' "$newest"
 }
 # Mirror the active artifact into the stable home so a later `cargo clean` can't strand it. Idempotent:
 # only copies when the source is newer than (or absent from) the cache, so it's cheap to call on every
@@ -65,10 +72,15 @@ stash() { # <file> <subdir>
 }
 
 # The read-only report queries (show/where/callers/map/diff/audit) live in the candor-query binary.
-# `ls -t` (newest first) for the same reason as find_lib — a fresh clone build must beat a stale cache.
+# Newest wins, via the same explicit mtime scan as find_lib (a fresh clone build must beat a stale cache).
 find_query() {
-  ls -t "$CANDOR_DIR"/target/release/candor-query "$CANDOR_DIR"/target/debug/candor-query \
-        "$CANDOR_CACHE"/bin/candor-query 2>/dev/null | head -1
+  local newest="" f
+  for f in "$CANDOR_DIR"/target/release/candor-query "$CANDOR_DIR"/target/debug/candor-query \
+           "$CANDOR_CACHE"/bin/candor-query; do
+    [ -e "$f" ] || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
+  done
+  [ -n "$newest" ] && printf '%s\n' "$newest"
 }
 query() {
   local q; q="$(find_query || true)"
