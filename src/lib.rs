@@ -564,6 +564,15 @@ fn fs_kind(path: &str) -> &'static [&'static str] {
     &[]
 }
 
+/// The fs read/write detail to record for a call classified `Fs` — but ONLY when that classification
+/// came from the BUILT-IN classifier (`builtin == Some("Fs")`), whose paths are real std::fs /
+/// known-fs-crate verbs `fs_kind`'s table understands. A user `extra` rule can label any crate `Fs`,
+/// and its method names needn't be std::fs verbs (an in-memory `Builder::append()` would otherwise
+/// mis-tag as `Fs(write)`), so we make no read/write claim for those. `&[]` for any non-Fs effect too.
+fn fs_detail_for(builtin: Option<&'static str>, path: &str) -> &'static [&'static str] {
+    if builtin == Some("Fs") { fs_kind(path) } else { &[] }
+}
+
 /// Classify a resolved callee by the crate it belongs to and its full path.
 fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name.starts_with("aws_sdk_") || crate_name.starts_with("aws_smithy") {
@@ -1224,14 +1233,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             self.direct.entry(caller).or_default().insert(effect);
             // Non-breaking Fs refinement: when the verb tells us read vs write, record it (propagated
             // like effects below, surfaced as the report's `fs` detail). The `Fs` effect is unchanged.
-            // Only for BUILT-IN Fs classification — `fs_kind`'s verb table is std::fs-specific, so a
-            // user crate-prefix `extra` rule (whose method names needn't be std::fs verbs) must not be
-            // run through it, else e.g. an in-memory `Builder::append()` would mis-tag as Fs(write).
-            if effect == "Fs" && builtin == Some("Fs") {
-                let kinds = fs_kind(&path);
-                if !kinds.is_empty() {
-                    self.fs_direct.entry(caller).or_default().extend(kinds.iter().copied());
-                }
+            // Gated to built-in Fs classification — see `fs_detail_for`.
+            let kinds = fs_detail_for(builtin, &path);
+            if !kinds.is_empty() {
+                self.fs_direct.entry(caller).or_default().extend(kinds.iter().copied());
             }
             if self.explain.is_some() {
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
@@ -1901,6 +1906,19 @@ mod tests {
         assert!(fs_kind("std::fs::OpenOptions::open").is_empty());
         assert!(fs_kind("memmap2::MmapOptions::map").is_empty());
         assert!(fs_kind("cap_std::fs::Dir::entries").is_empty());
+    }
+
+    #[test]
+    fn fs_detail_only_for_builtin_fs() {
+        // Built-in Fs classification → the verb table applies.
+        assert_eq!(fs_detail_for(Some("Fs"), "std::fs::write"), &["write"][..]);
+        assert_eq!(fs_detail_for(Some("Fs"), "std::fs::read_to_string"), &["read"][..]);
+        // A user `extra` rule labels the crate Fs (builtin is None) and the leaf collides with a
+        // write verb — but we must NOT claim a kind for it (the regression: false `Fs(write)`).
+        assert!(fs_detail_for(None, "mybuf::Builder::append").is_empty());
+        assert!(fs_detail_for(None, "std::fs::write").is_empty());
+        // A different built-in effect never carries fs detail.
+        assert!(fs_detail_for(Some("Net"), "std::fs::write").is_empty());
     }
 
     #[test]

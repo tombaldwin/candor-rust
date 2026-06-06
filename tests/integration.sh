@@ -64,19 +64,30 @@ echo "== cross-crate effect inheritance (lib+bin) =="
 X=$(mktemp -d)/xc; mkdir -p "$X/src" "$X/.candor"
 printf '[package]\nname="xc"\nversion="0.1.0"\nedition="2021"\n' > "$X/Cargo.toml"
 printf 'pub fn writes() { let _ = std::fs::write("/tmp/xc_probe", b"x"); }\n' > "$X/src/lib.rs"
-printf 'fn caller() { xc::writes(); }\nfn main() { caller(); }\n' > "$X/src/main.rs"
+{ printf 'fn caller() { xc::writes(); }\n'                                          # cross-crate Fs only
+  printf 'fn local_read() { let _ = std::fs::read("/tmp/xc_r"); }\n'                # local Fs read
+  printf 'fn mixed() { let _ = std::fs::read("/tmp/xc_r"); xc::writes(); }\n'       # local read + cross write
+  printf 'fn main() { caller(); local_read(); mixed(); }\n'; } > "$X/src/main.rs"
 dl "$X" env CANDOR_JSON="$X/.candor/r" >/dev/null
-caller_eff=$(python3 - "$X/.candor" <<'PY'
+xcfs=$(python3 - "$X/.candor" <<'PY'
 import json, glob, sys
+d = {}
 for f in glob.glob(sys.argv[1] + '/r.xc.Executable.json'):
-    d = json.load(open(f))
-    funcs = d['functions'] if isinstance(d, dict) else d   # v0.2 envelope or v0.1 array
+    data = json.load(open(f))
+    funcs = data['functions'] if isinstance(data, dict) else data   # v0.2 envelope or v0.1 array
     for e in funcs:
-        if e['fn'] == 'caller':
-            print(','.join(e['inferred']))
+        d[e['fn']] = (','.join(sorted(e.get('inferred', []))), ','.join(e.get('fs', [])))
+for fn in ('caller', 'local_read', 'mixed'):
+    inf, fs = d.get(fn, ('', ''))
+    print(f"{fn} inferred=[{inf}] fs=[{fs}]")
 PY
 )
-want "bin 'caller' inherits lib Fs across the crate boundary" "$caller_eff" "Fs"
+want "bin 'caller' inherits lib Fs across the crate boundary"      "$xcfs" "caller inferred=[Fs]"
+want "a local Fs read carries its read/write detail"               "$xcfs" "local_read inferred=[Fs] fs=[read]"
+want "cross-crate Fs carries NO read/write detail (kind unknown)"  "$xcfs" "caller inferred=[Fs] fs=[]"
+# The regression: a fn that reads locally AND writes cross-crate must NOT report `fs=[read]` (a partial
+# claim that hides the cross-crate write) — the detail is suppressed to nothing.
+want "mixed local+cross-crate Fs suppresses the partial detail"    "$xcfs" "mixed inferred=[Fs] fs=[]"
 
 # ── 5. Version provenance: the dylib self-reports its build version, and reports are self-describing ──
 echo "== version stamping (build tag + self-describing sidecar) =="
@@ -103,6 +114,18 @@ want "audit: effect tally rendered"                  "$aud" "effects"
 want "audit: broadest-surface section"               "$aud" "broadest effect surface"
 want "audit: main shows its transitive { Exec Fs }"  "$aud" "Exec Fs"
 rm -rf "$(dirname "$A")"
+
+# Per-crate label comes from the FILENAME (candor-query report_files), so an unreadable report still
+# shows its <crate>.<type> label instead of blanking to "0 " (regression). A directory in place of the
+# file makes read_to_string fail (EISDIR) for every user, including root.
+QBIN="$ROOT/target/debug/candor-query"
+QD=$(mktemp -d)
+printf '[{"fn":"f","inferred":["Net"]}]' > "$QD/r.good.lib.json"   # readable, one effectful fn
+mkdir "$QD/r.bad.lib.json"                                          # unreadable (a directory)
+qaud=$("$QBIN" audit "$QD/r" testver /no/such/suspect 2>/dev/null || true)
+want "audit: labels a readable crate report"          "$qaud" "good.lib"
+want "audit: still labels an UNREADABLE crate report" "$qaud" "bad.lib"
+rm -rf "$QD"
 
 # ── 7. Agent-facing effect diff: `cargo candor diff` describes the per-function delta (P0 §1) ──
 echo "== effect diff (cargo candor diff) =="
