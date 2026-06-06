@@ -74,7 +74,7 @@ cargo install cargo-dylint dylint-link   # once per machine
 ```
 
 `install.sh` is one-shot and idempotent: it builds the lint (rustup auto-fetches the pinned nightly +
-`rustc-dev` from `rust-toolchain.toml` — you never manage the toolchain by hand), stashes the dylib +
+`rustc-dev` from `rust-toolchain` — you never manage the toolchain by hand), stashes the dylib +
 the `candor-query` binary under `~/.candor` (a stable home that survives a `cargo clean` in this
 clone), and symlinks `cargo-candor` into `~/.cargo/bin` so `cargo candor …` resolves everywhere. Re-run
 it (or `cargo candor setup`) any time to refresh; `cargo candor update` pulls + rebuilds + refreshes.
@@ -332,8 +332,9 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 
 ## Tests
 
-`cargo test` runs unit tests over the *classifier* precision rules (e.g. `std::net::TcpStream` is
-`Net` but `std::net::SocketAddr` is not) plus a load smoke-test. The **stateful core** (call-graph
+`cargo test --workspace` runs unit tests over the *classifier* precision rules (e.g. `std::net::TcpStream`
+is `Net` but `std::net::SocketAddr` is not) plus a load smoke-test, and the `candor-report` /
+`candor-query` tooling tests (report parsing/discovery, the query commands). The **stateful core** (call-graph
 fixpoint, CHA, conformance) isn't unit-tested — it needs the dylint harness, which has no bless
 support — so it's covered instead by the `sample/`+`sample-capstd/` crates and a CI *behavioural*
 check that asserts real audit output (so a "candor emits nothing" regression fails CI). The lint also
@@ -345,9 +346,10 @@ Prototype. Validated on a real ~8k-line codebase (the `ebman` AWS Elastic Beanst
 audit tagged ~445 functions; a leaf module was converted to the capability discipline and brought to
 zero conformance violations while still building on stable.
 
-candor also **guards itself**: CI runs candor over candor against `.candor/baseline`, so its three
-existing effectful functions (config/baseline reads + the report write, all `Env`/`Fs`) can't gain a
-*new* effect unnoticed. Note the guard's scope, honestly: per AS-EFF-005's design it flags
+candor also **guards itself**: CI runs candor over candor against `.candor/baseline`. Its effectful
+surface — five functions in the lint (config / baseline / cross-report reads + the report write, all
+`Env`/`Fs`), plus `candor-report`'s `report_files` (`Fs`) and the build script (`Exec`/`Fs`) — can't
+gain a *new* effect unnoticed. Note the guard's scope, honestly: per AS-EFF-005's design it flags
 *regressions in existing functions*, not brand-new functions (those are reviewed as new code), so a
 newly-added effectful function wouldn't trip it. Refresh with `cargo candor snapshot .candor/baseline`
 when a new effect is intended.
