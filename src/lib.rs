@@ -353,7 +353,19 @@ fn parse_dph(s: &str) -> Option<(u64, u64)> {
 /// so the bin must still load the lib's report) into a `DefPathHash -> effects` map for
 /// cross-crate resolution. Each function's *inferred* (already-transitive) set is what a caller in
 /// another crate inherits. Skips `<prefix>.calibrated.json` / `encountered-*` sidecars (one segment).
-fn load_cross_reports(prefix: &str, me: &str, me_kind: &str) -> HashMap<(u64, u64), Vec<&'static str>> {
+///
+/// `trust_siblings`: when false (live analysis, `CANDOR_JSON`), a sibling produced by a DIFFERENT
+/// engine is downgraded to `Unknown` (candor-spec §2.1 — its effects were computed by rules this
+/// engine may have changed). When true (the guard, `CANDOR_BASELINE`), the "siblings" ARE the
+/// baseline's own snapshot of the project's crates — intentionally from the baseline commit — so we
+/// trust them as-is; downgrading them would change the very cross-inclusive set the guard exists to
+/// reproduce, firing a spurious AS-EFF-005 every time the engine moves ahead of the baseline.
+fn load_cross_reports(
+    prefix: &str,
+    me: &str,
+    me_kind: &str,
+    trust_siblings: bool,
+) -> HashMap<(u64, u64), Vec<&'static str>> {
     let mut out: HashMap<(u64, u64), Vec<&'static str>> = HashMap::new();
     for rf in report_files(prefix) {
         // Skip our OWN report (by crate name AND type); DefPathHash keys are globally unique so
@@ -367,7 +379,7 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str) -> HashMap<(u64, u6
         // was computed by rules this engine may have changed, so we must not silently trust its
         // effects — downgrade everything inherited from it to `Unknown`. (A legacy v0.1 report has no
         // version; we can't check it, so it's trusted as before.)
-        let stale = report_version(&text).is_some_and(|v| v != CANDOR_VERSION);
+        let stale = !trust_siblings && report_version(&text).is_some_and(|v| v != CANDOR_VERSION);
         let Some(arr) = report_entries(&text) else { continue };
         for e in arr {
             let Some(key) = parse_dph(&e.hash) else { continue };
@@ -1114,9 +1126,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // CANDOR_BASELINE (the guard) — so the guard computes the SAME cross-inclusive effect set
         // the baseline was snapshotted with, instead of a within-crate-only set (which would make
         // the AS-EFF-005 diff compare two different effect models).
-        let prefix = std::env::var("CANDOR_JSON")
-            .ok()
-            .or_else(|| std::env::var("CANDOR_BASELINE").ok());
+        // CANDOR_JSON (snapshot/audit) loads LIVE sibling reports — version-trust applies. CANDOR_BASELINE
+        // (the guard) loads the baseline's OWN snapshot of the siblings — trust them as-is, so the engine
+        // moving ahead of the baseline doesn't spuriously downgrade them to Unknown (see load_cross_reports).
+        let (prefix, trust_siblings) = match std::env::var("CANDOR_JSON") {
+            Ok(p) => (Some(p), false),
+            Err(_) => (std::env::var("CANDOR_BASELINE").ok(), true),
+        };
         if let Some(prefix) = prefix {
             let me = cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).to_string();
             let me_kind = cx
@@ -1126,7 +1142,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 .map(|t| format!("{t:?}"))
                 .collect::<Vec<_>>()
                 .join("-");
-            self.cross = load_cross_reports(&prefix, &me, &me_kind);
+            self.cross = load_cross_reports(&prefix, &me, &me_kind, trust_siblings);
         }
     }
 
@@ -2110,7 +2126,7 @@ mod tests {
         w("r.calibrated.json", r#"{"crates":[]}"#.to_string());
         w("r.encountered-dep-Rlib.json", r#"["serde"]"#.to_string());
 
-        let m = load_cross_reports(prefix, "mybin", "Executable");
+        let m = load_cross_reports(prefix, "mybin", "Executable", false);
 
         // dep::f loaded under its parsed-hash key with both effects.
         let mut got = m.get(&parse_dph(h_lib).unwrap()).cloned().unwrap_or_default();
@@ -2138,12 +2154,21 @@ mod tests {
 
         // A v0.2 report from a DIFFERENT engine → inherited effects downgraded to Unknown (§2.1).
         w(format!(r#"{{"candor":{{"version":"OTHER"}},"functions":[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h}"}}]}}"#));
-        let m = load_cross_reports(prefix, "mybin", "Executable");
+        let m = load_cross_reports(prefix, "mybin", "Executable", false);
         assert_eq!(m.get(&parse_dph(h).unwrap()).cloned().unwrap_or_default(), vec![UNKNOWN]);
 
         // The SAME engine version → trusted as-is.
         w(format!(r#"{{"candor":{{"version":"{CANDOR_VERSION}"}},"functions":[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h}"}}]}}"#));
-        let m = load_cross_reports(prefix, "mybin", "Executable");
+        let m = load_cross_reports(prefix, "mybin", "Executable", false);
+        let mut got = m.get(&parse_dph(h).unwrap()).cloned().unwrap_or_default();
+        got.sort();
+        assert_eq!(got, vec!["Fs", "Net"]);
+
+        // Guard mode (trust_siblings=true): an OTHER-version report is the baseline's own snapshot, so
+        // it is trusted as-is — NOT downgraded. (Otherwise the guard fires AS-EFF-005 every time the
+        // engine moves ahead of the baseline it is comparing against.)
+        w(format!(r#"{{"candor":{{"version":"OTHER"}},"functions":[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h}"}}]}}"#));
+        let m = load_cross_reports(prefix, "mybin", "Executable", true);
         let mut got = m.get(&parse_dph(h).unwrap()).cloned().unwrap_or_default();
         got.sort();
         assert_eq!(got, vec!["Fs", "Net"]);
