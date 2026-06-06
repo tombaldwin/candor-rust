@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use candor_report::{report_entries, ReportEntry};
+use candor_report::{report_entries, report_files, ReportEntry, EFFECTS};
 use regex::Regex;
 use serde::Serialize;
 
@@ -41,35 +41,11 @@ fn main() {
 
 // ── report loading ──────────────────────────────────────────────────────────────────────────────
 
-/// Files matching the Python glob `pre + '.*.*.json'`: same directory, basename `<base>.`, ending
-/// `.json`, with at least the two `.`-separated wildcard segments between (≥3 dots in the suffix).
-/// Sorted for deterministic output. A directoryless prefix reads the current dir.
+/// Report file PATHS for a prefix — the `<base>.<crate>.<type>.json` reports, sorted, excluding the
+/// `.calibrated`/`.encountered-*` sidecars. Thin wrapper over `candor_report::report_files`, which
+/// owns the ONE discrimination rule shared with the lint (so the two can't disagree).
 fn glob_reports(prefix: &str) -> Vec<PathBuf> {
-    let p = Path::new(prefix);
-    let dir = match p.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let base = match p.file_name().and_then(|s| s.to_str()) {
-        Some(b) => b,
-        None => return Vec::new(),
-    };
-    let needle = format!("{base}.");
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for ent in rd.flatten() {
-            let name = ent.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if name.starts_with(&needle) && name.ends_with(".json") {
-                let suffix = &name[base.len()..]; // starts with '.'
-                if suffix.matches('.').count() >= 3 {
-                    out.push(ent.path());
-                }
-            }
-        }
-    }
-    out.sort();
-    out
+    report_files(prefix).into_iter().map(|r| r.path).collect()
 }
 
 /// All report entries across the matching files (skipping unreadable / unparsable ones, like Python).
@@ -125,22 +101,14 @@ fn cmd_audit(args: &[String]) -> i32 {
     };
     let base = prefix_base(pre);
 
-    // entries + per-crate counts, in sorted-glob order.
+    // entries + per-crate counts, in sorted order. The `<crate>.<type>` label is taken from the
+    // filename (via report_files) regardless of readability, so an unreadable report still shows its
+    // label with a count of 0 (matching the Python this replaced).
     let mut fns: Vec<ReportEntry> = Vec::new();
     let mut percrate: Vec<(String, usize)> = Vec::new();
-    for path in glob_reports(pre) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            percrate.push((String::new(), 0));
-            continue;
-        };
-        let es = report_entries(&text).unwrap_or_default();
-        // label = filename with the `<base>.` prefix and `.json` suffix stripped → `<crate>.<type>`.
-        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let label = fname
-            .strip_prefix(&format!("{base}."))
-            .and_then(|s| s.strip_suffix(".json"))
-            .unwrap_or("")
-            .to_string();
+    for rf in report_files(pre) {
+        let label = format!("{}.{}", rf.krate, rf.kind);
+        let es = std::fs::read_to_string(&rf.path).ok().and_then(|t| report_entries(&t)).unwrap_or_default();
         percrate.push((label, es.len()));
         fns.extend(es);
     }
@@ -150,9 +118,7 @@ fn cmd_audit(args: &[String]) -> i32 {
         return 0;
     }
 
-    const EFFS: [&str; 10] =
-        ["Net", "Db", "Fs", "Exec", "Ipc", "Env", "Clock", "Rand", "Clipboard", "Log"];
-    let mut tally: BTreeMap<&str, usize> = EFFS.iter().map(|e| (*e, 0)).collect();
+    let mut tally: BTreeMap<&str, usize> = EFFECTS.iter().map(|e| (*e, 0)).collect();
     let mut unresolved: Vec<String> = Vec::new();
     for e in &fns {
         for x in &e.inferred {
@@ -170,7 +136,7 @@ fn cmd_audit(args: &[String]) -> i32 {
     println!("{} effectful functions  ·  {}", fns.len(), pc);
     println!();
     // ranked: effects with count>0, by (count desc, name desc) — matches Python's reverse sort of (n,e).
-    let mut ranked: Vec<(usize, &str)> = EFFS.iter().filter(|e| tally[**e] > 0).map(|e| (tally[*e], *e)).collect();
+    let mut ranked: Vec<(usize, &str)> = EFFECTS.iter().filter(|e| tally[**e] > 0).map(|e| (tally[*e], *e)).collect();
     ranked.sort_by(|a, b| b.cmp(a));
     let eff_line = ranked.iter().map(|(n, e)| format!("{n} {e}")).collect::<Vec<_>>().join(" · ");
     println!("  effects   {eff_line}");
@@ -195,7 +161,15 @@ fn cmd_audit(args: &[String]) -> i32 {
         }
     }
     let suspect = std::fs::read_to_string(suspect_path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let suspect = suspect.and_then(|s| Regex::new(&s).ok());
+    // Warn (don't silently skip) when the suspect pattern won't compile — the `regex` crate rejects
+    // some constructs Python's `re` accepted, and a silent drop would hide the coverage-gap check.
+    let suspect = suspect.and_then(|s| match Regex::new(&s) {
+        Ok(re) => Some(re),
+        Err(e) => {
+            eprintln!("candor: ignoring unparsable suspect pattern ({e}); coverage-gap check skipped");
+            None
+        }
+    });
     let calibrated = |c: &str| -> bool {
         calib_c.contains(c)
             || calib_c.iter().any(|k| c == k || c.starts_with(&format!("{k}_")))
@@ -555,9 +529,8 @@ fn cmd_diff(args: &[String]) -> i32 {
     }
 
     if want_json {
-        let mut sorted_changes = changes.clone();
-        sorted_changes.sort_by(|a, b| a.func.cmp(&b.func));
-        let out = DiffJson { baseline_version: bver, engine_version: ever, changes: sorted_changes };
+        changes.sort_by(|a, b| a.func.cmp(&b.func));
+        let out = DiffJson { baseline_version: bver, engine_version: ever, changes };
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }

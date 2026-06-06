@@ -95,8 +95,10 @@ case "$cmd" in
   verify) # verify <runid> — objective: did the agent's edit introduce the task's effect?
     runid="$1"; work="$RUNS/$runid/work"
     effect="$(awk -F'\t' '$1=="effect"{print $2}' "$RUNS/$runid/meta.tsv")"
+    # `|| true` so a missing jq / absent baseline / non-zero diff degrades to empty (→ INCOMPLETE via
+    # ${gained:-0}) instead of aborting the whole script under `set -euo pipefail`.
     gained="$( cd "$work"; "$CC" diff "$RUNS/$runid/baseline" --json 2>/dev/null \
-               | jq -r --arg e "$effect" '[.changes[]|select(.gained|index($e))|.fn]|length' )"
+               | jq -r --arg e "$effect" '[.changes[]|select(.gained|index($e))|.fn]|length' 2>/dev/null || true )"
     if [ "${gained:-0}" -gt 0 ]; then
       echo "COMPLETED: $gained function(s) gained $effect (task implemented)"
     else

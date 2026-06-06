@@ -2,7 +2,60 @@
 //! reports) and the CLI / tooling (which read them) depend on one definition instead of re-deriving
 //! the JSON shape in every script. This is the type-safe, DRY core the bash+Python tooling lacked.
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
+
+/// The ten effects candor classifies (excluding the synthetic `Unknown`). Defined once here so the
+/// lint and the CLI share one vocabulary instead of each keeping its own copy (which had already
+/// drifted in ordering). Order is irrelevant to consumers — both tally by name and sort the output.
+pub const EFFECTS: [&str; 10] =
+    ["Net", "Db", "Fs", "Exec", "Ipc", "Env", "Clock", "Rand", "Clipboard", "Log"];
+
+/// A discovered per-crate report file. candor's report naming convention is
+/// `<prefix>.<crate>.<type>.json`; the sidecars (`<prefix>.calibrated.json`,
+/// `<prefix>.encountered-*.json`) have only ONE segment after the prefix and are NOT reports.
+pub struct ReportFile {
+    pub path: PathBuf,
+    /// The `<crate>` segment of the filename.
+    pub krate: String,
+    /// The `<type>` segment (e.g. `lib`, `Executable`).
+    pub kind: String,
+}
+
+/// Discover the per-crate report files for a prefix (`.candor/report` →
+/// `.candor/report.<crate>.<type>.json`), sorted by path for deterministic output. A directoryless
+/// prefix reads the current directory. ONE discrimination rule — `<crate>.<type>`, exactly two
+/// segments — shared by the lint's cross-crate loader and the CLI's queries, so the two can never
+/// disagree about which files are reports.
+pub fn report_files(prefix: &str) -> Vec<ReportFile> {
+    let p = Path::new(prefix);
+    let dir = p
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return Vec::new() };
+    let prefix_dot = format!("{base}.");
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&dir) else { return out };
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name.strip_prefix(&prefix_dot) else { continue };
+        let Some(rest) = rest.strip_suffix(".json") else { continue };
+        // `<crate>.<type>` — exactly two segments; a one-segment sidecar or any 3+-segment name is not
+        // a report.
+        let mut segs = rest.splitn(2, '.');
+        let (Some(krate), Some(kind)) = (segs.next(), segs.next()) else { continue };
+        if kind.contains('.') {
+            continue;
+        }
+        out.push(ReportFile { path: ent.path(), krate: krate.to_string(), kind: kind.to_string() });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
 
 /// One function entry of a candor report. `#[serde(default)]` on the non-essential fields so a
 /// partial or legacy report still deserializes; the lint sets them all when writing.

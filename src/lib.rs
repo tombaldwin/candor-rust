@@ -25,7 +25,9 @@ extern crate rustc_middle;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use candor_report::{report_entries, report_version, to_report_json, ReportEntry, ReportMeta};
+use candor_report::{
+    report_entries, report_files, report_version, to_report_json, ReportEntry, ReportMeta, EFFECTS,
+};
 
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -51,6 +53,46 @@ dylint_linting::impl_late_lint! {
 
 /// The effect recorded for a call candor cannot resolve to a concrete callee.
 const UNKNOWN: &str = "Unknown";
+
+/// Sentinel in the `fs` read/write set marking that a function inherits `Fs` with an UNKNOWN kind
+/// (e.g. across a crate boundary, where the dependency's report records no read/write detail). When
+/// present we emit no `fs` detail at all — a missing claim is honest; a partial one would mislead.
+const FS_UNKNOWN: &str = "?";
+
+/// Transitive fixpoint over the local call graph: `acc[f] = seed[f] ∪ ⋃ { acc[g] : g ∈ calls[f] }`.
+/// Used for both the effect set and the Fs read/write detail (which ride the same graph). Takes the
+/// pre-seeded map by value and grows it in place to convergence (the sets only grow, bounded by a
+/// finite alphabet, so it terminates).
+fn propagate(
+    mut acc: HashMap<LocalDefId, BTreeSet<&'static str>>,
+    calls: &HashMap<LocalDefId, HashSet<LocalDefId>>,
+) -> HashMap<LocalDefId, BTreeSet<&'static str>> {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let callers: Vec<LocalDefId> = calls.keys().copied().collect();
+        for f in callers {
+            let mut add: BTreeSet<&'static str> = BTreeSet::new();
+            if let Some(callees) = calls.get(&f) {
+                for g in callees {
+                    if let Some(gk) = acc.get(g) {
+                        add.extend(gk.iter().copied());
+                    }
+                }
+            }
+            if add.is_empty() {
+                continue;
+            }
+            let entry = acc.entry(f).or_default();
+            let before = entry.len();
+            entry.extend(add);
+            if entry.len() != before {
+                changed = true;
+            }
+        }
+    }
+    acc
+}
 
 pub struct Candor {
     /// Effects performed directly in a function's own body (and its inline closures).
@@ -313,29 +355,14 @@ fn parse_dph(s: &str) -> Option<(u64, u64)> {
 /// another crate inherits. Skips `<prefix>.calibrated.json` / `encountered-*` sidecars (one segment).
 fn load_cross_reports(prefix: &str, me: &str, me_kind: &str) -> HashMap<(u64, u64), Vec<&'static str>> {
     let mut out: HashMap<(u64, u64), Vec<&'static str>> = HashMap::new();
-    let path = std::path::Path::new(prefix);
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let dir = parent.unwrap_or_else(|| std::path::Path::new("."));
-    let Some(base) = path.file_name().and_then(|s| s.to_str()) else { return out; };
-    let Ok(entries) = std::fs::read_dir(dir) else { return out; };
-    for ent in entries.flatten() {
-        let fname = ent.file_name();
-        let Some(fname) = fname.to_str() else { continue };
-        let Some(rest) = fname.strip_prefix(&format!("{base}.")) else { continue };
-        let Some(rest) = rest.strip_suffix(".json") else { continue };
-        // Report files are `<crate>.<type>` (two segments); sidecars are one — skip those.
-        let mut segs = rest.splitn(2, '.');
-        let (Some(krate), Some(kind)) = (segs.next(), segs.next()) else { continue };
-        if kind.contains('.') {
-            continue; // a third segment → a sidecar like `encountered-x` slipped the prefix check
-        }
+    for rf in report_files(prefix) {
         // Skip our OWN report (by crate name AND type); DefPathHash keys are globally unique so
         // all other crates merge into one map. (Own entries are local defs and the cross path is
         // guarded by `!def_id.is_local()`, so loading them would be harmless — just wasteful.)
-        if krate == me && kind == me_kind {
+        if rf.krate == me && rf.kind == me_kind {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
+        let Ok(text) = std::fs::read_to_string(&rf.path) else { continue };
         // Version-aware trust (candor-spec §2.1): a sibling report produced by a DIFFERENT engine
         // was computed by rules this engine may have changed, so we must not silently trust its
         // effects — downgrade everything inherited from it to `Unknown`. (A legacy v0.1 report has no
@@ -873,9 +900,6 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     None
 }
 
-const EFFECTS: [&str; 10] =
-    ["Net", "Fs", "Exec", "Env", "Clock", "Log", "Clipboard", "Rand", "Db", "Ipc"];
-
 fn cap_from_name(name: &str) -> Option<&'static str> {
     EFFECTS.iter().copied().find(|e| *e == name)
 }
@@ -1194,13 +1218,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             self.encountered.insert(crate_name.to_string());
         }
         let path = cx.tcx.def_path_str(def_id);
-        let effect = classify(crate_name.as_str(), &path)
-            .or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
+        let builtin = classify(crate_name.as_str(), &path);
+        let effect = builtin.or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
         if let Some(effect) = effect {
             self.direct.entry(caller).or_default().insert(effect);
             // Non-breaking Fs refinement: when the verb tells us read vs write, record it (propagated
             // like effects below, surfaced as the report's `fs` detail). The `Fs` effect is unchanged.
-            if effect == "Fs" {
+            // Only for BUILT-IN Fs classification — `fs_kind`'s verb table is std::fs-specific, so a
+            // user crate-prefix `extra` rule (whose method names needn't be std::fs verbs) must not be
+            // run through it, else e.g. an in-memory `Builder::append()` would mis-tag as Fs(write).
+            if effect == "Fs" && builtin == Some("Fs") {
                 let kinds = fs_kind(&path);
                 if !kinds.is_empty() {
                     self.fs_direct.entry(caller).or_default().extend(kinds.iter().copied());
@@ -1258,58 +1285,20 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         }
 
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let callers: Vec<LocalDefId> = self.calls.keys().copied().collect();
-            for f in callers {
-                let mut add: BTreeSet<&'static str> = BTreeSet::new();
-                if let Some(callees) = self.calls.get(&f) {
-                    for g in callees {
-                        if let Some(ge) = eff.get(g) {
-                            add.extend(ge.iter().copied());
-                        }
-                    }
-                }
-                let entry = eff.entry(f).or_default();
-                let before = entry.len();
-                entry.extend(add);
-                if entry.len() != before {
-                    changed = true;
-                }
-            }
-        }
+        let eff = propagate(eff, &self.calls);
 
-        // Filesystem read/write detail rides the SAME call graph in a separate, additive fixpoint that
-        // never touches `eff`:  fs[f] = fs_direct[f] ∪ ⋃ { fs[g] : g ∈ calls[f] }.  Cross-crate `Fs`
-        // carries no detail (a dependency's report doesn't record it), so a function that reaches the
-        // filesystem only across a crate boundary gets `Fs` with an empty `fs` — honestly "read vs
-        // write unknown here".
-        let mut fsacc: HashMap<LocalDefId, BTreeSet<&'static str>> = self.fs_direct.clone();
-        let mut fs_changed = true;
-        while fs_changed {
-            fs_changed = false;
-            let callers: Vec<LocalDefId> = self.calls.keys().copied().collect();
-            for f in callers {
-                let mut add: BTreeSet<&'static str> = BTreeSet::new();
-                if let Some(callees) = self.calls.get(&f) {
-                    for g in callees {
-                        if let Some(gk) = fsacc.get(g) {
-                            add.extend(gk.iter().copied());
-                        }
-                    }
-                }
-                if add.is_empty() {
-                    continue;
-                }
-                let entry = fsacc.entry(f).or_default();
-                let before = entry.len();
-                entry.extend(add);
-                if entry.len() != before {
-                    fs_changed = true;
-                }
+        // Filesystem read/write detail rides the SAME propagation helper, in a separate set that never
+        // touches `eff`:  fs[f] = fs_direct[f] ∪ ⋃ { fs[g] : g ∈ calls[f] }.  A function that reaches
+        // the filesystem across a crate boundary inherits `Fs` but NO recorded kind (a dependency's
+        // report omits it) — seed it with `FS_UNKNOWN` so we present an empty `fs` (no claim) rather
+        // than a misleading partial like `Fs(read)` for a fn that also writes via that dependency.
+        let mut fs_seed = self.fs_direct.clone();
+        for (f, effs) in &self.via_cross {
+            if effs.contains("Fs") {
+                fs_seed.entry(*f).or_default().insert(FS_UNKNOWN);
             }
         }
+        let fsacc = propagate(fs_seed, &self.calls);
 
         // CANDOR_EXPLAIN=<query>: for each matching function, trace the call path to where each of
         // its effects originates (the leaf call + location). A dedicated query mode — print and
@@ -1445,7 +1434,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     overdeclared: owned(&unused),
                     unresolved: has_unknown,
                     hash: dph_hex(cx.tcx, f.to_def_id()),
-                    fs: fsacc.get(&f).map(|s| owned_set(s)).unwrap_or_default(),
+                    // Empty when the kind is incomplete (FS_UNKNOWN — Fs reached cross-crate with no
+                    // recorded detail): present no read/write claim rather than a misleading partial.
+                    fs: match fsacc.get(&f) {
+                        Some(s) if !s.contains(FS_UNKNOWN) => owned_set(s),
+                        _ => Vec::new(),
+                    },
                 });
                 continue;
             }
