@@ -48,7 +48,9 @@ pub fn report_files(prefix: &str) -> Vec<ReportFile> {
         // a report.
         let mut segs = rest.splitn(2, '.');
         let (Some(krate), Some(kind)) = (segs.next(), segs.next()) else { continue };
-        if kind.contains('.') {
+        // both segments must be non-empty (`<base>.<crate>..json` would otherwise parse to an empty
+        // `kind`) and `kind` must itself be a single segment (no further dots).
+        if krate.is_empty() || kind.is_empty() || kind.contains('.') {
             continue;
         }
         out.push(ReportFile { path: ent.path(), krate: krate.to_string(), kind: kind.to_string() });
@@ -115,14 +117,21 @@ pub struct Report {
 /// the legacy v0.1 bare array `[...]` (the migration contract — candor-spec §2). An envelope is a
 /// JSON object, so a bare array fails that parse and falls through; the two forms are unambiguous.
 pub fn report_entries(text: &str) -> Option<Vec<ReportEntry>> {
-    #[derive(Deserialize)]
-    struct Envelope {
-        functions: Vec<ReportEntry>,
-    }
-    if let Ok(env) = serde_json::from_str::<Envelope>(text) {
-        return Some(env.functions);
-    }
-    serde_json::from_str::<Vec<ReportEntry>>(text).ok()
+    // Accept the v0.2 envelope `{candor, functions:[...]}` or a legacy bare array. Deserialize each
+    // entry INDEPENDENTLY (via raw `Value`s), skipping any that fail — so one malformed entry (a
+    // partial write, a hand-edit, an entry missing `fn`) loses only ITSELF, not the whole crate's
+    // report. The old all-or-nothing `Vec<ReportEntry>` deser dropped every function in the file on a
+    // single bad entry — a silent under-report of the entire crate.
+    let val: serde_json::Value = serde_json::from_str(text).ok()?;
+    let arr = val
+        .get("functions")
+        .and_then(|f| f.as_array())
+        .or_else(|| val.as_array())?;
+    Some(
+        arr.iter()
+            .filter_map(|e| serde_json::from_value::<ReportEntry>(e.clone()).ok())
+            .collect(),
+    )
 }
 
 /// Serialize a v0.2 report from a header + entries, borrowing both so the caller keeps ownership
@@ -182,6 +191,20 @@ mod tests {
         assert_eq!(back[0].func, "f");
         // empty `calls` is omitted on write.
         assert!(!s.contains("\"calls\""));
+    }
+
+    #[test]
+    fn report_entries_skips_a_bad_entry_not_the_whole_file() {
+        // One entry missing the required `fn` must lose ONLY itself — not drop every function in the
+        // file (which was a silent whole-crate under-report under the old all-or-nothing deser).
+        let bare = r#"[{"fn":"good","inferred":["Net"]},{"inferred":["Db"]},{"fn":"good2"}]"#;
+        let got = report_entries(bare).unwrap();
+        assert_eq!(got.iter().map(|e| e.func.as_str()).collect::<Vec<_>>(), ["good", "good2"]);
+        // same inside a v0.2 envelope.
+        let env = r#"{"candor":{"version":"v","toolchain":"t"},"functions":[{"inferred":["Db"]},{"fn":"ok"}]}"#;
+        assert_eq!(report_entries(env).unwrap().len(), 1);
+        // genuinely-broken JSON still yields None (not a panic).
+        assert!(report_entries("{not json").is_none());
     }
 
     /// The ONE discrimination rule shared by the lint's cross-crate loader and the CLI: a report is

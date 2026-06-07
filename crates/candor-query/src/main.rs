@@ -84,8 +84,13 @@ fn glob_encountered(prefix: &str) -> Vec<PathBuf> {
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for ent in rd.flatten() {
             if let Some(n) = ent.file_name().to_str() {
-                if n.starts_with(&needle) && n.ends_with(".json") {
-                    out.push(ent.path());
+                if let Some(mid) = n.strip_prefix(&needle).and_then(|m| m.strip_suffix(".json")) {
+                    // an encountered sidecar is `<base>.encountered-<crate>-<kind>.json` — a SINGLE
+                    // dotless segment. Excluding any further dot avoids mis-claiming the REPORT of a
+                    // crate literally named `encountered-…` (`<base>.encountered-foo.lib.json`).
+                    if !mid.contains('.') {
+                        out.push(ent.path());
+                    }
                 }
             }
         }
@@ -302,6 +307,13 @@ struct ShowJson {
     unresolved: bool,
 }
 
+/// Match a function name against a query. EXACT-wins: if some candidate equals `q` verbatim, only
+/// exact names match (`show foo` returns `foo`, not `foobar`); otherwise fall back to substring so a
+/// partial query still searches. `exact_exists` is precomputed over the candidate set.
+fn q_match(name: &str, q: &str, exact_exists: bool) -> bool {
+    if exact_exists { name == q } else { name.contains(q) }
+}
+
 fn cmd_show(args: &[String]) -> i32 {
     let (pre, q, want_json) = match three(args) {
         Some(t) => t,
@@ -310,7 +322,9 @@ fn cmd_show(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let mut fns: Vec<ReportEntry> = load_entries(pre).into_iter().filter(|e| e.func.contains(q)).collect();
+    let all = load_entries(pre);
+    let exact = all.iter().any(|e| e.func == q);
+    let mut fns: Vec<ReportEntry> = all.into_iter().filter(|e| q_match(&e.func, q, exact)).collect();
     fns.sort_by(|a, b| a.func.cmp(&b.func));
 
     if want_json {
@@ -425,10 +439,12 @@ fn cmd_callers(args: &[String]) -> i32 {
         }
     };
     // callee (matching q) -> set of its callers
+    let entries = load_entries(pre);
+    let exact = entries.iter().any(|e| e.calls.iter().any(|c| c == q));
     let mut hits: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for e in load_entries(pre) {
+    for e in &entries {
         for callee in &e.calls {
-            if callee.contains(q) {
+            if q_match(callee, q, exact) {
                 hits.entry(callee.clone()).or_default().insert(e.func.clone());
             }
         }
@@ -471,8 +487,19 @@ fn cmd_map(args: &[String]) -> i32 {
     // module -> (effects, count). Module = fn name with a leading '<' stripped, up to the first '::'.
     let mut mods: BTreeMap<String, (BTreeSet<String>, usize)> = BTreeMap::new();
     for e in load_entries(pre) {
+        // Module = the first path component. For a qualified trait-impl path `<Type as Trait>::m`,
+        // that's `Type` — stop at the first of ` as `, `>`, or `::` (whichever comes first) so the
+        // bucket isn't the malformed `Type as Trait>`.
         let stripped = e.func.strip_prefix('<').unwrap_or(&e.func);
-        let m = stripped.split("::").next().filter(|s| !s.is_empty()).unwrap_or("(root)").to_string();
+        let end = [stripped.find(" as "), stripped.find('>'), stripped.find("::")]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(stripped.len());
+        let m = match stripped[..end].trim() {
+            "" => "(root)".to_string(),
+            s => s.to_string(),
+        };
         let v = mods.entry(m).or_default();
         v.0.extend(e.inferred.iter().filter(|x| *x != "Unknown").cloned());
         v.1 += 1;
@@ -519,16 +546,16 @@ struct FnInfo {
 
 /// fn -> its effect info, last write wins (mirrors Python's `out[e['fn']] = …`).
 fn load_fninfo(prefix: &str) -> BTreeMap<String, FnInfo> {
-    let mut out = BTreeMap::new();
+    let mut out: BTreeMap<String, FnInfo> = BTreeMap::new();
     for e in load_entries(prefix) {
-        out.insert(
-            e.func.clone(),
-            FnInfo {
-                inferred: e.inferred.into_iter().collect(),
-                direct: e.direct.into_iter().collect(),
-                calls: e.calls.into_iter().collect(),
-            },
-        );
+        // MERGE (union) rather than overwrite: two crates can render a function with the same printed
+        // name (`main`, a shared generic monomorphization). Overwriting dropped one crate's effects, so
+        // diff/gains could miss a newly-introduced effect in the shadowed crate. Union over-approximates
+        // (sound for a regression check — a gain in EITHER is surfaced).
+        let info = out.entry(e.func.clone()).or_default();
+        info.inferred.extend(e.inferred);
+        info.direct.extend(e.direct);
+        info.calls.extend(e.calls);
     }
     out
 }
