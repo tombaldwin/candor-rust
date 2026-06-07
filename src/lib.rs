@@ -1190,6 +1190,20 @@ fn is_pure_std_trait(crate_name: &str, trait_name: &str) -> bool {
         )
 }
 
+/// std traits whose dispatch genuinely *hides I/O*: the impl behind a generic `R: Read` / `W: Write`
+/// could be a file (`Fs`), a socket (`Net`), or a pure in-memory buffer — candor can't see which
+/// across the (non-local) trait, so a generic call over one is honestly `Unknown`, NOT assumed pure.
+/// Matched by full path so `std::io::Write` (effectful) is never confused with `core::fmt::Write`
+/// (pure formatting). Bounded to the std I/O traits — the case where "assumed pure" is a real
+/// *under*-report (the dangerous direction) without flooding the way marking *all* generic dispatch
+/// Unknown would (that stays behind `CANDOR_PARANOID`).
+fn is_effectful_std_trait(trait_path: &str) -> bool {
+    matches!(
+        trait_path,
+        "std::io::Read" | "std::io::Write" | "std::io::BufRead" | "std::io::Seek"
+    )
+}
+
 /// Capabilities a function declares by taking the matching token as a parameter
 /// (e.g. `&Fs` declares the right to perform `Fs`). This is the Rust expression of
 /// the spec's "capabilities as typed parameters" pillar.
@@ -1470,7 +1484,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // overwhelmingly-pure dispatch would otherwise flood reports with false Unknowns.
         if let Some(td) = trait_did {
             let pure = is_pure_std_trait(cx.tcx.crate_name(td.krate).as_str(), cx.tcx.item_name(td).as_str());
-            if !cha_resolved && !pure && (dynamic || self.paranoid) {
+            // Generic (non-`dyn`) dispatch is assumed pure by default (marking it all Unknown floods —
+            // that's `CANDOR_PARANOID`). EXCEPT over a known-effectful std trait (`io::Read`/`Write`/…),
+            // where "assumed pure" is a real under-report: the reader/writer behind the generic could be
+            // a file or socket. So those are Unknown by default too — bounded, doesn't flood.
+            let effectful_dispatch = is_effectful_std_trait(&cx.tcx.def_path_str(td));
+            if !cha_resolved && !pure && (dynamic || self.paranoid || effectful_dispatch) {
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
                 if self.explain.is_some() {
                     let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
@@ -1678,9 +1697,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
         for f in items {
             let span = cx.tcx.def_span(f);
-            // Skip macro-generated items (e.g. tracing's `__CALLSITE` statics): they're
-            // not code the developer wrote or can edit, and would flood the report.
-            if span.from_expansion() {
+            // Macro-generated items. The blanket `from_expansion()` skip was added to suppress the
+            // flood from tracing's `__CALLSITE` *statics* — but it also hid macro-generated
+            // FUNCTIONS (an `async_trait` method, a derive-impl method, a user decl-macro fn) that
+            // can genuinely perform I/O. Narrow it: still skip macro-generated consts/statics (where
+            // the flood lives — a `static __CALLSITE = …` per log site) but ANALYZE macro-generated
+            // functions, so an effectful one is visible in the report and to the AS-EFF modes. (Their
+            // bodies were always traced for propagation; this gives them their own row + diagnostics.)
+            if span.from_expansion()
+                && !matches!(cx.tcx.def_kind(f.to_def_id()), DefKind::Fn | DefKind::AssocFn)
+            {
                 continue;
             }
             let effs = &eff[&f];
@@ -2217,6 +2243,20 @@ mod tests {
         // Unrelated crates are pure.
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
         assert_eq!(classify("std", "std::vec::Vec::push"), None);
+    }
+
+    #[test]
+    fn effectful_std_traits_are_io_only() {
+        // Generic dispatch over these hides real I/O → Unknown (not assumed pure).
+        assert!(is_effectful_std_trait("std::io::Write"));
+        assert!(is_effectful_std_trait("std::io::Read"));
+        assert!(is_effectful_std_trait("std::io::BufRead"));
+        assert!(is_effectful_std_trait("std::io::Seek"));
+        // core::fmt::Write is PURE formatting — must NOT be confused with std::io::Write.
+        assert!(!is_effectful_std_trait("core::fmt::Write"));
+        // Conventionally-pure traits stay pure.
+        assert!(!is_effectful_std_trait("std::iter::Iterator"));
+        assert!(!is_effectful_std_trait("serde::Serialize"));
     }
 
     #[test]
