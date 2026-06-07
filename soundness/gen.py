@@ -40,6 +40,7 @@ HELPERS = {
     "run_trait":  "trait Run { fn run(&self); }\nstruct W<F>(F);\nimpl<F: Fn()> Run for W<F> { fn run(&self) { (self.0)(); } }",
     "recv_boxed": "fn recv_boxed(cb: Box<dyn Fn()>) { cb(); }",          # receiving side: boxed dyn Fn param
     "recv_impl":  "fn recv_impl<G: Fn()>(cb: G) { cb(); }",              # receiving side: generic Fn param
+    "mcall":      "macro_rules! mcall { ($f:expr) => { $f() }; }",        # the call lives in a macro expansion
 }
 
 # Each "edge form" returns (body_calling_callee, helpers_needed, extra_expected_fns).
@@ -60,6 +61,8 @@ def edge_forms(callee):
         "recv_boxed": (f"recv_boxed(Box::new(|| {callee}()));", ["recv_boxed"], ["recv_boxed"]),
         # RECEIVING side: the effect reaches a fn ONLY through a generic Fn param it invokes.
         "recv_impl":  (f"recv_impl(|| {callee}());", ["recv_impl"], ["recv_impl"]),
+        # the call lives inside a MACRO expansion (from_expansion span) — candor must still see it.
+        "macro_call": (f"mcall!({callee});", ["mcall"], []),
     }
 
 
@@ -80,8 +83,11 @@ def main():
     needed_helpers = set()
     expected = set(fns) | {"sink", "main"}
 
-    # sink performs the effect directly.
+    # sink performs the effect directly. Sometimes DEFINE sink via a macro — a macro-generated
+    # function that performs I/O must still be reported (the #5 macro-fn-visibility fix); if candor
+    # ever re-omits macro-gen fns, the checker flags `sink(pure/omitted)`.
     bodies["sink"] = leaf
+    macro_sink = rng.random() < 0.3
 
     forms_log = {}
     for i in range(n):
@@ -99,7 +105,12 @@ def main():
         if h in needed_helpers:
             lines.append(HELPERS[h])
     lines.append("")
-    for name in ["sink"] + fns:
+    if macro_sink:
+        lines.append("macro_rules! mksink { () => { fn sink() { %s } }; }" % bodies["sink"])
+        lines.append("mksink!();")
+    else:
+        lines.append("fn sink() { %s }" % bodies["sink"])
+    for name in fns:
         lines.append("fn %s() { %s }" % (name, bodies[name]))
     lines.append("")
     lines.append("fn main() { %s(); }" % fns[0])

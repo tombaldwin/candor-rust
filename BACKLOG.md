@@ -156,8 +156,12 @@ that's the narrow, modest-value axis. Diminishing returns.
       candor's static prediction (`main`'s transitive `inferred`) over-approximates the kernel-observed
       effect — ground truth that trusts nothing about the generator. CI runs 60 construction seeds + 40
       oracle seeds/push (oracle is Linux-only; `oracle_check.py` decision logic unit-validated).
-      **Next:** per-function attribution in the oracle (instrument fns + interleave with the trace) and
-      more forms (cross-crate, macro bodies).
+      **Extended:** a **cross-crate variant** (`run_cross.sh` — a lib→bin boundary exercising
+      `DefPathHash` cross-crate propagation; teeth-verified by disabling `load_cross_reports`), plus
+      **macro forms** (a call inside a `macro_rules!` expansion, and a macro-DEFINED `sink` testing the
+      #5 macro-fn-visibility fix; teeth-verified by reverting it). CI now runs 60 construction + 40
+      cross + 40 oracle seeds/push. **Still TODO:** per-function attribution in the oracle (instrument
+      fns + interleave with the trace) and arbitrary-self-type trait-object forms.
 - [x] **Database clients.** `sqlx`/`rusqlite`/`postgres`/`tokio_postgres`/`diesel`/`redis`/… now
       classified `Db` (execution verbs only, not query building; best-effort, tune via CONFIG).
 - [x] **`tokio::net` / `std::os::unix::net` Unix sockets** → `Ipc`, no longer conflated with `Net`.

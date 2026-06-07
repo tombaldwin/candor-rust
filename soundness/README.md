@@ -19,8 +19,22 @@ dispatch — that the unit/integration suite missed; this catches that entire cl
 - `generic` (a named fn handed to `fn apply<F: Fn()>(f: F)`),
 - `boxed_val` (a named fn as a `Box<dyn Fn>` value),
 - `dyn_method` (a fn in a generic struct dispatched via `&dyn Trait`),
+- `macro_call` (the call lives inside a `macro_rules!` expansion),
 - **receiving side:** `recv_boxed` / `recv_impl` — a function that takes a `Box<dyn Fn>` / `impl Fn`
   parameter and *invokes* it (where the real bugs lived).
+
+It also sometimes DEFINES `sink` via a macro (testing the macro-generated-fn visibility fix — a
+macro-gen fn that performs I/O must still be reported, not omitted).
+
+## Cross-crate variant (`run_cross.sh`)
+
+`gen_cross.py` emits one package compiled as lib+bin (the dylint-friendly way to get two linted crates
+that reference each other): the lib performs the effect in `dep_sink`; the bin chains across the crate
+boundary into `xc::dep_entry()` using the same call forms. One `cargo dylint` lints both; the bin must
+inherit the lib's effect **across the boundary** — directly (precise) or as `Unknown` (sound). This
+exercises candor's `DefPathHash` cross-crate propagation, a distinct bug-prone surface the single-crate
+fuzzer can't reach. Teeth-verified: disabling `load_cross_reports` fails the seeds whose effect depends
+on cross-crate inheritance.
 
 Every emitted function transitively reaches the effect, so candor MUST report each one with the effect
 in `inferred` **or** with `Unknown` (a sound over-approximation). `truth.json` records which functions
@@ -47,10 +61,11 @@ without strace; `oracle.sh` is Linux-only and skips gracefully elsewhere.
 bash soundness/run.sh            # construction fuzzer: 40 seeds (builds candor first)
 bash soundness/run.sh 200        # more seeds = more coverage
 SEEDS="1 4 7" bash soundness/run.sh   # specific seeds (reproducible by seed)
+bash soundness/run_cross.sh 40   # cross-crate variant (lib→bin boundary)
 bash soundness/oracle.sh 40      # dynamic oracle (Linux + strace; no-op elsewhere)
 ```
 
-CI runs 60 construction seeds + 40 oracle seeds on every push. The construction checker is verified to
+CI runs 60 construction + 40 cross-crate + 40 oracle seeds on every push. The construction checker is verified to
 have teeth: reintroducing the historical `resolve_callee` `_ => None` hole makes every `recv_boxed`
 seed fail with `recv_boxed(pure/omitted)`.
 

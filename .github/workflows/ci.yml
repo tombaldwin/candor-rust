@@ -80,6 +80,11 @@ jobs:
       - name: Soundness fuzzer
         run: bash soundness/run.sh 60
 
+      # Cross-crate variant: the chain crosses a lib→bin boundary, exercising candor's DefPathHash
+      # cross-crate propagation (its own bug-prone surface the single-crate fuzzer can't reach).
+      - name: Soundness fuzzer (cross-crate)
+        run: bash soundness/run_cross.sh 40
+
       # Dynamic oracle (phase 2): RUN each generated program under strace and assert candor's static
       # prediction over-approximates the effects the kernel actually observed — ground truth that
       # trusts nothing about how the crate was generated. Catches a program that demonstrably performs

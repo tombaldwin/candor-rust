@@ -21,7 +21,7 @@ def main():
     expect = set(truth["expect"])
 
     entries = {}
-    for f in glob.glob(d + "/r.candor_fuzz.*.json"):
+    for f in glob.glob(d + "/r.*.*.json"):
         try:
             doc = json.load(open(f))
         except Exception:

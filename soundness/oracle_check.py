@@ -25,7 +25,7 @@ def predicted_effects(crate_dir):
     point), falling back to the union over all functions if `main` isn't reported."""
     main_inf = None
     union = set()
-    for f in glob.glob(crate_dir + "/r.candor_fuzz.*.json"):
+    for f in glob.glob(crate_dir + "/r.*.*.json"):
         try:
             doc = json.load(open(f))
         except Exception:
