@@ -138,10 +138,13 @@ fn cmd_audit(args: &[String]) -> i32 {
     let (pre, ver, suspect_path) = match args {
         [a, b, c, ..] => (a.as_str(), b.as_str(), c.as_str()),
         _ => {
-            eprintln!("usage: candor-query audit <prefix> <engine_ver> <suspect_file>");
+            eprintln!("usage: candor-query audit <prefix> <engine_ver> <suspect_file> [--coverage]");
             return 2;
         }
     };
+    // `--coverage`: list every external crate candor has no effect rules for (the full blind-spot
+    // surface), not just the name-heuristic suspects.
+    let coverage = args.iter().any(|a| a == "--coverage" || a == "-c");
     let base = prefix_base(pre);
 
     // entries + per-crate counts, in sorted order. The `<crate>.<type>` label is taken from the
@@ -183,7 +186,7 @@ fn cmd_audit(args: &[String]) -> i32 {
     }
 
     // coverage: external crates candor saw called but does not calibrate, that LOOK effectful.
-    let (calib_c, calib_p) = load_calibrated(pre, &base);
+    let (calib_c, calib_p, calib_path) = load_calibrated(pre, &base);
     let seen = encountered_set(pre);
     let suspect = std::fs::read_to_string(suspect_path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     // Warn (don't silently skip) when the suspect pattern won't compile — the `regex` crate rejects
@@ -199,11 +202,38 @@ fn cmd_audit(args: &[String]) -> i32 {
         calib_c.contains(c)
             || calib_c.iter().any(|k| c == k || c.starts_with(&format!("{k}_")))
             || calib_p.iter().any(|p| c.starts_with(p))
+            || calib_path.contains(c) // path-matched runtimes (tokio/async_std/mio) ARE covered
     };
-    if let Some(re) = &suspect {
-        let gaps: Vec<String> = seen.iter().filter(|c| re.is_match(c) && !calibrated(c)).cloned().collect();
-        if !gaps.is_empty() {
-            println!("  ⚠ coverage: {} uncalibrated — effects through them may be under-counted", gaps.join(", "));
+    // The full honest under-report surface: every external crate candor called into but has no effect
+    // rules for. Calls into these are assumed PURE — if any perform I/O, candor is under-reporting it.
+    let uncovered: Vec<String> = seen.iter().filter(|c| !calibrated(c)).cloned().collect();
+    // Default: the suspect heuristic surfaces the *likely-effectful* uncovered crates loudly.
+    let suspect_gaps: Vec<String> = match &suspect {
+        Some(re) => uncovered.iter().filter(|c| re.is_match(c)).cloned().collect(),
+        None => Vec::new(),
+    };
+    if !suspect_gaps.is_empty() {
+        println!("  ⚠ coverage: {} uncalibrated — effects through them may be under-counted", suspect_gaps.join(", "));
+        println!();
+    }
+    if coverage {
+        // `--coverage`: the complete auditable list, regardless of the name heuristic. This is the
+        // honest answer to "could candor be under-reporting via a dep it doesn't know?".
+        if uncovered.is_empty() {
+            println!("  coverage: every external crate candor called into is calibrated — no blind spots.");
+        } else {
+            println!("  coverage — {} external crate(s) candor has NO effect rules for; calls into them", uncovered.len());
+            println!("  are assumed PURE, so any I/O they perform is UNDER-REPORTED. Verify the effectful ones:");
+            for c in &uncovered {
+                println!("      {c}");
+            }
+        }
+        println!();
+    } else if !uncovered.is_empty() {
+        // Don't leave the rest fully silent: a one-line, neutral pointer to the full audit.
+        let other = uncovered.len() - suspect_gaps.len();
+        if other > 0 {
+            println!("  {other} more external crate(s) have no effect rules (assumed pure) — `cargo candor audit --coverage` to list", );
             println!();
         }
     }
@@ -224,12 +254,17 @@ fn cmd_audit(args: &[String]) -> i32 {
     }
 
     println!("  full per-function view:  cargo candor audit --all");
+    if !coverage {
+        println!("  classifier blind spots:  cargo candor audit --coverage");
+    }
     println!("  guard against new effects:  cargo candor snapshot .candor/baseline");
     0
 }
 
-/// The calibrated-coverage sidecar `<dir>/<base>.calibrated.json` → (crates, prefixes).
-fn load_calibrated(prefix: &str, base: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+/// The calibrated-coverage sidecar `<dir>/<base>.calibrated.json` → (crates, prefixes, path_crates).
+/// `path_crates` are crates the engine matches by path-prefix (tokio/async_std/mio) — covered, but
+/// absent from the crate-name list — so the coverage check doesn't mislabel them as blind spots.
+fn load_calibrated(prefix: &str, base: &str) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
     let dir = Path::new(prefix).parent().filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
     let path = dir.join(format!("{base}.calibrated.json"));
     let Ok(text) = std::fs::read_to_string(&path) else { return Default::default() };
@@ -240,7 +275,7 @@ fn load_calibrated(prefix: &str, base: &str) -> (BTreeSet<String>, BTreeSet<Stri
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default()
     };
-    (pick("crates"), pick("prefixes"))
+    (pick("crates"), pick("prefixes"), pick("path_crates"))
 }
 
 // ── show ────────────────────────────────────────────────────────────────────────────────────────
@@ -715,7 +750,8 @@ fn cmd_receipt(args: &[String]) -> i32 {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let (calib_c, calib_p) = load_calibrated(pre, &base);
+    let (mut calib_c, calib_p, calib_path) = load_calibrated(pre, &base);
+    calib_c.extend(calib_path); // path-matched runtimes (tokio/…) count as covered for the receipt too
     let encountered = encountered_set(pre);
     let join = |s: &BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(" ");
     println!("fns\t{}", fns.len());

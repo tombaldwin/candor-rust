@@ -127,6 +127,22 @@ want "audit: labels a readable crate report"          "$qaud" "good.lib"
 want "audit: still labels an UNREADABLE crate report" "$qaud" "bad.lib"
 rm -rf "$QD"
 
+# coverage visibility: `audit --coverage` lists every external crate candor has NO rules for (the
+# blind-spot surface), while path-matched runtimes (tokio/async_std/mio) and name/prefix-calibrated
+# crates are correctly treated as COVERED (not false-flagged).
+CV=$(mktemp -d)
+printf '[{"fn":"app::main","inferred":["Net"],"direct":["Net"]}]' > "$CV/r.app.Bin.json"
+printf '{"crates":["reqwest"],"prefixes":["aws_sdk_"],"path_crates":["tokio"]}' > "$CV/r.calibrated.json"
+printf '["tokio","reqwest","aws_sdk_s3","serde","mystery_io"]' > "$CV/r.encountered-app-Bin.json"
+cov=$("$QBIN" audit "$CV/r" testver /no/such/suspect --coverage 2>/dev/null || true)
+want   "coverage: lists an uncalibrated crate as a blind spot"  "$cov" "mystery_io"
+absent "coverage: a path-matched runtime is NOT a blind spot"   "$cov" "tokio"
+absent "coverage: a name-calibrated crate is NOT a blind spot"  "$cov" "reqwest"
+absent "coverage: a prefix-calibrated crate is NOT a blind spot" "$cov" "aws_sdk_s3"
+covd=$("$QBIN" audit "$CV/r" testver /no/such/suspect 2>/dev/null || true)
+want   "audit default: hints at the uncovered remainder"        "$covd" "audit --coverage"
+rm -rf "$CV"
+
 # ── 7. Agent-facing effect diff: `cargo candor diff` describes the per-function delta (P0 §1) ──
 echo "== effect diff (cargo candor diff) =="
 D=$(mktemp -d)/d; mkdir -p "$D/src"

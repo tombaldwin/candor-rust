@@ -539,6 +539,12 @@ const CALIBRATED_CRATES: [&str; 44] = [
 ];
 const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
 
+/// Crates `classify` matches by PATH prefix rather than crate-name equality (their effectful modules
+/// are recognised, e.g. `tokio::net::`/`async_std::fs::`/`mio::net::`), so they're absent from
+/// `CALIBRATED_CRATES` (which the liveness test probes by crate name). The coverage check must still
+/// treat them as *covered* — otherwise it would mislabel the most common async crates as blind spots.
+const PATH_CALIBRATED_CRATES: [&str; 3] = ["tokio", "async_std", "mio"];
+
 /// Database client crates whose execution verbs are I/O (see the DB branch in `classify`).
 /// Module-level so `db_crates_are_calibrated` can enforce `DB_CRATES ⊆ CALIBRATED_CRATES`.
 const DB_CRATES: [&str; 11] = [
@@ -940,10 +946,40 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "glob" && (path.ends_with("::glob") || path.ends_with("::glob_with")) {
         return Some("Fs");
     }
-    // Randomness / entropy. getrandom + fastrand are effectful end-to-end; `rand` also
-    // contains pure distribution constructors, so this slightly over-reports there.
-    if crate_name == "rand" || crate_name == "getrandom" || crate_name == "fastrand" {
+    // Randomness / entropy. `getrandom`/`fastrand` are effectful end-to-end. `rand` is NOT — it
+    // mixes entropy/generation (effectful) with *pure* distribution constructors (`Uniform::new`,
+    // `Normal::new`) and deterministic-seed constructors (`seed_from_u64`). Flagging the whole crate
+    // over-reported those as `Rand`; match only the calls that actually consume randomness — the
+    // entropy sources (`OsRng`, `thread_rng`/`rng`, `from_entropy`/`from_os_rng`) and the generation
+    // verbs (`gen*`/`random*`/`fill*`/`sample*`/`next_u*`). A `Uniform::new` is now correctly pure.
+    if crate_name == "getrandom" || crate_name == "fastrand" {
         return Some("Rand");
+    }
+    if crate_name == "rand" {
+        let rng_verb = path.ends_with("::gen")
+            || path.ends_with("::gen_range")
+            || path.ends_with("::gen_bool")
+            || path.ends_with("::gen_ratio")
+            || path.ends_with("::random")
+            || path.ends_with("::random_range")
+            || path.ends_with("::random_bool")
+            || path.ends_with("::random_ratio")
+            || path.ends_with("::fill")
+            || path.ends_with("::fill_bytes")
+            || path.ends_with("::try_fill")
+            || path.ends_with("::try_fill_bytes")
+            || path.ends_with("::sample")
+            || path.ends_with("::sample_iter")
+            || path.ends_with("::next_u32")
+            || path.ends_with("::next_u64")
+            || path.ends_with("::thread_rng")
+            || path.ends_with("::rng")
+            || path.ends_with("::from_entropy")
+            || path.ends_with("::from_os_rng");
+        if rng_verb || path.contains("OsRng") {
+            return Some("Rand");
+        }
+        return None;
     }
     // Subprocess spawning. `tokio::process` is the async mirror of `std::process` — it exists
     // only to spawn/control subprocesses (`Command`/`Child`, no pure data types like std's
@@ -1768,6 +1804,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 // `.as_slice()`: serde only derives Serialize for arrays up to length 32.
                 "crates": CALIBRATED_CRATES.as_slice(),
                 "prefixes": CALIBRATED_PREFIXES.as_slice(),
+                "path_crates": PATH_CALIBRATED_CRATES.as_slice(),
             });
             let cfile = format!("{prefix}.calibrated.json");
             if let Err(e) = std::fs::write(&cfile, calib.to_string()) {
@@ -2019,6 +2056,7 @@ mod tests {
                 format!("{c}::glob"),        // glob
                 format!("{c}::X::run"),      // duct
                 format!("{c}::dotenv"),      // dotenvy / dotenv
+                format!("{c}::random"),      // rand (verb-gated)
                 format!("{c}::X::anything"),
             ];
             assert!(
@@ -2198,6 +2236,13 @@ mod tests {
         assert_eq!(classify("ureq", "ureq::Request::set"), None);
         // Randomness family + pty subprocess + mmap.
         assert_eq!(classify("rand", "rand::random"), Some("Rand"));
+        // `rand` is verb-gated: entropy/generation calls are Rand, pure constructors are NOT.
+        assert_eq!(classify("rand", "rand::Rng::gen_range"), Some("Rand"));
+        assert_eq!(classify("rand", "rand::rngs::OsRng::next_u32"), Some("Rand"));
+        assert_eq!(classify("rand", "rand::thread_rng"), Some("Rand"));
+        assert_eq!(classify("rand", "rand::distributions::Uniform::new"), None); // pure constructor
+        assert_eq!(classify("rand", "rand::rngs::StdRng::seed_from_u64"), None); // deterministic seed
+        assert_eq!(classify("rand", "rand::distributions::Distribution::sample"), Some("Rand"));
         assert_eq!(classify("fastrand", "fastrand::u32"), Some("Rand"));
         assert_eq!(classify("portable_pty", "portable_pty::native_pty_system"), Some("Exec"));
         assert_eq!(classify("memmap2", "memmap2::Mmap::flush"), Some("Fs"));

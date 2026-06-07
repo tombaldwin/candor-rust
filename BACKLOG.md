@@ -150,6 +150,12 @@ that's the narrow, modest-value axis. Diminishing returns.
       a subprocess via `tokio::process::Command`/`Child` was classified pure, a silent under-report of
       subprocess execution (the dangerous direction). Closed to match the existing `tokio::fs`/
       `tokio::net` coverage; `tokio::process` has no pure data types to over-flag. Unit-tested.
+- [x] **`rand` over-report fixed — now verb-precise.** Whole-crate `rand` → `Rand` flagged its *pure*
+      distribution constructors (`Uniform::new`, `Normal::new`) and deterministic-seed constructors
+      (`seed_from_u64`) as effectful. Now matched to the calls that actually consume randomness — the
+      entropy sources (`OsRng`/`thread_rng`/`rng`/`from_entropy`) and generation verbs
+      (`gen*`/`random*`/`fill*`/`sample*`/`next_u*`). `getrandom`/`fastrand` stay wholesale (effectful
+      end-to-end). Removes the false positives without losing the generation coverage. Unit-tested.
 - [x] **const/static initializers** now reported (a `static X = effectful()` performs its effect),
       with macro-generated items (e.g. tracing `__CALLSITE` statics) filtered out via
       `span.from_expansion()` — that filter was needed; without it the report flooded.
@@ -242,6 +248,18 @@ that's the narrow, modest-value axis. Diminishing returns.
       All readers accept the legacy v0.1 bare array during migration (candor-spec §2).
 - [x] **`cargo candor audit` at-a-glance profile** — effect tally, unresolvable-call list, coverage
       gaps, broadest-surface functions; `--all` keeps the full per-function lint.
+- [x] **`cargo candor audit --coverage` — make the classifier ceiling auditable** (the principled
+      partial-fix for "silent under-report via an uncovered dep", the most dangerous gap). The default
+      coverage check only warned for crates matching the `candor-suspect` *name* heuristic, so an
+      effectful crate whose name doesn't look effectful slipped through silently. `--coverage` now lists
+      **every** external crate candor saw called but has no effect rules for — calls into them are
+      assumed pure, so any I/O they perform is under-reported. Can't *eliminate* the ceiling (candor
+      can't know an unanalyzed crate is effectful), but converts it from silent to visible — candor's
+      honesty thesis applied to its own coverage. Fixed a latent false-positive en route: path-matched
+      runtimes (`tokio`/`async_std`/`mio`, matched by module path not crate name) were absent from
+      `CALIBRATED_CRATES` and would have been mislabeled blind spots; a new `path_crates` field in the
+      `calibrated.json` sidecar marks them covered. Default also gained a one-line count hint;
+      `candor-suspect` widened (subprocess/dns/serial/socket families). Integration-tested.
 - [x] **candor-java: adopt the v0.2 envelope + first tests/CI — done.** It now emits the
       `{ candor: {version, toolchain}, functions }` envelope (git hash baked in at build time via
       `build-info.properties`, readers still accept v0.1 bare arrays), and ships a 26-check `test/

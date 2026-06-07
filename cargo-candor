@@ -167,10 +167,12 @@ lint_fresh() {
 case "$cmd" in
   audit)
     # `--all`/`-a` → the full per-function lint: the dylint-native view, spans in context.
+    # `--coverage`/`-c` → also list every external crate candor has no effect rules for (blind spots).
     # Default → an at-a-glance profile (candor-query), aggregated across the project's crates.
     if [ "${1:-}" = "--all" ] || [ "${1:-}" = "-a" ]; then
       exec cargo dylint --lib-path "$LIB"
     fi
+    cov=""; { [ "${1:-}" = "--coverage" ] || [ "${1:-}" = "-c" ]; } && cov="--coverage"
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
     echo "candor: analyzing…" >&2
     run_json() { CANDOR_JSON="$tmp/a" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
@@ -181,7 +183,7 @@ case "$cmd" in
       echo "candor: no report produced — did the crate build? Try 'cargo candor audit --all' to see errors." >&2
       exit 1
     fi
-    query audit "$tmp/a" "$(engine_ver)" "$CANDOR_DIR/candor-suspect"
+    query audit "$tmp/a" "$(engine_ver)" "$CANDOR_DIR/candor-suspect" $cov
     exit 0 ;;
   strict)     export CANDOR_STRICT="${1:-1}";      exec cargo dylint --lib-path "$LIB" ;;
   no-ambient) export CANDOR_NO_AMBIENT="${1:-1}";  exec cargo dylint --lib-path "$LIB" ;;
