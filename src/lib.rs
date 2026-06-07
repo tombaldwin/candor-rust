@@ -411,7 +411,11 @@ fn parse_dph(s: &str) -> Option<(u64, u64)> {
     if s.len() != 32 {
         return None;
     }
-    Some((u64::from_str_radix(&s[..16], 16).ok()?, u64::from_str_radix(&s[16..], 16).ok()?))
+    // `get(..16)`/`get(16..)`, NOT `&s[..16]`: a 32-BYTE string can split a multi-byte UTF-8 char at
+    // index 16 (a corrupt/hand-edited `hash` field), and slicing there panics — an ICE that aborts the
+    // user's build. `get` returns None on a non-char-boundary, so we degrade to "unresolvable" instead.
+    let (hi, lo) = (s.get(..16)?, s.get(16..)?);
+    Some((u64::from_str_radix(hi, 16).ok()?, u64::from_str_radix(lo, 16).ok()?))
 }
 
 /// Load the per-crate reports of this project's OTHER crates (`<prefix>.<crate>.<type>.json`, all
@@ -524,7 +528,12 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
             TyKind::FnPtr(..) => Some(Callee::Unresolved), // function pointer
             TyKind::Closure(..) => None,                   // inline closure body counted lexically
             TyKind::Param(..) | TyKind::Alias(..) | TyKind::Dynamic(..) => Some(Callee::Unresolved),
-            _ => None,
+            // Any OTHER callee type of a Call is still a callable we can't see through — a `dyn Fn`
+            // behind a smart pointer (`Box`/`Rc`/`Arc<dyn Fn>`), a `&dyn Fn`, or a user type with an
+            // `Fn` impl. These MUST be `Unresolved` (→ `Unknown`), not `None`: returning `None` made
+            // `check_expr` bail before recording anything, so a directly-invoked boxed callback was
+            // silently assumed pure — a soundness under-report. (Closures stay `None`: counted lexically.)
+            _ => Some(Callee::Unresolved),
         },
         _ => None,
     }
@@ -2546,6 +2555,12 @@ mod tests {
         assert_eq!(parse_dph("tooshort"), None);
         assert_eq!(parse_dph(&"0".repeat(33)), None); // wrong length
         assert_eq!(parse_dph("zz234567_89abcdef0123456789abcde"), None); // 32 chars, non-hex
+        // 32 BYTES but a multi-byte char straddles index 16 — must NOT panic (was an ICE: `&s[..16]`
+        // on a non-char-boundary). "é" is 2 bytes: 15 ASCII + é + 15 ASCII = 32 bytes, boundary at 16
+        // falls mid-char.
+        let straddle = format!("{}é{}", "a".repeat(15), "a".repeat(15));
+        assert_eq!(straddle.len(), 32);
+        assert_eq!(parse_dph(&straddle), None);
     }
 
     #[test]

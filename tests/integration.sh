@@ -276,6 +276,12 @@ printf 'fn nlhof(f: impl Fn(&str) -> String){ let _=f("x"); }\nfn nluser(){ nlho
 ( cd "$CF"; rm -f r.*.json; CANDOR_JSON="$PWD/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
 cfn=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" nlhof 0 2>&1 )
 want   "closure-flow: NON-local callback keeps Unknown (soundness)" "$cfn" "Unknown"
+# SOUNDNESS: a directly-invoked `Box<dyn Fn>` callback must be Unknown, not silently pure (it used to
+# fall through resolve_callee's `_ => None` and record nothing at all).
+printf 'fn boxed(cb: Box<dyn Fn()>){ cb(); }\nfn main(){ boxed(Box::new(|| {})); }\n' > "$CF/src/main.rs"
+( cd "$CF"; rm -f r.*.json; CANDOR_JSON="$PWD/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
+cfb=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" boxed 0 2>&1 )
+want   "dyn-callable: boxed dyn Fn call is Unknown (soundness)" "$cfb" "Unknown"
 rm -rf "$(dirname "$CF")"
 mapout=$( cd "$Q"; "$ROOT/cargo-candor" map 2>&1 )
 want   "map: module/effects overview rendered"        "$mapout" "candor map"
