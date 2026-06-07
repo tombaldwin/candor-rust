@@ -1,0 +1,4 @@
+task	orderflow
+condition	treatment
+runid	of-treatment-1
+effect	Net

@@ -1,0 +1,44 @@
+You are grading ONE software-engineering summary, BLIND, strictly and mechanically.
+
+The engineer made a change that makes a low-level function gain the effect "Net". That effect then
+propagates transitively to these 16 OTHER functions (the "propagation set"):
+  - Pricing::quote_bulk
+  - Cart::line_total
+  - Cart::subtotal
+  - Cart::total
+  - Discount::for_cart
+  - Checkout::review
+  - Checkout::place
+  - OrderService::quote_one
+  - OrderService::quote_many
+  - OrderService::checkout
+  - api::get_quote
+  - api::list_quotes
+  - api::post_checkout
+  - report::daily_revenue
+  - admin::recompute_prices
+  - main
+
+PART 1 — COMPLETENESS (primary). For EACH function in the propagation set above, decide whether the
+summary identifies it as now performing "Net" — i.e. the function is named explicitly, OR it is
+covered by an explicit blanket statement ("all callers", "every caller", "the whole call chain up to
+main"). A function merely existing in the code does NOT count; the summary must indicate IT gains the
+effect. Output one line per function, in order:
+  <function>: yes
+  <function>: no
+Then a single line:
+  COMPLETENESS: <number-of-yes>/16
+
+PART 2 — BINARY AWARENESS (secondary). One line:
+  VERDICT: yes|partial|no
+where yes = names >=1 specific non-local caller OR the full set; partial = notes a generic
+"callers/performance are affected" WITHOUT naming a specific non-local caller; no = only the local change.
+
+Output ONLY the per-function lines, the COMPLETENESS line, and the VERDICT line. No other text.
+
+--- SUMMARY TO GRADE ---
+The the analysis diff confirms the new network effect propagation. The implementation is complete.
+
+## Summary
+I replaced the hardcoded FX placeholders in `Pricing::quote` (in `src/pricing.rs`) with a live lookup against the rates service at `rates.internal:7070`. For non-USD currencies, a new helper `fetch_rate_milli` opens a TCP connection, writes the 3-letter currency code (e.g. `EUR`/`GBP`), reads back the rate-times-1000 integer, and parses it; USD short-circuits to parity and never touches the network. Any connection, read, or parse failure returns `None`, so `quote` falls back to the original placeholder rate (920 for EUR, 790 for GBP) and a quote never fails outright; I also set 2-second read/write timeouts so a hung service can't stall pricing indefinitely. The public API of `Pricing` is unchanged, so no callers needed edits and the crate builds clean with no new dependencies (standard-library `std::net`/`std::io` only). The the analysis diff shows the expected consequence for reviewers: `quote` now performs network I/O, so a new `Net` effect originates in `pricing::fetch_rate_milli` and propagates up through 16 intermediate callers (including `api::get_quote`, `api::list_quotes`, `api::post_checkout`, and `admin::recompute_prices`) all the way to `main` — meaning every quote-producing entry point is now effectively network-dependent (with graceful fallback) where it previously was pure.
+--- END SUMMARY ---

@@ -291,8 +291,17 @@ that's the narrow, modest-value axis. Diminishing returns.
       **control completeness 7% vs treatment 100%** (binary 0.17 vs 1.00); neither falsification
       condition triggered — candor's edit-feedback takes a realistic agent from naming ~0 of the
       non-local callers to all of them, for ~5% extra tokens, a large lift consistent across 3 tasks.
-      **Remaining (batch 3):** a *large* fixture + a frontier model (the one untested cell), more trials,
-      and edit-quality-beyond-summary measures.
+      **Batch 3 (`eval/scaled/RESULTS-v3.md`) — the untested cell, shipped:** a *large* fixture
+      (`tasks-v3/orderflow` — Net propagating to **16** non-local fns across 9 files / 3–5 call-graph
+      layers, vs 7/4 in the small tasks) × a **frontier** agent (Opus-class), 2 arms × 3 trials, blind
+      frontier judges, pre-registered (fixture + 16-fn denominator committed before the run). Result:
+      **control completeness 6% vs treatment 79%** (conservative; ~100% under the lenient blanket
+      reading 2 of 3 judges applied), gap 0.73 — neither falsification condition triggered. **Decisive
+      new finding:** a frontier model does **not** close the gap — the Opus control still named only the
+      one helper it edits past (1/16) and wrote "callers unaffected"; the missing thing is call-graph
+      *enumeration*, not capability, which is exactly what candor supplies. The 6%→100% effect is not a
+      small-fixture / weak-model artifact. **Remaining:** more tasks/power at this scale, and
+      edit-quality-beyond-summary measures (does the agent *act* on the propagation, not just report it).
 - [x] Effect-aware PR review — `examples/candor-pr-review.yml`: a workflow that POSTS the per-function
       effect delta vs the baseline as a PR comment + step summary (the *review-time* sibling of P0's
       *edit-time* loop; both powered by `cargo candor diff`). It informs rather than blocks (pair with

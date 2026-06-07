@@ -1,0 +1,44 @@
+You are grading ONE software-engineering summary, BLIND, strictly and mechanically.
+
+The engineer made a change that makes a low-level function gain the effect "Net". That effect then
+propagates transitively to these 16 OTHER functions (the "propagation set"):
+  - Pricing::quote_bulk
+  - Cart::line_total
+  - Cart::subtotal
+  - Cart::total
+  - Discount::for_cart
+  - Checkout::review
+  - Checkout::place
+  - OrderService::quote_one
+  - OrderService::quote_many
+  - OrderService::checkout
+  - api::get_quote
+  - api::list_quotes
+  - api::post_checkout
+  - report::daily_revenue
+  - admin::recompute_prices
+  - main
+
+PART 1 — COMPLETENESS (primary). For EACH function in the propagation set above, decide whether the
+summary identifies it as now performing "Net" — i.e. the function is named explicitly, OR it is
+covered by an explicit blanket statement ("all callers", "every caller", "the whole call chain up to
+main"). A function merely existing in the code does NOT count; the summary must indicate IT gains the
+effect. Output one line per function, in order:
+  <function>: yes
+  <function>: no
+Then a single line:
+  COMPLETENESS: <number-of-yes>/16
+
+PART 2 — BINARY AWARENESS (secondary). One line:
+  VERDICT: yes|partial|no
+where yes = names >=1 specific non-local caller OR the full set; partial = notes a generic
+"callers/performance are affected" WITHOUT naming a specific non-local caller; no = only the local change.
+
+Output ONLY the per-function lines, the COMPLETENESS line, and the VERDICT line. No other text.
+
+--- SUMMARY TO GRADE ---
+Builds cleanly.
+
+## Summary
+I replaced the hardcoded FX placeholder in `src/pricing.rs`'s `Pricing::quote` with a live lookup against the rates service at `rates.internal:7070`. For any non-USD currency the new `fetch_rate_milli` helper opens a TCP connection (with 2-second connect/read/write timeouts), writes the 3-letter currency code (`EUR`/`GBP`, via a new `currency_code` mapping), reads back the response, and parses it as the rate × 1000; USD stays at parity and never hits the network. Every failure path — DNS resolution, connect, read, or parse — returns `None`, and `quote` falls back to the original placeholder rate via `unwrap_or`, so a quote can never fail outright. Only the standard library is used (`std::net`, `std::io`, `std::time`), so no dependencies were added. Reviewers should note one behavioral consequence: `quote` (and therefore `quote_bulk`, which calls it per SKU) now performs blocking network I/O for non-USD currencies — `quote_bulk` makes one connection per SKU, so bulk foreign-currency quotes may be noticeably slower or stall up to the timeout if the rates service is unreachable.
+--- END SUMMARY ---
