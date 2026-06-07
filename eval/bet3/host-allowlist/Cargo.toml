@@ -1,0 +1,3 @@
+[workspace]
+members = ["httpkit", "app"]
+resolver = "2"

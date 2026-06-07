@@ -138,17 +138,24 @@ invariants and candor flags any *transitive* violation:
 
 ```text
 # .candor/policy
-deny Net Db Fs  domain     # the domain layer must reach no I/O — even through a helper
-pure            parse      # parsing must be side-effect-free
-deny Exec                  # nothing may spawn a subprocess
+deny Net Db Fs  domain                       # the domain layer must reach no I/O — even through a helper
+pure            parse                        # parsing must be side-effect-free
+deny Exec                                    # nothing may spawn a subprocess
+allow Net in billing  api.stripe.com         # billing may reach the network — but ONLY Stripe
 ```
 
 ```text
 [AS-EFF-006] `domain::checkout` performs { Db }, forbidden by policy (scope `domain`): `deny Net Db Fs domain`
+[AS-EFF-008] `billing::record_activity` reaches { metrics.growthtracker.io:443 } outside the allowlist, forbidden by policy (scope `billing`): `allow Net in billing api.stripe.com`
 ```
 
 `checkout` need not touch the database *directly* — candor catches it reaching `Db` through any callee,
-the boundary break a local diff would hide. See [examples/candor-policy](examples/candor-policy).
+the boundary break a local diff would hide. The **host allowlist** (`allow Net in <scope> <host>…`,
+AS-EFF-008) goes further: it certifies *which endpoints* a layer may reach — a supply-chain boundary
+a model can't self-check, because the literal host is buried in a transitive, often **cross-crate**,
+callee. Enforce it across a whole workspace by snapshotting each crate's report and pointing
+`CANDOR_REPORTS` at them; an endpoint that lives in a shared crate still gets caught. See
+[examples/candor-policy](examples/candor-policy) and [eval/bet3](eval/bet3/RESULTS.md).
 
 `cargo candor risk` is an **advisory, heuristic** nudge toward the injection class — an effect whose
 argument derives from a function parameter (`fs::read(format!("/var/cache/{key}"))`, `Command::new(name)`):

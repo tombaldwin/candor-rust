@@ -1,0 +1,3 @@
+host-allowlist/target/
+host-allowlist/**/target/
+host-allowlist/r.*.json

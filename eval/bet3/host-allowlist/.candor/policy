@@ -1,0 +1,4 @@
+# Architecture-as-code, enforced by candor (AS-EFF-008).
+# The billing module may reach the network, but ONLY Stripe. Any other endpoint — even one reached
+# through a shared crate, where the literal host is nowhere near the billing source — is a violation.
+allow Net in billing  api.stripe.com  hooks.stripe.com

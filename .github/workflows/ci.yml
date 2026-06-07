@@ -54,6 +54,12 @@ jobs:
       - name: Integration tests (AS-EFF modes + cross-crate)
         run: bash tests/integration.sh
 
+      # Workspace-scale enforcement: AS-EFF-008 host allowlist catching a forbidden endpoint that
+      # lives in a SIBLING crate (the cross-crate host-propagation + CANDOR_REPORTS path). Teeth:
+      # the verify script also confirms the violation is missed without cross-crate resolution.
+      - name: Host-allowlist cross-crate enforcement
+        run: bash eval/bet3/verify.sh
+
       # The Claude Code receipt is plain bash (no Rust test reaches it) and has shipped real
       # bugs (the sidecar/report glob collision). Guard its coverage/freshness/count logic.
       - name: Receipt logic tests (Claude Code integration)

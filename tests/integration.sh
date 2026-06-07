@@ -187,6 +187,19 @@ want   "AS-EFF-006 flags the TRANSITIVE boundary violation (domain_logic reaches
 absent "the genuinely-pure domain fn is NOT flagged"                                               "$out" '[AS-EFF-006] `domain_pure`'
 rm -rf "$(dirname "$PL")"
 
+# ── 9a. Host allowlist: enforce per-scope Net endpoints (AS-EFF-008) ──
+echo "== host allowlist / AS-EFF-008 (CANDOR_POLICY allow Net) =="
+HA=$(mktemp -d)/ha; mkdir -p "$HA/src"
+printf '[package]\nname="ha"\nversion="0.1.0"\nedition="2021"\n' > "$HA/Cargo.toml"
+# billing::charge reaches the allowed host (Stripe) via a helper; billing::track reaches a DIFFERENT
+# host via a helper — the endpoint is in the helper, not in the named fn (transitive, like real code).
+printf 'mod billing {\n  fn pay(){ let _=std::net::TcpStream::connect("api.stripe.com:443"); }\n  fn beacon(){ let _=std::net::TcpStream::connect("metrics.evil.example:443"); }\n  pub fn charge(){ pay(); }\n  pub fn track(){ beacon(); }\n}\nfn main(){ billing::charge(); billing::track(); }\n' > "$HA/src/main.rs"
+echo "allow Net in billing  api.stripe.com" > "$HA/policy"
+out=$(dl "$HA" env CANDOR_POLICY="$HA/policy")
+want   "AS-EFF-008 flags the off-allowlist host reached transitively (billing::track)" "$out" '[AS-EFF-008] `billing::track`'
+absent "the allowed-host path is NOT flagged (billing::charge → api.stripe.com)"       "$out" '[AS-EFF-008] `billing::charge`'
+rm -rf "$(dirname "$HA")"
+
 # ── 10. Taint heuristic: an effect on caller-derived input (AS-EFF-007, P0′ §7) ──
 echo "== taint heuristic / AS-EFF-007 (CANDOR_TAINT) =="
 TZ=$(mktemp -d)/tz; mkdir -p "$TZ/src"

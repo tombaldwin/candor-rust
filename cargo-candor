@@ -370,16 +370,18 @@ case "$cmd" in
     exit 0 ;;
 
   policy)
-    # Enforce declared effect boundaries (default .candor/policy). Fails (exit 1) on any AS-EFF-006 —
-    # a function that *transitively* performs an effect a rule forbids (e.g. domain code reaching the
-    # network through a helper). Rules: `deny <Effects...> [scope]`, `pure [scope]`; scope = a path
-    # substring. This is the architectural-invariant gate an agent can't self-check.
+    # Enforce declared effect boundaries (default .candor/policy). Fails (exit 1) on AS-EFF-006 (a
+    # function that *transitively* performs an effect a rule forbids — e.g. domain code reaching the
+    # network through a helper) or AS-EFF-008 (a function in scope reaching a Net host outside its
+    # declared allowlist, or an endpoint candor can't pin down). Rules: `deny <Effects...> [scope]`,
+    # `pure [scope]`, `allow Net [in <scope>] <host>...`; scope = a path substring. This is the
+    # architectural-invariant gate an agent can't self-check.
     pol="${1:-.candor/policy}"
-    [ -f "$pol" ] || { echo "candor: no policy at '$pol'. Write rules like 'deny Net Db domain' or 'pure parse'." >&2; exit 2; }
+    [ -f "$pol" ] || { echo "candor: no policy at '$pol'. Rules: 'deny Net Db domain', 'pure parse', 'allow Net in billing api.stripe.com'." >&2; exit 2; }
     out="$(lint_fresh CANDOR_POLICY="$pol")"
-    printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]' >&2 || true
-    if printf '%s' "$out" | grep -q 'AS-EFF-006'; then
-      echo "candor: effect-policy violation (AS-EFF-006) — blocked. Bypass: git push --no-verify" >&2
+    printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]' >&2 || true
+    if printf '%s' "$out" | grep -qE 'AS-EFF-006|AS-EFF-008'; then
+      echo "candor: effect-policy violation (AS-EFF-006/008) — blocked. Bypass: git push --no-verify" >&2
       exit 1
     fi
     echo "candor: policy OK — no boundary violations." >&2

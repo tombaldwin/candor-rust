@@ -2,3 +2,5 @@ target/
 r.*.json
 .candor.out
 trials/
+trials2/
+trials3/

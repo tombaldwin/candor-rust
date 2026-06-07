@@ -10,6 +10,10 @@
 #   deny <Effects...> [scope]    forbid those effects in scope   (effects: Net Fs Db Exec Env Clock
 #                                                                  Ipc Log Rand Clipboard Unknown)
 #   pure [scope]                 forbid ALL effects in scope (must be side-effect-free)
+#   allow Net [in <scope>] <host>...   in scope, Net may reach ONLY these hosts — any other endpoint
+#                                      (or one candor can't see) is a violation (AS-EFF-008). An
+#                                      allowlist a model can't self-check: the host is a literal buried
+#                                      in a transitive, possibly cross-crate, callee.
 #
 # `#` comments and blank lines are ignored.
 
@@ -21,3 +25,8 @@ pure             parse
 
 # Nothing in this crate should ever spawn a subprocess.
 deny Exec
+
+# The billing module may reach the network, but ONLY Stripe — a call that ends up hitting any other
+# host (even through a deep or cross-crate helper) is flagged. This is the supply-chain boundary: a
+# model editing billing can't see which endpoint a transitive callee actually connects to.
+allow Net in billing  api.stripe.com  hooks.stripe.com
