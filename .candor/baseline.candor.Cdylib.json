@@ -1,15 +1,16 @@
 {
   "candor": {
-    "version": "b417579",
+    "version": "e314398",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:1217:5: 1217:54",
+      "loc": "src/lib.rs:1253:5: 1253:54",
       "inferred": [
         "Env",
-        "Fs"
+        "Fs",
+        "Unknown"
       ],
       "direct": [
         "Env"
@@ -20,15 +21,18 @@
         "Fs"
       ],
       "overdeclared": [],
-      "unresolved": false,
+      "unresolved": true,
       "hash": "5dc78c79389006ef5bde9f6edc307bf5",
+      "fs": [
+        "read"
+      ],
       "calls": [
         "load_cross_reports"
       ]
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:1410:5: 1410:59",
+      "loc": "src/lib.rs:1446:5: 1446:59",
       "inferred": [
         "Env",
         "Fs"
@@ -100,7 +104,8 @@
       "fn": "load_cross_reports",
       "loc": "src/lib.rs:363:1: 368:44",
       "inferred": [
-        "Fs"
+        "Fs",
+        "Unknown"
       ],
       "direct": [
         "Fs"
@@ -110,8 +115,11 @@
         "Fs"
       ],
       "overdeclared": [],
-      "unresolved": false,
-      "hash": "5dc78c79389006ef514cd803e91c0d80"
+      "unresolved": true,
+      "hash": "5dc78c79389006ef514cd803e91c0d80",
+      "fs": [
+        "read"
+      ]
     }
   ]
 }
