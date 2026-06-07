@@ -1,12 +1,12 @@
 {
   "candor": {
-    "version": "a7003c1",
+    "version": "8856b5c",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:1346:5: 1346:54",
+      "loc": "src/lib.rs:1360:5: 1360:54",
       "inferred": [
         "Env",
         "Fs"
@@ -28,7 +28,7 @@
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:1547:5: 1547:59",
+      "loc": "src/lib.rs:1566:5: 1566:59",
       "inferred": [
         "Env",
         "Fs"
@@ -127,6 +127,29 @@
       "overdeclared": [],
       "unresolved": false,
       "hash": "b17b9d811ad434e8e2ecf50cd7ab7cde"
+    },
+    {
+      "fn": "register_lints",
+      "loc": "/Users/tom/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dylint_linting-6.0.1/src/lib.rs:285:13: 285:105",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "b17b9d811ad434e8d6c59c97cc247c52",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "Candor::new"
+      ]
     }
   ]
 }
