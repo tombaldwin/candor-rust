@@ -15,11 +15,16 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
+# candor intentionally carries NO git dependencies, so it can be published to crates.io. The single
+# clippy_utils helper it used (`span_lint`) is vendored in src/lib.rs. (crates.io still requires the
+# pinned nightly + rustc-dev to BUILD this — `rustc_private` — but that's a toolchain requirement,
+# not a forbidden dependency.)
 dylint_linting = "6.0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-candor-report = { path = "crates/candor-report" }
+# `version` alongside `path`: cargo builds against the local path here, but a crates.io publish uses
+# the version (publish candor-report first). Carrying the version keeps candor publish-ready.
+candor-report = { path = "crates/candor-report", version = "0.2.0" }
 
 [dev-dependencies]
 dylint_testing = "6.0.1"

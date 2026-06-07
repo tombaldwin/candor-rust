@@ -20,6 +20,7 @@
 // The built-in classifier (`classify`) knows a fixed set of crates; a project can add
 // its own crate/path → effect rules via a CANDOR_CONFIG file (see `parse_config`).
 
+extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_middle;
 
@@ -49,6 +50,40 @@ dylint_linting::impl_late_lint! {
     Warn,
     "aggregates each function's transitive capability/effect set",
     Candor::new()
+}
+
+/// Emit a candor lint diagnostic at `sp` with message `msg`.
+///
+/// Vendored from the single `clippy_utils::diagnostics::span_lint` helper candor used to depend on —
+/// minus clippy's docs-page hyperlink (candor is not a clippy lint, so there's no page to link). It's
+/// a thin wrapper over rustc's own `LintContext::emit_span_lint`; replicating these few lines lets
+/// candor drop its ONLY git-only dependency (`clippy_utils`), so the crate can be published to
+/// crates.io (which forbids git deps, not `rustc_private`). Mirrors the upstream shape exactly so it
+/// compiles against the same pinned nightly.
+fn span_lint(
+    cx: &impl rustc_lint::LintContext,
+    lint: &'static rustc_lint::Lint,
+    sp: impl Into<rustc_errors::MultiSpan>,
+    msg: impl Into<rustc_errors::DiagMessage>,
+) {
+    use rustc_errors::{Diag, DiagCtxtHandle, Diagnostic, Level};
+    struct CandorDiag<F: FnOnce(&mut Diag<'_, ()>)>(F);
+    impl<'a, F: FnOnce(&mut Diag<'_, ()>)> Diagnostic<'a, ()> for CandorDiag<F> {
+        fn into_diag(self, dcx: DiagCtxtHandle<'a>, level: Level) -> Diag<'a, ()> {
+            let mut diag = Diag::new(dcx, level, "");
+            (self.0)(&mut diag);
+            diag
+        }
+    }
+    let sp = sp.into();
+    cx.emit_span_lint(
+        lint,
+        sp.clone(),
+        CandorDiag(move |diag: &mut Diag<'_, ()>| {
+            diag.primary_message(msg);
+            diag.span(sp);
+        }),
+    );
 }
 
 /// The effect recorded for a call candor cannot resolve to a concrete callee.
@@ -1635,7 +1670,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         }
                     })
                     .collect();
-                clippy_utils::diagnostics::span_lint(
+                span_lint(
                     cx,
                     CANDOR,
                     span,
@@ -1649,7 +1684,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             if in_scope(no_ambient_var.as_deref(), &name) {
                 let ambient = ambient_effects(&direct);
                 if !ambient.is_empty() {
-                    clippy_utils::diagnostics::span_lint(
+                    span_lint(
                         cx,
                         CANDOR,
                         span,
@@ -1672,7 +1707,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     } else {
                         format!("only {{ {} }}", join(&declared))
                     };
-                    clippy_utils::diagnostics::span_lint(
+                    span_lint(
                         cx,
                         CANDOR,
                         span,
@@ -1687,7 +1722,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 // capabilities cannot be verified complete (the honest answer to dynamic
                 // dispatch / fn-pointers / callbacks — never a silent pass).
                 if has_unknown {
-                    clippy_utils::diagnostics::span_lint(
+                    span_lint(
                         cx,
                         CANDOR,
                         span,
@@ -1700,7 +1735,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 }
                 // AS-EFF-002: declares a capability it never exercises.
                 if !unused.is_empty() {
-                    clippy_utils::diagnostics::span_lint(
+                    span_lint(
                         cx,
                         CANDOR,
                         span,
@@ -1720,7 +1755,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 if let Some(prior) = base.get(&name) {
                     let gained = gained_effects(effs, prior);
                     if !gained.is_empty() {
-                        clippy_utils::diagnostics::span_lint(
+                        span_lint(
                             cx,
                             CANDOR,
                             span,
@@ -1750,7 +1785,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 };
                 if !bad.is_empty() {
                     let scope = rule.scope.as_deref().map(|s| format!(" (scope `{s}`)")).unwrap_or_default();
-                    clippy_utils::diagnostics::span_lint(
+                    span_lint(
                         cx,
                         CANDOR,
                         span,
@@ -1767,7 +1802,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // argument — a heuristic review nudge (see the taint helpers for its honest limits).
             if self.taint {
                 if let Some(t) = self.tainted.get(&f).filter(|t| !t.is_empty()) {
-                    clippy_utils::diagnostics::span_lint(
+                    span_lint(
                         cx,
                         CANDOR,
                         span,
