@@ -71,3 +71,11 @@ jobs:
             echo "::error::candor's effect surface grew vs .candor/baseline; refresh it if intended"
             exit 1
           fi
+
+      # Adversarial SOUNDNESS check: generate crates that thread a known effect through every call
+      # form known to produce silent under-reports (closures, dyn dispatch, generic/boxed callbacks,
+      # the receiving side), and assert candor never reports a reachable function PURE (effect or
+      # Unknown only). This turns "never silently under-reports" from a hope into a gate — it catches
+      # the exact class of bug a hand review found one-at-a-time.
+      - name: Soundness fuzzer
+        run: bash soundness/run.sh 60

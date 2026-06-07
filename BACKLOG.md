@@ -143,6 +143,16 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P1 — correctness (silent wrong answers are the worst failure)
 
+- [~] **Soundness fuzzer — "never silently under-reports" is now a CI gate, not a hope** (`soundness/`,
+      **Bet 1 phase 1** of the improvement roadmap). A hand review found multiple trust-contract
+      violations the unit/integration suite missed (`Box<dyn Fn>` callbacks, non-local callbacks,
+      `Arc<dyn>` dispatch — candor reported them PURE instead of `Unknown`). The fuzzer generates crates
+      that thread a known effect through every call form known to under-report (closures, `dyn`
+      dispatch, generic/boxed callbacks, the receiving side) and asserts every reachable function is
+      `effect`-or-`Unknown`, never silent-pure. **Verified to have teeth:** reintroducing the historical
+      `resolve_callee` `_ => None` hole makes every `recv_boxed` seed fail. CI runs 60 seeds/push.
+      **Phase 2 (next):** a dynamic oracle — run each program under a syscall tracer and assert the
+      static prediction over-approximates *observed* effects (closes the loop on *any* under-report).
 - [x] **Database clients.** `sqlx`/`rusqlite`/`postgres`/`tokio_postgres`/`diesel`/`redis`/… now
       classified `Db` (execution verbs only, not query building; best-effort, tune via CONFIG).
 - [x] **`tokio::net` / `std::os::unix::net` Unix sockets** → `Ipc`, no longer conflated with `Net`.
