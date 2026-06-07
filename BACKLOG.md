@@ -265,23 +265,27 @@ sound over-approximation (`Unknown`), which candor already does.
 
 - [x] Distribution: repo is **public** (git is the channel — `--git` / `git clone`, as AGENTS.md
       uses).
-- [ ] **crates.io distribution — vendor `span_lint`, drop the only git dep (correcting the old "can't"
-      claim).** The prior note here said crates.io is impossible because `clippy_utils` is a git
-      dependency — but **candor uses clippy_utils for exactly one function** (`diagnostics::span_lint`,
-      a thin wrapper over `LateContext::span_lint`). Vendor those few lines, drop the git dep, and
-      candor *is* publishable — crates.io forbids git/path deps, **not** `rustc_private` / nightly
-      features (rustc_private crates do live on crates.io). The nightly-toolchain requirement remains
-      (users still need the matching nightly + rustc-dev), so it's not `cargo install` for everyone —
-      but "git dep ⇒ no crates.io" was the actual blocker and it's removable cheaply. *(From the
-      critical-assessment pushback: I'd called this fundamental; it isn't.)*
+- [x] **crates.io distribution — vendored `span_lint`, dropped the only git dep (the old "can't" was
+      wrong).** The prior note said crates.io is impossible because `clippy_utils` is a git dependency —
+      but candor used clippy_utils for **exactly one function** (`diagnostics::span_lint`, a thin
+      wrapper over `LintContext::emit_span_lint`). **Done:** vendored those few lines (minus clippy's
+      docs-page link) into `src/lib.rs`, removed the dep. Verified `0` git sources in `Cargo.lock`;
+      `cargo package` now packages candor and stops only on `candor-report` not yet being on crates.io
+      (routine multi-crate release ordering), with no git-dep blocker. Added a `version` to the
+      `candor-report` path dep so the manifest is publish-ready. ui tests confirm byte-identical
+      diagnostics. The nightly + rustc-dev toolchain is still needed to *build* (`rustc_private`) — that
+      was never the crates.io blocker. *(Pushback was right: I'd called this fundamental; it wasn't.)*
 - [x] Nightly fragility (`rustc_private` pins `nightly-2026-04-16`) — the bump process is now a
       step-by-step in `CONTRIBUTING.md` (pick matching nightly+clippy_utils rev, fix rustc_private
       breakage, re-bless ui, re-baseline the self-guard).
-- [ ] **Automate the nightly bump.** The pin can't be removed while we're a dylint lint, but the
-      *migration* can be a bot: a scheduled workflow that tries the next nightly, runs
-      build/test/bless/re-baseline, and opens a PR if green (or reports the breakage). Turns the
-      manual CONTRIBUTING chore into a notification. *(Pushback item: "expensive maintenance", not a
-      hard limit.)*
+- [x] **Automated nightly bump — shipped** (`.github/workflows/nightly-bump.yml`). The pin can't be
+      removed while we're a dylint lint, but the *migration* is now a bot: a weekly (+ manual) workflow
+      that pins a candidate nightly, runs the full build/test, **re-blesses the ui fixtures** and
+      **re-baselines the self-guard**, and opens a PR if green — or fails loudly and files a tracking
+      issue if the nightly broke `rustc_private` (the case that needs a human). Vendoring clippy_utils
+      already removed the old "pick a matching clippy_utils rev" step, so a bump is now just "pick a
+      nightly, fix any rustc_private breakage". *(Pushback item: "expensive maintenance", not a hard
+      limit — now a notification.)*
 - [x] Test coverage — unit (pure logic) + `ui_test` fixtures with blessed `.stderr` (copied from the
       framework-saved file, since compiletest has no bless) + scripted `tests/integration.sh`
       (AS-EFF modes, cross-crate, version stamping, audit) + `test-receipt.sh` (the bash receipt).
