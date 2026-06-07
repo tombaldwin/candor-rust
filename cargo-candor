@@ -139,6 +139,11 @@ ensure_report() {
     rm -rf target/dylint 2>/dev/null || true
     CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
     ls .candor/report.*.*.json >/dev/null 2>&1 || { echo "candor: could not produce a report (build failed?)." >&2; return 1; }
+    # Stamp state at generation so the staleness check below can actually fire on a later run. Without
+    # this, the no-watcher path (generate once, never write state) served a stale report SILENTLY after
+    # any edit, because the `elif` requires a state file to compare against.
+    find "$PWD" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
+      | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1 > .candor/state
   elif [ -f .candor/state ]; then
     local cur
     cur="$(find "$PWD" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
@@ -193,7 +198,16 @@ case "$cmd" in
     # knows which candor produced it.
     pre="${1:-.candor/baseline}"
     mkdir -p "$(dirname "$pre")"
+    # dylint emits the report ONLY when the crate recompiles. A warm `target/dylint` (e.g. a prior
+    # `cargo candor audit` in the same session) would otherwise produce ZERO baseline files while
+    # snapshot still stamped a version and reported success — an EMPTY baseline silently disables the
+    # guard. Force the recompile, then verify the files actually appeared.
+    rm -rf target/dylint 2>/dev/null || true
     CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB"
+    if ! ls "$pre".*.*.json >/dev/null 2>&1; then
+      echo "candor: snapshot produced NO report files — did the crate build? Baseline NOT written." >&2
+      exit 1
+    fi
     engine_ver > "$pre.candor-version"
     rm -f "$(dirname "$pre")/review-seen" 2>/dev/null || true   # new baseline → reset §2 self-review
     echo "candor: baseline written and stamped @$(cat "$pre.candor-version" 2>/dev/null)." >&2
@@ -213,8 +227,18 @@ case "$cmd" in
       echo "candor: 'cargo candor update' (or 'cargo candor snapshot $pre') here, then commit." >&2
       exit 0
     fi
-    out="$(CANDOR_BASELINE="$pre" cargo dylint --lib-path "$LIB" 2>&1 || true)"
-    printf '%s\n' "$out" >&2
+    # dylint emits AS-EFF-005 only when the crate recompiles, so a warm `target/dylint` (a prior
+    # audit/diff in the same job) would emit NOTHING and the guard would FAIL OPEN — passing a real
+    # regression. Force the recompile so the lint actually runs over the code.
+    rm -rf target/dylint 2>/dev/null || true
+    if out="$(CANDOR_BASELINE="$pre" cargo dylint --lib-path "$LIB" 2>&1)"; then
+      printf '%s\n' "$out" >&2
+    else
+      # dylint itself failed (the crate didn't build) — the guard could NOT run, so do not pass silently.
+      printf '%s\n' "$out" >&2
+      echo "candor: guard could NOT run (the crate failed to build under dylint) — failing closed, not a pass." >&2
+      exit 2
+    fi
     if printf '%s' "$out" | grep -q 'AS-EFF-005'; then
       echo "candor: a function GAINED an effect vs the baseline (AS-EFF-005) — blocked. Bypass: git push --no-verify" >&2
       exit 1
@@ -377,6 +401,11 @@ case "$cmd" in
     "$CANDOR_DIR/install.sh" >&2
     LIB="$(find_lib || true)"; ev="$(engine_ver)"
     echo "candor: engine now @$ev — scripts and AGENTS.md current too." >&2
+    # Invalidate the cached read-only query report: it was produced by the OLD engine, but `.candor/state`
+    # still matches the (unchanged) source, so the query/diff fast-path would serve a stale-engine report
+    # against the new-engine baseline → spurious reclassification deltas. Clearing it forces a rebuild
+    # with the new engine on next use.
+    rm -f .candor/report.*.*.json .candor/state 2>/dev/null || true
     # Auto-refresh a baseline in THIS project so the guard never false-fires after an
     # upgrade. Force a recompile (dylint emits only on recompile), regenerate, re-stamp.
     if ls .candor/baseline.*.json >/dev/null 2>&1; then

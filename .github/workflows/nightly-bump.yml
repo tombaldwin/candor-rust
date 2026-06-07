@@ -77,7 +77,9 @@ jobs:
             out="$(cargo test --lib ui 2>&1 || true)"
             for f in ui/*.rs; do
               base="$(basename "$f" .rs)"
-              saved="$(printf '%s\n' "$out" | grep -o "/[^ ]*${base}[^ ]*\.stderr" | head -1)"
+              # Anchor on `/<base>.stderr` (a path-segment boundary), NOT a substring — else `base=main`
+              # would also match `…/domain.stderr` and cross-bless an unrelated fixture.
+              saved="$(printf '%s\n' "$out" | grep -oE "/[^ ]*/${base}\.stderr" | head -1)"
               [ -n "$saved" ] && [ -f "$saved" ] && cp "$saved" "ui/$base.stderr" && echo "blessed ui/$base.stderr"
             done
             cargo test --lib ui # must pass after blessing, else the change is non-trivial → fail
@@ -87,7 +89,7 @@ jobs:
       - name: Re-baseline self-guard
         if: steps.pick.outputs.already != '1'
         run: |
-          LIB="$(ls "$PWD"/target/debug/libcandor@*.so)"
+          LIB="$(ls "$PWD"/target/debug/libcandor@*.so | head -1)"
           CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
           CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1 | grep -q "AS-EFF-005" \
             && { echo "::error::self-guard still trips after re-baseline — investigate"; exit 1; } || true
@@ -100,6 +102,11 @@ jobs:
         if: steps.pick.outputs.already != '1'
         uses: peter-evans/create-pull-request@v7
         with:
+          # A PR created with the default GITHUB_TOKEN does NOT trigger CI (GitHub's loop-prevention),
+          # so the "green bump" PR would arrive with no checks run on the new nightly. Set a repo secret
+          # NIGHTLY_BUMP_PAT (a fine-grained PAT with contents+PR write) to get CI on the bot branch;
+          # falls back to github.token (PR still opens, just unverified — the bump job's own log stands).
+          token: ${{ secrets.NIGHTLY_BUMP_PAT || github.token }}
           branch: bot/nightly-${{ steps.pick.outputs.candidate }}
           title: "Bump pinned nightly to ${{ steps.pick.outputs.candidate }}"
           commit-message: |

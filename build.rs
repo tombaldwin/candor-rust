@@ -37,6 +37,12 @@ fn main() {
     // commit updates the ref, not HEAD). Missing paths (no .git, e.g. a packaged source) just
     // force a conservative rebuild rather than failing.
     println!("cargo:rerun-if-changed=.git/HEAD");
+    // Also watch `packed-refs`: `git gc` (which runs automatically, and a `git pull` can trigger) moves
+    // a branch ref from the loose `.git/refs/heads/<branch>` into `.git/packed-refs` and deletes the
+    // loose file. A later `git pull` then updates `packed-refs` ONLY — `.git/HEAD` is unchanged (still
+    // `ref: refs/heads/<branch>`) and the loose ref is gone — so without watching packed-refs the
+    // version stamp goes stale exactly in the pull-without-rebuild case this exists to catch.
+    println!("cargo:rerun-if-changed=.git/packed-refs");
     if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
         if let Some(r) = head.strip_prefix("ref: ") {
             println!("cargo:rerun-if-changed=.git/{}", r.trim());

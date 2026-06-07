@@ -83,8 +83,15 @@ import json, os, sys
 path, cmd = sys.argv[1], sys.argv[2]
 data = {}
 if os.path.exists(path):
-    try: data = json.load(open(path))
-    except Exception: data = {}
+    try:
+        data = json.load(open(path))
+    except Exception:
+        # The file exists but isn't plain JSON — most likely comments / trailing commas, which Claude
+        # Code itself accepts but json.load rejects. Do NOT reset-and-overwrite (that would WIPE the
+        # user's permissions/env/model/other hooks). Leave it untouched and print the manual snippet.
+        sys.stderr.write("  WARNING: %s isn't plain JSON (comments or trailing commas?) — NOT modifying it.\n" % path)
+        sys.stderr.write('  Add this Stop hook by hand: {"matcher":"*","hooks":[{"type":"command","command":"%s"}]}\n' % cmd)
+        sys.exit(0)
 stop = data.setdefault("hooks", {}).setdefault("Stop", [])
 def has(c):
     return any(h.get("command") == c for g in stop for h in g.get("hooks", []))
@@ -101,6 +108,9 @@ fi
 # --- keep generated artifacts out of git (baseline stays opt-in to commit) ---
 GI="$TARGET/.gitignore"
 grep -qxF '.candor/report.*.json' "$GI" 2>/dev/null || {
+  # Ensure the file ends with a newline first, else the first pattern fuses onto the last existing
+  # line (which both breaks that ignore pattern AND makes the grep above never match → re-append forever).
+  if [ -s "$GI" ] && [ -n "$(tail -c1 "$GI" 2>/dev/null)" ]; then echo >> "$GI"; fi
   { echo '.candor/report.*.json'; echo '.candor/state'; echo '.candor/last-error.log'; } >> "$GI"
 }
 

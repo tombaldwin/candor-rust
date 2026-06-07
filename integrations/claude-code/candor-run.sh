@@ -41,13 +41,20 @@ PREV=""; [ -f "$STATE" ] && PREV="$(cat "$STATE" 2>/dev/null)"
 
 # ---- locate the candor dylib ----
 find_lib() {
-  local c
-  for c in "${CANDOR_LIB:-}" \
-           "${CANDOR_HOME:-}"/target/debug/libcandor@*.dylib "${CANDOR_HOME:-}"/target/debug/libcandor@*.so \
+  # An explicit override wins outright.
+  [ -n "${CANDOR_LIB:-}" ] && [ -e "${CANDOR_LIB:-}" ] && { echo "$CANDOR_LIB"; return 0; }
+  # Otherwise pick the NEWEST `libcandor@<toolchain>.{dylib,so}` by mtime — NOT the first glob match.
+  # After a pinned-toolchain bump the previous `libcandor@<old-toolchain>.dylib` lingers beside the new
+  # one and sorts first alphabetically; loading it runs a stale engine (or fails on a toolchain rustc
+  # no longer has) on every Stop hook. (Mirrors cargo-candor's newest-mtime locator.)
+  local c newest=""
+  for c in "${CANDOR_HOME:-}"/target/debug/libcandor@*.dylib "${CANDOR_HOME:-}"/target/debug/libcandor@*.so \
            "$DIR"/../candor/target/debug/libcandor@*.dylib "$DIR"/../candor/target/debug/libcandor@*.so \
            /tmp/candor/target/debug/libcandor@*.dylib /tmp/candor/target/debug/libcandor@*.so; do
-    [ -n "$c" ] && [ -e "$c" ] && { echo "$c"; return 0; }
+    [ -e "$c" ] || continue
+    { [ -z "$newest" ] || [ "$c" -nt "$newest" ]; } && newest="$c"
   done
+  [ -n "$newest" ] && { echo "$newest"; return 0; }
   return 1
 }
 
@@ -154,9 +161,12 @@ fi
 # One `candor-query receipt` yields the fn count, effect breakdown, unresolved count, the calibrated
 # set (the engine's <prefix>.calibrated.json sidecar — the single source of truth) and the encountered
 # crates — replacing several inline Python heredocs with the typed query binary. The hardcoded
-# CALIBRATED list is only a fallback for before a sidecar exists (report not yet generated).
-CALIBRATED="reqwest isahc ureq sqlx rusqlite postgres tokio_postgres diesel redis mongodb mysql mysql_async sea_orm deadpool_postgres memmap2 rand getrandom fastrand chrono tracing arboard portable_pty"
-CALIB_PREFIXES="aws_sdk_ aws_smithy cap_"
+# The calibrated set is the engine's, read from the report's `.calibrated.json` sidecar (via the
+# receipt's `calibrated` line). We deliberately do NOT hardcode a copy here — it drifted out of sync
+# with the engine's real set (a stale list mislabels now-calibrated crates as coverage gaps). Until the
+# sidecar is available (before the first report), the coverage gap check is simply deferred.
+CALIBRATED=""
+CALIB_PREFIXES=""
 FNS=""; EFFS=""; UNRES=""; ENCOUNTERED=""; calib=""
 RECEIPT=""
 [ -n "$QUERY" ] && RECEIPT="$("$QUERY" receipt "$REPORT_PREFIX" 2>/dev/null)"
@@ -173,8 +183,9 @@ if [ -n "$RECEIPT" ]; then
       calibrated)  calib="$v" ;;
     esac
   done <<< "$RECEIPT"
-  # Override the hardcoded fallback only when the engine emitted a (non-empty) calibrated sidecar.
-  [ -n "$calib" ] && [ "$calib" != "|" ] && { CALIBRATED="${calib%%|*}"; CALIB_PREFIXES="${calib##*|}"; }
+  # The calibrated set comes from the engine's sidecar; flag when we actually got it (the coverage gap
+  # check below only runs then, so it can never disagree with the engine's real calibration).
+  [ -n "$calib" ] && [ "$calib" != "|" ] && { CALIBRATED="${calib%%|*}"; CALIB_PREFIXES="${calib##*|}"; CALIB_SIDECAR=1; }
 else
   # candor-query missing OR failed (stale binary, etc.): honest crude fn-count rather than a false
   # "0 fns". Build/refresh it via install.sh or `cargo candor setup` for the full breakdown.
@@ -212,7 +223,7 @@ if [ -z "$deps" ]; then
   ' Cargo.toml 2>/dev/null | sort -u)
 fi
 gaps=""
-if [ -n "$SUSPECT" ]; then
+if [ -n "$SUSPECT" ] && [ "${CALIB_SIDECAR:-0}" = 1 ]; then
   for d in $deps; do
     nd="${d//-/_}"
     is_calibrated "$nd" && continue
@@ -235,7 +246,9 @@ else
 fi
 
 # ---- coverage label ----
-if [ -n "$gaps" ]; then
+if [ "${CALIB_SIDECAR:-0}" != 1 ]; then
+  COV="coverage: deferred (calibrated set arrives with the first report)"
+elif [ -n "$gaps" ]; then
   COV="⚠ coverage: $(echo "$gaps" | tr ' ' ',') uncalibrated — Db/Net may be incomplete for code using them"
 else
   COV="coverage ✓ (all effectful-looking deps recognized)"
@@ -279,7 +292,7 @@ if [ "$need_run" = 1 ] && [ "$ran_ok" = 0 ]; then
   exit "${surfaced:-0}"
 fi
 if [ -n "$REVIEW" ]; then
-  printf 'candor — your edits this turn gave functions NEW effects (vs the committed .candor baseline):\n%s\n\nA local edit can change the effect surface non-locally — a new effect propagates to every caller. For each: was it intended? If a function gained Net/Db/Exec/Fs/Env/Ipc it lacked, confirm it is necessary, and prefer threading a capability over reaching for ambient authority. A gained `Unknown` means candor can no longer prove that function complete — read it. If all are intended, just finish; this will not re-prompt for these.\n' "$REVIEW"
+  printf 'candor — functions have effects NOT in the committed .candor baseline (surfaced once):\n%s\n\nA local edit can change the effect surface non-locally — a new effect propagates to every caller. For each: was it intended? If a function gained Net/Db/Exec/Fs/Env/Ipc it lacked, confirm it is necessary, and prefer threading a capability over reaching for ambient authority. A gained `Unknown` means candor can no longer prove that function complete — read it. If all are intended, just finish; this will not re-prompt for these.\n' "$REVIEW"
   exit 11
 fi
 echo "candor$VERSTAMP · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json$NUDGE"
