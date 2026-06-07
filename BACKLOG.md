@@ -205,12 +205,17 @@ sound over-approximation (`Unknown`), which candor already does.
       generates effectful code becomes visible). The blocker is *re-flooding risk*, which needs a
       real-codebase corpus to tune — a **validation problem, not an impossibility**. *(Pushback: the
       user-vs-noise distinction is decidable from the expansion's identity.)*
-- [ ] **Literal `Net` host detail.** Full host-by-runtime-value is genuinely undecidable, but the
-      **literal** subset is extractable — `TcpStream::connect("api.example.com:443")` has a known
-      endpoint. Surface it as a `hosts` detail (analogous to the `fs` read/write detail), omitted when
-      the address is a non-literal (the taint pass already distinguishes literal vs param args). Turns
-      "performs Net" into "performs Net to api.example.com" wherever it's statically visible.
-      *(Pushback: "not statically knowable" is only true for the runtime-value subset.)*
+- [x] **Literal `Net` host detail — shipped (engine + report + spec).** Full host-by-runtime-value is
+      undecidable, but the **literal** subset is extractable. **Done:** a directly-classified `Net`
+      call carrying a string-literal address/URL records the host (`host[:port]`, scheme/path/userinfo
+      stripped), propagated on the same call graph as `fs` detail (`propagate` is now generic over the
+      element), surfaced as the report's optional `hosts` field and rendered by `show` as
+      `Net*(api.example.com)`. Honest by construction: a runtime address yields `Net` with **no** host
+      (absent ≠ "no network"); a header value / verb is filtered out (`net_host_literal` requires a
+      dotted name or `host:port`). Spec'd in candor-spec §2 (never a completeness claim — `Net` keeps
+      the I/O claim; `hosts` only narrows it with what's provably visible). Unit + integration tested.
+      **Follow-up:** candor-java parity; more host-bearing APIs (e.g. URL builders) if a real case wants
+      it. *(Pushback was right: "not statically knowable" only held for the runtime subset.)*
 - [ ] **Smarter generic-dispatch over foreign types** (currently assumed pure to avoid flooding;
       `CANDOR_PARANOID` is the opt-in). A *choice*, not a limit: could assume-pure only when the
       dispatch's trait bounds **exclude** all known-effectful traits, and mark `Unknown` otherwise —
