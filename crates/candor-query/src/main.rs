@@ -152,8 +152,13 @@ fn cmd_audit(args: &[String]) -> i32 {
     // label with a count of 0 (matching the Python this replaced).
     let mut fns: Vec<ReportEntry> = Vec::new();
     let mut percrate: Vec<(String, usize)> = Vec::new();
+    // Crates that have their OWN report here are analyzed via cross-crate propagation (their effects
+    // are inherited, not guessed) — so they're NOT classifier blind spots, even though the classifier
+    // has no rule for them. (E.g. a workspace sibling like `candor_report`.)
+    let mut analyzed: BTreeSet<String> = BTreeSet::new();
     for rf in report_files(pre) {
         let label = format!("{}.{}", rf.krate, rf.kind);
+        analyzed.insert(rf.krate.clone());
         let es = std::fs::read_to_string(&rf.path).ok().and_then(|t| report_entries(&t)).unwrap_or_default();
         percrate.push((label, es.len()));
         fns.extend(es);
@@ -204,9 +209,11 @@ fn cmd_audit(args: &[String]) -> i32 {
             || calib_p.iter().any(|p| c.starts_with(p))
             || calib_path.contains(c) // path-matched runtimes (tokio/async_std/mio) ARE covered
     };
-    // The full honest under-report surface: every external crate candor called into but has no effect
-    // rules for. Calls into these are assumed PURE — if any perform I/O, candor is under-reporting it.
-    let uncovered: Vec<String> = seen.iter().filter(|c| !calibrated(c)).cloned().collect();
+    // The full honest under-report surface: every external crate candor called into but has neither a
+    // classifier rule NOR its own report (a crate with a report is analyzed via cross-crate, so its
+    // effects are inherited — not a blind spot). Calls into what remains are assumed PURE.
+    let uncovered: Vec<String> =
+        seen.iter().filter(|c| !calibrated(c) && !analyzed.contains(*c)).cloned().collect();
     // Default: the suspect heuristic surfaces the *likely-effectful* uncovered crates loudly.
     let suspect_gaps: Vec<String> = match &suspect {
         Some(re) => uncovered.iter().filter(|c| re.is_match(c)).cloned().collect(),

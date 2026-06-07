@@ -67,24 +67,27 @@ fn span_lint(
     sp: impl Into<rustc_errors::MultiSpan>,
     msg: impl Into<rustc_errors::DiagMessage>,
 ) {
-    use rustc_errors::{Diag, DiagCtxtHandle, Diagnostic, Level};
-    struct CandorDiag<F: FnOnce(&mut Diag<'_, ()>)>(F);
-    impl<'a, F: FnOnce(&mut Diag<'_, ()>)> Diagnostic<'a, ()> for CandorDiag<F> {
+    use rustc_errors::{Diag, DiagCtxtHandle, DiagMessage, Diagnostic, Level, MultiSpan};
+    // Store the message + span DIRECTLY rather than a decorate closure. clippy's `span_lint` carries a
+    // closure because it's the generic base of an *extensible* family (`span_lint_and_then`); candor
+    // only ever sets the message + span, so the closure is pure overhead — and a closure stored in a
+    // struct field is exactly what candor can't see through (it was candor's one self-`Unknown`). The
+    // direct form is simpler AND analyzable: dropping an abstraction candor didn't need, not contorting
+    // code to please the analyzer.
+    struct CandorDiag {
+        sp: MultiSpan,
+        msg: DiagMessage,
+    }
+    impl<'a> Diagnostic<'a, ()> for CandorDiag {
         fn into_diag(self, dcx: DiagCtxtHandle<'a>, level: Level) -> Diag<'a, ()> {
             let mut diag = Diag::new(dcx, level, "");
-            (self.0)(&mut diag);
+            diag.primary_message(self.msg);
+            diag.span(self.sp);
             diag
         }
     }
     let sp = sp.into();
-    cx.emit_span_lint(
-        lint,
-        sp.clone(),
-        CandorDiag(move |diag: &mut Diag<'_, ()>| {
-            diag.primary_message(msg);
-            diag.span(sp);
-        }),
-    );
+    cx.emit_span_lint(lint, sp.clone(), CandorDiag { sp, msg: msg.into() });
 }
 
 /// The effect recorded for a call candor cannot resolve to a concrete callee.
