@@ -1,12 +1,12 @@
 {
   "candor": {
-    "version": "e314398",
+    "version": "f1df24e",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:1253:5: 1253:54",
+      "loc": "src/lib.rs:1288:5: 1288:54",
       "inferred": [
         "Env",
         "Fs"
@@ -21,14 +21,14 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "5dc78c79389006ef5bde9f6edc307bf5",
+      "hash": "b17b9d811ad434e818cb313fe3ff4d0f",
       "calls": [
         "load_cross_reports"
       ]
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:1446:5: 1446:59",
+      "loc": "src/lib.rs:1481:5: 1481:59",
       "inferred": [
         "Env",
         "Fs"
@@ -44,7 +44,7 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "5dc78c79389006ef3cfd0330aad965cc",
+      "hash": "b17b9d811ad434e8c4a39054f13fe890",
       "fs": [
         "read",
         "write"
@@ -54,8 +54,23 @@
       ]
     },
     {
+      "fn": "<span_lint::CandorDiag<F> as rustc_errors::Diagnostic<'a, ()>>::into_diag",
+      "loc": "src/lib.rs:72:9: 72:82",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "b17b9d811ad434e829b0d9c52fc723db"
+    },
+    {
       "fn": "Candor::new",
-      "loc": "src/lib.rs:166:5: 166:25",
+      "loc": "src/lib.rs:201:5: 201:25",
       "inferred": [
         "Env",
         "Fs"
@@ -71,14 +86,14 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "5dc78c79389006ef0574c4c6bc25fb75",
+      "hash": "b17b9d811ad434e82ef2e5772cbb5c4d",
       "fs": [
         "read"
       ]
     },
     {
       "fn": "load_baseline",
-      "loc": "src/lib.rs:404:1: 404:74",
+      "loc": "src/lib.rs:439:1: 439:74",
       "inferred": [
         "Fs"
       ],
@@ -91,14 +106,14 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "5dc78c79389006eff22141b4c97bc68d",
+      "hash": "b17b9d811ad434e81356fdac4584ce63",
       "fs": [
         "read"
       ]
     },
     {
       "fn": "load_cross_reports",
-      "loc": "src/lib.rs:363:1: 368:44",
+      "loc": "src/lib.rs:398:1: 403:44",
       "inferred": [
         "Fs"
       ],
@@ -111,7 +126,7 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "5dc78c79389006ef514cd803e91c0d80"
+      "hash": "b17b9d811ad434e8e2ecf50cd7ab7cde"
     }
   ]
 }
