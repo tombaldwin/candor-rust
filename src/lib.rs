@@ -521,16 +521,21 @@ fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: Def
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-const CALIBRATED_CRATES: [&str; 34] = [
+const CALIBRATED_CRATES: [&str; 44] = [
     // network (aws_config resolves credentials over the network on `.load()`;
-    // git2 remote ops — fetch/push/connect — contact the network)
-    "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp",
+    // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer)
+    "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
     "async_nats", "lapin", "lettre", "tungstenite", "elasticsearch", "tonic", "rdkafka",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
-    // filesystem / entropy / subprocess / clock / log / clipboard
-    "memmap2", "rand", "getrandom", "fastrand", "portable_pty", "chrono", "tracing", "log", "arboard",
+    // filesystem (async_fs = smol; fs_err = std::fs wrapper; tempfile; glob) / entropy /
+    // subprocess (async_process = smol; duct) / env (dotenvy/dotenv) / clock (time) / log / clipboard
+    "memmap2", "fs_err", "async_fs", "tempfile", "glob",
+    "rand", "getrandom", "fastrand",
+    "portable_pty", "async_process", "duct",
+    "dotenvy", "dotenv",
+    "chrono", "time", "tracing", "log", "arboard",
 ];
 const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
 
@@ -752,8 +757,14 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         return None;
     }
     // Local IPC (Unix-domain sockets) is I/O but not *network* — keep it distinct so
-    // CANDOR_NO_AMBIENT and audits don't conflate it with internet access.
-    if path.starts_with("tokio::net::Unix") || path.starts_with("std::os::unix::net") {
+    // CANDOR_NO_AMBIENT and audits don't conflate it with internet access. async-std puts its
+    // Unix sockets under `os::unix::net` (mirroring std); async-net (smol's net layer) under
+    // `unix`.
+    if path.starts_with("tokio::net::Unix")
+        || path.starts_with("std::os::unix::net")
+        || path.starts_with("async_std::os::unix::net")
+        || path.starts_with("async_net::unix")
+    {
         return Some("Ipc");
     }
     // Raw sockets. Match the I/O *types* only — `std::net` also holds pure data types
@@ -768,10 +779,20 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // Legacy tokio 0.1 socket crates — `tokio_tcp`/`tokio_udp` are *entirely* networking
     // (no pure types to over-flag), so the whole crate is Net. (Found hardening on websocat,
     // which is still on tokio 0.1: its `tokio_tcp::TcpStream::connect` was classified
-    // network-free — a network tool confidently reporting 0 Net. NOTE: detection is keyed to
-    // specific socket crates; async-std/smol/mio nets are the same gap class, not yet
-    // calibrated for lack of a real repro.)
+    // network-free — a network tool confidently reporting 0 Net.)
     if matches!(crate_name, "tokio_tcp" | "tokio_udp") {
+        return Some("Net");
+    }
+    // The other async runtimes mirror tokio's module layout, and their `net` modules hold only
+    // socket I/O types (the pure `SocketAddr`/`IpAddr` are re-exports that resolve to `std::net`,
+    // so they're excluded by def-path). `mio` is the low-level non-blocking-socket layer under
+    // tokio/others; `async_net` is smol's net crate. Closes the async-std/smol/mio gap the
+    // tokio_tcp note flagged. (Calibrated by module structure — these crates ARE networking — not
+    // a live repro; the TCP/UDP types are defined in-crate so the def-path prefix is exact.)
+    if path.starts_with("async_std::net::")
+        || path.starts_with("mio::net::")
+        || crate_name == "async_net"
+    {
         return Some("Net");
     }
     // Database clients. Like the AWS/HTTP builders, only the execution verbs are I/O;
@@ -885,7 +906,38 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
-    if path.starts_with("std::fs::") || path.starts_with("tokio::fs::") || crate_name == "memmap2" {
+    // Filesystem. `tokio::fs`/`async_std::fs` are the async mirrors of `std::fs`; `async_fs` is
+    // smol's fs crate; `fs_err` is a drop-in `std::fs` wrapper (its whole surface is fs I/O).
+    if path.starts_with("std::fs::")
+        || path.starts_with("tokio::fs::")
+        || path.starts_with("async_std::fs::")
+        || crate_name == "async_fs"
+        || crate_name == "fs_err"
+        || crate_name == "memmap2"
+    {
+        return Some("Fs");
+    }
+    // tempfile: creating a temp file/dir touches the disk. Match the create/persist verbs (the
+    // `Builder` setters — prefix/suffix/rand_bytes — stay pure). `persist`/`keep` rename/retain
+    // the file on disk; `close` removes it.
+    if crate_name == "tempfile"
+        && (path.ends_with("::tempfile")
+            || path.ends_with("::tempfile_in")
+            || path.ends_with("::tempdir")
+            || path.ends_with("::tempdir_in")
+            || path.ends_with("NamedTempFile::new")
+            || path.ends_with("NamedTempFile::new_in")
+            || path.ends_with("TempDir::new")
+            || path.ends_with("TempDir::new_in")
+            || path.ends_with("::persist")
+            || path.ends_with("::persist_noclobber")
+            || path.ends_with("::keep"))
+    {
+        return Some("Fs");
+    }
+    // glob: walks the filesystem to expand a pattern (the returned iterator reads directories).
+    // `Pattern::matches` is pure string matching — match only the directory-walking entry points.
+    if crate_name == "glob" && (path.ends_with("::glob") || path.ends_with("::glob_with")) {
         return Some("Fs");
     }
     // Randomness / entropy. getrandom + fastrand are effectful end-to-end; `rand` also
@@ -902,16 +954,52 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         || path.starts_with("std::process::Child")
         || path.starts_with("tokio::process::Command")
         || path.starts_with("tokio::process::Child")
+        || path.starts_with("async_std::process::Command")
+        || path.starts_with("async_std::process::Child")
+        || crate_name == "async_process"
         || crate_name == "portable_pty"
+    {
+        return Some("Exec");
+    }
+    // duct: a subprocess-orchestration crate. `cmd()`/`cmd!` only *build* an Expression; the
+    // spawn/wait happens at `run`/`read`/`start`. Match the execution verbs, not the builder.
+    if crate_name == "duct"
+        && (path.ends_with("::run")
+            || path.ends_with("::read")
+            || path.ends_with("::start")
+            || path.ends_with("::read_chars"))
     {
         return Some("Exec");
     }
     if path.starts_with("std::env::") {
         return Some("Env");
     }
+    // dotenvy / dotenv: load environment variables (reading a `.env` file and mutating the process
+    // environment). Match the load/read entry points; `Error`/builder types stay pure.
+    if matches!(crate_name, "dotenvy" | "dotenv")
+        && (path.ends_with("::dotenv")
+            || path.ends_with("::dotenv_override")
+            || path.ends_with("::from_path")
+            || path.ends_with("::from_path_override")
+            || path.ends_with("::from_filename")
+            || path.ends_with("::from_filename_override")
+            || path.ends_with("::from_read")
+            || path.ends_with("::from_read_override")
+            || path.ends_with("::load")
+            || path.ends_with("::var")
+            || path.ends_with("::vars"))
+    {
+        return Some("Env");
+    }
     // Wall-clock reads. Match the `now` accessor precisely (ends_with), not any path
-    // containing the substring "now".
+    // containing the substring "now". The `time` crate (distinct from `std::time`/`chrono`)
+    // reads the clock via `now_utc`/`now_local` (and the deprecated `Instant::now`).
     if (crate_name == "chrono" || path.starts_with("std::time::")) && path.ends_with("::now") {
+        return Some("Clock");
+    }
+    if crate_name == "time"
+        && (path.ends_with("::now_utc") || path.ends_with("::now_local") || path.ends_with("::now"))
+    {
         return Some("Clock");
     }
     if crate_name == "tracing" {
@@ -1835,6 +1923,46 @@ mod tests {
     }
 
     #[test]
+    fn classify_async_runtimes_and_aux_crates() {
+        // async-std / smol(async-net/fs/process) / mio mirror std+tokio — same effects.
+        assert_eq!(classify("async_std", "async_std::net::TcpStream::connect"), Some("Net"));
+        assert_eq!(classify("mio", "mio::net::TcpListener::bind"), Some("Net"));
+        assert_eq!(classify("async_net", "async_net::TcpStream::connect"), Some("Net"));
+        assert_eq!(classify("async_net", "async_net::unix::UnixStream::connect"), Some("Ipc"));
+        assert_eq!(classify("async_std", "async_std::os::unix::net::UnixStream::connect"), Some("Ipc"));
+        assert_eq!(classify("async_std", "async_std::fs::read"), Some("Fs"));
+        assert_eq!(classify("async_fs", "async_fs::read"), Some("Fs"));
+        assert_eq!(classify("async_std", "async_std::process::Command::spawn"), Some("Exec"));
+        assert_eq!(classify("async_process", "async_process::Command::spawn"), Some("Exec"));
+        // SocketAddr/IpAddr re-exports resolve to std::net (not async_std::net) → not flagged.
+        assert_eq!(classify("std", "std::net::SocketAddr::new"), None);
+        // fs_err is a std::fs drop-in — wholesale Fs.
+        assert_eq!(classify("fs_err", "fs_err::read_to_string"), Some("Fs"));
+        assert_eq!(classify("fs_err", "fs_err::File::open"), Some("Fs"));
+        // tempfile: create/persist verbs touch disk; Builder setters stay pure.
+        assert_eq!(classify("tempfile", "tempfile::tempfile"), Some("Fs"));
+        assert_eq!(classify("tempfile", "tempfile::NamedTempFile::new"), Some("Fs"));
+        assert_eq!(classify("tempfile", "tempfile::NamedTempFile::persist"), Some("Fs"));
+        assert_eq!(classify("tempfile", "tempfile::Builder::prefix"), None);
+        // glob walks the filesystem; Pattern matching is pure.
+        assert_eq!(classify("glob", "glob::glob"), Some("Fs"));
+        assert_eq!(classify("glob", "glob::Pattern::matches"), None);
+        // duct: run/read/start execute; cmd() only builds.
+        assert_eq!(classify("duct", "duct::Expression::run"), Some("Exec"));
+        assert_eq!(classify("duct", "duct::Expression::read"), Some("Exec"));
+        assert_eq!(classify("duct", "duct::cmd"), None);
+        // dotenvy/dotenv load env (file read + process-env mutation).
+        assert_eq!(classify("dotenvy", "dotenvy::dotenv"), Some("Env"));
+        assert_eq!(classify("dotenvy", "dotenvy::from_filename"), Some("Env"));
+        assert_eq!(classify("dotenv", "dotenv::dotenv"), Some("Env"));
+        // the `time` crate's clock reads (distinct from std::time / chrono).
+        assert_eq!(classify("time", "time::OffsetDateTime::now_utc"), Some("Clock"));
+        assert_eq!(classify("time", "time::OffsetDateTime::now_local"), Some("Clock"));
+        assert_eq!(classify("time", "time::Instant::now"), Some("Clock"));
+        assert_eq!(classify("time", "time::Duration::seconds"), None);
+    }
+
+    #[test]
     fn db_crates_are_calibrated() {
         // The emitted calibrated set must cover every DB client the classifier knows,
         // or the receipt's coverage check would flag a recognized crate as a blind spot.
@@ -1863,6 +1991,10 @@ mod tests {
                 format!("{c}::Utc::now"),
                 format!("{c}::X::load"),
                 format!("{c}::__private_api::log"),
+                format!("{c}::tempfile"),    // tempfile
+                format!("{c}::glob"),        // glob
+                format!("{c}::X::run"),      // duct
+                format!("{c}::dotenv"),      // dotenvy / dotenv
                 format!("{c}::X::anything"),
             ];
             assert!(
