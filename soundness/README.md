@@ -29,20 +29,34 @@ those are. `check.py` asserts it. A reachable function reported pure — or omit
 
 `Unknown` is a PASS. This harness tests **soundness** (never silent-pure), not precision.
 
+## Phase 2 — dynamic oracle (ground truth from the kernel)
+
+The construction checker trusts the generator's labels. The **dynamic oracle** trusts nothing but
+reality: `oracle.sh` RUNS each generated program under `strace`, confirms the effect actually executed
+(its distinctive marker — a seed-specific path, `127.0.0.1`, an `echo` arg — appears in the trace,
+which filters out the runtime's own startup syscalls), and then asserts candor's static prediction for
+the program (`main`'s transitive `inferred`) contains that effect or `Unknown`. A program that
+*demonstrably* performs an effect candor predicts nowhere is a silent under-report — caught against the
+kernel's own record. (`Env` isn't syscall-observable — it reads process memory — so the oracle skips
+it; the construction checker still covers it.) `oracle_check.py` is the pure decision logic, unit-able
+without strace; `oracle.sh` is Linux-only and skips gracefully elsewhere.
+
 ## Run it
 
 ```sh
-bash soundness/run.sh            # fuzz 40 seeds (builds candor first)
+bash soundness/run.sh            # construction fuzzer: 40 seeds (builds candor first)
 bash soundness/run.sh 200        # more seeds = more coverage
 SEEDS="1 4 7" bash soundness/run.sh   # specific seeds (reproducible by seed)
+bash soundness/oracle.sh 40      # dynamic oracle (Linux + strace; no-op elsewhere)
 ```
 
-CI runs 60 fixed seeds on every push. It's verified to have teeth: reintroducing the historical
-`resolve_callee` `_ => None` hole makes every `recv_boxed` seed fail with `recv_boxed(pure/omitted)`.
+CI runs 60 construction seeds + 40 oracle seeds on every push. The construction checker is verified to
+have teeth: reintroducing the historical `resolve_callee` `_ => None` hole makes every `recv_boxed`
+seed fail with `recv_boxed(pure/omitted)`.
 
 ## Next (not yet built)
 
-- **Phase 2 — dynamic oracle:** run each generated program under a syscall tracer (strace/seccomp) and
-  assert candor's static prediction over-approximates the *observed* effects. That closes the loop on
-  *any* under-report, including forms the generator doesn't construct.
+- **Per-function attribution in the oracle:** instrument each fn to emit a marker at runtime, interleave
+  with the syscall trace, so the oracle catches a *specific* function under-reporting (today it's a
+  whole-program check on `main`).
 - More forms: cross-crate boundaries, macro-generated bodies, trait objects with arbitrary self types.

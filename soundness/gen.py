@@ -20,13 +20,19 @@ import os
 import random
 import sys
 
-# effect -> the std leaf call that performs it (candor classifies these as Fs/Net/Exec/Env).
-EFFECTS = {
-    "Fs":   'let _ = std::fs::read_to_string("/tmp/candor_fuzz_x");',
-    "Net":  'let _ = std::net::TcpStream::connect("candor.invalid:1");',
-    "Exec": 'let _ = std::process::Command::new("true").status();',
-    "Env":  'let _ = std::env::var("CANDOR_FUZZ");',
-}
+# effect -> (the std leaf call that performs it, a distinctive runtime MARKER greppable in a syscall
+# trace). The marker lets the dynamic oracle (phase 2) attribute the observed syscall to THIS effect
+# and filter out the runtime's own startup syscalls (every binary opens libc, etc.). A `None` marker
+# means the effect isn't syscall-observable (`Env` reads process memory — no syscall) so the oracle
+# skips it. The leaf calls are chosen to emit their syscall even on failure (missing file, refused
+# connection): `openat`, `connect(127.0.0.1)`, `execve(echo candor_fuzz_marker)`.
+def effects_for(seed):
+    return {
+        "Fs":   ('let _ = std::fs::read_to_string("/tmp/candor_fuzz_%d");' % seed, "/tmp/candor_fuzz_%d" % seed),
+        "Net":  ('let _ = std::net::TcpStream::connect("127.0.0.1:9");', "127.0.0.1"),
+        "Exec": ('let _ = std::process::Command::new("echo").arg("candor_fuzz_marker").status();', "candor_fuzz_marker"),
+        "Env":  ('let _ = std::env::var("CANDOR_FUZZ");', None),
+    }
 
 # Shared helpers, emitted once when any edge needs them. Keyed so we only emit each at most once.
 HELPERS = {
@@ -62,7 +68,11 @@ def main():
     out = sys.argv[2]
     rng = random.Random(seed)
 
-    effect = rng.choice(list(EFFECTS))
+    EFFECTS = effects_for(seed)
+    # The oracle restricts to syscall-observable effects via CANDOR_FUZZ_EFFECTS (e.g. "Fs Net Exec").
+    allowed = os.environ.get("CANDOR_FUZZ_EFFECTS", "").split() or list(EFFECTS)
+    effect = rng.choice([e for e in EFFECTS if e in allowed])
+    leaf, marker = EFFECTS[effect]
     n = rng.randint(3, 9)  # chain length
 
     fns = [f"f{i:02d}" for i in range(n)]
@@ -71,7 +81,7 @@ def main():
     expected = set(fns) | {"sink", "main"}
 
     # sink performs the effect directly.
-    bodies["sink"] = EFFECTS[effect]
+    bodies["sink"] = leaf
 
     forms_log = {}
     for i in range(n):
@@ -101,7 +111,11 @@ def main():
     with open(os.path.join(out, "src", "main.rs"), "w") as f:
         f.write(src)
     with open(os.path.join(out, "truth.json"), "w") as f:
-        json.dump({"seed": seed, "effect": effect, "expect": sorted(expected), "forms": forms_log}, f, indent=2)
+        json.dump(
+            {"seed": seed, "effect": effect, "marker": marker, "expect": sorted(expected), "forms": forms_log},
+            f,
+            indent=2,
+        )
 
 
 if __name__ == "__main__":

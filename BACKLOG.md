@@ -150,9 +150,14 @@ that's the narrow, modest-value axis. Diminishing returns.
       that thread a known effect through every call form known to under-report (closures, `dyn`
       dispatch, generic/boxed callbacks, the receiving side) and asserts every reachable function is
       `effect`-or-`Unknown`, never silent-pure. **Verified to have teeth:** reintroducing the historical
-      `resolve_callee` `_ => None` hole makes every `recv_boxed` seed fail. CI runs 60 seeds/push.
-      **Phase 2 (next):** a dynamic oracle — run each program under a syscall tracer and assert the
-      static prediction over-approximates *observed* effects (closes the loop on *any* under-report).
+      `resolve_callee` `_ => None` hole makes every `recv_boxed` seed fail. **Phase 2 shipped — a
+      dynamic oracle** (`soundness/oracle.sh`): RUNS each generated program under `strace`, confirms the
+      effect executed (its marker in the trace, filtering runtime startup syscalls), and asserts
+      candor's static prediction (`main`'s transitive `inferred`) over-approximates the kernel-observed
+      effect — ground truth that trusts nothing about the generator. CI runs 60 construction seeds + 40
+      oracle seeds/push (oracle is Linux-only; `oracle_check.py` decision logic unit-validated).
+      **Next:** per-function attribution in the oracle (instrument fns + interleave with the trace) and
+      more forms (cross-crate, macro bodies).
 - [x] **Database clients.** `sqlx`/`rusqlite`/`postgres`/`tokio_postgres`/`diesel`/`redis`/… now
       classified `Db` (execution verbs only, not query building; best-effort, tune via CONFIG).
 - [x] **`tokio::net` / `std::os::unix::net` Unix sockets** → `Ipc`, no longer conflated with `Net`.

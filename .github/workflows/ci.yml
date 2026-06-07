@@ -79,3 +79,12 @@ jobs:
       # the exact class of bug a hand review found one-at-a-time.
       - name: Soundness fuzzer
         run: bash soundness/run.sh 60
+
+      # Dynamic oracle (phase 2): RUN each generated program under strace and assert candor's static
+      # prediction over-approximates the effects the kernel actually observed — ground truth that
+      # trusts nothing about how the crate was generated. Catches a program that demonstrably performs
+      # an effect candor predicts nowhere.
+      - name: Install strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
+      - name: Soundness dynamic oracle
+        run: bash soundness/oracle.sh 40
