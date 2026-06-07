@@ -85,6 +85,12 @@ pub struct ReportEntry {
     /// when the function performs no `Fs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fs: Vec<String>,
+    /// Literal Net endpoints statically visible from this function (`host[:port]`, scheme/path
+    /// stripped) — the decidable subset of "who does it talk to". A non-breaking refinement of `Net`;
+    /// omitted when none are visible (a runtime-computed address, or no `Net` at all). Never a
+    /// completeness claim — host-by-runtime-value is undecidable, so absence ≠ "no network".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
     /// Effectful local functions this one calls — the effect-relevant call graph ("who calls X?").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,

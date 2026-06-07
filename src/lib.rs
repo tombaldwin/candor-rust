@@ -20,6 +20,7 @@
 // The built-in classifier (`classify`) knows a fixed set of crates; a project can add
 // its own crate/path → effect rules via a CANDOR_CONFIG file (see `parse_config`).
 
+extern crate rustc_ast;
 extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_middle;
@@ -95,23 +96,25 @@ const UNKNOWN: &str = "Unknown";
 const FS_UNKNOWN: &str = "?";
 
 /// Transitive fixpoint over the local call graph: `acc[f] = seed[f] ∪ ⋃ { acc[g] : g ∈ calls[f] }`.
-/// Used for both the effect set and the Fs read/write detail (which ride the same graph). Takes the
-/// pre-seeded map by value and grows it in place to convergence (the sets only grow, bounded by a
-/// finite alphabet, so it terminates).
-fn propagate(
-    mut acc: HashMap<LocalDefId, BTreeSet<&'static str>>,
+/// Used for the effect set, the Fs read/write detail, AND the literal Net host detail (all ride the
+/// same graph). Generic over the element so it serves both `&'static str` (effects/fs) and owned
+/// `String` (hosts). Takes the pre-seeded map by value and grows it to convergence (the sets only
+/// grow, bounded by a finite alphabet — for hosts, the finite set of literals in the crate — so it
+/// terminates).
+fn propagate<T: Ord + Clone>(
+    mut acc: HashMap<LocalDefId, BTreeSet<T>>,
     calls: &HashMap<LocalDefId, HashSet<LocalDefId>>,
-) -> HashMap<LocalDefId, BTreeSet<&'static str>> {
+) -> HashMap<LocalDefId, BTreeSet<T>> {
     let mut changed = true;
     while changed {
         changed = false;
         let callers: Vec<LocalDefId> = calls.keys().copied().collect();
         for f in callers {
-            let mut add: BTreeSet<&'static str> = BTreeSet::new();
+            let mut add: BTreeSet<T> = BTreeSet::new();
             if let Some(callees) = calls.get(&f) {
                 for g in callees {
                     if let Some(gk) = acc.get(g) {
-                        add.extend(gk.iter().copied());
+                        add.extend(gk.iter().cloned());
                     }
                 }
             }
@@ -137,6 +140,13 @@ pub struct Candor {
     /// the call graph like effects and surfaced as the report's optional `fs` detail — a NON-breaking
     /// refinement of `Fs` (the effect itself is unchanged, so no baseline regresses).
     fs_direct: HashMap<LocalDefId, BTreeSet<&'static str>>,
+    /// Literal Net endpoints performed directly: when a directly-classified `Net` call carries a
+    /// string-LITERAL address/URL (`TcpStream::connect("rates.internal:7070")`,
+    /// `reqwest::get("https://api.example.com/x")`), the host part. Propagated like `fs_direct` and
+    /// surfaced as the report's optional `hosts` detail — a non-breaking refinement of `Net`. Only the
+    /// *statically visible* (literal) subset; a runtime-computed address is simply absent (the host is
+    /// undecidable in general, so this is honest best-effort, never a completeness claim).
+    net_hosts_direct: HashMap<LocalDefId, BTreeSet<String>>,
     /// Local-crate functions each function calls, for transitive propagation.
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
     /// Project-supplied classifier rules: (effect, is_crate_prefix, prefix).
@@ -228,6 +238,7 @@ impl Candor {
         Self {
             direct: HashMap::new(),
             fs_direct: HashMap::new(),
+            net_hosts_direct: HashMap::new(),
             calls: HashMap::new(),
             extra,
             paranoid,
@@ -629,6 +640,53 @@ fn fs_kind(path: &str) -> &'static [&'static str] {
 /// mis-tag as `Fs(write)`), so we make no read/write claim for those. `&[]` for any non-Fs effect too.
 fn fs_detail_for(builtin: Option<&'static str>, path: &str) -> &'static [&'static str] {
     if builtin == Some("Fs") { fs_kind(path) } else { &[] }
+}
+
+/// The host part of a string literal that looks like a network endpoint — the statically-visible
+/// subset of "who does this Net call talk to". Strips the scheme and path, leaving `host[:port]`:
+/// `"https://api.example.com/v1"` → `api.example.com`, `"rates.internal:7070"` → `rates.internal:7070`.
+/// Returns `None` for a literal that doesn't look host-ish (no dot or colon, or has whitespace) so a
+/// non-address string argument (a header value, an HTTP verb) isn't mistaken for a host. Full
+/// host-by-runtime-value is undecidable — this only ever sees literals, and says so.
+fn net_host_literal(s: &str) -> Option<String> {
+    let s = s.trim();
+    // authority = after `://` (if a URL), up to the first `/` (drop any path)
+    let authority = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
+    let authority = authority.split('/').next().unwrap_or(authority);
+    // drop userinfo (`user:pass@host`) if present
+    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    if authority.is_empty() || authority.contains(char::is_whitespace) {
+        return None;
+    }
+    // must look like a host: a dotted name / IP, or a `host:port`
+    if authority.contains('.') || authority.contains(':') {
+        Some(authority.to_string())
+    } else {
+        None
+    }
+}
+
+/// Extract literal Net hosts from a call expr's arguments (not the receiver — that's the client/socket,
+/// not the address). Scans string-literal args through `net_host_literal`. Called only for a call
+/// already classified `Net`, so the literal we find is the endpoint, not an unrelated string.
+fn net_hosts_in_call(expr: &Expr<'_>) -> BTreeSet<String> {
+    use rustc_ast::LitKind;
+    let args: &[Expr<'_>] = match expr.kind {
+        ExprKind::Call(_, args) => args,
+        ExprKind::MethodCall(_, _, args, _) => args,
+        _ => return BTreeSet::new(),
+    };
+    let mut out = BTreeSet::new();
+    for a in args {
+        if let ExprKind::Lit(lit) = &a.kind {
+            if let LitKind::Str(sym, _) = lit.node {
+                if let Some(host) = net_host_literal(sym.as_str()) {
+                    out.insert(host);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Classify a resolved callee by the crate it belongs to and its full path.
@@ -1444,6 +1502,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             if !kinds.is_empty() {
                 self.fs_direct.entry(caller).or_default().extend(kinds.iter().copied());
             }
+            // Non-breaking Net refinement: a literal address/URL argument tells us the endpoint.
+            // Gated to built-in Net classification (a user `extra` rule's arg shape is unknown).
+            if builtin == Some("Net") {
+                let hosts = net_hosts_in_call(expr);
+                if !hosts.is_empty() {
+                    self.net_hosts_direct.entry(caller).or_default().extend(hosts);
+                }
+            }
             if self.explain.is_some() {
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                 self.sites.entry(caller).or_default().push(EffectSite { eff: effect, via: path.clone(), loc });
@@ -1510,6 +1576,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         }
         let fsacc = propagate(fs_seed, &self.calls);
+
+        // Literal Net host detail rides the SAME propagation, in its own set that never touches `eff`:
+        // hosts[f] = net_hosts_direct[f] ∪ ⋃ { hosts[g] : g ∈ calls[f] }. No cross-crate sentinel (unlike
+        // fs): an absent host already reads as "no literal endpoint visible here" — a runtime-computed
+        // address, or a dependency whose report carried none — which is the honest, never-over-claiming
+        // interpretation. So a fn with `Net` but empty `hosts` means "talks to the network, endpoint not
+        // statically known", exactly right.
+        let hostsacc = propagate(self.net_hosts_direct.clone(), &self.calls);
 
         // CANDOR_EXPLAIN=<query>: for each matching function, trace the call path to where each of
         // its effects originates (the leaf call + location). A dedicated query mode — print and
@@ -1651,6 +1725,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         Some(s) if !s.contains(FS_UNKNOWN) => owned_set(s),
                         _ => Vec::new(),
                     },
+                    // The literal Net endpoints statically visible from here (empty = none visible).
+                    hosts: hostsacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
                 });
                 continue;
             }
@@ -2141,6 +2217,21 @@ mod tests {
         // Unrelated crates are pure.
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
         assert_eq!(classify("std", "std::vec::Vec::push"), None);
+    }
+
+    #[test]
+    fn net_host_literal_extracts_endpoints() {
+        // URLs → bare host (scheme + path stripped), host:port kept, userinfo dropped.
+        assert_eq!(net_host_literal("https://api.example.com/v1/x"), Some("api.example.com".into()));
+        assert_eq!(net_host_literal("http://api.example.com:8443/x"), Some("api.example.com:8443".into()));
+        assert_eq!(net_host_literal("rates.internal:7070"), Some("rates.internal:7070".into()));
+        assert_eq!(net_host_literal("1.2.3.4:80"), Some("1.2.3.4:80".into()));
+        assert_eq!(net_host_literal("user:pass@db.internal:5432"), Some("db.internal:5432".into()));
+        // Non-host strings (an HTTP verb, a header value, a path) are NOT mistaken for hosts.
+        assert_eq!(net_host_literal("GET"), None);
+        assert_eq!(net_host_literal("application/json"), None);
+        assert_eq!(net_host_literal("hello world"), None);
+        assert_eq!(net_host_literal(""), None);
     }
 
     #[test]

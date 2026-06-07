@@ -289,6 +289,9 @@ struct ShowJson {
     /// Fs read/write detail, omitted when absent — see `ReportEntry::fs`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     fs: Vec<String>,
+    /// Literal Net endpoints, omitted when none visible — see `ReportEntry::hosts`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hosts: Vec<String>,
     unresolved: bool,
 }
 
@@ -311,6 +314,7 @@ fn cmd_show(args: &[String]) -> i32 {
                 inferred: sorted(&e.inferred),
                 direct: sorted(&e.direct),
                 fs: e.fs.clone(),
+                hosts: e.hosts.clone(),
                 unresolved: e.unresolved,
             })
             .collect();
@@ -323,15 +327,19 @@ fn cmd_show(args: &[String]) -> i32 {
     }
     let w = fns.iter().map(|e| e.func.chars().count()).max().unwrap_or(0);
     let any_fs = fns.iter().any(|e| !e.fs.is_empty());
+    let any_hosts = fns.iter().any(|e| !e.hosts.is_empty());
     for e in &fns {
         let direct: BTreeSet<&String> = e.direct.iter().collect();
         let parts: Vec<String> = sorted(&e.inferred)
             .into_iter()
             .map(|x| {
                 let star = if direct.contains(&x) { "*" } else { "" };
-                // Refine Fs with its read/write detail when known: `Fs*(write)`.
+                // Refine Fs with its read/write detail (`Fs*(write)`) and Net with the literal
+                // endpoint(s) candor could see (`Net*(api.example.com)`), when known.
                 if x == "Fs" && !e.fs.is_empty() {
                     format!("Fs{star}({})", e.fs.join(","))
+                } else if x == "Net" && !e.hosts.is_empty() {
+                    format!("Net{star}({})", e.hosts.join(","))
                 } else {
                     format!("{x}{star}")
                 }
@@ -341,7 +349,8 @@ fn cmd_show(args: &[String]) -> i32 {
         println!("  {:<w$}  {{ {} }}{}", e.func, parts.join(" "), unk, w = w);
     }
     let fs_note = if any_fs { ";  Fs(read/write) = the filesystem access seen" } else { "" };
-    println!("  (* = performed in the function's own body; unmarked = via a callee{fs_note})");
+    let host_note = if any_hosts { ";  Net(host) = a literal endpoint seen (runtime addresses aren't shown)" } else { "" };
+    println!("  (* = performed in the function's own body; unmarked = via a callee{fs_note}{host_note})");
     0
 }
 

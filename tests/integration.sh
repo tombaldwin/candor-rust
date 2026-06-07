@@ -252,6 +252,13 @@ fsj=$( cd "$Q"; "$ROOT/cargo-candor" show both --json 2>&1 )
 want   "show: Fs read detail on a direct reader"      "$fsr" "Fs*(read)"
 want   "show: Fs read+write propagates transitively"  "$fsb" "Fs(read,write)"
 want   "show --json: fs detail is machine-readable"   "$fsj" '"fs"'
+# Non-breaking Net host refinement (P2): a LITERAL connect address surfaces as Net(host), transitively.
+hlf=$( cd "$Q"; "$ROOT/cargo-candor" show leaf 2>&1 )
+hhd=$( cd "$Q"; "$ROOT/cargo-candor" show handler 2>&1 )
+hjson=$( cd "$Q"; "$ROOT/cargo-candor" show leaf --json 2>&1 )
+want   "show: literal Net endpoint on the source"    "$hlf" "Net*(127.0.0.1:1)"
+want   "show: Net host propagates to the caller"     "$hhd" "Net(127.0.0.1:1)"
+want   "show --json: hosts detail is machine-readable" "$hjson" '"hosts"'
 mapout=$( cd "$Q"; "$ROOT/cargo-candor" map 2>&1 )
 want   "map: module/effects overview rendered"        "$mapout" "candor map"
 want   "map: surfaces the Net effect"                 "$mapout" "Net"
