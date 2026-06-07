@@ -509,6 +509,32 @@ enum Callee {
 /// Classify a call site. We still resolve `dyn Trait` method calls to the trait method
 /// `DefId` (flagged `dynamic`) so CHA can enumerate impls; only genuinely opaque calls
 /// (fn pointers, closures through generic params) are `Unresolved`.
+/// Is a method-call receiver a trait object — i.e. is the dispatch dynamic (vtable, unresolvable)?
+/// `peel_refs()` alone only strips `&`/`&mut`, so it misses an **arbitrary self type**:
+/// `Arc<dyn Job>::run(self: Arc<Self>)` (common in actor / async-trait code). Walk through the
+/// std smart pointers (`Box`/`Rc`/`Arc`/`Pin`, which carry their pointee in the first type arg) so a
+/// `dyn` behind one is detected as dynamic — otherwise a non-local `dyn` call gets no honest `Unknown`.
+fn is_dyn_receiver(tcx: TyCtxt<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
+    use rustc_middle::ty::TyKind;
+    let mut ty = ty.peel_refs();
+    for _ in 0..8 {
+        // bounded against any pathological nesting
+        match ty.kind() {
+            TyKind::Dynamic(..) => return true,
+            TyKind::Adt(adt, args)
+                if matches!(tcx.item_name(adt.did()).as_str(), "Box" | "Rc" | "Arc" | "Pin") =>
+            {
+                match args.types().next() {
+                    Some(inner) => ty = inner.peel_refs(),
+                    None => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Callee> {
     use rustc_middle::ty::TyKind;
     // Defensive: `typeck_results()` panics (ICE) for an expr outside a typechecked
@@ -516,8 +542,7 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
     let typeck = cx.maybe_typeck_results()?;
     match expr.kind {
         ExprKind::MethodCall(_, receiver, _, _) => {
-            let recv_ty = typeck.expr_ty_adjusted(receiver).peel_refs();
-            let dynamic = matches!(recv_ty.kind(), TyKind::Dynamic(..));
+            let dynamic = is_dyn_receiver(cx.tcx, typeck.expr_ty_adjusted(receiver));
             match typeck.type_dependent_def_id(expr.hir_id) {
                 Some(did) => Some(Callee::Def { did, dynamic }),
                 None => Some(Callee::Unresolved),
@@ -1245,15 +1270,21 @@ fn is_pure_std_trait(crate_name: &str, trait_name: &str) -> bool {
 /// std traits whose dispatch genuinely *hides I/O*: the impl behind a generic `R: Read` / `W: Write`
 /// could be a file (`Fs`), a socket (`Net`), or a pure in-memory buffer — candor can't see which
 /// across the (non-local) trait, so a generic call over one is honestly `Unknown`, NOT assumed pure.
-/// Matched by full path so `std::io::Write` (effectful) is never confused with `core::fmt::Write`
-/// (pure formatting). Bounded to the std I/O traits — the case where "assumed pure" is a real
-/// *under*-report (the dangerous direction) without flooding the way marking *all* generic dispatch
-/// Unknown would (that stays behind `CANDOR_PARANOID`).
-fn is_effectful_std_trait(trait_path: &str) -> bool {
-    matches!(
-        trait_path,
-        "std::io::Read" | "std::io::Write" | "std::io::BufRead" | "std::io::Seek"
-    )
+/// `std::io::{Read,Write,BufRead,Seek}` — keyed on `(crate, item)` (cheap; no per-call path String).
+/// The defining crate disambiguates `std::io::Write` (effectful) from `core::fmt::Write` (pure
+/// formatting), which share the item name `Write` — so this never false-flags `fmt::Write`. Bounded to
+/// the std I/O traits — where "assumed pure" is a real *under*-report — without the flood that marking
+/// *all* generic dispatch Unknown would cause (that stays behind `CANDOR_PARANOID`).
+fn is_effectful_std_trait(crate_name: &str, item_name: &str) -> bool {
+    crate_name == "std" && matches!(item_name, "Read" | "Write" | "BufRead" | "Seek")
+}
+
+/// `core::fmt::Write` is pure (it formats into a buffer/`Formatter`, no I/O) but isn't in
+/// `is_pure_std_trait`'s name list — and it can't be added there, since that list is crate-agnostic
+/// across core/std/alloc and would then also mark the *effectful* `std::io::Write` pure (same item
+/// name). Keyed on the defining crate so only `core::fmt::Write` matches.
+fn is_pure_fmt_write(crate_name: &str, item_name: &str) -> bool {
+    crate_name == "core" && item_name == "Write"
 }
 
 /// Capabilities a function declares by taking the matching token as a parameter
@@ -1606,12 +1637,17 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // ...but NOT for conventionally-pure std traits (Display/Error/…), where the
         // overwhelmingly-pure dispatch would otherwise flood reports with false Unknowns.
         if let Some(td) = trait_did {
-            let pure = is_pure_std_trait(cx.tcx.crate_name(td.krate).as_str(), cx.tcx.item_name(td).as_str());
+            let tk = cx.tcx.crate_name(td.krate);
+            let tk = tk.as_str();
+            let ti = cx.tcx.item_name(td);
+            let ti = ti.as_str();
+            // `core::fmt::Write` is pure formatting — never `Unknown`, even via `&mut dyn fmt::Write`.
+            let pure = is_pure_std_trait(tk, ti) || is_pure_fmt_write(tk, ti);
             // Generic (non-`dyn`) dispatch is assumed pure by default (marking it all Unknown floods —
             // that's `CANDOR_PARANOID`). EXCEPT over a known-effectful std trait (`io::Read`/`Write`/…),
             // where "assumed pure" is a real under-report: the reader/writer behind the generic could be
             // a file or socket. So those are Unknown by default too — bounded, doesn't flood.
-            let effectful_dispatch = is_effectful_std_trait(&cx.tcx.def_path_str(td));
+            let effectful_dispatch = is_effectful_std_trait(tk, ti);
             if !cha_resolved && !pure && (dynamic || self.paranoid || effectful_dispatch) {
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
                 if self.explain.is_some() {
@@ -2035,23 +2071,38 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // putting I/O in a layer that's meant to be pure, which it can't see from a local edit.
             for rule in &self.policy {
                 if let Some(scope) = &rule.scope {
-                    if !name.contains(scope.as_str()) {
+                    if !scope_matches(&name, scope) {
                         continue;
                     }
                 }
+                // A `deny`d effect that's actually present is a definite violation; `Unknown` is an
+                // UNPROVABLE case — the function makes an unresolvable call that COULD perform the
+                // forbidden effect, so the boundary can't be certified. Both must flag (silently
+                // passing an unprovable boundary is the §4 trust contract's forbidden direction; under
+                // a policy-only run there's no AS-EFF-003 backstop). A `pure` rule already treats any
+                // effect — including `Unknown` — as a violation.
                 let bad: Vec<&str> = if rule.effects.is_empty() {
                     effs.iter().copied().collect() // `pure` rule: any effect is a violation
                 } else {
-                    effs.iter().copied().filter(|e| rule.effects.contains(e)).collect()
+                    effs.iter()
+                        .copied()
+                        .filter(|e| *e == UNKNOWN || rule.effects.contains(e))
+                        .collect()
                 };
                 if !bad.is_empty() {
                     let scope = rule.scope.as_deref().map(|s| format!(" (scope `{s}`)")).unwrap_or_default();
+                    let caveat = if bad.contains(&UNKNOWN) {
+                        " — `Unknown` is an unresolvable call that MAY perform a forbidden effect; \
+                         the boundary can't be certified"
+                    } else {
+                        ""
+                    };
                     span_lint(
                         cx,
                         CANDOR,
                         span,
                         format!(
-                            "[AS-EFF-006] `{name}` performs {{ {} }}, forbidden by policy{scope}: `{}`",
+                            "[AS-EFF-006] `{name}` performs {{ {} }}, forbidden by policy{scope}: `{}`{caveat}",
                             bad.join(", "),
                             rule.raw
                         ),
@@ -2131,6 +2182,14 @@ fn in_scope(var: Option<&str>, name: &str) -> bool {
         Some("1") | Some("") => true,
         Some(prefix) => name.starts_with(prefix),
     }
+}
+
+/// A CANDOR_POLICY rule's scope (`deny Net domain`) matches a function when any path SEGMENT *starts
+/// with* the scope — so `domain` matches the `domain` module (`app::domain::f`) and a `domain_logic`
+/// fn, but NOT `app::subdomain::f` (the segment `subdomain` doesn't start with `domain`). Bare
+/// `contains` over-fired on any path that merely contained the scope text mid-word (the substring bug).
+fn scope_matches(name: &str, scope: &str) -> bool {
+    name.split("::").any(|seg| seg.starts_with(scope))
 }
 
 #[test]
@@ -2412,17 +2471,30 @@ mod tests {
     }
 
     #[test]
+    fn scope_matches_by_segment_not_substring() {
+        assert!(scope_matches("app::domain::handle", "domain"));
+        assert!(scope_matches("domain::handle", "domain"));
+        assert!(scope_matches("app::domain", "domain"));
+        assert!(scope_matches("crate::domain_logic", "domain")); // segment-prefixed fn name
+        // the substring bug: `subdomain` (scope mid-word) must NOT match scope `domain`.
+        assert!(!scope_matches("app::subdomain::handle", "domain"));
+        assert!(!scope_matches("app::not_my_domain::f", "domain"));
+    }
+
+    #[test]
     fn effectful_std_traits_are_io_only() {
         // Generic dispatch over these hides real I/O → Unknown (not assumed pure).
-        assert!(is_effectful_std_trait("std::io::Write"));
-        assert!(is_effectful_std_trait("std::io::Read"));
-        assert!(is_effectful_std_trait("std::io::BufRead"));
-        assert!(is_effectful_std_trait("std::io::Seek"));
-        // core::fmt::Write is PURE formatting — must NOT be confused with std::io::Write.
-        assert!(!is_effectful_std_trait("core::fmt::Write"));
-        // Conventionally-pure traits stay pure.
-        assert!(!is_effectful_std_trait("std::iter::Iterator"));
-        assert!(!is_effectful_std_trait("serde::Serialize"));
+        assert!(is_effectful_std_trait("std", "Write"));
+        assert!(is_effectful_std_trait("std", "Read"));
+        assert!(is_effectful_std_trait("std", "BufRead"));
+        assert!(is_effectful_std_trait("std", "Seek"));
+        // core::fmt::Write is PURE formatting — same item name as std::io::Write, disambiguated by crate.
+        assert!(!is_effectful_std_trait("core", "Write"));
+        assert!(is_pure_fmt_write("core", "Write"));
+        assert!(!is_pure_fmt_write("std", "Write")); // std::io::Write is NOT pure
+        // Conventionally-pure traits stay pure (not effectful).
+        assert!(!is_effectful_std_trait("std", "Iterator"));
+        assert!(!is_effectful_std_trait("serde", "Serialize"));
     }
 
     #[test]
