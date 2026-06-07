@@ -31,8 +31,12 @@ fn main() {
         "callers" => cmd_callers(rest),
         "map" => cmd_map(rest),
         "diff" => cmd_diff(rest),
+        "receipt" => cmd_receipt(rest),
+        "gains" => cmd_gains(rest),
         other => {
-            eprintln!("candor-query: unknown command '{other}' (audit|show|where|callers|map|diff)");
+            eprintln!(
+                "candor-query: unknown command '{other}' (audit|show|where|callers|map|diff|receipt|gains)"
+            );
             2
         }
     };
@@ -656,6 +660,88 @@ fn rank(c: &Change, top_level: &BTreeSet<String>) -> u8 {
     } else {
         3
     }
+}
+
+// ── receipt ─────────────────────────────────────────────────────────────────────────────────────
+
+/// The Claude Code receipt's report-derived fields, emitted as shell-friendly `key<TAB>value` lines
+/// so `candor-run.sh` reads them without a JSON parser (it used inline Python heredocs). Fields:
+/// `fns`, `effects` (count-prefixed, in the receipt's display order), `unresolved`, `calibrated`
+/// (`<crates>|<prefixes>`), `encountered` (crates candor saw resolved calls into).
+fn cmd_receipt(args: &[String]) -> i32 {
+    let Some(pre) = args.first().map(String::as_str) else {
+        eprintln!("usage: candor-query receipt <prefix>");
+        return 2;
+    };
+    let base = prefix_base(pre);
+    let fns = load_entries(pre);
+    let mut tally: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut unresolved = 0usize;
+    for e in &fns {
+        for x in &e.inferred {
+            *tally.entry(x.as_str()).or_default() += 1;
+        }
+        if e.unresolved || e.inferred.iter().any(|x| x == "Unknown") {
+            unresolved += 1;
+        }
+    }
+    // The receipt's own display order (Db-first), preserved byte-for-byte from the Python it replaces.
+    const ORDER: [&str; 10] =
+        ["Db", "Net", "Fs", "Exec", "Env", "Clock", "Ipc", "Rand", "Clipboard", "Log"];
+    let effects = ORDER
+        .iter()
+        .filter(|k| tally.get(**k).copied().unwrap_or(0) > 0)
+        .map(|k| format!("{} {k}", tally[*k]))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let (calib_c, calib_p) = load_calibrated(pre, &base);
+    let mut encountered: BTreeSet<String> = BTreeSet::new();
+    for path in glob_encountered(pre) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&text) {
+                encountered.extend(arr);
+            }
+        }
+    }
+    let join = |s: &BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(" ");
+    println!("fns\t{}", fns.len());
+    println!("effects\t{effects}");
+    println!("unresolved\t{unresolved}");
+    println!("calibrated\t{}|{}", join(&calib_c), join(&calib_p));
+    println!("encountered\t{}", join(&encountered));
+    0
+}
+
+// ── gains (edit-time self-review) ───────────────────────────────────────────────────────────────
+
+/// Every `<fn>\t<effect>` a function INHERITED or introduced since the baseline (current `inferred`
+/// minus baseline `inferred`), sorted. `candor-run.sh`'s opt-in self-review dedups these against its
+/// `review-seen` file and formats the prompt — the seen-file state stays in bash so this stays a
+/// read-only query.
+fn cmd_gains(args: &[String]) -> i32 {
+    let (cur_pre, base_pre) = match args {
+        [a, b, ..] => (a.as_str(), b.as_str()),
+        _ => {
+            eprintln!("usage: candor-query gains <cur_prefix> <base_prefix>");
+            return 2;
+        }
+    };
+    let cur = load_fninfo(cur_pre);
+    let base = load_fninfo(base_pre);
+    let empty = BTreeSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (func, info) in &cur {
+        let b = base.get(func).map(|i| &i.inferred).unwrap_or(&empty);
+        for e in info.inferred.difference(b) {
+            out.push((func.clone(), e.clone()));
+        }
+    }
+    out.sort();
+    for (func, e) in out {
+        println!("{func}\t{e}");
+    }
+    0
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────────────────────────

@@ -51,6 +51,20 @@ find_lib() {
   return 1
 }
 
+# ---- locate the candor-query binary (the receipt's report aggregation; was inline Python) ----
+find_query() {
+  local c
+  for c in "${CANDOR_QUERY:-}" \
+           "${CANDOR_HOME:-}"/target/release/candor-query "${CANDOR_HOME:-}"/target/debug/candor-query \
+           "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-query \
+           "$DIR"/../candor/target/release/candor-query "$DIR"/../candor/target/debug/candor-query \
+           /tmp/candor/target/release/candor-query /tmp/candor/target/debug/candor-query; do
+    [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+QUERY="$(find_query 2>/dev/null || true)"
+
 # ---- version stamp + update/rebuild nudges (the clone is the single source of truth) ----
 LIBP="$(find_lib 2>/dev/null || true)"
 VER=""; NUDGE=""
@@ -92,20 +106,14 @@ report_exists || need_run=1
 # recompile — dylint emits the report ONLY on recompilation, so an already-built
 # project would otherwise produce nothing.
 touch_roots() {
-  if command -v cargo >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
-import sys, json, os
-try: m = json.load(sys.stdin)
-except Exception: sys.exit(0)
-for p in m.get("packages", []):
-    d = os.path.dirname(p["manifest_path"])
-    for f in ("src/lib.rs", "src/main.rs"):
-        fp = os.path.join(d, f)
-        if os.path.exists(fp): print(fp)
-' | while IFS= read -r f; do touch "$f"; done
-  else
-    for r in src/lib.rs src/main.rs; do [ -f "$DIR/$r" ] && touch "$DIR/$r"; done
-  fi
+  # Touch every workspace member's crate root: find each Cargo.toml (target/ excluded) and touch its
+  # src/lib.rs / src/main.rs. Plain bash — no `cargo metadata` / python3.
+  local mf d f
+  find "$DIR" -name Cargo.toml -not -path '*/target/*' 2>/dev/null | while IFS= read -r mf; do
+    d="$(dirname "$mf")"
+    for f in "$d/src/lib.rs" "$d/src/main.rs"; do [ -f "$f" ] && touch "$f"; done
+  done
+  for r in src/lib.rs src/main.rs; do [ -f "$DIR/$r" ] && touch "$DIR/$r"; done
 }
 run_lint() { CANDOR_JSON="$REPORT_PREFIX" cargo dylint --lib-path "$LIB" >/dev/null 2>"$STATE_DIR/last-error.log"; }
 
@@ -134,69 +142,35 @@ if [ "$need_run" = 1 ]; then
   fi
 fi
 
-# ---- aggregate the report (python3 preferred; degrade gracefully) ----
-read_summary() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$REPORT_PREFIX" <<'PY' 2>/dev/null
-import sys, glob, json
-pre = sys.argv[1]
-fns = 0; eff = {}; unres = 0
-for f in glob.glob(pre + '.*.*.json'):
-    try:
-        data = json.load(open(f))
-    except Exception:
-        continue
-    # v0.2 self-describing envelope {candor, functions} OR legacy v0.1 bare array.
-    if isinstance(data, dict) and isinstance(data.get('functions'), list):
-        entries = data['functions']
-    elif isinstance(data, list):
-        entries = data
-    else:                            # the calibrated.json sidecar, etc.
-        continue
-    for e in entries:
-        fns += 1
-        inf = e.get('inferred', []) or []
-        for x in inf:
-            eff[x] = eff.get(x, 0) + 1
-        if e.get('unresolved') or 'Unknown' in inf:
-            unres += 1
-order = ['Db', 'Net', 'Fs', 'Exec', 'Env', 'Clock', 'Ipc', 'Rand', 'Clipboard', 'Log']
-parts = [f"{eff[k]} {k}" for k in order if eff.get(k)]
-print(f"{fns}\t{', '.join(parts)}\t{unres}")
-PY
-  else
-    # crude fallback: count "fn" keys across report files
-    local n
-    n=$(grep -ho '"fn"' "$REPORT_PREFIX".*.*.json 2>/dev/null | wc -l | tr -d ' ')
-    printf '%s\t(install python3 for the effect breakdown)\t?\n' "$n"
-  fi
-}
-SUM="$(read_summary)"
-FNS="$(printf '%s' "$SUM" | cut -f1)"
-EFFS="$(printf '%s' "$SUM" | cut -f2)"
-UNRES="$(printf '%s' "$SUM" | cut -f3)"
-[ -z "$FNS" ] && FNS=0
-[ -z "$EFFS" ] && EFFS="no effects detected"
-
-# ---- coverage: dependencies that LOOK effectful but candor has no rule for ----
-# The calibrated set is read from what the ENGINE emitted beside the report
-# (<prefix>.calibrated.json) — the single source of truth. The hardcoded list is only
-# a fallback for when that sidecar isn't present (e.g. report not yet generated). The
-# SUSPECT pattern is a deliberately-curated heuristic — it nudges, it does not certify.
+# ---- aggregate the report (candor-query preferred; degrade gracefully without it) ----
+# One `candor-query receipt` yields the fn count, effect breakdown, unresolved count, the calibrated
+# set (the engine's <prefix>.calibrated.json sidecar — the single source of truth) and the encountered
+# crates — replacing several inline Python heredocs with the typed query binary. The hardcoded
+# CALIBRATED list is only a fallback for before a sidecar exists (report not yet generated).
 CALIBRATED="reqwest isahc ureq sqlx rusqlite postgres tokio_postgres diesel redis mongodb mysql mysql_async sea_orm deadpool_postgres memmap2 rand getrandom fastrand chrono tracing arboard portable_pty"
 CALIB_PREFIXES="aws_sdk_ aws_smithy cap_"
-if [ -f "$REPORT_PREFIX.calibrated.json" ] && command -v python3 >/dev/null 2>&1; then
-  line="$(python3 - "$REPORT_PREFIX.calibrated.json" <<'PY' 2>/dev/null
-import sys, json
-d = json.load(open(sys.argv[1]))
-print(" ".join(d.get("crates", [])) + "|" + " ".join(d.get("prefixes", [])))
-PY
-)"
-  if [ -n "$line" ]; then
-    CALIBRATED="${line%%|*}"
-    CALIB_PREFIXES="${line##*|}"
+FNS=0; EFFS="no effects detected"; UNRES="?"; ENCOUNTERED=""
+if [ -n "$QUERY" ]; then
+  RECEIPT="$("$QUERY" receipt "$REPORT_PREFIX" 2>/dev/null)"
+  if [ -n "$RECEIPT" ]; then
+    FNS="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="fns"{print $2; exit}')"
+    EFFS="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="effects"{print $2; exit}')"
+    UNRES="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="unresolved"{print $2; exit}')"
+    ENCOUNTERED="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="encountered"{print $2; exit}')"
+    calib="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="calibrated"{print $2; exit}')"
+    # Override the fallback only when the engine emitted a (non-empty) calibrated sidecar.
+    if [ -n "$calib" ] && [ "$calib" != "|" ]; then
+      CALIBRATED="${calib%%|*}"; CALIB_PREFIXES="${calib##*|}"
+    fi
   fi
+else
+  # No candor-query (build it via install.sh): crude fn count, no breakdown.
+  FNS=$(grep -ho '"fn"' "$REPORT_PREFIX".*.*.json 2>/dev/null | wc -l | tr -d ' ')
+  EFFS="(build candor-query for the effect breakdown)"
 fi
+[ -z "$FNS" ] && FNS=0
+[ -z "$EFFS" ] && EFFS="no effects detected"
+[ -z "$UNRES" ] && UNRES="?"
 # Coverage heuristic: crates that LOOK effectful but aren't calibrated. Single source of truth —
 # `candor-suspect` in the clone (also read by cargo-candor). Empty if not found → the nudge is skipped.
 _self="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
@@ -213,22 +187,10 @@ is_calibrated() {
   done
   return 1
 }
-# Prefer GROUND TRUTH: the external crates candor actually saw resolved calls into
-# (emitted per crate as `<prefix>.encountered-<crate>.json`). This reflects real usage
-# and catches deps declared in workspace MEMBERS — which a root-Cargo.toml scan misses
-# (e.g. git2 in gitui's asyncgit member). Fall back to the manifest when absent.
-deps=""
-if ls "$REPORT_PREFIX".encountered-*.json >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-  deps=$(python3 - "$REPORT_PREFIX" <<'PY' 2>/dev/null
-import sys, glob, json
-seen = set()
-for f in glob.glob(sys.argv[1] + '.encountered-*.json'):
-    try: seen |= set(json.load(open(f)))
-    except Exception: pass
-print(" ".join(sorted(seen)))
-PY
-)
-fi
+# Prefer GROUND TRUTH: crates candor actually saw resolved calls into (the `encountered` set from the
+# receipt above). Catches deps declared in workspace MEMBERS that a root-Cargo.toml scan misses (e.g.
+# git2 in gitui's asyncgit member). Fall back to the manifest when the encountered set is empty.
+deps="$ENCOUNTERED"
 if [ -z "$deps" ]; then
   deps=$(awk '
     /^\[(dependencies|build-dependencies)\]/{f=1;next}
@@ -271,39 +233,30 @@ fi
 # effect not surfaced before, emit a self-review PROMPT (exit 11) that the Stop hook feeds back to
 # the agent. Conservative: needs CANDOR_REVIEW, a good current report (ran_ok), a baseline, a
 # matching engine version (else the delta is reclassification noise, not the agent's edit), and
-# python3. `.candor/review-seen` makes each gained effect prompt at most once. Default OFF.
+# candor-query. `.candor/review-seen` makes each gained effect prompt at most once. Default OFF.
 REVIEW=""
 BASELINE_PREFIX="$STATE_DIR/baseline"
 if [ "${CANDOR_REVIEW:-0}" != 0 ] && [ "$ran_ok" = 1 ] \
-   && ls "$BASELINE_PREFIX".*.*.json >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+   && ls "$BASELINE_PREFIX".*.*.json >/dev/null 2>&1 && [ -n "$QUERY" ]; then
   bver=""; [ -f "$BASELINE_PREFIX.candor-version" ] && bver="$(cat "$BASELINE_PREFIX.candor-version" 2>/dev/null)"
   if [ -z "$bver" ] || [ -z "$VER" ] || [ "$bver" = "$VER" ]; then
-    REVIEW="$(python3 - "$REPORT_PREFIX" "$BASELINE_PREFIX" "$STATE_DIR/review-seen" <<'PY' 2>/dev/null
-import sys, glob, json
-cur_pre, base_pre, seen_path = sys.argv[1], sys.argv[2], sys.argv[3]
-def load(pre):
-    out = {}
-    for f in glob.glob(pre + '.*.*.json'):
-        try: d = json.load(open(f))
-        except Exception: continue
-        fns = d['functions'] if isinstance(d, dict) and isinstance(d.get('functions'), list) else d if isinstance(d, list) else []
-        for e in fns: out[e['fn']] = set(e.get('inferred', []))
-    return out
-cur, base = load(cur_pre), load(base_pre)
-gains = sorted({(fn, e) for fn, effs in cur.items() for e in (effs - base.get(fn, set()))})
-try: seen = set(open(seen_path).read().split('\n'))
-except Exception: seen = set()
-fresh = [(fn, e) for fn, e in gains if (fn + '\t' + e) not in seen]
-if not fresh: sys.exit(0)
-open(seen_path, 'w').write('\n'.join(fn + '\t' + e for fn, e in gains))   # each gain prompts once
-byfn = {}
-for fn, e in fresh: byfn.setdefault(fn, []).append(e)
-for fn in sorted(byfn):
-    es = sorted(byfn[fn])
-    flag = '  (Unknown — effect set no longer provably complete)' if 'Unknown' in es else ''
-    print('  + ' + fn + '  gained { ' + ' '.join(es) + ' }' + flag)
-PY
-)"
+    seen="$STATE_DIR/review-seen"; [ -f "$seen" ] || : > "$seen"
+    # candor-query emits every `<fn>\t<effect>` gained vs the baseline; bash owns the seen-file so the
+    # query stays read-only. fresh = gains not seen before; then record ALL gains (each prompts once).
+    allg="$("$QUERY" gains "$REPORT_PREFIX" "$BASELINE_PREFIX" 2>/dev/null)"
+    if [ -n "$allg" ]; then
+      fresh="$(printf '%s\n' "$allg" | grep -vxF -f "$seen" 2>/dev/null)"
+      printf '%s\n' "$allg" > "$seen"
+      [ -n "$fresh" ] && REVIEW="$(printf '%s\n' "$fresh" | awk -F'\t' '
+        $1 != p && p != "" { emit() }
+        { e = e " " $2; if ($2 == "Unknown") u = 1; p = $1 }
+        END { if (p != "") emit() }
+        function emit() {
+          printf "  + %s  gained { %s }%s\n", p, substr(e, 2),
+                 (u ? "  (Unknown — effect set no longer provably complete)" : "")
+          e = ""; u = 0
+        }')"
+    fi
   fi
 fi
 

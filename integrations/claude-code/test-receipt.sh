@@ -6,7 +6,12 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN="$HERE/candor-run.sh"
-command -v python3 >/dev/null || { echo "SKIP: python3 required"; exit 0; }
+# The receipt is powered by candor-query now (was inline Python). Build/locate it and point
+# candor-run.sh at it via CANDOR_QUERY. (stop-hook.sh still parses Claude's hook JSON with python3 —
+# the stop-hook subtests below skip if python3 is absent.)
+QUERY="$(ls "$HERE/../../target/release/candor-query" "$HERE/../../target/debug/candor-query" 2>/dev/null | head -1)"
+[ -n "$QUERY" ] || { echo "SKIP: candor-query not built (run: cargo build -p candor-query)"; exit 0; }
+export CANDOR_QUERY="$QUERY"
 
 pass=0; fail=0
 chk()  { if printf '%s' "$2" | grep -qE -- "$3"; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1 — want /$3/"; echo "       in: $2"; fail=$((fail+1)); fi; }
@@ -97,14 +102,19 @@ chk  "review: candor-run exits 11 on a newly-introduced effect"  "$codr" '^11$'
 chk  "review: the prompt names the gained Net"                   "$outr" 'gained \{ Net'
 outr2="$("$RUN" "$R" 2>/dev/null)"; codr2=$?
 nchk "review: the same effect is NOT re-surfaced (exit ≠ 11)"    "$codr2" '^11$'
-# stop-hook feeds the agent only when not already looping.
-rm -f "$R/.candor/review-seen"
-hb=$(printf '{"cwd":"%s","stop_hook_active":false}' "$R" | bash "$HERE/stop-hook.sh" 2>/dev/null)
-chk  "stop-hook: blocks + feeds the agent on a new effect"       "$hb" '"decision": ?"block"'
-chk  "stop-hook: routes the prompt via additionalContext"        "$hb" 'additionalContext'
-rm -f "$R/.candor/review-seen"
-hl=$(printf '{"cwd":"%s","stop_hook_active":true}' "$R" | bash "$HERE/stop-hook.sh" 2>/dev/null)
-nchk "stop-hook: does NOT block when already looping (loop guard)" "$hl" '"decision"'
+# stop-hook feeds the agent only when not already looping. (stop-hook.sh parses the hook JSON with
+# python3 — skip these two if it's unavailable.)
+if command -v python3 >/dev/null 2>&1; then
+  rm -f "$R/.candor/review-seen"
+  hb=$(printf '{"cwd":"%s","stop_hook_active":false}' "$R" | bash "$HERE/stop-hook.sh" 2>/dev/null)
+  chk  "stop-hook: blocks + feeds the agent on a new effect"       "$hb" '"decision": ?"block"'
+  chk  "stop-hook: routes the prompt via additionalContext"        "$hb" 'additionalContext'
+  rm -f "$R/.candor/review-seen"
+  hl=$(printf '{"cwd":"%s","stop_hook_active":true}' "$R" | bash "$HERE/stop-hook.sh" 2>/dev/null)
+  nchk "stop-hook: does NOT block when already looping (loop guard)" "$hl" '"decision"'
+else
+  echo "  skip stop-hook subtests (no python3)"
+fi
 rm -rf "$(dirname "$R")"
 
 echo
