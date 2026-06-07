@@ -79,7 +79,7 @@ to the clone (`$CANDOR_HOME/integrations/claude-code/…`, pinned in `.candor/co
 everything is one step in the clone:
 
 ```sh
-cargo candor update           # = git pull --ff-only + cargo build, in the clone
+cargo candor update           # = git pull --ff-only, then rebuild + restash via install.sh, in the clone
 ```
 
 That pulls the **engine, these scripts, and `AGENTS.md` at the same commit** — nothing in your

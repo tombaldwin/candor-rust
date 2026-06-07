@@ -88,5 +88,5 @@ grep -qxF '.candor/report.*.json' "$GI" 2>/dev/null || {
   { echo '.candor/report.*.json'; echo '.candor/state'; echo '.candor/last-error.log'; } >> "$GI"
 }
 
-echo "Done. Updates flow from the clone: 'cargo candor update' (or git pull + cargo build) there"
+echo "Done. Updates flow from the clone: 'cargo candor update' (or git pull + ./install.sh) there"
 echo "refreshes the engine, these scripts, and AGENTS.md at once. Try '/candor' in Claude Code."
