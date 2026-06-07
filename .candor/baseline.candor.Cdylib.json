@@ -1,12 +1,12 @@
 {
   "candor": {
-    "version": "6ace09e",
+    "version": "6152376",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:1410:5: 1410:54",
+      "loc": "src/lib.rs:1431:5: 1431:54",
       "inferred": [
         "Env",
         "Fs"
@@ -28,10 +28,11 @@
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:1648:5: 1648:59",
+      "loc": "src/lib.rs:1669:5: 1669:59",
       "inferred": [
         "Env",
-        "Fs"
+        "Fs",
+        "Log"
       ],
       "direct": [
         "Env",
@@ -40,7 +41,8 @@
       "declared": [],
       "undeclared": [
         "Env",
-        "Fs"
+        "Fs",
+        "Log"
       ],
       "overdeclared": [],
       "unresolved": false,
@@ -50,7 +52,8 @@
         "write"
       ],
       "calls": [
-        "load_baseline"
+        "load_baseline",
+        "span_lint"
       ]
     },
     {
@@ -135,6 +138,23 @@
       "calls": [
         "Candor::new"
       ]
+    },
+    {
+      "fn": "span_lint",
+      "loc": "src/lib.rs:64:1: 69:2",
+      "inferred": [
+        "Log"
+      ],
+      "direct": [
+        "Log"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Log"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "b17b9d811ad434e8c08bedff259f8586"
     }
   ]
 }
