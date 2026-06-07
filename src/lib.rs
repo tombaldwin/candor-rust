@@ -893,8 +893,15 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "rand" || crate_name == "getrandom" || crate_name == "fastrand" {
         return Some("Rand");
     }
+    // Subprocess spawning. `tokio::process` is the async mirror of `std::process` — it exists
+    // only to spawn/control subprocesses (`Command`/`Child`, no pure data types like std's
+    // `Stdio`/`ExitStatus`/`exit`), so spawning through it is Exec just the same. Without this an
+    // async app's `tokio::process::Command::new(..).spawn()` classified pure — a silent under-report
+    // of subprocess execution, the dangerous direction (mirrors the tokio::fs/tokio::net coverage).
     if path.starts_with("std::process::Command")
         || path.starts_with("std::process::Child")
+        || path.starts_with("tokio::process::Command")
+        || path.starts_with("tokio::process::Child")
         || crate_name == "portable_pty"
     {
         return Some("Exec");
@@ -1889,6 +1896,9 @@ mod tests {
         assert_eq!(classify("std", "std::process::Command::new"), Some("Exec"));
         assert_eq!(classify("std", "std::process::Child::wait"), Some("Exec"));
         assert_eq!(classify("std", "std::process::exit"), None);
+        // tokio::process is the async mirror — spawning through it is Exec too.
+        assert_eq!(classify("tokio", "tokio::process::Command::spawn"), Some("Exec"));
+        assert_eq!(classify("tokio", "tokio::process::Child::wait"), Some("Exec"));
         assert_eq!(classify("std", "std::env::var"), Some("Env"));
         assert_eq!(classify("chrono", "chrono::Utc::now"), Some("Clock"));
         assert_eq!(classify("std", "std::time::SystemTime::now"), Some("Clock"));

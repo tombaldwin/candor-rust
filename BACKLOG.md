@@ -146,6 +146,10 @@ that's the narrow, modest-value axis. Diminishing returns.
 - [x] **Database clients.** `sqlx`/`rusqlite`/`postgres`/`tokio_postgres`/`diesel`/`redis`/… now
       classified `Db` (execution verbs only, not query building; best-effort, tune via CONFIG).
 - [x] **`tokio::net` / `std::os::unix::net` Unix sockets** → `Ipc`, no longer conflated with `Net`.
+- [x] **`tokio::process` → `Exec`.** The async mirror of `std::process` (which was covered) — spawning
+      a subprocess via `tokio::process::Command`/`Child` was classified pure, a silent under-report of
+      subprocess execution (the dangerous direction). Closed to match the existing `tokio::fs`/
+      `tokio::net` coverage; `tokio::process` has no pure data types to over-flag. Unit-tested.
 - [x] **const/static initializers** now reported (a `static X = effectful()` performs its effect),
       with macro-generated items (e.g. tracing `__CALLSITE` statics) filtered out via
       `span.from_expansion()` — that filter was needed; without it the report flooded.
@@ -230,9 +234,13 @@ that's the narrow, modest-value axis. Diminishing returns.
       All readers accept the legacy v0.1 bare array during migration (candor-spec §2).
 - [x] **`cargo candor audit` at-a-glance profile** — effect tally, unresolvable-call list, coverage
       gaps, broadest-surface functions; `--all` keeps the full per-function lint.
-- [ ] **candor-java: adopt the v0.2 envelope + first tests/CI.** It still emits v0.1 bare arrays
-      (accepted by readers, but it should self-describe), and has *no* automated tests — its
-      `sample/`, `conf-sample/`, `spring-sample/`, `cha-sample/` dirs are ready-made fixtures.
+- [x] **candor-java: adopt the v0.2 envelope + first tests/CI — done.** It now emits the
+      `{ candor: {version, toolchain}, functions }` envelope (git hash baked in at build time via
+      `build-info.properties`, readers still accept v0.1 bare arrays), and ships a 26-check `test/
+      smoke.sh` behavioural suite (over real bytecode fixtures) gated in `.github/workflows/ci.yml`
+      (JDK 21). Reached near-parity with the Rust impl: cross-jar hash/inheritance + version-trust,
+      `calls`, the `show/where/callers/map/diff` query layer (`--json`), fs read/write detail,
+      lambdas/method-refs, and constructors.
 - [x] **Engine-level version-aware cross-crate trust** (candor-spec §2.1 SHOULD): `load_cross_reports`
       now reads each sibling report's `candor.version`; on a mismatch with the running engine it
       downgrades the inherited effects to `Unknown` (can't trust analysis by rules this engine may have
