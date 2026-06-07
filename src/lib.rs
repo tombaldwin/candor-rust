@@ -587,7 +587,7 @@ fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: Def
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-const CALIBRATED_CRATES: [&str; 44] = [
+const CALIBRATED_CRATES: [&str; 46] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
@@ -602,6 +602,8 @@ const CALIBRATED_CRATES: [&str; 44] = [
     "portable_pty", "async_process", "duct",
     "dotenvy", "dotenv",
     "chrono", "time", "tracing", "log", "arboard",
+    // compiler diagnostic emission (a dylint lint's output) — see the Log rules in classify
+    "rustc_lint", "rustc_errors",
 ];
 const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
 
@@ -1157,6 +1159,25 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // The `log` facade: its macros route through `log::__private_api`; the crate's types
     // (`Level`, `LevelFilter`) are pure, so match the logging entry, not the whole crate.
     if crate_name == "log" && path.contains("::__private_api") {
+        return Some("Log");
+    }
+    // Compiler diagnostic emission — the ONE genuinely effectful operation in the otherwise-pure
+    // rustc_* surface (a dylint lint's actual OUTPUT: it writes warnings/errors to the compiler's
+    // diagnostic sink). Classified `Log` (same family as `tracing`/`log` — program output). Match the
+    // emission verbs precisely; rustc_lint/rustc_errors are mostly pure types (Lint, LintId, the Diag
+    // BUILDERS), and only the terminal `emit`/`emit_span_lint` actually produces output.
+    if crate_name == "rustc_lint"
+        && (path.ends_with("::emit_span_lint")
+            || path.ends_with("::span_lint")
+            || path.ends_with("::span_lint_hir"))
+    {
+        return Some("Log");
+    }
+    if crate_name == "rustc_errors"
+        && (path.ends_with("::emit")
+            || path.ends_with("::emit_diagnostic")
+            || path.ends_with("::emit_now"))
+    {
         return Some("Log");
     }
     if crate_name == "arboard" {
@@ -2167,6 +2188,11 @@ mod tests {
         // `log` facade: macros route through `__private_api`; Level/LevelFilter are pure.
         assert_eq!(classify("log", "log::__private_api::log"), Some("Log"));
         assert_eq!(classify("log", "log::LevelFilter::Info"), None);
+        // Compiler diagnostic emission (a dylint lint's output) → Log; the Diag BUILDERS stay pure.
+        assert_eq!(classify("rustc_lint", "rustc_lint::context::LintContext::emit_span_lint"), Some("Log"));
+        assert_eq!(classify("rustc_errors", "rustc_errors::diagnostic::Diag::emit"), Some("Log"));
+        assert_eq!(classify("rustc_errors", "rustc_errors::diagnostic::Diag::primary_message"), None);
+        assert_eq!(classify("rustc_lint", "rustc_lint::Lint::default_level"), None);
     }
 
     #[test]
@@ -2305,6 +2331,8 @@ mod tests {
                 format!("{c}::X::run"),      // duct
                 format!("{c}::dotenv"),      // dotenvy / dotenv
                 format!("{c}::random"),      // rand (verb-gated)
+                format!("{c}::emit"),        // rustc_errors diagnostic emission
+                format!("{c}::X::emit_span_lint"), // rustc_lint diagnostic emission
                 format!("{c}::X::anything"),
             ];
             assert!(
