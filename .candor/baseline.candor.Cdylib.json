@@ -9,8 +9,7 @@
       "loc": "src/lib.rs:1253:5: 1253:54",
       "inferred": [
         "Env",
-        "Fs",
-        "Unknown"
+        "Fs"
       ],
       "direct": [
         "Env"
@@ -21,11 +20,8 @@
         "Fs"
       ],
       "overdeclared": [],
-      "unresolved": true,
+      "unresolved": false,
       "hash": "5dc78c79389006ef5bde9f6edc307bf5",
-      "fs": [
-        "read"
-      ],
       "calls": [
         "load_cross_reports"
       ]
@@ -104,8 +100,7 @@
       "fn": "load_cross_reports",
       "loc": "src/lib.rs:363:1: 368:44",
       "inferred": [
-        "Fs",
-        "Unknown"
+        "Fs"
       ],
       "direct": [
         "Fs"
@@ -115,11 +110,8 @@
         "Fs"
       ],
       "overdeclared": [],
-      "unresolved": true,
-      "hash": "5dc78c79389006ef514cd803e91c0d80",
-      "fs": [
-        "read"
-      ]
+      "unresolved": false,
+      "hash": "5dc78c79389006ef514cd803e91c0d80"
     }
   ]
 }
