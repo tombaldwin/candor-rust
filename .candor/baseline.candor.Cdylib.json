@@ -1,12 +1,12 @@
 {
   "candor": {
-    "version": "8856b5c",
+    "version": "35d4366",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:1360:5: 1360:54",
+      "loc": "src/lib.rs:1407:5: 1407:54",
       "inferred": [
         "Env",
         "Fs"
@@ -28,7 +28,7 @@
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:1566:5: 1566:59",
+      "loc": "src/lib.rs:1645:5: 1645:59",
       "inferred": [
         "Env",
         "Fs"
@@ -70,7 +70,7 @@
     },
     {
       "fn": "Candor::new",
-      "loc": "src/lib.rs:211:5: 211:25",
+      "loc": "src/lib.rs:225:5: 225:25",
       "inferred": [
         "Env",
         "Fs"
@@ -93,7 +93,7 @@
     },
     {
       "fn": "load_baseline",
-      "loc": "src/lib.rs:450:1: 450:74",
+      "loc": "src/lib.rs:467:1: 467:74",
       "inferred": [
         "Fs"
       ],
@@ -113,7 +113,7 @@
     },
     {
       "fn": "load_cross_reports",
-      "loc": "src/lib.rs:409:1: 414:44",
+      "loc": "src/lib.rs:426:1: 431:44",
       "inferred": [
         "Fs"
       ],
