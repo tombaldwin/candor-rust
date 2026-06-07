@@ -24,7 +24,8 @@ CACHE="$SELF/.cache/$(basename "$TASKS")"
 # The effect each task's canonical edit introduces.
 effect_of(){ case "$1" in
   minicache) echo Fs ;; geoip) echo Net ;; renderer) echo Exec ;;
-  *) echo "harness: unknown task '$1' (minicache|geoip|renderer)" >&2; exit 2 ;;
+  orderflow) echo Net ;;   # batch-3 LARGE fixture (point CANDOR_EVAL_TASKS at tasks-v3)
+  *) echo "harness: unknown task '$1' (minicache|geoip|renderer|orderflow)" >&2; exit 2 ;;
 esac; }
 
 # The NON-LOCAL functions each task's effect propagates to (the edited fn excluded) — the
@@ -33,6 +34,7 @@ nonlocal_of(){ case "$1" in
   minicache) echo "Service::lookup Service::batch api::get_one api::get_many report::build main" ;;
   geoip)     echo "GeoService::locate GeoService::batch api::lookup_one api::lookup_many report::summary main" ;;
   renderer)  echo "Page::render_token Page::render api::render_one api::render_many report::build_all main" ;;
+  orderflow) echo "Pricing::quote_bulk Cart::line_total Cart::subtotal Cart::total Discount::for_cart Checkout::review Checkout::place OrderService::quote_one OrderService::quote_many OrderService::checkout api::get_quote api::list_quotes api::post_checkout report::daily_revenue admin::recompute_prices main" ;;
 esac; }
 
 # Cache a pristine baseline per task (the fixture never changes), so per-trial setup just copies it.
