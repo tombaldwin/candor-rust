@@ -41,6 +41,8 @@ HELPERS = {
     "recv_boxed": "fn recv_boxed(cb: Box<dyn Fn()>) { cb(); }",          # receiving side: boxed dyn Fn param
     "recv_impl":  "fn recv_impl<G: Fn()>(cb: G) { cb(); }",              # receiving side: generic Fn param
     "mcall":      "macro_rules! mcall { ($f:expr) => { $f() }; }",        # the call lives in a macro expansion
+    # arbitrary self type: dispatch on `Arc<dyn Trait>` via `self: Arc<Self>` (the is_dyn_receiver case).
+    "arc_run":    "use std::sync::Arc;\ntrait ARun { fn arun(self: Arc<Self>); }\nstruct AW<F>(F);\nimpl<F: Fn()> ARun for AW<F> { fn arun(self: Arc<Self>) { (self.0)(); } }",
 }
 
 # Each "edge form" returns (body_calling_callee, helpers_needed, extra_expected_fns).
@@ -63,6 +65,9 @@ def edge_forms(callee):
         "recv_impl":  (f"recv_impl(|| {callee}());", ["recv_impl"], ["recv_impl"]),
         # the call lives inside a MACRO expansion (from_expansion span) — candor must still see it.
         "macro_call": (f"mcall!({callee});", ["mcall"], []),
+        # ARBITRARY SELF TYPE: dispatch through `Arc<dyn ARun>` whose method takes `self: Arc<Self>`
+        # (peel_refs doesn't see the `dyn` behind the `Arc` — the is_dyn_receiver path).
+        "arc_dyn":    (f"{{ let a: Arc<dyn ARun> = Arc::new(AW({callee})); a.arun(); }}", ["arc_run"], []),
     }
 
 
