@@ -1,0 +1,4 @@
+# Architecture-as-code. Enforced by candor (AS-EFF-006).
+# The pricing domain is the pure core: it must perform NO effects of any kind.
+# All I/O belongs in the service layer. See ARCHITECTURE.md.
+pure pricing
