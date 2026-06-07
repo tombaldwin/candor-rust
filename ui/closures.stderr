@@ -12,5 +12,17 @@ warning: `in_nested_closure` effects: { Exec }   (* = via callee)
 LL | fn in_nested_closure() {
    | ^^^^^^^^^^^^^^^^^^^^^^
 
-warning: 2 warnings emitted
+warning: `passes_fn_by_name` effects: { Fs* }   (* = via callee)
+  --> $DIR/closures.rs:23:1
+   |
+LL | fn passes_fn_by_name() {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `reads` effects: { Fs }   (* = via callee)
+  --> $DIR/closures.rs:15:1
+   |
+LL | fn reads(p: &str) -> usize {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 4 warnings emitted
 

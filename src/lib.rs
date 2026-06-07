@@ -1242,6 +1242,30 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        // A named function referenced as a VALUE — passed as a callback, stored in a struct, handed
+        // to a higher-order combinator (`iter().map(parse)`, `thread::spawn(work)`, `register(cb)`)
+        // — isn't *called* here, but its effects are reachable through whoever invokes it. Add a call
+        // edge so they propagate, exactly as an inline closure's body is charged to its enclosing fn.
+        // Without it, an effectful fn passed as a callback looked pure to its passer — a silent
+        // under-report. (This is the statically-resolvable half of the closure problem: the callee
+        // identity is a known `FnDef`. The still-deferred residue is the *receiving* side — an
+        // `impl Fn` parameter whose concrete target needs interprocedural flow, kept honest `Unknown`.
+        // The callee position of a normal call is also a `FnDef` path; re-adding that edge is a
+        // harmless no-op on the `calls` set.)
+        if let ExprKind::Path(..) = expr.kind {
+            if let Some(typeck) = cx.maybe_typeck_results() {
+                if let rustc_middle::ty::TyKind::FnDef(did, _) = typeck.expr_ty(expr).kind() {
+                    if let (Some(local), Some(caller)) =
+                        (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
+                    {
+                        if matches!(cx.tcx.def_kind(*did), DefKind::Fn | DefKind::AssocFn) {
+                            self.calls.entry(caller).or_default().insert(local);
+                        }
+                    }
+                }
+            }
+        }
+
         let Some(callee) = resolve_callee(cx, expr) else {
             return;
         };
