@@ -98,4 +98,84 @@ choice is real, not forced. This is the regime where candor *could* matter; if
 control still doesn't violate, candor's redundancy for small/visible tasks is
 robust.
 
-_Results below, populated after the pre-registered run._
+**Result — the first positive:**
+
+| arm        | n  | compiles | io_in_pricing (grep, primary) | candor_violation (transitive, secondary) |
+|------------|----|----------|-------------------------------|------------------------------------------|
+| control    | 10 | 10/10    | **5/10**                      | **8/10**                                 |
+| treatment  | 10 | 10/10    | **0/10**                      | **0/10**                                 |
+
+- **Primary effect (grep):** 5/10 − 0/10 = **0.50**. Fisher's exact two-sided
+  **p = 0.033**.
+- **Secondary effect (candor's own transitive verdict):** 8/10 − 0/10 = **0.80**.
+  Fisher's exact two-sided **p = 0.0007**.
+- Compile failures: 0. Both arms shipped working code; they differed in *where*
+  the I/O landed.
+
+**Interpretation: candor changed the code that shipped.** Removing the clean seam
+exposed the failure candor exists to catch. Without candor, **8 of 10** control
+submissions had `pricing` transitively performing network I/O — the architecture
+boundary `.candor/policy` declares — and 5 of those put the raw socket
+syntactically *inside* `pricing.rs`. With candor enforcing the same boundary,
+**0 of 10** did: every treatment agent relocated the fetch into `main` or a
+separate module that `pricing` never calls. Same task, same model, same files —
+the only difference was the candor gate, and it moved the shipped-code violation
+rate from 50–80% to 0%.
+
+**The grep-vs-candor gap is itself the headline.** In control trials 03, 06, and
+08 the agent factored the fetch into a new `rates.rs` module and had
+`pricing::quote` *call* it. A file-scoped check — grep, a human skimming
+`pricing.rs`, a file-level lint — sees no I/O syntax in `pricing.rs` and passes
+it (`io_in_pricing = 0`). candor's **transitive** effect inference correctly
+reports `pricing::Pricing::quote performs { Net }` and flags the violation
+(`candor_violation = 1`). That is exactly candor's reason to exist: the boundary
+breaks *across* a module edge a local read can't see. The conservative syntactic
+metric undercounts the violation by 3/10; candor catches all of them.
+
+The two control "clean" trials (04, 07) fetched in `main` and used `set_rate` —
+proving the clean path was genuinely available, not foreclosed. So the effect is
+candor changing behaviour, not the fixture forcing it.
+
+---
+
+## Synthesis — *when* candor changes what an agent ships
+
+Three pre-registered experiments, identical except for one variable each, map the
+boundary precisely:
+
+| experiment | boundary stated in… | clean seam pre-built? | control violation (candor) | treatment | effect |
+|------------|---------------------|-----------------------|----------------------------|-----------|--------|
+| 1 | prose `ARCHITECTURE.md` | yes (`service::current_rate`) | 0/10 | 0/10 | none (floor) |
+| 2 | only `.candor/policy` | yes (`service::current_rate`) | 0/10 | 0/10 | none (floor) |
+| 3 | only `.candor/policy` | **no** | **8/10** | 0/10 | **p < 0.001** |
+
+The honest, specific conclusion:
+
+- **When the code already affords a clean place for the new I/O** (a seam in the
+  right layer), a careful frontier model puts it there on its own — with or
+  without a prose rule. candor is **redundant** in that common, well-structured
+  case (Experiments 1–2).
+- **When the locally-simplest edit lands the effect in a layer that must stay
+  pure** — the agent doing a local change cannot see that the boundary is being
+  crossed transitively — candor **changes what ships**, taking the violation rate
+  from 80% to 0% (Experiment 3). This is the case file-level review misses, and
+  the one candor's transitive analysis is built for.
+
+This neither over- nor under-sells candor. It says: candor earns its keep exactly
+when a boundary is crossed by a *non-local* consequence of a *local* edit — and
+is redundant when the right structure is already in front of the model. That is a
+falsifiable, measured claim, and it points straight at Bet 3: the value compounds
+as the distance between the edit and the boundary grows past what fits in one
+context — which these single-crate fixtures only begin to probe.
+
+## Limitations (carried from the pre-registrations)
+
+- Single model (Sonnet 4.6), single crate, K=10/arm. The effect is demonstrated,
+  not yet characterised across models or at workspace scale.
+- The primary grep metric is syntactic and conservative (it undercounts the
+  transitive violations — see trials 03/06/08); candor's own verdict is the
+  transitive measure but is not instrument-independent of candor. Both point the
+  same way here.
+- No Linux/strace transitive *runtime* oracle (agents ran on macOS) — the
+  shipped-code boundary check is static. A runtime oracle remains a documented
+  follow-up, as does a larger multi-crate fixture for the Bet-3 scale claim.
