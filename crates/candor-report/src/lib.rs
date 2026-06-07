@@ -147,6 +147,15 @@ pub fn to_report_json(candor: &ReportMeta, functions: &[ReportEntry]) -> serde_j
 
 /// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy
 /// v0.1 bare array (no header).
+/// Does the report carry a v0.2 `{ candor: {...}, functions }` ENVELOPE (vs a legacy v0.1 bare array)?
+/// Used to tell "no version because it's pre-v0.2 (trust as documented)" from "has an envelope but the
+/// version is missing/garbage (a partial write — do NOT trust)".
+pub fn report_has_envelope(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .map(|v| v.get("candor").is_some())
+        .unwrap_or(false)
+}
+
 pub fn report_version(text: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Meta {

@@ -124,8 +124,14 @@ esac
 # baseline. Fall back to HEAD only if the tag can't be read (e.g. no `strings`).
 engine_ver() {
   local v
-  v="$(strings -a "$LIB" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-fA-F]+' | head -1 | cut -d= -f2)"
+  # The dylib's OWN stamp is authoritative — including the literal `unknown` build.rs writes when git
+  # was absent at build time. Match `[0-9a-zA-Z]+` (not just hex) so `candor-build-version=unknown` is
+  # returned as-is, rather than falling through to the source HEAD below — that fallback reintroduces
+  # the very "pulled-but-not-rebuilt source diverges from the running dylib" masking build.rs avoids.
+  v="$(strings -a "$LIB" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-zA-Z]+' | head -1 | cut -d= -f2)"
   [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+  # Only when there's NO readable tag at all (no `strings`, a fully stripped binary) do we last-resort
+  # to source HEAD — there's nothing better to report.
   git -C "$CANDOR_DIR" rev-parse --short HEAD 2>/dev/null
 }
 

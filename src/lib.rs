@@ -28,7 +28,8 @@ extern crate rustc_middle;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use candor_report::{
-    report_entries, report_files, report_version, to_report_json, ReportEntry, ReportMeta, EFFECTS,
+    report_entries, report_files, report_has_envelope, report_version, to_report_json, ReportEntry,
+    ReportMeta, EFFECTS,
 };
 
 use rustc_hir::def::DefKind;
@@ -447,9 +448,15 @@ fn load_cross_reports(
         let Ok(text) = std::fs::read_to_string(&rf.path) else { continue };
         // Version-aware trust (candor-spec §2.1): a sibling report produced by a DIFFERENT engine
         // was computed by rules this engine may have changed, so we must not silently trust its
-        // effects — downgrade everything inherited from it to `Unknown`. (A legacy v0.1 report has no
-        // version; we can't check it, so it's trusted as before.)
-        let stale = !trust_siblings && report_version(&text).is_some_and(|v| v != CANDOR_VERSION);
+        // effects — downgrade everything inherited from it to `Unknown`. A legacy v0.1 report (a bare
+        // array, no envelope) has no version and is trusted as documented. But an envelope WITHOUT a
+        // parseable version is a partial write / corruption — NOT a v0.1 report — so don't trust it
+        // either (treat as stale): a missing version where one is expected can't certify provenance.
+        let stale = !trust_siblings
+            && match report_version(&text) {
+                Some(v) => v != CANDOR_VERSION,
+                None => report_has_envelope(&text),
+            };
         let Some(arr) = report_entries(&text) else { continue };
         for e in arr {
             let Some(key) = parse_dph(&e.hash) else { continue };

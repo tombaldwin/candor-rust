@@ -81,7 +81,7 @@ VER=""; NUDGE=""
 # The TRUE version of the running dylib — the tag build.rs embedded — NOT CANDOR_HOME's git HEAD,
 # which races ahead of an un-rebuilt dylib. The receipt must not claim a version the loaded binary
 # isn't; this is the engine that actually produced the report below.
-[ -n "$LIBP" ] && VER="$(strings -a "$LIBP" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-fA-F]+' | head -1 | cut -d= -f2)"
+[ -n "$LIBP" ] && VER="$(strings -a "$LIBP" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-zA-Z]+' | head -1 | cut -d= -f2)"
 if [ -n "${CANDOR_HOME:-}" ] && git -C "$CANDOR_HOME" rev-parse --git-dir >/dev/null 2>&1; then
   head="$(git -C "$CANDOR_HOME" rev-parse --short HEAD 2>/dev/null)"
   [ -z "$VER" ] && VER="$head"   # fall back to clone HEAD only if the tag is unreadable
