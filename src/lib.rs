@@ -149,6 +149,20 @@ pub struct Candor {
     net_hosts_direct: HashMap<LocalDefId, BTreeSet<String>>,
     /// Local-crate functions each function calls, for transitive propagation.
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
+    /// Closure-flow, *receiving* side (bounded). Per FREE fn, the parameter indices it INVOKES as a
+    /// callback (`fn apply(f: impl Fn()) { f() }` → {0}). The honest `Unknown` for such a call is
+    /// DEFERRED, not inserted on the spot — resolved in `check_crate_post` from the concrete fns the
+    /// HOF is actually passed at its call sites (`callback_named`). If every call site passes a NAMED
+    /// fn, we edge the HOF to them and drop the redundant `Unknown`; if any passes an unresolvable
+    /// callback (a closure / fn-pointer), the `Unknown` stands (sound). Free fns only, so arg index
+    /// equals param index (a method's `self` would offset it).
+    param_calls: HashMap<LocalDefId, BTreeSet<usize>>,
+    /// Named fns passed at argument position `i` of a free fn `F`, over all call sites — the candidate
+    /// targets of `F`'s callback param `i`. (`DefId` isn't `Ord`, so a `HashSet`.)
+    callback_named: HashMap<(DefId, usize), HashSet<DefId>>,
+    /// `(F, i)` positions where an UNRESOLVABLE callback (closure / fn-ptr / generic value) was passed
+    /// — forces `F`'s param `i` back to `Unknown` (we can't enumerate its targets).
+    callback_unknown: HashSet<(DefId, usize)>,
     /// Project-supplied classifier rules: (effect, is_crate_prefix, prefix).
     extra: Vec<(&'static str, bool, String)>,
     /// CANDOR_PARANOID: also treat generic static trait dispatch as Unknown.
@@ -239,6 +253,9 @@ impl Candor {
             direct: HashMap::new(),
             fs_direct: HashMap::new(),
             net_hosts_direct: HashMap::new(),
+            param_calls: HashMap::new(),
+            callback_named: HashMap::new(),
+            callback_unknown: HashSet::new(),
             calls: HashMap::new(),
             extra,
             paranoid,
@@ -1296,6 +1313,36 @@ fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
 // stated limits. ---
 
 /// HirIds of the binding patterns in a function's parameters (the "untrusted input" surface).
+/// If `call` invokes one of `caller`'s own callback PARAMETERS (`fn apply(f: impl Fn()) { f() }`),
+/// the 0-based parameter index. FREE functions only — a method's `self` would offset arg vs param
+/// index, breaking the call-site matching. This is the receiving side of the closure problem: rather
+/// than a blanket `Unknown` for `f()`, we defer and resolve it from the fns passed at `apply`'s call
+/// sites (see `param_calls`).
+fn invoked_param_index(tcx: TyCtxt<'_>, call: &Expr<'_>, caller: LocalDefId) -> Option<usize> {
+    if !matches!(tcx.def_kind(caller.to_def_id()), DefKind::Fn) {
+        return None; // free fn only
+    }
+    let ExprKind::Call(callee, _) = call.kind else { return None };
+    let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = callee.kind else { return None };
+    let rustc_hir::def::Res::Local(local) = path.res else { return None };
+    let body = tcx.hir_body_owned_by(caller);
+    for (i, p) in body.params.iter().enumerate() {
+        let mut found = false;
+        p.pat.walk(|pat| {
+            if let rustc_hir::PatKind::Binding(_, hir_id, _, _) = pat.kind {
+                if hir_id == local {
+                    found = true;
+                }
+            }
+            true
+        });
+        if found {
+            return Some(i);
+        }
+    }
+    None
+}
+
 fn param_bindings(tcx: TyCtxt<'_>, def_id: LocalDefId) -> std::collections::HashSet<HirId> {
     let mut out = std::collections::HashSet::new();
     if !matches!(tcx.def_kind(def_id.to_def_id()), DefKind::Fn | DefKind::AssocFn) {
@@ -1419,6 +1466,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let (def_id, dynamic) = match callee {
             // A call we cannot see through at all (fn pointer / `impl Fn` callback).
             Callee::Unresolved => {
+                // Receiving side of the closure problem: if this is `caller` invoking its OWN callback
+                // parameter, DON'T stamp `Unknown` here — defer it. check_crate_post resolves it from
+                // the concrete fns passed at caller's call sites; the `Unknown` only stands if some
+                // caller passes an unresolvable callback. (Free fns only — see invoked_param_index.)
+                if let Some(i) = invoked_param_index(cx.tcx, expr, caller) {
+                    self.param_calls.entry(caller).or_default().insert(i);
+                    return;
+                }
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
                 if self.explain.is_some() {
                     let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
@@ -1442,6 +1497,30 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         };
         add_edge(self, def_id);
+
+        // Closure-flow bookkeeping: record what's passed at each arg position of a FREE fn call, so a
+        // callback parameter that fn invokes can later be resolved to these concrete targets. A named
+        // fn (`FnDef`) is a resolvable target; a closure / fn-pointer / generic value is unresolvable
+        // (forces that position back to `Unknown`). Free fns only → arg index == param index.
+        if let ExprKind::Call(_, args) = expr.kind {
+            if matches!(cx.tcx.def_kind(def_id), DefKind::Fn) {
+                if let Some(typeck) = cx.maybe_typeck_results() {
+                    for (i, arg) in args.iter().enumerate() {
+                        match typeck.expr_ty(arg).kind() {
+                            rustc_middle::ty::TyKind::FnDef(t, _) => {
+                                self.callback_named.entry((def_id, i)).or_default().insert(*t);
+                            }
+                            rustc_middle::ty::TyKind::Closure(..)
+                            | rustc_middle::ty::TyKind::FnPtr(..)
+                            | rustc_middle::ty::TyKind::Param(..) => {
+                                self.callback_unknown.insert((def_id, i));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
 
         // Resolve a trait-method call to the impls whose effects it could perform. PREFER
         // devirtualization: a call on a CONCRETE (non-`dyn`) receiver of a LOCAL trait
@@ -1564,6 +1643,35 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
     }
 
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
+        // Closure-flow resolution (receiving side): turn each deferred callback-parameter invocation
+        // into either edges (when every call site passed a NAMED fn) or the honest `Unknown` (when any
+        // passed an unresolvable callback, or the HOF is never called locally so we can't tell). Runs
+        // BEFORE the fixpoint so the new edges / Unknowns participate in propagation.
+        let param_calls = std::mem::take(&mut self.param_calls);
+        for (caller, indices) in &param_calls {
+            for &i in indices {
+                let key = (caller.to_def_id(), i);
+                let unknown = self.callback_unknown.contains(&key);
+                match self.callback_named.get(&key) {
+                    Some(targets) if !unknown && !targets.is_empty() => {
+                        // Fully resolvable: edge the HOF to each LOCAL named target — its effects now
+                        // propagate into the HOF, and the redundant `Unknown` we deferred never appears.
+                        let locals: Vec<LocalDefId> = targets
+                            .iter()
+                            .filter(|t| matches!(cx.tcx.def_kind(**t), DefKind::Fn | DefKind::AssocFn))
+                            .filter_map(|t| t.as_local())
+                            .collect();
+                        self.calls.entry(*caller).or_default().extend(locals);
+                    }
+                    _ => {
+                        // An unresolvable callback was passed somewhere, or the HOF is never called
+                        // locally (external callers pass who-knows-what) → the deferred `Unknown` stands.
+                        self.direct.entry(*caller).or_default().insert(UNKNOWN);
+                    }
+                }
+            }
+        }
+
         // effects[f] = direct[f] ∪ ⋃ { effects[g] : g ∈ calls[f] }, to a fixpoint.
         let mut eff: HashMap<LocalDefId, BTreeSet<&'static str>> = self.direct.clone();
         // Fold in effects inherited via cross-crate calls (kept out of `direct` so the report's

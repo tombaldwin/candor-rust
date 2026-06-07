@@ -259,6 +259,18 @@ hjson=$( cd "$Q"; "$ROOT/cargo-candor" show leaf --json 2>&1 )
 want   "show: literal Net endpoint on the source"    "$hlf" "Net*(127.0.0.1:1)"
 want   "show: Net host propagates to the caller"     "$hhd" "Net(127.0.0.1:1)"
 want   "show --json: hosts detail is machine-readable" "$hjson" '"hosts"'
+# Closure-flow receiving side (P2): a HOF only ever passed NAMED fns resolves (no redundant Unknown);
+# a HOF passed a closure keeps the honest Unknown.
+CF=$(mktemp -d)/cf; mkdir -p "$CF/src"
+printf '[package]\nname="cf"\nversion="0.1.0"\nedition="2021"\n' > "$CF/Cargo.toml"
+printf 'fn named_hof(f: impl Fn()){ f(); }\nfn net_cb(){ let _=std::net::TcpStream::connect("h:1"); }\nfn user(){ named_hof(net_cb); }\nfn closure_hof(f: impl Fn()){ f(); }\nfn c2(){ closure_hof(|| { let _=std::net::TcpStream::connect("z:1"); }); }\nfn main(){ user(); c2(); }\n' > "$CF/src/main.rs"
+( cd "$CF"; CANDOR_JSON="$PWD/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
+cfa=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" named_hof 0 2>&1 )
+cfc=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" closure_hof 0 2>&1 )
+want   "closure-flow: named-only HOF resolves to Net" "$cfa" "Net"
+absent "closure-flow: resolved HOF drops the Unknown" "$cfa" "Unknown"
+want   "closure-flow: closure-passed HOF stays Unknown" "$cfc" "Unknown"
+rm -rf "$(dirname "$CF")"
 mapout=$( cd "$Q"; "$ROOT/cargo-candor" map 2>&1 )
 want   "map: module/effects overview rendered"        "$mapout" "candor map"
 want   "map: surfaces the Net effect"                 "$mapout" "Net"

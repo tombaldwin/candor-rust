@@ -1,8 +1,30 @@
-# Design note — closure / `impl Fn` flow (the deferred "receiving side")
+# Design note — closure / `impl Fn` flow (the "receiving side")
 
-**Status:** scoped, not built. This note is the output of BACKLOG P2 "MIR closure-flow". It states the
-problem precisely, measures what's *already* handled, and recommends **not** building the full MIR pass
-yet — with the evidence for that call and the cheapest increment if the picture changes.
+**Status:** the **bounded HIR slice is shipped**; the full MIR pass remains deferred (with a measured
+trigger). This note states the problem, measures what's handled, and records the design. The shipped
+slice (below, "What shipped") resolves the common case — a free higher-order fn only ever passed
+*named* functions — without any MIR; the residue (closures, methods, mixed call sites) keeps the sound
+`Unknown`.
+
+## What shipped (the bounded slice)
+
+A free fn that invokes a callback parameter (`fn apply(f: impl Fn()) { f() }`) no longer stamps a
+blanket `Unknown` on the spot. Instead candor **defers** it and, in `check_crate_post`, resolves it
+from the concrete functions passed at the HOF's call sites:
+
+- every call site passes a **named fn** → edge the HOF to those targets; the redundant `Unknown` never
+  appears (and effects — even the `Net` host detail — propagate *through* the HOF). `apply(net_cb)`
+  makes `apply` report `{ Net }`.
+- any call site passes a **closure / fn-pointer / generic value**, OR the HOF is **never called
+  locally** (external callers pass who-knows-what) → the deferred `Unknown` stands. Sound.
+
+Bounded to **free functions** (arg index == param index; a method's `self` would offset it) and **named
+callbacks** (a passed closure's effects are already captured lexically on its definer, so nothing is
+lost — only the HOF's own attribution stays `Unknown`). This is "CHA for callbacks": the HOF's effect
+is the union over the named fns that flow to it, exactly as a trait call unions over its impls.
+
+The rest of this note is the original scoping that justified doing *only* this slice and deferring the
+general pass.
 
 ## The problem
 

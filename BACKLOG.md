@@ -188,8 +188,17 @@ These were dismissed as hard limits; they're really *expensive or risky*, not im
 genuine floor is undecidability (no sound+complete effect set in general) — and the answer there is
 sound over-approximation (`Unknown`), which candor already does.
 
-- [~] **MIR closure-flow — the `impl Fn`/fn-pointer *receiving* side: SCOPED → deferred with a
-      measured trigger** ([docs/closure-flow.md](docs/closure-flow.md)). A function that *invokes* a
+- [~] **Closure-flow — the `impl Fn` *receiving* side: BOUNDED SLICE SHIPPED; full MIR pass deferred**
+      ([docs/closure-flow.md](docs/closure-flow.md)). **Shipped (no MIR needed):** a free fn that
+      invokes a callback param defers its `Unknown`; `check_crate_post` resolves it from the concrete
+      fns passed at the HOF's call sites — all **named** → edge the HOF to them and drop the redundant
+      `Unknown` (effects + host detail propagate *through* the HOF, "CHA for callbacks"); any
+      **closure / fn-ptr**, or **never called locally** → the sound `Unknown` stands. Bounded to free
+      fns (arg index == param index) and named callbacks (a closure's effects are already captured
+      lexically on its definer). Integration-tested (resolved drops Unknown; closure-passed keeps it).
+      **Residue (deferred, the genuinely MIR-hard part):** methods (self offset), and removing the
+      `Unknown` for closure callbacks (needs un-folding the lexical charging / per-instance MIR). The
+      original scoping + the trigger for the full pass are in the note. A function that *invokes* a
       callback parameter keeps an honest `Unknown` (its target isn't pinned at HIR). Scoping it
       surfaced the decisive fact, **measured** not assumed: the effects are **not missed** — an inline
       closure's body is charged lexically, and a named fn passed as a value gets a call edge (the
