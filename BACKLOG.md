@@ -159,11 +159,17 @@ that's the narrow, modest-value axis. Diminishing returns.
       propagate through `dyn` and generic dispatch (sound over-approximation). On ebman this resolved
       the LLM feature and dropped `Unknown` 100→92, of which only 6 are now *purely* Unknown.
       `CANDOR_PARANOID` remains the opt-in for the residual *non-local* generic-dispatch gap.
-- [ ] **Escaping closures / `impl Fn` callbacks** — the deep residue (the 6 purely-`Unknown` fns on
-      ebman are mostly this). Needs effects to ride in *function types* (interprocedural closure
-      flow) — a MIR-level engine, not an HIR patch. Partly *not a hole*: an effectful closure's
-      effect is attributed to the function that lexically defines it, so it usually lands on the
-      caller anyway. **Deferred** (small, characterized residue).
+- [~] **Closures / callbacks — the statically-resolvable half is closed.** A **named** function
+      passed as a value (handed to a combinator — `iter().map(parse)` — `thread::spawn`, stored as a
+      callback, registered) now adds a `caller → fn` edge, so its effects propagate even though the
+      *call* happens inside unseen library code. Previously dropped (the `Path`-to-`FnDef` value
+      wasn't a Call), a silent under-report inconsistent with inline closures (already charged
+      lexically). Over-approximates in the safe direction; local targets only; ui-tested. **Residue
+      (deferred, the genuinely MIR-hard part):** the *receiving* side — an `impl Fn`/fn-pointer
+      **parameter** invoked inside a function — keeps an honest `Unknown`, because pinning its
+      concrete target needs interprocedural closure-flow (effects riding in function types), a
+      MIR-level pass. An effectful *inline* closure already lands on its lexical owner, so the live
+      hole is now just "effect arrives only through an unknown callback parameter." Small, characterized.
 - [~] **stdio / println.** Decided *against* for now: `std::io::stdout`/`println!` is pervasive and
       low-signal (especially for TUIs); would add noise without authority-level value. Reconsider if
       a use case appears. `stdin` (real input) could be added later as its own effect.
@@ -172,10 +178,12 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 - [x] **Entry-point handling in strict mode.** `main` no longer raises AS-EFF-001 (it's the root
       that legitimately holds the whole capability bundle).
-- [ ] **Reachability / dead-code elimination.** CHA made the call graph much more complete (it now
-      has edges through local trait-object/generic dispatch), but it's still missing closure/std-`dyn`
-      edges, so reachability would *still* mislabel some closure-reached code as dead. Closer to
-      soundness than before, but not there yet — **deferred** until the closure-flow gap closes.
+- [ ] **Reachability / dead-code elimination.** CHA + the new named-fn-callback edges made the call
+      graph much more complete (edges through local trait-object/generic dispatch, and through fns
+      passed by name to combinators/`spawn`/registries), but it's still missing the *unknown-callback*
+      `impl Fn`/std-`dyn` edges, so reachability would *still* mislabel some callback-reached code as
+      dead. Closer to soundness than before, but not there yet — **deferred** until that residual
+      closure-flow gap closes.
 - [~] **Finer `Fs` granularity (read vs write).** **Non-breaking refinement shipped:** each report
       entry now carries an optional `fs: ["read"|"write"]`, derived from the verb of every
       directly-classified `Fs` call (`fs::write`→write, `File::open`→read, `fs::copy`→both;
