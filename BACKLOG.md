@@ -2,6 +2,42 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+## Direction — where the value actually concentrates (a critical read)
+
+candor's measured, durable value is narrow and worth protecting from scope creep. Concentrate effort
+on the two places the evidence is strongest:
+
+1. **Agent edit-time blast-radius feedback** — the diff / `CANDOR_REVIEW` self-review / MCP / Claude
+   Code hook. The pre-registered eval's decisive result (full-propagation reporting **7% → 100%**) is
+   here. This is the north star (P0); everything that sharpens the *delta back to the agent* wins.
+2. **The effect-regression CI ratchet** (AS-EFF-005) and **policy boundaries** (AS-EFF-006). Low
+   adoption cost (no token threading), real felt need ("fail the PR that makes a parser open a
+   socket"), unambiguous. Under-emphasised relative to its deployability — promote it.
+
+**De-prioritise** the capability/conformance discipline (token threading, `&Fs`/cap-std migration):
+elegant, but realistically almost no team rewrites a real codebase for it, so it stays the deep,
+optional tier — not a place to spend polish.
+
+**Honest ceiling to keep in view (don't paper over):** correctness is bounded by a *curated
+classifier*, so the failure mode is a silent *under*-report ("network-free" when it isn't) — the most
+dangerous direction. The mitigation (`Unknown` / coverage-gaps / version-trust) is candor's best
+asset; keep widening classifier coverage and never trade the honesty for a cleaner-looking number.
+The efficiency claim ("cheaper than reading source") depreciates as models get cheaper/longer-context;
+lead with blast-radius, which is a reasoning gap, not a cost gap.
+
+### Non-goal: a "candor score" / cross-codebase grade (decided — do not build)
+
+A single aggregate score (incl. the tempting "resolvability = 1 − unresolved%") was considered and
+**rejected.** It conflates *analyzability* with *quality* (penalises DI / plugins / event-driven —
+good designs); drifts with the *engine* version, not just the code (this session's resolution work
+would move it for unchanged source); is gameable in the harmful direction (de-abstract a seam to
+satisfy the analyzer); and collapses the actionable signal (the *list* of unresolved fns) into an
+ambiguous digit that cross-codebase comparison would read as "team A writes worse code" when it means
+"team A uses Spring." The right primitives are a **ratchet** (don't regress) + a **map** (the
+descriptive profile) + opt-in **discipline counts → 0** (conformance/policy) — candor already has all
+three. Resolvability is legitimately useful **inward**, as a metric candor tracks about *its own*
+coverage release-over-release — not a developer-facing grade.
+
 ## P0 — agent coding: make candor change what an agent *does* (the north star)
 
 This is the point of the rest. The bet: candor's value to a coding agent is **verification, not

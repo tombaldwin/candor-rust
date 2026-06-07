@@ -6,10 +6,13 @@ and where it honestly *can't* tell. A capability/effect checker built as a
 [dylint](https://github.com/trailofbits/dylint) lint — the Rust reference implementation of
 [candor-spec](https://github.com/tombaldwin/candor-spec) (the same idea, specified across languages).
 
-**Built for AI coding agents.** An agent re-derives "what does this do?" every session and pays per
-token to read code. candor precompiles it into a report read in seconds — and marks calls it can't
-resolve `Unknown` rather than guessing. In a pilot ([EVAL.md](EVAL.md)) a JSON-only agent scoped a
-refactor ~3× cheaper and ~6.5× faster than one reading source.
+**Built for AI coding agents.** An agent edits one function without seeing the *non-local*
+consequence — a network call added deep in a helper now propagates to every caller. candor's diff
+surfaces exactly that. In a pre-registered eval ([EVAL.md](EVAL.md)) an agent handed candor's delta
+reported the **full propagation 100% of the time, vs 7% without it** — and scoped whole-codebase
+effect questions several times cheaper than reading source. The map is only as accurate as its
+classifier, so candor marks what it can't resolve `Unknown` rather than guessing, and stays honest
+about the gap (coverage warnings, version-stamped reports).
 
 ### Get an agent using it — one paste, from nothing
 
@@ -51,6 +54,15 @@ loops, and it's off by default. This is the difference between candor *informing
 (`candor_effects` / `candor_where` / `candor_callers` / `candor_diff`) as native MCP tools, so an
 agent calls candor reflexively — in one cheap call instead of grepping and reading source. Pair it
 with `cargo candor watch` so every call serves from a fresh report.
+
+**Where it earns its keep — and where it doesn't.** candor is sharpest at two things: handing an
+editing agent the *non-local* consequence of a change (above), and a low-friction **CI ratchet** —
+fail the PR that makes a parser open a socket ([CI guardrail](#ci-guardrail-lowest-friction-adoption)),
+no token-threading or rewrite required. It is deliberately *not* a few things: not a security boundary
+([SECURITY.md](SECURITY.md)); not a codebase-quality grade (effect counts are domain-dependent — there
+is no "candor score" to chase); and only as sound as a curated classifier, with two known holes
+(generic dispatch is assumed to honour its bound; macro-generated code is invisible) — `Unknown` and
+coverage warnings mark the rest. A sharp, narrow, trustworthy instrument, not a quality platform.
 
 *Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
 [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md)
