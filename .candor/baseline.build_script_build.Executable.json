@@ -1,6 +1,6 @@
 {
   "candor": {
-    "version": "136b082",
+    "version": "b417579",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
@@ -22,7 +22,7 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "62504ec9278343ea7be5e5be4e2b9ead",
+      "hash": "4d028517c494da3ef44378e5ff58d0b3",
       "fs": [
         "read"
       ]

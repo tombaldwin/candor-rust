@@ -1,12 +1,12 @@
 {
   "candor": {
-    "version": "136b082",
+    "version": "b417579",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:1101:5: 1101:54",
+      "loc": "src/lib.rs:1217:5: 1217:54",
       "inferred": [
         "Env",
         "Fs"
@@ -21,14 +21,14 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "91903e397ba112fba9a775e90f84673a",
+      "hash": "5dc78c79389006ef5bde9f6edc307bf5",
       "calls": [
         "load_cross_reports"
       ]
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:1270:5: 1270:59",
+      "loc": "src/lib.rs:1410:5: 1410:59",
       "inferred": [
         "Env",
         "Fs"
@@ -44,7 +44,7 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "91903e397ba112fb356b2e2928bda8f3",
+      "hash": "5dc78c79389006ef3cfd0330aad965cc",
       "fs": [
         "read",
         "write"
@@ -71,14 +71,14 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "91903e397ba112fbca21d9b1e659f12a",
+      "hash": "5dc78c79389006ef0574c4c6bc25fb75",
       "fs": [
         "read"
       ]
     },
     {
       "fn": "load_baseline",
-      "loc": "src/lib.rs:392:1: 392:74",
+      "loc": "src/lib.rs:404:1: 404:74",
       "inferred": [
         "Fs"
       ],
@@ -91,14 +91,14 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "91903e397ba112fb9a6603f15a89fcf1",
+      "hash": "5dc78c79389006eff22141b4c97bc68d",
       "fs": [
         "read"
       ]
     },
     {
       "fn": "load_cross_reports",
-      "loc": "src/lib.rs:356:1: 356:103",
+      "loc": "src/lib.rs:363:1: 368:44",
       "inferred": [
         "Fs"
       ],
@@ -111,7 +111,7 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "91903e397ba112fb1324e3ed22c7863b"
+      "hash": "5dc78c79389006ef514cd803e91c0d80"
     }
   ]
 }
