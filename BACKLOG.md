@@ -188,16 +188,22 @@ These were dismissed as hard limits; they're really *expensive or risky*, not im
 genuine floor is undecidability (no sound+complete effect set in general) — and the answer there is
 sound over-approximation (`Unknown`), which candor already does.
 
-- [ ] **MIR closure-flow — the `impl Fn`/fn-pointer *receiving* side** (the deferred half of the
-      closure problem; see P1). A function that *invokes* a callback parameter keeps an honest
-      `Unknown` because its concrete target isn't pinned at HIR. This is buildable *within* the dylint
-      architecture — we already call `Instance::try_resolve`, and rustc hands us MIR. It's a real
-      interprocedural pass (weeks: soundness/precision design + a test corpus), **not** a different
-      project. Cheaper partial win first: **monomorphization-aware resolution** — at a concrete call
-      site, `Instance::resolve` can sometimes pin the generic callback to its actual closure/fn, which
-      we can then edge to (we already do this for trait methods). Land the partial win, measure the
-      residual, then decide on the full dataflow pass. *(Pushback: "needs a MIR engine" framed a road
-      as a wall.)*
+- [~] **MIR closure-flow — the `impl Fn`/fn-pointer *receiving* side: SCOPED → deferred with a
+      measured trigger** ([docs/closure-flow.md](docs/closure-flow.md)). A function that *invokes* a
+      callback parameter keeps an honest `Unknown` (its target isn't pinned at HIR). Scoping it
+      surfaced the decisive fact, **measured** not assumed: the effects are **not missed** — an inline
+      closure's body is charged lexically, and a named fn passed as a value gets a call edge (the
+      passing side, already shipped), so `Net`/`Fs`/etc. land correctly on the definers and their
+      callers. The *only* residue is the `Unknown` the HOF (and its callers) carry — **sound**, and in
+      the common case **redundant** (the real effect is already captured elsewhere). So this isn't a
+      soundness fix; it's *reducing redundant `Unknown` noise* on higher-order call paths. Three
+      buildable routes exist (effect-polymorphic signatures / per-monomorphization MIR via the
+      `Instance::try_resolve` we already use / closure-flow dataflow), none a different project — but
+      the payoff is precision on a safe base. **Recommendation: don't build yet**; the trigger is a
+      measurement — if `audit`'s `Unknown` count on real callback-heavy crates traces mostly to HOF
+      invokers (not genuine dynamic dispatch / FFI), prototype the per-mono route behind a flag against
+      a 3-shape fixture corpus. *(Pushback was right that "needs a MIR engine" framed a road as a wall;
+      scoping then showed the road isn't worth walking until the noise is shown to matter.)*
 - [ ] **Macro-generated effects — narrow the blanket filter.** Today `span.from_expansion()` skips
       *all* macro output (added because compiler-internal/`tracing __CALLSITE` expansions flooded the
       report). But every expansion carries its macro's identity (`ExpnData`/`DefId`), so we can filter
