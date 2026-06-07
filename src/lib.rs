@@ -1294,6 +1294,40 @@ fn is_pure_fmt_write(crate_name: &str, item_name: &str) -> bool {
     crate_name == "core" && item_name == "Write"
 }
 
+/// Collect the capability tokens a type carries, peeling common WRAPPERS so a cap behind
+/// `Option<&Fs>` / `Vec<&Fs>` / `Box<&Fs>` / `Result<&Fs, _>` / a tuple is still recognised — not just
+/// a bare `&Fs`. Without this, wrapping a capability produced a FALSE AS-EFF-001 ("performs Fs but
+/// declares no capability") even though it was declared, just inside a container. Bounded depth.
+fn caps_in_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: rustc_middle::ty::Ty<'tcx>, depth: u32, out: &mut BTreeSet<&'static str>) {
+    use rustc_middle::ty::TyKind;
+    if depth > 4 {
+        return;
+    }
+    let ty = ty.peel_refs();
+    match ty.kind() {
+        TyKind::Adt(adt, args) => {
+            let name = tcx.item_name(adt.did());
+            let krate = tcx.crate_name(adt.did().krate);
+            if let Some(c) =
+                cap_from_name(name.as_str()).or_else(|| capstd_cap(krate.as_str(), name.as_str()))
+            {
+                out.insert(c);
+                return; // this node IS a capability — don't descend into its own generics
+            }
+            // a non-cap container (Option/Vec/Box/Result/…) — look inside its type arguments.
+            for arg in args.types() {
+                caps_in_ty(tcx, arg, depth + 1, out);
+            }
+        }
+        TyKind::Tuple(elems) => {
+            for e in elems.iter() {
+                caps_in_ty(tcx, e, depth + 1, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Capabilities a function declares by taking the matching token as a parameter
 /// (e.g. `&Fs` declares the right to perform `Fs`). This is the Rust expression of
 /// the spec's "capabilities as typed parameters" pillar.
@@ -1305,16 +1339,7 @@ fn declared_caps(tcx: TyCtxt<'_>, def_id: LocalDefId) -> BTreeSet<&'static str> 
     }
     let sig = tcx.fn_sig(did).instantiate_identity().skip_binder();
     for input in sig.inputs().iter() {
-        let ty = input.peel_refs();
-        if let Some(adt) = ty.ty_adt_def() {
-            let name = tcx.item_name(adt.did());
-            let krate = tcx.crate_name(adt.did().krate);
-            if let Some(c) = cap_from_name(name.as_str())
-                .or_else(|| capstd_cap(krate.as_str(), name.as_str()))
-            {
-                out.insert(c);
-            }
-        }
+        caps_in_ty(tcx, *input, 0, &mut out);
     }
     out
 }
