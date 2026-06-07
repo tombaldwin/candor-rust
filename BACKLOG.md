@@ -182,6 +182,41 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P2 — depth / precision
 
+### From the critical-assessment pushback — "fundamental" was too strong (these are buildable)
+
+These were dismissed as hard limits; they're really *expensive or risky*, not impossible. The one
+genuine floor is undecidability (no sound+complete effect set in general) — and the answer there is
+sound over-approximation (`Unknown`), which candor already does.
+
+- [ ] **MIR closure-flow — the `impl Fn`/fn-pointer *receiving* side** (the deferred half of the
+      closure problem; see P1). A function that *invokes* a callback parameter keeps an honest
+      `Unknown` because its concrete target isn't pinned at HIR. This is buildable *within* the dylint
+      architecture — we already call `Instance::try_resolve`, and rustc hands us MIR. It's a real
+      interprocedural pass (weeks: soundness/precision design + a test corpus), **not** a different
+      project. Cheaper partial win first: **monomorphization-aware resolution** — at a concrete call
+      site, `Instance::resolve` can sometimes pin the generic callback to its actual closure/fn, which
+      we can then edge to (we already do this for trait methods). Land the partial win, measure the
+      residual, then decide on the full dataflow pass. *(Pushback: "needs a MIR engine" framed a road
+      as a wall.)*
+- [ ] **Macro-generated effects — narrow the blanket filter.** Today `span.from_expansion()` skips
+      *all* macro output (added because compiler-internal/`tracing __CALLSITE` expansions flooded the
+      report). But every expansion carries its macro's identity (`ExpnData`/`DefId`), so we can filter
+      **only known-noise macros** and analyze the rest (so an `async_trait`/derive/decl-macro that
+      generates effectful code becomes visible). The blocker is *re-flooding risk*, which needs a
+      real-codebase corpus to tune — a **validation problem, not an impossibility**. *(Pushback: the
+      user-vs-noise distinction is decidable from the expansion's identity.)*
+- [ ] **Literal `Net` host detail.** Full host-by-runtime-value is genuinely undecidable, but the
+      **literal** subset is extractable — `TcpStream::connect("api.example.com:443")` has a known
+      endpoint. Surface it as a `hosts` detail (analogous to the `fs` read/write detail), omitted when
+      the address is a non-literal (the taint pass already distinguishes literal vs param args). Turns
+      "performs Net" into "performs Net to api.example.com" wherever it's statically visible.
+      *(Pushback: "not statically knowable" is only true for the runtime-value subset.)*
+- [ ] **Smarter generic-dispatch over foreign types** (currently assumed pure to avoid flooding;
+      `CANDOR_PARANOID` is the opt-in). A *choice*, not a limit: could assume-pure only when the
+      dispatch's trait bounds **exclude** all known-effectful traits, and mark `Unknown` otherwise —
+      tightening the default without the paranoid-mode noise. *(Pushback: a tunable tradeoff, not a
+      wall.)*
+
 - [x] **Entry-point handling in strict mode.** `main` no longer raises AS-EFF-001 (it's the root
       that legitimately holds the whole capability bundle).
 - [ ] **Reachability / dead-code elimination.** CHA + the new named-fn-callback edges made the call
@@ -229,12 +264,24 @@ that's the narrow, modest-value axis. Diminishing returns.
 ## P4 — packaging / maintenance
 
 - [x] Distribution: repo is **public** (git is the channel — `--git` / `git clone`, as AGENTS.md
-      uses). Note: crates.io is **not** an option for the lint itself — it depends on `clippy_utils`
-      via a git dependency, which crates.io forbids (true of every dylint lint). A separate, non-lint
-      helper crate *could* be published, but the lint can't.
+      uses).
+- [ ] **crates.io distribution — vendor `span_lint`, drop the only git dep (correcting the old "can't"
+      claim).** The prior note here said crates.io is impossible because `clippy_utils` is a git
+      dependency — but **candor uses clippy_utils for exactly one function** (`diagnostics::span_lint`,
+      a thin wrapper over `LateContext::span_lint`). Vendor those few lines, drop the git dep, and
+      candor *is* publishable — crates.io forbids git/path deps, **not** `rustc_private` / nightly
+      features (rustc_private crates do live on crates.io). The nightly-toolchain requirement remains
+      (users still need the matching nightly + rustc-dev), so it's not `cargo install` for everyone —
+      but "git dep ⇒ no crates.io" was the actual blocker and it's removable cheaply. *(From the
+      critical-assessment pushback: I'd called this fundamental; it isn't.)*
 - [x] Nightly fragility (`rustc_private` pins `nightly-2026-04-16`) — the bump process is now a
       step-by-step in `CONTRIBUTING.md` (pick matching nightly+clippy_utils rev, fix rustc_private
       breakage, re-bless ui, re-baseline the self-guard).
+- [ ] **Automate the nightly bump.** The pin can't be removed while we're a dylint lint, but the
+      *migration* can be a bot: a scheduled workflow that tries the next nightly, runs
+      build/test/bless/re-baseline, and opens a PR if green (or reports the breakage). Turns the
+      manual CONTRIBUTING chore into a notification. *(Pushback item: "expensive maintenance", not a
+      hard limit.)*
 - [x] Test coverage — unit (pure logic) + `ui_test` fixtures with blessed `.stderr` (copied from the
       framework-saved file, since compiletest has no bless) + scripted `tests/integration.sh`
       (AS-EFF modes, cross-crate, version stamping, audit) + `test-receipt.sh` (the bash receipt).
