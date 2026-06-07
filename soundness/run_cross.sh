@@ -29,6 +29,11 @@ pass=0; fail=0; failed=""
 for s in $SEEDS; do
   d="$WORK/s$s"
   python3 "$ROOT/soundness/gen_cross.py" "$s" "$d" || { echo "  seed $s: GEN ERROR"; fail=$((fail+1)); continue; }
+  # Compile FIRST: a generator bug that emits non-compiling code yields a partial/empty report that
+  # would masquerade as a soundness failure. A non-compiling crate is a harness bug to fix, not candor's.
+  if ! ( cd "$d" && cargo build -q >/dev/null 2>&1 ); then
+    echo "  seed $s: GENERATOR BUG — crate does not compile"; fail=$((fail+1)); continue
+  fi
   ( cd "$d" && CANDOR_JSON="$d/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
   if ! ls "$d"/r.xc.*.json >/dev/null 2>&1; then
     echo "  seed $s: NO REPORT (build failed under dylint?)"; fail=$((fail+1)); continue

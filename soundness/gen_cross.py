@@ -69,12 +69,12 @@ def main():
     ]
     if use_arc:
         # a lib-defined trait object with an arbitrary self type, performing the effect in its impl.
+        # Fully-qualified `std::sync::Arc` (no `use`) so it never clashes with the arc_run helper's import.
         lib += [
-            "use std::sync::Arc;",
-            "pub trait LibJob { fn run(self: Arc<Self>); }",
+            "pub trait LibJob { fn run(self: std::sync::Arc<Self>); }",
             "pub struct LibImpl;",
-            "impl LibJob for LibImpl { fn run(self: Arc<Self>) { dep_sink(); } }",
-            "pub fn make_job() -> Arc<dyn LibJob> { Arc::new(LibImpl) }",
+            "impl LibJob for LibImpl { fn run(self: std::sync::Arc<Self>) { dep_sink(); } }",
+            "pub fn make_job() -> std::sync::Arc<dyn LibJob> { std::sync::Arc::new(LibImpl) }",
         ]
         expected.add("run")  # the lib impl's `run` reaches the effect via dep_sink
     lib.append("")
@@ -82,8 +82,7 @@ def main():
     # ---- main.rs: the bin chaining across the boundary ----
     bin_ = ["// GENERATED. seed=%d effect=%s (cross-crate)" % (seed, effect), ""]
     if use_arc:
-        bin_.append("use std::sync::Arc;")
-        bin_.append("fn recv_arc(j: Arc<dyn xc::LibJob>) { j.run(); }")
+        bin_.append("fn recv_arc(j: std::sync::Arc<dyn xc::LibJob>) { j.run(); }")
     for h in HELPERS:
         if h in needed:
             bin_.append(HELPERS[h])

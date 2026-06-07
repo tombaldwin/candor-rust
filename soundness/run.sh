@@ -31,6 +31,10 @@ pass=0; fail=0; failed_seeds=""
 for s in $SEEDS; do
   d="$WORK/s$s"
   python3 "$ROOT/soundness/gen.py" "$s" "$d" || { echo "  seed $s: GEN ERROR"; fail=$((fail+1)); continue; }
+  # Compile first: a non-compiling crate is a generator bug (no report ⇒ false "all pure"), not candor's.
+  if ! ( cd "$d" && cargo build -q >/dev/null 2>&1 ); then
+    echo "  seed $s: GENERATOR BUG — crate does not compile"; fail=$((fail+1)); continue
+  fi
   ( cd "$d" && CANDOR_JSON="$d/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
   if ! ls "$d"/r.candor_fuzz.*.json >/dev/null 2>&1; then
     echo "  seed $s: NO REPORT (build failed under dylint?)"; fail=$((fail+1)); continue

@@ -42,7 +42,8 @@ HELPERS = {
     "recv_impl":  "fn recv_impl<G: Fn()>(cb: G) { cb(); }",              # receiving side: generic Fn param
     "mcall":      "macro_rules! mcall { ($f:expr) => { $f() }; }",        # the call lives in a macro expansion
     # arbitrary self type: dispatch on `Arc<dyn Trait>` via `self: Arc<Self>` (the is_dyn_receiver case).
-    "arc_run":    "use std::sync::Arc;\ntrait ARun { fn arun(self: Arc<Self>); }\nstruct AW<F>(F);\nimpl<F: Fn()> ARun for AW<F> { fn arun(self: Arc<Self>) { (self.0)(); } }",
+    # Fully-qualified `std::sync::Arc` (no `use`) so it never clashes with another helper/crate import.
+    "arc_run":    "trait ARun { fn arun(self: std::sync::Arc<Self>); }\nstruct AW<F>(F);\nimpl<F: Fn()> ARun for AW<F> { fn arun(self: std::sync::Arc<Self>) { (self.0)(); } }",
 }
 
 # Each "edge form" returns (body_calling_callee, helpers_needed, extra_expected_fns).
@@ -67,7 +68,7 @@ def edge_forms(callee):
         "macro_call": (f"mcall!({callee});", ["mcall"], []),
         # ARBITRARY SELF TYPE: dispatch through `Arc<dyn ARun>` whose method takes `self: Arc<Self>`
         # (peel_refs doesn't see the `dyn` behind the `Arc` — the is_dyn_receiver path).
-        "arc_dyn":    (f"{{ let a: Arc<dyn ARun> = Arc::new(AW({callee})); a.arun(); }}", ["arc_run"], []),
+        "arc_dyn":    (f"{{ let a: std::sync::Arc<dyn ARun> = std::sync::Arc::new(AW({callee})); a.arun(); }}", ["arc_run"], []),
     }
 
 
