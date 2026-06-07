@@ -52,16 +52,19 @@ find_lib() {
 }
 
 # ---- locate the candor-query binary (the receipt's report aggregation; was inline Python) ----
+# An explicit CANDOR_QUERY wins; otherwise pick the NEWEST by mtime among the candidates (so a fresh
+# build beats a stale one — matching cargo-candor's find_query/find_lib, not first-existing).
 find_query() {
-  local c
-  for c in "${CANDOR_QUERY:-}" \
-           "${CANDOR_HOME:-}"/target/release/candor-query "${CANDOR_HOME:-}"/target/debug/candor-query \
+  [ -n "${CANDOR_QUERY:-}" ] && [ -x "${CANDOR_QUERY}" ] && { printf '%s\n' "$CANDOR_QUERY"; return 0; }
+  local newest="" c
+  for c in "${CANDOR_HOME:-}"/target/release/candor-query "${CANDOR_HOME:-}"/target/debug/candor-query \
            "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-query \
            "$DIR"/../candor/target/release/candor-query "$DIR"/../candor/target/debug/candor-query \
            /tmp/candor/target/release/candor-query /tmp/candor/target/debug/candor-query; do
-    [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return 0; }
+    [ -x "$c" ] || continue
+    if [ -z "$newest" ] || [ "$c" -nt "$newest" ]; then newest="$c"; fi
   done
-  return 1
+  [ -n "$newest" ] && printf '%s\n' "$newest"
 }
 QUERY="$(find_query 2>/dev/null || true)"
 
@@ -106,10 +109,15 @@ report_exists || need_run=1
 # recompile — dylint emits the report ONLY on recompilation, so an already-built
 # project would otherwise produce nothing.
 touch_roots() {
-  # Touch every workspace member's crate root: find each Cargo.toml (target/ excluded) and touch its
-  # src/lib.rs / src/main.rs. Plain bash — no `cargo metadata` / python3.
-  local mf d f
-  find "$DIR" -name Cargo.toml -not -path '*/target/*' 2>/dev/null | while IFS= read -r mf; do
+  # Touch every workspace member's crate root so dylint recompiles. Prefer `cargo metadata` — it lists
+  # ALL members, including OUT-OF-TREE ones (`members = ["../sibling"]`) a `$DIR` tree scan would miss;
+  # parse manifest_path with grep/sed (no python3). Fall back to a tree scan if cargo metadata fails.
+  local mf d f roots
+  roots="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+           | grep -o '"manifest_path":"[^"]*"' | sed 's/.*:"//; s/"$//')"
+  [ -n "$roots" ] || roots="$(find "$DIR" -name Cargo.toml -not -path '*/target/*' 2>/dev/null)"
+  printf '%s\n' "$roots" | while IFS= read -r mf; do
+    [ -n "$mf" ] || continue
     d="$(dirname "$mf")"
     for f in "$d/src/lib.rs" "$d/src/main.rs"; do [ -f "$f" ] && touch "$f"; done
   done
@@ -149,24 +157,29 @@ fi
 # CALIBRATED list is only a fallback for before a sidecar exists (report not yet generated).
 CALIBRATED="reqwest isahc ureq sqlx rusqlite postgres tokio_postgres diesel redis mongodb mysql mysql_async sea_orm deadpool_postgres memmap2 rand getrandom fastrand chrono tracing arboard portable_pty"
 CALIB_PREFIXES="aws_sdk_ aws_smithy cap_"
-FNS=0; EFFS="no effects detected"; UNRES="?"; ENCOUNTERED=""
-if [ -n "$QUERY" ]; then
-  RECEIPT="$("$QUERY" receipt "$REPORT_PREFIX" 2>/dev/null)"
-  if [ -n "$RECEIPT" ]; then
-    FNS="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="fns"{print $2; exit}')"
-    EFFS="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="effects"{print $2; exit}')"
-    UNRES="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="unresolved"{print $2; exit}')"
-    ENCOUNTERED="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="encountered"{print $2; exit}')"
-    calib="$(printf '%s\n' "$RECEIPT" | awk -F'\t' '$1=="calibrated"{print $2; exit}')"
-    # Override the fallback only when the engine emitted a (non-empty) calibrated sidecar.
-    if [ -n "$calib" ] && [ "$calib" != "|" ]; then
-      CALIBRATED="${calib%%|*}"; CALIB_PREFIXES="${calib##*|}"
-    fi
-  fi
+FNS=""; EFFS=""; UNRES=""; ENCOUNTERED=""; calib=""
+RECEIPT=""
+[ -n "$QUERY" ] && RECEIPT="$("$QUERY" receipt "$REPORT_PREFIX" 2>/dev/null)"
+if [ -n "$RECEIPT" ]; then
+  # Parse the five key<TAB>value lines in ONE pass. A real fn-count receipt always prints all five
+  # keys, so an EMPTY $RECEIPT means candor-query is missing OR failed (e.g. a stale binary lacking the
+  # `receipt` subcommand) — handled by the else branch, NOT a silent "0 fns".
+  while IFS=$'\t' read -r k v; do
+    case "$k" in
+      fns)         FNS="$v" ;;
+      effects)     EFFS="$v" ;;
+      unresolved)  UNRES="$v" ;;
+      encountered) ENCOUNTERED="$v" ;;
+      calibrated)  calib="$v" ;;
+    esac
+  done <<< "$RECEIPT"
+  # Override the hardcoded fallback only when the engine emitted a (non-empty) calibrated sidecar.
+  [ -n "$calib" ] && [ "$calib" != "|" ] && { CALIBRATED="${calib%%|*}"; CALIB_PREFIXES="${calib##*|}"; }
 else
-  # No candor-query (build it via install.sh): crude fn count, no breakdown.
+  # candor-query missing OR failed (stale binary, etc.): honest crude fn-count rather than a false
+  # "0 fns". Build/refresh it via install.sh or `cargo candor setup` for the full breakdown.
   FNS=$(grep -ho '"fn"' "$REPORT_PREFIX".*.*.json 2>/dev/null | wc -l | tr -d ' ')
-  EFFS="(build candor-query for the effect breakdown)"
+  EFFS="(effect breakdown unavailable — build/refresh candor-query)"
 fi
 [ -z "$FNS" ] && FNS=0
 [ -z "$EFFS" ] && EFFS="no effects detected"

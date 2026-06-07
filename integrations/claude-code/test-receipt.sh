@@ -9,7 +9,11 @@ RUN="$HERE/candor-run.sh"
 # The receipt is powered by candor-query now (was inline Python). Build/locate it and point
 # candor-run.sh at it via CANDOR_QUERY. (stop-hook.sh still parses Claude's hook JSON with python3 —
 # the stop-hook subtests below skip if python3 is absent.)
-QUERY="$(ls "$HERE/../../target/release/candor-query" "$HERE/../../target/debug/candor-query" 2>/dev/null | head -1)"
+QUERY=""   # newest-by-mtime among release/debug (not `ls|head`, which sorts alphabetically → debug)
+for q in "$HERE/../../target/release/candor-query" "$HERE/../../target/debug/candor-query"; do
+  [ -x "$q" ] || continue
+  if [ -z "$QUERY" ] || [ "$q" -nt "$QUERY" ]; then QUERY="$q"; fi
+done
 [ -n "$QUERY" ] || { echo "SKIP: candor-query not built (run: cargo build -p candor-query)"; exit 0; }
 export CANDOR_QUERY="$QUERY"
 

@@ -48,15 +48,31 @@ EOF
 done
 cp "$SRC/commands/candor.md" "$TARGET/.claude/commands/"
 
-# --- pin the clone (and the resolved dylib) in the project config ---
+# --- pin the clone (and the resolved dylib + query binary) in the project config ---
 LIB="$(ls "$CANDOR_HOME"/target/debug/libcandor@*.dylib "$CANDOR_HOME"/target/debug/libcandor@*.so 2>/dev/null | head -1 || true)"
+# candor-query powers the receipt's effect breakdown + self-review. A bare `cargo build` builds the
+# dylib but NOT candor-query (it's not a dependency of the lint), so build it here if it's missing —
+# it's a small stable crate, quick to compile.
+QUERY=""
+for q in "$CANDOR_HOME"/target/release/candor-query "$CANDOR_HOME"/target/debug/candor-query \
+         "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-query; do
+  [ -x "$q" ] && { QUERY="$q"; break; }
+done
+if [ -z "$QUERY" ]; then
+  echo "  building candor-query (receipt breakdown + self-review)…"
+  ( cd "$CANDOR_HOME" && cargo build -q -p candor-query ) 2>/dev/null || true
+  [ -x "$CANDOR_HOME/target/debug/candor-query" ] && QUERY="$CANDOR_HOME/target/debug/candor-query"
+fi
 {
   printf 'CANDOR_HOME=%q\n' "$CANDOR_HOME"
   [ -n "$LIB" ] && printf 'CANDOR_LIB=%q\n' "$LIB"
+  [ -n "$QUERY" ] && printf 'CANDOR_QUERY=%q\n' "$QUERY"
 } > "$TARGET/.candor/config"
 if [ -n "$LIB" ]; then echo "  pinned CANDOR_HOME and CANDOR_LIB"; else
   echo "  pinned CANDOR_HOME. No dylib built yet — run 'cargo candor update' (or 'cargo build' in the clone)."
 fi
+[ -n "$QUERY" ] && echo "  pinned CANDOR_QUERY ($(basename "$(dirname "$(dirname "$QUERY")")")/$(basename "$(dirname "$QUERY")")/candor-query)" \
+  || echo "  ⚠ candor-query unavailable — the receipt will show a crude count until you run 'cargo candor setup'."
 
 # --- merge the Stop hook into .claude/settings.json (non-destructive) ---
 SETTINGS="$TARGET/.claude/settings.json"

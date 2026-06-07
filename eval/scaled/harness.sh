@@ -101,8 +101,12 @@ case "$cmd" in
     # breakage as a model false-negative.
     dj="$( cd "$work"; "$CC" diff "$RUNS/$runid/baseline" --json 2>/dev/null || true )"
     gained="$(printf '%s' "$dj" | jq -r --arg e "$effect" '[.changes[]|select(.gained|index($e))|.fn]|length' 2>/dev/null || true)"
-    if [ -z "$dj" ] || [ -z "$gained" ]; then
-      echo "ERROR: could not evaluate (no baseline, build failure, or jq missing)"
+    # `gained` must be a single integer; empty / non-numeric / multi-line all mean the check couldn't
+    # run → ERROR (not a misrouted INCOMPLETE, and `[ -gt ]` never sees a non-number).
+    if [ -z "$dj" ]; then
+      echo "ERROR: could not evaluate (no baseline, build failure, or diff produced no output)"
+    elif case "$gained" in ''|*[!0-9]*) true ;; *) false ;; esac; then
+      echo "ERROR: could not evaluate (jq missing or unexpected diff output)"
     elif [ "$gained" -gt 0 ]; then
       echo "COMPLETED: $gained function(s) gained $effect (task implemented)"
     else

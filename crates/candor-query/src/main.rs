@@ -93,6 +93,45 @@ fn glob_encountered(prefix: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Per-effect counts (only the `EFFECTS` vocabulary — `Unknown` is excluded) plus the names of the
+/// functions whose effect set may be incomplete (`unresolved`, or containing `Unknown`). Shared by the
+/// `audit` and `receipt` views so the tally + unresolved rule are defined exactly once.
+fn tally_effects(fns: &[ReportEntry]) -> (BTreeMap<&'static str, usize>, Vec<String>) {
+    let mut tally: BTreeMap<&'static str, usize> = EFFECTS.iter().map(|e| (*e, 0)).collect();
+    let mut unresolved: Vec<String> = Vec::new();
+    for e in fns {
+        for x in &e.inferred {
+            if let Some(n) = tally.get_mut(x.as_str()) {
+                *n += 1;
+            }
+        }
+        if e.unresolved || e.inferred.iter().any(|x| x == "Unknown") {
+            unresolved.push(e.func.clone());
+        }
+    }
+    (tally, unresolved)
+}
+
+/// The external crates candor saw resolved calls into — the union of the `<prefix>.encountered-*.json`
+/// sidecars. Shared by `audit` (coverage gaps) and `receipt`.
+fn encountered_set(prefix: &str) -> BTreeSet<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for path in glob_encountered(prefix) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&text) {
+                seen.extend(arr);
+            }
+        }
+    }
+    seen
+}
+
+/// THE definition of a "gained" effect: present in `cur`'s set, absent from `base`'s. Shared by `diff`
+/// (per-function gained list) and `gains` (the self-review pairs) so they can't drift.
+fn gained_effects(cur: &BTreeSet<String>, base: &BTreeSet<String>) -> Vec<String> {
+    cur.difference(base).cloned().collect()
+}
+
 /// `cargo candor audit` default view: an at-a-glance effect profile aggregated across the crates.
 /// Args: `<prefix> <engine_ver> <suspect_file>`. Always exits 0 (a report renderer).
 fn cmd_audit(args: &[String]) -> i32 {
@@ -122,18 +161,7 @@ fn cmd_audit(args: &[String]) -> i32 {
         return 0;
     }
 
-    let mut tally: BTreeMap<&str, usize> = EFFECTS.iter().map(|e| (*e, 0)).collect();
-    let mut unresolved: Vec<String> = Vec::new();
-    for e in &fns {
-        for x in &e.inferred {
-            if let Some(n) = tally.get_mut(x.as_str()) {
-                *n += 1;
-            }
-        }
-        if e.unresolved || e.inferred.iter().any(|x| x == "Unknown") {
-            unresolved.push(e.func.clone());
-        }
-    }
+    let (tally, unresolved) = tally_effects(&fns);
 
     println!("candor @{ver}");
     let pc = percrate.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(" · ");
@@ -156,14 +184,7 @@ fn cmd_audit(args: &[String]) -> i32 {
 
     // coverage: external crates candor saw called but does not calibrate, that LOOK effectful.
     let (calib_c, calib_p) = load_calibrated(pre, &base);
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    for path in glob_encountered(pre) {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&text) {
-                seen.extend(arr);
-            }
-        }
-    }
+    let seen = encountered_set(pre);
     let suspect = std::fs::read_to_string(suspect_path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     // Warn (don't silently skip) when the suspect pattern won't compile — the `regex` crate rejects
     // some constructs Python's `re` accepted, and a silent drop would hide the coverage-gap check.
@@ -511,7 +532,7 @@ fn cmd_diff(args: &[String]) -> i32 {
             }
             continue;
         }
-        let gained: Vec<String> = ci.difference(bi).cloned().collect();
+        let gained: Vec<String> = gained_effects(ci, bi);
         let lost: Vec<String> =
             if base.contains_key(fn_) { bi.difference(ci).cloned().collect() } else { vec![] };
         if gained.is_empty() && lost.is_empty() {
@@ -675,19 +696,18 @@ fn cmd_receipt(args: &[String]) -> i32 {
     };
     let base = prefix_base(pre);
     let fns = load_entries(pre);
-    let mut tally: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut unresolved = 0usize;
-    for e in &fns {
-        for x in &e.inferred {
-            *tally.entry(x.as_str()).or_default() += 1;
-        }
-        if e.unresolved || e.inferred.iter().any(|x| x == "Unknown") {
-            unresolved += 1;
-        }
-    }
+    let (tally, unresolved) = tally_effects(&fns);
+    let unresolved = unresolved.len();
     // The receipt's own display order (Db-first), preserved byte-for-byte from the Python it replaces.
+    // It must list exactly the EFFECTS vocabulary; the assert catches a new effect added to EFFECTS but
+    // not here (which would silently drop it from the receipt while `audit` still showed it).
     const ORDER: [&str; 10] =
         ["Db", "Net", "Fs", "Exec", "Env", "Clock", "Ipc", "Rand", "Clipboard", "Log"];
+    debug_assert_eq!(
+        ORDER.iter().copied().collect::<BTreeSet<_>>(),
+        EFFECTS.iter().copied().collect::<BTreeSet<_>>(),
+        "receipt ORDER must be a permutation of candor_report::EFFECTS",
+    );
     let effects = ORDER
         .iter()
         .filter(|k| tally.get(**k).copied().unwrap_or(0) > 0)
@@ -696,14 +716,7 @@ fn cmd_receipt(args: &[String]) -> i32 {
         .join(", ");
 
     let (calib_c, calib_p) = load_calibrated(pre, &base);
-    let mut encountered: BTreeSet<String> = BTreeSet::new();
-    for path in glob_encountered(pre) {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&text) {
-                encountered.extend(arr);
-            }
-        }
-    }
+    let encountered = encountered_set(pre);
     let join = |s: &BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(" ");
     println!("fns\t{}", fns.len());
     println!("effects\t{effects}");
@@ -733,8 +746,8 @@ fn cmd_gains(args: &[String]) -> i32 {
     let mut out: Vec<(String, String)> = Vec::new();
     for (func, info) in &cur {
         let b = base.get(func).map(|i| &i.inferred).unwrap_or(&empty);
-        for e in info.inferred.difference(b) {
-            out.push((func.clone(), e.clone()));
+        for e in gained_effects(&info.inferred, b) {
+            out.push((func.clone(), e));
         }
     }
     out.sort();
