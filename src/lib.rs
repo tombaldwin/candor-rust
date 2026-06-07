@@ -1079,6 +1079,8 @@ fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::random_range")
             || path.ends_with("::random_bool")
             || path.ends_with("::random_ratio")
+            || path.ends_with("::random_iter") // rand 0.9 iterator generator
+            || path.ends_with("::gen_iter")
             || path.ends_with("::fill")
             || path.ends_with("::fill_bytes")
             || path.ends_with("::try_fill")
@@ -1530,16 +1532,25 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             if matches!(cx.tcx.def_kind(def_id), DefKind::Fn) {
                 if let Some(typeck) = cx.maybe_typeck_results() {
                     for (i, arg) in args.iter().enumerate() {
+                        // ONLY a LOCAL named fn is a resolvable callback target (we can edge to its
+                        // body). A non-local fn-item, a closure, a fn-pointer, or any opaque/`dyn`
+                        // callable (`impl Fn` return, `&dyn Fn`, `Box<dyn Fn>`) we can't enumerate —
+                        // mark the position `callback_unknown` so the deferred `Unknown` STANDS instead
+                        // of being silently dropped. (A non-callable value at a non-callback position
+                        // also lands here; harmless — that key is consulted only for an invoked param,
+                        // where the arg is necessarily a callable.) SOUNDNESS: routing a *non-local* fn
+                        // into `callback_named` let the resolver see a non-empty target set, filter it to
+                        // an empty `locals`, and add neither an edge nor the `Unknown` → a false `pure`.
                         match typeck.expr_ty(arg).kind() {
-                            rustc_middle::ty::TyKind::FnDef(t, _) => {
+                            rustc_middle::ty::TyKind::FnDef(t, _)
+                                if t.as_local().is_some()
+                                    && matches!(cx.tcx.def_kind(*t), DefKind::Fn | DefKind::AssocFn) =>
+                            {
                                 self.callback_named.entry((def_id, i)).or_default().insert(*t);
                             }
-                            rustc_middle::ty::TyKind::Closure(..)
-                            | rustc_middle::ty::TyKind::FnPtr(..)
-                            | rustc_middle::ty::TyKind::Param(..) => {
+                            _ => {
                                 self.callback_unknown.insert((def_id, i));
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -1685,7 +1696,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             .filter(|t| matches!(cx.tcx.def_kind(**t), DefKind::Fn | DefKind::AssocFn))
                             .filter_map(|t| t.as_local())
                             .collect();
-                        self.calls.entry(*caller).or_default().extend(locals);
+                        if locals.is_empty() {
+                            // Defensive: targets present but none local (recording now routes non-local
+                            // fns to `callback_unknown`, so this shouldn't fire — but if it ever did,
+                            // dropping the `Unknown` would be a silent under-report). Keep it honest.
+                            self.direct.entry(*caller).or_default().insert(UNKNOWN);
+                        } else {
+                            self.calls.entry(*caller).or_default().extend(locals);
+                        }
                     }
                     _ => {
                         // An unresolvable callback was passed somewhere, or the HOF is never called
