@@ -92,7 +92,21 @@ def main():
     # function that performs I/O must still be reported (the #5 macro-fn-visibility fix); if candor
     # ever re-omits macro-gen fns, the checker flags `sink(pure/omitted)`.
     bodies["sink"] = leaf
-    macro_sink = rng.random() < 0.3
+    # CANDOR_FUZZ_INSTRUMENT=1 brackets each chain fn's body with eprintln entry/exit markers — visible
+    # to strace (a write(2,…)) but NOT to candor (stdio is not a classified effect), so the per-function
+    # dynamic oracle can reconstruct the call stack at each effect syscall. (Disables macro_sink, which
+    # would otherwise wrap sink in a macro that's awkward to instrument.)
+    instrument = os.environ.get("CANDOR_FUZZ_INSTRUMENT") == "1"
+    macro_sink = (rng.random() < 0.3) and not instrument
+
+    def emit(name, body):
+        # eprintln routes through the free fn `std::io::_eprint` (NOT a trait method), so candor sees a
+        # pure non-local call — the markers don't pollute its analysis (a UFCS `io::Write::write_all`
+        # would, via #6's effectful-dispatch rule). A literal eprintln is one atomic `write(2,…)` syscall,
+        # which is exactly what strace and oracle_pf_check.py's regex expect.
+        if instrument:
+            return 'fn %s() { eprintln!("CFE %s"); %s eprintln!("CFX %s"); }' % (name, name, body, name)
+        return "fn %s() { %s }" % (name, body)
 
     forms_log = {}
     for i in range(n):
@@ -114,11 +128,11 @@ def main():
         lines.append("macro_rules! mksink { () => { fn sink() { %s } }; }" % bodies["sink"])
         lines.append("mksink!();")
     else:
-        lines.append("fn sink() { %s }" % bodies["sink"])
+        lines.append(emit("sink", bodies["sink"]))
     for name in fns:
-        lines.append("fn %s() { %s }" % (name, bodies[name]))
+        lines.append(emit(name, bodies[name]))
     lines.append("")
-    lines.append("fn main() { %s(); }" % fns[0])
+    lines.append(emit("main", "%s();" % fns[0]))
     src = "\n".join(lines) + "\n"
 
     os.makedirs(os.path.join(out, "src"), exist_ok=True)

@@ -160,8 +160,12 @@ that's the narrow, modest-value axis. Diminishing returns.
       `DefPathHash` cross-crate propagation; teeth-verified by disabling `load_cross_reports`), plus
       **macro forms** (a call inside a `macro_rules!` expansion, and a macro-DEFINED `sink` testing the
       #5 macro-fn-visibility fix; teeth-verified by reverting it). CI now runs 60 construction + 40
-      cross + 40 oracle seeds/push. **Still TODO:** per-function attribution in the oracle (instrument
-      fns + interleave with the trace) and arbitrary-self-type trait-object forms.
+      cross + 40 oracle seeds/push. **Now also:** **arbitrary-self-type trait-object forms** (`arc_dyn`
+      + a cross-crate `Arc<dyn LibTrait>` variant — #4 teeth: reverting `is_dyn_receiver` fails the
+      non-local arc seeds), and **per-function oracle attribution** (`oracle_pf.sh` — instrument the
+      chain with `eprintln` entry/exit markers, reconstruct the call STACK at each effect syscall, and
+      pin a runtime-proven effect to the EXACT on-stack function, not just `main`). CI runs 60
+      construction + 40 cross + 40 whole-program-oracle + 40 per-function-oracle seeds/push.
 - [x] **Database clients.** `sqlx`/`rusqlite`/`postgres`/`tokio_postgres`/`diesel`/`redis`/… now
       classified `Db` (execution verbs only, not query building; best-effort, tune via CONFIG).
 - [x] **`tokio::net` / `std::os::unix::net` Unix sockets** → `Ipc`, no longer conflated with `Net`.

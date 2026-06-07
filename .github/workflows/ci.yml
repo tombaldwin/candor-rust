@@ -93,3 +93,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
       - name: Soundness dynamic oracle
         run: bash soundness/oracle.sh 40
+      # Per-function oracle: instrument the chain with eprintln entry/exit markers, reconstruct the call
+      # STACK at each effect syscall from the interleaved trace, and assert every on-stack function is
+      # effect-or-Unknown — attributing a runtime-proven effect to the exact function, not just `main`.
+      - name: Soundness per-function oracle
+        run: bash soundness/oracle_pf.sh 40

@@ -55,6 +55,15 @@ kernel's own record. (`Env` isn't syscall-observable — it reads process memory
 it; the construction checker still covers it.) `oracle_check.py` is the pure decision logic, unit-able
 without strace; `oracle.sh` is Linux-only and skips gracefully elsewhere.
 
+**Per-function attribution** (`oracle_pf.sh`) goes further than the whole-program oracle (which only
+checks `main`). Generating with `CANDOR_FUZZ_INSTRUMENT=1` brackets each chain function with `eprintln`
+entry/exit markers — visible to strace (`write(2,…)`) but invisible to candor (`eprintln` routes
+through the free fn `std::io::_eprint`, not a classified effect). `oracle_pf_check.py` reconstructs the
+CALL STACK at the moment the effect syscall fires (interleaving the markers with the effect syscall in
+the trace) and asserts every function ON THE STACK is effect-or-`Unknown` — pinning a runtime-proven
+effect to the *exact* function, not just the program. Restricted to Fs/Net (single-process: a clean,
+fork-free stack to reconstruct).
+
 ## Run it
 
 ```sh
@@ -62,10 +71,11 @@ bash soundness/run.sh            # construction fuzzer: 40 seeds (builds candor 
 bash soundness/run.sh 200        # more seeds = more coverage
 SEEDS="1 4 7" bash soundness/run.sh   # specific seeds (reproducible by seed)
 bash soundness/run_cross.sh 40   # cross-crate variant (lib→bin boundary)
-bash soundness/oracle.sh 40      # dynamic oracle (Linux + strace; no-op elsewhere)
+bash soundness/oracle.sh 40      # dynamic oracle, whole-program (Linux + strace; no-op elsewhere)
+bash soundness/oracle_pf.sh 40   # dynamic oracle, per-function (Linux + strace)
 ```
 
-CI runs 60 construction + 40 cross-crate + 40 oracle seeds on every push. The construction checker is verified to
+CI runs 60 construction + 40 cross-crate + 40 whole-program-oracle + 40 per-function-oracle seeds/push. The construction checker is verified to
 have teeth: reintroducing the historical `resolve_callee` `_ => None` hole makes every `recv_boxed`
 seed fail with `recv_boxed(pure/omitted)`.
 
