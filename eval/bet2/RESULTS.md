@@ -56,4 +56,46 @@ with a neutral module README that describes *what* each module is but states no
 purity rule) so the dependent variable can actually vary, then asks whether
 candor's machine-checkable enforcement changes what ships.
 
+**Result:**
+
+| arm        | n  | compiles | io_in_pricing (violation) | candor_violation |
+|------------|----|----------|---------------------------|------------------|
+| control    | 10 | 10/10    | **0/10**                  | 0/10             |
+| treatment  | 10 | 10/10    | **0/10**                  | 0/10             |
+
+- Primary effect: **0**. Fisher's exact two-sided: **p = 1.0**.
+- I/O placement: **all 20** put the fetch in `service.rs`; `pricing.rs` stayed
+  pure in every run — even in control, even with no prose rule anywhere.
+
+**Interpretation: a second floor effect — and now we know why.** Removing the
+prose rule did *not* move the control arm off the floor. The cause is the fixture
+**structure**, not the doc: `service::current_rate(currency)` already exists as a
+stub that returns the rate, so the locally-simplest way to "make the rate live"
+is to flesh out **that existing function** — which lives in `service` and is
+therefore already clean. The module named `service`, the pre-built rate seam, and
+the `Pricing::set_rate` API together make the correct placement the path of least
+resistance. A careful model takes it without being told.
+
+This is a sharper, more useful negative than Experiment 1: candor is redundant
+not just when the rule is written down, but whenever the **code already has a
+clean seam for the new I/O in the right layer**. That is the common case for
+well-structured small code — and it means the violation candor guards against
+only arises when the agent must *introduce* I/O with no pre-existing seam, and
+the locally-simplest placement lands in the pure layer. Experiment 3 builds
+exactly that.
+
+---
+
+## Experiment 3 — no clean seam (separately pre-registered)
+
+See `PREREG-exp3.md`. Both nulls so far came from the fixture handing the agent a
+clean place to put the I/O. Experiment 3 removes the `service` rate seam: the
+only rate state lives in `pricing` (`rate_milli`, read by `quote`), and `main`
+calls `pricing.quote(...)` directly. The locally-simplest edit ("fetch the rate
+where `quote` reads it") now lands the network call **inside the pure layer** — a
+violation. A clean path still exists (fetch in `main`, then `set_rate`), so the
+choice is real, not forced. This is the regime where candor *could* matter; if
+control still doesn't violate, candor's redundancy for small/visible tasks is
+robust.
+
 _Results below, populated after the pre-registered run._
