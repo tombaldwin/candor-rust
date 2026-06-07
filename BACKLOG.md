@@ -262,6 +262,11 @@ _Latest pass:_ cross-crate propagation (DefPathHash) · devirtualization · repo
 versioning · v0.2 self-describing envelope · `cargo candor audit` at-a-glance profile · formal
 `SEMANTICS.md` + a clause-by-clause code↔spec audit · remediated a real consumer's stale baseline.
 
+_Hardening pass:_ Python→Rust query port (`candor-report` + `candor-query`) · Fs read/write detail ·
+frictionless `install.sh` + stable `~/.candor` home · dylib/query resolution by newest-mtime (was the
+`head -1` glob) · self-guard trusts the baseline's own siblings (no spurious cross-engine downgrade) ·
+fixpoint profiled on ripgrep (negligible).
+
 ## Known limitations (confirmed by review 2026-05-29; documented, not all worth fixing)
 
 - **declared_caps sees only direct parameters** — a capability behind a struct field / `Option` /
@@ -275,5 +280,7 @@ versioning · v0.2 self-describing envelope · `cargo candor audit` at-a-glance 
   call edges, and a const reference isn't a Call expr anyway).
 - **Baseline key is `def_path_str`** — not guaranteed unique; identical stringly-named items
   (rare) could collide in the guard. Names are the only stable cross-run key, so this is inherent.
-- **`cargo-candor` picks `head -1`** of the dylib glob — a stale dylib from a previous toolchain
-  could be chosen after a bump. Minor.
+- **Effect/fs fixpoint is naive iterate-to-convergence**, not a worklist (`O(rounds × V × E)` per
+  crate). Measured negligible: on ripgrep (52k lines) the largest crate (`rg`: 1179 fns / 3302 edges)
+  fixpoints in 0.42 ms, ~0.7 ms total across the workspace — ~0.017% of the run. Per-crate cost is
+  dominated by call resolution + rustc, not propagation, so a worklist rewrite isn't worth it.
