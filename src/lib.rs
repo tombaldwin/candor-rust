@@ -217,11 +217,21 @@ pub struct Candor {
     allow_rules: Vec<AllowRule>,
     /// CANDOR_POLICY: declared module-layering rules to enforce (AS-EFF-009). Parsed from the same file.
     layer_rules: Vec<LayerRule>,
-    /// Cross-crate layering hits: a local function that DIRECTLY calls a sibling-crate function whose
-    /// path matches some `forbid <A> -> <B>` rule's `to` scope. `caller -> [(rule index, callee path)]`.
-    /// Lets AS-EFF-009 catch a dependency on another crate (`forbid app -> infra` where `infra` is a
-    /// sibling crate), seeding the same reverse-reachability the within-crate case uses.
-    layer_cross_hits: HashMap<LocalDefId, Vec<(usize, String)>>,
+    /// Cross-crate callees of each local function: `caller -> [(callee DefPathHash, callee path)]`,
+    /// recorded for layering (AS-EFF-009) when any `forbid` rule is present. The path lets us match a
+    /// `to` scope (a direct dependency on another crate); the hash lets us chain to that callee's own
+    /// `layerreach` summary (a dependency *laundered through* that crate). Empty without `forbid` rules.
+    cross_callees: HashMap<LocalDefId, Vec<((u64, u64), String)>>,
+    /// Per sibling-crate function (`DefPathHash`), the set of `forbid` *target* scopes it transitively
+    /// reaches — loaded from that crate's `layerreach` sidecar (written during this same enforce pass,
+    /// crates linted dependency-first). This is what makes layering follow a dependency through a THIRD
+    /// crate: `app -> util -> infra` is caught because `util`'s sidecar records that `util::f` reaches
+    /// `infra`. Empty unless layering sidecars are present (workspace enforce mode).
+    cross_layer_reach: HashMap<(u64, u64), BTreeSet<String>>,
+    /// The report prefix (`CANDOR_REPORTS`/`CANDOR_JSON`/`CANDOR_BASELINE`) this run resolves siblings
+    /// against — also where the `layerreach` sidecar is written, so dependent crates in the same enforce
+    /// pass can read it. `None` when no prefix is set (single-crate run).
+    reports_prefix: Option<String>,
     /// CANDOR_TAINT: flag effects whose argument derives from a function parameter (AS-EFF-007).
     taint: bool,
     /// Per-function effects performed on a parameter-derived (caller-controlled) argument.
@@ -306,7 +316,9 @@ impl Candor {
             policy,
             allow_rules,
             layer_rules,
-            layer_cross_hits: HashMap::new(),
+            cross_callees: HashMap::new(),
+            cross_layer_reach: HashMap::new(),
+            reports_prefix: None,
             taint: std::env::var("CANDOR_TAINT").is_ok(),
             tainted: HashMap::new(),
         }
@@ -622,6 +634,47 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str, trust_siblings: boo
         }
     }
     CrossData { effects: out, hosts, cmds, paths }
+}
+
+/// The on-disk name of a crate's layering-reachability sidecar (`<prefix>.<crate>.<kind>.layerreach.json`).
+/// A 3-segment name, so `report_files` (which wants exactly two) never mistakes it for an effect report.
+fn layer_reach_path(prefix: &str, krate: &str, kinds: &str) -> String {
+    format!("{prefix}.{krate}.{kinds}.layerreach.json")
+}
+
+/// Write this crate's `layerreach` sidecar: for each local function (by hex `DefPathHash`), the set of
+/// `forbid`-target scopes it transitively reaches. Dependent crates load it (later in the same enforce
+/// pass) so a dependency *laundered through* this crate is still caught (AS-EFF-009).
+fn write_layer_reach(path: &str, reach: &HashMap<String, Vec<String>>) {
+    if let Ok(body) = serde_json::to_string(reach) {
+        let _ = std::fs::write(path, body);
+    }
+}
+
+/// Load every `layerreach` sidecar under `prefix` into `DefPathHash -> reached target scopes`. These are
+/// written by sibling crates earlier in the same enforce pass; merged across all of them.
+fn load_layer_reach(prefix: &str) -> HashMap<(u64, u64), BTreeSet<String>> {
+    let mut out: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
+    let p = std::path::Path::new(prefix);
+    let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return out };
+    let prefix_dot = format!("{base}.");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return out };
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(&prefix_dot) || !name.ends_with(".layerreach.json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
+        let Ok(map) = serde_json::from_str::<HashMap<String, Vec<String>>>(&text) else { continue };
+        for (hex, scopes) in map {
+            if let Some(key) = parse_dph(&hex) {
+                out.entry(key).or_default().extend(scopes);
+            }
+        }
+    }
+    out
 }
 
 
@@ -1726,6 +1779,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             self.cross_hosts = cd.hosts;
             self.cross_cmds = cd.cmds;
             self.cross_paths = cd.paths;
+            // Layering (AS-EFF-009): load the `forbid`-target scopes each sibling function reaches, from
+            // the `layerreach` sidecars written earlier in this enforce pass (dependency-first order).
+            if !self.layer_rules.is_empty() {
+                self.cross_layer_reach = load_layer_reach(&prefix);
+            }
+            self.reports_prefix = Some(prefix);
         }
     }
 
@@ -1951,22 +2010,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // the dependency keyed its report by the concrete IMPL method — so devirtualize to that
             // impl first (when the receiver is concrete), else the lookup would always miss.
             let key_did = devirtualize(cx, expr, def_id).unwrap_or(def_id);
-            // Layering across crates (AS-EFF-009): if the callee's path matches a `forbid -> B` target
-            // scope (e.g. B is a sibling crate name), the caller directly depends on B. Record it as a
-            // reachability seed. Computed from the callee PATH alone, so it works even with no sibling
-            // report loaded. (Collect first to avoid borrowing self mutably while iterating layer_rules.)
+            // Layering across crates (AS-EFF-009): record this cross-crate callee (its DefPathHash +
+            // path) so check_crate_post can compute reachability — a direct dependency (callee path
+            // matches a `forbid -> B` scope) or one laundered through that crate (its `layerreach`
+            // summary, keyed by the hash). Recorded from the callee identity alone, so it works even
+            // with no sibling report loaded.
             if !self.layer_rules.is_empty() {
                 let callee_path = cx.tcx.def_path_str(key_did);
-                let hits: Vec<(usize, String)> = self
-                    .layer_rules
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| scope_matches(&callee_path, &r.to))
-                    .map(|(ri, _)| (ri, callee_path.clone()))
-                    .collect();
-                if !hits.is_empty() {
-                    self.layer_cross_hits.entry(caller).or_default().extend(hits);
-                }
+                self.cross_callees.entry(caller).or_default().push((dph(cx.tcx, key_did), callee_path));
             }
             if self.cross.is_empty() {
                 return;
@@ -2169,61 +2220,75 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let mut items: Vec<LocalDefId> = eff.keys().copied().collect();
         items.sort_by_cached_key(|f| cx.tcx.def_path_str(f.to_def_id()));
 
-        // AS-EFF-009 layering: precompute, per offending function, which forbidden layer it reaches.
-        // A `forbid A -> B` rule is violated by any function in scope A that *transitively* calls into
-        // scope B. We reverse-BFS from every function matching B over the LOCAL call graph and record
-        // each ancestor in scope A (with one reached B-target, for the message). The seeds are local
-        // B-functions' callers AND any local function that DIRECTLY calls a sibling-crate B-function
-        // (`layer_cross_hits`), so a cross-crate dependency (`forbid app -> infra`, infra a sibling
-        // crate) is caught too. (A dependency laundered through a THIRD crate — A→util→B where util is
-        // a separate crate — is not followed: that needs util's call graph; documented limitation.)
+        // AS-EFF-009 layering: compute, for each local function, the set of `forbid`-TARGET scopes it
+        // transitively reaches, then flag any function in a `from` scope that reaches its paired `to`.
+        // The reach surface is seeded from each function's DIRECT callees — local or cross-crate — whose
+        // path matches a target scope (a direct dependency on B), PLUS the reach of any cross-crate
+        // callee as recorded in its `layerreach` sidecar (a dependency *laundered through* that crate).
+        // `propagate` then carries it transitively over the local call graph. This unifies within-crate,
+        // direct cross-crate, and third-crate-laundered layering. The sidecar we write below lets the
+        // crates that depend on THIS one do the same. `reach` maps a `to`-scope → an example reached path
+        // (for the diagnostic); only the scope set participates in propagation.
         let mut layer_viol: HashMap<LocalDefId, Vec<(String, String)>> = HashMap::new();
         if !self.layer_rules.is_empty() {
             let name_of = |g: LocalDefId| cx.tcx.def_path_str(g.to_def_id());
-            // reverse adjacency: callee -> its local callers.
-            let mut rev: HashMap<LocalDefId, Vec<LocalDefId>> = HashMap::new();
-            for (caller, callees) in &self.calls {
-                for c in callees {
-                    rev.entry(*c).or_default().push(*caller);
+            let tos: BTreeSet<&str> = self.layer_rules.iter().map(|r| r.to.as_str()).collect();
+            // Seed: scopes each function reaches via a DIRECT callee (local path match, cross path match,
+            // or cross callee's sidecar reach). Track an example path per (fn, scope) for the message.
+            let mut seed: HashMap<LocalDefId, BTreeSet<String>> = HashMap::new();
+            let mut example: HashMap<(LocalDefId, String), String> = HashMap::new();
+            let note = |seed: &mut HashMap<LocalDefId, BTreeSet<String>>,
+                            example: &mut HashMap<(LocalDefId, String), String>,
+                            f: LocalDefId,
+                            scope: &str,
+                            via: &str| {
+                seed.entry(f).or_default().insert(scope.to_string());
+                example.entry((f, scope.to_string())).or_insert_with(|| via.to_string());
+            };
+            for (&f, callees) in &self.calls {
+                for &c in callees {
+                    let cpath = name_of(c);
+                    for to in &tos {
+                        if scope_matches(&cpath, to) {
+                            note(&mut seed, &mut example, f, to, &cpath);
+                        }
+                    }
                 }
             }
-            for (ri, rule) in self.layer_rules.iter().enumerate() {
-                let targets: Vec<LocalDefId> =
-                    eff.keys().copied().filter(|g| scope_matches(&name_of(*g), &rule.to)).collect();
-                let mut seen: HashSet<LocalDefId> = HashSet::new();
-                let mut stack: Vec<(LocalDefId, String)> = Vec::new();
-                for t in &targets {
-                    let tn = name_of(*t);
-                    if let Some(callers) = rev.get(t) {
-                        for &c in callers {
-                            if seen.insert(c) {
-                                stack.push((c, tn.clone()));
-                            }
+            for (&f, ccs) in &self.cross_callees {
+                for (hash, cpath) in ccs {
+                    for to in &tos {
+                        if scope_matches(cpath, to) {
+                            note(&mut seed, &mut example, f, to, cpath);
+                        }
+                    }
+                    if let Some(reached) = self.cross_layer_reach.get(hash) {
+                        for s in reached {
+                            note(&mut seed, &mut example, f, s, cpath);
                         }
                     }
                 }
-                // cross-crate seeds: a local fn that directly calls a sibling fn matching scope B is
-                // itself a reaching node (flagged if it's in scope A, then its ancestors explored).
-                for (caller, hits) in &self.layer_cross_hits {
-                    for (hri, callee_name) in hits {
-                        if *hri == ri && seen.insert(*caller) {
-                            stack.push((*caller, callee_name.clone()));
-                        }
+            }
+            let reach = propagate(seed, &self.calls);
+
+            // Write this crate's sidecar (hex DefPathHash -> reached scopes) for dependent crates.
+            if let Some(prefix) = &self.reports_prefix {
+                let mut sidecar: HashMap<String, Vec<String>> = HashMap::new();
+                for (f, scopes) in &reach {
+                    if !scopes.is_empty() {
+                        sidecar.insert(dph_hex(cx.tcx, f.to_def_id()), scopes.iter().cloned().collect());
                     }
                 }
-                if stack.is_empty() {
-                    continue;
-                }
-                while let Some((node, tgt)) = stack.pop() {
-                    if scope_matches(&name_of(node), &rule.from) {
-                        layer_viol.entry(node).or_default().push((rule.raw.clone(), tgt.clone()));
-                    }
-                    if let Some(callers) = rev.get(&node) {
-                        for &c in callers {
-                            if seen.insert(c) {
-                                stack.push((c, tgt.clone()));
-                            }
-                        }
+                write_layer_reach(&layer_reach_path(prefix, &krate.to_string(), &kinds), &sidecar);
+            }
+
+            // Flag: a function in scope `from` that reaches its rule's `to` scope.
+            for (&f, scopes) in &reach {
+                let fname = name_of(f);
+                for rule in &self.layer_rules {
+                    if scopes.contains(&rule.to) && scope_matches(&fname, &rule.from) {
+                        let via = example.get(&(f, rule.to.clone())).cloned().unwrap_or_else(|| rule.to.clone());
+                        layer_viol.entry(f).or_default().push((rule.raw.clone(), via));
                     }
                 }
             }

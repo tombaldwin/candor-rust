@@ -64,6 +64,11 @@ jobs:
       - name: Cross-crate layering enforcement
         run: bash eval/bet3/verify-layering.sh
 
+      # Layering through a THIRD crate (app -> util -> infra): the workspace gate's layerreach sidecars
+      # follow the laundered dependency.
+      - name: Laundered (third-crate) layering enforcement
+        run: bash eval/bet3/verify-laundered.sh
+
       # The Claude Code receipt is plain bash (no Rust test reaches it) and has shipped real
       # bugs (the sidecar/report glob collision). Guard its coverage/freshness/count logic.
       - name: Receipt logic tests (Claude Code integration)

@@ -38,12 +38,16 @@ forbid <A> -> <B>
 "A function in scope `A` must not transitively call into scope `B`" — *the domain layer must not reach
 into infra, even through a chain of helpers.* This is the one check that reads the **call graph**, not
 the effect lattice: a layer can be forbidden from *depending on* another even when neither performs an
-effect. Computed by reverse-reachability, seeded both from local `B`-functions' callers and from local
-functions that **directly call a sibling-crate `B`-function** — so `forbid app -> infra` catches a
-dependency on a whole sibling **crate** (`infra`), not just an intra-crate module. (A dependency
-laundered through a *third* crate — `A -> util -> B` — isn't followed; that needs `util`'s call graph.)
-Together the three rule kinds make `CANDOR_POLICY` a real architecture-as-code layer: `deny`/`pure`
-(*what* a layer does), `allow Net/Exec/Fs` (*which* values), `forbid ->` (*who* it depends on).
+effect. It's computed by a forward **reach** over the call graph, seeded from each function's direct
+callees whose path matches a target scope (local *and* cross-crate) — so it catches three cases in one
+mechanism: within-crate layers, a direct dependency on a whole sibling **crate** (`forbid app -> infra`),
+and a dependency **laundered through a third crate** (`app -> util -> infra`). The laundered case works
+because, under the workspace gate, each crate writes a `layerreach` sidecar — which target scopes each of
+its functions reaches — and dependent crates (linted later, dependency-first) read it; so `util`'s
+sidecar tells `app` that `util::store` reaches `infra`. (Computing reach during *util*'s own lint uses
+its full local call graph, so pure intermediates are handled too.) Together the three rule kinds make
+`CANDOR_POLICY` a real architecture-as-code layer: `deny`/`pure` (*what* a layer does), `allow
+Net/Exec/Fs` (*which* values), `forbid ->` (*who* it depends on).
 
 **2. Cross-crate host propagation + workspace-scale enforcement.** Two gaps blocked enforcing any
 boundary across a workspace:
@@ -89,9 +93,10 @@ on the same cross-crate violation. This is the case a developer (or their agent)
   transitively through a helper, not the allowed-host path; §9b — AS-EFF-009 flags the forbidden
   cross-layer dependency reached transitively, not a sibling that doesn't reach it. (70/70 pass.)
 - Soundness harness: unchanged and green (20/20) — the enforcement additions don't touch inference.
-- End-to-end teeth (both in CI): `eval/bet3/verify.sh` (host allowlist cross-crate + single-command
-  gate) and `eval/bet3/verify-layering.sh` (cross-crate `forbid` catching a dependency on a sibling
-  crate, and not flagging a pure function).
+- End-to-end teeth (all in CI): `eval/bet3/verify.sh` (host allowlist cross-crate + single-command
+  gate), `eval/bet3/verify-layering.sh` (direct cross-crate `forbid` on a sibling crate), and
+  `eval/bet3/verify-laundered.sh` (a three-crate `app -> util -> infra` dependency caught through util's
+  `layerreach` sidecar) — each also asserting a pure function is *not* flagged.
 
 ## Why this is the right Bet 3
 
@@ -108,8 +113,9 @@ surface, can *block the PR*. That is the repositioning: from "help your agent un
   strongest where endpoints are literals (the common case for SDK calls).
 - AS-EFF-008 certifies the visible host surface only (see semantics above); pair it with `deny Unknown
   <scope>` if you also want to forbid unverifiable Net in a scope.
-- **Layering (AS-EFF-009) follows direct cross-crate dependencies** (`forbid app -> infra`, infra a
-  sibling crate) and transitive paths within the depending crate, but does **not** follow a dependency
-  *laundered through a third crate* (`A -> util -> B` where `util` is a separate crate): that needs
-  `util`'s call graph, which isn't loaded. The common cases (within-crate layers, and a crate depending
-  on another crate) are covered.
+- **Layering (AS-EFF-009) follows dependencies through any number of crates** under the workspace gate
+  (via `layerreach` sidecars). Plain `cargo dylint` with only `CANDOR_POLICY` (no workspace snapshot)
+  still catches within-crate and *direct* cross-crate dependencies, but a *laundered* one (`A -> util ->
+  B`) needs the sidecars and so requires `cargo candor policy` (or `CANDOR_REPORTS`). Stale sidecars in a
+  reused report dir could over-report; the gate uses a fresh temp dir each run, so this only affects
+  hand-rolled `CANDOR_REPORTS` setups.

@@ -1,0 +1,2 @@
+# The domain layer must not depend on infra — even laundered through a third crate (util).
+forbid domain -> infra
