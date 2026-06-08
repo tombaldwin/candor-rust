@@ -35,11 +35,13 @@ fn main() {
         "gains" => cmd_gains(rest),
         "state" => cmd_state(rest),
         "reports" => cmd_reports(rest),
+        "locate" => cmd_locate(rest),
+        "engine-version" => cmd_engine_version(rest),
         "merge-hook" => cmd_merge_hook(rest),
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|receipt|gains|state|reports|merge-hook)"
+                 (audit|show|where|callers|map|diff|receipt|gains|state|reports|locate|engine-version|merge-hook)"
             );
             2
         }
@@ -976,12 +978,74 @@ fn cmd_state(args: &[String]) -> i32 {
 /// Default: print one report path per line. `--exists`: print nothing, exit 0 if any report exists
 /// else 1 — a drop-in for the `ls "$prefix".*.*.json >/dev/null` existence checks in the wrapper, so
 /// "what counts as a report" is defined once (here) instead of approximated by a shell glob.
+/// Which backend produced the report(s) at <prefix>: `scan` (the stable scanner writes `.<crate>.scan`),
+/// `lint` (the nightly lint writes `.<crate>.<Rlib|Executable|Cdylib|…>`), or `none`. The single owner
+/// of "what backend is this report" — replaces a filename glob duplicated across both bash orchestrators.
+fn report_backend(prefix: &str) -> &'static str {
+    let files = report_files(prefix);
+    if files.is_empty() {
+        "none"
+    } else if files.iter().any(|f| f.kind == "scan") {
+        "scan"
+    } else {
+        "lint"
+    }
+}
+
+/// Is a filename (relative to the prefix's directory) a STABLE-backend artifact for <base>? True for
+/// `<base>.<crate>.scan.json` and its `.scan.callgraph.json` sidecar — i.e. a `.scan.` segment.
+fn is_scan_artifact(base: &str, name: &str) -> bool {
+    name.strip_prefix(base)
+        .and_then(|r| r.strip_prefix('.'))
+        .is_some_and(|rest| rest.contains(".scan.") || rest.ends_with(".scan.json"))
+}
+
+/// Remove every report artifact for <prefix> that does NOT belong to the `keep` backend — so a lint
+/// report and a scan report never coexist under one prefix. Removes reports + callgraph/encountered/
+/// calibrated sidecars of the other backend; never touches the kept backend's files (so a build failure
+/// keeps the same-backend last-good report). Returns the count removed.
+fn clear_other_reports(prefix: &str, keep: &str) -> usize {
+    let p = Path::new(prefix);
+    let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return 0 };
+    let prefix_dot = format!("{base}.");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return 0 };
+    let mut removed = 0;
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(&prefix_dot) || !name.ends_with(".json") {
+            continue;
+        }
+        let scan = is_scan_artifact(base, name);
+        let remove = match keep {
+            "scan" => !scan, // keep the scan report; drop the lint reports + its sidecars
+            "lint" => scan,  // keep the lint report(s); drop the scan report + its callgraph
+            _ => false,
+        };
+        if remove && std::fs::remove_file(ent.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 fn cmd_reports(args: &[String]) -> i32 {
     let exists_only = args.iter().any(|a| a == "--exists");
+    let backend = args.iter().any(|a| a == "--backend");
+    let clear_keep = args.iter().position(|a| a == "--clear-other").and_then(|i| args.get(i + 1)).cloned();
     let Some(prefix) = args.iter().find(|a| !a.starts_with("--")) else {
-        eprintln!("usage: candor-query reports <prefix> [--exists]");
+        eprintln!("usage: candor-query reports <prefix> [--exists | --backend | --clear-other <scan|lint>]");
         return 2;
     };
+    if backend {
+        println!("{}", report_backend(prefix));
+        return 0;
+    }
+    if let Some(keep) = clear_keep {
+        clear_other_reports(prefix, &keep);
+        return 0;
+    }
     let files = report_files(prefix);
     if exists_only {
         return if files.is_empty() { 1 } else { 0 };
@@ -989,6 +1053,78 @@ fn cmd_reports(args: &[String]) -> i32 {
     for rf in &files {
         println!("{}", rf.path.display());
     }
+    0
+}
+
+/// `candor-query locate <lib|scan> <dir>...` — print the NEWEST-by-mtime matching artifact across the
+/// given dirs (a dylib for `lib`, the `candor-scan` binary for `scan`), or nothing. The single owner of
+/// the newest-mtime locator logic (was copied into both bash scripts; `ls | head` there silently picked
+/// the alphabetically-first — stale — toolchain dylib after a bump). `query` itself stays a bash
+/// bootstrap (it can't locate the binary that does the locating).
+/// Newest-by-mtime artifact of `kind` (`lib` = a `libcandor@*.{dylib,so}`, `scan` = the `candor-scan`
+/// binary) across `dirs`, or None. Newest mtime — NOT alphabetical (`ls | head` picks the stale
+/// toolchain dylib after a bump). Pure (unit-tested); `cmd_locate` just prints it.
+fn locate_newest(kind: &str, dirs: &[String]) -> Option<PathBuf> {
+    let matches_kind = |name: &str| -> bool {
+        match kind {
+            "scan" => name == "candor-scan",
+            "lib" => name.starts_with("libcandor@") && (name.ends_with(".dylib") || name.ends_with(".so")),
+            _ => false,
+        }
+    };
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+        for ent in rd.flatten() {
+            let name = ent.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !matches_kind(name) {
+                continue;
+            }
+            let Ok(mtime) = ent.metadata().and_then(|m| m.modified()) else { continue };
+            if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
+                newest = Some((mtime, ent.path()));
+            }
+        }
+    }
+    newest.map(|(_, p)| p)
+}
+
+fn cmd_locate(args: &[String]) -> i32 {
+    let Some(kind) = args.first() else {
+        eprintln!("usage: candor-query locate <lib|scan> <dir>...");
+        return 2;
+    };
+    match locate_newest(kind, &args[1..]) {
+        Some(p) => {
+            println!("{}", p.display());
+            0
+        }
+        None => 1,
+    }
+}
+
+/// `candor-query engine-version <lib-path>` — print the `candor-build-version=` tag build.rs embedded in
+/// the dylib (the version of the engine that actually produced a report), or nothing. Replaces a
+/// `strings -a | grep -oE` incantation duplicated across both bash scripts (and not portable without
+/// `strings`). Reads the file bytes directly.
+fn cmd_engine_version(args: &[String]) -> i32 {
+    let Some(path) = args.first() else {
+        eprintln!("usage: candor-query engine-version <lib-path>");
+        return 2;
+    };
+    let Ok(bytes) = std::fs::read(path) else { return 1 };
+    let needle = b"candor-build-version=";
+    let Some(start) = bytes.windows(needle.len()).position(|w| w == needle) else { return 1 };
+    let v: Vec<u8> = bytes[start + needle.len()..]
+        .iter()
+        .copied()
+        .take_while(|b| b.is_ascii_alphanumeric())
+        .collect();
+    if v.is_empty() {
+        return 1;
+    }
+    println!("{}", String::from_utf8_lossy(&v));
     0
 }
 
@@ -1108,6 +1244,73 @@ fn two(args: &[String]) -> Option<(&str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_scan_artifact_discriminates() {
+        assert!(is_scan_artifact("report", "report.mycrate.scan.json"));
+        assert!(is_scan_artifact("report", "report.mycrate.scan.callgraph.json"));
+        // lint artifacts are NOT scan
+        assert!(!is_scan_artifact("report", "report.mycrate.Rlib.json"));
+        assert!(!is_scan_artifact("report", "report.mycrate.Executable.callgraph.json"));
+        assert!(!is_scan_artifact("report", "report.calibrated.json"));
+        // a different prefix is not ours
+        assert!(!is_scan_artifact("report", "other.mycrate.scan.json"));
+    }
+
+    #[test]
+    fn report_backend_and_clear_other() {
+        let dir = std::env::temp_dir().join("candor-query-backend-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pre = dir.join("report");
+        let prefix = pre.to_string_lossy().to_string();
+        let w = |name: &str| std::fs::write(dir.join(name), b"{}").unwrap();
+
+        // none
+        assert_eq!(report_backend(&prefix), "none");
+        // a scan report
+        w("report.c.scan.json");
+        w("report.c.scan.callgraph.json");
+        assert_eq!(report_backend(&prefix), "scan");
+        // now a lint run lands too → both present; clear the scan side (keep lint)
+        w("report.c.Rlib.json");
+        w("report.c.Rlib.callgraph.json");
+        w("report.calibrated.json");
+        assert_eq!(report_backend(&prefix), "scan"); // scan still present
+        let removed = clear_other_reports(&prefix, "lint"); // keep lint, drop scan
+        assert_eq!(removed, 2); // report.c.scan.json + report.c.scan.callgraph.json
+        assert!(!dir.join("report.c.scan.json").exists());
+        assert!(dir.join("report.c.Rlib.json").exists());
+        assert_eq!(report_backend(&prefix), "lint");
+        // and the reverse: keep scan would drop the lint reports + calibrated sidecar
+        w("report.c.scan.json");
+        let removed = clear_other_reports(&prefix, "scan");
+        assert!(removed >= 3); // Rlib.json + Rlib.callgraph.json + calibrated.json
+        assert!(dir.join("report.c.scan.json").exists());
+        assert_eq!(report_backend(&prefix), "scan");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locate_picks_newest_by_mtime() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join("candor-query-locate-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // two toolchain-suffixed dylibs; the alphabetically-FIRST is the OLDER (the stale-pick bug)
+        let old = dir.join("libcandor@nightly-2025-01-01-x.dylib");
+        let new = dir.join("libcandor@nightly-2026-01-01-x.dylib");
+        std::fs::write(&old, b"x").unwrap();
+        std::fs::write(&new, b"x").unwrap();
+        // make `new` strictly newer
+        let f_old = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
+        f_old.set_modified(SystemTime::now() - Duration::from_secs(100)).unwrap();
+        let f_new = std::fs::OpenOptions::new().write(true).open(&new).unwrap();
+        f_new.set_modified(SystemTime::now()).unwrap();
+        let out = locate_newest("lib", &[dir.to_string_lossy().to_string()]);
+        assert_eq!(out, Some(new)); // newest mtime, not the alphabetically-first (older) one
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// merge-hook must: add the hook to a fresh/empty file; PRESERVE the user's other settings; be
     /// idempotent; and — the critical safeguard — leave an unparseable file UNTOUCHED rather than

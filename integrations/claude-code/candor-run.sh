@@ -32,19 +32,23 @@ mkdir -p "$STATE_DIR" 2>/dev/null || true
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 # ---- locate the candor-query binary (used for the receipt AND the source-state hash) ----
-# An explicit CANDOR_QUERY wins; otherwise pick the NEWEST by mtime among the candidates (so a fresh
-# build beats a stale one — matching cargo-candor's find_query/find_lib, not first-existing).
-find_query() {
-  [ -n "${CANDOR_QUERY:-}" ] && [ -x "${CANDOR_QUERY}" ] && { printf '%s\n' "$CANDOR_QUERY"; return 0; }
+# Newest of the candidates by mtime — the ONE locator primitive (a fresh build beats a stale one; NOT
+# first-existing, which would pick a stale-toolchain dylib). Non-matching globs stay literal; `[ -e ]`
+# skips them.
+newest_of() {
   local newest="" c
-  for c in "${CANDOR_HOME:-}"/target/release/candor-query "${CANDOR_HOME:-}"/target/debug/candor-query \
-           "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-query \
-           "$DIR"/../candor/target/release/candor-query "$DIR"/../candor/target/debug/candor-query \
-           /tmp/candor/target/release/candor-query /tmp/candor/target/debug/candor-query; do
-    [ -x "$c" ] || continue
+  for c in "$@"; do
+    [ -e "$c" ] || continue
     if [ -z "$newest" ] || [ "$c" -nt "$newest" ]; then newest="$c"; fi
   done
   [ -n "$newest" ] && printf '%s\n' "$newest"
+}
+find_query() {
+  [ -n "${CANDOR_QUERY:-}" ] && [ -x "${CANDOR_QUERY}" ] && { printf '%s\n' "$CANDOR_QUERY"; return 0; }
+  newest_of "${CANDOR_HOME:-}"/target/release/candor-query "${CANDOR_HOME:-}"/target/debug/candor-query \
+            "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-query \
+            "$DIR"/../candor/target/release/candor-query "$DIR"/../candor/target/debug/candor-query \
+            /tmp/candor/target/release/candor-query /tmp/candor/target/debug/candor-query
 }
 QUERY="$(find_query 2>/dev/null || true)"
 
@@ -57,38 +61,25 @@ CUR="$(src_hash)"; SHORT="${CUR:0:8}"
 PREV=""; [ -f "$STATE" ] && PREV="$(cat "$STATE" 2>/dev/null)"
 
 # ---- locate the candor dylib ----
+# The nightly dylib (newest-mtime; an explicit CANDOR_LIB override wins). After a pinned-toolchain bump
+# the previous `libcandor@<old>.dylib` lingers beside the new one and sorts first alphabetically; loading
+# it runs a stale engine — newest_of avoids that.
 find_lib() {
-  # An explicit override wins outright.
   [ -n "${CANDOR_LIB:-}" ] && [ -e "${CANDOR_LIB:-}" ] && { echo "$CANDOR_LIB"; return 0; }
-  # Otherwise pick the NEWEST `libcandor@<toolchain>.{dylib,so}` by mtime — NOT the first glob match.
-  # After a pinned-toolchain bump the previous `libcandor@<old-toolchain>.dylib` lingers beside the new
-  # one and sorts first alphabetically; loading it runs a stale engine (or fails on a toolchain rustc
-  # no longer has) on every Stop hook. (Mirrors cargo-candor's newest-mtime locator.)
-  local c newest=""
-  for c in "${CANDOR_HOME:-}"/target/debug/libcandor@*.dylib "${CANDOR_HOME:-}"/target/debug/libcandor@*.so \
-           "$DIR"/../candor/target/debug/libcandor@*.dylib "$DIR"/../candor/target/debug/libcandor@*.so \
-           /tmp/candor/target/debug/libcandor@*.dylib /tmp/candor/target/debug/libcandor@*.so; do
-    [ -e "$c" ] || continue
-    { [ -z "$newest" ] || [ "$c" -nt "$newest" ]; } && newest="$c"
-  done
-  [ -n "$newest" ] && { echo "$newest"; return 0; }
-  return 1
+  newest_of "${CANDOR_HOME:-}"/target/debug/libcandor@*.dylib "${CANDOR_HOME:-}"/target/debug/libcandor@*.so \
+            "$DIR"/../candor/target/debug/libcandor@*.dylib "$DIR"/../candor/target/debug/libcandor@*.so \
+            /tmp/candor/target/debug/libcandor@*.dylib /tmp/candor/target/debug/libcandor@*.so
 }
 
-# ---- locate the STABLE backend (candor-scan) — the zero-install fallback ----
-# When no nightly dylib is present (a fresh machine, stable-only CI, a locked-down box), the receipt
-# still works: candor-scan produces the same report JSON on stock `cargo`. Newest-mtime, like the others.
+# The STABLE backend (candor-scan) — the zero-install fallback. When no nightly dylib is present (fresh
+# machine, stable-only CI, locked-down box), the receipt still works: candor-scan produces the same
+# report JSON on stock `cargo`. An explicit CANDOR_SCAN override wins.
 find_scan() {
   [ -n "${CANDOR_SCAN:-}" ] && [ -x "${CANDOR_SCAN}" ] && { printf '%s\n' "$CANDOR_SCAN"; return 0; }
-  local newest="" c
-  for c in "${CANDOR_HOME:-}"/target/release/candor-scan "${CANDOR_HOME:-}"/target/debug/candor-scan \
-           "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-scan \
-           "$DIR"/../candor/target/release/candor-scan "$DIR"/../candor/target/debug/candor-scan \
-           /tmp/candor/target/release/candor-scan /tmp/candor/target/debug/candor-scan; do
-    [ -x "$c" ] || continue
-    if [ -z "$newest" ] || [ "$c" -nt "$newest" ]; then newest="$c"; fi
-  done
-  [ -n "$newest" ] && printf '%s\n' "$newest"
+  newest_of "${CANDOR_HOME:-}"/target/release/candor-scan "${CANDOR_HOME:-}"/target/debug/candor-scan \
+            "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-scan \
+            "$DIR"/../candor/target/release/candor-scan "$DIR"/../candor/target/debug/candor-scan \
+            /tmp/candor/target/release/candor-scan /tmp/candor/target/debug/candor-scan
 }
 
 # (candor-query located above, as QUERY — used both for the source-state hash and the receipt below.)
@@ -100,7 +91,7 @@ VER=""; NUDGE=""; BACKEND=""
 # The TRUE version of the running dylib — the tag build.rs embedded — NOT CANDOR_HOME's git HEAD,
 # which races ahead of an un-rebuilt dylib. The receipt must not claim a version the loaded binary
 # isn't; this is the engine that actually produced the report below.
-[ -n "$LIBP" ] && VER="$(strings -a "$LIBP" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-zA-Z]+' | head -1 | cut -d= -f2)"
+[ -n "$LIBP" ] && [ -n "$QUERY" ] && VER="$("$QUERY" engine-version "$LIBP" 2>/dev/null)"
 if [ -n "${CANDOR_HOME:-}" ] && git -C "$CANDOR_HOME" rev-parse --git-dir >/dev/null 2>&1; then
   head="$(git -C "$CANDOR_HOME" rev-parse --short HEAD 2>/dev/null)"
   [ -z "$VER" ] && VER="$head"   # fall back to clone HEAD only if the tag is unreadable
@@ -131,8 +122,12 @@ VERSTAMP=""; [ -n "$VER" ] && VERSTAMP=" @$VER"
 report_exists() {
   if [ -n "$QUERY" ]; then "$QUERY" reports "$REPORT_PREFIX" --exists; else ls "$REPORT_PREFIX".*.*.json >/dev/null 2>&1; fi
 }
-# A scan-produced report is named `<prefix>.<crate>.scan.json` — detectable by filename.
-is_scan_report() { ls "$REPORT_PREFIX".*.scan.json >/dev/null 2>&1; }
+# Which backend produced the report — `candor-query reports --backend` (the single owner, shared with
+# the wrapper). Falls back to the filename glob only when candor-query isn't located yet.
+is_scan_report() {
+  if [ -n "$QUERY" ]; then [ "$("$QUERY" reports "$REPORT_PREFIX" --backend 2>/dev/null)" = scan ]
+  else ls "$REPORT_PREFIX".*.scan.json >/dev/null 2>&1; fi
+}
 need_run=$FORCE
 [ "$CUR" != "$PREV" ] && need_run=1
 report_exists || need_run=1
@@ -160,16 +155,11 @@ touch_roots() {
   for r in src/lib.rs src/main.rs; do [ -f "$DIR/$r" ] && touch "$DIR/$r"; done
 }
 # Remove the OTHER backend's report before (re)generating, so lint and scan reports never coexist under
-# one prefix (which would double-count fns and mix backends). We clear only the OTHER backend's files —
-# never the one we're about to write — so a build failure still keeps the same-backend last-good report.
-clear_scan_reports() { rm -f "$REPORT_PREFIX".*.scan.json "$REPORT_PREFIX".*.scan.callgraph.json 2>/dev/null || true; }
-clear_lint_reports() {
-  local f
-  for f in "$REPORT_PREFIX".*.json "$REPORT_PREFIX".*.callgraph.json; do
-    [ -e "$f" ] || continue
-    case "$f" in *.scan.json | *.scan.callgraph.json) ;; *) rm -f "$f" ;; esac
-  done
-}
+# one prefix (which would double-count fns and mix backends). `candor-query reports --clear-other <keep>`
+# clears only the non-kept backend's files (exact report_files semantics, incl. sidecars) — never the
+# one we're about to write — so a build failure still keeps the same-backend last-good report.
+clear_scan_reports() { [ -n "$QUERY" ] && "$QUERY" reports "$REPORT_PREFIX" --clear-other lint >/dev/null 2>&1 || true; }
+clear_lint_reports() { [ -n "$QUERY" ] && "$QUERY" reports "$REPORT_PREFIX" --clear-other scan >/dev/null 2>&1 || true; }
 run_lint() { clear_scan_reports; CANDOR_JSON="$REPORT_PREFIX" cargo dylint --lib-path "$LIB" >/dev/null 2>"$STATE_DIR/last-error.log"; }
 # The stable backend: produce the report with no nightly toolchain. candor-scan parses sources (it does
 # NOT build the crate), so it can't fail on a compile error — but it under-reports vs the lint (no

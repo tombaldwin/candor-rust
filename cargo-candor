@@ -44,21 +44,23 @@ if [ ! -f "$CANDOR_DIR/Cargo.toml" ] && [ -f "$CANDOR_CACHE/clone" ]; then
   CANDOR_DIR="$(cat "$CANDOR_CACHE/clone" 2>/dev/null || echo "$CANDOR_DIR")"
 fi
 
-# Locate the lint dylib among the clone's target/ and the stable ~/.candor/lib, preferring the NEWEST:
-# a fresh clone build (candor's own development) must beat a stale cache, and after a `cargo clean` the
-# cache copy is all that's left. Explicit mtime scan, NOT `ls … | head`: plain `ls` sorts operands
-# alphabetically (so ~/.candor — `.candor` < `git`/`code`/… — would shadow a fresh build), and `ls -t`
-# silently drops its time-sort once any operand doesn't exist (no release build, no `.so` on macOS —
-# the usual case), returning the OLDEST. Non-matching globs stay literal under bash; `[ -e ]` skips them.
-find_lib() {
+# Newest of the given candidate files by mtime — the ONE locator primitive (was copied into find_lib/
+# find_query/find_scan). Explicit mtime scan, NOT `ls … | head`: plain `ls` sorts alphabetically (so a
+# stale-toolchain `libcandor@nightly-2025-…` would shadow a fresh `…2026-…` build), and `ls -t` drops
+# its time-sort once any operand is missing. Non-matching globs stay literal under bash; `[ -e ]` skips.
+newest_of() {
   local newest="" f
-  for f in "$CANDOR_DIR"/target/release/libcandor@*.dylib "$CANDOR_DIR"/target/release/libcandor@*.so \
-           "$CANDOR_DIR"/target/debug/libcandor@*.dylib   "$CANDOR_DIR"/target/debug/libcandor@*.so \
-           "$CANDOR_CACHE"/lib/libcandor@*.dylib          "$CANDOR_CACHE"/lib/libcandor@*.so; do
+  for f in "$@"; do
     [ -e "$f" ] || continue
     if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
   done
   [ -n "$newest" ] && printf '%s\n' "$newest"
+}
+# The lint dylib (newest across the clone's target/ and the stable ~/.candor/lib).
+find_lib() {
+  newest_of "$CANDOR_DIR"/target/release/libcandor@*.dylib "$CANDOR_DIR"/target/release/libcandor@*.so \
+            "$CANDOR_DIR"/target/debug/libcandor@*.dylib   "$CANDOR_DIR"/target/debug/libcandor@*.so \
+            "$CANDOR_CACHE"/lib/libcandor@*.dylib          "$CANDOR_CACHE"/lib/libcandor@*.so
 }
 # Mirror the active artifact into the stable home so a later `cargo clean` can't strand it. Idempotent:
 # only copies when the source is newer than (or absent from) the cache, so it's cheap to call on every
@@ -72,27 +74,16 @@ stash() { # <file> <subdir>
   fi
 }
 
-# The read-only report queries (show/where/callers/map/diff/audit) live in the candor-query binary.
-# Newest wins, via the same explicit mtime scan as find_lib (a fresh clone build must beat a stale cache).
+# candor-query (the read-only/orchestration Rust binary) — the bootstrap locator: bash MUST find this
+# before it can delegate the rest (backend detection, report-clearing, version-stamp, locate) to it.
 find_query() {
-  local newest="" f
-  for f in "$CANDOR_DIR"/target/release/candor-query "$CANDOR_DIR"/target/debug/candor-query \
-           "$CANDOR_CACHE"/bin/candor-query; do
-    [ -e "$f" ] || continue
-    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
-  done
-  [ -n "$newest" ] && printf '%s\n' "$newest"
+  newest_of "$CANDOR_DIR"/target/release/candor-query "$CANDOR_DIR"/target/debug/candor-query \
+            "$CANDOR_CACHE"/bin/candor-query
 }
-# The STABLE backend (candor-scan) — a syntactic effect report that needs NO nightly toolchain. Built
-# on stable Rust; located/built the same way as candor-query.
+# The STABLE backend (candor-scan) binary.
 find_scan() {
-  local newest="" f
-  for f in "$CANDOR_DIR"/target/release/candor-scan "$CANDOR_DIR"/target/debug/candor-scan \
-           "$CANDOR_CACHE"/bin/candor-scan; do
-    [ -e "$f" ] || continue
-    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
-  done
-  [ -n "$newest" ] && printf '%s\n' "$newest"
+  newest_of "$CANDOR_DIR"/target/release/candor-scan "$CANDOR_DIR"/target/debug/candor-scan \
+            "$CANDOR_CACHE"/bin/candor-scan
 }
 query() {
   local q; q="$(find_query || true)"
@@ -128,21 +119,25 @@ src_state() { query state 2>/dev/null; }
 # `.layerreach`) is never counted as a report. The coarse `ls "$prefix".*.*.json` glob could: `*`
 # matches dots, so a 3-segment `r.app.Executable.layerreach.json` matches `r.*.*.json`. Falls back to
 # that glob only when the query binary isn't located yet, so it never breaks the wrapper.
+# Delegate to candor-query if it's already located — NO build-on-demand, NO exit (unlike `query()`), so
+# the read-only report helpers below degrade gracefully before the first build. The report-lifecycle
+# logic (exists/backend/clear) now lives ONCE in candor-query (tested), not copy-pasted across scripts.
+cq() { local q; q="$(find_query 2>/dev/null || true)"; [ -n "$q" ] && "$q" "$@"; }
+
 report_exists() {
   local q; q="$(find_query 2>/dev/null || true)"
   if [ -n "$q" ]; then "$q" reports "$1" --exists; else ls "$1".*.*.json >/dev/null 2>&1; fi
 }
 
-# A stable-backend report is named `<prefix>.<crate>.scan.json` — so its presence is detectable by the
-# filename, no parsing needed. Used to keep the lint and scan backends from being confused/mixed.
-is_scan_report() { ls "$1".*.scan.json >/dev/null 2>&1; }
+# Which backend produced the report at <prefix>: `candor-query reports --backend` (reads report_files'
+# exact kind, the single owner). Used to keep the lint and scan backends from being confused/mixed.
+is_scan_report() { [ "$(cq reports "$1" --backend 2>/dev/null)" = scan ]; }
 
 # Remove a stale STABLE-backend report for <prefix> (e.g. left by the Stop hook when no dylib was
-# present) before the lint regenerates, so a lint report and a scan report never coexist under the same
-# prefix — which would otherwise double-count functions (report_files matches both) and let a
-# `diff`/receipt read a mix. Clears ONLY the scan files, so the lint's own last-good report survives a
-# build failure.
-clear_scan_reports() { rm -f "$1".*.scan.json "$1".*.scan.callgraph.json 2>/dev/null || true; }
+# present) before the lint regenerates, so a lint report and a scan report never coexist under one
+# prefix (which would double-count functions and let a diff/receipt read a mix). `--clear-other lint`
+# keeps the lint's files (incl. its last-good report on a build failure) and drops only the scan ones.
+clear_scan_reports() { cq reports "$1" --clear-other lint >/dev/null 2>&1 || true; }
 
 # Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
 [ "${1:-}" = "candor" ] && shift
@@ -189,14 +184,12 @@ engine_ver() {
   # No lint dylib resolved → the report came from the STABLE scanner; stamp it `scan` so a reader (and
   # `cargo candor audit`'s header) can't mistake a syntactic report for the nightly lint at a git hash.
   [ -z "${LIB:-}" ] && { printf 'scan'; return 0; }
-  # The dylib's OWN stamp is authoritative — including the literal `unknown` build.rs writes when git
-  # was absent at build time. Match `[0-9a-zA-Z]+` (not just hex) so `candor-build-version=unknown` is
-  # returned as-is, rather than falling through to the source HEAD below — that fallback reintroduces
-  # the very "pulled-but-not-rebuilt source diverges from the running dylib" masking build.rs avoids.
-  v="$(strings -a "$LIB" 2>/dev/null | grep -oE 'candor-build-version=[0-9a-zA-Z]+' | head -1 | cut -d= -f2)"
+  # The dylib's OWN stamp is authoritative (`candor-query engine-version` reads the tag build.rs embedded
+  # — portable, no `strings` dependency; includes the literal `unknown` build.rs writes without a git).
+  v="$(cq engine-version "$LIB" 2>/dev/null)"
   [ -n "$v" ] && { printf '%s' "$v"; return 0; }
-  # Only when there's NO readable tag at all (no `strings`, a fully stripped binary) do we last-resort
-  # to source HEAD — there's nothing better to report.
+  # Only when there's NO readable tag (stripped binary, or candor-query not located) do we last-resort to
+  # source HEAD — there's nothing better to report.
   git -C "$CANDOR_DIR" rev-parse --short HEAD 2>/dev/null
 }
 
