@@ -1,0 +1,346 @@
+[
+ {
+  "name": "reqwest",
+  "expect": "Net (HTTP client)",
+  "ver": "0.13.4",
+  "rs": 40,
+  "fns": 7,
+  "eff": {
+   "Fs": 4,
+   "Ipc": 2,
+   "Env": 1
+  }
+ },
+ {
+  "name": "hyper",
+  "expect": "Net (HTTP)",
+  "ver": "1.10.1",
+  "rs": 64,
+  "fns": 18,
+  "eff": {
+   "Clock": 18
+  }
+ },
+ {
+  "name": "ureq",
+  "expect": "Net (blocking HTTP)",
+  "missing": true
+ },
+ {
+  "name": "tokio",
+  "expect": "Net/Fs/Clock (async runtime)",
+  "ver": "1.52.3",
+  "rs": 547,
+  "fns": 153,
+  "eff": {
+   "Fs": 41,
+   "Log": 36,
+   "Net": 31,
+   "Clock": 27,
+   "Rand": 22,
+   "Ipc": 11,
+   "Env": 2,
+   "Exec": 1
+  }
+ },
+ {
+  "name": "mio",
+  "expect": "Net/Ipc (low-level IO)",
+  "ver": "1.2.1",
+  "rs": 62,
+  "fns": 26,
+  "eff": {
+   "Net": 16,
+   "Fs": 7,
+   "Ipc": 5
+  }
+ },
+ {
+  "name": "tonic",
+  "expect": "Net (gRPC)",
+  "ver": "0.14.6",
+  "rs": 61,
+  "fns": 7,
+  "eff": {
+   "Net": 4,
+   "Ipc": 2,
+   "Log": 1
+  }
+ },
+ {
+  "name": "rusqlite",
+  "expect": "Db (SQLite FFI)",
+  "ver": "0.39.0",
+  "rs": 60,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "redis",
+  "expect": "Db/Net",
+  "ver": "0.27.6",
+  "rs": 63,
+  "fns": 81,
+  "eff": {
+   "Net": 53,
+   "Rand": 26,
+   "Ipc": 7
+  }
+ },
+ {
+  "name": "tempfile",
+  "expect": "Fs/Env/Rand",
+  "ver": "3.27.0",
+  "rs": 19,
+  "fns": 18,
+  "eff": {
+   "Env": 12,
+   "Fs": 12,
+   "Rand": 9
+  }
+ },
+ {
+  "name": "walkdir",
+  "expect": "Fs (dir walk)",
+  "ver": "2.5.0",
+  "rs": 7,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "notify",
+  "expect": "Fs (file watch)",
+  "ver": "8.2.0",
+  "rs": 9,
+  "fns": 27,
+  "eff": {
+   "Fs": 15,
+   "Clock": 8,
+   "Env": 6
+  }
+ },
+ {
+  "name": "memmap2",
+  "expect": "Fs (mmap)",
+  "ver": "0.9.10",
+  "rs": 6,
+  "fns": 2,
+  "eff": {
+   "Fs": 2
+  }
+ },
+ {
+  "name": "git2",
+  "expect": "Fs/Net/Exec (libgit2)",
+  "ver": "0.20.4",
+  "rs": 81,
+  "fns": 7,
+  "eff": {
+   "Exec": 3,
+   "Env": 2,
+   "Fs": 2
+  }
+ },
+ {
+  "name": "flate2",
+  "expect": "Fs (compression)",
+  "ver": "1.1.9",
+  "rs": 49,
+  "fns": 1,
+  "eff": {
+   "Rand": 1
+  }
+ },
+ {
+  "name": "tar",
+  "expect": "Fs (archives)",
+  "ver": "0.4.46",
+  "rs": 15,
+  "fns": 9,
+  "eff": {
+   "Fs": 9
+  }
+ },
+ {
+  "name": "zip",
+  "expect": "Fs (archives)",
+  "missing": true
+ },
+ {
+  "name": "csv",
+  "expect": "Fs (csv io)",
+  "ver": "1.4.0",
+  "rs": 49,
+  "fns": 2,
+  "eff": {
+   "Fs": 2
+  }
+ },
+ {
+  "name": "config",
+  "expect": "Fs/Env (config)",
+  "ver": "0.15.19",
+  "rs": 35,
+  "fns": 3,
+  "eff": {
+   "Env": 3,
+   "Fs": 1
+  }
+ },
+ {
+  "name": "clap",
+  "expect": "Env (arg parsing)",
+  "ver": "4.6.1",
+  "rs": 85,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "chrono",
+  "expect": "Clock",
+  "ver": "0.4.45",
+  "rs": 44,
+  "fns": 21,
+  "eff": {
+   "Clock": 13,
+   "Fs": 11,
+   "Env": 9
+  }
+ },
+ {
+  "name": "time",
+  "expect": "Clock",
+  "ver": "0.3.47",
+  "rs": 147,
+  "fns": 6,
+  "eff": {
+   "Clock": 6
+  }
+ },
+ {
+  "name": "uuid",
+  "expect": "Rand/Clock",
+  "ver": "1.23.2",
+  "rs": 23,
+  "fns": 24,
+  "eff": {
+   "Rand": 24
+  }
+ },
+ {
+  "name": "rand",
+  "expect": "Rand",
+  "ver": "0.10.1",
+  "rs": 29,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "ring",
+  "expect": "Rand (crypto)",
+  "ver": "0.17.14",
+  "rs": 168,
+  "fns": 1,
+  "eff": {
+   "Rand": 1
+  }
+ },
+ {
+  "name": "rustls",
+  "expect": "Net (TLS)",
+  "ver": "0.23.40",
+  "rs": 110,
+  "fns": 3,
+  "eff": {
+   "Fs": 3,
+   "Env": 1
+  }
+ },
+ {
+  "name": "sha2",
+  "expect": "pure (hashing)",
+  "ver": "0.11.0",
+  "rs": 29,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "regex",
+  "expect": "pure",
+  "ver": "1.12.3",
+  "rs": 22,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "serde_json",
+  "expect": "pure (parse)",
+  "ver": "1.0.150",
+  "rs": 69,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "toml",
+  "expect": "pure (parse)",
+  "ver": "1.1.2+spec-1.1.0",
+  "rs": 39,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "nix",
+  "expect": "Fs/Exec/Net/Ipc (syscalls)",
+  "ver": "0.29.0",
+  "rs": 113,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "which",
+  "expect": "Fs/Env/Exec",
+  "ver": "8.0.2",
+  "rs": 8,
+  "fns": 13,
+  "eff": {
+   "Fs": 8,
+   "Env": 5
+  }
+ },
+ {
+  "name": "dirs",
+  "expect": "Fs/Env",
+  "ver": "6.0.0",
+  "rs": 5,
+  "fns": 12,
+  "eff": {
+   "Env": 12
+  }
+ },
+ {
+  "name": "tracing",
+  "expect": "Log",
+  "ver": "0.1.44",
+  "rs": 85,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "log",
+  "expect": "Log",
+  "ver": "0.4.32",
+  "rs": 12,
+  "fns": 0,
+  "eff": {}
+ },
+ {
+  "name": "crossbeam-channel",
+  "expect": "Ipc (channels)",
+  "ver": "0.5.15",
+  "rs": 34,
+  "fns": 29,
+  "eff": {
+   "Clock": 29
+  }
+ }
+]

@@ -20,10 +20,13 @@
 //! crate that would link every `.new()` to all 100+ `*::new` defs and smear one type's effect across the
 //! whole graph (a false-positive blow-up). Under-reporting an ambiguous edge is the honest failure mode.
 //!
-//! Usage:  candor-scan [<crate-dir>] [--out <prefix>] [--json]
+//! Usage:  candor-scan [<crate-dir>] [--out <prefix>] [--json] [--include-tests]
 //!   default dir = ".", default prefix = "<dir>/.candor/report"; writes <prefix>.<crate>.scan.json (+ a
 //!   callgraph sidecar so `cargo candor callers <fn>` works on the stable report too). `--json` prints
-//!   the report to stdout instead.
+//!   the report to stdout instead. By DEFAULT only the crate's library/binary source is scanned —
+//!   `tests/`, `benches/`, `examples/`, `test/`, `build.rs`, and `#[cfg(test)]` modules are skipped, so
+//!   the report describes what the CRATE does, not what its harness does (`--include-tests` keeps them).
+//!   See eval/calibration for accuracy on 35 real crates.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -101,10 +104,37 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     }
 }
 
+/// True if an item carries `#[cfg(test)]` (or `#[cfg(any(test, ...))]`) — a test-only module the
+/// default scan skips, since its effects describe the crate's TESTS, not the crate.
+fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("cfg") && {
+            let mut found = false;
+            // tokens of `cfg(...)` — a literal `test` ident anywhere inside is the signal (covers
+            // `cfg(test)` and `cfg(any(test, feature = "x"))`).
+            let _ = a.parse_nested_meta(|m| {
+                if m.path.is_ident("test") {
+                    found = true;
+                }
+                // descend into any(...)/all(...) groups without erroring on their contents
+                let _ = m.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("test") {
+                        found = true;
+                    }
+                    Ok(())
+                });
+                Ok(())
+            });
+            found
+        }
+    })
+}
+
 fn scan_items(
     items: &[syn::Item],
     modpath: &str,
     file: &str,
+    include_tests: bool,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -134,10 +164,13 @@ fn scan_items(
                 }
             }
             syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue; // a #[cfg(test)] module — its effects are the tests', not the crate's
+                }
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, file, &mut subuses, out);
+                    scan_items(inner, &sub, file, include_tests, &mut subuses, out);
                 }
             }
             _ => {}
@@ -203,13 +236,17 @@ fn main() {
     let mut dir = ".".to_string();
     let mut prefix = String::new();
     let mut want_json = false;
+    let mut include_tests = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--out" => prefix = it.next().cloned().unwrap_or_default(),
             "--json" => want_json = true,
+            "--include-tests" => include_tests = true,
             "-h" | "--help" => {
-                eprintln!("candor-scan [<dir>] [--out <prefix>] [--json] — stable, syntactic effect report");
+                eprintln!("candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests]");
+                eprintln!("  stable, syntactic effect report. By default skips Cargo's non-library targets");
+                eprintln!("  (tests/ benches/ examples/) and #[cfg(test)] modules — pass --include-tests to keep them.");
                 return;
             }
             _ => dir = a.clone(),
@@ -227,12 +264,33 @@ fn main() {
         if p.components().any(|c| matches!(c.as_os_str().to_str(), Some("target") | Some(".git"))) {
             continue;
         }
+        // The build script runs at COMPILE time (ring's build.rs execs nasm) — never the crate's runtime
+        // behaviour, so skip it always.
+        if p.file_name().and_then(|s| s.to_str()) == Some("build.rs") {
+            continue;
+        }
+        // Cargo's non-library compilation targets (tests/, benches/, examples/) — and the common nonstandard
+        // singular `test/` tree (e.g. nix) — describe what the crate's HARNESS does (spawn a server, read
+        // fixtures, seed RNG), not what the crate itself does. Scanning them conflates the two (redis's bench
+        // harness alone showed Exec/Net/Fs/Env/Rand on 200+ fns). A `#[cfg(test)] mod foo;` FILE module is
+        // also invisible here — its test-ness is declared at the `mod` site, not in foo.rs — so matching the
+        // directory name is the only syntactic signal we have. Skip by default; `--include-tests` keeps them.
+        if !include_tests
+            && p.components().any(|c| {
+                matches!(
+                    c.as_os_str().to_str(),
+                    Some("tests") | Some("test") | Some("benches") | Some("examples")
+                )
+            })
+        {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(p) else { continue };
         let Ok(file) = syn::parse_file(&text) else { continue };
         let rel = p.strip_prefix(root).unwrap_or(p);
         let modpath = module_path(rel);
         let mut uses = HashMap::new();
-        scan_items(&file.items, &modpath, &rel.to_string_lossy(), &mut uses, &mut fns);
+        scan_items(&file.items, &modpath, &rel.to_string_lossy(), include_tests, &mut uses, &mut fns);
     }
 
     // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
@@ -525,6 +583,19 @@ mod tests {
         let bare: Option<&Vec<String>> =
             tail2("new").and_then(|t2| by_tail2.get(&t2)).or_else(|| by_leaf.get("new").filter(|v| v.len() == 1));
         assert_eq!(bare, None);
+    }
+
+    #[test]
+    fn cfg_test_modules_are_recognised() {
+        let yes1: syn::ItemMod = syn::parse_str("#[cfg(test)] mod tests {}").unwrap();
+        let yes2: syn::ItemMod =
+            syn::parse_str("#[cfg(any(test, feature = \"x\"))] mod tests {}").unwrap();
+        let no1: syn::ItemMod = syn::parse_str("#[cfg(feature = \"std\")] mod imp {}").unwrap();
+        let no2: syn::ItemMod = syn::parse_str("mod real {}").unwrap();
+        assert!(is_cfg_test(&yes1.attrs));
+        assert!(is_cfg_test(&yes2.attrs));
+        assert!(!is_cfg_test(&no1.attrs));
+        assert!(!is_cfg_test(&no2.attrs));
     }
 
     #[test]

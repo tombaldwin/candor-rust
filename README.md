@@ -128,6 +128,14 @@ identity. So on resolution-heavy code it **under-reports** relative to the lint.
 zero-friction triage and CI on stable; use the nightly lint when you need the soundness contract
 (`Unknown` over-approximation, conformance, the policy/guard gates).
 
+By default `scan` reports only the crate's **library/binary** source — it skips `tests/`, `benches/`,
+`examples/`, `build.rs`, and `#[cfg(test)]` modules, so the report is what the *crate* does, not what its
+harness does (`--include-tests` keeps them). A [calibration on 35 real crates](eval/calibration/CALIBRATION.md)
+found that with this in place the scanner has **no false positives in library code** — every effect it
+reports is real; its only errors are under-reports through FFI, method dispatch, and macros (the lint's
+job). E.g. it correctly catches chrono reading `/etc/localtime`+`$TZ` and `which` resolving `$PATH`,
+and honestly shows `Net: 0` on reqwest (whose socket I/O hides behind hyper's resolved method calls).
+
 ## Quick start (humans)
 
 After `install.sh`, use the wrapper from any Rust project (it self-heals — rebuilding the dylib if it
