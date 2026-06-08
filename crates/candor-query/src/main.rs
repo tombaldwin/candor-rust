@@ -34,10 +34,12 @@ fn main() {
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
         "state" => cmd_state(rest),
+        "reports" => cmd_reports(rest),
+        "merge-hook" => cmd_merge_hook(rest),
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|receipt|gains|state)"
+                 (audit|show|where|callers|map|diff|receipt|gains|state|reports|merge-hook)"
             );
             2
         }
@@ -872,6 +874,94 @@ fn cmd_state(args: &[String]) -> i32 {
     0
 }
 
+/// `reports <prefix> [--exists]` — the canonical report-file discovery for a prefix, via
+/// `candor_report::report_files` (the SAME `<prefix>.<crate>.<type>.json` shape, with the exact
+/// sidecar exclusion: `.calibrated.json` / `.encountered-*` / `.layerreach.json` are NOT reports).
+/// Default: print one report path per line. `--exists`: print nothing, exit 0 if any report exists
+/// else 1 — a drop-in for the `ls "$prefix".*.*.json >/dev/null` existence checks in the wrapper, so
+/// "what counts as a report" is defined once (here) instead of approximated by a shell glob.
+fn cmd_reports(args: &[String]) -> i32 {
+    let exists_only = args.iter().any(|a| a == "--exists");
+    let Some(prefix) = args.iter().find(|a| !a.starts_with("--")) else {
+        eprintln!("usage: candor-query reports <prefix> [--exists]");
+        return 2;
+    };
+    let files = report_files(prefix);
+    if exists_only {
+        return if files.is_empty() { 1 } else { 0 };
+    }
+    for rf in &files {
+        println!("{}", rf.path.display());
+    }
+    0
+}
+
+/// `merge-hook <settings.json> <hook-command>` — idempotently merge candor's Stop hook into a Claude
+/// Code settings file, NON-destructively. Replaces an inline `python3` heredoc (one less interpreter
+/// dependency, and typed + tested). If the file exists but isn't strict JSON (comments / trailing
+/// commas, which Claude Code tolerates but a strict parser rejects), it is LEFT UNTOUCHED and a manual
+/// snippet is printed — never reset-and-overwritten, which would wipe the user's other settings.
+fn cmd_merge_hook(args: &[String]) -> i32 {
+    let (Some(path), Some(cmd)) = (args.first(), args.get(1)) else {
+        eprintln!("usage: candor-query merge-hook <settings.json> <hook-command>");
+        return 2;
+    };
+    let manual = || {
+        eprintln!("  WARNING: {path} isn't plain JSON (comments or trailing commas?) — NOT modifying it.");
+        eprintln!(
+            "  Add this Stop hook by hand: {{\"matcher\":\"*\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{cmd}\"}}]}}"
+        );
+    };
+    let mut data: serde_json::Value = if Path::new(path).exists() {
+        match std::fs::read_to_string(path) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(v) => v,
+                Err(_) => {
+                    manual();
+                    return 0; // unparseable → leave it; do not risk the user's settings
+                }
+            },
+            Err(e) => {
+                eprintln!("candor-query: cannot read {path}: {e}");
+                return 1;
+            }
+        }
+    } else {
+        serde_json::json!({})
+    };
+    // Navigate/insert hooks.Stop, bailing (untouched) if any node is the wrong JSON type.
+    let Some(obj) = data.as_object_mut() else {
+        manual();
+        return 0;
+    };
+    let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
+    let Some(stop) = hooks
+        .as_object_mut()
+        .map(|h| h.entry("Stop").or_insert_with(|| serde_json::json!([])))
+        .and_then(|s| s.as_array_mut())
+    else {
+        manual();
+        return 0;
+    };
+    let present = stop.iter().any(|g| {
+        g.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+            hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd.as_str()))
+        })
+    });
+    if present {
+        println!("  Stop hook already present in {path}");
+        return 0;
+    }
+    stop.push(serde_json::json!({"matcher": "*", "hooks": [{"type": "command", "command": cmd}]}));
+    let body = serde_json::to_string_pretty(&data).unwrap_or_default();
+    if let Err(e) = std::fs::write(path, format!("{body}\n")) {
+        eprintln!("candor-query: cannot write {path}: {e}");
+        return 1;
+    }
+    println!("  merged Stop hook into {path}");
+    0
+}
+
 /// Recursively collect `*.rs` files under `dir`, skipping `target` and `.git` directories (and any
 /// symlinked dir, to avoid cycles). Order-independent; the caller sorts.
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -922,6 +1012,46 @@ fn two(args: &[String]) -> Option<(&str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// merge-hook must: add the hook to a fresh/empty file; PRESERVE the user's other settings; be
+    /// idempotent; and — the critical safeguard — leave an unparseable file UNTOUCHED rather than
+    /// clobber it. (The bug this guards against once wiped a user's permissions/model on re-install.)
+    #[test]
+    fn merge_hook_is_nondestructive_and_idempotent() {
+        let dir = std::env::temp_dir().join("candor-query-merge-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cmd = "X/stop-hook.sh".to_string();
+        let arg = |p: &std::path::Path| vec![p.to_string_lossy().to_string(), cmd.clone()];
+
+        // 1) fresh file → hook added, parseable.
+        let fresh = dir.join("fresh.json");
+        assert_eq!(cmd_merge_hook(&arg(&fresh)), 0);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], cmd.as_str());
+
+        // 2) existing unrelated settings preserved.
+        let keep = dir.join("keep.json");
+        std::fs::write(&keep, r#"{"model":"opus","permissions":{"allow":["Bash"]}}"#).unwrap();
+        assert_eq!(cmd_merge_hook(&arg(&keep)), 0);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&keep).unwrap()).unwrap();
+        assert_eq!(v["model"], "opus");
+        assert_eq!(v["permissions"]["allow"][0], "Bash");
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], cmd.as_str());
+
+        // 3) idempotent — a second merge doesn't duplicate the hook.
+        assert_eq!(cmd_merge_hook(&arg(&keep)), 0);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&keep).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
+
+        // 4) unparseable (comments/trailing comma) → LEFT UNTOUCHED.
+        let bad = dir.join("bad.json");
+        let original = "{ // comment\n  \"model\": \"x\",\n}";
+        std::fs::write(&bad, original).unwrap();
+        assert_eq!(cmd_merge_hook(&arg(&bad)), 0);
+        assert_eq!(std::fs::read_to_string(&bad).unwrap(), original, "must not touch a non-JSON file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `collect_rs` + the FNV digest must be deterministic, sensitive to `.rs` content, and blind to
     /// `target/` and `.git/` — the contract the ~10 shell sites used to re-implement (inconsistently).

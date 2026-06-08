@@ -74,34 +74,16 @@ fi
 [ -n "$QUERY" ] && echo "  pinned CANDOR_QUERY ($(basename "$(dirname "$(dirname "$QUERY")")")/$(basename "$(dirname "$QUERY")")/candor-query)" \
   || echo "  ⚠ candor-query unavailable — the receipt will show a crude count until you run 'cargo candor setup'."
 
-# --- merge the Stop hook into .claude/settings.json (non-destructive) ---
+# --- merge the Stop hook into .claude/settings.json (non-destructive, via candor-query) ---
+# candor-query does the merge: idempotent, preserves the user's other settings, and LEAVES the file
+# untouched if it isn't strict JSON (comments / trailing commas) rather than risking a clobber. One
+# fewer interpreter dependency than the old inline python3 heredoc, and the logic is unit-tested.
 SETTINGS="$TARGET/.claude/settings.json"
 HOOK_CMD='${CLAUDE_PROJECT_DIR}/.claude/candor/stop-hook.sh'
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$SETTINGS" "$HOOK_CMD" <<'PY'
-import json, os, sys
-path, cmd = sys.argv[1], sys.argv[2]
-data = {}
-if os.path.exists(path):
-    try:
-        data = json.load(open(path))
-    except Exception:
-        # The file exists but isn't plain JSON — most likely comments / trailing commas, which Claude
-        # Code itself accepts but json.load rejects. Do NOT reset-and-overwrite (that would WIPE the
-        # user's permissions/env/model/other hooks). Leave it untouched and print the manual snippet.
-        sys.stderr.write("  WARNING: %s isn't plain JSON (comments or trailing commas?) — NOT modifying it.\n" % path)
-        sys.stderr.write('  Add this Stop hook by hand: {"matcher":"*","hooks":[{"type":"command","command":"%s"}]}\n' % cmd)
-        sys.exit(0)
-stop = data.setdefault("hooks", {}).setdefault("Stop", [])
-def has(c):
-    return any(h.get("command") == c for g in stop for h in g.get("hooks", []))
-if not has(cmd):
-    stop.append({"matcher": "*", "hooks": [{"type": "command", "command": cmd}]})
-json.dump(data, open(path, "w"), indent=2); open(path, "a").write("\n")
-print("  merged Stop hook into", path)
-PY
+if [ -n "$QUERY" ]; then
+  "$QUERY" merge-hook "$SETTINGS" "$HOOK_CMD"
 else
-  echo "  python3 not found — add this to $SETTINGS manually:"
+  echo "  candor-query unavailable — add this to $SETTINGS manually:"
   echo '    {"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"'"$HOOK_CMD"'"}]}]}}'
 fi
 
