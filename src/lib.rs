@@ -200,6 +200,8 @@ pub struct Candor {
     policy: Vec<PolicyRule>,
     /// CANDOR_POLICY: declared host-allowlist rules to enforce (AS-EFF-008). Parsed from the same file.
     host_rules: Vec<HostRule>,
+    /// CANDOR_POLICY: declared module-layering rules to enforce (AS-EFF-009). Parsed from the same file.
+    layer_rules: Vec<LayerRule>,
     /// CANDOR_TAINT: flag effects whose argument derives from a function parameter (AS-EFF-007).
     taint: bool,
     /// Per-function effects performed on a parameter-derived (caller-controlled) argument.
@@ -260,7 +262,7 @@ impl Candor {
             },
             Err(_) => ParsedPolicy::default(),
         };
-        let ParsedPolicy { rules: policy, host_rules } = parsed_policy;
+        let ParsedPolicy { rules: policy, host_rules, layer_rules } = parsed_policy;
         Self {
             direct: HashMap::new(),
             fs_direct: HashMap::new(),
@@ -279,6 +281,7 @@ impl Candor {
             sites: HashMap::new(),
             policy,
             host_rules,
+            layer_rules,
             taint: std::env::var("CANDOR_TAINT").is_ok(),
             tainted: HashMap::new(),
         }
@@ -365,12 +368,25 @@ struct HostRule {
     raw: String,
 }
 
+/// One module-layering rule (`forbid <A> -> <B>`): a function in scope `A` must not *transitively*
+/// call into scope `B`. This is the dependency-direction half of architecture-as-code — "the domain
+/// layer must not reach into infra" — complementing the effect rules (which constrain *what* a layer
+/// does, not *who* it may depend on). AS-EFF-009. Checked over the local call graph (see the §6
+/// limitation note: cross-crate dependency edges are not yet loaded).
+struct LayerRule {
+    from: String,
+    to: String,
+    raw: String,
+}
+
 /// The rule kinds parsed from a `CANDOR_POLICY` file: effect-boundary rules (`deny`/`pure`,
-/// AS-EFF-006) and host-allowlist rules (`allow Net …`, AS-EFF-008).
+/// AS-EFF-006), host-allowlist rules (`allow Net …`, AS-EFF-008), and module-layering rules
+/// (`forbid <A> -> <B>`, AS-EFF-009).
 #[derive(Default)]
 struct ParsedPolicy {
     rules: Vec<PolicyRule>,
     host_rules: Vec<HostRule>,
+    layer_rules: Vec<LayerRule>,
 }
 
 /// The hostname part of a `host[:port]` literal (everything before the first `:`). Host-allowlist
@@ -449,6 +465,21 @@ fn parse_policy(text: &str) -> ParsedPolicy {
                 scope: toks.next().map(str::to_string),
                 raw: line.to_string(),
             }),
+            // `forbid <A> -> <B>` — a module-layering rule (AS-EFF-009).
+            "forbid" => {
+                let a = toks.next().unwrap_or("");
+                let arrow = toks.next().unwrap_or("");
+                let b = toks.next().unwrap_or("");
+                if a.is_empty() || arrow != "->" || b.is_empty() {
+                    eprintln!("candor: ignoring layering rule (want `forbid <scope> -> <scope>`): {line}");
+                    continue;
+                }
+                out.layer_rules.push(LayerRule {
+                    from: a.to_string(),
+                    to: b.to_string(),
+                    raw: line.to_string(),
+                });
+            }
             other => eprintln!("candor: ignoring policy rule (unknown kind `{other}`): {line}"),
         }
     }
@@ -2000,11 +2031,60 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             || baseline.is_some()
             || !self.policy.is_empty()
             || !self.host_rules.is_empty()
+            || !self.layer_rules.is_empty()
             || self.taint;
 
         // Stable ordering for reproducible output.
         let mut items: Vec<LocalDefId> = eff.keys().copied().collect();
         items.sort_by_cached_key(|f| cx.tcx.def_path_str(f.to_def_id()));
+
+        // AS-EFF-009 layering: precompute, per offending function, which forbidden layer it reaches.
+        // A `forbid A -> B` rule is violated by any function in scope A that *transitively* calls into
+        // scope B. We reverse-BFS from every function matching B over the LOCAL call graph and record
+        // each ancestor in scope A (with one reached B-target, for the message). Cross-crate dependency
+        // edges are not loaded — layering is within-crate (the common case; documented limitation).
+        let mut layer_viol: HashMap<LocalDefId, Vec<(String, String)>> = HashMap::new();
+        if !self.layer_rules.is_empty() {
+            let name_of = |g: LocalDefId| cx.tcx.def_path_str(g.to_def_id());
+            // reverse adjacency: callee -> its local callers.
+            let mut rev: HashMap<LocalDefId, Vec<LocalDefId>> = HashMap::new();
+            for (caller, callees) in &self.calls {
+                for c in callees {
+                    rev.entry(*c).or_default().push(*caller);
+                }
+            }
+            for rule in &self.layer_rules {
+                let targets: Vec<LocalDefId> =
+                    eff.keys().copied().filter(|g| scope_matches(&name_of(*g), &rule.to)).collect();
+                if targets.is_empty() {
+                    continue;
+                }
+                let mut seen: HashSet<LocalDefId> = HashSet::new();
+                let mut stack: Vec<(LocalDefId, String)> = Vec::new();
+                for t in &targets {
+                    let tn = name_of(*t);
+                    if let Some(callers) = rev.get(t) {
+                        for &c in callers {
+                            if seen.insert(c) {
+                                stack.push((c, tn.clone()));
+                            }
+                        }
+                    }
+                }
+                while let Some((node, tgt)) = stack.pop() {
+                    if scope_matches(&name_of(node), &rule.from) {
+                        layer_viol.entry(node).or_default().push((rule.raw.clone(), tgt.clone()));
+                    }
+                    if let Some(callers) = rev.get(&node) {
+                        for &c in callers {
+                            if seen.insert(c) {
+                                stack.push((c, tgt.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let mut json_entries: Vec<ReportEntry> = Vec::new();
         let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -2278,6 +2358,23 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         CANDOR,
                         span,
                         format!("[AS-EFF-008] `{name}` {detail}, forbidden by policy{scope}: `{}`", rule.raw),
+                    );
+                }
+            }
+
+            // AS-EFF-009 (CANDOR_POLICY layering): this function (in a `from` scope) transitively calls
+            // into a forbidden layer — the dependency-direction architecture rule. Precomputed above by
+            // reverse reachability over the call graph; emitted here where the function's span is known.
+            if let Some(viols) = layer_viol.get(&f) {
+                for (raw, tgt) in viols {
+                    span_lint(
+                        cx,
+                        CANDOR,
+                        span,
+                        format!(
+                            "[AS-EFF-009] `{name}` reaches into a forbidden layer (via `{tgt}`), \
+                             violating policy: `{raw}`"
+                        ),
                     );
                 }
             }
@@ -2906,6 +3003,22 @@ mod tests {
         // host_part compares by hostname, so a rule host accepts a reached host with a port.
         assert_eq!(host_part("api.stripe.com:443"), "api.stripe.com");
         assert_eq!(host_part("api.stripe.com"), "api.stripe.com");
+    }
+
+    #[test]
+    fn layering_rule_parses() {
+        let p = parse_policy(
+            "forbid domain -> infra\n\
+             forbid  app::web  ->  app::db \n\
+             forbid domain infra\n\
+             forbid domain ->\n\
+             forbid\n",
+        );
+        // Only the two well-formed `forbid <A> -> <B>` rules survive; the missing-arrow, missing-target,
+        // and bare `forbid` lines are dropped.
+        assert_eq!(p.layer_rules.len(), 2);
+        assert_eq!((p.layer_rules[0].from.as_str(), p.layer_rules[0].to.as_str()), ("domain", "infra"));
+        assert_eq!((p.layer_rules[1].from.as_str(), p.layer_rules[1].to.as_str()), ("app::web", "app::db"));
     }
 
     #[test]

@@ -14,6 +14,14 @@ effect questions several times cheaper than reading source. The map is only as a
 classifier, so candor marks what it can't resolve `Unknown` rather than guessing, and stays honest
 about the gap (coverage warnings, version-stamped reports).
 
+**And it enforces, at a scale nobody holds in their head.** Surfacing effects helps an agent; *blocking
+the PR* is what a model can't do for itself. As models get better at local call-graph tracing, candor's
+edge moves to the boundary a local edit can't see — an effect, an endpoint, or a layer dependency
+reached *transitively, across crates*. `cargo candor policy` makes that an architecture-as-code gate
+over a whole workspace: forbidden effects, network host allowlists, and layer-dependency rules
+(AS-EFF-006/008/009). A [pre-registered trial](eval/bet2/RESULTS.md) found that when the locally-simplest
+edit crossed a pure boundary, candor took the shipped-violation rate from **80% to 0%**.
+
 ### Get an agent using it — one paste, from nothing
 
 Give your coding agent (Claude Code, Cursor, …) this:
@@ -132,9 +140,12 @@ candor @62a9383
     …
 ```
 
-`cargo candor policy` enforces **architectural effect boundaries** — the failure mode AI agents have
-most, because they edit one function without seeing the whole effect graph. A policy file declares
-invariants and candor flags any *transitive* violation:
+`cargo candor policy` is candor's **architecture-as-code** layer — and the part that earns its keep as
+models get better at local reasoning. A model advises; only a tool, holding the whole effect graph,
+*blocks the PR*. It enforces the failure mode AI agents have most — editing one function without seeing
+the whole effect graph — and does it at a scale nobody holds in their head: one command snapshots every
+crate in the workspace, then enforces with the siblings loaded, so a boundary catches a violation whose
+cause lives in *another crate*. A policy file declares invariants and candor flags any *transitive* one:
 
 ```text
 # .candor/policy
@@ -142,20 +153,29 @@ deny Net Db Fs  domain                       # the domain layer must reach no I/
 pure            parse                        # parsing must be side-effect-free
 deny Exec                                    # nothing may spawn a subprocess
 allow Net in billing  api.stripe.com         # billing may reach the network — but ONLY Stripe
+forbid domain -> infra                       # the domain layer must not depend on infrastructure
 ```
 
 ```text
 [AS-EFF-006] `domain::checkout` performs { Db }, forbidden by policy (scope `domain`): `deny Net Db Fs domain`
 [AS-EFF-008] `billing::record_activity` reaches { metrics.growthtracker.io:443 } outside the allowlist, forbidden by policy (scope `billing`): `allow Net in billing api.stripe.com`
+[AS-EFF-009] `domain::checkout` reaches into a forbidden layer (via `infra::db::save`), violating policy: `forbid domain -> infra`
 ```
 
-`checkout` need not touch the database *directly* — candor catches it reaching `Db` through any callee,
-the boundary break a local diff would hide. The **host allowlist** (`allow Net in <scope> <host>…`,
-AS-EFF-008) goes further: it certifies *which endpoints* a layer may reach — a supply-chain boundary
-a model can't self-check, because the literal host is buried in a transitive, often **cross-crate**,
-callee. Enforce it across a whole workspace by snapshotting each crate's report and pointing
-`CANDOR_REPORTS` at them; an endpoint that lives in a shared crate still gets caught. See
-[examples/candor-policy](examples/candor-policy) and [eval/bet3](eval/bet3/RESULTS.md).
+Three boundary kinds, all checked *transitively* so they catch what a local diff hides:
+
+- **`deny` / `pure`** (AS-EFF-006) — *what* a layer may do. `checkout` need not touch the database
+  directly; candor catches it reaching `Db` through any callee.
+- **`allow Net in <scope> <host>…`** (AS-EFF-008) — *which endpoints* a layer may reach. A supply-chain
+  boundary a model can't self-check, because the literal host is buried in a transitive, often
+  **cross-crate**, callee.
+- **`forbid <A> -> <B>`** (AS-EFF-009) — *who* a layer may depend on. The domain layer must not reach
+  into infra, even through a chain of helpers.
+
+`cargo candor policy` enforces all three across a whole workspace in one command — it snapshots every
+crate, then enforces with the siblings loaded, so an effect or endpoint that lives in a *shared crate*
+still gets caught at the boundary that forbids it. See [examples/candor-policy](examples/candor-policy)
+and [eval/bet3](eval/bet3/RESULTS.md).
 
 `cargo candor risk` is an **advisory, heuristic** nudge toward the injection class — an effect whose
 argument derives from a function parameter (`fs::read(format!("/var/cache/{key}"))`, `Command::new(name)`):

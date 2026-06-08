@@ -14,8 +14,11 @@
 #                                      (or one candor can't see) is a violation (AS-EFF-008). An
 #                                      allowlist a model can't self-check: the host is a literal buried
 #                                      in a transitive, possibly cross-crate, callee.
+#   forbid <A> -> <B>            a function in scope A must not (transitively) call into scope B — the
+#                                dependency-direction rule (AS-EFF-009). "domain must not reach infra."
 #
-# `#` comments and blank lines are ignored.
+# `#` comments and blank lines are ignored. Enforce a whole workspace in one command with
+# `cargo candor policy` (it snapshots every crate, then enforces with siblings loaded).
 
 # The domain / business-logic layer must not reach the network, a database, or the filesystem.
 deny Net Db Fs   domain
@@ -30,3 +33,6 @@ deny Exec
 # host (even through a deep or cross-crate helper) is flagged. This is the supply-chain boundary: a
 # model editing billing can't see which endpoint a transitive callee actually connects to.
 allow Net in billing  api.stripe.com  hooks.stripe.com
+
+# Layering: the domain layer must not depend on infrastructure — not even through a chain of helpers.
+forbid domain -> infra

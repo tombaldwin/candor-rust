@@ -200,6 +200,18 @@ want   "AS-EFF-008 flags the off-allowlist host reached transitively (billing::t
 absent "the allowed-host path is NOT flagged (billing::charge → api.stripe.com)"       "$out" '[AS-EFF-008] `billing::charge`'
 rm -rf "$(dirname "$HA")"
 
+# ── 9b. Module layering: forbid a dependency direction (AS-EFF-009) ──
+echo "== module layering / AS-EFF-009 (CANDOR_POLICY forbid) =="
+LY=$(mktemp -d)/ly; mkdir -p "$LY/src"
+printf '[package]\nname="ly"\nversion="0.1.0"\nedition="2021"\n' > "$LY/Cargo.toml"
+# domain::checkout reaches infra::db::save TRANSITIVELY through a domain helper; domain::price doesn't.
+printf 'mod infra { pub mod db { pub fn save(){} } }\nmod domain {\n  fn persist(){ crate::infra::db::save(); }\n  pub fn checkout(){ persist(); }\n  pub fn price()->u32{ 42 }\n}\nfn main(){ domain::checkout(); let _=domain::price(); }\n' > "$LY/src/main.rs"
+echo "forbid domain -> infra" > "$LY/policy"
+out=$(dl "$LY" env CANDOR_POLICY="$LY/policy")
+want   "AS-EFF-009 flags the forbidden cross-layer dependency reached transitively (domain::checkout)" "$out" '[AS-EFF-009] `domain::checkout`'
+absent "a domain fn that does NOT reach infra is not flagged (domain::price)"                          "$out" '[AS-EFF-009] `domain::price`'
+rm -rf "$(dirname "$LY")"
+
 # ── 10. Taint heuristic: an effect on caller-derived input (AS-EFF-007, P0′ §7) ──
 echo "== taint heuristic / AS-EFF-007 (CANDOR_TAINT) =="
 TZ=$(mktemp -d)/tz; mkdir -p "$TZ/src"

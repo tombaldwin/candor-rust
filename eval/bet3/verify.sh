@@ -44,5 +44,16 @@ else
   echo "PASS: allowed host (api.stripe.com) not flagged on billing::charge_customer"
 fi
 
+# 3) The SINGLE-COMMAND workspace gate: `cargo candor policy` snapshots the workspace then enforces
+#    with siblings loaded, in one invocation. Must block (exit 1) on the cross-crate host violation.
+echo "---"
+rm -rf target/dylint r.*.json
+wout="$(bash "$ROOT/../../cargo-candor" policy .candor/policy 2>&1)"; wrc=$?
+if [ "$wrc" -eq 1 ] && echo "$wout" | grep -q 'AS-EFF-008.*record_activity'; then
+  echo "PASS: single-command \`cargo candor policy\` blocks (exit 1) on the cross-crate violation"
+else
+  echo "FAIL: \`cargo candor policy\` should exit 1 and flag record_activity (got exit $wrc)"; fail=1
+fi
+
 rm -rf target/dylint r.*.json
 exit $fail

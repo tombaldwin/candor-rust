@@ -377,11 +377,23 @@ case "$cmd" in
     # `pure [scope]`, `allow Net [in <scope>] <host>...`; scope = a path substring. This is the
     # architectural-invariant gate an agent can't self-check.
     pol="${1:-.candor/policy}"
-    [ -f "$pol" ] || { echo "candor: no policy at '$pol'. Rules: 'deny Net Db domain', 'pure parse', 'allow Net in billing api.stripe.com'." >&2; exit 2; }
-    out="$(lint_fresh CANDOR_POLICY="$pol")"
-    printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]' >&2 || true
-    if printf '%s' "$out" | grep -qE 'AS-EFF-006|AS-EFF-008'; then
-      echo "candor: effect-policy violation (AS-EFF-006/008) — blocked. Bypass: git push --no-verify" >&2
+    [ -f "$pol" ] || { echo "candor: no policy at '$pol'. Rules: 'deny Net Db domain', 'pure parse', 'allow Net in billing api.stripe.com', 'forbid domain -> infra'." >&2; exit 2; }
+    # Workspace-scale, one command. First SNAPSHOT every crate's report (dylint lints all workspace
+    # members in one pass), so a boundary can see effects/hosts that physically live in a SIBLING crate.
+    # Then ENFORCE with those siblings loaded read-only (CANDOR_REPORTS) — host allowlists and effect
+    # boundaries now resolve across the crate graph, not just within the crate being checked.
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    snap() { CANDOR_JSON="$tmp/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
+    snap
+    ls "$tmp"/r.*.*.json >/dev/null 2>&1 || { rm -rf target/dylint 2>/dev/null || true; snap; }
+    # The snapshot warmed cargo's check cache; the CANDOR_* env vars aren't part of cargo's build
+    # fingerprint, so a plain re-run would be a cache hit that never re-emits diagnostics. Clear
+    # target/dylint so the enforce pass definitely re-runs the lint (with the siblings loaded).
+    rm -rf target/dylint 2>/dev/null || true
+    out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" cargo dylint --lib-path "$LIB" 2>&1 || true)"
+    printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]|\[AS-EFF-009\]' >&2 || true
+    if printf '%s' "$out" | grep -qE 'AS-EFF-006|AS-EFF-008|AS-EFF-009'; then
+      echo "candor: architecture-policy violation (AS-EFF-006/008/009) — blocked. Bypass: git push --no-verify" >&2
       exit 1
     fi
     echo "candor: policy OK — no boundary violations." >&2
