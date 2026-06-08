@@ -4,6 +4,11 @@ version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Shared candor report types + parsing (no rustc_private) — used by the lint and the CLI."
+authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
+repository = "https://github.com/tombaldwin/candor"
+readme = "README.md"
+keywords = ["candor", "effects", "report", "audit"]
+categories = ["development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

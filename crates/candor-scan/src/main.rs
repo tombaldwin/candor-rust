@@ -535,10 +535,25 @@ fn main() {
             "--out" => prefix = it.next().cloned().unwrap_or_default(),
             "--json" => want_json = true,
             "--include-tests" => include_tests = true,
+            "-V" | "--version" => {
+                println!("candor-scan {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
             "-h" | "--help" => {
-                eprintln!("candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests]");
-                eprintln!("  stable, syntactic effect report. By default skips Cargo's non-library targets");
-                eprintln!("  (tests/ benches/ examples/) and #[cfg(test)] modules — pass --include-tests to keep them.");
+                println!("candor-scan {} — stable-Rust effect scanner (no nightly)", env!("CARGO_PKG_VERSION"));
+                println!();
+                println!("USAGE:  candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests]");
+                println!();
+                println!("  <dir>             crate root to scan (default: .)");
+                println!("  --out <prefix>    report path prefix (default: <dir>/.candor/report);");
+                println!("                    writes <prefix>.<crate>.scan.json + a call-graph sidecar");
+                println!("  --json            print the report to stdout instead of writing files");
+                println!("  --include-tests   also scan tests/ benches/ examples/ and #[cfg(test)] modules");
+                println!("                    (off by default → the report describes the crate, not its harness)");
+                println!("  -V, --version     print version");
+                println!();
+                println!("Syntactic, so it under-reports vs the full candor nightly lint (no Unknown). It never");
+                println!("fabricates an effect. See https://github.com/tombaldwin/candor");
                 return;
             }
             _ => dir = a.clone(),

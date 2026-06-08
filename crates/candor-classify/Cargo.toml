@@ -4,6 +4,11 @@ version = "0.3.0"
 edition = "2021"
 description = "candor's curated effect classifier (crate+path -> effect) — pure, stable Rust."
 license = "MIT OR Apache-2.0"
+authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
+repository = "https://github.com/tombaldwin/candor"
+readme = "README.md"
+keywords = ["candor", "effects", "classifier", "capabilities", "audit"]
+categories = ["development-tools"]
 
 [dependencies]
 candor-report = { path = "../candor-report", version = "0.3.0" }

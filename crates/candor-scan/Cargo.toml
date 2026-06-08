@@ -4,6 +4,11 @@ version = "0.3.0"
 edition = "2021"
 description = "candor's STABLE-Rust effect scanner — syntactic call-graph + effect report, no nightly."
 license = "MIT OR Apache-2.0"
+authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
+repository = "https://github.com/tombaldwin/candor"
+readme = "README.md"
+keywords = ["effects", "capabilities", "static-analysis", "audit", "security"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 candor-report = { path = "../candor-report", version = "0.3.0" }
