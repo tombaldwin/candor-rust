@@ -1,0 +1,4 @@
+**/target/
+trials/
+.candor/
+.candor-usage.log
