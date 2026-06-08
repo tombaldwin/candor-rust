@@ -33,7 +33,14 @@ else
     || { echo "candor: could not build even the stable backend — see the errors above." >&2; exit 1; }
 fi
 
-LIB="$(ls "$CLONE"/target/debug/libcandor@*.dylib "$CLONE"/target/debug/libcandor@*.so 2>/dev/null | head -1 || true)"
+# Pick the NEWEST dylib by mtime — NOT `ls | head -1`, which sorts alphabetically: after a pinned-nightly
+# bump, `libcandor@nightly-2025-…dylib` sorts before the fresh `…2026-…dylib`, so head -1 would stash the
+# STALE-toolchain engine (and a later `cargo clean` would leave only that). Mirrors cargo-candor/find_lib.
+LIB=""
+for f in "$CLONE"/target/debug/libcandor@*.dylib "$CLONE"/target/debug/libcandor@*.so; do
+  [ -e "$f" ] || continue
+  { [ -z "$LIB" ] || [ "$f" -nt "$LIB" ]; } && LIB="$f"
+done
 Q="$(ls "$CLONE"/target/debug/candor-query 2>/dev/null | head -1 || true)"
 S="$(ls "$CLONE"/target/debug/candor-scan 2>/dev/null | head -1 || true)"
 [ -n "$S" ] || { echo "candor: no candor-scan binary produced — see the errors above." >&2; exit 1; }

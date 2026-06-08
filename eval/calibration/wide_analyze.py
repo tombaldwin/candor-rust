@@ -42,7 +42,8 @@ print("="*70)
 total=len(d["rows"])
 with_eff=sum(1 for r in d["rows"] if r["eff"])
 print(f"  {total} crates scanned, {len(d['errors'])} errors/timeouts")
-print(f"  {with_eff} report >=1 effect ({100*with_eff//total}%); {total-with_eff} report none")
+pct = (100*with_eff//total) if total else 0
+print(f"  {with_eff} report >=1 effect ({pct}%); {total-with_eff} report none")
 from collections import Counter
 alleff=Counter()
 for r in d["rows"]:

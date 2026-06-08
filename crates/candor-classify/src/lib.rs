@@ -23,8 +23,8 @@ pub fn classify_extra(
 /// PREFIXES it recognizes. This is the single source of truth for "what candor knows":
 /// it is emitted beside the JSON report (`<prefix>.calibrated.json`) so the Claude Code
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
-/// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
-/// enforces that every named crate the classifier matches appears here.
+/// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
+/// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
 pub const CALIBRATED_CRATES: [&str; 47] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer)
@@ -696,4 +696,75 @@ pub fn capstd_cap(crate_name: &str, type_name: &str) -> Option<&'static str> {
         "SystemClock" | "MonotonicClock" => "Clock",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_crates_are_calibrated() {
+        // The calibrated set must cover every DB client the classifier knows, or the receipt's coverage
+        // check would flag a recognized crate as a blind spot. (Was nightly-lint-only; now runs on stable.)
+        for c in DB_CRATES {
+            assert!(
+                CALIBRATED_CRATES.contains(&c),
+                "DB crate `{c}` is matched by classify() but missing from CALIBRATED_CRATES"
+            );
+        }
+    }
+
+    #[test]
+    fn calibrated_crates_are_live() {
+        // Conversely, every crate advertised as calibrated must actually be matched by classify() for
+        // some representative path — a dead entry would silently suppress a real coverage warning.
+        for c in CALIBRATED_CRATES {
+            let probes = [
+                format!("{c}::X::send"),
+                format!("{c}::X::execute"),
+                format!("{c}::X::call"),
+                format!("{c}::X::query"),
+                format!("{c}::X::fetch_one"),
+                format!("{c}::Remote::fetch"),
+                format!("{c}::X::connect"),
+                format!("{c}::Utc::now"),
+                format!("{c}::X::load"),
+                format!("{c}::__private_api::log"),
+                format!("{c}::tempfile"),
+                format!("{c}::glob"),
+                format!("{c}::X::run"),
+                format!("{c}::dotenv"),
+                format!("{c}::random"),
+                format!("{c}::emit"),
+                format!("{c}::X::emit_span_lint"),
+                format!("{c}::X::anything"),
+            ];
+            assert!(
+                probes.iter().any(|p| classify(c, p).is_some()),
+                "calibrated crate `{c}` is matched by no path in classify() — dead list entry"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_core_effects() {
+        // A representative smoke test of the classifier's main families, so the published crate is not
+        // shipped untested (these used to live only in the nightly-only src/lib.rs).
+        assert_eq!(classify("std", "std::fs::read_to_string"), Some("Fs"));
+        assert_eq!(classify("std", "std::process::Command::new"), Some("Exec"));
+        assert_eq!(classify("std", "std::env::var"), Some("Env"));
+        assert_eq!(classify("reqwest", "reqwest::Client::execute"), Some("Net"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::execute"), Some("Db"));
+        assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
+        // FFI tiers (matched by distinctive leaf, alias-independent)
+        assert_eq!(classify("libc", "libc::open"), Some("Fs"));
+        assert_eq!(classify("libc", "libc::connect"), Some("Net"));
+        assert_eq!(classify("libc", "libc::read"), None); // generic fd op — deliberately unclassified
+        assert_eq!(classify("ffi", "ffi::sqlite3_step"), Some("Db"));
+        assert_eq!(classify("raw", "raw::git_remote_fetch"), Some("Net"));
+        assert_eq!(classify("ffi", "ffi::SSL_connect"), Some("Net"));
+        // pure crates stay pure
+        assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
+        assert_eq!(classify("std", "std::vec::Vec::push"), None);
+    }
 }

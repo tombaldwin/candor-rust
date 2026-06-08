@@ -133,6 +133,17 @@ report_exists() {
   if [ -n "$q" ]; then "$q" reports "$1" --exists; else ls "$1".*.*.json >/dev/null 2>&1; fi
 }
 
+# A stable-backend report is named `<prefix>.<crate>.scan.json` — so its presence is detectable by the
+# filename, no parsing needed. Used to keep the lint and scan backends from being confused/mixed.
+is_scan_report() { ls "$1".*.scan.json >/dev/null 2>&1; }
+
+# Remove a stale STABLE-backend report for <prefix> (e.g. left by the Stop hook when no dylib was
+# present) before the lint regenerates, so a lint report and a scan report never coexist under the same
+# prefix — which would otherwise double-count functions (report_files matches both) and let a
+# `diff`/receipt read a mix. Clears ONLY the scan files, so the lint's own last-good report survives a
+# build failure.
+clear_scan_reports() { rm -f "$1".*.scan.json "$1".*.scan.callgraph.json 2>/dev/null || true; }
+
 # Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
 [ "${1:-}" = "candor" ] && shift
 cmd="${1:-audit}"; shift || true
@@ -175,6 +186,9 @@ esac
 # baseline. Fall back to HEAD only if the tag can't be read (e.g. no `strings`).
 engine_ver() {
   local v
+  # No lint dylib resolved → the report came from the STABLE scanner; stamp it `scan` so a reader (and
+  # `cargo candor audit`'s header) can't mistake a syntactic report for the nightly lint at a git hash.
+  [ -z "${LIB:-}" ] && { printf 'scan'; return 0; }
   # The dylib's OWN stamp is authoritative — including the literal `unknown` build.rs writes when git
   # was absent at build time. Match `[0-9a-zA-Z]+` (not just hex) so `candor-build-version=unknown` is
   # returned as-is, rather than falling through to the source HEAD below — that fallback reintroduces
@@ -250,12 +264,17 @@ case "$cmd" in
     else
       # Zero-install: the stable scanner produces the same report JSON with no nightly toolchain.
       echo "candor: using the stable backend (candor-scan)." >&2
+      # The stable backend writes no `.encountered`/`.calibrated` sidecars, so the coverage blind-spot
+      # list would come back EMPTY — a false all-clear. Don't pass --coverage; say it's unavailable.
+      [ -n "$cov" ] && { echo "candor: --coverage is unavailable on the stable backend (it needs the nightly lint's encountered-crate set)." >&2; cov=""; }
       scan_run "$PWD" --out "$tmp/a" >/dev/null 2>&1 || true
     fi
     if ! report_exists "$tmp/a"; then
       echo "candor: no report produced — did the crate build? Try 'cargo candor audit --all' to see errors." >&2
       exit 1
     fi
+    # engine_ver returns `scan` on the stable backend now (never empty), so the audit header honestly
+    # reads `@scan` rather than the clone's git hash — and the quoted slot can't collapse and shift argv.
     query audit "$tmp/a" "$(engine_ver)" "$CANDOR_DIR/candor-suspect" $cov
     exit 0 ;;
   strict)     export CANDOR_STRICT="${1:-1}";      exec cargo dylint --lib-path "$LIB" ;;
@@ -328,7 +347,11 @@ case "$cmd" in
     # hash everything else does (content-based, so a stale report can never be mistaken for fresh; a
     # mismatch just falls back to the slow path).
     cur=""; rp=".candor/report"
-    if report_exists "$rp" && [ -f .candor/state ]; then
+    # FAST PATH applies only to a LINT report: `diff` compares against a lint baseline, so a fresh but
+    # SCAN-produced `.candor/report` (e.g. the Stop hook ran the stable backend) must NOT be used as
+    # `cur` — its under-reporting would mask a real effect regression as 'no change'. Fall to the slow
+    # path (re-lint) when the cached report is a scan report.
+    if report_exists "$rp" && [ -f .candor/state ] && ! is_scan_report "$rp"; then
       cur_hash="$(src_state)"
       [ -n "$cur_hash" ] && [ "$cur_hash" = "$(cat .candor/state 2>/dev/null)" ] && cur="$rp"
     fi
@@ -367,6 +390,7 @@ case "$cmd" in
       cur="$(sh_hash)"
       if [ -n "$cur" ] && [ "$cur" != "$last" ]; then
         [ "$cleared" = 0 ] && { rm -rf target/dylint 2>/dev/null || true; cleared=1; }   # cold cache → force the first emit
+        clear_scan_reports "$PWD/.candor/report"   # drop any stale scan report so lint+scan never coexist
         if CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 \
            && report_exists .candor/report; then
           echo "$cur" > .candor/state                      # stamp ONLY on a successful build → fresh

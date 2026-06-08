@@ -24,9 +24,18 @@ ACTIVE="$(field 'str(d.get("stop_hook_active", False)).lower()')"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$("$SELF_DIR/candor-run.sh" "$DIR" 2>/dev/null)"; CODE=$?
 
-emit_human() {   # surface the last line to the human only (never reaches the model)
-  local msg; msg="$(printf '%s' "$OUT" | tail -1 | sed 's/\\/\\\\/g; s/"/\\"/g')"
-  [ -n "$msg" ] && printf '{"systemMessage": "%s", "suppressOutput": true}\n' "$msg"
+emit_human() {   # surface candor's output to the human only (never reaches the model)
+  # A plain receipt (exit 10) is one line; a §2 self-review (exit 11 in the loop-guard branch) is
+  # MULTI-line — the gained-effect detail then the advice. Send the WHOLE message (JSON escapes the
+  # newlines) so the loop-guard human still sees WHICH function/effect changed, not just the last line.
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$OUT" | python3 -c 'import sys,json
+m=sys.stdin.read().rstrip("\n")
+if m: print(json.dumps({"systemMessage": m, "suppressOutput": True}))'
+  else
+    local msg; msg="$(printf '%s' "$OUT" | tail -1 | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    [ -n "$msg" ] && printf '{"systemMessage": "%s", "suppressOutput": true}\n' "$msg"
+  fi
 }
 
 if [ "$CODE" = 11 ] && [ "$ACTIVE" != true ] && command -v python3 >/dev/null 2>&1 && [ -n "$OUT" ]; then

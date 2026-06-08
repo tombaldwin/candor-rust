@@ -123,13 +123,23 @@ fi
 VERSTAMP=""; [ -n "$VER" ] && VERSTAMP=" @$VER"
 
 # ---- decide whether to (re)run candor ----
-# Report is current iff it exists AND the source hash hasn't moved since we wrote it.
-# Reports are `<prefix>.<crate>.<type>.json` (two middle segments); the `.*.*.json` glob
-# matches those but NOT the single-segment `<prefix>.calibrated.json` coverage sidecar.
-report_exists() { ls "$REPORT_PREFIX".*.*.json >/dev/null 2>&1; }
+# Report is current iff it exists AND the source hash hasn't moved since we wrote it. Use candor-query's
+# `reports --exists` (the EXACT `report_files` two-segment rule) so a 3-segment sidecar
+# (`.callgraph.json` / `.layerreach.json`) is never miscounted as a report — the coarse `ls *.*.json`
+# glob matches those (`*` matches dots) and the receipt would then claim a non-existent map is present.
+# Fall back to the glob only when the query binary isn't located yet.
+report_exists() {
+  if [ -n "$QUERY" ]; then "$QUERY" reports "$REPORT_PREFIX" --exists; else ls "$REPORT_PREFIX".*.*.json >/dev/null 2>&1; fi
+}
+# A scan-produced report is named `<prefix>.<crate>.scan.json` — detectable by filename.
+is_scan_report() { ls "$REPORT_PREFIX".*.scan.json >/dev/null 2>&1; }
 need_run=$FORCE
 [ "$CUR" != "$PREV" ] && need_run=1
 report_exists || need_run=1
+# Backend transition: if a cached report was produced by the stable scanner but a nightly dylib is NOW
+# available, regenerate with the lint — otherwise the receipt would attribute the syntactic scan report
+# to the nightly engine (and never self-correct until the source changes).
+[ -n "$LIBP" ] && is_scan_report && need_run=1
 
 # Touch every workspace member's crate root (mtime only) to force `cargo dylint` to
 # recompile — dylint emits the report ONLY on recompilation, so an already-built
@@ -149,11 +159,22 @@ touch_roots() {
   done
   for r in src/lib.rs src/main.rs; do [ -f "$DIR/$r" ] && touch "$DIR/$r"; done
 }
-run_lint() { CANDOR_JSON="$REPORT_PREFIX" cargo dylint --lib-path "$LIB" >/dev/null 2>"$STATE_DIR/last-error.log"; }
+# Remove the OTHER backend's report before (re)generating, so lint and scan reports never coexist under
+# one prefix (which would double-count fns and mix backends). We clear only the OTHER backend's files —
+# never the one we're about to write — so a build failure still keeps the same-backend last-good report.
+clear_scan_reports() { rm -f "$REPORT_PREFIX".*.scan.json "$REPORT_PREFIX".*.scan.callgraph.json 2>/dev/null || true; }
+clear_lint_reports() {
+  local f
+  for f in "$REPORT_PREFIX".*.json "$REPORT_PREFIX".*.callgraph.json; do
+    [ -e "$f" ] || continue
+    case "$f" in *.scan.json | *.scan.callgraph.json) ;; *) rm -f "$f" ;; esac
+  done
+}
+run_lint() { clear_scan_reports; CANDOR_JSON="$REPORT_PREFIX" cargo dylint --lib-path "$LIB" >/dev/null 2>"$STATE_DIR/last-error.log"; }
 # The stable backend: produce the report with no nightly toolchain. candor-scan parses sources (it does
 # NOT build the crate), so it can't fail on a compile error — but it under-reports vs the lint (no
 # Unknown; misses some method/macro/cross-crate effects). Marked clearly so the receipt stays honest.
-run_scan() { "$SCAN" "$DIR" --out "$REPORT_PREFIX" >/dev/null 2>"$STATE_DIR/last-error.log"; }
+run_scan() { clear_lint_reports; "$SCAN" "$DIR" --out "$REPORT_PREFIX" >/dev/null 2>"$STATE_DIR/last-error.log"; }
 
 ran_ok=1; surfaced=0
 if [ "$need_run" = 1 ]; then
@@ -180,7 +201,9 @@ if [ "$need_run" = 1 ]; then
     # Zero-install fallback: the stable scanner. No nightly, no dylint — works anywhere `cargo` does.
     SCAN="$SCANP"
     BACKEND=" · stable backend (syntactic — install the nightly lint for Unknown/soundness)"
-    [ -z "$VER" ] && { VER="scan"; VERSTAMP=" @scan"; }
+    # Stamp the report as `@scan` UNCONDITIONALLY (override any clone-HEAD VER set above): the report was
+    # produced by the syntactic scanner, not the nightly lint at that commit, so the receipt must say so.
+    VER="scan"; VERSTAMP=" @scan"
     if run_scan && emitted; then
       echo "$CUR" > "$STATE"; ran_ok=1
     else
@@ -191,8 +214,12 @@ if [ "$need_run" = 1 ]; then
     exit 10
   fi
 fi
-# If a prior run left a scan report and the lint still isn't available, keep the receipt honest about it.
-[ -z "$LIBP" ] && [ -n "$SCANP" ] && [ -z "$BACKEND" ] && BACKEND=" · stable backend (syntactic — install the nightly lint for Unknown/soundness)"
+# If we're SERVING a cached scan report (no rerun this turn, no dylib), keep the receipt honest: mark it
+# the stable backend and stamp `@scan`, regardless of any clone-HEAD VER computed above.
+if [ -z "$LIBP" ] && is_scan_report; then
+  [ -z "$BACKEND" ] && BACKEND=" · stable backend (syntactic — install the nightly lint for Unknown/soundness)"
+  VER="scan"; VERSTAMP=" @scan"
+fi
 
 # ---- aggregate the report (candor-query preferred; degrade gracefully without it) ----
 # One `candor-query receipt` yields the fn count, effect breakdown, unresolved count, the calibrated
@@ -283,7 +310,11 @@ else
 fi
 
 # ---- coverage label ----
-if [ "${CALIB_SIDECAR:-0}" != 1 ]; then
+if [ "${CALIB_SIDECAR:-0}" != 1 ] && [ -z "$LIBP" ] && is_scan_report; then
+  # The stable backend writes no calibrated sidecar, so the gap check can't run — say so plainly rather
+  # than "deferred (arrives with the first report)", which never comes true on a scan-only machine.
+  COV="coverage: n/a on the stable backend (install the nightly lint for blind-spot detection)"
+elif [ "${CALIB_SIDECAR:-0}" != 1 ]; then
   COV="coverage: deferred (calibrated set arrives with the first report)"
 elif [ -n "$gaps" ]; then
   COV="⚠ coverage: $(echo "$gaps" | tr ' ' ',') uncalibrated — Db/Net may be incomplete for code using them"
@@ -299,7 +330,11 @@ fi
 # candor-query. `.candor/review-seen` makes each gained effect prompt at most once. Default OFF.
 REVIEW=""
 BASELINE_PREFIX="$STATE_DIR/baseline"
-if [ "${CANDOR_REVIEW:-0}" != 0 ] && [ "$ran_ok" = 1 ] \
+# Skip the review when the CURRENT report is a SCAN report (`! is_scan_report`): the baseline is
+# lint-produced and carries `Unknown`, so diffing a syntactic scan report against it would false-fire
+# (scan-only artifacts read as "gained") or silently defeat the review (a real effect scan can't see
+# makes the report show FEWER effects). The self-review needs the lint's soundness on both sides.
+if [ "${CANDOR_REVIEW:-0}" != 0 ] && [ "$ran_ok" = 1 ] && ! is_scan_report \
    && ls "$BASELINE_PREFIX".*.*.json >/dev/null 2>&1 && [ -n "$QUERY" ]; then
   bver=""; [ -f "$BASELINE_PREFIX.candor-version" ] && bver="$(cat "$BASELINE_PREFIX.candor-version" 2>/dev/null)"
   if [ -z "$bver" ] || [ -z "$VER" ] || [ "$bver" = "$VER" ]; then

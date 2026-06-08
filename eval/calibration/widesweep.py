@@ -37,12 +37,12 @@ for name in names:
         errors.append((name,"timeout")); continue
     except Exception as e:
         errors.append((name, str(e)[:40])); continue
-    fns = doc["functions"]
+    fns = doc.get("functions", []) if isinstance(doc, dict) else []
     eff = Counter()
     direct_src = Counter()  # distinct functions that DIRECTLY source each effect
     for f in fns:
-        for e in f["inferred"]: eff[e]+=1
-        for e in f.get("direct",[]): direct_src[e]+=1
+        for e in f.get("inferred", []): eff[e]+=1
+        for e in f.get("direct", []): direct_src[e]+=1
     rows.append({"name":name,"ver":os.path.basename(d).replace(name+"-",""),
                  "fns":len(fns),"eff":dict(eff),"direct":dict(direct_src)})
 json.dump({"rows":rows,"errors":errors,"pure":sorted(PURE)}, open("/tmp/wide_results.json","w"))

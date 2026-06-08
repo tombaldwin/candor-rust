@@ -116,7 +116,12 @@ fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, returns: &ReturnI
             let full = path_to_string(&p.path);
             let leaf = full.rsplit("::").next().unwrap_or(&full);
             if let Some((ty, last)) = full.rsplit_once("::") {
-                if is_ctor(last) && !ty.is_empty() {
+                // `Type::ctor(..)` yields `Type` — but ONLY when the receiver is a TYPE, not a module.
+                // Require the receiver's last segment to be type-like (UpperCamel), so `Client::new` →
+                // Client but `serde_json::from_str` (module path) does NOT infer the module as a type.
+                let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
+                let type_like = ty_leaf.chars().next().is_some_and(|c| c.is_uppercase());
+                if is_ctor(last) && type_like {
                     return Some(expand(ty, uses));
                 }
             }
@@ -147,15 +152,21 @@ fn unwrap_result_option(ty: &syn::Type) -> &syn::Type {
 /// `Command::new` → `std::process::Command::new`. `crate`/`self`/`super` prefixes are stripped (local).
 fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     let mut segs: Vec<&str> = path.split("::").collect();
+    // A path rooted at `crate`/`self`/`super` is EXPLICITLY crate-local — it is NOT subject to the file's
+    // `use` aliases, so after stripping the prefix we return it as-is. (Re-applying `uses` here would let
+    // a `use other::config;` import hijack a local `crate::config::load` call.)
+    let rooted_local = matches!(segs.first().copied(), Some("crate" | "self" | "super"));
     while matches!(segs.first().copied(), Some("crate" | "self" | "super")) {
         segs.remove(0);
     }
     if segs.is_empty() {
         return path.to_string();
     }
-    if let Some(full) = uses.get(segs[0]) {
-        let rest = &segs[1..];
-        return if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
+    if !rooted_local {
+        if let Some(full) = uses.get(segs[0]) {
+            let rest = &segs[1..];
+            return if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
+        }
     }
     segs.join("::")
 }
@@ -187,13 +198,13 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Try(t) => self.resolve_recv_type(&t.expr),
             syn::Expr::Await(a) => self.resolve_recv_type(&a.base),
             syn::Expr::MethodCall(m) => {
-                // Prefer a recorded return type for this method (only present when UNAMBIGUOUS — common
-                // names like `get`/`build` map to many types and are dropped, so this never hijacks a
-                // builder chain); else fall back to the base-receiver heuristic.
-                self.returns
-                    .get(&m.method.to_string())
-                    .cloned()
-                    .or_else(|| self.resolve_recv_type(&m.receiver))
+                // Walk through the chain to the base receiver's type. We deliberately do NOT consult the
+                // return-type index by method NAME here: a method name doesn't identify the method, so a
+                // single crate-wide `fn conn() -> redis::Connection` would otherwise hijack every
+                // `x.conn().get()` on an unrelated `x`, fabricating a Db effect. The return index is used
+                // only for free-function factory calls (the `Expr::Call` arm via `ctor_type`), where the
+                // name does identify the function.
+                self.resolve_recv_type(&m.receiver)
             }
             syn::Expr::Path(p) => {
                 let name = p.path.get_ident()?.to_string();
@@ -289,25 +300,39 @@ fn is_test_file_stem(stem: &str) -> bool {
     stem == "tests" || stem == "test" || stem.ends_with("_tests") || stem.ends_with("_test")
 }
 
-/// True if an item carries `#[cfg(test)]` (or `#[cfg(any(test, ...))]`) — a test-only module the
-/// default scan skips, since its effects describe the crate's TESTS, not the crate.
+/// True if `test` is POSITIVELY required by this cfg predicate node (recursing through `any`/`all` to
+/// any depth, but NOT through `not` — a `test` under `not()` means "compile when NOT testing", i.e.
+/// production code that must NOT be skipped).
+fn cfg_meta_requires_test(m: &syn::meta::ParseNestedMeta) -> bool {
+    if m.path.is_ident("test") {
+        return true;
+    }
+    if m.path.is_ident("any") || m.path.is_ident("all") {
+        let mut inner_test = false;
+        // (the parse may error on a non-meta tail like a bare `not(unix)` group; `test` is recorded
+        // before that, and the error is swallowed — we only care whether a positive `test` was seen.)
+        let _ = m.parse_nested_meta(|inner| {
+            if cfg_meta_requires_test(&inner) {
+                inner_test = true;
+            }
+            Ok(())
+        });
+        return inner_test;
+    }
+    false // `not(...)`, `feature = "..."`, target predicates, etc.
+}
+
+/// True if an item carries a `#[cfg(...)]` that POSITIVELY requires `test` — a test-only module the
+/// default scan skips, since its effects describe the crate's TESTS, not the crate. `#[cfg(not(test))]`
+/// (production code) and `#[cfg(all(unix, not(test)))]` are correctly NOT treated as test.
 fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("cfg") && {
             let mut found = false;
-            // tokens of `cfg(...)` — a literal `test` ident anywhere inside is the signal (covers
-            // `cfg(test)` and `cfg(any(test, feature = "x"))`).
             let _ = a.parse_nested_meta(|m| {
-                if m.path.is_ident("test") {
+                if cfg_meta_requires_test(&m) {
                     found = true;
                 }
-                // descend into any(...)/all(...) groups without erroring on their contents
-                let _ = m.parse_nested_meta(|inner| {
-                    if inner.path.is_ident("test") {
-                        found = true;
-                    }
-                    Ok(())
-                });
                 Ok(())
             });
             found
@@ -429,6 +454,7 @@ fn record_return(sig: &syn::Signature, uses: &HashMap<String, String>, rets: &mu
 /// by the caller). A name collision is rare and at worst yields a wrong (still verb-gated) classify.
 fn collect_decls(
     items: &[syn::Item],
+    include_tests: bool,
     uses: &mut HashMap<String, String>,
     fields: &mut FieldIndex,
     rets: &mut HashMap<String, Option<String>>,
@@ -468,9 +494,16 @@ fn collect_decls(
                 }
             }
             syn::Item::Mod(m) => {
+                // Skip `#[cfg(test)]` modules here too (Pass B / scan_items already does): otherwise a
+                // test module's struct fields and fn return types leak into the crate-wide index and get
+                // used to type PRODUCTION code (e.g. `struct App { http: MockClient }` in `mod tests`
+                // colliding with the real App).
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, &mut subuses, fields, rets);
+                    collect_decls(inner, include_tests, &mut subuses, fields, rets);
                 }
             }
             _ => {}
@@ -623,7 +656,7 @@ fn main() {
     let mut rets_tmp: HashMap<String, Option<String>> = HashMap::new();
     for (_, file) in &parsed {
         let mut uses = HashMap::new();
-        collect_decls(&file.items, &mut uses, &mut fields, &mut rets_tmp);
+        collect_decls(&file.items, include_tests, &mut uses, &mut fields, &mut rets_tmp);
     }
     // Keep only unambiguous fn-leaf -> return-type mappings (a name with conflicting return types was
     // marked `None`); a guessed type would mis-classify.
@@ -773,11 +806,21 @@ fn host_part(h: &str) -> String {
 
 fn read_crate_name(root: &Path) -> Option<String> {
     let txt = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
     for line in txt.lines() {
         let l = line.trim();
-        if let Some(rest) = l.strip_prefix("name") {
-            if let Some(v) = rest.split('=').nth(1) {
-                return Some(v.trim().trim_matches('"').replace('-', "_"));
+        if l.starts_with('[') {
+            in_package = l == "[package]"; // only the [package] table's `name` is the crate name
+            continue;
+        }
+        // Match the key `name` exactly — `name =` / `name=` — not `namespace`/`name-server`, and only
+        // inside `[package]` (a `name = ` in `[[bin]]`/`[dependencies]` is not the crate name).
+        if in_package {
+            if let Some(rest) = l.strip_prefix("name") {
+                let rest = rest.trim_start();
+                if let Some(v) = rest.strip_prefix('=') {
+                    return Some(v.trim().trim_matches('"').replace('-', "_"));
+                }
             }
         }
     }
@@ -1024,10 +1067,41 @@ mod tests {
             syn::parse_str("#[cfg(any(test, feature = \"x\"))] mod tests {}").unwrap();
         let no1: syn::ItemMod = syn::parse_str("#[cfg(feature = \"std\")] mod imp {}").unwrap();
         let no2: syn::ItemMod = syn::parse_str("mod real {}").unwrap();
+        // deeper nesting positively requiring test → still skipped
+        let yes3: syn::ItemMod =
+            syn::parse_str("#[cfg(any(all(test, unix), windows))] mod t {}").unwrap();
+        // `not(test)` is PRODUCTION code — must NOT be treated as a test module (the regression fix)
+        let prod1: syn::ItemMod = syn::parse_str("#[cfg(not(test))] mod prod {}").unwrap();
+        let prod2: syn::ItemMod = syn::parse_str("#[cfg(all(unix, not(test)))] mod prod {}").unwrap();
         assert!(is_cfg_test(&yes1.attrs));
         assert!(is_cfg_test(&yes2.attrs));
+        assert!(is_cfg_test(&yes3.attrs));
         assert!(!is_cfg_test(&no1.attrs));
         assert!(!is_cfg_test(&no2.attrs));
+        assert!(!is_cfg_test(&prod1.attrs), "cfg(not(test)) is production, not a test module");
+        assert!(!is_cfg_test(&prod2.attrs), "cfg(all(unix, not(test))) is production");
+    }
+
+    #[test]
+    fn expand_does_not_alias_a_crate_rooted_path() {
+        // `crate::config::load` is explicitly crate-local; a `use other::config;` import must NOT hijack it.
+        let u = uses(&[("config", "other::config")]);
+        assert_eq!(expand("crate::config::load", &u), "config::load");
+        assert_eq!(expand("self::config::load", &u), "config::load");
+        // a NON-rooted bare `config::load` still expands via the use alias
+        assert_eq!(expand("config::load", &u), "other::config::load");
+    }
+
+    #[test]
+    fn ctor_type_rejects_a_module_path_receiver() {
+        // `serde_json::from_str(s)` must NOT infer the MODULE `serde_json` as a type (lower-case receiver);
+        // `reqwest::Client::new()` must still infer `reqwest::Client` (UpperCamel type receiver).
+        let u = HashMap::new();
+        let r = ReturnIndex::new();
+        let modcall: syn::Expr = syn::parse_str("serde_json::from_str(s)").unwrap();
+        assert_eq!(ctor_type(&modcall, &u, &r), None);
+        let typecall: syn::Expr = syn::parse_str("reqwest::Client::new()").unwrap();
+        assert_eq!(ctor_type(&typecall, &u, &r).as_deref(), Some("reqwest::Client"));
     }
 
     #[test]
