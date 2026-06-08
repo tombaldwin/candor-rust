@@ -765,6 +765,34 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
             // silently assumed pure — a soundness under-report. (Closures stay `None`: counted lexically.)
             _ => Some(Callee::Unresolved),
         },
+        // OVERLOADED OPERATORS desugar to a trait-method call but are NOT `Call`/`MethodCall` nodes:
+        // `a + b` is `Binary`, `-a` / `*p` is `Unary`, `a[i]` is `Index`, `a += b` is `AssignOp`. typeck
+        // records the resolved trait method (`Add::add`, `Index::index`, `Deref::deref`, …) on the
+        // operator expr's OWN hir_id — but ONLY when it's overloaded (a user/std impl); a builtin op on
+        // primitives (`1 + 2`, `arr[i]` on a slice) has no `type_dependent_def_id`, so `None` = no call.
+        // Without this, an effectful `impl Add`/`Index`/`Deref` reached through operator sugar was
+        // invisible to the call graph — the caller looked pure though the impl performs I/O. A silent
+        // under-report; teeth: soundness/gen.py `op_add`/`index`/`deref` forms. Operator dispatch is
+        // static (the impl is selected by the operand types), never `dyn`, so `dynamic: false`.
+        // OVERLOADED OPERATORS desugar to a trait-method call but are NOT `Call`/`MethodCall` nodes:
+        // `a + b` is `Binary`, `-a` / `*p` is `Unary`, `a[i]` is `Index`, `a += b` is `AssignOp`. typeck
+        // records the resolved TRAIT method (`core::ops::Add::add`, `Index::index`, `Deref::deref`, …)
+        // on the operator expr's own hir_id — but ONLY when it's overloaded (a user/std impl); a builtin
+        // op on primitives (`1 + 2`, slice `arr[i]`) has no `type_dependent_def_id`, so `None` = no call.
+        // The trait method is non-local (`core`), so we must devirtualize it to the CONCRETE impl via the
+        // operand types (operators dispatch statically, never `dyn`): a LOCAL impl is the real target to
+        // edge into; a non-local/std impl (`String + &str`, `Vec` indexing, `Arc` deref) resolves to std
+        // and is treated as pure, matching the std-trait calibration; an unresolvable generic stays pure.
+        // Without this, an effectful `impl Add`/`Index`/`Deref` reached through operator sugar was
+        // invisible to the call graph — the caller looked pure though the impl performs I/O. A silent
+        // under-report; teeth: soundness/gen.py `op_add`/`index`/`deref` forms.
+        ExprKind::Binary(..)
+        | ExprKind::Unary(..)
+        | ExprKind::Index(..)
+        | ExprKind::AssignOp(..) => {
+            let method_did = typeck.type_dependent_def_id(expr.hir_id)?;
+            devirtualize(cx, expr, method_did).map(|did| Callee::Def { did, dynamic: false })
+        }
         _ => None,
     }
 }
@@ -796,13 +824,22 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
     out
 }
 
-/// Resolve a (non-`dyn`) trait-method call to the single concrete impl it dispatches to, when
-/// the receiver type is known — so candor can use the ONE real target instead of CHA-expanding
+/// Resolve a (non-`dyn`) trait-method dispatch to the single concrete impl it lands on, when the
+/// receiver/operand type is known — so candor can use the ONE real target instead of CHA-expanding
 /// to every impl (the over-approximation that yields confident false positives, CRITIQUE §9).
-/// Returns None for `dyn`/generic receivers that can't be pinned down here, so the caller falls
-/// back to CHA. Only method calls carry the receiver substs on the call expr.
+/// Returns None for `dyn`/generic receivers that can't be pinned down here, so the caller falls back
+/// to CHA. Method calls AND overloaded operators (`Binary`/`Unary`/`Index`/`AssignOp`) both record
+/// their substs as `node_args` on the call/operator expr — operators dispatch statically, so
+/// devirtualization is exact for them (never `dyn`).
 fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: DefId) -> Option<DefId> {
-    if !matches!(expr.kind, ExprKind::MethodCall(..)) {
+    if !matches!(
+        expr.kind,
+        ExprKind::MethodCall(..)
+            | ExprKind::Binary(..)
+            | ExprKind::Unary(..)
+            | ExprKind::Index(..)
+            | ExprKind::AssignOp(..)
+    ) {
         return None;
     }
     // `Instance::try_resolve` asserts the def is a Fn/AssocFn/Const; method calls are always

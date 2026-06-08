@@ -20,11 +20,19 @@ dispatch — that the unit/integration suite missed; this catches that entire cl
 - `boxed_val` (a named fn as a `Box<dyn Fn>` value),
 - `dyn_method` (a fn in a generic struct dispatched via `&dyn Trait`),
 - `macro_call` (the call lives inside a `macro_rules!` expansion),
+- `arc_dyn` (dispatch through `Arc<dyn Trait>` whose method takes `self: Arc<Self>` — arbitrary self type),
+- **operator overloads:** `op_add` / `index` / `deref` — the effect is reached through an overloaded
+  `a + b` / `v[i]` / `*p` whose `Add`/`Index`/`Deref` impl performs the I/O. In HIR these are
+  `Binary`/`Index`/`Unary` nodes, NOT Call/MethodCall, so `resolve_callee` must devirtualize them to
+  the concrete impl or the edge is invisible and the caller looks pure.
 - **receiving side:** `recv_boxed` / `recv_impl` — a function that takes a `Box<dyn Fn>` / `impl Fn`
   parameter and *invokes* it (where the real bugs lived).
 
 It also sometimes DEFINES `sink` via a macro (testing the macro-generated-fn visibility fix — a
 macro-gen fn that performs I/O must still be reported, not omitted).
+
+`CANDOR_FUZZ_FORMS="op_add index deref"` restricts the generator to a chosen subset of forms — CI uses
+it to run a dedicated operator-overload lane (`Soundness fuzzer (operators)`).
 
 ## Cross-crate variant (`run_cross.sh`)
 

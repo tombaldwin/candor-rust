@@ -46,29 +46,42 @@ HELPERS = {
     "arc_run":    "trait ARun { fn arun(self: std::sync::Arc<Self>); }\nstruct AW<F>(F);\nimpl<F: Fn()> ARun for AW<F> { fn arun(self: std::sync::Arc<Self>) { (self.0)(); } }",
 }
 
-# Each "edge form" returns (body_calling_callee, helpers_needed, extra_expected_fns).
+# Each "edge form" returns (body_calling_callee, helpers_needed, extra_expected_fns, extra_items).
 # `extra_expected_fns` are helper fns that ALSO transitively reach the effect via this edge and so must
-# themselves be effect-or-Unknown (the receiving-side checks — where the real bugs live).
-def edge_forms(callee):
+# themselves be effect-or-Unknown (the receiving-side checks — where the real bugs live). `extra_items`
+# are full module-level items emitted verbatim (used by the operator-overload forms, which need a
+# PER-EDGE struct + effectful trait impl naming the specific callee — they can't be shared HELPERS).
+def edge_forms(callee, i=0):
     return {
-        "direct":     (f"{callee}();", [], []),
-        "iife":       (f"(|| {callee}())();", [], []),
-        "stored":     (f"{{ let c = || {callee}(); c(); }}", [], []),
+        "direct":     (f"{callee}();", [], [], []),
+        "iife":       (f"(|| {callee}())();", [], [], []),
+        "stored":     (f"{{ let c = || {callee}(); c(); }}", [], [], []),
         # named fn handed to a generic combinator (passing side) + apply itself invokes its param.
-        "generic":    (f"apply({callee});", ["apply"], ["apply"]),
+        "generic":    (f"apply({callee});", ["apply"], ["apply"], []),
         # named fn boxed as a dyn Fn value, then called.
-        "boxed_val":  (f"{{ let b: Box<dyn Fn()> = Box::new({callee}); b(); }}", [], []),
+        "boxed_val":  (f"{{ let b: Box<dyn Fn()> = Box::new({callee}); b(); }}", [], [], []),
         # named fn in a generic struct dispatched via &dyn Trait (dyn dispatch + a field closure call).
-        "dyn_method": (f"{{ let w = W({callee}); let r: &dyn Run = &w; r.run(); }}", ["run_trait"], []),
+        "dyn_method": (f"{{ let w = W({callee}); let r: &dyn Run = &w; r.run(); }}", ["run_trait"], [], []),
         # RECEIVING side: the effect reaches a fn ONLY through a Box<dyn Fn> param it invokes.
-        "recv_boxed": (f"recv_boxed(Box::new(|| {callee}()));", ["recv_boxed"], ["recv_boxed"]),
+        "recv_boxed": (f"recv_boxed(Box::new(|| {callee}()));", ["recv_boxed"], ["recv_boxed"], []),
         # RECEIVING side: the effect reaches a fn ONLY through a generic Fn param it invokes.
-        "recv_impl":  (f"recv_impl(|| {callee}());", ["recv_impl"], ["recv_impl"]),
+        "recv_impl":  (f"recv_impl(|| {callee}());", ["recv_impl"], ["recv_impl"], []),
         # the call lives inside a MACRO expansion (from_expansion span) — candor must still see it.
-        "macro_call": (f"mcall!({callee});", ["mcall"], []),
+        "macro_call": (f"mcall!({callee});", ["mcall"], [], []),
         # ARBITRARY SELF TYPE: dispatch through `Arc<dyn ARun>` whose method takes `self: Arc<Self>`
         # (peel_refs doesn't see the `dyn` behind the `Arc` — the is_dyn_receiver path).
-        "arc_dyn":    (f"{{ let a: std::sync::Arc<dyn ARun> = std::sync::Arc::new(AW({callee})); a.arun(); }}", ["arc_run"], []),
+        "arc_dyn":    (f"{{ let a: std::sync::Arc<dyn ARun> = std::sync::Arc::new(AW({callee})); a.arun(); }}", ["arc_run"], [], []),
+        # OPERATOR OVERLOAD: the effect is reached through an overloaded `+` whose `Add::add` impl calls
+        # the next fn. In HIR this is `ExprKind::Binary`, NOT a Call/MethodCall — so resolve_callee must
+        # query type_dependent_def_id on the operator node or the edge is invisible (silent-pure hole).
+        "op_add":     (f"{{ let _ = Op{i:02d} + Op{i:02d}; }}", [], [], [
+            f"struct Op{i:02d};\nimpl std::ops::Add for Op{i:02d} {{ type Output = (); fn add(self, _: Self) {{ {callee}(); }} }}"]),
+        # OVERLOADED INDEX: `v[0]` is `ExprKind::Index` → `Index::index`; same root cause as op_add.
+        "index":      (f"{{ let v = Ix{i:02d}(()); let _ = v[0]; }}", [], [], [
+            f"struct Ix{i:02d}(());\nimpl std::ops::Index<usize> for Ix{i:02d} {{ type Output = (); fn index(&self, _: usize) -> &() {{ {callee}(); &self.0 }} }}"]),
+        # OVERLOADED DEREF: `*v` is `ExprKind::Unary(Deref)` → `Deref::deref`; same root cause.
+        "deref":      (f"{{ let v = Dr{i:02d}(()); let _ = *v; }}", [], [], [
+            f"struct Dr{i:02d}(());\nimpl std::ops::Deref for Dr{i:02d} {{ type Target = (); fn deref(&self) -> &() {{ {callee}(); &self.0 }} }}"]),
     }
 
 
@@ -87,7 +100,11 @@ def main():
     fns = [f"f{i:02d}" for i in range(n)]
     bodies = {}
     needed_helpers = set()
+    extra_items = []  # per-edge module-level items (operator-overload structs/impls)
     expected = set(fns) | {"sink", "main"}
+    # Optionally restrict the call FORMS (e.g. CANDOR_FUZZ_FORMS="op_add index deref" to fuzz only the
+    # operator-overload edges — a focused lane for the desugared-call soundness holes).
+    only_forms = os.environ.get("CANDOR_FUZZ_FORMS", "").split()
 
     # sink performs the effect directly. Sometimes DEFINE sink via a macro — a macro-generated
     # function that performs I/O must still be reported (the #5 macro-fn-visibility fix); if candor
@@ -112,11 +129,14 @@ def main():
     forms_log = {}
     for i in range(n):
         callee = fns[i + 1] if i + 1 < n else "sink"
-        form_name = rng.choice(list(edge_forms(callee)))
-        body, helpers, extra = edge_forms(callee)[form_name]
+        forms = edge_forms(callee, i)
+        choices = [f for f in forms if f in only_forms] if only_forms else list(forms)
+        form_name = rng.choice(choices)
+        body, helpers, extra, items = forms[form_name]
         bodies[fns[i]] = body
         needed_helpers.update(helpers)
         expected.update(extra)
+        extra_items.extend(items)
         forms_log[fns[i]] = form_name
 
     # Assemble the source.
@@ -124,6 +144,8 @@ def main():
     for h in HELPERS:
         if h in needed_helpers:
             lines.append(HELPERS[h])
+    for item in extra_items:  # per-edge operator-overload structs + effectful trait impls
+        lines.append(item)
     lines.append("")
     if macro_sink:
         lines.append("macro_rules! mksink { () => { fn sink() { %s } }; }" % bodies["sink"])

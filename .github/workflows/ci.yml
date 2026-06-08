@@ -105,6 +105,13 @@ jobs:
       - name: Soundness fuzzer
         run: bash soundness/run.sh 60
 
+      # Operator-overload variant: thread the effect through OVERLOADED operators (`a + b`, `v[i]`,
+      # `*p`) whose `Add`/`Index`/`Deref` impls perform the I/O. In HIR these are `Binary`/`Index`/
+      # `Unary` nodes, NOT Call/MethodCall — so resolve_callee must devirtualize them or the edge is
+      # invisible and the caller looks pure. Teeth-verified: reverting the operator arm fails every seed.
+      - name: Soundness fuzzer (operators)
+        run: CANDOR_FUZZ_FORMS="op_add index deref" bash soundness/run.sh 40
+
       # Cross-crate variant: the chain crosses a lib→bin boundary, exercising candor's DefPathHash
       # cross-crate propagation (its own bug-prone surface the single-crate fuzzer can't reach).
       - name: Soundness fuzzer (cross-crate)
