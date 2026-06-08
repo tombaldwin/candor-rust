@@ -246,6 +246,11 @@ pub struct Candor {
     taint: bool,
     /// Per-function effects performed on a parameter-derived (caller-controlled) argument.
     tainted: HashMap<LocalDefId, BTreeSet<&'static str>>,
+    /// Why each function introduces `Unknown` DIRECTLY: an origin tag per unresolvable site
+    /// (`dispatch:<trait>`, `callback:<fn-ptr / closure>`). Always populated (cheap, unlike `sites`
+    /// which is explain-only) so the report's `unknownWhy` can tell the improvable opacity (a dispatch
+    /// that would resolve with more inputs) from the irreducible — see candor-spec §2.
+    unknown_why: HashMap<LocalDefId, BTreeSet<String>>,
 }
 
 /// Where an effect enters a function's body — the callee that produced it and the source location.
@@ -331,6 +336,7 @@ impl Candor {
             reports_prefix: None,
             taint: std::env::var("CANDOR_TAINT").is_ok(),
             tainted: HashMap::new(),
+            unknown_why: HashMap::new(),
         }
     }
 
@@ -1464,6 +1470,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     return;
                 }
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
+                self.unknown_why
+                    .entry(caller)
+                    .or_default()
+                    .insert("callback:fn-pointer / closure".to_string());
                 if self.explain.is_some() {
                     let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                     self.sites.entry(caller).or_default().push(EffectSite {
@@ -1614,6 +1624,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             let effectful_dispatch = is_effectful_std_trait(tk, ti);
             if !cha_resolved && !pure && (dynamic || self.paranoid || effectful_dispatch) {
                 self.direct.entry(caller).or_default().insert(UNKNOWN);
+                self.unknown_why
+                    .entry(caller)
+                    .or_default()
+                    .insert(format!("dispatch:{}", cx.tcx.def_path_str(td)));
                 if self.explain.is_some() {
                     let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                     let via = format!("unresolvable dispatch over `{}`", cx.tcx.def_path_str(td));
@@ -1758,6 +1772,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             // fns to `callback_unknown`, so this shouldn't fire — but if it ever did,
                             // dropping the `Unknown` would be a silent under-report). Keep it honest.
                             self.direct.entry(*caller).or_default().insert(UNKNOWN);
+                            self.unknown_why.entry(*caller).or_default().insert("callback:invoked param".to_string());
                         } else {
                             self.calls.entry(*caller).or_default().extend(locals);
                         }
@@ -1766,6 +1781,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         // An unresolvable callback was passed somewhere, or the HOF is never called
                         // locally (external callers pass who-knows-what) → the deferred `Unknown` stands.
                         self.direct.entry(*caller).or_default().insert(UNKNOWN);
+                        self.unknown_why.entry(*caller).or_default().insert("callback:invoked param".to_string());
                     }
                 }
             }
@@ -2068,6 +2084,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     // Literal subprocess commands / filesystem paths statically visible (empty = none).
                     cmds: cmdsacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
                     paths: pathsacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+                    // Why this fn DIRECTLY introduces Unknown (origin tags), so a consumer can tell
+                    // improvable opacity from irreducible. Only when `direct` actually carries Unknown
+                    // (a cross-crate-inherited Unknown is transitive, not introduced here).
+                    unknown_why: if direct.contains(UNKNOWN) {
+                        self.unknown_why.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
                 });
                 continue;
             }

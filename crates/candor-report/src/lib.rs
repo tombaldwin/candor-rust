@@ -107,6 +107,13 @@ pub struct ReportEntry {
     /// Effectful local functions this one calls — the effect-relevant call graph ("who calls X?").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,
+    /// Why this function introduces `Unknown` DIRECTLY (candor-spec §2 `unknownWhy`): an origin tag per
+    /// unresolvable site — `dispatch:<trait>` (a `dyn`/effectful-trait call with no visible impl),
+    /// `callback:<fn-pointer / closure>` (an unresolvable indirect call). Lets a consumer tell the
+    /// improvable kind (a dispatch that would resolve with more inputs) from the irreducible. Omitted
+    /// when the function introduces no direct `Unknown`.
+    #[serde(default, rename = "unknownWhy", skip_serializing_if = "Vec::is_empty")]
+    pub unknown_why: Vec<String>,
 }
 
 /// The candor-spec contract version this build implements (the report SCHEMA + AS-EFF codes), distinct
@@ -215,13 +222,24 @@ mod tests {
     fn round_trips() {
         let r = Report {
             candor: ReportMeta { version: "v".into(), toolchain: "t".into(), spec: "0.3".into() },
-            functions: vec![ReportEntry { func: "f".into(), inferred: vec!["Db".into()], ..Default::default() }],
+            functions: vec![ReportEntry {
+                func: "f".into(),
+                inferred: vec!["Db".into(), "Unknown".into()],
+                unknown_why: vec!["dispatch:foo::Bar".into()],
+                ..Default::default()
+            }],
         };
         let s = serde_json::to_string(&r).unwrap();
         let back = report_entries(&s).unwrap();
         assert_eq!(back[0].func, "f");
         // empty `calls` is omitted on write.
         assert!(!s.contains("\"calls\""));
+        // `unknownWhy` round-trips under its JSON name and survives deserialization.
+        assert!(s.contains("\"unknownWhy\":[\"dispatch:foo::Bar\"]"), "unknownWhy must serialize: {s}");
+        assert_eq!(back[0].unknown_why, vec!["dispatch:foo::Bar".to_string()]);
+        // …and is omitted entirely when empty (the common case).
+        let empty = serde_json::to_string(&ReportEntry { func: "g".into(), ..Default::default() }).unwrap();
+        assert!(!empty.contains("unknownWhy"), "empty unknownWhy must be omitted: {empty}");
         // the spec contract version (§2.1) is emitted in the envelope header.
         assert!(s.contains("\"spec\":\"0.3\""), "envelope must carry the spec version: {s}");
         assert_eq!(SPEC_VERSION, "0.3");

@@ -827,6 +827,14 @@ fn main() {
             cmds: cmdsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             paths: pathsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             calls: calls.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default(),
+            // The syntactic backend has ONE Unknown origin: a call it couldn't see through (a closure /
+            // fn-pointer value). Tag it directly-introduced Unknowns so the receipt matches the lint's
+            // `unknownWhy` (candor-spec §2). Coarser than the lint's per-trait tag — by design.
+            unknown_why: if direct.get(q).is_some_and(|d| d.contains("Unknown")) {
+                vec!["callback:unresolved call".to_string()]
+            } else {
+                Vec::new()
+            },
         });
     }
     entries.sort_by(|a, b| a.func.cmp(&b.func));

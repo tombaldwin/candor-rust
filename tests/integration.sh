@@ -369,6 +369,11 @@ printf 'fn boxed(cb: Box<dyn Fn()>){ cb(); }\nfn main(){ boxed(Box::new(|| {}));
 ( cd "$CF"; rm -f r.*.json; CANDOR_JSON="$PWD/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
 cfb=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" boxed 0 2>&1 )
 want   "dyn-callable: boxed dyn Fn call is Unknown (soundness)" "$cfb" "Unknown"
+# The report must say WHY it's Unknown (candor-spec §2 unknownWhy): a `callback:` origin tag for the
+# unresolvable indirect call — distinguishing improvable opacity from irreducible.
+cfraw=$( cd "$CF"; cat r.*.json 2>/dev/null )
+want   "dyn-callable: report carries an unknownWhy origin tag" "$cfraw" '"unknownWhy"'
+want   "dyn-callable: unknownWhy names the callback origin"    "$cfraw" 'callback:'
 rm -rf "$(dirname "$CF")"
 mapout=$( cd "$Q"; "$ROOT/cargo-candor" map 2>&1 )
 want   "map: module/effects overview rendered"        "$mapout" "candor map"
