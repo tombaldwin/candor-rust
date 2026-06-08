@@ -96,7 +96,29 @@ def edge_forms(callee, i=0):
                 f"fn help{i:02d}() -> Result<(), Ea{i:02d}> {{ Err(Ea{i:02d}) }}",
             ],
         ),
+        # `.await` over a CUSTOM Future whose `poll` performs the I/O. `Fut.await` desugars to a
+        # (compiler-generated) `Future::poll(..)` Call — a non-local trait method dispatched statically to
+        # the LOCAL impl, which candor must devirtualize through the Call or the caller looks pure. The
+        # awaited future is created-but-not-driven (no executor), so this NEVER RUNS at runtime — it's a
+        # CONSTRUCTION-only form (excluded from DEFAULT_FORMS so it can't make the strace oracle vacuous).
+        "await_poll": (
+            f"{{ let _ = aw{i:02d}(); }}",
+            [], [],
+            [
+                f"struct Fut{i:02d}(());",
+                f"impl std::future::Future for Fut{i:02d} {{ type Output = (); "
+                f"fn poll(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) "
+                f"-> std::task::Poll<()> {{ {callee}(); std::task::Poll::Ready(()) }} }}",
+                f"async fn aw{i:02d}() {{ Fut{i:02d}(()).await; }}",
+            ],
+        ),
     }
+
+
+# Forms that DON'T execute at runtime (the awaited future is never driven) — fine for the construction
+# checker (candor's static report), but they'd make the dynamic strace oracle vacuous, so they're kept
+# OUT of the default form set and only reachable via an explicit CANDOR_FUZZ_FORMS lane.
+CONSTRUCTION_ONLY = {"await_poll"}
 
 
 def main():
@@ -144,7 +166,11 @@ def main():
     for i in range(n):
         callee = fns[i + 1] if i + 1 < n else "sink"
         forms = edge_forms(callee, i)
-        choices = [f for f in forms if f in only_forms] if only_forms else list(forms)
+        choices = (
+            [f for f in forms if f in only_forms]
+            if only_forms
+            else [f for f in forms if f not in CONSTRUCTION_ONLY]
+        )
         form_name = rng.choice(choices)
         body, helpers, extra, items = forms[form_name]
         bodies[fns[i]] = body

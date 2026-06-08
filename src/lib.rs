@@ -829,20 +829,12 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 /// receiver/operand type is known — so candor can use the ONE real target instead of CHA-expanding
 /// to every impl (the over-approximation that yields confident false positives, CRITIQUE §9).
 /// Returns None for `dyn`/generic receivers that can't be pinned down here, so the caller falls back
-/// to CHA. Method calls AND overloaded operators (`Binary`/`Unary`/`Index`/`AssignOp`) both record
-/// their substs as `node_args` on the call/operator expr — operators dispatch statically, so
-/// devirtualization is exact for them (never `dyn`).
+/// to CHA. Handles method calls, overloaded operators (`Binary`/`Unary`/`Index`/`AssignOp`), AND
+/// fully-qualified trait Calls — including the ones the compiler GENERATES, like `Future::poll(..)`
+/// from a `.await` desugar or `Trait::method(x)` UFCS. Method/operator nodes carry their substs as
+/// `node_args` on the expr; a `Call` carries them on the callee path's `FnDef` type instead. All
+/// dispatch statically here (never `dyn`), so devirtualization is exact.
 fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: DefId) -> Option<DefId> {
-    if !matches!(
-        expr.kind,
-        ExprKind::MethodCall(..)
-            | ExprKind::Binary(..)
-            | ExprKind::Unary(..)
-            | ExprKind::Index(..)
-            | ExprKind::AssignOp(..)
-    ) {
-        return None;
-    }
     // `Instance::try_resolve` asserts the def is a Fn/AssocFn/Const; method calls are always
     // AssocFn today, but guard explicitly so an unexpected DefKind can never ICE the build (an
     // effect checker must degrade to Unknown, never abort compilation).
@@ -850,7 +842,20 @@ fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: Def
         return None;
     }
     let typeck = cx.maybe_typeck_results()?;
-    let args = typeck.node_args(expr.hir_id);
+    // The generic args that pin the impl. A `Call`'s substs live on the callee path's `FnDef`
+    // (`node_args(call_expr)` is empty there); method/operator nodes carry them on the expr itself.
+    let args = match expr.kind {
+        ExprKind::Call(callee, _) => match typeck.expr_ty(callee).kind() {
+            rustc_middle::ty::TyKind::FnDef(_, substs) => *substs,
+            _ => return None,
+        },
+        ExprKind::MethodCall(..)
+        | ExprKind::Binary(..)
+        | ExprKind::Unary(..)
+        | ExprKind::Index(..)
+        | ExprKind::AssignOp(..) => typeck.node_args(expr.hir_id),
+        _ => return None,
+    };
     let instance =
         rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), method_did, args)
             .ok()
@@ -1483,13 +1488,18 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // left to the `Unknown` logic below.)
         let trait_did = cx.tcx.trait_of_assoc(def_id);
         let mut cha_resolved = false;
-        if let Some(td) = trait_did {
+        if trait_did.is_some() {
             // Only accept a devirtualized target we can actually analyze: a LOCAL fn/method whose
             // body we'll see. If resolution lands on a non-local target (would be silently dropped
             // by `add_edge`, leaving `cha_resolved = true` to suppress the honest `Unknown`), fall
-            // back to CHA instead. (Defensive: orphan rules make a local trait's impls local, so
-            // this rarely fires — but it keeps the soundness invariant explicit.)
-            let devirt = if !dynamic && td.is_local() {
+            // back to CHA instead. We attempt this for ANY non-`dyn` dispatch, not just LOCAL traits:
+            // a LOCAL impl of a NON-local trait is exactly where the silent holes live — a custom
+            // `Future::poll` reached via `.await`, an effectful `Clone`/`Display`/operator impl. The
+            // `.filter(is_local)` keeps it sound and precise: a non-local impl (std `Clone`, `String +
+            // &str`) resolves non-local → dropped → falls to CHA (empty for non-local traits) → the
+            // `Unknown` logic below decides, exactly as before. So this only ADDS local-impl edges that
+            // static dispatch was missing; it never changes a non-local-impl call's verdict.
+            let devirt = if !dynamic {
                 devirtualize(cx, expr, def_id).filter(|t| t.is_local())
             } else {
                 None

@@ -29,6 +29,11 @@ dispatch — that the unit/integration suite missed; this catches that entire cl
   invoked by the `?` desugar's error path. candor sees the std `FromResidual::from_residual` call but
   not the LOCAL `From::from` it dispatches to internally, so the edge is recovered from the call's
   residual/Self types (`from_residual_local_edge`).
+- **`.await` over a custom Future:** `await_poll` — the effect is in a custom `Future::poll`, reached
+  via `.await`. The desugar emits a `Future::poll(..)` Call dispatched statically to the LOCAL impl,
+  which candor devirtualizes through the Call. CONSTRUCTION-ONLY (the future is never executor-driven,
+  so it never runs) — excluded from the default form set so it can't make the dynamic oracle vacuous;
+  reach it via `CANDOR_FUZZ_FORMS="await_poll"`.
 - **receiving side:** `recv_boxed` / `recv_impl` — a function that takes a `Box<dyn Fn>` / `impl Fn`
   parameter and *invokes* it (where the real bugs lived).
 

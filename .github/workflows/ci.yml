@@ -119,6 +119,14 @@ jobs:
       - name: Soundness fuzzer (try/from)
         run: CANDOR_FUZZ_FORMS="try_from" bash soundness/run.sh 40
 
+      # `.await` variant: the effect is reached through a custom `Future` whose `poll` performs the I/O,
+      # driven by a `.await`. `Fut.await` desugars to a `Future::poll(..)` Call — a non-local trait
+      # method dispatched statically to the LOCAL impl, which candor must devirtualize THROUGH the Call.
+      # Construction-only (the future is never executor-driven), so it has its own lane, not the oracle.
+      # Teeth-verified: disabling Call devirtualization fails every seed.
+      - name: Soundness fuzzer (await)
+        run: CANDOR_FUZZ_FORMS="await_poll" bash soundness/run.sh 40
+
       # Cross-crate variant: the chain crosses a lib→bin boundary, exercising candor's DefPathHash
       # cross-crate propagation (its own bug-prone surface the single-crate fuzzer can't reach).
       - name: Soundness fuzzer (cross-crate)
