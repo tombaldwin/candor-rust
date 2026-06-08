@@ -34,6 +34,12 @@ dispatch — that the unit/integration suite missed; this catches that entire cl
   which candor devirtualizes through the Call. CONSTRUCTION-ONLY (the future is never executor-driven,
   so it never runs) — excluded from the default form set so it can't make the dynamic oracle vacuous;
   reach it via `CANDOR_FUZZ_FORMS="await_poll"`.
+- **UFCS dynamic dispatch:** `ufcs_dyn` — `Trait::method(obj)` on a `&dyn Trait` is a `Call` (not a
+  MethodCall), so the structural `is_dyn_receiver` check never runs and `dynamic` starts false.
+  Resolving the trait method on a `dyn` Self yields a VIRTUAL instance whose `def_id()` is the bodyless
+  trait method — candor must report it as still-virtual (`Devirt::StillVirtual`) and CHA the local
+  impls, not edge to the bodyless method. (The same fix closes the exotic nightly case of a custom
+  `DispatchFromDyn` smart pointer with an arbitrary self type.)
 - **receiving side:** `recv_boxed` / `recv_impl` — a function that takes a `Box<dyn Fn>` / `impl Fn`
   parameter and *invokes* it (where the real bugs lived).
 

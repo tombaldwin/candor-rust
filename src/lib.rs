@@ -792,7 +792,14 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
         | ExprKind::Index(..)
         | ExprKind::AssignOp(..) => {
             let method_did = typeck.type_dependent_def_id(expr.hir_id)?;
-            devirtualize(cx, expr, method_did).map(|did| Callee::Def { did, dynamic: false })
+            match devirtualize(cx, expr, method_did) {
+                Some(Devirt::Static(did)) => Some(Callee::Def { did, dynamic: false }),
+                // An operator that resolves still-virtual (vanishingly rare — operators dispatch
+                // statically) is honestly dynamic: keep the trait method + flag it so check_expr CHAs
+                // or marks it `Unknown` rather than treating it as a pinned target.
+                Some(Devirt::StillVirtual) => Some(Callee::Def { did: method_did, dynamic: true }),
+                None => None,
+            }
         }
         _ => None,
     }
@@ -825,16 +832,27 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
     out
 }
 
-/// Resolve a (non-`dyn`) trait-method dispatch to the single concrete impl it lands on, when the
-/// receiver/operand type is known — so candor can use the ONE real target instead of CHA-expanding
-/// to every impl (the over-approximation that yields confident false positives, CRITIQUE §9).
-/// Returns None for `dyn`/generic receivers that can't be pinned down here, so the caller falls back
-/// to CHA. Handles method calls, overloaded operators (`Binary`/`Unary`/`Index`/`AssignOp`), AND
-/// fully-qualified trait Calls — including the ones the compiler GENERATES, like `Future::poll(..)`
-/// from a `.await` desugar or `Trait::method(x)` UFCS. Method/operator nodes carry their substs as
-/// `node_args` on the expr; a `Call` carries them on the callee path's `FnDef` type instead. All
-/// dispatch statically here (never `dyn`), so devirtualization is exact.
-fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: DefId) -> Option<DefId> {
+/// The outcome of trying to devirtualize a trait-method dispatch.
+enum Devirt {
+    /// Statically resolved to exactly this impl method — a real devirtualization.
+    Static(DefId),
+    /// Resolution says the call is STILL virtual (vtable dispatch): a `dyn` receiver the structural
+    /// `is_dyn_receiver` check didn't recognise (e.g. behind a custom smart pointer / arbitrary self
+    /// type). The caller must treat it as dynamic — CHA the local impls, or honest `Unknown` for a
+    /// non-local trait — and must NOT edge to the (bodyless) trait method `instance.def_id()` returns.
+    StillVirtual,
+}
+
+/// Resolve a trait-method dispatch to the single concrete impl it lands on, when the receiver/operand
+/// type is known — so candor can use the ONE real target instead of CHA-expanding to every impl (the
+/// over-approximation that yields confident false positives, CRITIQUE §9). Returns None for
+/// generic receivers that can't be pinned down here, `Devirt::StillVirtual` for a dispatch that's
+/// actually dynamic, and `Devirt::Static` for a real resolution — so the caller falls back to CHA in
+/// the first two cases. Handles method calls, overloaded operators (`Binary`/`Unary`/`Index`/
+/// `AssignOp`), AND fully-qualified trait Calls — including the ones the compiler GENERATES, like
+/// `Future::poll(..)` from a `.await` desugar or `Trait::method(x)` UFCS. Method/operator nodes carry
+/// their substs as `node_args` on the expr; a `Call` carries them on the callee path's `FnDef` type.
+fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: DefId) -> Option<Devirt> {
     // `Instance::try_resolve` asserts the def is a Fn/AssocFn/Const; method calls are always
     // AssocFn today, but guard explicitly so an unexpected DefKind can never ICE the build (an
     // effect checker must degrade to Unknown, never abort compilation).
@@ -860,7 +878,15 @@ fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: Def
         rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), method_did, args)
             .ok()
             .flatten()?;
-    Some(instance.def_id())
+    // A `Virtual` instance means resolution did NOT devirtualize — the call is still vtable dispatch
+    // (a `dyn` the structural `is_dyn_receiver` check didn't recognise, e.g. behind a custom smart
+    // pointer with an arbitrary self type). `instance.def_id()` is then the BODYLESS trait method, so
+    // edging to it would falsely mark the dispatch resolved and hide every real impl. Report it as
+    // still-virtual instead, so the caller CHAs the local impls (or keeps an honest `Unknown`).
+    match instance.def {
+        rustc_middle::ty::InstanceKind::Virtual(..) => Some(Devirt::StillVirtual),
+        _ => Some(Devirt::Static(instance.def_id())),
+    }
 }
 
 
@@ -1488,33 +1514,39 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // left to the `Unknown` logic below.)
         let trait_did = cx.tcx.trait_of_assoc(def_id);
         let mut cha_resolved = false;
+        // May be upgraded to `true` if resolution reveals the call is actually virtual (a `dyn` the
+        // structural `is_dyn_receiver` check missed) — so the `Unknown` logic below stays honest.
+        let mut dynamic = dynamic;
         if trait_did.is_some() {
-            // Only accept a devirtualized target we can actually analyze: a LOCAL fn/method whose
-            // body we'll see. If resolution lands on a non-local target (would be silently dropped
-            // by `add_edge`, leaving `cha_resolved = true` to suppress the honest `Unknown`), fall
-            // back to CHA instead. We attempt this for ANY non-`dyn` dispatch, not just LOCAL traits:
-            // a LOCAL impl of a NON-local trait is exactly where the silent holes live — a custom
-            // `Future::poll` reached via `.await`, an effectful `Clone`/`Display`/operator impl. The
-            // `.filter(is_local)` keeps it sound and precise: a non-local impl (std `Clone`, `String +
-            // &str`) resolves non-local → dropped → falls to CHA (empty for non-local traits) → the
-            // `Unknown` logic below decides, exactly as before. So this only ADDS local-impl edges that
-            // static dispatch was missing; it never changes a non-local-impl call's verdict.
-            let devirt = if !dynamic {
-                devirtualize(cx, expr, def_id).filter(|t| t.is_local())
-            } else {
-                None
+            // Prefer a real devirtualization to a LOCAL impl whose body we can see, over CHA-expanding
+            // to every impl. We attempt this for ANY non-`dyn` dispatch, not just LOCAL traits: a LOCAL
+            // impl of a NON-local trait is exactly where the silent holes live — a custom `Future::poll`
+            // reached via `.await`, an effectful `Clone`/`Display`/operator impl. CHA is the sound
+            // fallback when resolution lands non-local, stays virtual, or can't pin the target.
+            let devirt = if !dynamic { devirtualize(cx, expr, def_id) } else { None };
+            // CHA fallback: enumerate the local impls the dispatch could reach. Used when devirt didn't
+            // resolve to a LOCAL impl (non-local target, still-virtual, or unresolvable).
+            let mut cha = |this: &mut Self| {
+                for target in cha_targets(cx.tcx, def_id) {
+                    cha_resolved = true;
+                    add_edge(this, target);
+                }
             };
             match devirt {
-                Some(target) => {
+                // A real, static resolution to a LOCAL impl — the one true target.
+                Some(Devirt::Static(target)) if target.is_local() => {
                     add_edge(self, target);
                     cha_resolved = true;
                 }
-                None => {
-                    for target in cha_targets(cx.tcx, def_id) {
-                        cha_resolved = true;
-                        add_edge(self, target);
-                    }
+                // Still virtual: resolution proved this is dynamic dispatch the structural check missed.
+                // Mark it dynamic so a non-local trait (CHA empty) gets an honest `Unknown` below, and
+                // CHA the local impls for a local trait. NEVER edge to the bodyless trait method.
+                Some(Devirt::StillVirtual) => {
+                    dynamic = true;
+                    cha(self);
                 }
+                // Resolved non-local, or couldn't resolve: CHA the local impls.
+                _ => cha(self),
             }
         }
 
@@ -1605,7 +1637,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // workspace member). For a TRAIT-method call the callee `def_id` is the trait method, but
             // the dependency keyed its report by the concrete IMPL method — so devirtualize to that
             // impl first (when the receiver is concrete), else the lookup would always miss.
-            let key_did = devirtualize(cx, expr, def_id).unwrap_or(def_id);
+            let key_did = match devirtualize(cx, expr, def_id) {
+                Some(Devirt::Static(did)) => did,
+                _ => def_id, // still-virtual / unresolvable → the trait method is the key fallback
+            };
             // Layering across crates (AS-EFF-009): record this cross-crate callee (its DefPathHash +
             // path) so check_crate_post can compute reachability — a direct dependency (callee path
             // matches a `forbid -> B` scope) or one laundered through that crate (its `layerreach`

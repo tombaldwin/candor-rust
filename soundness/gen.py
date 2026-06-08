@@ -71,6 +71,20 @@ def edge_forms(callee, i=0):
         # ARBITRARY SELF TYPE: dispatch through `Arc<dyn ARun>` whose method takes `self: Arc<Self>`
         # (peel_refs doesn't see the `dyn` behind the `Arc` — the is_dyn_receiver path).
         "arc_dyn":    (f"{{ let a: std::sync::Arc<dyn ARun> = std::sync::Arc::new(AW({callee})); a.arun(); }}", ["arc_run"], [], []),
+        # UFCS DYNAMIC DISPATCH: `Trait::method(obj)` on a `&dyn Trait` is a `Call` (not a MethodCall), so
+        # `is_dyn_receiver` never runs and `dynamic` starts false. Resolving the trait method on a `dyn`
+        # Self yields a VIRTUAL instance whose `def_id()` is the bodyless trait method — devirtualize must
+        # report it as still-virtual (→ CHA the local impls) instead of edging to that bodyless method,
+        # or the caller looks pure. Teeth: soundness/gen.py `ufcs_dyn` form.
+        "ufcs_dyn":   (
+            f"{{ let o: &dyn Jd{i:02d} = &Sd{i:02d}; Jd{i:02d}::run(o); }}",
+            [], [],
+            [
+                f"trait Jd{i:02d} {{ fn run(&self); }}",
+                f"struct Sd{i:02d};",
+                f"impl Jd{i:02d} for Sd{i:02d} {{ fn run(&self) {{ {callee}(); }} }}",
+            ],
+        ),
         # OPERATOR OVERLOAD: the effect is reached through an overloaded `+` whose `Add::add` impl calls
         # the next fn. In HIR this is `ExprKind::Binary`, NOT a Call/MethodCall — so resolve_callee must
         # query type_dependent_def_id on the operator node or the edge is invisible (silent-pure hole).

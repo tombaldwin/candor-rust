@@ -127,6 +127,13 @@ jobs:
       - name: Soundness fuzzer (await)
         run: CANDOR_FUZZ_FORMS="await_poll" bash soundness/run.sh 40
 
+      # UFCS dynamic-dispatch variant: `Trait::method(obj)` on a `&dyn Trait` is a Call (not a
+      # MethodCall), so the structural `is_dyn_receiver` check never runs; resolution yields a VIRTUAL
+      # instance whose `def_id()` is the bodyless trait method. candor must report that as still-virtual
+      # (→ CHA the local impls) instead of edging to the bodyless method. Teeth-verified.
+      - name: Soundness fuzzer (ufcs-dyn)
+        run: CANDOR_FUZZ_FORMS="ufcs_dyn" bash soundness/run.sh 40
+
       # Cross-crate variant: the chain crosses a lib→bin boundary, exercising candor's DefPathHash
       # cross-crate propagation (its own bug-prone surface the single-crate fuzzer can't reach).
       - name: Soundness fuzzer (cross-crate)

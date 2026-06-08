@@ -17,7 +17,7 @@ import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen import HELPERS, edge_forms, effects_for  # noqa: E402
+from gen import CONSTRUCTION_ONLY, HELPERS, edge_forms, effects_for  # noqa: E402
 
 
 def main():
@@ -34,6 +34,7 @@ def main():
     binfns = [f"f{i:02d}" for i in range(n)]
     bodies = {}
     needed = set()
+    extra_items = []  # per-edge module-level items (operator-overload structs/impls)
     expected = set(binfns) | {"main", "dep_sink", "dep_entry"}
     forms_log = {}
 
@@ -54,11 +55,13 @@ def main():
             continue
         # the LAST bin edge crosses into the lib (xc::dep_entry); earlier edges are intra-bin.
         callee = binfns[i + 1] if not last else "xc::dep_entry"
-        form = rng.choice(list(edge_forms(callee)))
-        body, helpers, extra = edge_forms(callee)[form]
+        forms = edge_forms(callee, i)
+        form = rng.choice([f for f in forms if f not in CONSTRUCTION_ONLY])
+        body, helpers, extra, items = forms[form]
         bodies[binfns[i]] = body
         needed.update(helpers)
         expected.update(extra)
+        extra_items.extend(items)
         forms_log[binfns[i]] = ("CROSS:" + form) if last else form
 
     # ---- lib.rs: the dependency performing the effect ----
@@ -86,6 +89,8 @@ def main():
     for h in HELPERS:
         if h in needed:
             bin_.append(HELPERS[h])
+    for item in extra_items:  # per-edge operator-overload structs + effectful trait impls
+        bin_.append(item)
     bin_.append("")
     for name in binfns:
         bin_.append("fn %s() { %s }" % (name, bodies[name]))
