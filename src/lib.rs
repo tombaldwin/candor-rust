@@ -601,7 +601,22 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str, trust_siblings: boo
         if rf.krate == me && rf.kind == me_kind {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&rf.path) else { continue };
+        // A sibling report `report_files` returned (so it IS a `<crate>.<kind>.json` report, not a
+        // sidecar) that we then can't read or parse is a corrupt/partial write — fail LOUD, not silent.
+        // Skipping it silently degrades cross-crate resolution: an effect that lives in that sibling
+        // would be invisible to a caller here, so an enforcement run (guard/policy) could pass when it
+        // should fire. Warn so the degradation is visible; resolution still proceeds for the rest.
+        let text = match std::fs::read_to_string(&rf.path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "candor: sibling report {:?} could not be read ({e}) — its cross-crate effects are \
+                     NOT loaded; an effect reaching it may be under-reported",
+                    rf.path
+                );
+                continue;
+            }
+        };
         // Version-aware trust (candor-spec §2.1): a sibling report produced by a DIFFERENT engine
         // was computed by rules this engine may have changed, so we must not silently trust its
         // effects — downgrade everything inherited from it to `Unknown`. A legacy v0.1 report (a bare
@@ -613,7 +628,14 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str, trust_siblings: boo
                 Some(v) => v != CANDOR_VERSION,
                 None => report_has_envelope(&text),
             };
-        let Some(arr) = report_entries(&text) else { continue };
+        let Some(arr) = report_entries(&text) else {
+            eprintln!(
+                "candor: sibling report {:?} could not be parsed (corrupt/partial write?) — its \
+                 cross-crate effects are NOT loaded; an effect reaching it may be under-reported",
+                rf.path
+            );
+            continue;
+        };
         for e in arr {
             let Some(key) = parse_dph(&e.hash) else { continue };
             let effs: Vec<&'static str> = if stale {
@@ -3109,6 +3131,33 @@ mod tests {
         assert_eq!(cd.hosts.get(&k).cloned().unwrap_or_default(), ["api.stripe.com".to_string()].into_iter().collect());
         assert_eq!(cd.cmds.get(&k).cloned().unwrap_or_default(), ["git".to_string()].into_iter().collect());
         assert_eq!(cd.paths.get(&k).cloned().unwrap_or_default(), ["/etc/app".to_string()].into_iter().collect());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cross_reports_skips_corrupt_sibling_but_keeps_the_rest() {
+        // A corrupt/partial sibling report (a valid `<crate>.<kind>.json` name, but unparseable JSON)
+        // must be skipped gracefully — never panic, and never abort loading the OTHER siblings. (The
+        // skip is paired with a stderr warning so the cross-crate degradation is loud, not silent.)
+        let dir = std::env::temp_dir().join("candor_cross_corrupt_unit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("r");
+        let prefix = prefix.to_str().unwrap();
+        let h_good = "0123456789abcdef0123456789abcdef";
+        let w = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+
+        // A good sibling and a corrupt one (truncated mid-write); both pass `report_files`' name filter.
+        w("r.good.Rlib.json", &format!(r#"[{{"fn":"good::f","inferred":["Net"],"hash":"{h_good}"}}]"#));
+        w("r.bad.Rlib.json", r#"[{"fn":"bad::f","inferred":["Fs"#);
+
+        let cd = load_cross_reports(prefix, "mybin", "Executable", false);
+        // The good sibling still loaded despite the corrupt one being present.
+        assert_eq!(
+            cd.effects.get(&parse_dph(h_good).unwrap()).cloned().unwrap_or_default(),
+            vec!["Net"],
+            "a corrupt sibling must not block loading the valid ones"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
