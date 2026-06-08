@@ -151,6 +151,14 @@ pub struct Candor {
     /// *statically visible* (literal) subset; a runtime-computed address is simply absent (the host is
     /// undecidable in general, so this is honest best-effort, never a completeness claim).
     net_hosts_direct: HashMap<LocalDefId, BTreeSet<String>>,
+    /// Literal subprocess commands a function runs directly (the program in `Command::new("git")`).
+    /// Propagated like `net_hosts_direct`; surfaced as the report's optional `cmds` detail and enforced
+    /// by `allow Exec …` (AS-EFF-008). Static-literal subset only — a runtime command is simply absent.
+    exec_cmds_direct: HashMap<LocalDefId, BTreeSet<String>>,
+    /// Literal filesystem paths a function touches directly (the path in a built-in `Fs` call).
+    /// Propagated like `net_hosts_direct`; surfaced as the report's optional `paths` detail and enforced
+    /// by `allow Fs …` (AS-EFF-008). Static-literal subset only — a runtime path is simply absent.
+    fs_paths_direct: HashMap<LocalDefId, BTreeSet<String>>,
     /// Local-crate functions each function calls, for transitive propagation.
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
     /// Closure-flow, *receiving* side (bounded). Per FREE fn, the parameter indices it INVOKES as a
@@ -190,6 +198,12 @@ pub struct Candor {
     /// the crate boundary, so "billing may only reach Stripe" holds even when the actual `connect` is
     /// in a shared lib. Empty unless a cross report carried `hosts`.
     cross_hosts: HashMap<(u64, u64), BTreeSet<String>>,
+    /// Subprocess commands a sibling crate's function runs, keyed by `DefPathHash` (its report's `cmds`).
+    /// Lets `allow Exec …` see a command that lives across the crate boundary. Empty unless carried.
+    cross_cmds: HashMap<(u64, u64), BTreeSet<String>>,
+    /// Filesystem paths a sibling crate's function touches, keyed by `DefPathHash` (its report's
+    /// `paths`). Lets `allow Fs …` see a path that lives across the crate boundary. Empty unless carried.
+    cross_paths: HashMap<(u64, u64), BTreeSet<String>>,
     /// CANDOR_EXPLAIN=<query>: when set, record where each effect enters (the call + location) so
     /// `cargo candor explain` can trace the path from a function to the source of each effect.
     explain: Option<String>,
@@ -198,8 +212,9 @@ pub struct Candor {
     sites: HashMap<LocalDefId, Vec<EffectSite>>,
     /// CANDOR_POLICY: declared effect-boundary rules to enforce (AS-EFF-006).
     policy: Vec<PolicyRule>,
-    /// CANDOR_POLICY: declared host-allowlist rules to enforce (AS-EFF-008). Parsed from the same file.
-    host_rules: Vec<HostRule>,
+    /// CANDOR_POLICY: declared literal-allowlist rules to enforce (AS-EFF-008: Net hosts / Exec commands
+    /// / Fs paths). Parsed from the same file.
+    allow_rules: Vec<AllowRule>,
     /// CANDOR_POLICY: declared module-layering rules to enforce (AS-EFF-009). Parsed from the same file.
     layer_rules: Vec<LayerRule>,
     /// CANDOR_TAINT: flag effects whose argument derives from a function parameter (AS-EFF-007).
@@ -262,11 +277,13 @@ impl Candor {
             },
             Err(_) => ParsedPolicy::default(),
         };
-        let ParsedPolicy { rules: policy, host_rules, layer_rules } = parsed_policy;
+        let ParsedPolicy { rules: policy, allow_rules, layer_rules } = parsed_policy;
         Self {
             direct: HashMap::new(),
             fs_direct: HashMap::new(),
             net_hosts_direct: HashMap::new(),
+            exec_cmds_direct: HashMap::new(),
+            fs_paths_direct: HashMap::new(),
             param_calls: HashMap::new(),
             callback_named: HashMap::new(),
             callback_unknown: HashSet::new(),
@@ -277,10 +294,12 @@ impl Candor {
             cross: HashMap::new(),
             via_cross: HashMap::new(), // (cross map keyed by structured DefPathHash, not a string)
             cross_hosts: HashMap::new(),
+            cross_cmds: HashMap::new(),
+            cross_paths: HashMap::new(),
             explain,
             sites: HashMap::new(),
             policy,
-            host_rules,
+            allow_rules,
             layer_rules,
             taint: std::env::var("CANDOR_TAINT").is_ok(),
             tainted: HashMap::new(),
@@ -355,16 +374,17 @@ struct PolicyRule {
     raw: String,
 }
 
-/// One declared *host allowlist* rule (`allow Net [in <scope>] <host>…`). A function in `scope`
-/// that performs `Net` may reach ONLY the listed hosts; reaching any other host — or a host candor
-/// cannot see (a dynamically-built endpoint, or an `Unknown` call that may connect anywhere) — is
-/// AS-EFF-008. Like the rest of policy mode it's checked against *transitive* hosts, so it catches an
-/// endpoint buried in a deep or cross-crate callee that a local edit can't see: the architecture-as-
-/// code form of "the billing module may only ever talk to api.stripe.com". `hosts` are `host[:port]`
-/// literals; matching is by hostname (ports ignored, see `host_part`).
-struct HostRule {
+/// One declared *literal allowlist* rule (`allow <Effect> [in <scope>] <literal>…`). A function in
+/// `scope` that performs `effect` may reach ONLY the listed literals; reaching any other — or one
+/// candor cannot see (a dynamically-built value) — is AS-EFF-008. Checked against the *transitive*
+/// literal surface, so it catches a value buried in a deep or cross-crate callee that a local edit
+/// can't see. Three effects carry a literal surface: `Net` hosts ("billing may only talk to Stripe"),
+/// `Exec` commands ("this layer may only run git"), and `Fs` paths ("config may only read /etc/app").
+/// Matching is effect-specific (`literal_allowed`): host by name, command by basename, path by prefix.
+struct AllowRule {
+    effect: &'static str,
     scope: Option<String>,
-    hosts: BTreeSet<String>,
+    literals: BTreeSet<String>,
     raw: String,
 }
 
@@ -385,7 +405,7 @@ struct LayerRule {
 #[derive(Default)]
 struct ParsedPolicy {
     rules: Vec<PolicyRule>,
-    host_rules: Vec<HostRule>,
+    allow_rules: Vec<AllowRule>,
     layer_rules: Vec<LayerRule>,
 }
 
@@ -412,17 +432,21 @@ fn parse_policy(text: &str) -> ParsedPolicy {
         }
         let mut toks = line.split_whitespace();
         match toks.next().unwrap_or("") {
-            // `allow Net [in <scope>] <host>…` — a host allowlist (AS-EFF-008). Only Net carries host
-            // detail today; an `allow` for any other effect is rejected loudly (silent acceptance would
-            // let a caller believe a boundary is enforced when it isn't).
+            // `allow <Effect> [in <scope>] <literal>…` — a literal allowlist (AS-EFF-008). Effects that
+            // carry a literal surface are Net (hosts), Exec (commands), Fs (paths); any other is rejected
+            // loudly (silent acceptance would let a caller believe a boundary is enforced when it isn't).
             "allow" => {
-                let effect = toks.next().unwrap_or("");
-                if effect != "Net" {
-                    eprintln!(
-                        "candor: ignoring policy rule (only `allow Net …` host allowlists are supported): {line}"
-                    );
-                    continue;
-                }
+                let effect = match toks.next().unwrap_or("") {
+                    "Net" => "Net",
+                    "Exec" => "Exec",
+                    "Fs" => "Fs",
+                    _ => {
+                        eprintln!(
+                            "candor: ignoring policy rule (allow supports only Net hosts / Exec commands / Fs paths): {line}"
+                        );
+                        continue;
+                    }
+                };
                 let mut rest: Vec<&str> = toks.collect();
                 // optional `in <scope>` prefix; without it the rule applies to the whole crate.
                 let scope = if rest.first() == Some(&"in") {
@@ -432,12 +456,12 @@ fn parse_policy(text: &str) -> ParsedPolicy {
                 } else {
                     None
                 };
-                let hosts: BTreeSet<String> = rest.iter().map(|h| h.to_string()).collect();
-                if hosts.is_empty() {
-                    eprintln!("candor: ignoring policy rule (allow Net names no hosts): {line}");
+                let literals: BTreeSet<String> = rest.iter().map(|h| h.to_string()).collect();
+                if literals.is_empty() {
+                    eprintln!("candor: ignoring policy rule (allow {effect} names no values): {line}");
                     continue;
                 }
-                out.host_rules.push(HostRule { scope, hosts, raw: line.to_string() });
+                out.allow_rules.push(AllowRule { effect, scope, literals, raw: line.to_string() });
             }
             "deny" => {
                 let mut effects = BTreeSet::new();
@@ -526,14 +550,22 @@ fn parse_dph(s: &str) -> Option<(u64, u64)> {
 /// baseline's own snapshot of the project's crates — intentionally from the baseline commit — so we
 /// trust them as-is; downgrading them would change the very cross-inclusive set the guard exists to
 /// reproduce, firing a spurious AS-EFF-005 every time the engine moves ahead of the baseline.
-fn load_cross_reports(
-    prefix: &str,
-    me: &str,
-    me_kind: &str,
-    trust_siblings: bool,
-) -> (HashMap<(u64, u64), Vec<&'static str>>, HashMap<(u64, u64), BTreeSet<String>>) {
+///
+/// Everything a dependent crate inherits from its siblings' reports, keyed by `DefPathHash`: effects,
+/// and the literal detail surfaces the allowlists need (Net hosts, Exec commands, Fs paths).
+#[derive(Default)]
+struct CrossData {
+    effects: HashMap<(u64, u64), Vec<&'static str>>,
+    hosts: HashMap<(u64, u64), BTreeSet<String>>,
+    cmds: HashMap<(u64, u64), BTreeSet<String>>,
+    paths: HashMap<(u64, u64), BTreeSet<String>>,
+}
+
+fn load_cross_reports(prefix: &str, me: &str, me_kind: &str, trust_siblings: bool) -> CrossData {
     let mut out: HashMap<(u64, u64), Vec<&'static str>> = HashMap::new();
     let mut hosts: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
+    let mut cmds: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
+    let mut paths: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
     for rf in report_files(prefix) {
         // Skip our OWN report (by crate name AND type); DefPathHash keys are globally unique so
         // all other crates merge into one map. (Own entries are local defs and the cross path is
@@ -567,15 +599,23 @@ fn load_cross_reports(
             if !effs.is_empty() {
                 out.insert(key, effs);
             }
-            // Carry the sibling's literal Net hosts (its report's `hosts` detail) so the host
-            // allowlist can see endpoints that live across the crate boundary. Dropped when stale —
-            // a downgraded report's host claims are no more trustworthy than its effects.
-            if !stale && !e.hosts.is_empty() {
-                hosts.entry(key).or_default().extend(e.hosts.iter().cloned());
+            // Carry the sibling's literal detail (hosts / commands / paths) so the allowlists can see
+            // values that live across the crate boundary. Dropped when stale — a downgraded report's
+            // literal claims are no more trustworthy than its effects.
+            if !stale {
+                if !e.hosts.is_empty() {
+                    hosts.entry(key).or_default().extend(e.hosts.iter().cloned());
+                }
+                if !e.cmds.is_empty() {
+                    cmds.entry(key).or_default().extend(e.cmds.iter().cloned());
+                }
+                if !e.paths.is_empty() {
+                    paths.entry(key).or_default().extend(e.paths.iter().cloned());
+                }
             }
         }
     }
-    (out, hosts)
+    CrossData { effects: out, hosts, cmds, paths }
 }
 
 
@@ -852,6 +892,47 @@ fn net_hosts_in_call(expr: &Expr<'_>) -> BTreeSet<String> {
         }
     }
     out
+}
+
+/// The first string-literal argument of a call, if any. The program for `Command::new("git")` and the
+/// path for `fs::read("/etc/x")` are both the first arg, so this serves the `Exec`/`Fs` allowlists the
+/// way `net_hosts_in_call` serves `Net`. Called only for a call already classified with that effect.
+fn first_str_lit_arg(expr: &Expr<'_>) -> Option<String> {
+    use rustc_ast::LitKind;
+    let args: &[Expr<'_>] = match expr.kind {
+        ExprKind::Call(_, args) => args,
+        ExprKind::MethodCall(_, _, args, _) => args,
+        _ => return None,
+    };
+    for a in args {
+        if let ExprKind::Lit(lit) = &a.kind {
+            if let LitKind::Str(sym, _) = lit.node {
+                let s = sym.as_str().trim();
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The basename of a command (`/usr/bin/git` → `git`), so `allow Exec … git` accepts an absolute path
+/// to the same program. A bare name is returned unchanged.
+fn cmd_base(c: &str) -> &str {
+    c.rsplit(['/', '\\']).next().unwrap_or(c)
+}
+
+/// Whether a *reached* literal is covered by an allowlist, with effect-appropriate matching: `Net`
+/// hosts match by hostname (port-insensitive); `Exec` commands match by basename; `Fs` paths match by
+/// path-prefix (an allowed directory covers everything beneath it). Unknown effects: exact match.
+fn literal_allowed(effect: &str, reached: &str, allow: &BTreeSet<String>) -> bool {
+    match effect {
+        "Net" => allow.iter().any(|a| host_part(a) == host_part(reached)),
+        "Exec" => allow.iter().any(|a| cmd_base(a) == cmd_base(reached)),
+        "Fs" => allow.iter().any(|a| reached == a || reached.starts_with(a.as_str())),
+        _ => allow.contains(reached),
+    }
 }
 
 /// Classify a resolved callee by the crate it belongs to and its full path.
@@ -1634,9 +1715,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 .map(|t| format!("{t:?}"))
                 .collect::<Vec<_>>()
                 .join("-");
-            let (cross, cross_hosts) = load_cross_reports(&prefix, &me, &me_kind, trust_siblings);
-            self.cross = cross;
-            self.cross_hosts = cross_hosts;
+            let cd = load_cross_reports(&prefix, &me, &me_kind, trust_siblings);
+            self.cross = cd.effects;
+            self.cross_hosts = cd.hosts;
+            self.cross_cmds = cd.cmds;
+            self.cross_paths = cd.paths;
         }
     }
 
@@ -1831,6 +1914,20 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     self.net_hosts_direct.entry(caller).or_default().extend(hosts);
                 }
             }
+            // Non-breaking Exec/Fs refinements: the literal command (`Command::new("git")`) / path
+            // (`fs::read("/etc/x")`) is the first string-literal argument. Gated to the built-in
+            // classifier (a user `extra` rule's arg shape is unknown). Feeds the `allow Exec/Fs …`
+            // allowlists, exactly as host literals feed `allow Net …`.
+            if builtin == Some("Exec") {
+                if let Some(cmd) = first_str_lit_arg(expr) {
+                    self.exec_cmds_direct.entry(caller).or_default().insert(cmd);
+                }
+            }
+            if builtin == Some("Fs") {
+                if let Some(p) = first_str_lit_arg(expr) {
+                    self.fs_paths_direct.entry(caller).or_default().insert(p);
+                }
+            }
             if self.explain.is_some() {
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                 self.sites.entry(caller).or_default().push(EffectSite { eff: effect, via: path.clone(), loc });
@@ -1851,11 +1948,17 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // impl first (when the receiver is concrete), else the lookup would always miss.
             let key_did = devirtualize(cx, expr, def_id).unwrap_or(def_id);
             let cross_key = dph(cx.tcx, key_did);
-            // Inherit the cross-crate callee's literal Net hosts into the caller's direct host set, so
-            // within-crate host propagation (hostsacc) carries them up to every transitive caller —
-            // the host allowlist then sees an endpoint that physically lives in another crate.
+            // Inherit the cross-crate callee's literal detail (hosts / commands / paths) into the
+            // caller's direct sets, so within-crate propagation carries them up to every transitive
+            // caller — the allowlists then see a value that physically lives in another crate.
             if let Some(hs) = self.cross_hosts.get(&cross_key) {
                 self.net_hosts_direct.entry(caller).or_default().extend(hs.iter().cloned());
+            }
+            if let Some(cs) = self.cross_cmds.get(&cross_key) {
+                self.exec_cmds_direct.entry(caller).or_default().extend(cs.iter().cloned());
+            }
+            if let Some(ps) = self.cross_paths.get(&cross_key) {
+                self.fs_paths_direct.entry(caller).or_default().extend(ps.iter().cloned());
             }
             if let Some(effs) = self.cross.get(&cross_key).cloned() {
                 for e in &effs {
@@ -1948,6 +2051,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // interpretation. So a fn with `Net` but empty `hosts` means "talks to the network, endpoint not
         // statically known", exactly right.
         let hostsacc = propagate(self.net_hosts_direct.clone(), &self.calls);
+        let cmdsacc = propagate(self.exec_cmds_direct.clone(), &self.calls);
+        let pathsacc = propagate(self.fs_paths_direct.clone(), &self.calls);
 
         // CANDOR_EXPLAIN=<query>: for each matching function, trace the call path to where each of
         // its effects originates (the leaf call + location). A dedicated query mode — print and
@@ -2030,7 +2135,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             || no_ambient_var.is_some()
             || baseline.is_some()
             || !self.policy.is_empty()
-            || !self.host_rules.is_empty()
+            || !self.allow_rules.is_empty()
             || !self.layer_rules.is_empty()
             || self.taint;
 
@@ -2148,6 +2253,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     },
                     // The literal Net endpoints statically visible from here (empty = none visible).
                     hosts: hostsacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+                    // Literal subprocess commands / filesystem paths statically visible (empty = none).
+                    cmds: cmdsacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+                    paths: pathsacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
                 });
                 continue;
             }
@@ -2310,48 +2418,61 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 }
             }
 
-            // AS-EFF-008 (CANDOR_POLICY host allowlist): a function in scope performs Net to a host
-            // OUTSIDE its declared allowlist — or to a host candor cannot pin down (a dynamically-built
-            // endpoint leaving no literal, or an `Unknown` call that could connect anywhere). The latter
-            // can't be silently certified (the §4 trust contract's forbidden direction), so it flags
-            // with a caveat. Checked against TRANSITIVE hosts: this catches an un-sanctioned endpoint
-            // reached through a deep or cross-crate callee — the "billing only talks to Stripe" boundary
-            // a local edit can't verify.
-            for rule in &self.host_rules {
+            // AS-EFF-008 (CANDOR_POLICY allowlist): a function in scope performs an effect (Net/Exec/Fs)
+            // reaching a literal OUTSIDE its declared allowlist — or one candor cannot pin down (a
+            // dynamically-built value leaving no literal). The opaque case can't be silently certified
+            // (the §4 trust contract's forbidden direction), so it flags with a caveat. Checked against
+            // the TRANSITIVE literal surface: this catches an un-sanctioned host/command/path reached
+            // through a deep or cross-crate callee — the "billing only talks to Stripe" / "this layer
+            // only runs git" / "config only reads /etc/app" boundary a local edit can't verify.
+            for rule in &self.allow_rules {
                 if let Some(scope) = &rule.scope {
                     if !scope_matches(&name, scope) {
                         continue;
                     }
                 }
-                if !effs.contains("Net") {
-                    continue; // no Net effect ⇒ the host allowlist is trivially satisfied
+                if !effs.contains(rule.effect) {
+                    continue; // the effect isn't performed ⇒ the allowlist is trivially satisfied
                 }
-                let reached = hostsacc.get(&f);
-                // Hosts reached that no allowlist entry covers (compared by hostname; see host_part).
+                // The transitive literal surface for this effect (hosts / commands / paths).
+                let reached = match rule.effect {
+                    "Net" => hostsacc.get(&f),
+                    "Exec" => cmdsacc.get(&f),
+                    "Fs" => pathsacc.get(&f),
+                    _ => None,
+                };
+                // Literals reached that no allowlist entry covers (effect-specific match, see
+                // `literal_allowed`).
                 let bad: Vec<&str> = reached
-                    .map(|hs| {
-                        hs.iter()
-                            .filter(|h| !rule.hosts.iter().any(|a| host_part(a) == host_part(h)))
-                            .map(|h| h.as_str())
+                    .map(|set| {
+                        set.iter()
+                            .filter(|v| !literal_allowed(rule.effect, v, &rule.literals))
+                            .map(|v| v.as_str())
                             .collect()
                     })
                     .unwrap_or_default();
-                // Net is present but candor sees NO literal host at all (a fully dynamic endpoint) — it
-                // can't certify which host, so it flags. NOTE: a function that reaches a KNOWN allowed
-                // host but ALSO makes an `Unknown` call is NOT flagged here: AS-EFF-008 certifies the
-                // host surface candor can SEE; the residual "an unresolvable call might connect anywhere"
-                // risk is exactly what AS-EFF-003/006 cover. Folding `Unknown` in here would fire on
-                // essentially every real network function (they all do dynamic-dispatch `write!`), making
-                // the allowlist unusable — the wrong trade for a host rule.
-                let opaque = reached.map(|hs| hs.is_empty()).unwrap_or(true);
+                // The effect is present but candor sees NO literal at all (a fully dynamic value) — it
+                // can't certify the surface, so it flags. NOTE: a function that reaches a KNOWN allowed
+                // value but ALSO makes an `Unknown` call is NOT flagged here: AS-EFF-008 certifies the
+                // surface candor can SEE; the residual "an unresolvable call might reach anything" risk is
+                // exactly what AS-EFF-003/006 cover. Folding `Unknown` in here would fire on essentially
+                // every real effectful function, making the allowlist unusable.
+                let opaque = reached.map(|set| set.is_empty()).unwrap_or(true);
                 if !bad.is_empty() || opaque {
                     let scope = rule.scope.as_deref().map(|s| format!(" (scope `{s}`)")).unwrap_or_default();
+                    let noun = match rule.effect {
+                        "Exec" => "a command",
+                        "Fs" => "a path",
+                        _ => "a host",
+                    };
                     let detail = if !bad.is_empty() {
                         format!("reaches {{ {} }} outside the allowlist", bad.join(", "))
                     } else {
-                        "performs Net to a host candor cannot determine (a dynamically-built endpoint); \
-                         the allowlist cannot be certified"
-                            .to_string()
+                        format!(
+                            "performs {} to {noun} candor cannot determine (a dynamically-built value); \
+                             the allowlist cannot be certified",
+                            rule.effect
+                        )
                     };
                     span_lint(
                         cx,
@@ -2980,29 +3101,41 @@ mod tests {
     }
 
     #[test]
-    fn host_allowlist_parses() {
+    fn allowlist_parses() {
         let p = parse_policy(
             "allow Net in billing  api.stripe.com  hooks.stripe.com\n\
+             allow Exec in ci  git\n\
+             allow Fs in config  /etc/app\n\
              allow Net  github.com\n\
-             allow Fs  in x  /tmp\n\
+             allow Db  whatever\n\
              allow Net in nohosts\n\
              allow\n",
         );
-        // Only the two well-formed `allow Net` rules survive: the `allow Fs` (unsupported effect),
-        // the scoped rule that names no hosts, and the bare `allow` are all dropped.
-        assert_eq!(p.host_rules.len(), 2);
-        // `allow Net in billing api.stripe.com hooks.stripe.com`
-        assert_eq!(p.host_rules[0].scope.as_deref(), Some("billing"));
+        // The four well-formed Net/Exec/Fs rules survive; `allow Db` (unsupported effect), the
+        // scoped Net rule that names no hosts, and the bare `allow` are dropped.
+        assert_eq!(p.allow_rules.len(), 4);
+        // `allow Net in billing …`
+        assert_eq!((p.allow_rules[0].effect, p.allow_rules[0].scope.as_deref()), ("Net", Some("billing")));
         assert_eq!(
-            p.host_rules[0].hosts,
+            p.allow_rules[0].literals,
             ["api.stripe.com", "hooks.stripe.com"].iter().map(|s| s.to_string()).collect()
         );
+        // `allow Exec in ci git`
+        assert_eq!((p.allow_rules[1].effect, p.allow_rules[1].scope.as_deref()), ("Exec", Some("ci")));
+        assert!(p.allow_rules[1].literals.contains("git"));
+        // `allow Fs in config /etc/app`
+        assert_eq!((p.allow_rules[2].effect, p.allow_rules[2].scope.as_deref()), ("Fs", Some("config")));
         // `allow Net github.com` — no `in`, so whole-crate scope.
-        assert!(p.host_rules[1].scope.is_none());
-        assert!(p.host_rules[1].hosts.contains("github.com"));
-        // host_part compares by hostname, so a rule host accepts a reached host with a port.
-        assert_eq!(host_part("api.stripe.com:443"), "api.stripe.com");
-        assert_eq!(host_part("api.stripe.com"), "api.stripe.com");
+        assert_eq!((p.allow_rules[3].effect, p.allow_rules[3].scope.is_none()), ("Net", true));
+
+        // effect-specific matching: host by name, command by basename, path by prefix.
+        let set = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        assert!(literal_allowed("Net", "api.stripe.com:443", &set(&["api.stripe.com"])));
+        assert!(literal_allowed("Exec", "/usr/bin/git", &set(&["git"])));
+        assert!(!literal_allowed("Exec", "/usr/bin/curl", &set(&["git"])));
+        assert!(literal_allowed("Fs", "/etc/app/conf.toml", &set(&["/etc/app"])));
+        assert!(!literal_allowed("Fs", "/etc/shadow", &set(&["/etc/app"])));
+        assert_eq!(cmd_base("/usr/bin/git"), "git");
     }
 
     #[test]
@@ -3045,11 +3178,11 @@ mod tests {
         let w = |name: &str, body: String| std::fs::write(dir.join(name), body).unwrap();
 
         // A dependency report — SHOULD load (only the entry with a valid hash + non-empty effects).
-        // dep::f also carries a literal Net host, which must propagate into the cross host map.
+        // dep::f also carries literal host/command/path detail, which must propagate into the cross maps.
         w(
             "r.dep.Rlib.json",
             format!(
-                r#"[{{"fn":"dep::f","inferred":["Net","Fs"],"hosts":["api.stripe.com"],"hash":"{h_lib}"}},
+                r#"[{{"fn":"dep::f","inferred":["Net","Fs","Exec"],"hosts":["api.stripe.com"],"cmds":["git"],"paths":["/etc/app"],"hash":"{h_lib}"}},
                     {{"fn":"dep::pure","inferred":[],"hash":"{h_lib}"}},
                     {{"fn":"dep::old","inferred":["Db"]}}]"#
             ),
@@ -3060,20 +3193,22 @@ mod tests {
         w("r.calibrated.json", r#"{"crates":[]}"#.to_string());
         w("r.encountered-dep-Rlib.json", r#"["serde"]"#.to_string());
 
-        let (m, hosts) = load_cross_reports(prefix, "mybin", "Executable", false);
+        let cd = load_cross_reports(prefix, "mybin", "Executable", false);
+        let m = &cd.effects;
 
-        // dep::f loaded under its parsed-hash key with both effects.
+        // dep::f loaded under its parsed-hash key with all three effects.
         let mut got = m.get(&parse_dph(h_lib).unwrap()).cloned().unwrap_or_default();
         got.sort();
-        assert_eq!(got, vec!["Fs", "Net"]);
+        assert_eq!(got, vec!["Exec", "Fs", "Net"]);
         // dep::pure (empty effects) and dep::old (no hash) are dropped; own report is skipped.
         assert!(m.get(&parse_dph(h_own).unwrap()).is_none(), "own report must be skipped");
         assert_eq!(m.len(), 1, "only the one dependency entry with hash + effects should load");
-        // dep::f's host crossed the boundary into the cross host map (the scale path for AS-EFF-008).
-        assert_eq!(
-            hosts.get(&parse_dph(h_lib).unwrap()).cloned().unwrap_or_default(),
-            ["api.stripe.com".to_string()].into_iter().collect()
-        );
+        // dep::f's host/command/path detail crossed the boundary into the cross maps (the scale path
+        // for the AS-EFF-008 allowlists).
+        let k = parse_dph(h_lib).unwrap();
+        assert_eq!(cd.hosts.get(&k).cloned().unwrap_or_default(), ["api.stripe.com".to_string()].into_iter().collect());
+        assert_eq!(cd.cmds.get(&k).cloned().unwrap_or_default(), ["git".to_string()].into_iter().collect());
+        assert_eq!(cd.paths.get(&k).cloned().unwrap_or_default(), ["/etc/app".to_string()].into_iter().collect());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3093,12 +3228,12 @@ mod tests {
 
         // A v0.2 report from a DIFFERENT engine → inherited effects downgraded to Unknown (§2.1).
         w(format!(r#"{{"candor":{{"version":"OTHER"}},"functions":[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h}"}}]}}"#));
-        let (m, _) = load_cross_reports(prefix, "mybin", "Executable", false);
+        let m = load_cross_reports(prefix, "mybin", "Executable", false).effects;
         assert_eq!(m.get(&parse_dph(h).unwrap()).cloned().unwrap_or_default(), vec![UNKNOWN]);
 
         // The SAME engine version → trusted as-is.
         w(format!(r#"{{"candor":{{"version":"{CANDOR_VERSION}"}},"functions":[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h}"}}]}}"#));
-        let (m, _) = load_cross_reports(prefix, "mybin", "Executable", false);
+        let m = load_cross_reports(prefix, "mybin", "Executable", false).effects;
         let mut got = m.get(&parse_dph(h).unwrap()).cloned().unwrap_or_default();
         got.sort();
         assert_eq!(got, vec!["Fs", "Net"]);
@@ -3107,7 +3242,7 @@ mod tests {
         // it is trusted as-is — NOT downgraded. (Otherwise the guard fires AS-EFF-005 every time the
         // engine moves ahead of the baseline it is comparing against.)
         w(format!(r#"{{"candor":{{"version":"OTHER"}},"functions":[{{"fn":"dep::f","inferred":["Net","Fs"],"hash":"{h}"}}]}}"#));
-        let (m, _) = load_cross_reports(prefix, "mybin", "Executable", true);
+        let m = load_cross_reports(prefix, "mybin", "Executable", true).effects;
         let mut got = m.get(&parse_dph(h).unwrap()).cloned().unwrap_or_default();
         got.sort();
         assert_eq!(got, vec!["Fs", "Net"]);

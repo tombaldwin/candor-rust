@@ -93,6 +93,17 @@ pub struct ReportEntry {
     /// completeness claim — host-by-runtime-value is undecidable, so absence ≠ "no network".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
+    /// Literal subprocess commands statically visible from this function (the program name passed to
+    /// `Command::new("…")`). The decidable subset of "what does it run". A non-breaking refinement of
+    /// `Exec`; omitted when none are visible (a runtime-computed command, or no `Exec`). Never a
+    /// completeness claim — command-by-runtime-value is undecidable, so absence ≠ "runs nothing".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cmds: Vec<String>,
+    /// Literal filesystem paths statically visible from this function (the path passed to a built-in
+    /// `Fs` call). The decidable subset of "what does it touch". A non-breaking refinement of `Fs`;
+    /// omitted when none are visible (a runtime-computed path, or no `Fs`). Never a completeness claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
     /// Effectful local functions this one calls — the effect-relevant call graph ("who calls X?").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,

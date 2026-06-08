@@ -153,6 +153,7 @@ deny Net Db Fs  domain                       # the domain layer must reach no I/
 pure            parse                        # parsing must be side-effect-free
 deny Exec                                    # nothing may spawn a subprocess
 allow Net in billing  api.stripe.com         # billing may reach the network — but ONLY Stripe
+allow Exec in build   git                    # the build layer may run subprocesses — but ONLY git
 forbid domain -> infra                       # the domain layer must not depend on infrastructure
 ```
 
@@ -166,9 +167,11 @@ Three boundary kinds, all checked *transitively* so they catch what a local diff
 
 - **`deny` / `pure`** (AS-EFF-006) — *what* a layer may do. `checkout` need not touch the database
   directly; candor catches it reaching `Db` through any callee.
-- **`allow Net in <scope> <host>…`** (AS-EFF-008) — *which endpoints* a layer may reach. A supply-chain
-  boundary a model can't self-check, because the literal host is buried in a transitive, often
-  **cross-crate**, callee.
+- **`allow <Effect> in <scope> <value>…`** (AS-EFF-008) — *which values* an effect may reach: `Net`
+  hosts ("billing may only talk to Stripe"), `Exec` commands ("build may only run git"), `Fs` paths
+  ("config may only read /etc/app"). A supply-chain boundary a model can't self-check, because the
+  literal is buried in a transitive, often **cross-crate**, callee (matched per-effect: host by name,
+  command by basename, path by prefix).
 - **`forbid <A> -> <B>`** (AS-EFF-009) — *who* a layer may depend on. The domain layer must not reach
   into infra, even through a chain of helpers.
 

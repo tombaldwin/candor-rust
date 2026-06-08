@@ -200,6 +200,30 @@ want   "AS-EFF-008 flags the off-allowlist host reached transitively (billing::t
 absent "the allowed-host path is NOT flagged (billing::charge → api.stripe.com)"       "$out" '[AS-EFF-008] `billing::charge`'
 rm -rf "$(dirname "$HA")"
 
+# ── 9a-Exec. Command allowlist: allow Exec <cmd> (AS-EFF-008) ──
+echo "== command allowlist / AS-EFF-008 (allow Exec) =="
+EX=$(mktemp -d)/ex; mkdir -p "$EX/src"
+printf '[package]\nname="ex"\nversion="0.1.0"\nedition="2021"\n' > "$EX/Cargo.toml"
+# build::sync runs `git` (allowed) via a helper; build::deploy runs `ssh` (not allowed) via a helper.
+printf 'mod build {\n  fn run_git(){ let _=std::process::Command::new("git").status(); }\n  fn run_ssh(){ let _=std::process::Command::new("ssh").status(); }\n  pub fn sync(){ run_git(); }\n  pub fn deploy(){ run_ssh(); }\n}\nfn main(){ build::sync(); build::deploy(); }\n' > "$EX/src/main.rs"
+echo "allow Exec in build  git" > "$EX/policy"
+out=$(dl "$EX" env CANDOR_POLICY="$EX/policy")
+want   "AS-EFF-008 flags the off-allowlist command reached transitively (build::deploy → ssh)" "$out" '[AS-EFF-008] `build::deploy`'
+absent "the allowed command (git) is NOT flagged (build::sync)"                                "$out" '[AS-EFF-008] `build::sync`'
+rm -rf "$(dirname "$EX")"
+
+# ── 9a-Fs. Path allowlist: allow Fs <prefix> (AS-EFF-008) ──
+echo "== path allowlist / AS-EFF-008 (allow Fs) =="
+FA=$(mktemp -d)/fa; mkdir -p "$FA/src"
+printf '[package]\nname="fa"\nversion="0.1.0"\nedition="2021"\n' > "$FA/Cargo.toml"
+# config::load reads under /etc/app (allowed); config::leak reads /etc/shadow (outside the prefix).
+printf 'mod config {\n  fn read_conf(){ let _=std::fs::read_to_string("/etc/app/conf.toml"); }\n  fn read_secret(){ let _=std::fs::read_to_string("/etc/shadow"); }\n  pub fn load(){ read_conf(); }\n  pub fn leak(){ read_secret(); }\n}\nfn main(){ config::load(); config::leak(); }\n' > "$FA/src/main.rs"
+echo "allow Fs in config  /etc/app" > "$FA/policy"
+out=$(dl "$FA" env CANDOR_POLICY="$FA/policy")
+want   "AS-EFF-008 flags the path outside the allowed prefix (config::leak → /etc/shadow)" "$out" '[AS-EFF-008] `config::leak`'
+absent "a path under the allowed prefix is NOT flagged (config::load → /etc/app/…)"       "$out" '[AS-EFF-008] `config::load`'
+rm -rf "$(dirname "$FA")"
+
 # ── 9b. Module layering: forbid a dependency direction (AS-EFF-009) ──
 echo "== module layering / AS-EFF-009 (CANDOR_POLICY forbid) =="
 LY=$(mktemp -d)/ly; mkdir -p "$LY/src"

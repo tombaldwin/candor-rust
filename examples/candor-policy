@@ -10,10 +10,12 @@
 #   deny <Effects...> [scope]    forbid those effects in scope   (effects: Net Fs Db Exec Env Clock
 #                                                                  Ipc Log Rand Clipboard Unknown)
 #   pure [scope]                 forbid ALL effects in scope (must be side-effect-free)
-#   allow Net [in <scope>] <host>...   in scope, Net may reach ONLY these hosts — any other endpoint
-#                                      (or one candor can't see) is a violation (AS-EFF-008). An
-#                                      allowlist a model can't self-check: the host is a literal buried
-#                                      in a transitive, possibly cross-crate, callee.
+#   allow <Effect> [in <scope>] <value>...   in scope, that effect may reach ONLY these values — any
+#                                other (or one candor can't see) is a violation (AS-EFF-008). Three
+#                                effects carry a literal surface: Net hosts, Exec commands, Fs paths.
+#                                Matching is per-effect: host by name, command by basename, path by
+#                                prefix. An allowlist a model can't self-check — the value is a literal
+#                                buried in a transitive, possibly cross-crate, callee.
 #   forbid <A> -> <B>            a function in scope A must not (transitively) call into scope B — the
 #                                dependency-direction rule (AS-EFF-009). "domain must not reach infra."
 #
@@ -33,6 +35,12 @@ deny Exec
 # host (even through a deep or cross-crate helper) is flagged. This is the supply-chain boundary: a
 # model editing billing can't see which endpoint a transitive callee actually connects to.
 allow Net in billing  api.stripe.com  hooks.stripe.com
+
+# The build module may run subprocesses, but ONLY git — not ssh, not curl, however deep the call.
+allow Exec in build  git
+
+# Anything that reads config may only touch /etc/app — not /etc/shadow, not $HOME/.ssh.
+allow Fs in config  /etc/app
 
 # Layering: the domain layer must not depend on infrastructure — not even through a chain of helpers.
 forbid domain -> infra
