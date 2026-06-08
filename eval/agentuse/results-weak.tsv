@@ -1,0 +1,21 @@
+trial	recall	missed_rs	rs_broken	place_ok	added	used_candor	decision
+control-01	0.938	0	0	1	1	0	relocated: orders::order_tot
+control-02	0.938	0	0	1	1	0	relocated: api
+control-03	0.938	0	0	1	1	0	relocated: invoice::line_tot
+control-04	0.938	0	0	1	1	0	relocated: invoice
+control-05	0.812	0	0	1	1	0	relocated: export_pdf
+control-06	0.938	0	0	1	1	0	relocated: report::export_pd
+control-07	0.938	0	0	1	1	0	relocated: invoice
+control-08	0.938	0	0	1	1	0	relocated: invoice::line_tot
+control-09	0.938	0	1	0	1	0	relocated: pricing::priced
+control-10	0.938	0	0	1	1	0	relocated: line_total
+treatment-01	1.0	0	0	1	1	1	relocated: report::export_pd
+treatment-02	1.0	0	0	1	1	1	relocated: report::export_pd
+treatment-03	1.0	0	0	1	1	1	relocated: batch::nightly_jo
+treatment-04	1.0	0	0	1	1	1	relocated: batch::batch_expo
+treatment-05	1.0	0	0	1	1	1	relocated: batch::batch_expo
+treatment-06	1.0	0	0	1	1	1	relocated: invoice::line_tot
+treatment-07	1.0	0	1	0	1	1	relocated: tax::apply_tax_lo
+treatment-08	1.0	0	0	1	1	1	relocated: invoice::line_tot
+treatment-09	1.0	0	0	1	1	1	relocated: orders::order_tot
+treatment-10	1.0	0	0	1	1	1	relocated: report::export_pd
