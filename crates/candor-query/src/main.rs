@@ -977,7 +977,7 @@ fn cmd_containment(args: &[String]) -> i32 {
             return if leaks.is_empty() { 0 } else { 1 };
         }
         if !leaks.is_empty() {
-            println!("[containment] a boundary effect leaked into a layer it wasn't in:");
+            println!("[AS-EFF-010] a boundary effect leaked into a layer it wasn't in:");
             for l in &leaks {
                 println!("  {l}");
             }
