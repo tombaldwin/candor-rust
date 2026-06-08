@@ -31,11 +31,11 @@
   "expect": "Net/Fs/Clock (async runtime)",
   "ver": "1.52.3",
   "rs": 547,
-  "fns": 153,
+  "fns": 156,
   "eff": {
    "Fs": 41,
    "Log": 36,
-   "Net": 31,
+   "Net": 34,
    "Clock": 27,
    "Rand": 22,
    "Ipc": 11,
@@ -48,11 +48,11 @@
   "expect": "Net/Ipc (low-level IO)",
   "ver": "1.2.1",
   "rs": 62,
-  "fns": 26,
+  "fns": 27,
   "eff": {
    "Net": 16,
-   "Fs": 7,
-   "Ipc": 5
+   "Ipc": 12,
+   "Fs": 7
   }
  },
  {
@@ -293,17 +293,23 @@
   "expect": "Fs/Exec/Net/Ipc (syscalls)",
   "ver": "0.29.0",
   "rs": 113,
-  "fns": 0,
-  "eff": {}
+  "fns": 59,
+  "eff": {
+   "Fs": 26,
+   "Net": 17,
+   "Ipc": 7,
+   "Clock": 5,
+   "Exec": 4
+  }
  },
  {
   "name": "which",
   "expect": "Fs/Env/Exec",
   "ver": "8.0.2",
   "rs": 8,
-  "fns": 13,
+  "fns": 15,
   "eff": {
-   "Fs": 8,
+   "Fs": 10,
    "Env": 5
   }
  },

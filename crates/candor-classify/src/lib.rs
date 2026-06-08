@@ -25,7 +25,7 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
 /// enforces that every named crate the classifier matches appears here.
-pub const CALIBRATED_CRATES: [&str; 46] = [
+pub const CALIBRATED_CRATES: [&str; 47] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
@@ -42,6 +42,8 @@ pub const CALIBRATED_CRATES: [&str; 46] = [
     "chrono", "time", "tracing", "log", "arboard",
     // compiler diagnostic emission (a dylint lint's output) — see the Log rules in classify
     "rustc_lint", "rustc_errors",
+    // raw syscalls via FFI — the syscall-name table that lights up the FFI-thin tier (nix etc.)
+    "libc",
 ];
 
 pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
@@ -93,6 +95,80 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::upload")
         {
             return Some("Net");
+        }
+        return None;
+    }
+    // libc — raw syscalls via FFI. The FFI-thin tier (nix, and the syscall layer beneath rusqlite/git2)
+    // is invisible to a name classifier unless we model libc directly: a 35-crate calibration
+    // (eval/calibration) showed nix reporting ZERO library effects because every wrapper bottoms out in
+    // an unrecognised `libc::*` call. Classify by syscall name, but ONLY the UNAMBIGUOUS ones — the
+    // socket family is Net, path/dir syscalls are Fs, spawn/exec/wait is Exec, SysV/pipe IPC is Ipc,
+    // env/clock/entropy each their own. We deliberately SKIP the generic file-descriptor ops
+    // (read/write/close/lseek/dup/fcntl/ioctl/poll/select/epoll*/mmap): they operate on ANY fd — file,
+    // socket, or pipe — so a fixed label would mis-categorise as often as it helps. An honest
+    // no-classify (under-report) beats emitting the WRONG effect. Pure conversions (htons/inet_pton/
+    // gmtime) are also skipped.
+    if crate_name == "libc" {
+        let f = path.rsplit("::").next().unwrap_or(path);
+        // path / directory / metadata syscalls (incl. *64 and *at variants)
+        const FS: &[&str] = &[
+            "open", "open64", "openat", "openat2", "creat", "creat64", "stat", "stat64", "lstat",
+            "lstat64", "fstatat", "fstatat64", "newfstatat", "statx", "access", "faccessat",
+            "faccessat2", "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat", "rename", "renameat",
+            "renameat2", "link", "linkat", "symlink", "symlinkat", "readlink", "readlinkat", "chmod",
+            "fchmodat", "chown", "lchown", "fchownat", "truncate", "truncate64", "ftruncate",
+            "ftruncate64", "opendir", "fdopendir", "readdir", "readdir64", "readdir_r", "closedir",
+            "rewinddir", "seekdir", "telldir", "scandir", "mkstemp", "mkstemps", "mkostemp", "mkdtemp",
+            "mknod", "mknodat", "chdir", "fchdir", "getcwd", "get_current_dir_name", "chroot",
+            "pivot_root", "statfs", "statfs64", "fstatfs", "fstatfs64", "statvfs", "fstatvfs", "mount",
+            "umount", "umount2", "fsync", "fdatasync", "sync", "syncfs", "sync_file_range", "fallocate",
+            "posix_fallocate", "posix_fadvise", "sendfile", "sendfile64", "copy_file_range", "flock",
+            "getdents", "getdents64", "utime", "utimes", "lutimes", "futimens", "utimensat", "futimesat",
+            "realpath",
+        ];
+        // socket family — these operate only on sockets, so Net is unambiguous (AF_UNIX domain isn't
+        // visible at the call, so a Unix socket reads as Net rather than Ipc; acceptable over-general).
+        const NET: &[&str] = &[
+            "socket", "setsockopt", "getsockopt", "bind", "listen", "accept", "accept4", "connect",
+            "shutdown", "send", "sendto", "sendmsg", "sendmmsg", "recv", "recvfrom", "recvmsg",
+            "recvmmsg", "getpeername", "getsockname", "getaddrinfo", "freeaddrinfo", "getnameinfo",
+        ];
+        // process creation / replacement / reaping
+        const EXEC: &[&str] = &[
+            "fork", "vfork", "clone", "clone3", "execl", "execlp", "execle", "execv", "execvp",
+            "execvpe", "execve", "execveat", "fexecve", "posix_spawn", "posix_spawnp", "system",
+            "popen", "pclose", "wait", "waitpid", "wait3", "wait4", "waitid",
+        ];
+        // pipes / FIFOs / SysV + POSIX message queues, semaphores, shared memory; socketpair (AF_UNIX)
+        const IPC: &[&str] = &[
+            "pipe", "pipe2", "mkfifo", "mkfifoat", "socketpair", "msgget", "msgsnd", "msgrcv", "msgctl",
+            "semget", "semop", "semtimedop", "semctl", "shmget", "shmat", "shmdt", "shmctl", "mq_open",
+            "mq_send", "mq_receive", "mq_timedsend", "mq_timedreceive", "mq_close", "mq_unlink",
+        ];
+        const ENV: &[&str] = &["getenv", "secure_getenv", "setenv", "putenv", "unsetenv", "clearenv"];
+        const CLOCK: &[&str] =
+            &["time", "gettimeofday", "clock_gettime", "clock_getres", "nanosleep", "clock_nanosleep"];
+        const RAND: &[&str] = &["getrandom", "getentropy", "arc4random", "arc4random_buf", "arc4random_uniform"];
+        if FS.contains(&f) {
+            return Some("Fs");
+        }
+        if NET.contains(&f) {
+            return Some("Net");
+        }
+        if EXEC.contains(&f) {
+            return Some("Exec");
+        }
+        if IPC.contains(&f) {
+            return Some("Ipc");
+        }
+        if ENV.contains(&f) {
+            return Some("Env");
+        }
+        if CLOCK.contains(&f) {
+            return Some("Clock");
+        }
+        if RAND.contains(&f) {
+            return Some("Rand");
         }
         return None;
     }

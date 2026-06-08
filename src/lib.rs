@@ -2468,6 +2468,37 @@ mod tests {
     }
 
     #[test]
+    fn classify_libc_syscalls_by_category() {
+        // The FFI-thin tier (nix etc.) bottoms out in raw libc — classify the unambiguous syscalls.
+        assert_eq!(classify("libc", "libc::open"), Some("Fs"));
+        assert_eq!(classify("libc", "libc::openat"), Some("Fs"));
+        assert_eq!(classify("libc", "libc::unlinkat"), Some("Fs"));
+        assert_eq!(classify("libc", "libc::statx"), Some("Fs"));
+        assert_eq!(classify("libc", "libc::socket"), Some("Net"));
+        assert_eq!(classify("libc", "libc::connect"), Some("Net"));
+        assert_eq!(classify("libc", "libc::sendto"), Some("Net"));
+        assert_eq!(classify("libc", "libc::execve"), Some("Exec"));
+        assert_eq!(classify("libc", "libc::fork"), Some("Exec"));
+        assert_eq!(classify("libc", "libc::posix_spawn"), Some("Exec"));
+        assert_eq!(classify("libc", "libc::pipe2"), Some("Ipc"));
+        assert_eq!(classify("libc", "libc::shmget"), Some("Ipc"));
+        assert_eq!(classify("libc", "libc::socketpair"), Some("Ipc")); // AF_UNIX pair → Ipc, not Net
+        assert_eq!(classify("libc", "libc::getenv"), Some("Env"));
+        assert_eq!(classify("libc", "libc::clock_gettime"), Some("Clock"));
+        assert_eq!(classify("libc", "libc::getrandom"), Some("Rand"));
+        // Generic fd ops are DELIBERATELY unclassified — they run on any fd, so a fixed label would
+        // mis-categorise; honest under-report beats wrong effect.
+        assert_eq!(classify("libc", "libc::read"), None);
+        assert_eq!(classify("libc", "libc::write"), None);
+        assert_eq!(classify("libc", "libc::close"), None);
+        assert_eq!(classify("libc", "libc::fcntl"), None);
+        assert_eq!(classify("libc", "libc::mmap"), None);
+        // Pure conversions/constants stay pure.
+        assert_eq!(classify("libc", "libc::htons"), None);
+        assert_eq!(classify("libc", "libc::O_RDONLY"), None);
+    }
+
+    #[test]
     fn scope_matches_by_segment_not_substring() {
         assert!(scope_matches("app::domain::handle", "domain"));
         assert!(scope_matches("domain::handle", "domain"));

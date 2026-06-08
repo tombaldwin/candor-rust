@@ -11,7 +11,7 @@ crypto, time, parsing, channels, logging). For each, the newest version on disk 
 [`sweep.py`](sweep.py). Raw output: [`results-notest.json`](results-notest.json). 2 crates (ureq, zip)
 weren't on disk.
 
-This run **drove two scanner fixes** (below); the numbers here are post-fix.
+This run **drove three fixes** (two scanner, one classifier); the numbers here are post-fix.
 
 ## Headline
 
@@ -49,14 +49,27 @@ Impact (effectful-function count, before → after):
    smear across every same-named method. Without it reqwest reported phantom `Ipc` on 441 functions;
    the calibration confirmed that fix holds at scale (no crate shows a runaway effect now).
 
+3. **A `libc` classifier table** — the biggest *under*-report the sweep found was the FFI-thin tier:
+   nix reported **zero** library effects because every typed wrapper bottoms out in an unrecognised
+   `libc::*` call. Added a syscall-name table (`socket/connect/…`→Net, path/dir syscalls→Fs,
+   `fork/execve/wait`→Exec, pipes/SysV/POSIX-mq→Ipc, `getenv`→Env, `clock_gettime`→Clock,
+   `getrandom`→Rand), deliberately skipping the generic file-descriptor ops (`read`/`write`/`close`/
+   `fcntl`/`mmap`) that run on any fd — an honest no-classify beats a wrong label. **nix 0 → 59
+   effectful fns**, all correct (`sys::socket::*`→Net, `mqueue::mq_*`→Ipc, `socketpair`→Ipc not Net,
+   `sys::wait`/`clone`→Exec, `time::clock_*`→Clock — the module paths corroborate each). Also nudged
+   mio's IPC up (5→12: its `socketpair`/`pipe` waker) and tokio/which a touch. Note it does **not**
+   help rusqlite or git2 — those wrap *other* C libraries (libsqlite3, libgit2), not libc, so they
+   stay honest under-reports (use the nightly lint, or add those libs' tables later).
+
 ## Results — accuracy by category
 
 **A. Accurate** — reported effects match the crate's real, syntactically-visible surface:
 
 | crate | effects | note |
 |---|---|---|
-| tokio | Fs/Net/Clock/Ipc/Rand/Log | async runtime; its real syscalls are path-qualified (std/mio/libc-free paths) |
-| mio | Net/Fs/Ipc | low-level non-blocking I/O |
+| tokio | Fs/Net/Clock/Ipc/Rand/Log | async runtime; real syscalls are path-qualified (std/mio/libc) |
+| mio | Net/Ipc/Fs | low-level non-blocking I/O + `socketpair`/`pipe` waker (Ipc) |
+| nix | Fs/Net/Ipc/Exec/Clock | syscall wrappers lit up by the libc table — every effect matches the syscall |
 | tempfile | Env/Fs/Rand | temp dir from `$TMPDIR`, random names |
 | memmap2 | Fs | memory-mapped files |
 | notify | Fs/Clock/Env | filesystem watcher |
@@ -82,9 +95,8 @@ lint (or know to look) for these:
 |---|---|---|
 | hyper | Net | socket I/O via resolved method dispatch on tokio types |
 | reqwest | Net | through hyper (same) |
-| rusqlite | Db | libsqlite3 **FFI** |
-| git2 | Net | libgit2 **FFI** |
-| nix | Fs/Net/Exec/Ipc | thin **FFI** over `libc::*` (the classifier has no `libc`) |
+| rusqlite | Db | libsqlite3 **FFI** (a different C lib — the libc table doesn't reach it) |
+| git2 | Net | libgit2 **FFI** (same — wraps libgit2, not libc) |
 | rand | Rand | entropy via `getrandom` / method-style calls |
 | crossbeam-channel | Ipc | crossbeam's own channel types aren't in the classifier (it knows `std::sync::mpsc`, tokio) |
 | walkdir | Fs | `read_dir` consumed through std iterator **methods** |
@@ -98,10 +110,11 @@ lint (or know to look) for these:
    trust tool — and it validates the curated-allowlist classifier on code it was never tuned against.
 2. **The biggest accuracy lever found here was non-code, not classification** — excluding test/build
    noise. Shipped.
-3. **The highest-value classifier extension is `libc`.** Three of the under-reports (nix, and the FFI
-   half of rusqlite/git2) collapse to "we don't model `libc`." A modest `libc::{open,read,write,…}→Fs`,
-   `{socket,connect,bind}→Net`, `{fork,execve}→Exec` table would light up the whole FFI-thin tier.
-   Candidate next step.
+3. **The `libc` table was the highest-value classifier extension — and it shipped.** It took nix from
+   0 → 59 correctly-classified functions and completed mio's IPC, with zero false positives. The
+   remaining FFI under-reports (rusqlite/git2) wrap *different* C libraries (libsqlite3, libgit2); each
+   would need its own small table, or the nightly lint. So the pattern generalises: a thin Rust crate
+   over a C library is classifiable once that library's effectful entry points are named.
 4. **What stays the nightly lint's job:** anything behind method dispatch (hyper/reqwest `Net`), macros
    (tracing `Log`), or non-std channels (crossbeam `Ipc`). The two backends are complementary, exactly
    as documented — this sweep quantifies *where* the line falls.
