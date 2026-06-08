@@ -2523,6 +2523,13 @@ mod tests {
         assert_eq!(classify("raw", "raw::git_remote_name"), None);
         // a non-libgit2 function that merely starts with `git_` is not falsely classified
         assert_eq!(classify("myapp", "myapp::git_dir_helper"), None);
+        // libssl (openssl calls `ffi::SSL_*`): TLS-over-socket ops -> Net; crypto/setup stay pure.
+        assert_eq!(classify("ffi", "ffi::SSL_connect"), Some("Net"));
+        assert_eq!(classify("ffi", "ffi::SSL_read"), Some("Net"));
+        assert_eq!(classify("ffi", "ffi::SSL_do_handshake"), Some("Net"));
+        assert_eq!(classify("openssl_sys", "openssl_sys::SSL_shutdown"), Some("Net"));
+        assert_eq!(classify("ffi", "ffi::SSL_CTX_new"), None); // context setup is pure
+        assert_eq!(classify("ffi", "ffi::SSL_set_fd"), None); // just sets the socket fd
     }
 
     #[test]

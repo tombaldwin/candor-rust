@@ -225,6 +225,18 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             }
             return None;
         }
+        if let Some(op) = leaf.strip_prefix("SSL_") {
+            // OpenSSL (libssl, under the `openssl`/`native-tls` crates, called `ffi::SSL_*`). The TLS
+            // handshake and record I/O run over the peer socket -> Net. Unlike libc read/write, an SSL_*
+            // op is ~always over a network BIO (the rare memory-BIO/sans-IO case is the honest exception
+            // we accept). The crypto surface (EVP_*/SHA*/AES*) and pure setup (SSL_CTX_new/SSL_set_fd) are
+            // NOT here; `BIO_*` is skipped (a BIO may be memory or socket). Validated vs openssl 0.9 source.
+            const SSL_NET: &[&str] = &[
+                "connect", "accept", "do_handshake", "read", "read_ex", "write", "write_ex", "peek",
+                "peek_ex", "shutdown",
+            ];
+            return SSL_NET.contains(&op).then_some("Net");
+        }
     }
     // HTTP clients use the same builder pattern as the AWS SDK: only the dispatch is
     // I/O. (Found by the eval: ebman's reqwest calls to the Anthropic API + webhooks
