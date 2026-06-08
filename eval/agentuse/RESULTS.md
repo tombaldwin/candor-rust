@@ -62,11 +62,33 @@ harder 16-function task, `eval/scaled`), took completeness from 6% to 79–100% 
   about to make effectful" — and closing that (`callers`/blast-radius on any function) is the
   highest-leverage way to make the active-tool experience actually pay off, not just get invoked.
 
+## Follow-up: the gap is closed
+
+The finding was actionable, so it's fixed. The engine now emits a **full call-graph sidecar**
+(`<prefix>.<crate>.<kind>.callgraph.json`) alongside the report — every function's callees, *including
+pure ones the report omits* — and `cargo candor callers <fn>` reads it to return the **transitive**
+caller set (the blast radius) for **any** function. On the exact pure fixture the agents queried,
+`callers compute_price` now answers directly:
+
+```
+`pricing::compute_price` is reached by 6 function(s) (the blast radius if it gained an effect):
+    invoice::line_item (direct)
+    invoice::render_invoice
+    main
+    monitoring::health_probe (direct)
+    report::export_csv
+    report::monthly_report
+```
+
+That is the complete blast radius — including `health_probe` (marked direct) and `main` (the function
+agents tended to omit when tracing by hand) — with no edit required. The "callers of pure functions
+aren't tracked" dead-end is gone. Integration tests cover the new pure/transitive behaviour; the old
+report-based path remains as a fallback.
+
 ## Limitations
 
 Single model, single task, K=10. The fixture is within Sonnet's manual call-graph-tracing ability, so it
-can't measure outcome *lift* from candor — but it wasn't able to anyway, because candor didn't answer the
-pre-edit question. The adoption result (10/10, right commands) is the robust finding; the workflow gap is
-the actionable one. Next: close the gap (make `callers`/blast-radius work on pure functions), then re-run
-on a harder fixture where manual tracing fails — to measure the lift candor *could* deliver once it
-actually answers the question agents ask.
+can't measure outcome *lift* — though it couldn't anyway, because (pre-fix) candor didn't answer the
+pre-edit question. The adoption result (10/10, right commands) is the robust finding; the workflow gap
+was the actionable one, now closed. A natural next eval: a harder fixture where manual tracing fails, to
+measure the lift candor can now deliver since `callers` actually answers the question agents ask.

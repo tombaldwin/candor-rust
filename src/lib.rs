@@ -2657,6 +2657,23 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 },
                 Err(e) => eprintln!("candor: failed to serialize report ({e})"),
             }
+            // Full local call graph sidecar (every function's direct callees by path, INCLUDING pure
+            // ones the report omits). `cargo candor callers <fn>` reads it to answer "who (transitively)
+            // calls X" for ANY function — the pre-edit blast-radius question an agent asks before adding
+            // an effect ("I'm about to touch X; who depends on it?"). The main report only records
+            // effect-relevant edges, so it can't answer that for a pure X. 3-segment name ⇒ report_files
+            // ignores it. (Surfaced by the agent-use eval, eval/agentuse.)
+            let mut cg: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+            for (caller, callees) in &self.calls {
+                let mut cs: Vec<String> =
+                    callees.iter().map(|c| cx.tcx.def_path_str(c.to_def_id())).collect();
+                cs.sort();
+                cg.insert(cx.tcx.def_path_str(caller.to_def_id()), cs);
+            }
+            let cgfile = format!("{prefix}.{krate}.{kinds}.callgraph.json");
+            if let Ok(body) = serde_json::to_string(&cg) {
+                let _ = std::fs::write(&cgfile, body);
+            }
             // Emit candor's calibrated crate set alongside the report, so downstream
             // coverage checks read it from the engine rather than a duplicated copy. Also stamp
             // the engine's build identity here so the report is self-describing (a consumer in any

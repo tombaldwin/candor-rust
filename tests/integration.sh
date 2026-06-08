@@ -319,6 +319,19 @@ want   "where: splits the direct source out"          "$whout" "directly"
 want   "where: names the source (leaf)"               "$whout" "leaf"
 want   "where --json: machine-readable"               "$whj" '"directly"'
 want   "callers: leaf's caller (handler) found from the report" "$clout" "handler"
+# callers works on a PURE function too, transitively (the pre-edit blast-radius an agent asks for
+# before adding an effect). The report omits pure fns, so this needs the call-graph sidecar.
+cp_pure=$( cd "$Q"; "$ROOT/cargo-candor" callers reader 2>&1 )   # reader is Fs; both/main reach it
+PC=$(mktemp -d)/pc; mkdir -p "$PC/src" "$PC/.candor"
+printf '[package]\nname="pc"\nversion="0.1.0"\nedition="2021"\n' > "$PC/Cargo.toml"
+# `helper` is PURE; reached by direct caller `mid` and transitively by `top`.
+printf 'fn helper()->u32{ 41 }\nfn mid()->u32{ helper()+1 }\nfn top()->u32{ mid() }\nfn main(){ let _=top(); }\n' > "$PC/src/main.rs"
+( cd "$PC"; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
+"$QBIN" state "$PC" > "$PC/.candor/state"
+pcout=$( cd "$PC"; "$ROOT/cargo-candor" callers helper 2>&1 )
+want   "callers on a PURE fn finds its direct caller (mid)"        "$pcout" "mid"
+want   "callers on a PURE fn finds its TRANSITIVE caller (top)"    "$pcout" "top"
+rm -rf "$(dirname "$PC")"
 # Non-breaking Fs read/write refinement (P2): show annotates Fs with its access kind, transitively.
 fsr=$( cd "$Q"; "$ROOT/cargo-candor" show reader 2>&1 )
 fsb=$( cd "$Q"; "$ROOT/cargo-candor" show both 2>&1 )

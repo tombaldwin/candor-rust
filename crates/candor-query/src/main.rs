@@ -442,7 +442,16 @@ fn cmd_callers(args: &[String]) -> i32 {
             return 2;
         }
     };
-    // callee (matching q) -> set of its callers
+    // Prefer the full call-graph sidecar (the engine emits `<prefix>.<crate>.<kind>.callgraph.json`
+    // alongside the report). It records EVERY function's callees — including pure ones — so we can
+    // answer "who TRANSITIVELY calls X" for any function: the blast radius an agent needs *before*
+    // adding an effect to X. The report alone only records effect-relevant edges (can't see a pure X).
+    let cg = load_callgraph(pre);
+    if !cg.is_empty() {
+        return callers_via_callgraph(&cg, q, want_json);
+    }
+
+    // Fallback (no call-graph sidecar): the older effect-relevant, direct-only view.
     let entries = load_entries(pre);
     let exact = entries.iter().any(|e| e.calls.iter().any(|c| c == q));
     let mut hits: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -470,6 +479,93 @@ fn cmd_callers(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// "Who reaches `q`?" over the full call graph: the DIRECT callers and the full TRANSITIVE set (the
+/// blast radius if `q` gained an effect). Works for any function, effectful or pure.
+fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str, want_json: bool) -> i32 {
+    // reverse adjacency: callee -> its direct callers.
+    let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (caller, callees) in cg {
+        for c in callees {
+            rev.entry(c.as_str()).or_default().push(caller.as_str());
+        }
+    }
+    // resolve `q` to the actual node name(s): exact path, or a unique basename / `::q` suffix match.
+    let names: BTreeSet<&str> =
+        cg.keys().map(|s| s.as_str()).chain(cg.values().flatten().map(|s| s.as_str())).collect();
+    let exact = names.contains(q);
+    let targets: Vec<&str> = names.iter().copied().filter(|n| q_match(n, q, exact)).collect();
+    if targets.is_empty() {
+        if want_json {
+            println!("{{}}");
+        } else {
+            println!("candor: no function matching `{q}` found in the call graph.");
+        }
+        return 0;
+    }
+
+    let direct: BTreeSet<&str> = targets.iter().flat_map(|t| rev.get(t).into_iter().flatten().copied()).collect();
+    // transitive closure of callers (reverse BFS).
+    let mut all: BTreeSet<&str> = BTreeSet::new();
+    let mut stack: Vec<&str> = targets.clone();
+    while let Some(n) = stack.pop() {
+        if let Some(cs) = rev.get(n) {
+            for &c in cs {
+                if all.insert(c) {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+
+    if want_json {
+        let out = serde_json::json!({
+            "of": targets,
+            "direct": direct.iter().collect::<Vec<_>>(),
+            "transitive": all.iter().collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return 0;
+    }
+    let tgt = targets.join(", ");
+    if all.is_empty() {
+        println!("  `{tgt}` has no callers (nothing in this crate calls it).");
+        return 0;
+    }
+    println!(
+        "  `{tgt}` is reached by {} function(s) (the blast radius if it gained an effect):",
+        all.len()
+    );
+    for c in &all {
+        let mark = if direct.contains(c) { " (direct)" } else { "" };
+        println!("      {c}{mark}");
+    }
+    0
+}
+
+/// Load + merge every `<prefix>.*.callgraph.json` sidecar into one `caller -> [callees]` map (by path).
+fn load_callgraph(prefix: &str) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let p = Path::new(prefix);
+    let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return out };
+    let pfx = format!("{base}.");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return out };
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(&pfx) || !name.ends_with(".callgraph.json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
+        if let Ok(map) = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&text) {
+            for (k, v) in map {
+                out.entry(k).or_default().extend(v);
+            }
+        }
+    }
+    out
 }
 
 // ── map ─────────────────────────────────────────────────────────────────────────────────────────
