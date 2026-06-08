@@ -846,6 +846,7 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
 }
 
 /// The outcome of trying to devirtualize a trait-method dispatch.
+#[derive(Clone, Copy)]
 enum Devirt {
     /// Statically resolved to exactly this impl method — a real devirtualization.
     Static(DefId),
@@ -1484,7 +1485,34 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 }
             }
         };
-        add_edge(self, def_id);
+        // Resolve trait dispatch up-front so the BASE edge can be suppressed when devirt PROVES the
+        // call lands on a concrete override (see resolved_override).
+        let trait_did = cx.tcx.trait_of_assoc(def_id);
+        let mut cha_resolved = false;
+        // May be upgraded to `true` if resolution reveals the call is actually virtual (a `dyn` the
+        // structural `is_dyn_receiver` check missed) — so the `Unknown` logic below stays honest.
+        let mut dynamic = dynamic;
+        let devirt = if trait_did.is_some() && !dynamic {
+            devirtualize(cx, expr, def_id)
+        } else {
+            None
+        };
+
+        // The BASE edge to def_id (the typeck-resolved callee). For a non-trait call, def_id IS the
+        // target. For trait dispatch, def_id is the TRAIT method: a required method is bodyless
+        // (harmless), a PROVIDED method carries the DEFAULT body — keep that edge so a non-overriding
+        // impl inheriting the default isn't under-reported (`cha_targets` via `impl_item_implementor_ids`
+        // misses non-overriding impls, so this base edge is the only thing that counts the default body
+        // under generic/CHA dispatch). EXCEPT when devirt PROVED the call resolves to a concrete
+        // OVERRIDE (a local target ≠ def_id): the default body then provably never runs for this
+        // concrete receiver, so attributing its effects is a confident false positive (a pure override
+        // of an effectful default inheriting the default's effect — the precision bug devirt exists to
+        // kill, previously covered only for required methods, see ui/inherited.rs).
+        let resolved_override =
+            matches!(devirt, Some(Devirt::Static(t)) if t.is_local() && t != def_id);
+        if !resolved_override {
+            add_edge(self, def_id);
+        }
 
         // `?` ERROR-CONVERSION edge: the `?` desugar calls the std `FromResidual::from_residual`, whose
         // body invokes a LOCAL `<E2 as From<E1>>::from` to convert the error — invisible THROUGH the
@@ -1534,18 +1562,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // inherit a sibling rule's effect — CRITIQUE §9). CHA remains the sound fallback for
         // `dyn`/generic dispatch we can't pin down. (Non-local traits: neither sees the body;
         // left to the `Unknown` logic below.)
-        let trait_did = cx.tcx.trait_of_assoc(def_id);
-        let mut cha_resolved = false;
-        // May be upgraded to `true` if resolution reveals the call is actually virtual (a `dyn` the
-        // structural `is_dyn_receiver` check missed) — so the `Unknown` logic below stays honest.
-        let mut dynamic = dynamic;
         if trait_did.is_some() {
-            // Prefer a real devirtualization to a LOCAL impl whose body we can see, over CHA-expanding
-            // to every impl. We attempt this for ANY non-`dyn` dispatch, not just LOCAL traits: a LOCAL
-            // impl of a NON-local trait is exactly where the silent holes live — a custom `Future::poll`
-            // reached via `.await`, an effectful `Clone`/`Display`/operator impl. CHA is the sound
-            // fallback when resolution lands non-local, stays virtual, or can't pin the target.
-            let devirt = if !dynamic { devirtualize(cx, expr, def_id) } else { None };
+            // Prefer a real devirtualization (computed above) to a LOCAL impl whose body we can see,
+            // over CHA-expanding to every impl. We attempt this for ANY non-`dyn` dispatch, not just
+            // LOCAL traits: a LOCAL impl of a NON-local trait is exactly where the silent holes live —
+            // a custom `Future::poll` reached via `.await`, an effectful `Clone`/`Display`/operator
+            // impl. CHA is the sound fallback when resolution lands non-local, stays virtual, or can't
+            // pin the target.
             // CHA fallback: enumerate the local impls the dispatch could reach. Used when devirt didn't
             // resolve to a LOCAL impl (non-local target, still-virtual, or unresolvable).
             let mut cha = |this: &mut Self| {
