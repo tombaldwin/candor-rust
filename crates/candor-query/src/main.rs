@@ -872,12 +872,22 @@ fn rank(c: &Change, top_level: &BTreeSet<String>) -> u8 {
 const CONTAINED: &[&str] = &["Db", "Net", "Exec", "Fs", "Ipc"];
 const AMBIENT: &[&str] = &["Log", "Clock", "Rand", "Env"];
 
+/// Normalize a function path for layer derivation: a UFCS trait-impl path `<Type as Trait>::method`
+/// becomes the impl's `Type` (whose module is the real layer), not the literal `<Type as Trait` token.
+/// Other names pass through. (Lint-backend names use this `def_path_str` form; scan names don't.)
+fn norm_name(name: &str) -> &str {
+    match name.strip_prefix('<') {
+        Some(rest) => rest.split(" as ").next().unwrap_or(rest),
+        None => name,
+    }
+}
+
 /// The number of leading `::` segments shared by EVERY function name — the codebase root, so the next
 /// segment is the architectural "layer" (`pgman::app::…` → `app`; a multi-crate report → the crate).
 fn common_prefix_len(names: &[&String]) -> usize {
     let mut prefix: Option<Vec<&str>> = None;
     for n in names {
-        let segs: Vec<&str> = n.split("::").collect();
+        let segs: Vec<&str> = norm_name(n).split("::").collect();
         match &mut prefix {
             None => prefix = Some(segs),
             Some(p) => {
@@ -896,7 +906,7 @@ fn common_prefix_len(names: &[&String]) -> usize {
 /// the root (`pgman::main`) has no module beyond the crate, so it buckets into `(root)` rather than
 /// becoming its own pseudo-layer — the layer is `segs[prefix_len]` only when a leaf follows it.
 fn layer_of(name: &str, prefix_len: usize) -> String {
-    let segs: Vec<&str> = name.split("::").collect();
+    let segs: Vec<&str> = norm_name(name).split("::").collect();
     if prefix_len + 1 < segs.len() {
         segs[prefix_len].to_string()
     } else {
@@ -1446,6 +1456,9 @@ mod tests {
         assert_eq!(layer_of("pgman::query::Q::run", pl), "query");
         // a free function at the crate root has no module → buckets into (root), not its own layer.
         assert_eq!(layer_of("pgman::main", pl), "(root)");
+        // a UFCS trait-impl path normalizes to the impl Type's module, not the literal `<Type as …`.
+        assert_eq!(norm_name("<pgman::conn::Conn as std::fmt::Debug>::fmt"), "pgman::conn::Conn");
+        assert_eq!(layer_of("<pgman::conn::Conn as std::fmt::Debug>::fmt", pl), "conn");
         // multi-crate report: no shared first segment → the crate IS the layer.
         let multi: Vec<String> =
             ["a::x::f".to_string(), "b::y::g".to_string()].to_vec();

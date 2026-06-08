@@ -601,12 +601,17 @@ fn module_path(rel: &Path) -> String {
     if comps.first().map(String::as_str) == Some("src") {
         comps.remove(0);
     }
-    if let Some(last) = comps.last_mut() {
+    if let Some(last) = comps.last() {
         let stem = last.trim_end_matches(".rs").to_string();
         if stem == "lib" || stem == "main" || stem == "mod" {
             comps.pop();
         } else {
-            *last = stem;
+            // A dotted file stem encodes a NESTED module path — the tonic / prost gRPC convention names
+            // a file `envoy.service.accesslog.v3.rs` for the module `envoy::service::accesslog::v3`. Split
+            // on `.` so the qualified name is `::`-separated, not one ugly dotted segment.
+            let parts: Vec<String> = stem.split('.').map(String::from).collect();
+            comps.pop();
+            comps.extend(parts);
         }
     }
     comps.join("::")
@@ -985,6 +990,11 @@ mod tests {
         assert_eq!(module_path(Path::new("src/pricing.rs")), "pricing");
         assert_eq!(module_path(Path::new("src/billing/mod.rs")), "billing");
         assert_eq!(module_path(Path::new("src/billing/tax.rs")), "billing::tax");
+        // a dotted file stem (tonic/prost gRPC codegen) is a nested module path, not one segment.
+        assert_eq!(
+            module_path(Path::new("src/generated/envoy.service.auth.v3.rs")),
+            "generated::envoy::service::auth::v3"
+        );
     }
 
     #[test]
