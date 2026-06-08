@@ -11,7 +11,8 @@ crypto, time, parsing, channels, logging). For each, the newest version on disk 
 [`sweep.py`](sweep.py). Raw output: [`results-notest.json`](results-notest.json). 2 crates (ureq, zip)
 weren't on disk.
 
-This run **drove five fixes** (three scanner, two classifier); the numbers here are post-fix.
+This run **drove six fixes** (four scanner, two classifier); the numbers here are post-fix. The last —
+receiver-type inference for method dispatch — is written up in its own section below.
 
 > **Update (FFI tiers + macros).** After the libc table below, two more C-library tables were added —
 > **libsqlite3** (rusqlite) and **libgit2** (git2) — matched by the distinctive C leaf name
@@ -117,6 +118,42 @@ lint (or know to look) for these:
 | walkdir | Fs | `read_dir` consumed through std iterator **methods** |
 | tracing, log | Log | **macro**-based emission |
 | clap | Env | mostly operates on already-parsed args |
+
+## Method-dispatch frontier — receiver-type inference (apps, not libraries)
+
+The hardest under-report is **method dispatch**: `client.execute(req)` is invisible because the scanner
+doesn't know `client: reqwest::Client`. But the classifier already has verb-precise rules for
+reqwest/sqlx/redis/mongodb/… — they were simply unreachable from a bare method name. So the scanner now
+does **light, local receiver-type inference** (no compiler): it tracks variable types from function
+**parameters**, **struct fields** (a crate-wide pre-pass), typed `let`s, and `let x = T::new()`
+constructors; resolves a method call's receiver (including `self.field` and through a builder **chain**)
+to its type; and forms `Type::method` so the existing rules fire.
+
+Two guards keep this false-positive-free, both found *by* this calibration:
+- **std/core/alloc receivers are excluded.** The std rules are coarse prefix matches written for
+  free-function calls (`std::fs::`, `std::process::Command`); applied to inferred method calls they
+  mis-fire on *pure* ones (`File::as_raw_fd`, `Command::arg`). mio wraps an eventfd in a `std::fs::File`,
+  which made `Waker::as_raw_fd` read as Fs — caught and excluded. The external-crate rules are
+  verb-precise, so they stay. (std free-function effects are still caught path-qualified.)
+- **`#[cfg(...)]`-gated struct fields are skipped.** tokio's `resource_span: tracing::Span` (gated on the
+  off-by-default `tracing` feature) otherwise made every `self.resource_span.in_scope(..)` read as Log —
+  452 phantom functions.
+
+Net effect on the 35 **libraries**: ~nil — libraries mostly call std and their own types, not *other*
+high-level crates — and crucially **no new false positives** (the pure crates stayed at 0). The value
+shows on **application** code, which is candor's primary target. On a representative app
+([`method-dispatch-demo/`](method-dispatch-demo/src/lib.rs)):
+
+```
+App::fetch_user   { Db, Net }   # self.db.fetch_one(..)  +  self.http.get(..).send()   (struct fields + chain)
+ping              { Net }       # fn ping(client: &Client)  ->  client.execute(..)      (param type)
+one_shot          { Net }       # let c = reqwest::Client::new(); c.get(..).send()      (constructor + chain)
+format_label/normalize → pure   # correctly omitted
+```
+
+Without inference all three effectful functions report **nothing** — the exact blast-radius miss the
+agent eval ([EVAL.md](../../EVAL.md)) measured. This is the frontier moving: not full type resolution,
+but the reliable local slice of it, kept honest by excluding the cases where a coarse rule would lie.
 
 ## Takeaways for the project
 

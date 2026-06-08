@@ -31,11 +31,11 @@
   "expect": "Net/Fs/Clock (async runtime)",
   "ver": "1.52.3",
   "rs": 547,
-  "fns": 156,
+  "fns": 157,
   "eff": {
    "Fs": 41,
    "Log": 36,
-   "Net": 34,
+   "Net": 35,
    "Clock": 27,
    "Rand": 22,
    "Ipc": 11,
@@ -60,9 +60,9 @@
   "expect": "Net (gRPC)",
   "ver": "0.14.6",
   "rs": 61,
-  "fns": 7,
+  "fns": 9,
   "eff": {
-   "Net": 4,
+   "Net": 6,
    "Ipc": 2,
    "Log": 1
   }
@@ -94,11 +94,11 @@
   "expect": "Fs/Env/Rand",
   "ver": "3.27.0",
   "rs": 19,
-  "fns": 18,
+  "fns": 19,
   "eff": {
    "Env": 12,
    "Fs": 12,
-   "Rand": 9
+   "Rand": 10
   }
  },
  {

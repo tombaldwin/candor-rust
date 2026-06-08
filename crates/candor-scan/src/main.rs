@@ -39,6 +39,10 @@ struct Call {
     path: String,            // "std::fs::read", "compute_price", "pricing::priced"
     leaf: String,            // last segment
     str_arg: Option<String>, // first string-literal argument (host/cmd/path detail)
+    /// Synthesized from receiver-type inference (`reqwest::Client::send` from `client.send()`). Used for
+    /// external-crate classification ONLY — excluded from local call-graph edges, since its `Type::method`
+    /// tail could spuriously link to a same-named LOCAL method the call doesn't actually target.
+    typed: bool,
 }
 
 /// One function the scan found: its module-qualified name, where, and the calls in its body.
@@ -49,13 +53,68 @@ struct FnInfo {
     calls: Vec<Call>,
 }
 
+/// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.
+/// Built crate-wide in a pre-pass so a method call on `self.http` can be resolved to its type and
+/// classified by the existing per-crate method rules (`reqwest::Client::execute` -> Net).
+type FieldIndex = HashMap<String, HashMap<String, String>>;
+
 struct CallCollector<'a> {
     uses: &'a HashMap<String, String>,
+    /// local variable / param / `self` -> expanded type path, grown as `let`s are visited in order.
+    vars: HashMap<String, String>,
+    fields: &'a FieldIndex,
     calls: Vec<Call>,
 }
 
 fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
+}
+
+/// The (use-expanded) type path of a `syn::Type`, ignoring references and generic args:
+/// `&reqwest::Client` -> `reqwest::Client`, `Pool<Postgres>` -> `sqlx::Pool` (via `uses`). `None` for
+/// non-nameable types (impl Trait, tuples, …) where there's nothing to classify a method against.
+fn type_path(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<String> {
+    match ty {
+        syn::Type::Reference(r) => type_path(&r.elem, uses),
+        syn::Type::Paren(p) => type_path(&p.elem, uses),
+        syn::Type::Group(g) => type_path(&g.elem, uses),
+        syn::Type::Path(p) => Some(expand(&path_to_string(&p.path), uses)),
+        _ => None,
+    }
+}
+
+/// Constructor-style associated function names: `let x = Foo::new(..)` (or `::connect().await?`) means
+/// `x: Foo`. Conservative set of names that return `Self` (or `Result<Self>`), so the inferred type is
+/// reliable. A non-constructor assoc call (`Foo::parse`) is NOT treated as producing a `Foo`.
+fn is_ctor(name: &str) -> bool {
+    matches!(
+        name,
+        "new" | "default" | "builder" | "with_capacity" | "connect" | "open" | "init" | "from"
+            | "from_path" | "from_str" | "with_config" | "create"
+    )
+}
+
+/// The type a `let` initializer produces, when it's a constructor call `Path::ctor(..)` (peeling
+/// `&`/`(..)`/`?`/`.await` wrappers). Returns the expanded `Path` (the type), e.g.
+/// `reqwest::Client::new()` -> `reqwest::Client`, `Pool::connect(url).await?` -> `sqlx::Pool`.
+fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>) -> Option<String> {
+    match expr {
+        syn::Expr::Reference(r) => ctor_type(&r.expr, uses),
+        syn::Expr::Paren(p) => ctor_type(&p.expr, uses),
+        syn::Expr::Try(t) => ctor_type(&t.expr, uses),
+        syn::Expr::Await(a) => ctor_type(&a.base, uses),
+        syn::Expr::Call(c) => {
+            let syn::Expr::Path(p) = &*c.func else { return None };
+            let full = path_to_string(&p.path);
+            let (ty, last) = full.rsplit_once("::")?;
+            if is_ctor(last) && !ty.is_empty() {
+                Some(expand(ty, uses))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Expand a call path against this file's `use` map: if the first segment is the last segment of some
@@ -88,19 +147,87 @@ fn first_str_lit(args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma
     None
 }
 
+impl<'a> CallCollector<'a> {
+    /// Best-effort type of a method-call receiver, so `recv.method()` can be classified as
+    /// `Type::method`. Resolves a bare variable/param/`self` (via `vars`), a `base.field` access (via
+    /// the struct `FieldIndex`), and peels `&`/`(..)`/`?`/`.await`. For a method CHAIN
+    /// (`client.get(url).send()`) it returns the BASE receiver's type — the chain stays within one
+    /// crate's builder family, and the classifier verb-gates per crate, so attributing the terminal
+    /// verb to the base type is correct in practice (`reqwest::Client` + `::send` -> Net).
+    fn resolve_recv_type(&self, expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Reference(r) => self.resolve_recv_type(&r.expr),
+            syn::Expr::Paren(p) => self.resolve_recv_type(&p.expr),
+            syn::Expr::Group(g) => self.resolve_recv_type(&g.expr),
+            syn::Expr::Try(t) => self.resolve_recv_type(&t.expr),
+            syn::Expr::Await(a) => self.resolve_recv_type(&a.base),
+            syn::Expr::MethodCall(m) => self.resolve_recv_type(&m.receiver),
+            syn::Expr::Path(p) => {
+                let name = p.path.get_ident()?.to_string();
+                self.vars.get(&name).cloned()
+            }
+            syn::Expr::Field(f) => {
+                let base = self.resolve_recv_type(&f.base)?;
+                let syn::Member::Named(field) = &f.member else { return None };
+                let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                self.fields.get(base_leaf)?.get(&field.to_string()).cloned()
+            }
+            syn::Expr::Call(_) => ctor_type(expr, self.uses),
+            _ => None,
+        }
+    }
+}
+
 impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let syn::Expr::Path(p) = &*node.func {
             let path = expand(&path_to_string(&p.path), self.uses);
             let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
-            self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args) });
+            self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false });
         }
         syn::visit::visit_expr_call(self, node);
     }
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let leaf = node.method.to_string();
-        self.calls.push(Call { path: leaf.clone(), leaf, str_arg: first_str_lit(&node.args) });
+        let str_arg = first_str_lit(&node.args);
+        // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
+        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false });
+        // Typed call: if the receiver's type resolves, form `Type::method` so the existing per-crate
+        // method rules (reqwest/sqlx/redis/…) — unreachable from a bare method name — can fire. This is
+        // the method-dispatch frontier: light, local type inference, no compiler.
+        //
+        // EXTERNAL types only. The external-crate rules are verb-precise (`ends_with("::execute")`), so
+        // they're safe to apply to an inferred method call. The std rules are coarse PREFIX matches
+        // (`std::fs::`, `std::process::Command`) written for free-function/constructor calls — applied to
+        // arbitrary method calls they mis-fire on pure ones (`File::as_raw_fd`, `Command::arg`). So skip
+        // std/core/alloc receivers: their free-function effects are already caught path-qualified, and an
+        // honest miss on a std method beats a wrong effect on a pure one.
+        if let Some(ty) = self.resolve_recv_type(&node.receiver) {
+            let cr = ty.split("::").next().unwrap_or("");
+            if !matches!(cr, "std" | "core" | "alloc") {
+                let path = format!("{ty}::{leaf}");
+                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true });
+            }
+        }
         syn::visit::visit_expr_method_call(self, node);
+    }
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        // Record `let x: T = ..` (annotated) and `let x = T::new(..)` (constructor) so later method
+        // calls on `x` resolve. Visited in source order, before any use of `x` (Rust requires it).
+        if let syn::Pat::Type(pt) = &node.pat {
+            if let syn::Pat::Ident(id) = &*pt.pat {
+                if let Some(ty) = type_path(&pt.ty, self.uses) {
+                    self.vars.insert(id.ident.to_string(), ty);
+                }
+            }
+        } else if let syn::Pat::Ident(id) = &node.pat {
+            if let Some(init) = &node.init {
+                if let Some(ty) = ctor_type(&init.expr, self.uses) {
+                    self.vars.insert(id.ident.to_string(), ty);
+                }
+            }
+        }
+        syn::visit::visit_local(self, node);
     }
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         // syn does not parse a macro's body, so every call hidden inside one is invisible by default —
@@ -116,6 +243,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
     }
+}
+
+/// True if the item carries any `#[cfg(...)]` attribute (conditionally compiled).
+fn has_cfg(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("cfg"))
 }
 
 /// True if an item carries `#[cfg(test)]` (or `#[cfg(any(test, ...))]`) — a test-only module the
@@ -149,6 +281,7 @@ fn scan_items(
     modpath: &str,
     file: &str,
     include_tests: bool,
+    fields: &FieldIndex,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -162,7 +295,7 @@ fn scan_items(
         match it {
             syn::Item::Fn(f) => {
                 let n = f.sig.ident.to_string();
-                out.push(fninfo(&n, &qual(&n), file, &f.block, uses));
+                out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields));
             }
             syn::Item::Impl(im) => {
                 let tyname = impl_type_name(&im.self_ty);
@@ -173,7 +306,7 @@ fn scan_items(
                             Some(t) => qual(&format!("{t}::{n}")),
                             None => qual(&n),
                         };
-                        out.push(fninfo(&n, &q, file, &m.block, uses));
+                        out.push(fninfo(&n, &q, file, &m.sig, &m.block, tyname.as_deref(), uses, fields));
                     }
                 }
             }
@@ -184,7 +317,7 @@ fn scan_items(
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, file, include_tests, &mut subuses, out);
+                    scan_items(inner, &sub, file, include_tests, fields, &mut subuses, out);
                 }
             }
             _ => {}
@@ -192,12 +325,83 @@ fn scan_items(
     }
 }
 
-fn fninfo(leaf: &str, qual: &str, file: &str, block: &syn::Block, uses: &HashMap<String, String>) -> FnInfo {
-    let mut c = CallCollector { uses, calls: Vec::new() };
+/// Seed a function's variable→type map from its parameters (`fn h(c: &reqwest::Client)`) and, for an
+/// impl method, `self` → the impl type. These are the most reliable type facts available syntactically.
+fn seed_vars(sig: &syn::Signature, self_ty: Option<&str>, uses: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    if let Some(t) = self_ty {
+        vars.insert("self".to_string(), t.to_string());
+    }
+    for arg in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            if let syn::Pat::Ident(id) = &*pt.pat {
+                if let Some(ty) = type_path(&pt.ty, uses) {
+                    vars.insert(id.ident.to_string(), ty);
+                }
+            }
+        }
+    }
+    vars
+}
+
+fn fninfo(
+    leaf: &str,
+    qual: &str,
+    file: &str,
+    sig: &syn::Signature,
+    block: &syn::Block,
+    self_ty: Option<&str>,
+    uses: &HashMap<String, String>,
+    fields: &FieldIndex,
+) -> FnInfo {
+    let vars = seed_vars(sig, self_ty, uses);
+    let mut c = CallCollector { uses, vars, fields, calls: Vec::new() };
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
     }
     FnInfo { qual: qual.to_string(), leaf: leaf.to_string(), loc: file.to_string(), calls: c.calls }
+}
+
+/// Pre-pass: index every named struct's field types (`App -> { http: reqwest::Client }`), expanded via
+/// each module's `use` map. Recurses into modules exactly like `scan_items` (cloning uses on descent).
+/// Keyed by struct leaf name — a name collision across modules is rare and at worst yields a wrong
+/// (still verb-gated) classify, never a crash.
+fn collect_structs(items: &[syn::Item], uses: &mut HashMap<String, String>, out: &mut FieldIndex) {
+    for it in items {
+        if let syn::Item::Use(u) = it {
+            collect_use(&u.tree, String::new(), uses);
+        }
+    }
+    for it in items {
+        match it {
+            syn::Item::Struct(s) => {
+                if let syn::Fields::Named(named) = &s.fields {
+                    let entry = out.entry(s.ident.to_string()).or_default();
+                    for f in &named.named {
+                        // Skip `#[cfg(...)]`-gated fields: they aren't unconditionally present, so
+                        // inferring effects through them mis-fires. (tokio's `resource_span:
+                        // tracing::Span`, gated on the off-by-default `tracing` feature, otherwise made
+                        // every `self.resource_span.in_scope(..)` read as Log — 452 phantom functions.)
+                        if has_cfg(&f.attrs) {
+                            continue;
+                        }
+                        if let Some(name) = &f.ident {
+                            if let Some(ty) = type_path(&f.ty, uses) {
+                                entry.insert(name.to_string(), ty);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    let mut subuses = uses.clone();
+                    collect_structs(inner, &mut subuses, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn impl_type_name(ty: &syn::Type) -> Option<String> {
@@ -269,7 +473,8 @@ fn main() {
     let root = Path::new(&dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
 
-    let mut fns: Vec<FnInfo> = Vec::new();
+    // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below).
+    let mut parsed: Vec<(String, syn::File)> = Vec::new();
     for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
         let p = entry.path();
         if !p.is_file() || p.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -302,9 +507,23 @@ fn main() {
         let Ok(text) = std::fs::read_to_string(p) else { continue };
         let Ok(file) = syn::parse_file(&text) else { continue };
         let rel = p.strip_prefix(root).unwrap_or(p);
-        let modpath = module_path(rel);
+        parsed.push((rel.to_string_lossy().into_owned(), file));
+    }
+
+    // Pass A — index struct field types crate-wide, so a method call on `self.field` can be typed and
+    // classified by the per-crate method rules.
+    let mut fields: FieldIndex = HashMap::new();
+    for (_, file) in &parsed {
         let mut uses = HashMap::new();
-        scan_items(&file.items, &modpath, &rel.to_string_lossy(), include_tests, &mut uses, &mut fns);
+        collect_structs(&file.items, &mut uses, &mut fields);
+    }
+
+    // Pass B — collect each function's calls (now with receiver-type inference available).
+    let mut fns: Vec<FnInfo> = Vec::new();
+    for (rel, file) in &parsed {
+        let modpath = module_path(Path::new(rel));
+        let mut uses = HashMap::new();
+        scan_items(&file.items, &modpath, rel, include_tests, &fields, &mut uses, &mut fns);
     }
 
     // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
@@ -344,9 +563,11 @@ fn main() {
                     }
                 }
             }
-            if !matches!(cr, "std" | "core" | "alloc") {
+            if !c.typed && !matches!(cr, "std" | "core" | "alloc") {
                 // Resolve the call to local definitions: a qualified-tail match first (`Type::method`),
                 // else a leaf match ONLY when it's unique. Never link to a many-way-ambiguous bare leaf.
+                // Typed (receiver-inferred) calls are skipped here — they're for external classification,
+                // and their synthetic `Type::method` tail could mis-link to a same-named local method.
                 let targets: Option<&Vec<String>> = tail2(&c.path)
                     .and_then(|t2| by_tail2.get(&t2))
                     .or_else(|| by_leaf.get(&c.leaf).filter(|v| v.len() == 1));
@@ -604,17 +825,45 @@ mod tests {
         // git2 hides every libgit2 FFI call in `try_call!(...)`; format macros hide call args. Both
         // must be collected, while a non-expression macro body (matches!) is skipped without panicking.
         let uses = HashMap::new();
+        let fields = FieldIndex::new();
         let block: syn::Block = syn::parse_str(
             "{ try_call!(raw::git_remote_fetch(x)); println!(\"{}\", helper()); let _ = matches!(y, Some(_)); }",
         )
         .unwrap();
-        let mut c = CallCollector { uses: &uses, calls: Vec::new() };
+        let mut c = CallCollector { uses: &uses, vars: HashMap::new(), fields: &fields, calls: Vec::new() };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
         }
         let leaves: Vec<&str> = c.calls.iter().map(|c| c.leaf.as_str()).collect();
         assert!(leaves.contains(&"git_remote_fetch"), "call inside try_call! macro was missed: {leaves:?}");
         assert!(leaves.contains(&"helper"), "call inside println! macro was missed: {leaves:?}");
+    }
+
+    #[test]
+    fn receiver_type_inference_resolves_method_dispatch() {
+        // A method call on a param/field/typed-let of a known type resolves to `Type::method`, so the
+        // existing per-crate rules fire. Build a collector with `client: reqwest::Client` in scope.
+        let uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        // struct App { http: reqwest::Client }
+        fields.entry("App".into()).or_default().insert("http".into(), "reqwest::Client".into());
+        let mut vars = HashMap::new();
+        vars.insert("client".to_string(), "reqwest::Client".to_string());
+        vars.insert("self".to_string(), "App".to_string());
+        let block: syn::Block =
+            syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
+        let mut c = CallCollector { uses: &uses, vars, fields: &fields, calls: Vec::new() };
+        for stmt in &block.stmts {
+            c.visit_stmt(stmt);
+        }
+        let typed: Vec<&str> = c.calls.iter().map(|c| c.path.as_str()).collect();
+        // chain `client.get(url).send()` → base type reqwest::Client, terminal verb send
+        assert!(typed.contains(&"reqwest::Client::send"), "chain not typed to base: {typed:?}");
+        // field access `self.http.execute(req)` resolves via the struct field index
+        assert!(typed.contains(&"reqwest::Client::execute"), "field recv not typed: {typed:?}");
+        // and both classify as Net through the shared classifier
+        assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::send"), Some("Net"));
+        assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::execute"), Some("Net"));
     }
 
     #[test]
