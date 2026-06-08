@@ -13,6 +13,13 @@
 //! under-reports relative to the lint. Use the lint when you need the soundness contract; use this when
 //! you need zero-friction, stable, installable triage. Shares the lint's classifier — one source of truth.
 //!
+//! CALL RESOLUTION. The local call graph is name-resolved, not type-resolved. A `Type::method` call is
+//! matched on its qualified tail (`RequestBuilder::new`), which keeps same-named methods on different
+//! types distinct; a bare `.method()` call (no type qualifier) is linked only when the name is
+//! UNAMBIGUOUS across the crate. We deliberately do NOT link a many-way-ambiguous bare name: on a real
+//! crate that would link every `.new()` to all 100+ `*::new` defs and smear one type's effect across the
+//! whole graph (a false-positive blow-up). Under-reporting an ambiguous edge is the honest failure mode.
+//!
 //! Usage:  candor-scan [<crate-dir>] [--out <prefix>] [--json]
 //!   default dir = ".", default prefix = "<dir>/.candor/report"; writes <prefix>.<crate>.scan.json (+ a
 //!   callgraph sidecar so `cargo candor callers <fn>` works on the stable report too). `--json` prints
@@ -228,9 +235,20 @@ fn main() {
         scan_items(&file.items, &modpath, &rel.to_string_lossy(), &mut uses, &mut fns);
     }
 
+    // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
+    // segment (`new`); `by_tail2` keys on the last TWO segments (`RequestBuilder::new`). The leaf index
+    // alone catastrophically over-connects on real crates: every call to *some* `new()` would link to
+    // ALL `*::new` defs (in reqwest, 181 of them), smearing one type's effect across the whole graph.
+    // So we prefer the qualified-tail match, which keeps `RequestBuilder::new` distinct from `Body::new`,
+    // and fall back to the leaf only when it's UNAMBIGUOUS (exactly one def) — under-reporting (the honest
+    // failure mode) rather than fabricating edges. See the precision note in the module doc.
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
+    let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
     for f in &fns {
         by_leaf.entry(f.leaf.clone()).or_default().push(f.qual.clone());
+        if let Some(t2) = tail2(&f.qual) {
+            by_tail2.entry(t2).or_default().push(f.qual.clone());
+        }
     }
 
     let mut direct: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
@@ -255,7 +273,12 @@ fn main() {
                 }
             }
             if !matches!(cr, "std" | "core" | "alloc") {
-                if let Some(targets) = by_leaf.get(&c.leaf) {
+                // Resolve the call to local definitions: a qualified-tail match first (`Type::method`),
+                // else a leaf match ONLY when it's unique. Never link to a many-way-ambiguous bare leaf.
+                let targets: Option<&Vec<String>> = tail2(&c.path)
+                    .and_then(|t2| by_tail2.get(&t2))
+                    .or_else(|| by_leaf.get(&c.leaf).filter(|v| v.len() == 1));
+                if let Some(targets) = targets {
                     for t in targets {
                         if t != &f.qual {
                             calls.entry(f.qual.clone()).or_default().insert(t.clone());
@@ -324,6 +347,18 @@ fn main() {
             entries.len()
         );
     }
+}
+
+/// The last two `::`-segments of a path (`a::b::Type::new` → `Type::new`), the key used to resolve a
+/// `Type::method` call to its definition without colliding every same-named method. `None` for a path
+/// with fewer than two segments (a bare method leaf — resolved by unique-leaf fallback instead).
+fn tail2(path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.split("::").collect();
+    let n = segs.len();
+    if n < 2 {
+        return None;
+    }
+    Some(format!("{}::{}", segs[n - 2], segs[n - 1]))
 }
 
 fn host_part(h: &str) -> String {
@@ -461,6 +496,35 @@ mod tests {
         assert!(acc["mid"].contains("Fs"));
         assert!(acc["top"].contains("Fs"));
         assert!(acc["pure"].is_empty());
+    }
+
+    #[test]
+    fn tail2_keys_on_the_qualified_method() {
+        assert_eq!(tail2("a::b::RequestBuilder::new").as_deref(), Some("RequestBuilder::new"));
+        assert_eq!(tail2("pricing::compute_price").as_deref(), Some("pricing::compute_price"));
+        assert_eq!(tail2("send"), None); // a bare method leaf — no type qualifier to disambiguate
+    }
+
+    #[test]
+    fn qualified_tail_disambiguates_same_named_methods() {
+        // Two distinct `new`s; a `RequestBuilder::new` call must resolve to ONLY the RequestBuilder one,
+        // never to every `*::new` (the leaf-collision over-connection that smeared one effect crate-wide).
+        let fns = ["http::RequestBuilder::new", "body::Body::new"];
+        let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
+        let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+        for q in fns {
+            by_leaf.entry("new".into()).or_default().push(q.into());
+            by_tail2.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        // a `RequestBuilder::new(...)` call
+        let resolved: Option<&Vec<String>> = tail2("api::RequestBuilder::new")
+            .and_then(|t2| by_tail2.get(&t2))
+            .or_else(|| by_leaf.get("new").filter(|v| v.len() == 1));
+        assert_eq!(resolved, Some(&vec!["http::RequestBuilder::new".to_string()]));
+        // a bare `.new()`-by-leaf with two candidates resolves to NEITHER (ambiguous → under-report)
+        let bare: Option<&Vec<String>> =
+            tail2("new").and_then(|t2| by_tail2.get(&t2)).or_else(|| by_leaf.get("new").filter(|v| v.len() == 1));
+        assert_eq!(bare, None);
     }
 
     #[test]
