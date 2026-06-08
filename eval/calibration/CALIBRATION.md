@@ -11,14 +11,29 @@ crypto, time, parsing, channels, logging). For each, the newest version on disk 
 [`sweep.py`](sweep.py). Raw output: [`results-notest.json`](results-notest.json). 2 crates (ureq, zip)
 weren't on disk.
 
-This run **drove three fixes** (two scanner, one classifier); the numbers here are post-fix.
+This run **drove five fixes** (three scanner, two classifier); the numbers here are post-fix.
+
+> **Update (FFI tiers + macros).** After the libc table below, two more C-library tables were added —
+> **libsqlite3** (rusqlite) and **libgit2** (git2) — matched by the distinctive C leaf name
+> (`sqlite3_*` / `git_*`) so every binding alias resolves. libsqlite3 took **rusqlite 0 → 48** (all
+> `Db`). libgit2 needed one more scanner fix: git2 wraps *every* FFI call in a `try_call!` macro, which
+> syn doesn't parse, so the scanner now **peeks inside macro token streams** (best-effort: parse as
+> comma-separated exprs, skip if not expression syntax). That took **git2 7 → 45** — `Remote::{connect,
+> fetch,download,push,list}` now correctly show `Net` (the exact gap this calibration first flagged),
+> repo/index/config ops show `Fs`. The macro-peek introduced **zero** new false positives (the pure
+> crates stayed at 0); it only added genuine recall (also +2 on redis, +2 on hyper). Tables don't help
+> a crate that hides calls behind *both* a macro and an unmodelled C lib unless both are addressed —
+> which is now the case for git2.
 
 ## Headline
 
 After the fixes, on these 35 crates the scanner has **no remaining false positives in library code** —
-every effect it reports is real. All its errors are now **under-reports**, and they cluster on exactly
-the three things a syntactic backend structurally cannot see: **FFI**, **dynamic method dispatch**, and
-**macros**. That is the honest, expected failure mode, and it's documented per-crate below.
+every effect it reports is real. All its errors are now **under-reports**. The remaining gaps are
+**dynamic method dispatch** (hyper/reqwest's `Net` lives behind resolved calls on tokio types) and
+**unmodelled C libraries** (any FFI tier whose entry points aren't yet named). The two failure modes
+that *were* dominant — FFI to common libraries, and calls hidden in macros — are now substantially
+closed (libc/libsqlite3/libgit2 tables + macro-peeking), so they're targetable rather than structural.
+That is the honest, expected behaviour, documented per-crate below.
 
 ## What the sweep found (and fixed)
 
@@ -70,6 +85,8 @@ Impact (effectful-function count, before → after):
 | tokio | Fs/Net/Clock/Ipc/Rand/Log | async runtime; real syscalls are path-qualified (std/mio/libc) |
 | mio | Net/Ipc/Fs | low-level non-blocking I/O + `socketpair`/`pipe` waker (Ipc) |
 | nix | Fs/Net/Ipc/Exec/Clock | syscall wrappers lit up by the libc table — every effect matches the syscall |
+| rusqlite | Db | libsqlite3 FFI, lit up by the sqlite3_* table (`step`/`exec`/`backup`/`blob`) |
+| git2 | Net/Fs | libgit2 FFI behind `try_call!` macros — `Remote::fetch`→Net, repo/index ops→Fs |
 | tempfile | Env/Fs/Rand | temp dir from `$TMPDIR`, random names |
 | memmap2 | Fs | memory-mapped files |
 | notify | Fs/Clock/Env | filesystem watcher |
@@ -95,8 +112,6 @@ lint (or know to look) for these:
 |---|---|---|
 | hyper | Net | socket I/O via resolved method dispatch on tokio types |
 | reqwest | Net | through hyper (same) |
-| rusqlite | Db | libsqlite3 **FFI** (a different C lib — the libc table doesn't reach it) |
-| git2 | Net | libgit2 **FFI** (same — wraps libgit2, not libc) |
 | rand | Rand | entropy via `getrandom` / method-style calls |
 | crossbeam-channel | Ipc | crossbeam's own channel types aren't in the classifier (it knows `std::sync::mpsc`, tokio) |
 | walkdir | Fs | `read_dir` consumed through std iterator **methods** |
@@ -110,11 +125,16 @@ lint (or know to look) for these:
    trust tool — and it validates the curated-allowlist classifier on code it was never tuned against.
 2. **The biggest accuracy lever found here was non-code, not classification** — excluding test/build
    noise. Shipped.
-3. **The `libc` table was the highest-value classifier extension — and it shipped.** It took nix from
-   0 → 59 correctly-classified functions and completed mio's IPC, with zero false positives. The
-   remaining FFI under-reports (rusqlite/git2) wrap *different* C libraries (libsqlite3, libgit2); each
-   would need its own small table, or the nightly lint. So the pattern generalises: a thin Rust crate
-   over a C library is classifiable once that library's effectful entry points are named.
-4. **What stays the nightly lint's job:** anything behind method dispatch (hyper/reqwest `Net`), macros
-   (tracing `Log`), or non-std channels (crossbeam `Ipc`). The two backends are complementary, exactly
-   as documented — this sweep quantifies *where* the line falls.
+3. **FFI tiers are classifiable by naming the C library's entry points — three now shipped.** `libc`
+   (nix 0 → 59), `libsqlite3` (rusqlite 0 → 48), `libgit2` (git2 7 → 45), all validated against source
+   with zero false positives. The pattern generalises: a thin Rust crate over a C library becomes
+   visible once that library's effectful functions are named, matched by the distinctive C leaf so the
+   binding alias is irrelevant. git2 additionally needed macro-peeking, since it routes every FFI call
+   through `try_call!`.
+4. **Macro-peeking is a free recall win.** Parsing macro token streams as expressions (skipping
+   non-expression bodies) recovered calls hidden in `try_call!`/`println!`/`write!` across the board
+   with no false positives — the pure crates stayed pure. A general improvement, not git2-specific.
+5. **What stays the nightly lint's job:** anything behind method dispatch (hyper/reqwest `Net`, and the
+   propagation from a binding crate's FFI leaves up to its own high-level wrappers), macro-defined
+   call syntax that isn't expression-shaped, or non-std channels (crossbeam `Ipc`). The two backends are
+   complementary — this sweep quantifies *where* the line falls.

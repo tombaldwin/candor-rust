@@ -2499,6 +2499,33 @@ mod tests {
     }
 
     #[test]
+    fn classify_c_library_ffi_by_leaf() {
+        // libsqlite3 (rusqlite calls `ffi::sqlite3_*`; lint resolves to `libsqlite3_sys`) — matched on
+        // the distinctive leaf regardless of the binding crate's alias.
+        assert_eq!(classify("ffi", "ffi::sqlite3_open"), Some("Db"));
+        assert_eq!(classify("libsqlite3_sys", "libsqlite3_sys::sqlite3_step"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_exec"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_backup_step"), Some("Db"));
+        // pure in-memory accessors stay pure (bind params / read columns do no I/O — that's at step)
+        assert_eq!(classify("ffi", "ffi::sqlite3_bind_int"), None);
+        assert_eq!(classify("ffi", "ffi::sqlite3_column_text"), None);
+        assert_eq!(classify("ffi", "ffi::sqlite3_free"), None);
+        // libgit2 (git2 calls `raw::git_*`) — remote ops Net, on-disk repo ops Fs.
+        assert_eq!(classify("raw", "raw::git_remote_fetch"), Some("Net"));
+        assert_eq!(classify("raw", "raw::git_clone"), Some("Net"));
+        assert_eq!(classify("libgit2_sys", "libgit2_sys::git_remote_push"), Some("Net"));
+        assert_eq!(classify("raw", "raw::git_repository_open"), Some("Fs"));
+        assert_eq!(classify("raw", "raw::git_index_write"), Some("Fs"));
+        assert_eq!(classify("raw", "raw::git_checkout_tree"), Some("Fs"));
+        // pure libgit2 helpers (oid formatting, options init, type queries) stay pure
+        assert_eq!(classify("raw", "raw::git_oid_fromstr"), None);
+        assert_eq!(classify("raw", "raw::git_clone_init_options"), None);
+        assert_eq!(classify("raw", "raw::git_remote_name"), None);
+        // a non-libgit2 function that merely starts with `git_` is not falsely classified
+        assert_eq!(classify("myapp", "myapp::git_dir_helper"), None);
+    }
+
+    #[test]
     fn scope_matches_by_segment_not_substring() {
         assert!(scope_matches("app::domain::handle", "domain"));
         assert!(scope_matches("domain::handle", "domain"));

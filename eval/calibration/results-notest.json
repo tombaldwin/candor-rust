@@ -16,9 +16,9 @@
   "expect": "Net (HTTP)",
   "ver": "1.10.1",
   "rs": 64,
-  "fns": 18,
+  "fns": 20,
   "eff": {
-   "Clock": 18
+   "Clock": 20
   }
  },
  {
@@ -72,18 +72,20 @@
   "expect": "Db (SQLite FFI)",
   "ver": "0.39.0",
   "rs": 60,
-  "fns": 0,
-  "eff": {}
+  "fns": 48,
+  "eff": {
+   "Db": 48
+  }
  },
  {
   "name": "redis",
   "expect": "Db/Net",
   "ver": "0.27.6",
   "rs": 63,
-  "fns": 81,
+  "fns": 83,
   "eff": {
    "Net": 53,
-   "Rand": 26,
+   "Rand": 28,
    "Ipc": 7
   }
  },
@@ -134,11 +136,12 @@
   "expect": "Fs/Net/Exec (libgit2)",
   "ver": "0.20.4",
   "rs": 81,
-  "fns": 7,
+  "fns": 45,
   "eff": {
+   "Fs": 36,
+   "Net": 6,
    "Exec": 3,
-   "Env": 2,
-   "Fs": 2
+   "Env": 2
   }
  },
  {

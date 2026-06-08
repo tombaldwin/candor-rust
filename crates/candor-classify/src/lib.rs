@@ -172,6 +172,60 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // C-library FFI bindings: libsqlite3 (under rusqlite) and libgit2 (under git2). Like the libc tier,
+    // these crates are thin Rust over a C library, so their real I/O is invisible until the C entry
+    // points are named. Match by the DISTINCTIVE C function name (`sqlite3_*` / `git_*`) via the call's
+    // LEAF — independent of the binding crate's alias: rusqlite calls `ffi::sqlite3_step`, git2 calls
+    // `raw::git_remote_fetch`, and the nightly lint resolves the same to `libsqlite3_sys`/`libgit2_sys`;
+    // all spellings share the leaf. Only the I/O-performing entry points are listed — the in-memory
+    // accessors (`sqlite3_bind_*`/`sqlite3_column_*`, `git_*_oid`/strarray/options builders) stay pure,
+    // so a non-listed `sqlite3_`/`git_` leaf returns None (under-report, never a wrong effect). Calibrated
+    // + validated against rusqlite 0.39 / git2 0.20 source (eval/calibration).
+    {
+        let leaf = path.rsplit("::").next().unwrap_or(path);
+        if let Some(rest) = leaf.strip_prefix("sqlite3_") {
+            let _ = rest;
+            // SQLite C API operations that touch the database (open/exec/step/prepare/backup/blob/wal).
+            const DB: &[&str] = &[
+                "sqlite3_open", "sqlite3_open_v2", "sqlite3_open16", "sqlite3_close", "sqlite3_close_v2",
+                "sqlite3_exec", "sqlite3_step", "sqlite3_prepare", "sqlite3_prepare_v2",
+                "sqlite3_prepare_v3", "sqlite3_prepare16", "sqlite3_prepare16_v2", "sqlite3_prepare16_v3",
+                "sqlite3_get_table", "sqlite3_backup_init", "sqlite3_backup_step", "sqlite3_backup_finish",
+                "sqlite3_blob_open", "sqlite3_blob_read", "sqlite3_blob_write", "sqlite3_blob_reopen",
+                "sqlite3_load_extension", "sqlite3_wal_checkpoint", "sqlite3_wal_checkpoint_v2",
+            ];
+            return DB.contains(&leaf).then_some("Db");
+        }
+        if leaf.starts_with("git_") {
+            // libgit2: remote/transport operations contact the network …
+            const NET: &[&str] = &[
+                "git_clone", "git_remote_connect", "git_remote_connect_ext", "git_remote_fetch",
+                "git_remote_download", "git_remote_upload", "git_remote_push", "git_remote_ls",
+            ];
+            // … and repository/index/odb/checkout/ref/config operations touch the on-disk .git store.
+            const FS: &[&str] = &[
+                "git_repository_open", "git_repository_open_ext", "git_repository_open_bare",
+                "git_repository_init", "git_repository_init_ext", "git_repository_discover",
+                "git_checkout_tree", "git_checkout_head", "git_checkout_index", "git_index_read",
+                "git_index_write", "git_index_write_tree", "git_index_write_tree_to",
+                "git_index_add_bypath", "git_index_add_all", "git_odb_open", "git_odb_read",
+                "git_odb_write", "git_odb_open_wstream", "git_odb_open_rstream",
+                "git_blob_create_fromdisk", "git_blob_create_fromworkdir", "git_blob_create_from_disk",
+                "git_blob_create_from_workdir", "git_blob_create_from_stream", "git_commit_create",
+                "git_commit_create_v", "git_reference_create", "git_reference_set_target",
+                "git_reference_delete", "git_config_open_default", "git_config_open_ondisk",
+                "git_config_add_file_ondisk", "git_tag_create", "git_treebuilder_write",
+                "git_packbuilder_write",
+            ];
+            if NET.contains(&leaf) {
+                return Some("Net");
+            }
+            if FS.contains(&leaf) {
+                return Some("Fs");
+            }
+            return None;
+        }
+    }
     // HTTP clients use the same builder pattern as the AWS SDK: only the dispatch is
     // I/O. (Found by the eval: ebman's reqwest calls to the Anthropic API + webhooks
     // were silently classified network-free because reqwest wasn't recognized.)

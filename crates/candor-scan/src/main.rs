@@ -102,6 +102,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.calls.push(Call { path: leaf.clone(), leaf, str_arg: first_str_lit(&node.args) });
         syn::visit::visit_expr_method_call(self, node);
     }
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        // syn does not parse a macro's body, so every call hidden inside one is invisible by default —
+        // a real miss on crates that route effectful calls through a macro (git2 wraps EVERY libgit2 FFI
+        // call in `try_call!(raw::git_...())`; `println!("{}", f())` hides `f`). Best-effort: parse the
+        // token stream as comma-separated expressions and walk any that parse. If the body isn't
+        // expression syntax (`quote!{}`, `matches!(x, Pat)`, macro_rules arms), parsing fails and we skip
+        // — so this only ever ADDS visibility, never breaks. Owned exprs, so visit a local copy.
+        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        if let Ok(exprs) = syn::parse::Parser::parse2(parser, node.tokens.clone()) {
+            for e in &exprs {
+                self.visit_expr(e);
+            }
+        }
+    }
 }
 
 /// True if an item carries `#[cfg(test)]` (or `#[cfg(any(test, ...))]`) — a test-only module the
@@ -583,6 +597,24 @@ mod tests {
         let bare: Option<&Vec<String>> =
             tail2("new").and_then(|t2| by_tail2.get(&t2)).or_else(|| by_leaf.get("new").filter(|v| v.len() == 1));
         assert_eq!(bare, None);
+    }
+
+    #[test]
+    fn macro_bodies_are_walked_for_hidden_calls() {
+        // git2 hides every libgit2 FFI call in `try_call!(...)`; format macros hide call args. Both
+        // must be collected, while a non-expression macro body (matches!) is skipped without panicking.
+        let uses = HashMap::new();
+        let block: syn::Block = syn::parse_str(
+            "{ try_call!(raw::git_remote_fetch(x)); println!(\"{}\", helper()); let _ = matches!(y, Some(_)); }",
+        )
+        .unwrap();
+        let mut c = CallCollector { uses: &uses, calls: Vec::new() };
+        for stmt in &block.stmts {
+            c.visit_stmt(stmt);
+        }
+        let leaves: Vec<&str> = c.calls.iter().map(|c| c.leaf.as_str()).collect();
+        assert!(leaves.contains(&"git_remote_fetch"), "call inside try_call! macro was missed: {leaves:?}");
+        assert!(leaves.contains(&"helper"), "call inside println! macro was missed: {leaves:?}");
     }
 
     #[test]
