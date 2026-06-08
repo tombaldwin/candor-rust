@@ -117,6 +117,27 @@ else
 fi
 rm -rf "$(dirname "$R")"
 
+# Zero-install fallback: with NO nightly dylib but candor-scan present, the receipt must still produce a
+# report (via the stable backend) and mark itself honestly. Needs the scan binary; skip otherwise.
+SCANB=""
+for s in "$HERE/../../target/release/candor-scan" "$HERE/../../target/debug/candor-scan"; do
+  [ -x "$s" ] && { SCANB="$s"; break; }
+done
+if [ -n "$SCANB" ]; then
+  S=$(mktemp -d)/s; mkdir -p "$S/src"
+  printf '[package]\nname="s"\nversion="0.1.0"\nedition="2021"\n[dependencies]\n' > "$S/Cargo.toml"
+  printf 'use std::fs;\npub fn load(){ let _ = fs::read_to_string("/etc/hosts"); }\n' > "$S/src/lib.rs"
+  # CANDOR_HOME points nowhere with a dylib; CANDOR_SCAN forces the scanner; no CANDOR_LIB.
+  outs=$(CANDOR_HOME="$(mktemp -d)" CANDOR_SCAN="$SCANB" "$RUN" --force "$S" 2>/dev/null)
+  chk  "no-dylib: receipt falls back to the stable scanner (produces a report)" "$outs" '[0-9]+ fns'
+  chk  "no-dylib: receipt detects the Fs effect via scan"                       "$outs" 'Fs'
+  chk  "no-dylib: receipt is honestly marked as the stable backend"             "$outs" 'stable backend'
+  chk  "no-dylib: a scan report file was written"                               "$(ls "$S/.candor/" 2>/dev/null)" 'report\..*\.scan\.json'
+  rm -rf "$(dirname "$S")"
+else
+  echo "  skip scan-fallback check (candor-scan not built)"
+fi
+
 echo
 echo "receipt tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

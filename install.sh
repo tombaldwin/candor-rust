@@ -21,19 +21,28 @@ BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
 echo "candor: installing from $CLONE" >&2
 
 # 1. Build. rust-toolchain.toml pins the nightly + components; rustup fetches them here if missing.
+# If the full build fails (no nightly / can't fetch rustc-dev — a stable-only or offline box), DON'T
+# abort: build just the stable crates (candor-scan + candor-query) with `+stable`, so candor still works
+# zero-install via the syntactic backend. The nightly lint adds the soundness contract when available.
 echo "candor: building (rustup may fetch the pinned nightly + rustc-dev the first time)…" >&2
-( cd "$CLONE" && cargo build --workspace )
+if ( cd "$CLONE" && cargo build --workspace ); then
+  :
+else
+  echo "candor: full build failed (nightly lint unavailable?) — building the STABLE backend only…" >&2
+  ( cd "$CLONE" && cargo +stable build -p candor-scan -p candor-query ) \
+    || { echo "candor: could not build even the stable backend — see the errors above." >&2; exit 1; }
+fi
 
 LIB="$(ls "$CLONE"/target/debug/libcandor@*.dylib "$CLONE"/target/debug/libcandor@*.so 2>/dev/null | head -1 || true)"
-[ -n "$LIB" ] || { echo "candor: build produced no dylib — see the errors above." >&2; exit 1; }
 Q="$(ls "$CLONE"/target/debug/candor-query 2>/dev/null | head -1 || true)"
 S="$(ls "$CLONE"/target/debug/candor-scan 2>/dev/null | head -1 || true)"
+[ -n "$S" ] || { echo "candor: no candor-scan binary produced — see the errors above." >&2; exit 1; }
 
-# 2. Stable home: dylib + query + scan binaries + a pointer back to the clone.
+# 2. Stable home: dylib (if built) + query + scan binaries + a pointer back to the clone.
 mkdir -p "$CACHE/lib" "$CACHE/bin"
-cp -f "$LIB" "$CACHE/lib/"
+[ -n "$LIB" ] && cp -f "$LIB" "$CACHE/lib/"
 [ -n "$Q" ] && cp -f "$Q" "$CACHE/bin/"
-[ -n "$S" ] && cp -f "$S" "$CACHE/bin/"   # the stable scanner — usable with NO nightly toolchain
+cp -f "$S" "$CACHE/bin/"   # the stable scanner — usable with NO nightly toolchain (the zero-install floor)
 printf '%s\n' "$CLONE" > "$CACHE/clone"
 
 # 3. `cargo candor` everywhere: symlink the wrapper onto PATH.
@@ -41,8 +50,13 @@ mkdir -p "$BIN"
 ln -sf "$CLONE/cargo-candor" "$BIN/cargo-candor"
 
 echo "candor: installed ✓" >&2
-echo "  engine   $(basename "$LIB")" >&2
-echo "  stable   $CACHE/  (dylib + query + scan — survives 'cargo clean')" >&2
+if [ -n "$LIB" ]; then
+  echo "  engine   $(basename "$LIB")  (nightly lint — soundness contract)" >&2
+else
+  echo "  engine   stable backend only (candor-scan) — nightly lint not built; queries/receipt work," >&2
+  echo "           enforcement (guard/policy) needs the lint. Re-run with the nightly available to add it." >&2
+fi
+echo "  stable   $CACHE/  (query + scan${LIB:+ + dylib} — survives 'cargo clean')" >&2
 echo "  command  $BIN/cargo-candor  →  use 'cargo candor …' in any project" >&2
 case ":$PATH:" in
   *":$BIN:"*) echo "  PATH     ok" >&2 ;;

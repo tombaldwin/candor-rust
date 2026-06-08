@@ -119,6 +119,13 @@ cargo candor audit     # NIGHTLY lint: the full rustc-backed analysis with the s
 can't drift on what counts as an effect. It needs nothing but a stable toolchain, so it runs anywhere
 `cargo` does (CI without a nightly, `cargo install`, a locked-down box).
 
+**Stable by default — you don't pick the backend.** The read-only queries (`show`/`where`/`callers`/`map`/
+`audit`) and the [Claude Code receipt](integrations/claude-code/) prefer the nightly lint when it's
+installed (for the soundness contract) and **automatically fall back to the stable scanner when it
+isn't** — so candor works with zero install on any machine, and the receipt says `· stable backend` when
+it's using the syntactic path. Enforcement (`guard`/`policy`/`snapshot`/`diff`) still requires the lint:
+blocking a PR needs the soundness guarantee.
+
 The trade is **precision, stated honestly**. The scanner is syntactic, so it sees what's *written*, not
 what the compiler *resolves*. It catches path-qualified effect calls (`std::fs::read`, `Command::new`,
 `reqwest::Client::execute`), `use`-aliases, and intra-crate transitive propagation. It **misses** —

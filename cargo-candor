@@ -142,6 +142,13 @@ cmd="${1:-audit}"; shift || true
 # or broken dylib first.
 case "$cmd" in
   setup|install|-h|--help|help|scan) LIB="" ;;
+  audit|show|where|callers|map)
+    # Read-only queries: prefer the nightly lint (soundness, Unknown), but DON'T hard-fail without it —
+    # fall back to the stable scanner so these work zero-install. Use an existing dylib if present; only
+    # attempt a build when one's already around to refresh. If none, LIB stays empty and the command's
+    # report path (ensure_report / audit) uses candor-scan instead.
+    LIB="$(find_lib || true)"
+    [ -n "${LIB:-}" ] && stash "$LIB" lib ;;
   *)
     LIB="$(find_lib || true)"
     if [ -z "${LIB:-}" ]; then
@@ -181,8 +188,14 @@ ensure_report() {
   if ! report_exists .candor/report; then
     echo "candor: no report yet — generating one (run 'cargo candor watch &' to keep it fresh)…" >&2
     mkdir -p .candor                                   # fresh project: the lint can't create its output dir
-    rm -rf target/dylint 2>/dev/null || true
-    CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
+    if [ -n "${LIB:-}" ]; then
+      rm -rf target/dylint 2>/dev/null || true
+      CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
+    else
+      # No nightly dylib — zero-install fallback to the stable scanner. Same report JSON, no build.
+      echo "candor: using the stable backend (candor-scan) — no nightly lint found." >&2
+      scan_run "$PWD" --out "$PWD/.candor/report" >/dev/null 2>&1 || true
+    fi
     report_exists .candor/report || { echo "candor: could not produce a report (build failed?)." >&2; return 1; }
     # Stamp state at generation so the staleness check below can actually fire on a later run. Without
     # this, the no-watcher path (generate once, never write state) served a stale report SILENTLY after
@@ -214,19 +227,26 @@ lint_fresh() {
 
 case "$cmd" in
   audit)
-    # `--all`/`-a` → the full per-function lint: the dylint-native view, spans in context.
+    # `--all`/`-a` → the full per-function lint: the dylint-native view, spans in context (lint only).
     # `--coverage`/`-c` → also list every external crate candor has no effect rules for (blind spots).
     # Default → an at-a-glance profile (candor-query), aggregated across the project's crates.
     if [ "${1:-}" = "--all" ] || [ "${1:-}" = "-a" ]; then
+      [ -n "${LIB:-}" ] || { echo "candor: 'audit --all' is the nightly lint view; none found. Run 'cargo candor audit' for the stable profile, or install the lint." >&2; exit 1; }
       exec cargo dylint --lib-path "$LIB"
     fi
     cov=""; { [ "${1:-}" = "--coverage" ] || [ "${1:-}" = "-c" ]; } && cov="--coverage"
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
     echo "candor: analyzing…" >&2
-    run_json() { CANDOR_JSON="$tmp/a" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
-    run_json
-    # dylint emits only on recompile; if nothing was written the build was cached — force it once.
-    report_exists "$tmp/a" || { rm -rf target/dylint 2>/dev/null || true; run_json; }
+    if [ -n "${LIB:-}" ]; then
+      run_json() { CANDOR_JSON="$tmp/a" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
+      run_json
+      # dylint emits only on recompile; if nothing was written the build was cached — force it once.
+      report_exists "$tmp/a" || { rm -rf target/dylint 2>/dev/null || true; run_json; }
+    else
+      # Zero-install: the stable scanner produces the same report JSON with no nightly toolchain.
+      echo "candor: using the stable backend (candor-scan) — no nightly lint found." >&2
+      scan_run "$PWD" --out "$tmp/a" >/dev/null 2>&1 || true
+    fi
     if ! report_exists "$tmp/a"; then
       echo "candor: no report produced — did the crate build? Try 'cargo candor audit --all' to see errors." >&2
       exit 1

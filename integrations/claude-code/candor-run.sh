@@ -75,11 +75,28 @@ find_lib() {
   return 1
 }
 
+# ---- locate the STABLE backend (candor-scan) — the zero-install fallback ----
+# When no nightly dylib is present (a fresh machine, stable-only CI, a locked-down box), the receipt
+# still works: candor-scan produces the same report JSON on stock `cargo`. Newest-mtime, like the others.
+find_scan() {
+  [ -n "${CANDOR_SCAN:-}" ] && [ -x "${CANDOR_SCAN}" ] && { printf '%s\n' "$CANDOR_SCAN"; return 0; }
+  local newest="" c
+  for c in "${CANDOR_HOME:-}"/target/release/candor-scan "${CANDOR_HOME:-}"/target/debug/candor-scan \
+           "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-scan \
+           "$DIR"/../candor/target/release/candor-scan "$DIR"/../candor/target/debug/candor-scan \
+           /tmp/candor/target/release/candor-scan /tmp/candor/target/debug/candor-scan; do
+    [ -x "$c" ] || continue
+    if [ -z "$newest" ] || [ "$c" -nt "$newest" ]; then newest="$c"; fi
+  done
+  [ -n "$newest" ] && printf '%s\n' "$newest"
+}
+
 # (candor-query located above, as QUERY — used both for the source-state hash and the receipt below.)
 
 # ---- version stamp + update/rebuild nudges (the clone is the single source of truth) ----
 LIBP="$(find_lib 2>/dev/null || true)"
-VER=""; NUDGE=""
+SCANP="$(find_scan 2>/dev/null || true)"
+VER=""; NUDGE=""; BACKEND=""
 # The TRUE version of the running dylib — the tag build.rs embedded — NOT CANDOR_HOME's git HEAD,
 # which races ahead of an un-rebuilt dylib. The receipt must not claim a version the loaded binary
 # isn't; this is the engine that actually produced the report below.
@@ -133,31 +150,49 @@ touch_roots() {
   for r in src/lib.rs src/main.rs; do [ -f "$DIR/$r" ] && touch "$DIR/$r"; done
 }
 run_lint() { CANDOR_JSON="$REPORT_PREFIX" cargo dylint --lib-path "$LIB" >/dev/null 2>"$STATE_DIR/last-error.log"; }
+# The stable backend: produce the report with no nightly toolchain. candor-scan parses sources (it does
+# NOT build the crate), so it can't fail on a compile error — but it under-reports vs the lint (no
+# Unknown; misses some method/macro/cross-crate effects). Marked clearly so the receipt stays honest.
+run_scan() { "$SCAN" "$DIR" --out "$REPORT_PREFIX" >/dev/null 2>"$STATE_DIR/last-error.log"; }
 
 ran_ok=1; surfaced=0
 if [ "$need_run" = 1 ]; then
   surfaced=10
-  if [ -z "$LIBP" ]; then
-    echo "candor$VERSTAMP ⚠ not installed — no dylib found. Build candor (cargo build in the clone) or set CANDOR_HOME/CANDOR_LIB in .candor/config.$NUDGE"
-    exit 10
-  fi
-  LIB="$LIBP"
   MARK="$STATE_DIR/.mark"; : > "$MARK"
   emitted() { [ -n "$(find "$STATE_DIR" -name 'report.*.*.json' -newer "$MARK" 2>/dev/null)" ]; }
-  if run_lint && emitted; then
-    echo "$CUR" > "$STATE"; ran_ok=1
-  else
-    # dylint produced no fresh report — either the crate didn't recompile (already
-    # built) or it failed to compile. Force a recompile and retry once.
-    touch_roots
-    : > "$MARK"
+  if [ -n "$LIBP" ]; then
+    # Preferred: the nightly lint (soundness contract, Unknown, conformance).
+    LIB="$LIBP"
     if run_lint && emitted; then
       echo "$CUR" > "$STATE"; ran_ok=1
     else
-      ran_ok=0   # genuine build error: keep last good report (if any), flag STALE
+      # dylint produced no fresh report — either the crate didn't recompile (already built) or it failed
+      # to compile. Force a recompile and retry once.
+      touch_roots
+      : > "$MARK"
+      if run_lint && emitted; then
+        echo "$CUR" > "$STATE"; ran_ok=1
+      else
+        ran_ok=0   # genuine build error: keep last good report (if any), flag STALE
+      fi
     fi
+  elif [ -n "$SCANP" ]; then
+    # Zero-install fallback: the stable scanner. No nightly, no dylint — works anywhere `cargo` does.
+    SCAN="$SCANP"
+    BACKEND=" · stable backend (syntactic — install the nightly lint for Unknown/soundness)"
+    [ -z "$VER" ] && { VER="scan"; VERSTAMP=" @scan"; }
+    if run_scan && emitted; then
+      echo "$CUR" > "$STATE"; ran_ok=1
+    else
+      ran_ok=0
+    fi
+  else
+    echo "candor$VERSTAMP ⚠ not installed — no candor backend found. Build candor (cargo build in the clone, or 'cargo candor setup') or set CANDOR_HOME in .candor/config.$NUDGE"
+    exit 10
   fi
 fi
+# If a prior run left a scan report and the lint still isn't available, keep the receipt honest about it.
+[ -z "$LIBP" ] && [ -n "$SCANP" ] && [ -z "$BACKEND" ] && BACKEND=" · stable backend (syntactic — install the nightly lint for Unknown/soundness)"
 
 # ---- aggregate the report (candor-query preferred; degrade gracefully without it) ----
 # One `candor-query receipt` yields the fn count, effect breakdown, unresolved count, the calibrated
@@ -297,5 +332,5 @@ if [ -n "$REVIEW" ]; then
   printf 'candor — functions have effects NOT in the committed .candor baseline (surfaced once):\n%s\n\nA local edit can change the effect surface non-locally — a new effect propagates to every caller. For each: was it intended? If a function gained Net/Db/Exec/Fs/Env/Ipc it lacked, confirm it is necessary, and prefer threading a capability over reaching for ambient authority. A gained `Unknown` means candor can no longer prove that function complete — read it. If all are intended, just finish; this will not re-prompt for these.\n' "$REVIEW"
   exit 11
 fi
-echo "candor$VERSTAMP · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json$NUDGE"
+echo "candor$VERSTAMP · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json$BACKEND$NUDGE"
 exit "${surfaced:-0}"
