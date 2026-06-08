@@ -1,7 +1,11 @@
 # Publishing the stable crates to crates.io
 
-**Status: `candor-report` / `candor-classify` / `candor-scan` v0.3.0 are published.**
+**Status: published — `candor-report` 0.3.0, `candor-classify` 0.3.0, `candor-scan` 0.3.1.**
 `cargo install candor-scan` works. The steps below are the runbook for future releases.
+
+**Binary-only patch:** when only the scanner changes (no classifier/report *logic* change), bump and
+publish just `candor-scan` — it keeps depending on the already-published `candor-report`/`candor-classify`
+0.3.0, so the crates' versions can diverge. (`candor-scan` 0.3.1 was such a patch — the code-review fixes.)
 
 Goal: make the zero-install path a one-liner — `cargo install candor-scan`. Three crates publish (all
 stable, no `rustc_private`); the root `candor` lint stays `publish = false` (it needs the pinned nightly
