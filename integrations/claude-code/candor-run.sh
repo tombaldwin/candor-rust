@@ -31,11 +31,28 @@ mkdir -p "$STATE_DIR" 2>/dev/null || true
 # scripts, and AGENTS.md — `git pull` / `cargo candor update` updates all three together.
 [ -f "$CONFIG" ] && . "$CONFIG"
 
-# ---- content hash of all Rust sources (path + content, target/.git excluded) ----
-src_hash() {
-  find "$DIR" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
-    | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1
+# ---- locate the candor-query binary (used for the receipt AND the source-state hash) ----
+# An explicit CANDOR_QUERY wins; otherwise pick the NEWEST by mtime among the candidates (so a fresh
+# build beats a stale one — matching cargo-candor's find_query/find_lib, not first-existing).
+find_query() {
+  [ -n "${CANDOR_QUERY:-}" ] && [ -x "${CANDOR_QUERY}" ] && { printf '%s\n' "$CANDOR_QUERY"; return 0; }
+  local newest="" c
+  for c in "${CANDOR_HOME:-}"/target/release/candor-query "${CANDOR_HOME:-}"/target/debug/candor-query \
+           "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-query \
+           "$DIR"/../candor/target/release/candor-query "$DIR"/../candor/target/debug/candor-query \
+           /tmp/candor/target/release/candor-query /tmp/candor/target/debug/candor-query; do
+    [ -x "$c" ] || continue
+    if [ -z "$newest" ] || [ "$c" -nt "$newest" ]; then newest="$c"; fi
+  done
+  [ -n "$newest" ] && printf '%s\n' "$newest"
 }
+QUERY="$(find_query 2>/dev/null || true)"
+
+# ---- content hash of all Rust sources (path + content, target/.git excluded) ----
+# ONE canonical implementation (`candor-query state`), shared with cargo-candor, so the hook and the
+# wrapper can never disagree on whether a report is fresh. Empty if the binary isn't found yet, which
+# the freshness gate below reads as "changed" (re-run) — the safe direction.
+src_hash() { [ -n "$QUERY" ] && "$QUERY" state 2>/dev/null; }
 CUR="$(src_hash)"; SHORT="${CUR:0:8}"
 PREV=""; [ -f "$STATE" ] && PREV="$(cat "$STATE" 2>/dev/null)"
 
@@ -58,22 +75,7 @@ find_lib() {
   return 1
 }
 
-# ---- locate the candor-query binary (the receipt's report aggregation; was inline Python) ----
-# An explicit CANDOR_QUERY wins; otherwise pick the NEWEST by mtime among the candidates (so a fresh
-# build beats a stale one — matching cargo-candor's find_query/find_lib, not first-existing).
-find_query() {
-  [ -n "${CANDOR_QUERY:-}" ] && [ -x "${CANDOR_QUERY}" ] && { printf '%s\n' "$CANDOR_QUERY"; return 0; }
-  local newest="" c
-  for c in "${CANDOR_HOME:-}"/target/release/candor-query "${CANDOR_HOME:-}"/target/debug/candor-query \
-           "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-query \
-           "$DIR"/../candor/target/release/candor-query "$DIR"/../candor/target/debug/candor-query \
-           /tmp/candor/target/release/candor-query /tmp/candor/target/debug/candor-query; do
-    [ -x "$c" ] || continue
-    if [ -z "$newest" ] || [ "$c" -nt "$newest" ]; then newest="$c"; fi
-  done
-  [ -n "$newest" ] && printf '%s\n' "$newest"
-}
-QUERY="$(find_query 2>/dev/null || true)"
+# (candor-query located above, as QUERY — used both for the source-state hash and the receipt below.)
 
 # ---- version stamp + update/rebuild nudges (the clone is the single source of truth) ----
 LIBP="$(find_lib 2>/dev/null || true)"

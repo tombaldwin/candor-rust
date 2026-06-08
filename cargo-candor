@@ -94,6 +94,12 @@ query() {
   "$q" "$@"
 }
 
+# The source-freshness key: a content hash of every `.rs` file under the project (excluding target/ &
+# .git/), used to tell whether a saved report still matches the tree. ONE canonical implementation in
+# candor-query (`state`), replacing the fragile `find … | shasum | shasum | cut` pipeline that was
+# copy-pasted — and had drifted — across the wrapper and hooks. `query state` ignores its argv tail.
+src_state() { query state 2>/dev/null; }
+
 # Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
 [ "${1:-}" = "candor" ] && shift
 cmd="${1:-audit}"; shift || true
@@ -148,12 +154,10 @@ ensure_report() {
     # Stamp state at generation so the staleness check below can actually fire on a later run. Without
     # this, the no-watcher path (generate once, never write state) served a stale report SILENTLY after
     # any edit, because the `elif` requires a state file to compare against.
-    find "$PWD" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
-      | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1 > .candor/state
+    src_state > .candor/state
   elif [ -f .candor/state ]; then
     local cur
-    cur="$(find "$PWD" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
-           | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
+    cur="$(src_state)"
     [ -n "$cur" ] && [ "$cur" != "$(cat .candor/state 2>/dev/null)" ] && \
       echo "candor: ⚠ report may be behind your edits — 'cargo candor watch &' (or /candor) to refresh." >&2
   fi
@@ -262,13 +266,12 @@ case "$cmd" in
       exit 2
     fi
     # FAST PATH: if the Stop hook (or `cargo candor watch`) already kept .candor/report.* fresh for
-    # the CURRENT source, diff it directly — no recompile. The freshness test matches candor-run.sh's
-    # src_hash exactly (find *.rs under $PWD, content-hash, compare to .candor/state). Content-based,
-    # so a stale report can never be mistaken for fresh; a mismatch just falls back to the slow path.
+    # the CURRENT source, diff it directly — no recompile. The freshness test uses the SAME `src_state`
+    # hash everything else does (content-based, so a stale report can never be mistaken for fresh; a
+    # mismatch just falls back to the slow path).
     cur=""; rp=".candor/report"
     if ls "$rp".*.*.json >/dev/null 2>&1 && [ -f .candor/state ]; then
-      cur_hash="$(find "$PWD" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
-                  | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
+      cur_hash="$(src_state)"
       [ -n "$cur_hash" ] && [ "$cur_hash" = "$(cat .candor/state 2>/dev/null)" ] && cur="$rp"
     fi
     if [ -z "$cur" ]; then
@@ -293,10 +296,8 @@ case "$cmd" in
     # fast path — the compile then happens concurrently with editing, OFF the agent's critical path.
     # Polls the source hash (identically to candor-run.sh) every CANDOR_WATCH_INTERVAL s (default 2)
     # and re-lints on a real change. Long-running: run it in a side terminal, or `cargo candor watch &`.
-    command -v shasum >/dev/null 2>&1 || { echo "candor: watch needs shasum" >&2; exit 2; }
     mkdir -p .candor
-    sh_hash() { find "$PWD" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 2>/dev/null \
-                | sort -z | xargs -0 shasum 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1; }
+    sh_hash() { src_state; }
     last=""; cleared=0
     if [ -f .candor/state ] && ls .candor/report.*.*.json >/dev/null 2>&1 && [ "$(sh_hash)" = "$(cat .candor/state 2>/dev/null)" ]; then
       last="$(sh_hash)"; cleared=1   # warm cache, report already fresh

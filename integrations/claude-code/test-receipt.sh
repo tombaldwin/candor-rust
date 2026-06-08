@@ -35,10 +35,9 @@ JSON
 echo '{"crates":["reqwest"],"prefixes":["aws_sdk_"]}' > "$T/.candor/report.calibrated.json"
 echo '["scylla","serde","tokio"]' > "$T/.candor/report.encountered-proj-Rlib.json"
 
-# Freeze the source hash so candor-run treats the report as CURRENT (no dylint re-run).
-hash=$(find "$T" -name '*.rs' -not -path '*/target/*' -not -path '*/.git/*' -print0 \
-       | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1)
-echo "$hash" > "$T/.candor/state"
+# Freeze the source hash (same canonical `candor-query state` the hook uses) so candor-run treats the
+# report as CURRENT (no dylint re-run).
+"$QUERY" state "$T" > "$T/.candor/state"
 
 out=$("$RUN" "$T" 2>/dev/null)
 echo "receipt: $out"
@@ -66,8 +65,7 @@ if [ -n "$tag" ]; then
   printf 'fn a(){}\n' > "$V/src/lib.rs"
   echo '[{"fn":"a","loc":"src/lib.rs:1","inferred":["Fs"],"direct":["Fs"],"unresolved":false}]' > "$V/.candor/report.p.Rlib.json"
   echo "CANDOR_LIB=$LIBV" > "$V/.candor/config"
-  vh=$(find "$V" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1)
-  echo "$vh" > "$V/.candor/state"
+  "$QUERY" state "$V" > "$V/.candor/state"
   outv=$("$RUN" "$V" 2>/dev/null)
   chk "receipt stamps the dylib's true build version (@$tag)"           "$outv" "@$tag"
   rm -rf "$(dirname "$V")"
@@ -84,8 +82,7 @@ cat > "$E/.candor/report.e.Rlib.json" <<'JSON'
  "functions":[{"fn":"a","loc":"src/lib.rs:1","inferred":["Db"],"direct":["Db"],"unresolved":false},
               {"fn":"b","loc":"src/lib.rs:2","inferred":["Net","Unknown"],"direct":["Net"],"unresolved":true}]}
 JSON
-eh=$(find "$E" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1)
-echo "$eh" > "$E/.candor/state"
+"$QUERY" state "$E" > "$E/.candor/state"
 oute=$("$RUN" "$E" 2>/dev/null)
 chk  "receipt summarizes the v0.2 envelope (2 fns from {candor,functions})"  "$oute" '2 fns'
 chk  "envelope: effect breakdown + unresolved counted through .functions"    "$oute" '1 unresolved'
@@ -99,8 +96,7 @@ echo "CANDOR_REVIEW=1" > "$R/.candor/config"
 # baseline: worker performs Fs only.  current report: worker gained Net.  (no version file → gate open)
 echo '{"candor":{"version":"v1"},"functions":[{"fn":"worker","inferred":["Fs"],"direct":["Fs"],"unresolved":false}]}' > "$R/.candor/baseline.r.Rlib.json"
 echo '{"candor":{"version":"v1"},"functions":[{"fn":"worker","inferred":["Fs","Net"],"direct":["Fs","Net"],"unresolved":false}]}' > "$R/.candor/report.r.Rlib.json"
-rh=$(find "$R" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1)
-echo "$rh" > "$R/.candor/state"
+"$QUERY" state "$R" > "$R/.candor/state"
 outr="$("$RUN" "$R" 2>/dev/null)"; codr=$?
 chk  "review: candor-run exits 11 on a newly-introduced effect"  "$codr" '^11$'
 chk  "review: the prompt names the gained Net"                   "$outr" 'gained \{ Net'

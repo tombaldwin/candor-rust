@@ -33,9 +33,11 @@ fn main() {
         "diff" => cmd_diff(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
+        "state" => cmd_state(rest),
         other => {
             eprintln!(
-                "candor-query: unknown command '{other}' (audit|show|where|callers|map|diff|receipt|gains)"
+                "candor-query: unknown command '{other}' \
+                 (audit|show|where|callers|map|diff|receipt|gains|state)"
             );
             2
         }
@@ -836,6 +838,59 @@ fn cmd_gains(args: &[String]) -> i32 {
     0
 }
 
+/// `state [<root>]` — print a stable content hash of every `.rs` file under `<root>` (default cwd),
+/// excluding `target/` and `.git/`. This is the source-freshness key the wrapper writes to
+/// `.candor/state` and later compares, to tell whether a saved report still matches the tree. It
+/// replaces a fragile `find … | sort -z | xargs shasum | shasum | cut` pipeline that was copy-pasted
+/// into ~10 shell sites — and had already DRIFTED (some copies excluded `.git`, some didn't), so two
+/// code paths could hash the same tree differently. One canonical implementation kills that bug class.
+/// The hash is FNV-1a over each file's path then bytes (NUL-separated) in sorted order — deterministic
+/// and dependency-free; the value need only be stable, not cryptographic (the state file is ephemeral).
+fn cmd_state(args: &[String]) -> i32 {
+    let root = args.first().map(String::as_str).unwrap_or(".");
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_rs(Path::new(root), &mut files);
+    files.sort();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a 64-bit offset basis
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for f in &files {
+        // Path relative to root, so the same tree hashes the same regardless of where it lives.
+        let rel = f.strip_prefix(root).unwrap_or(f);
+        feed(rel.to_string_lossy().as_bytes());
+        feed(&[0]);
+        if let Ok(bytes) = std::fs::read(f) {
+            feed(&bytes);
+        }
+        feed(&[0]);
+    }
+    println!("{h:016x}");
+    0
+}
+
+/// Recursively collect `*.rs` files under `dir`, skipping `target` and `.git` directories (and any
+/// symlinked dir, to avoid cycles). Order-independent; the caller sorts.
+fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for ent in rd.flatten() {
+        let path = ent.path();
+        let Ok(ft) = ent.file_type() else { continue };
+        if ft.is_dir() {
+            let name = ent.file_name();
+            if name == "target" || name == ".git" {
+                continue;
+            }
+            collect_rs(&path, out);
+        } else if ft.is_file() && path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
 // ── small helpers ───────────────────────────────────────────────────────────────────────────────
 
 fn sorted(v: &[String]) -> Vec<String> {
@@ -867,6 +922,56 @@ fn two(args: &[String]) -> Option<(&str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `collect_rs` + the FNV digest must be deterministic, sensitive to `.rs` content, and blind to
+    /// `target/` and `.git/` — the contract the ~10 shell sites used to re-implement (inconsistently).
+    #[test]
+    fn state_hash_is_deterministic_and_scoped() {
+        let dir = std::env::temp_dir().join("candor-query-state-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["src", "sub", "target/x", ".git"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("src/a.rs"), "fn a(){}").unwrap();
+        std::fs::write(dir.join("sub/b.rs"), "fn b(){}").unwrap();
+        std::fs::write(dir.join("target/x/c.rs"), "fn c(){}").unwrap(); // must be ignored
+        std::fs::write(dir.join(".git/d.rs"), "fn d(){}").unwrap(); // must be ignored
+        std::fs::write(dir.join("src/notrust.txt"), "ignored").unwrap();
+
+        let hash = |root: &Path| -> u64 {
+            let mut files = Vec::new();
+            collect_rs(root, &mut files);
+            files.sort();
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for f in &files {
+                for &b in f.strip_prefix(root).unwrap_or(f).to_string_lossy().as_bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                for &b in std::fs::read(f).unwrap_or_default().iter() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            h
+        };
+
+        // only the two real .rs files are collected (target/, .git/, and .txt excluded).
+        let mut files = Vec::new();
+        collect_rs(&dir, &mut files);
+        assert_eq!(files.len(), 2, "must collect exactly src/a.rs + sub/b.rs");
+
+        let h1 = hash(&dir);
+        assert_eq!(h1, hash(&dir), "deterministic");
+        // editing an ignored dir must NOT change the hash.
+        std::fs::write(dir.join("target/x/c.rs"), "fn c(){ let _=9; }").unwrap();
+        std::fs::write(dir.join(".git/d.rs"), "fn d(){ let _=9; }").unwrap();
+        assert_eq!(h1, hash(&dir), "target/ and .git/ edits are ignored");
+        // editing a real source file MUST change it.
+        std::fs::write(dir.join("src/a.rs"), "fn a(){ let _=1; }").unwrap();
+        assert_ne!(h1, hash(&dir), "a real .rs edit changes the hash");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The report glob must pick up `<base>.<crate>.<type>.json` (the `.*.*.json` shape) but NOT the
     /// `<base>.calibrated.json` / `<base>.encountered-*.json` sidecars (only two dot-segments) — and

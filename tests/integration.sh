@@ -268,7 +268,7 @@ printf 'fn worker(){ let _=std::fs::read("/tmp/x"); }\nfn main(){ worker(); }\n'
 printf 'fn worker(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn main(){ worker(); }\n' > "$FP/src/main.rs"
 # simulate the Stop hook: a fresh report + matching state hash for the edited source
 ( cd "$FP"; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
-( cd "$FP"; find "$PWD" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1 > .candor/state )
+"$QBIN" state "$FP" > "$FP/.candor/state"
 fpout=$( cd "$FP"; "$ROOT/cargo-candor" diff 2>&1 )
 want   "fast-path diff still computes the delta (worker +Net)"  "$fpout" "+Net"
 absent "fast path did NOT recompile (no 'analyzing…')"          "$fpout" "analyzing"
@@ -295,7 +295,7 @@ printf '[package]\nname="q"\nversion="0.1.0"\nedition="2021"\n' > "$Q/Cargo.toml
 printf 'fn leaf(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn handler(){ leaf(); }\nfn reader(){ let _=std::fs::read_to_string("/tmp/cq_x"); }\nfn writer(){ let _=std::fs::write("/tmp/cq_x","y"); }\nfn both(){ reader(); writer(); }\nfn main(){ handler(); both(); }\n' > "$Q/src/main.rs"
 # a fresh report (as watch/the hook would maintain) → the queries serve instantly, no recompile
 ( cd "$Q"; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
-( cd "$Q"; find "$PWD" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1 > .candor/state )
+"$QBIN" state "$Q" > "$Q/.candor/state"
 shout=$( cd "$Q"; "$ROOT/cargo-candor" show handler 2>&1 )
 whout=$( cd "$Q"; "$ROOT/cargo-candor" where Net 2>&1 )
 whj=$(   cd "$Q"; "$ROOT/cargo-candor" where Net --json 2>&1 )
@@ -363,7 +363,7 @@ M=$(mktemp -d)/m; mkdir -p "$M/src" "$M/.candor"
 printf '[package]\nname="m"\nversion="0.1.0"\nedition="2021"\n' > "$M/Cargo.toml"
 printf 'fn leaf(){ let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn handler(){ leaf(); }\nfn main(){ handler(); }\n' > "$M/src/main.rs"
 ( cd "$M"; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
-( cd "$M"; find "$PWD" -name '*.rs' -not -path '*/target/*' -print0 | sort -z | xargs -0 shasum 2>/dev/null | shasum | cut -d' ' -f1 > .candor/state )
+"$QBIN" state "$M" > "$M/.candor/state"
 cout=$( cd "$M"; printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"candor_where","arguments":{"effect":"Net"}}}' | python3 "$MCP" 2>/dev/null )
 want "MCP: tools/call candor_where returns the live result" "$cout" 'leaf'
 rm -rf "$(dirname "$M")"
