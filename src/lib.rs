@@ -24,6 +24,7 @@ extern crate rustc_ast;
 extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_middle;
+extern crate rustc_span;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -860,6 +861,57 @@ fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: Def
 
 
 
+/// Recover the `?` error-conversion edge. `x?` on a `Result<_, E1>` inside a fn returning
+/// `Result<_, E2>` desugars to a call to the std `FromResidual::from_residual`, whose body invokes
+/// `<E2 as From<E1>>::from` to convert the error. That `From::from` is a LOCAL impl candor can't see
+/// THROUGH the non-local std `from_residual` — so an effectful error conversion reached ONLY via `?`
+/// is a silent under-report. From the call's Self type (the from_residual return = the fn's return
+/// `Result<_, E2>`) and the residual arg (`Result<Infallible, E1>`), resolve `<E2 as From<E1>>::from`
+/// and return it when LOCAL. Precise: a std/blanket `From` (e.g. the identity `From<T> for T`)
+/// resolves non-local → no edge → correctly pure; no flooding `Unknown`. Result-only (the Residual
+/// shape it reads); other `Try` types are nightly-only and rare, left as the residual gap. Every
+/// guard fails to `None` (no edge) — adding an edge only ever ADDS soundness, never removes it.
+fn from_residual_local_edge<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    callee_did: DefId,
+) -> Option<DefId> {
+    // Gate to the std `FromResidual::from_residual` call of the `?` desugar (not a same-named user fn).
+    let trait_did = cx.tcx.trait_of_assoc(callee_did)?;
+    if cx.tcx.item_name(trait_did).as_str() != "FromResidual"
+        || !matches!(cx.tcx.crate_name(trait_did.krate).as_str(), "core" | "std" | "alloc")
+    {
+        return None;
+    }
+    let ExprKind::Call(_, args) = expr.kind else { return None };
+    let typeck = cx.maybe_typeck_results()?;
+    // The error type of a `Result<_, E>` (diagnostic-item gated so a user `Result` alias can't spoof it).
+    let err_of_result = |ty: rustc_middle::ty::Ty<'tcx>| -> Option<rustc_middle::ty::Ty<'tcx>> {
+        if let rustc_middle::ty::TyKind::Adt(def, substs) = ty.kind() {
+            if cx.tcx.is_diagnostic_item(rustc_span::sym::Result, def.did()) {
+                return Some(substs.type_at(1));
+            }
+        }
+        None
+    };
+    let e2 = err_of_result(typeck.expr_ty(expr))?; // Self = fn return Result<_, E2>
+    let e1 = err_of_result(typeck.expr_ty(args.first()?))?; // residual = Result<Infallible, E1>
+    // Resolve `<E2 as From<E1>>::from` to its concrete impl method.
+    let from_trait = cx.tcx.get_diagnostic_item(rustc_span::sym::From)?;
+    let from_fn = cx
+        .tcx
+        .associated_item_def_ids(from_trait)
+        .iter()
+        .copied()
+        .find(|d| matches!(cx.tcx.def_kind(*d), DefKind::AssocFn))?;
+    let gargs = cx.tcx.mk_args(&[e2.into(), e1.into()]); // From's args are [Self=E2, T=E1]
+    let inst = rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), from_fn, gargs)
+        .ok()
+        .flatten()?;
+    let did = inst.def_id();
+    did.is_local().then_some(did)
+}
+
 /// For a call already classified as `Fs`, the access *kind* its leaf verb implies: `["read"]`,
 /// `["write"]`, `["read","write"]` (e.g. `fs::copy`), or `&[]` when the verb doesn't say (so we make
 /// no claim). Keyed off the std::fs / `File` / `OpenOptions` verb vocabulary — a syntactic refinement
@@ -1345,6 +1397,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             return;
         };
 
+
         let (def_id, dynamic) = match callee {
             // A call we cannot see through at all (fn pointer / `impl Fn` callback).
             Callee::Unresolved => {
@@ -1379,6 +1432,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         };
         add_edge(self, def_id);
+
+        // `?` ERROR-CONVERSION edge: the `?` desugar calls the std `FromResidual::from_residual`, whose
+        // body invokes a LOCAL `<E2 as From<E1>>::from` to convert the error — invisible THROUGH the
+        // non-local std fn, so an effectful error conversion reached only via `?` looked pure. Recover
+        // that one edge from the call's types (see from_residual_local_edge). Adds soundness only.
+        if let Some(from_did) = from_residual_local_edge(cx, expr, def_id) {
+            add_edge(self, from_did);
+        }
 
         // Closure-flow bookkeeping: record what's passed at each arg position of a FREE fn call, so a
         // callback parameter that fn invokes can later be resolved to these concrete targets. A named

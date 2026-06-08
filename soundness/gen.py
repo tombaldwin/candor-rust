@@ -82,6 +82,20 @@ def edge_forms(callee, i=0):
         # OVERLOADED DEREF: `*v` is `ExprKind::Unary(Deref)` → `Deref::deref`; same root cause.
         "deref":      (f"{{ let v = Dr{i:02d}(()); let _ = *v; }}", [], [], [
             f"struct Dr{i:02d}(());\nimpl std::ops::Deref for Dr{i:02d} {{ type Target = (); fn deref(&self) -> &() {{ {callee}(); &self.0 }} }}"]),
+        # `?` ERROR CONVERSION: the effect is reached through a custom `From<Ea> for Eb` impl invoked by
+        # the `?` desugar's error path. candor sees the std `FromResidual::from_residual` call but not the
+        # LOCAL `From::from` it dispatches to — so the edge must be recovered from the residual/Self types
+        # (from_residual_local_edge). `help` always Errs, so the conversion (and the effect) also runs at
+        # runtime, keeping the oracle honest.
+        "try_from":   (
+            f"{{ let _: Result<(), Eb{i:02d}> = (|| -> Result<(), Eb{i:02d}> {{ help{i:02d}()?; Ok(()) }})(); }}",
+            [], [],
+            [
+                f"struct Ea{i:02d}; struct Eb{i:02d};",
+                f"impl From<Ea{i:02d}> for Eb{i:02d} {{ fn from(_: Ea{i:02d}) -> Eb{i:02d} {{ {callee}(); Eb{i:02d} }} }}",
+                f"fn help{i:02d}() -> Result<(), Ea{i:02d}> {{ Err(Ea{i:02d}) }}",
+            ],
+        ),
     }
 
 

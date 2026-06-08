@@ -25,6 +25,10 @@ dispatch — that the unit/integration suite missed; this catches that entire cl
   `a + b` / `v[i]` / `*p` whose `Add`/`Index`/`Deref` impl performs the I/O. In HIR these are
   `Binary`/`Index`/`Unary` nodes, NOT Call/MethodCall, so `resolve_callee` must devirtualize them to
   the concrete impl or the edge is invisible and the caller looks pure.
+- **`?` error conversion:** `try_from` — the effect is reached through a custom `From<Ea> for Eb` impl
+  invoked by the `?` desugar's error path. candor sees the std `FromResidual::from_residual` call but
+  not the LOCAL `From::from` it dispatches to internally, so the edge is recovered from the call's
+  residual/Self types (`from_residual_local_edge`).
 - **receiving side:** `recv_boxed` / `recv_impl` — a function that takes a `Box<dyn Fn>` / `impl Fn`
   parameter and *invokes* it (where the real bugs lived).
 

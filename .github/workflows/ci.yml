@@ -112,6 +112,13 @@ jobs:
       - name: Soundness fuzzer (operators)
         run: CANDOR_FUZZ_FORMS="op_add index deref" bash soundness/run.sh 40
 
+      # `?` error-conversion variant: the effect is reached through a custom `From<Ea> for Eb` impl
+      # invoked by the `?` desugar's error path. candor sees the std `from_residual` call but not the
+      # LOCAL `From::from` it dispatches to — the edge must be recovered from the residual/Self types.
+      # Teeth-verified: disabling from_residual_local_edge fails every seed.
+      - name: Soundness fuzzer (try/from)
+        run: CANDOR_FUZZ_FORMS="try_from" bash soundness/run.sh 40
+
       # Cross-crate variant: the chain crosses a lib→bin boundary, exercising candor's DefPathHash
       # cross-crate propagation (its own bug-prone surface the single-crate fuzzer can't reach).
       - name: Soundness fuzzer (cross-crate)
