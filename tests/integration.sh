@@ -236,6 +236,18 @@ want   "AS-EFF-009 flags the forbidden cross-layer dependency reached transitive
 absent "a domain fn that does NOT reach infra is not flagged (domain::price)"                          "$out" '[AS-EFF-009] `domain::price`'
 rm -rf "$(dirname "$LY")"
 
+# ── 9c. Implicit Drop: an effectful Drop guard propagates to the dropping fn (Bet 4 spike fix) ──
+echo "== implicit drop edge (effectful Drop guard) =="
+DR=$(mktemp -d)/dr; mkdir -p "$DR/src"
+printf '[package]\nname="dr"\nversion="0.1.0"\nedition="2021"\n' > "$DR/Cargo.toml"
+# Guard does network I/O on drop; via_drop holds one and lets it drop — HIR has no node for this, so
+# the MIR-derived drop edge is what makes via_drop inherit Net. pure_fn must stay effect-free.
+printf 'struct Guard;\nimpl Drop for Guard { fn drop(&mut self){ let _=std::net::TcpStream::connect("10.0.0.2:9"); } }\nfn via_drop(){ let _g = Guard; }\nfn pure_fn()->u32{ 1+2 }\nfn main(){ via_drop(); let _=pure_fn(); }\n' > "$DR/src/main.rs"
+out=$(dl "$DR")
+want   "the effectful Drop propagates to the dropping fn (via_drop gains Net)" "$out" '`via_drop` effects: { Net'
+absent "a genuinely pure fn is NOT given a phantom effect (pure_fn)"           "$out" '`pure_fn` effects'
+rm -rf "$(dirname "$DR")"
+
 # ── 10. Taint heuristic: an effect on caller-derived input (AS-EFF-007, P0′ §7) ──
 echo "== taint heuristic / AS-EFF-007 (CANDOR_TAINT) =="
 TZ=$(mktemp -d)/tz; mkdir -p "$TZ/src"

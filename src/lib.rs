@@ -38,6 +38,8 @@ use rustc_hir::{Expr, ExprKind, HirId};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::TyCtxt;
 
+mod mir_spike;
+
 dylint_linting::impl_late_lint! {
     /// ### What it does
     /// Reports, for each function, the transitive set of capabilities/effects it
@@ -995,7 +997,7 @@ fn literal_allowed(effect: &str, reached: &str, allow: &BTreeSet<String>) -> boo
 }
 
 /// Classify a resolved callee by the crate it belongs to and its full path.
-fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
+pub(crate) fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name.starts_with("aws_sdk_") || crate_name.starts_with("aws_smithy") {
         // Only request dispatch is network I/O; builder setters/accessors are pure.
         if path.ends_with("::send") || path.ends_with("::send_with") {
@@ -2053,6 +2055,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
     }
 
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
+        // Bet 4 spike (CANDOR_MIR=1): run the experimental MIR-based extractor INSTEAD of the HIR
+        // analysis and return. Non-production — it exists to gather evidence for a possible core rewrite.
+        if std::env::var("CANDOR_MIR").is_ok() {
+            mir_spike::run(cx.tcx);
+            return;
+        }
         // Closure-flow resolution (receiving side): turn each deferred callback-parameter invocation
         // into either edges (when every call site passed a NAMED fn) or the honest `Unknown` (when any
         // passed an unresolvable callback, or the HOF is never called locally so we can't tell). Runs
@@ -2087,6 +2095,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     }
                 }
             }
+        }
+
+        // Implicit-drop edges (narrow, production use of MIR): a value going out of scope runs its
+        // `Drop::drop`, which HIR has no node for — so an effectful guard (I/O on drop) was silently
+        // dropped from the effect graph. Add `caller -> drop-impl` edges from MIR's `Drop` terminators
+        // so those effects propagate. (See eval/bet4/FINDINGS.md — the Bet 4 spike surfaced this hole.)
+        for (caller, drop_impl) in mir_spike::drop_edges(cx.tcx) {
+            self.calls.entry(caller).or_default().insert(drop_impl);
         }
 
         // effects[f] = direct[f] ∪ ⋃ { effects[g] : g ∈ calls[f] }, to a fixpoint.
