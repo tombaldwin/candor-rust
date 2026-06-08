@@ -126,9 +126,12 @@ The hardest under-report is **method dispatch**: `client.execute(req)` is invisi
 doesn't know `client: reqwest::Client`. But the classifier already has verb-precise rules for
 reqwest/sqlx/redis/mongodb/… — they were simply unreachable from a bare method name. So the scanner now
 does **light, local receiver-type inference** (no compiler): it tracks variable types from function
-**parameters**, **struct fields** (a crate-wide pre-pass), typed `let`s, and `let x = T::new()`
-constructors; resolves a method call's receiver (including `self.field` and through a builder **chain**)
-to its type; and forms `Type::method` so the existing rules fire.
+**parameters**, **struct fields** (a crate-wide pre-pass), typed `let`s, `let x = T::new()` constructors,
+and **local function return types** (`let p = create_pool()?; p.fetch_one(q)` — `create_pool`'s recorded
+return type, `Result`/`Option` unwrapped, types `p`); resolves a method call's receiver (including
+`self.field`, a factory-call result, and through a builder **chain**) to its type; and forms
+`Type::method` so the existing rules fire. The return index keeps only **unambiguous** fn names — a name
+with two different return types is dropped, so common method names (`get`/`build`) never hijack a chain.
 
 Two guards keep this false-positive-free, both found *by* this calibration:
 - **std/core/alloc receivers are excluded.** The std rules are coarse prefix matches written for
@@ -149,6 +152,8 @@ shows on **application** code, which is candor's primary target. On a representa
 App::fetch_user   { Db, Net }   # self.db.fetch_one(..)  +  self.http.get(..).send()   (struct fields + chain)
 ping              { Net }       # fn ping(client: &Client)  ->  client.execute(..)      (param type)
 one_shot          { Net }       # let c = reqwest::Client::new(); c.get(..).send()      (constructor + chain)
+report            { Db }        # let p = build_pool(); p.fetch_one(..)                 (local return type)
+report2           { Db }        # build_pool().fetch_one(..)                            (return type, chained)
 format_label/normalize → pure   # correctly omitted
 ```
 

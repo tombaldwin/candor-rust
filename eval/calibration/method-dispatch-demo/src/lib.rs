@@ -33,3 +33,15 @@ pub async fn one_shot() {
 
 fn normalize(s: &str) -> String { s.trim().to_string() }
 fn make_req() -> reqwest::Request { todo!() }
+
+// return-type tracking: a factory fn whose result is used via method dispatch
+fn build_pool() -> sqlx::PgPool { todo!() }
+
+pub async fn report() -> i64 {
+    let pool = build_pool();            // pool: sqlx::PgPool (from return type)
+    pool.fetch_one("SELECT 1").await    // sqlx -> Db
+}
+
+pub async fn report2() -> i64 {
+    build_pool().fetch_one("SELECT 2").await  // chained directly off the factory call -> Db
+}

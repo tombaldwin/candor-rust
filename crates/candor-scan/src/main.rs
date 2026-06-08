@@ -58,11 +58,18 @@ struct FnInfo {
 /// classified by the existing per-crate method rules (`reqwest::Client::execute` -> Net).
 type FieldIndex = HashMap<String, HashMap<String, String>>;
 
+/// `fn-leaf -> expanded return-type-path`, e.g. `create_pool -> sqlx::Pool` (Result/Option unwrapped).
+/// Lets type inference flow through a LOCAL factory function: `let p = create_pool()?; p.fetch_one(q)`.
+/// Only UNAMBIGUOUS leaves are kept — a name with two different return types across the crate is dropped
+/// (no guess), like the unique-leaf call-graph rule.
+type ReturnIndex = HashMap<String, String>;
+
 struct CallCollector<'a> {
     uses: &'a HashMap<String, String>,
     /// local variable / param / `self` -> expanded type path, grown as `let`s are visited in order.
     vars: HashMap<String, String>,
     fields: &'a FieldIndex,
+    returns: &'a ReturnIndex,
     calls: Vec<Call>,
 }
 
@@ -94,27 +101,45 @@ fn is_ctor(name: &str) -> bool {
     )
 }
 
-/// The type a `let` initializer produces, when it's a constructor call `Path::ctor(..)` (peeling
-/// `&`/`(..)`/`?`/`.await` wrappers). Returns the expanded `Path` (the type), e.g.
-/// `reqwest::Client::new()` -> `reqwest::Client`, `Pool::connect(url).await?` -> `sqlx::Pool`.
-fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>) -> Option<String> {
+/// The type a call expression produces (peeling `&`/`(..)`/`?`/`.await`), by two routes:
+///   1. a constructor `Path::ctor(..)` -> the `Path` type (`reqwest::Client::new()` -> `reqwest::Client`);
+///   2. a LOCAL free function whose return type the pre-pass recorded (`create_pool()` -> `sqlx::Pool`).
+/// Returns the expanded type path. `returns` is the crate-wide fn-leaf -> return-type index.
+fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, returns: &ReturnIndex) -> Option<String> {
     match expr {
-        syn::Expr::Reference(r) => ctor_type(&r.expr, uses),
-        syn::Expr::Paren(p) => ctor_type(&p.expr, uses),
-        syn::Expr::Try(t) => ctor_type(&t.expr, uses),
-        syn::Expr::Await(a) => ctor_type(&a.base, uses),
+        syn::Expr::Reference(r) => ctor_type(&r.expr, uses, returns),
+        syn::Expr::Paren(p) => ctor_type(&p.expr, uses, returns),
+        syn::Expr::Try(t) => ctor_type(&t.expr, uses, returns),
+        syn::Expr::Await(a) => ctor_type(&a.base, uses, returns),
         syn::Expr::Call(c) => {
             let syn::Expr::Path(p) = &*c.func else { return None };
             let full = path_to_string(&p.path);
-            let (ty, last) = full.rsplit_once("::")?;
-            if is_ctor(last) && !ty.is_empty() {
-                Some(expand(ty, uses))
-            } else {
-                None
+            let leaf = full.rsplit("::").next().unwrap_or(&full);
+            if let Some((ty, last)) = full.rsplit_once("::") {
+                if is_ctor(last) && !ty.is_empty() {
+                    return Some(expand(ty, uses));
+                }
             }
+            // a local factory function call — its recorded (unambiguous) return type
+            returns.get(leaf).cloned()
         }
         _ => None,
     }
+}
+
+/// Peel `Result<T, _>` / `Option<T>` / `io::Result<T>` to the inner `T` — a fallible constructor's
+/// useful type is what it yields after `?`. Returns the inner type, or the type unchanged.
+fn unwrap_result_option(ty: &syn::Type) -> &syn::Type {
+    let syn::Type::Path(p) = ty else { return ty };
+    let Some(seg) = p.path.segments.last() else { return ty };
+    if matches!(seg.ident.to_string().as_str(), "Result" | "Option" | "IoResult") {
+        if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+            if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                return inner;
+            }
+        }
+    }
+    ty
 }
 
 /// Expand a call path against this file's `use` map: if the first segment is the last segment of some
@@ -161,7 +186,15 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Group(g) => self.resolve_recv_type(&g.expr),
             syn::Expr::Try(t) => self.resolve_recv_type(&t.expr),
             syn::Expr::Await(a) => self.resolve_recv_type(&a.base),
-            syn::Expr::MethodCall(m) => self.resolve_recv_type(&m.receiver),
+            syn::Expr::MethodCall(m) => {
+                // Prefer a recorded return type for this method (only present when UNAMBIGUOUS — common
+                // names like `get`/`build` map to many types and are dropped, so this never hijacks a
+                // builder chain); else fall back to the base-receiver heuristic.
+                self.returns
+                    .get(&m.method.to_string())
+                    .cloned()
+                    .or_else(|| self.resolve_recv_type(&m.receiver))
+            }
             syn::Expr::Path(p) => {
                 let name = p.path.get_ident()?.to_string();
                 self.vars.get(&name).cloned()
@@ -172,7 +205,7 @@ impl<'a> CallCollector<'a> {
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.fields.get(base_leaf)?.get(&field.to_string()).cloned()
             }
-            syn::Expr::Call(_) => ctor_type(expr, self.uses),
+            syn::Expr::Call(_) => ctor_type(expr, self.uses, self.returns),
             _ => None,
         }
     }
@@ -222,7 +255,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         } else if let syn::Pat::Ident(id) = &node.pat {
             if let Some(init) = &node.init {
-                if let Some(ty) = ctor_type(&init.expr, self.uses) {
+                if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
                     self.vars.insert(id.ident.to_string(), ty);
                 }
             }
@@ -282,12 +315,14 @@ fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_items(
     items: &[syn::Item],
     modpath: &str,
     file: &str,
     include_tests: bool,
     fields: &FieldIndex,
+    returns: &ReturnIndex,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -301,7 +336,7 @@ fn scan_items(
         match it {
             syn::Item::Fn(f) => {
                 let n = f.sig.ident.to_string();
-                out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields));
+                out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields, returns));
             }
             syn::Item::Impl(im) => {
                 let tyname = impl_type_name(&im.self_ty);
@@ -312,7 +347,7 @@ fn scan_items(
                             Some(t) => qual(&format!("{t}::{n}")),
                             None => qual(&n),
                         };
-                        out.push(fninfo(&n, &q, file, &m.sig, &m.block, tyname.as_deref(), uses, fields));
+                        out.push(fninfo(&n, &q, file, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns));
                     }
                 }
             }
@@ -323,7 +358,7 @@ fn scan_items(
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, file, include_tests, fields, &mut subuses, out);
+                    scan_items(inner, &sub, file, include_tests, fields, returns, &mut subuses, out);
                 }
             }
             _ => {}
@@ -350,6 +385,7 @@ fn seed_vars(sig: &syn::Signature, self_ty: Option<&str>, uses: &HashMap<String,
     vars
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fninfo(
     leaf: &str,
     qual: &str,
@@ -359,20 +395,44 @@ fn fninfo(
     self_ty: Option<&str>,
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
+    returns: &ReturnIndex,
 ) -> FnInfo {
     let vars = seed_vars(sig, self_ty, uses);
-    let mut c = CallCollector { uses, vars, fields, calls: Vec::new() };
+    let mut c = CallCollector { uses, vars, fields, returns, calls: Vec::new() };
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
     }
     FnInfo { qual: qual.to_string(), leaf: leaf.to_string(), loc: file.to_string(), calls: c.calls }
 }
 
-/// Pre-pass: index every named struct's field types (`App -> { http: reqwest::Client }`), expanded via
-/// each module's `use` map. Recurses into modules exactly like `scan_items` (cloning uses on descent).
-/// Keyed by struct leaf name — a name collision across modules is rare and at worst yields a wrong
-/// (still verb-gated) classify, never a crash.
-fn collect_structs(items: &[syn::Item], uses: &mut HashMap<String, String>, out: &mut FieldIndex) {
+/// Record `fn-leaf -> return type` into `rets`, tracking ambiguity: a leaf seen with two different
+/// return types is set to `None` (dropped later), so only UNAMBIGUOUS names survive. Result/Option are
+/// unwrapped to the success type.
+fn record_return(sig: &syn::Signature, uses: &HashMap<String, String>, rets: &mut HashMap<String, Option<String>>) {
+    let syn::ReturnType::Type(_, ty) = &sig.output else { return };
+    let Some(tp) = type_path(unwrap_result_option(ty), uses) else { return };
+    let leaf = sig.ident.to_string();
+    match rets.get(&leaf) {
+        None => {
+            rets.insert(leaf, Some(tp));
+        }
+        Some(Some(prev)) if *prev != tp => {
+            rets.insert(leaf, None); // conflicting return types — ambiguous, drop
+        }
+        _ => {}
+    }
+}
+
+/// Pre-pass: index struct field types (`App -> { http: reqwest::Client }`) AND function return types
+/// (`create_pool -> sqlx::Pool`), expanded via each module's `use` map. Recurses into modules like
+/// `scan_items`. Field index keyed by struct leaf; return map keyed by fn leaf (ambiguous names dropped
+/// by the caller). A name collision is rare and at worst yields a wrong (still verb-gated) classify.
+fn collect_decls(
+    items: &[syn::Item],
+    uses: &mut HashMap<String, String>,
+    fields: &mut FieldIndex,
+    rets: &mut HashMap<String, Option<String>>,
+) {
     for it in items {
         if let syn::Item::Use(u) = it {
             collect_use(&u.tree, String::new(), uses);
@@ -382,7 +442,7 @@ fn collect_structs(items: &[syn::Item], uses: &mut HashMap<String, String>, out:
         match it {
             syn::Item::Struct(s) => {
                 if let syn::Fields::Named(named) = &s.fields {
-                    let entry = out.entry(s.ident.to_string()).or_default();
+                    let entry = fields.entry(s.ident.to_string()).or_default();
                     for f in &named.named {
                         // Skip `#[cfg(...)]`-gated fields: they aren't unconditionally present, so
                         // inferring effects through them mis-fires. (tokio's `resource_span:
@@ -399,10 +459,18 @@ fn collect_structs(items: &[syn::Item], uses: &mut HashMap<String, String>, out:
                     }
                 }
             }
+            syn::Item::Fn(f) => record_return(&f.sig, uses, rets),
+            syn::Item::Impl(im) => {
+                for ii in &im.items {
+                    if let syn::ImplItem::Fn(m) = ii {
+                        record_return(&m.sig, uses, rets);
+                    }
+                }
+            }
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_structs(inner, &mut subuses, out);
+                    collect_decls(inner, &mut subuses, fields, rets);
                 }
             }
             _ => {}
@@ -534,20 +602,24 @@ fn main() {
         parsed.push((rel.to_string_lossy().into_owned(), file));
     }
 
-    // Pass A — index struct field types crate-wide, so a method call on `self.field` can be typed and
-    // classified by the per-crate method rules.
+    // Pass A — index struct field types and function return types crate-wide, so a method call on
+    // `self.field` or on the result of a local factory function can be typed and classified.
     let mut fields: FieldIndex = HashMap::new();
+    let mut rets_tmp: HashMap<String, Option<String>> = HashMap::new();
     for (_, file) in &parsed {
         let mut uses = HashMap::new();
-        collect_structs(&file.items, &mut uses, &mut fields);
+        collect_decls(&file.items, &mut uses, &mut fields, &mut rets_tmp);
     }
+    // Keep only unambiguous fn-leaf -> return-type mappings (a name with conflicting return types was
+    // marked `None`); a guessed type would mis-classify.
+    let returns: ReturnIndex = rets_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
 
     // Pass B — collect each function's calls (now with receiver-type inference available).
     let mut fns: Vec<FnInfo> = Vec::new();
     for (rel, file) in &parsed {
         let modpath = module_path(Path::new(rel));
         let mut uses = HashMap::new();
-        scan_items(&file.items, &modpath, rel, include_tests, &fields, &mut uses, &mut fns);
+        scan_items(&file.items, &modpath, rel, include_tests, &fields, &returns, &mut uses, &mut fns);
     }
 
     // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
@@ -854,7 +926,9 @@ mod tests {
             "{ try_call!(raw::git_remote_fetch(x)); println!(\"{}\", helper()); let _ = matches!(y, Some(_)); }",
         )
         .unwrap();
-        let mut c = CallCollector { uses: &uses, vars: HashMap::new(), fields: &fields, calls: Vec::new() };
+        let returns = ReturnIndex::new();
+        let mut c =
+            CallCollector { uses: &uses, vars: HashMap::new(), fields: &fields, returns: &returns, calls: Vec::new() };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
         }
@@ -874,9 +948,10 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("client".to_string(), "reqwest::Client".to_string());
         vars.insert("self".to_string(), "App".to_string());
+        let returns = ReturnIndex::new();
         let block: syn::Block =
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
-        let mut c = CallCollector { uses: &uses, vars, fields: &fields, calls: Vec::new() };
+        let mut c = CallCollector { uses: &uses, vars, fields: &fields, returns: &returns, calls: Vec::new() };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
         }
@@ -888,6 +963,30 @@ mod tests {
         // and both classify as Net through the shared classifier
         assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::send"), Some("Net"));
         assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::execute"), Some("Net"));
+    }
+
+    #[test]
+    fn return_type_inference_flows_through_local_factories() {
+        // `let p = create_pool()?; p.fetch_one(q)` — create_pool's recorded return type lets p resolve.
+        let uses = HashMap::new();
+        let fields = FieldIndex::new();
+        let mut returns = ReturnIndex::new();
+        returns.insert("create_pool".to_string(), "sqlx::PgPool".to_string());
+        let block: syn::Block =
+            syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
+        let mut c =
+            CallCollector { uses: &uses, vars: HashMap::new(), fields: &fields, returns: &returns, calls: Vec::new() };
+        for stmt in &block.stmts {
+            c.visit_stmt(stmt);
+        }
+        let typed: Vec<&str> = c.calls.iter().map(|c| c.path.as_str()).collect();
+        assert!(typed.contains(&"sqlx::PgPool::fetch_one"), "return-typed recv not resolved: {typed:?}");
+
+        // unwrap_result_option peels Result/Option to the success type
+        let r: syn::Type = syn::parse_str("std::io::Result<reqwest::Client>").unwrap();
+        assert_eq!(type_path(unwrap_result_option(&r), &uses).as_deref(), Some("reqwest::Client"));
+        let o: syn::Type = syn::parse_str("Option<PgPool>").unwrap();
+        assert_eq!(type_path(unwrap_result_option(&o), &uses).as_deref(), Some("PgPool"));
     }
 
     #[test]
