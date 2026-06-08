@@ -109,12 +109,23 @@ pub struct ReportEntry {
     pub calls: Vec<String>,
 }
 
-/// The envelope header (v0.2): which engine produced the report.
+/// The candor-spec contract version this build implements (the report SCHEMA + AS-EFF codes), distinct
+/// from the engine build id (`ReportMeta::version`) and from the crate release version. Bumped only when
+/// the spec contract changes; emitted as the envelope's `spec` so a consumer can see which contract a
+/// report conforms to. Both backends and the JVM port declare the SAME value — see candor-spec §2.1.
+pub const SPEC_VERSION: &str = "0.3";
+
+/// The envelope header: which engine produced the report (`version` = build id, `toolchain`), and which
+/// candor-spec contract it implements (`spec`).
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct ReportMeta {
     pub version: String,
     #[serde(default)]
     pub toolchain: String,
+    /// candor-spec contract version (e.g. `"0.3"`). `#[serde(default)]` so a legacy report without it
+    /// still parses (absent ⇒ pre-spec-field, treat as ≤ 0.2).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub spec: String,
 }
 
 /// The v0.2 self-describing report: a provenance header plus the function entries.
@@ -203,7 +214,7 @@ mod tests {
     #[test]
     fn round_trips() {
         let r = Report {
-            candor: ReportMeta { version: "v".into(), toolchain: "t".into() },
+            candor: ReportMeta { version: "v".into(), toolchain: "t".into(), spec: "0.3".into() },
             functions: vec![ReportEntry { func: "f".into(), inferred: vec!["Db".into()], ..Default::default() }],
         };
         let s = serde_json::to_string(&r).unwrap();
@@ -211,6 +222,9 @@ mod tests {
         assert_eq!(back[0].func, "f");
         // empty `calls` is omitted on write.
         assert!(!s.contains("\"calls\""));
+        // the spec contract version (§2.1) is emitted in the envelope header.
+        assert!(s.contains("\"spec\":\"0.3\""), "envelope must carry the spec version: {s}");
+        assert_eq!(SPEC_VERSION, "0.3");
     }
 
     #[test]

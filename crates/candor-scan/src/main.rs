@@ -834,6 +834,7 @@ fn main() {
     let meta = candor_report::ReportMeta {
         version: format!("scan-{}", env!("CARGO_PKG_VERSION")),
         toolchain: "stable".into(),
+        spec: candor_report::SPEC_VERSION.into(),
     };
     let body = candor_report::to_report_json(&meta, &entries).unwrap_or_default();
     if want_json {

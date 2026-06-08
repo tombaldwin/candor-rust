@@ -2311,7 +2311,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         if let Some(prefix) = &json_path {
             let file = format!("{prefix}.{krate}.{kinds}.json");
             // v0.2: a self-describing envelope { candor: {version, toolchain}, functions: [...] }.
-            let meta = ReportMeta { version: CANDOR_VERSION.into(), toolchain: CANDOR_TOOLCHAIN.into() };
+            let meta = ReportMeta {
+                version: CANDOR_VERSION.into(),
+                toolchain: CANDOR_TOOLCHAIN.into(),
+                spec: candor_report::SPEC_VERSION.into(),
+            };
             match to_report_json(&meta, &json_entries) {
                 Ok(body) => match std::fs::write(&file, body) {
                     Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
