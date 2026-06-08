@@ -1,0 +1,419 @@
+{
+  "candor": {
+    "version": "scan-0.3.1",
+    "toolchain": "stable"
+  },
+  "functions": [
+    {
+      "fn": "clear_other_reports",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "is_scan_artifact"
+      ]
+    },
+    {
+      "fn": "cmd_audit",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "encountered_set",
+        "load_calibrated",
+        "prefix_base",
+        "sorted",
+        "tally_effects"
+      ]
+    },
+    {
+      "fn": "cmd_callers",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "callers_via_callgraph",
+        "load_callgraph",
+        "load_entries",
+        "q_match",
+        "three"
+      ]
+    },
+    {
+      "fn": "cmd_diff",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "gained_effects",
+        "load_fninfo",
+        "q_or",
+        "rank"
+      ]
+    },
+    {
+      "fn": "cmd_engine_version",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": ""
+    },
+    {
+      "fn": "cmd_gains",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "gained_effects",
+        "load_fninfo"
+      ]
+    },
+    {
+      "fn": "cmd_locate",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "locate_newest"
+      ]
+    },
+    {
+      "fn": "cmd_map",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "load_entries",
+        "two"
+      ]
+    },
+    {
+      "fn": "cmd_merge_hook",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": ""
+    },
+    {
+      "fn": "cmd_receipt",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "encountered_set",
+        "load_calibrated",
+        "load_entries",
+        "prefix_base",
+        "tally_effects"
+      ]
+    },
+    {
+      "fn": "cmd_reports",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "clear_other_reports",
+        "report_backend"
+      ]
+    },
+    {
+      "fn": "cmd_show",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "load_entries",
+        "q_match",
+        "sorted",
+        "three"
+      ]
+    },
+    {
+      "fn": "cmd_state",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "collect_rs"
+      ]
+    },
+    {
+      "fn": "cmd_where",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "load_entries",
+        "three"
+      ]
+    },
+    {
+      "fn": "collect_rs",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": ""
+    },
+    {
+      "fn": "encountered_set",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "glob_encountered"
+      ]
+    },
+    {
+      "fn": "glob_encountered",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "prefix_base"
+      ]
+    },
+    {
+      "fn": "load_calibrated",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": ""
+    },
+    {
+      "fn": "load_callgraph",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": ""
+    },
+    {
+      "fn": "load_entries",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "glob_reports"
+      ]
+    },
+    {
+      "fn": "load_fninfo",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "load_entries"
+      ]
+    },
+    {
+      "fn": "locate_newest",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": ""
+    },
+    {
+      "fn": "main",
+      "loc": "src/main.rs",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "",
+      "calls": [
+        "cmd_audit",
+        "cmd_callers",
+        "cmd_diff",
+        "cmd_engine_version",
+        "cmd_gains",
+        "cmd_locate",
+        "cmd_map",
+        "cmd_merge_hook",
+        "cmd_receipt",
+        "cmd_reports",
+        "cmd_show",
+        "cmd_state",
+        "cmd_where"
+      ]
+    }
+  ]
+}

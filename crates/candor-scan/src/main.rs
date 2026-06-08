@@ -51,6 +51,11 @@ struct FnInfo {
     leaf: String,
     loc: String,
     calls: Vec<Call>,
+    /// The body invoked a callable the syntactic scan can't see through — a closure / fn-pointer value
+    /// (`(cb)()`, `arr[i]()`, a local bound to a closure). The target could perform ANY effect, so the
+    /// function can't honestly be certified pure: it's marked `Unknown` (matching the nightly lint's
+    /// soundness fallback) rather than silently reported clean.
+    unresolved: bool,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.
@@ -71,6 +76,11 @@ struct CallCollector<'a> {
     fields: &'a FieldIndex,
     returns: &'a ReturnIndex,
     calls: Vec<Call>,
+    /// locals bound to a closure (`let f = |..| ..`), so a later `f()` is recognised as a closure
+    /// invocation the scan can't see through — not a call to a free fn named `f`.
+    closure_vars: std::collections::HashSet<String>,
+    /// set once the body invokes a callable we can't resolve (see `FnInfo::unresolved`).
+    unresolved: bool,
 }
 
 fn path_to_string(p: &syn::Path) -> String {
@@ -224,10 +234,30 @@ impl<'a> CallCollector<'a> {
 
 impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(p) = &*node.func {
-            let path = expand(&path_to_string(&p.path), self.uses);
-            let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
-            self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false });
+        // Peel `(..)`/`{..}` wrappers around the callee so `(f)()` is treated like `f()`.
+        let mut func = &*node.func;
+        loop {
+            match func {
+                syn::Expr::Paren(p) => func = &p.expr,
+                syn::Expr::Group(g) => func = &g.expr,
+                _ => break,
+            }
+        }
+        match func {
+            syn::Expr::Path(p) => {
+                // A local bound to a closure — `let f = |..| ..` — has its body walked LEXICALLY by this
+                // same visitor, so `f()` adds nothing and is NOT a blind spot. (Skip recording it as a
+                // phantom call to a free fn `f`, too.) Any other path is a normal call.
+                if !p.path.get_ident().is_some_and(|id| self.closure_vars.contains(&id.to_string())) {
+                    let path = expand(&path_to_string(&p.path), self.uses);
+                    let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
+                    self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false });
+                }
+            }
+            // The callee is a COMPUTED value, not a path or a visible local closure: `(self.handler)()`,
+            // `arr[i]()`, `make_cb()()`. The scan can't identify the target or see its body — it could
+            // perform any effect — so the enclosing function can't be certified pure: honest `Unknown`.
+            _ => self.unresolved = true,
         }
         syn::visit::visit_expr_call(self, node);
     }
@@ -266,7 +296,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         } else if let syn::Pat::Ident(id) = &node.pat {
             if let Some(init) = &node.init {
-                if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
+                if matches!(&*init.expr, syn::Expr::Closure(_)) {
+                    // `let f = |..| ..` — remember `f` so a later `f()` is seen as a closure call.
+                    self.closure_vars.insert(id.ident.to_string());
+                } else if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
                     self.vars.insert(id.ident.to_string(), ty);
                 }
             }
@@ -423,11 +456,25 @@ fn fninfo(
     returns: &ReturnIndex,
 ) -> FnInfo {
     let vars = seed_vars(sig, self_ty, uses);
-    let mut c = CallCollector { uses, vars, fields, returns, calls: Vec::new() };
+    let mut c = CallCollector {
+        uses,
+        vars,
+        fields,
+        returns,
+        calls: Vec::new(),
+        closure_vars: std::collections::HashSet::new(),
+        unresolved: false,
+    };
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
     }
-    FnInfo { qual: qual.to_string(), leaf: leaf.to_string(), loc: file.to_string(), calls: c.calls }
+    FnInfo {
+        qual: qual.to_string(),
+        leaf: leaf.to_string(),
+        loc: file.to_string(),
+        calls: c.calls,
+        unresolved: c.unresolved,
+    }
 }
 
 /// Record `fn-leaf -> return type` into `rets`, tracking ambiguity: a leaf seen with two different
@@ -694,6 +741,12 @@ fn main() {
     let mut loc: HashMap<String, String> = HashMap::new();
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
+        // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
+        // perform any effect, so record an honest `Unknown` (propagated like any effect, surfaced in the
+        // receipt's unresolved count) instead of silently certifying the function pure.
+        if f.unresolved {
+            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+        }
         for c in &f.calls {
             let cr = c.path.split("::").next().unwrap_or("");
             if let Some(eff) = candor_classify::classify(cr, &c.path) {
@@ -750,7 +803,10 @@ fn main() {
             declared: Vec::new(),
             undeclared: Vec::new(),
             overdeclared: Vec::new(),
-            unresolved: false,
+            // Honest blind-spot signal: this function (transitively) reached a callable the scan couldn't
+            // see through. Mirrors the lint's `unresolved = has Unknown`, so the receipt's unresolved
+            // count is truthful for the stable backend too — not a hardcoded 0.
+            unresolved: inf.contains("Unknown"),
             hash: String::new(),
             fs: Vec::new(),
             hosts: hostsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
@@ -985,8 +1041,15 @@ mod tests {
         )
         .unwrap();
         let returns = ReturnIndex::new();
-        let mut c =
-            CallCollector { uses: &uses, vars: HashMap::new(), fields: &fields, returns: &returns, calls: Vec::new() };
+        let mut c = CallCollector {
+            uses: &uses,
+            vars: HashMap::new(),
+            fields: &fields,
+            returns: &returns,
+            calls: Vec::new(),
+            closure_vars: std::collections::HashSet::new(),
+            unresolved: false,
+        };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
         }
@@ -1009,7 +1072,15 @@ mod tests {
         let returns = ReturnIndex::new();
         let block: syn::Block =
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
-        let mut c = CallCollector { uses: &uses, vars, fields: &fields, returns: &returns, calls: Vec::new() };
+        let mut c = CallCollector {
+            uses: &uses,
+            vars,
+            fields: &fields,
+            returns: &returns,
+            calls: Vec::new(),
+            closure_vars: std::collections::HashSet::new(),
+            unresolved: false,
+        };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
         }
@@ -1032,13 +1103,44 @@ mod tests {
         returns.insert("create_pool".to_string(), "sqlx::PgPool".to_string());
         let block: syn::Block =
             syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
-        let mut c =
-            CallCollector { uses: &uses, vars: HashMap::new(), fields: &fields, returns: &returns, calls: Vec::new() };
+        let mut c = CallCollector {
+            uses: &uses,
+            vars: HashMap::new(),
+            fields: &fields,
+            returns: &returns,
+            calls: Vec::new(),
+            closure_vars: std::collections::HashSet::new(),
+            unresolved: false,
+        };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
         }
         let typed: Vec<&str> = c.calls.iter().map(|c| c.path.as_str()).collect();
         assert!(typed.contains(&"sqlx::PgPool::fetch_one"), "return-typed recv not resolved: {typed:?}");
+
+        // A computed-callable invocation (a closure / fn-pointer the scan can't see through) marks the
+        // function `unresolved` (→ honest `Unknown`), while a LOCAL closure whose body IS visible does
+        // not — its effects were already walked lexically.
+        let mk = |src: &str| {
+            let blk: syn::Block = syn::parse_str(src).unwrap();
+            let mut cc = CallCollector {
+                uses: &uses,
+                vars: HashMap::new(),
+                fields: &fields,
+                returns: &returns,
+                calls: Vec::new(),
+                closure_vars: std::collections::HashSet::new(),
+                unresolved: false,
+            };
+            for stmt in &blk.stmts {
+                cc.visit_stmt(stmt);
+            }
+            cc.unresolved
+        };
+        assert!(mk("{ (handlers[k])(); }"), "indexed callable must be unresolved");
+        assert!(mk("{ (self.cb)(); }"), "fn-pointer field call must be unresolved");
+        assert!(!mk("{ let g = |x: i32| x + 1; let _ = g(3); }"), "local closure body is visible — not unresolved");
+        assert!(!mk("{ helper(); other::thing(); }"), "ordinary path calls are not unresolved");
 
         // unwrap_result_option peels Result/Option to the success type
         let r: syn::Type = syn::parse_str("std::io::Result<reqwest::Client>").unwrap();

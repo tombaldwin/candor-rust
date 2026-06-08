@@ -28,8 +28,14 @@ under-report, never a wrong label.
   `use`-aliases, transitive propagation, calls hidden in macros (`try_call!`, `println!`), four C-library
   FFI tiers (libc, libsqlite3, libgit2, libssl), and method dispatch via light local type inference
   (struct fields, params, constructors, factory return types).
-- **Misses (silently):** effects reached only through unresolved trait-object dispatch, and
-  cross-crate propagation by stable identity. It does **not** emit `Unknown`.
+- **Honest `Unknown`:** when the body invokes a callable the scan can't see through — a closure or
+  fn-pointer held in a field, dispatch table, or index (`(self.handler)()`, `arr[i]()`) — it marks the
+  function `Unknown` rather than silently certifying it pure, and propagates that like any effect (so
+  the receipt's unresolved count is truthful, not a hardcoded 0). A LOCAL closure whose body IS visible
+  (`let f = |..| ..; f()`) is NOT flagged — its effects were already walked lexically.
+- **Misses (silently):** effects reached only through trait-object (`dyn`) dispatch on an uninferrable
+  receiver, overloaded operators / `?` / `.await` desugars, and cross-crate propagation by stable
+  identity. These need the semantic resolution only the nightly lint has.
 
 For the soundness contract (`Unknown` over-approximation), conformance checking, and the policy/guard
 CI gates, use the full nightly [candor](https://github.com/tombaldwin/candor) lint. The two share one
