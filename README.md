@@ -1,26 +1,37 @@
 # candor
 
-**A cheap, honest map of what every function in a Rust codebase actually does** — which functions
-reach the network, filesystem, a database, subprocesses, the clock, the environment; *transitively*;
-and where it honestly *can't* tell. A capability/effect checker built as a
-[dylint](https://github.com/trailofbits/dylint) lint — the Rust reference implementation of
-[candor-spec](https://github.com/tombaldwin/candor-spec) (the same idea, specified across languages).
+**Enforce the capability and architectural boundaries that AI-generated code silently crosses — as a
+CI gate you can trust.** candor is a Rust capability/effect checker built as a
+[dylint](https://github.com/trailofbits/dylint) lint (the reference implementation of
+[candor-spec](https://github.com/tombaldwin/candor-spec)). It knows which functions reach the network,
+filesystem, a database, a subprocess, the clock, or the environment — *transitively, across crates* —
+and turns invariants like *"this layer stays pure," "this service may only talk to Stripe," "the
+domain layer must not depend on infra"* into rules that **fail the PR** when an edit breaks them.
 
-**Built for AI coding agents.** An agent edits one function without seeing the *non-local*
-consequence — a network call added deep in a helper now propagates to every caller. candor's diff
-surfaces exactly that. In a pre-registered eval ([EVAL.md](EVAL.md)) an agent handed candor's delta
-reported the **full propagation 100% of the time, vs 7% without it** — and scoped whole-codebase
-effect questions several times cheaper than reading source. The map is only as accurate as its
-classifier, so candor marks what it can't resolve `Unknown` rather than guessing, and stays honest
-about the gap (coverage warnings, version-stamped reports).
+**Why this matters for AI-assisted development.** An agent's characteristic failure isn't a typo —
+it's a locally-reasonable edit that crosses a boundary it never sees. It adds a feature in
+`pricing.rs`, and the simplest way to get the data calls something that, three hops and one crate
+away, opens a socket or hits the database. The file looks clean; a quick review looks clean. candor's
+transitive, cross-crate analysis catches it and the gate blocks it — the one failure mode that gets
+*worse*, not better, as agents write more code faster. In a
+[pre-registered trial](eval/bet2/RESULTS.md), when the locally-simplest edit crossed a pure boundary,
+candor took the shipped-violation rate from **80% to 0%**.
 
-**And it enforces, at a scale nobody holds in their head.** Surfacing effects helps an agent; *blocking
-the PR* is what a model can't do for itself. As models get better at local call-graph tracing, candor's
-edge moves to the boundary a local edit can't see — an effect, an endpoint, or a layer dependency
-reached *transitively, across crates*. `cargo candor policy` makes that an architecture-as-code gate
-over a whole workspace: forbidden effects, network host allowlists, and layer-dependency rules
-(AS-EFF-006/008/009). A [pre-registered trial](eval/bet2/RESULTS.md) found that when the locally-simplest
-edit crossed a pure boundary, candor took the shipped-violation rate from **80% to 0%**.
+**A gate is only worth trusting if it never lies.** candor's contract is that it *never* silently
+reports a function pure when it actually reaches an effect: anything it can't resolve becomes
+`Unknown` (a sound over-approximation), never a false "clean." That contract is held by an adversarial
+**soundness fuzzer in CI** that threads a known effect through every way Rust can hide a call — operator
+overloads, `?`, `.await`, dynamic dispatch, closures and callbacks, macros, cross-crate boundaries —
+and fails the build if any reachable function comes back pure. So when candor certifies a boundary
+clean, you can act on it. `cargo candor policy` is the gate itself: forbidden effects, network host
+allowlists, and layer-dependency rules (AS-EFF-006/008/009), enforced across a whole workspace.
+
+**It maps, too.** The same analysis answers "what does this function transitively touch?" and "who
+reaches `Net`?" instantly from a cached report — a cheap blast-radius tool for an agent or a human in
+unfamiliar code. Handing an editing agent the *non-local* delta of its own change is real value too (a
+[pilot](EVAL.md) had the agent report the full propagation **100% of the time vs 7% without it**) — but
+as models get better at local call-graph tracing, candor's durable edge is the part a model *can't* do
+for itself: hold the whole effect graph and **block the PR**.
 
 ### Get an agent using it — one paste, from nothing
 
@@ -63,14 +74,19 @@ loops, and it's off by default. This is the difference between candor *informing
 agent calls candor reflexively — in one cheap call instead of grepping and reading source. Pair it
 with `cargo candor watch` so every call serves from a fresh report.
 
-**Where it earns its keep — and where it doesn't.** candor is sharpest at two things: handing an
-editing agent the *non-local* consequence of a change (above), and a low-friction **CI ratchet** —
-fail the PR that makes a parser open a socket ([CI guardrail](#ci-guardrail-lowest-friction-adoption)),
-no token-threading or rewrite required. It is deliberately *not* a few things: not a security boundary
-([SECURITY.md](SECURITY.md)); not a codebase-quality grade (effect counts are domain-dependent — there
-is no "candor score" to chase); and only as sound as a curated classifier, with two known holes
-(generic dispatch is assumed to honour its bound; macro-generated code is invisible) — `Unknown` and
-coverage warnings mark the rest. A sharp, narrow, trustworthy instrument, not a quality platform.
+**Where it earns its keep — and where it doesn't.** candor is sharpest as a **CI gate** enforcing
+capability and architectural boundaries transitively — fail the PR that makes a parser open a socket,
+or routes the domain layer into infra ([CI guardrail](#ci-guardrail-lowest-friction-adoption)), no
+token-threading or rewrite required — and as the *non-local* delta handed to an editing agent (above).
+Its value is **conditional**, stated honestly: it shows up when a codebase *has* boundaries worth
+defending and an edit *would* cross one. If the code already affords a clean seam, a strong model
+routes around the problem and candor is redundant — the same eval showed exactly that. It is
+deliberately *not* a few things: not a security boundary ([SECURITY.md](SECURITY.md)); not a
+codebase-quality grade (effect counts are domain-dependent — there is no "candor score" to chase);
+Rust-only; and the *sound* backend needs nightly — the zero-install [stable scanner](#two-backends-stable-scanner-zero-friction-vs-the-nightly-lint-soundness)
+is best-effort and under-reports. Residual unsoundness (generic dispatch assumed to honour its bound;
+macro-generated code invisible) is marked by `Unknown` and coverage warnings and listed under
+[Known limitations](#known-limitations). A sharp, narrow, trustworthy instrument, not a quality platform.
 
 *Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
 [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md)
@@ -431,6 +447,16 @@ fixpoint, CHA, conformance) isn't unit-tested — it needs the dylint harness, w
 support — so it's covered instead by the `sample/`+`sample-capstd/` crates and a CI *behavioural*
 check that asserts real audit output (so a "candor emits nothing" regression fails CI). The lint also
 fails *gracefully* (never an ICE) on expressions outside a typechecked body.
+
+The **soundness contract** — "never silently pure" — is its own gate, not a hope. An adversarial
+fuzzer ([`soundness/`](soundness/)) generates compilable crates that thread a *known* effect from a
+leaf up through a random chain of call forms, and asserts every reachable function is reported with
+that effect or `Unknown` (a pure/omitted function is the bug it hunts). Seven fuzzer lanes cover the
+forms that have historically hidden a call — direct/closure/generic/boxed callbacks, `dyn` and
+arbitrary-self dispatch, UFCS, overloaded operators, `?`, `.await`, macros, implicit `Drop`, and the
+cross-crate boundary — each *teeth-verified* (reverting the fix makes the lane fail). Two more
+lanes run each program under `strace` and confirm candor's static prediction over-approximates the
+effects the kernel actually observed — ground truth that trusts nothing about how the test was generated.
 
 ## Status
 
