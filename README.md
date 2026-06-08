@@ -183,6 +183,7 @@ cargo candor show     my_function       # a function's effects, instant (read fr
 cargo candor where    Net               # which functions perform an effect, instant
 cargo candor callers  my_function       # which functions call this one, instant (who depends on it)
 cargo candor explain  my_function       # trace WHY a function has each effect (the call path)
+cargo candor containment [baseline]     # effect-leakage diagnostic; with a baseline, a CI ratchet
 cargo candor policy   .candor/policy     # enforce effect boundaries (deny/pure rules)
 cargo candor risk                       # heuristic: effects on caller-derived input (advisory)
 cargo candor strict   my_module         # conformance, scoped to a module
@@ -256,6 +257,35 @@ argument derives from a function parameter (`fs::read(format!("/var/cache/{key}"
 It is *not* sound taint analysis: a syntactic, intra-procedural check that over- and under-flags
 (it misses flow through struct fields and across functions, and flags a parameter that's actually
 validated). Use it to find surfaces worth reviewing — never as a gate.
+
+### `cargo candor containment` — an architecture signal that isn't a "score"
+
+Raw effect *counts* are domain-dependent (a database app has lots of `Db` — not a defect), so there is
+no single "candor score". But the **dispersion** of a boundary effect across layers *is*
+domain-independent: `Db` all in one data layer is well-architected; `Db` smeared across `model`,
+`actions`, *and* `dao` is leaky — regardless of how much DB it does. `containment` measures that, per
+boundary effect (`Db`/`Net`/`Exec`/`Fs`/`Ipc`); `Log`/`Clock` are ambient (reported, not scored). Layers
+are inferred from the module after the common crate root, no config:
+
+```text
+  effect  contained  layers   owner  ← leaked into
+  Db            55%       3   conn (11)  ← query:7, app:2      # pgman: DB is mostly in conn/query…
+```
+
+(Run on `pgman` — whose DB is *meant* to live in `conn` + `query` — candor independently found that
+boundary **and** its one documented exception, the `app:2` leak.) Given a baseline prefix it's a
+**ratchet** — gate on getting worse, note getting better:
+
+```text
+[containment] a boundary effect leaked into a layer it wasn't in:   ← exit 1, fail the PR
+  Db → actions
+✓ improved — a boundary effect left a layer:                        ← informational
+  Db ⊘ legacy
+```
+
+`cargo candor containment` for the diagnostic, `cargo candor containment .candor/baseline` for the gate.
+Deliberately a **diagnostic + trend gate, not a single grade** — the absolute level is domain-dependent
+and gameable, but "did a boundary effect leak into a new layer?" is a real, enforceable quality signal.
 
 ## All modes (explicit invocation)
 

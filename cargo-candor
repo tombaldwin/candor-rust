@@ -13,6 +13,7 @@
 #   cargo candor where    Net                 # which functions perform an effect, INSTANT
 #   cargo candor callers  my_function         # which functions call this one, INSTANT (who depends on it)
 #   cargo candor map                          # a module -> effects overview of the project, INSTANT
+#   cargo candor containment [baseline]       # effect-leakage diagnostic; with a baseline, a CI ratchet
 #   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
 #   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure rules)
 #   cargo candor risk                         # heuristic: effects on caller-derived input (advisory)
@@ -148,7 +149,7 @@ cmd="${1:-audit}"; shift || true
 # or broken dylib first.
 case "$cmd" in
   setup|install|-h|--help|help|scan) LIB="" ;;
-  audit|show|where|callers|map)
+  audit|show|where|callers|map|containment)
     # Read-only queries: prefer the nightly lint (soundness, Unknown), but DON'T hard-fail without it —
     # fall back to the stable scanner so these work zero-install. Use an existing dylib if present; only
     # attempt a build when one's already around to refresh. If none, LIB stays empty and the command's
@@ -448,6 +449,18 @@ case "$cmd" in
     json=0; for a in "$@"; do [ "$a" = "--json" ] && json=1; done
     ensure_report || exit 1
     query map .candor/report "$json"
+    exit 0 ;;
+
+  containment)
+    # Effect-LEAKAGE diagnostic: how well each boundary effect (Db/Net/Exec/Fs/Ipc) stays in one layer
+    # — the architecture-quality signal counts can't give. With a baseline PREFIX it's a ratchet: exit 1
+    # if a boundary effect leaks into a new layer, and note when one is cleaned up. `--json` for machines.
+    #   cargo candor containment                    # the diagnostic
+    #   cargo candor containment .candor/baseline   # gate vs a committed snapshot (for CI)
+    cargs=(.candor/report)
+    for a in "$@"; do case "$a" in --json) cargs+=("--json") ;; -*) ;; *) cargs+=("$a") ;; esac; done
+    ensure_report || exit 1
+    query containment "${cargs[@]}"
     exit 0 ;;
 
   explain)
