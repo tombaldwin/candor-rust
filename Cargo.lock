@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "candor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "candor-report",
  "dylint_linting",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "candor-query"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "candor-report",
  "regex",
@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "candor-report"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",

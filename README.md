@@ -226,7 +226,7 @@ toolchain). This is dylint's equivalent of a dependency; dylint loads libraries 
 ```toml
 [workspace.metadata.dylint]
 # clone-free — pin a tag/rev for reproducibility:
-libraries = [{ git = "https://github.com/tombaldwin/candor", tag = "v0.2.0" }]
+libraries = [{ git = "https://github.com/tombaldwin/candor", tag = "v0.3.0" }]
 # …or a local checkout:
 libraries = [{ path = "/abs/path/to/candor" }]
 ```
