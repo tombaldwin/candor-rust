@@ -147,8 +147,13 @@ case "$cmd" in
     # fall back to the stable scanner so these work zero-install. Use an existing dylib if present; only
     # attempt a build when one's already around to refresh. If none, LIB stays empty and the command's
     # report path (ensure_report / audit) uses candor-scan instead.
-    LIB="$(find_lib || true)"
-    [ -n "${LIB:-}" ] && stash "$LIB" lib ;;
+    # `CANDOR_BACKEND=scan` forces the stable backend even when a dylib is present (CI/reproducibility).
+    if [ "${CANDOR_BACKEND:-}" = "scan" ]; then
+      LIB=""
+    else
+      LIB="$(find_lib || true)"
+      [ -n "${LIB:-}" ] && stash "$LIB" lib
+    fi ;;
   *)
     LIB="$(find_lib || true)"
     if [ -z "${LIB:-}" ]; then
@@ -193,7 +198,7 @@ ensure_report() {
       CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
     else
       # No nightly dylib — zero-install fallback to the stable scanner. Same report JSON, no build.
-      echo "candor: using the stable backend (candor-scan) — no nightly lint found." >&2
+      echo "candor: using the stable backend (candor-scan)." >&2
       scan_run "$PWD" --out "$PWD/.candor/report" >/dev/null 2>&1 || true
     fi
     report_exists .candor/report || { echo "candor: could not produce a report (build failed?)." >&2; return 1; }
@@ -244,7 +249,7 @@ case "$cmd" in
       report_exists "$tmp/a" || { rm -rf target/dylint 2>/dev/null || true; run_json; }
     else
       # Zero-install: the stable scanner produces the same report JSON with no nightly toolchain.
-      echo "candor: using the stable backend (candor-scan) — no nightly lint found." >&2
+      echo "candor: using the stable backend (candor-scan)." >&2
       scan_run "$PWD" --out "$tmp/a" >/dev/null 2>&1 || true
     fi
     if ! report_exists "$tmp/a"; then
