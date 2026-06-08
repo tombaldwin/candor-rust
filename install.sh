@@ -4,7 +4,7 @@
 #
 # It does three things:
 #   1. Builds the lint (rustup auto-fetches the pinned nightly + rustc-dev from rust-toolchain.toml).
-#   2. Stashes the dylib + the candor-query binary under ~/.candor — a STABLE home that survives a
+#   2. Stashes the dylib + the candor-query and candor-scan binaries under ~/.candor — a STABLE home that survives a
 #      `cargo clean` in this clone (which lives in target/ and would otherwise vanish).
 #   3. Symlinks `cargo-candor` into ~/.cargo/bin (on PATH for every Rust user), so `cargo candor`
 #      works from any directory.
@@ -27,11 +27,13 @@ echo "candor: building (rustup may fetch the pinned nightly + rustc-dev the firs
 LIB="$(ls "$CLONE"/target/debug/libcandor@*.dylib "$CLONE"/target/debug/libcandor@*.so 2>/dev/null | head -1 || true)"
 [ -n "$LIB" ] || { echo "candor: build produced no dylib — see the errors above." >&2; exit 1; }
 Q="$(ls "$CLONE"/target/debug/candor-query 2>/dev/null | head -1 || true)"
+S="$(ls "$CLONE"/target/debug/candor-scan 2>/dev/null | head -1 || true)"
 
-# 2. Stable home: dylib + query binary + a pointer back to the clone.
+# 2. Stable home: dylib + query + scan binaries + a pointer back to the clone.
 mkdir -p "$CACHE/lib" "$CACHE/bin"
 cp -f "$LIB" "$CACHE/lib/"
 [ -n "$Q" ] && cp -f "$Q" "$CACHE/bin/"
+[ -n "$S" ] && cp -f "$S" "$CACHE/bin/"   # the stable scanner — usable with NO nightly toolchain
 printf '%s\n' "$CLONE" > "$CACHE/clone"
 
 # 3. `cargo candor` everywhere: symlink the wrapper onto PATH.
@@ -40,7 +42,7 @@ ln -sf "$CLONE/cargo-candor" "$BIN/cargo-candor"
 
 echo "candor: installed ✓" >&2
 echo "  engine   $(basename "$LIB")" >&2
-echo "  stable   $CACHE/  (dylib + query — survives 'cargo clean')" >&2
+echo "  stable   $CACHE/  (dylib + query + scan — survives 'cargo clean')" >&2
 echo "  command  $BIN/cargo-candor  →  use 'cargo candor …' in any project" >&2
 case ":$PATH:" in
   *":$BIN:"*) echo "  PATH     ok" >&2 ;;

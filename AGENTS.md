@@ -22,6 +22,19 @@ CANDOR_JSON=/tmp/candor-report cargo dylint --lib-path "$LIB"
 
 This writes one report file per crate: `/tmp/candor-report.<crate>.<type>.json`.
 
+**No nightly? Use the stable scanner.** If `cargo install cargo-dylint` or the nightly build fails
+(locked-down box, stable-only CI), candor has a stable backend that needs nothing but stock `cargo` —
+it produces the same report JSON the rest of this guide reads:
+
+```sh
+( cd /tmp/candor && cargo build -p candor-scan )                       # stable Rust, no nightly/dylint
+/tmp/candor/target/debug/candor-scan . --out /tmp/candor-report       # writes /tmp/candor-report.<crate>.scan.json
+```
+
+It is *syntactic*, so it under-reports relative to the lint (it misses method-style effects, trait
+dispatch, macros, and cross-crate propagation, and does **not** emit `Unknown`) — good for fast triage,
+not for the soundness contract. Everything below works identically against its report.
+
 ## 2. Read the report
 
 Each entry:

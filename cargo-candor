@@ -2,7 +2,8 @@
 # cargo-candor — ergonomic wrapper around `cargo dylint` for the candor lint.
 #
 # One-time:  ./install.sh  (or `cargo candor setup`) — builds + puts `cargo candor` on PATH. Then e.g.
-#   cargo candor audit              # at-a-glance effect profile of the whole project
+#   cargo candor scan               # STABLE backend: produce the report on stock cargo (no nightly)
+#   cargo candor audit              # at-a-glance effect profile of the whole project (nightly lint)
 #   cargo candor audit --all        # the full per-function lint (spans in context)
 #   cargo candor snapshot .candor/baseline
 #   cargo candor guard    .candor/baseline   # CI gate: fail on a gained effect
@@ -82,6 +83,17 @@ find_query() {
   done
   [ -n "$newest" ] && printf '%s\n' "$newest"
 }
+# The STABLE backend (candor-scan) — a syntactic effect report that needs NO nightly toolchain. Built
+# on stable Rust; located/built the same way as candor-query.
+find_scan() {
+  local newest="" f
+  for f in "$CANDOR_DIR"/target/release/candor-scan "$CANDOR_DIR"/target/debug/candor-scan \
+           "$CANDOR_CACHE"/bin/candor-scan; do
+    [ -e "$f" ] || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
+  done
+  [ -n "$newest" ] && printf '%s\n' "$newest"
+}
 query() {
   local q; q="$(find_query || true)"
   if [ -z "$q" ]; then
@@ -92,6 +104,17 @@ query() {
   [ -n "$q" ] || { echo "candor: could not build/find candor-query (run: $CANDOR_DIR/install.sh)" >&2; exit 1; }
   stash "$q" bin
   "$q" "$@"
+}
+scan_run() {
+  local s; s="$(find_scan || true)"
+  if [ -z "$s" ]; then
+    echo "candor: building candor-scan (first run; stable Rust, no nightly)…" >&2
+    ( cd "$CANDOR_DIR" && cargo build -p candor-scan >&2 )
+    s="$(find_scan || true)"
+  fi
+  [ -n "$s" ] || { echo "candor: could not build/find candor-scan (run: $CANDOR_DIR/install.sh)" >&2; exit 1; }
+  stash "$s" bin
+  "$s" "$@"
 }
 
 # The source-freshness key: a content hash of every `.rs` file under the project (excluding target/ &
@@ -118,7 +141,7 @@ cmd="${1:-audit}"; shift || true
 # recovery path (it builds cleanly via install.sh), and help is free; neither should fail on a missing
 # or broken dylib first.
 case "$cmd" in
-  setup|install|-h|--help|help) LIB="" ;;
+  setup|install|-h|--help|help|scan) LIB="" ;;
   *)
     LIB="$(find_lib || true)"
     if [ -z "${LIB:-}" ]; then
@@ -331,6 +354,22 @@ case "$cmd" in
       sleep "${CANDOR_WATCH_INTERVAL:-2}"
     done ;;
 
+  scan)
+    # The STABLE backend: produce a candor report with NO nightly toolchain, dylint, or rustc_private —
+    # a syntactic scan (candor-scan) that shares the lint's classifier. This is the zero-friction path:
+    # `cargo candor scan` works on stock stable Rust, anywhere. It writes .candor/report.<crate>.scan.json
+    # (+ a callgraph sidecar), so every read-only query (show/where/callers/map) then works against it,
+    # exactly as they do against the lint's report. Precision is lower than the lint (it under-reports
+    # resolution-heavy effects and does NOT emit Unknown) — see `candor-scan --help`. Args pass through
+    # (e.g. `cargo candor scan path/to/crate --json`); default scans `.` to `.candor/report`.
+    json=0; for a in "$@"; do [ "$a" = "--json" ] && json=1; done
+    mkdir -p .candor
+    scan_run "$@"
+    # On a file-writing run (not --json-to-stdout), stamp source state so the staleness check (shared
+    # with the lint path) can fire after later edits, and refresh whichever read-only report it wrote.
+    [ "$json" = 1 ] || src_state > .candor/state 2>/dev/null || true
+    exit 0 ;;
+
   show)
     # INSTANT: a function's effect surface, read from the fresh report (no recompile). Replaces the
     # agent reading source to answer "what does this function do?". `--json` for machine reading.
@@ -468,9 +507,9 @@ case "$cmd" in
     exec "$CANDOR_DIR/install.sh" "$@" ;;
 
   -h|--help|help)
-    sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'
+    sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (setup|audit|snapshot|guard|diff|watch|show|where|callers|map|explain|policy|risk|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|map|explain|policy|risk|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac

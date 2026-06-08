@@ -49,6 +49,16 @@ jobs:
           echo "$out" | grep -q '`read_config` effects: { Fs }' \
             || { echo "::error::audit output regressed (expected read_config -> Fs)"; exit 1; }
 
+      # The STABLE backend, proven with NO nightly: candor-scan is built and run with +stable only,
+      # and must reproduce the same headline result the nightly lint gives on sample/ (read_config -> Fs).
+      # This is the zero-friction adoption path — if it ever needs the nightly, this step catches it.
+      - name: Stable scanner (no-nightly backend)
+        run: |
+          cargo +stable build -p candor-scan
+          out=$(./target/debug/candor-scan sample --json)
+          echo "$out"
+          echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert any("read_config" in f["fn"] and "Fs" in f["inferred"] for f in d["functions"]), "stable scanner did not find read_config -> Fs"; assert d["candor"]["toolchain"]=="stable"'
+
       # End-to-end coverage the in-process unit/ui tests can't reach: the AS-EFF mode
       # diagnostics (env-driven) and cross-crate propagation across a real lib+bin build.
       - name: Integration tests (AS-EFF modes + cross-crate)

@@ -26,12 +26,18 @@ def predicted_effects(crate_dir):
     main_inf = None
     union = set()
     for f in glob.glob(crate_dir + "/r.*.*.json"):
+        if f.endswith(".callgraph.json"):  # a report sidecar, not an effect report — skip
+            continue
         try:
             doc = json.load(open(f))
         except Exception:
             continue
         arr = doc.get("functions", doc) if isinstance(doc, dict) else doc
+        if not isinstance(arr, list):
+            continue
         for e in arr:
+            if not isinstance(e, dict):
+                continue
             inf = set(e.get("inferred", []))
             union |= inf
             if e.get("fn", "").split("::")[-1] == "main":

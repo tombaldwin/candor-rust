@@ -1,6 +1,6 @@
 {
   "candor": {
-    "version": "e8f2911",
+    "version": "47fdab6",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
@@ -22,9 +22,17 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "4d028517c494da3ef44378e5ff58d0b3",
+      "hash": "a9ebd5d552a2cd75d6de1a93313d7c51",
       "fs": [
         "read"
+      ],
+      "cmds": [
+        "git"
+      ],
+      "paths": [
+        ".git/HEAD",
+        "rust-toolchain",
+        "rust-toolchain.toml"
       ]
     }
   ]

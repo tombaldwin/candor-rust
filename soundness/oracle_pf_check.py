@@ -22,12 +22,18 @@ MARKER_RE = re.compile(r'write\(2, "CF([EX]) (\w+)')
 def report_inferred(crate_dir):
     out = {}
     for f in glob.glob(crate_dir + "/r.*.*.json"):
+        if f.endswith(".callgraph.json"):  # a report sidecar, not an effect report — skip
+            continue
         try:
             doc = json.load(open(f))
         except Exception:
             continue
         arr = doc.get("functions", doc) if isinstance(doc, dict) else doc
+        if not isinstance(arr, list):
+            continue
         for e in arr:
+            if not isinstance(e, dict):
+                continue
             out[e.get("fn", "").split("::")[-1]] = set(e.get("inferred", []))
     return out
 

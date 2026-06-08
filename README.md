@@ -80,9 +80,11 @@ coverage warnings mark the rest. A sharp, narrow, trustworthy instrument, not a 
 | Path | What |
 |---|---|
 | `src/lib.rs` | the entire lint — classifier, per-function call-graph fixpoint, the three modes |
-| `crates/candor-report` | the report types + parsing, shared by the lint and the CLI (no `rustc_private`) |
+| `crates/candor-classify` | the effect classifier (`crate × path → effect`) — pure string logic, no `rustc`; the one source of truth the lint **and** the stable scanner both call |
+| `crates/candor-scan` | the **stable-Rust** backend: a `syn`-based scanner that produces the same report JSON on stock `cargo`, no nightly/dylint (see below) |
+| `crates/candor-report` | the report types + parsing, shared by every backend and the CLI (no `rustc_private`) |
 | `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`) as one typed binary |
-| `cargo-candor` | the CLI wrapper — thin bash that orchestrates `cargo dylint` and dispatches queries to `candor-query` |
+| `cargo-candor` | the CLI wrapper — thin bash that orchestrates the backend (`cargo dylint` or `candor-scan`) and dispatches queries to `candor-query` |
 | `sample/` | a small crate written in the capability discipline, for trying conformance mode |
 | `rust-toolchain` | pins the nightly the lint links against (`rustc-dev`) |
 
@@ -101,13 +103,39 @@ it (or `cargo candor setup`) any time to refresh; `cargo candor update` pulls + 
 The pinned nightly is inherent to dylint (it links rustc internals) and runs only for the lint — it
 does not touch your projects' toolchains.
 
+### Two backends: stable scanner (zero-friction) vs the nightly lint (soundness)
+
+candor produces the **same report JSON** two ways, and every read-only query (`show`/`where`/`callers`/`map`)
+reads either one identically:
+
+```sh
+cargo candor scan      # STABLE: a syntactic scan on stock `cargo` — no nightly, no dylint, no rustc-dev
+cargo candor audit     # NIGHTLY lint: the full rustc-backed analysis with the soundness contract
+```
+
+`cargo candor scan` is the friction-killer. It walks the crate's `.rs` files, parses them with
+[`syn`](https://docs.rs/syn), resolves `use`-aliased call paths, and classifies them through the **same
+[`candor-classify`](crates/candor-classify) the lint uses** — one source of truth, so the two backends
+can't drift on what counts as an effect. It needs nothing but a stable toolchain, so it runs anywhere
+`cargo` does (CI without a nightly, `cargo install`, a locked-down box).
+
+The trade is **precision, stated honestly**. The scanner is syntactic, so it sees what's *written*, not
+what the compiler *resolves*. It catches path-qualified effect calls (`std::fs::read`, `Command::new`,
+`reqwest::Client::execute`), `use`-aliases, and intra-crate transitive propagation. It **misses** —
+*silently*, without emitting `Unknown` — effects reached only through a method call on a non-path-qualified
+receiver, trait-object dispatch, closures/fn-pointers, macros, and cross-crate propagation by stable
+identity. So on resolution-heavy code it **under-reports** relative to the lint. Use `scan` for
+zero-friction triage and CI on stable; use the nightly lint when you need the soundness contract
+(`Unknown` over-approximation, conformance, the policy/guard gates).
+
 ## Quick start (humans)
 
 After `install.sh`, use the wrapper from any Rust project (it self-heals — rebuilding the dylib if it
 ever goes missing):
 
 ```sh
-cargo candor audit                      # at-a-glance effect profile of the whole project
+cargo candor scan                       # STABLE backend: produce the report on stock cargo (no nightly)
+cargo candor audit                      # at-a-glance effect profile of the whole project (nightly lint)
 cargo candor audit --all                # the full per-function lint (spans in context)
 cargo candor snapshot .candor/baseline  # write a JSON report
 cargo candor guard    .candor/baseline  # fail on functions that gained an effect

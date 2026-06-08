@@ -1,12 +1,12 @@
 {
   "candor": {
-    "version": "e8f2911",
+    "version": "47fdab6",
     "toolchain": "nightly-2026-04-16"
   },
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:1505:5: 1505:54",
+      "loc": "src/lib.rs:1212:5: 1212:54",
       "inferred": [
         "Env",
         "Fs"
@@ -21,14 +21,15 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "b17b9d811ad434e818cb313fe3ff4d0f",
+      "hash": "f3527b5bef15a792135152eb4b9b8ab0",
       "calls": [
-        "load_cross_reports"
+        "load_cross_reports",
+        "load_layer_reach"
       ]
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:1757:5: 1757:59",
+      "loc": "src/lib.rs:1520:5: 1520:59",
       "inferred": [
         "Env",
         "Fs",
@@ -46,19 +47,20 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "b17b9d811ad434e8c4a39054f13fe890",
+      "hash": "f3527b5bef15a7923adce60027f5808c",
       "fs": [
         "read",
         "write"
       ],
       "calls": [
         "load_baseline",
-        "span_lint"
+        "span_lint",
+        "write_layer_reach"
       ]
     },
     {
       "fn": "Candor::new",
-      "loc": "src/lib.rs:229:5: 229:25",
+      "loc": "src/lib.rs:277:5: 277:25",
       "inferred": [
         "Env",
         "Fs"
@@ -74,14 +76,14 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "b17b9d811ad434e82ef2e5772cbb5c4d",
+      "hash": "f3527b5bef15a7921f91f700bbf0193b",
       "fs": [
         "read"
       ]
     },
     {
       "fn": "load_baseline",
-      "loc": "src/lib.rs:481:1: 481:74",
+      "loc": "src/lib.rs:691:1: 691:74",
       "inferred": [
         "Fs"
       ],
@@ -94,14 +96,14 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "b17b9d811ad434e81356fdac4584ce63",
+      "hash": "f3527b5bef15a792e6eca485279a0d14",
       "fs": [
         "read"
       ]
     },
     {
       "fn": "load_cross_reports",
-      "loc": "src/lib.rs:434:1: 439:44",
+      "loc": "src/lib.rs:591:1: 591:96",
       "inferred": [
         "Fs"
       ],
@@ -114,7 +116,27 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "b17b9d811ad434e8e2ecf50cd7ab7cde"
+      "hash": "f3527b5bef15a7926d6d42c39ad66118"
+    },
+    {
+      "fn": "load_layer_reach",
+      "loc": "src/lib.rs:665:1: 665:75",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f3527b5bef15a792eafa02919a60348a",
+      "fs": [
+        "read"
+      ]
     },
     {
       "fn": "register_lints",
@@ -131,7 +153,7 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "b17b9d811ad434e8d6c59c97cc247c52",
+      "hash": "f3527b5bef15a7923cc2af58c06dbe9a",
       "fs": [
         "read"
       ],
@@ -141,7 +163,7 @@
     },
     {
       "fn": "span_lint",
-      "loc": "src/lib.rs:65:1: 70:2",
+      "loc": "src/lib.rs:74:1: 79:2",
       "inferred": [
         "Log"
       ],
@@ -154,7 +176,27 @@
       ],
       "overdeclared": [],
       "unresolved": false,
-      "hash": "b17b9d811ad434e8c08bedff259f8586"
+      "hash": "f3527b5bef15a7922887275cb31f3e57"
+    },
+    {
+      "fn": "write_layer_reach",
+      "loc": "src/lib.rs:657:1: 657:71",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": false,
+      "hash": "f3527b5bef15a7922fe589369494fee0",
+      "fs": [
+        "write"
+      ]
     }
   ]
 }

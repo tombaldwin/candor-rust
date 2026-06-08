@@ -1,0 +1,557 @@
+//! candor-classify — the curated effect classifier (crate+path -> effect), extracted to a STABLE
+//! crate so both the nightly `rustc_private` lint AND a stable backend share ONE source of truth
+//! (no drift). Pure string logic; no rustc internals. The effect vocabulary lives in candor-report.
+
+use candor_report::EFFECTS;
+
+/// Project-supplied rules, consulted only when the built-in `classify` returns None.
+pub fn classify_extra(
+    crate_name: &str,
+    path: &str,
+    extra: &[(&'static str, bool, String)],
+) -> Option<&'static str> {
+    for (eff, is_crate, prefix) in extra {
+        let hit = if *is_crate { crate_name.starts_with(prefix.as_str()) } else { path.starts_with(prefix.as_str()) };
+        if hit {
+            return Some(eff);
+        }
+    }
+    None
+}
+
+/// The exact third-party crates `classify` has effect rules for, and the crate-name
+/// PREFIXES it recognizes. This is the single source of truth for "what candor knows":
+/// it is emitted beside the JSON report (`<prefix>.calibrated.json`) so the Claude Code
+/// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
+/// Keep in lockstep with `classify` below — the `calibrated_set_covers_classifier` test
+/// enforces that every named crate the classifier matches appears here.
+pub const CALIBRATED_CRATES: [&str; 46] = [
+    // network (aws_config resolves credentials over the network on `.load()`;
+    // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer)
+    "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
+    "async_nats", "lapin", "lettre", "tungstenite", "elasticsearch", "tonic", "rdkafka",
+    // database (see DB_CRATES in classify)
+    "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
+    "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
+    // filesystem (async_fs = smol; fs_err = std::fs wrapper; tempfile; glob) / entropy /
+    // subprocess (async_process = smol; duct) / env (dotenvy/dotenv) / clock (time) / log / clipboard
+    "memmap2", "fs_err", "async_fs", "tempfile", "glob",
+    "rand", "getrandom", "fastrand",
+    "portable_pty", "async_process", "duct",
+    "dotenvy", "dotenv",
+    "chrono", "time", "tracing", "log", "arboard",
+    // compiler diagnostic emission (a dylint lint's output) — see the Log rules in classify
+    "rustc_lint", "rustc_errors",
+];
+
+pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
+
+/// Crates `classify` matches by PATH prefix rather than crate-name equality (their effectful modules
+/// are recognised, e.g. `tokio::net::`/`async_std::fs::`/`mio::net::`), so they're absent from
+/// `CALIBRATED_CRATES` (which the liveness test probes by crate name). The coverage check must still
+/// treat them as *covered* — otherwise it would mislabel the most common async crates as blind spots.
+pub const PATH_CALIBRATED_CRATES: [&str; 3] = ["tokio", "async_std", "mio"];
+
+/// Database client crates whose execution verbs are I/O (see the DB branch in `classify`).
+/// Module-level so `db_crates_are_calibrated` can enforce `DB_CRATES ⊆ CALIBRATED_CRATES`.
+pub const DB_CRATES: [&str; 11] = [
+    "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
+    "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
+];
+
+/// Classify a resolved callee by the crate it belongs to and its full path.
+pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
+    if crate_name.starts_with("aws_sdk_") || crate_name.starts_with("aws_smithy") {
+        // Only request dispatch is network I/O; builder setters/accessors are pure.
+        if path.ends_with("::send") || path.ends_with("::send_with") {
+            return Some("Net");
+        }
+        return None;
+    }
+    // aws-config resolves credentials/region on `.load()` — it reaches the IMDS metadata
+    // endpoint / STS over the network (and reads ~/.aws + env). Builders (`defaults()`,
+    // `SdkConfig::builder()`, `BehaviorVersion::latest()`) are pure; the `load` is the I/O.
+    // (Found hardening on a real app, ebman: `builder.load().await` was classified pure.)
+    if crate_name == "aws_config" {
+        if path.ends_with("::load") || path.ends_with("::load_defaults") {
+            return Some("Net");
+        }
+        return None;
+    }
+    // git2 (libgit2 FFI): remote operations contact the network; everything else is local
+    // to the .git directory. Match the remote verbs precisely — NOT bare `::clone`, which is
+    // the `Clone`-trait dup of a `Remote` handle (pure), not `Repository::clone`. (Found
+    // hardening on gitui: `remote.fetch`/`remote.push` were classified network-free — a git
+    // client reporting it makes no network calls.)
+    if crate_name == "git2" {
+        if path.ends_with("::fetch")
+            || path.ends_with("::push")
+            || path.ends_with("::download")
+            || path.ends_with("::connect")
+            || path.ends_with("::connect_auth")
+            || path.ends_with("::ls")
+            || path.ends_with("::upload")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    // HTTP clients use the same builder pattern as the AWS SDK: only the dispatch is
+    // I/O. (Found by the eval: ebman's reqwest calls to the Anthropic API + webhooks
+    // were silently classified network-free because reqwest wasn't recognized.)
+    if crate_name == "reqwest" || crate_name == "isahc" {
+        if path.ends_with("::send") || path.ends_with("::execute") {
+            return Some("Net");
+        }
+        return None;
+    }
+    if crate_name == "ureq" && path.ends_with("::call") {
+        return Some("Net");
+    }
+    // Message-queue clients fully encapsulate the socket (the underlying tokio::net lives
+    // inside the crate, unseen), so a user's connect/publish/consume calls ARE the I/O
+    // boundary — to a remote broker, hence Net. Match the broker round-trip verbs (snake_case
+    // methods); the CamelCase option/property builders stay pure. (Found hardening on consumer
+    // apps: lapin `basic_publish`/`queue_declare` and async-nats `publish`/`subscribe` were
+    // classified pure — a message-queue client reporting no I/O.)
+    if crate_name == "async_nats" {
+        if path.ends_with("::connect")
+            || path.contains("::publish")
+            || path.ends_with("::subscribe")
+            || path.ends_with("::queue_subscribe")
+            || path.contains("::request")
+            || path.ends_with("::flush")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    if crate_name == "lapin" {
+        if path.ends_with("::connect")
+            || path.ends_with("::create_channel")
+            || path.contains("::basic_")
+            || path.contains("::queue_")
+            || path.contains("::exchange_")
+            || path.contains("::tx_")
+            || path.ends_with("::confirm_select")
+            || path.ends_with("::close")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    // SMTP email — lettre's `Transport::send` is the network dispatch; Message building is
+    // pure. (Found hardening on a lettre consumer: `mailer.send(&email)` classified pure.)
+    if crate_name == "lettre" {
+        if path.ends_with("::send") || path.ends_with("::send_raw") {
+            return Some("Net");
+        }
+        return None;
+    }
+    // WebSockets — tungstenite (the modern successor to the old `websocket` crate). connect
+    // and the socket read/write/send are network; Message constructors are pure. (Found on a
+    // tungstenite consumer: connect + send + read classified pure.)
+    if crate_name == "tungstenite" {
+        if path.ends_with("::connect")
+            || path.ends_with("::read")
+            || path.ends_with("::write")
+            || path.ends_with("::send")
+            || path.ends_with("::close")
+            || path.ends_with("::flush")
+            || path.ends_with("::read_message")
+            || path.ends_with("::write_message")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    // elasticsearch: request builders are pure; only the `.send()` dispatch is HTTP I/O
+    // (same shape as reqwest / the AWS SDK). (Found on an elasticsearch consumer.)
+    if crate_name == "elasticsearch" && path.ends_with("::send") {
+        return Some("Net");
+    }
+    // gRPC — tonic. The transport connect and the Grpc client RPC dispatch are network;
+    // codecs and request/response wrappers are pure. (connect repro-confirmed on a consumer;
+    // the unary/streaming RPC verbs are from the tonic::client::Grpc API.)
+    if crate_name == "tonic" {
+        if path.ends_with("::connect")
+            || path.ends_with("::unary")
+            || path.ends_with("::server_streaming")
+            || path.ends_with("::client_streaming")
+            || path.ends_with("::streaming")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    // Kafka — rdkafka (FFI to librdkafka). Producer send + consumer poll/recv/subscribe/
+    // commit are network round-trips to the brokers. (API-calibrated + unit-tested; a real
+    // repro needs librdkafka/cmake, deferred.)
+    if crate_name == "rdkafka" {
+        if path.ends_with("::send")
+            || path.ends_with("::send_result")
+            || path.ends_with("::recv")
+            || path.ends_with("::poll")
+            || path.ends_with("::subscribe")
+            || path.ends_with("::commit")
+            || path.ends_with("::commit_message")
+            || path.ends_with("::commit_consumer_state")
+            || path.ends_with("::store_offset")
+            || path.ends_with("::seek")
+            || path.ends_with("::fetch_metadata")
+            || path.ends_with("::fetch_watermarks")
+            || path.ends_with("::flush")
+        {
+            return Some("Net");
+        }
+        return None;
+    }
+    // cap-std: capability-oriented std. I/O goes *through* a held capability handle
+    // (Dir/Pool/Clock/...), so these calls ARE the effect. Recognising them means a
+    // cap-std project's real I/O is detected and matches the capability it declared
+    // (via `declared_caps`/`capstd_cap`) — conformance against unforgeable capabilities.
+    if crate_name.starts_with("cap_") {
+        if path.contains("::net::Unix") || path.contains("::os::") {
+            return Some("Ipc");
+        }
+        if path.contains("::net") {
+            return Some("Net");
+        }
+        if path.contains("::time") {
+            return Some("Clock");
+        }
+        if path.contains("::fs") || crate_name == "cap_tempfile" || crate_name == "cap_directories" {
+            return Some("Fs");
+        }
+        return None;
+    }
+    // Local IPC (Unix-domain sockets) is I/O but not *network* — keep it distinct so
+    // CANDOR_NO_AMBIENT and audits don't conflate it with internet access. async-std puts its
+    // Unix sockets under `os::unix::net` (mirroring std); async-net (smol's net layer) under
+    // `unix`.
+    if path.starts_with("tokio::net::Unix")
+        || path.starts_with("std::os::unix::net")
+        || path.starts_with("async_std::os::unix::net")
+        || path.starts_with("async_net::unix")
+    {
+        return Some("Ipc");
+    }
+    // Raw sockets. Match the I/O *types* only — `std::net` also holds pure data types
+    // (SocketAddr, IpAddr, …) whose construction must NOT be flagged.
+    if path.starts_with("std::net::TcpStream")
+        || path.starts_with("std::net::TcpListener")
+        || path.starts_with("std::net::UdpSocket")
+        || path.starts_with("tokio::net::")
+    {
+        return Some("Net");
+    }
+    // Legacy tokio 0.1 socket crates — `tokio_tcp`/`tokio_udp` are *entirely* networking
+    // (no pure types to over-flag), so the whole crate is Net. (Found hardening on websocat,
+    // which is still on tokio 0.1: its `tokio_tcp::TcpStream::connect` was classified
+    // network-free — a network tool confidently reporting 0 Net.)
+    if matches!(crate_name, "tokio_tcp" | "tokio_udp") {
+        return Some("Net");
+    }
+    // The other async runtimes mirror tokio's module layout, and their `net` modules hold only
+    // socket I/O types (the pure `SocketAddr`/`IpAddr` are re-exports that resolve to `std::net`,
+    // so they're excluded by def-path). `mio` is the low-level non-blocking-socket layer under
+    // tokio/others; `async_net` is smol's net crate. Closes the async-std/smol/mio gap the
+    // tokio_tcp note flagged. (Calibrated by module structure — these crates ARE networking — not
+    // a live repro; the TCP/UDP types are defined in-crate so the def-path prefix is exact.)
+    if path.starts_with("async_std::net::")
+        || path.starts_with("mio::net::")
+        || crate_name == "async_net"
+    {
+        return Some("Net");
+    }
+    // Database clients. Like the AWS/HTTP builders, only the execution verbs are I/O;
+    // query *construction* is pure. Best-effort across crates (tune via CANDOR_CONFIG).
+    // Note: bare `::query` is deliberately omitted — it executes in postgres/rusqlite but
+    // only *builds* in sqlx, so including it would false-positive sqlx's `query()` builder.
+    if DB_CRATES.contains(&crate_name) {
+        // Postgres / SQLite-family clients: `query`/`batch_execute`/`prepare`/etc. ARE the
+        // execution (round-trips to the server). sqlx is the outlier where bare `query()`
+        // only BUILDS — it keeps the narrow set below. (Found by running on a real
+        // tokio-postgres app, pgman: candor had reported only 4 of ~20 DB call sites.)
+        if matches!(crate_name, "postgres" | "tokio_postgres" | "deadpool_postgres" | "rusqlite") {
+            const PG: [&str; 13] = [
+                "::query", "::query_one", "::query_opt", "::query_raw", "::execute",
+                "::batch_execute", "::simple_query", "::prepare", "::prepare_typed",
+                "::copy_in", "::copy_out", "::transaction", "::connect",
+            ];
+            if PG.iter().any(|v| path.ends_with(v)) {
+                return Some("Db");
+            }
+            return None;
+        }
+        // redis: the way redis is ACTUALLY used is the high-level `Commands`/`AsyncCommands`
+        // traits (`con.get`/`set`/`hset`/`lpush`/…) — every method is a round-trip — plus
+        // connection establishment. The shared VERBS below only catch the low-level
+        // `cmd("GET").query(con)`, so without this a normal redis user's calls classify as
+        // PURE. (Found hardening on redis-rs: a fn doing `con.get`/`set` reported no effects.)
+        if crate_name == "redis"
+            && (path.contains("Commands::")
+                || path.contains("::get_connection")
+                || path.contains("::get_async_connection")
+                || path.contains("::get_multiplexed_async_connection")
+                || path.contains("ConnectionManager")
+                || path.ends_with("::query")
+                || path.ends_with("::query_async")
+                || path.ends_with("::req_command")
+                || path.ends_with("::req_packed_command")
+                || path.ends_with("::req_packed_commands"))
+        {
+            return Some("Db");
+        }
+        // mongodb: a document-store API with none of the SQL verbs — the user calls
+        // `coll.find_one`/`insert_one`/`aggregate`/… and `Client::with_uri_str`. Without
+        // these a mongodb user's calls classify PURE. (Found hardening: a fn doing
+        // `find_one`+`insert_one` reported no effects.) Handle accessors (name/namespace)
+        // and option/doc builders don't match these verbs, so they stay pure.
+        if crate_name == "mongodb" {
+            const MONGO: [&str; 27] = [
+                "::with_uri_str", "::connect", "::find", "::find_one", "::insert_one",
+                "::insert_many", "::update_one", "::update_many", "::delete_one",
+                "::delete_many", "::replace_one", "::aggregate", "::count_documents",
+                "::estimated_document_count", "::count", "::distinct", "::run_command",
+                "::find_one_and_update", "::find_one_and_delete", "::find_one_and_replace",
+                "::list_collections", "::list_collection_names", "::list_databases",
+                "::list_database_names", "::create_collection", "::create_index", "::watch",
+            ];
+            if MONGO.iter().any(|v| path.ends_with(v)) {
+                return Some("Db");
+            }
+            return None;
+        }
+        // mysql / mysql_async: the `query`/`exec` families + `get_conn`/`ping` execute
+        // immediately — no build-then-execute split like sqlx, so matching `::query` is safe
+        // here. Same DB-verb-dialect gap class as redis/mongodb; calibrated from the Queryable
+        // API (unit-tested; a real-app repro is the remaining confirmation).
+        if matches!(crate_name, "mysql" | "mysql_async") {
+            const MY: [&str; 16] = [
+                "::query", "::query_first", "::query_iter", "::query_map", "::query_fold",
+                "::query_drop", "::exec", "::exec_first", "::exec_iter", "::exec_map",
+                "::exec_fold", "::exec_drop", "::exec_batch", "::prep", "::ping", "::get_conn",
+            ];
+            if MY.iter().any(|v| path.ends_with(v)) {
+                return Some("Db");
+            }
+            return None;
+        }
+        // sea_orm: an ORM whose execution is split from building (like sqlx). The query
+        // BUILDERS (`Entity::find`, `Entity::insert`) are pure; execution happens at `.all`/
+        // `.one`/`.count`/`.stream` and `Insert/Update/Delete::exec`. The write path via an
+        // ActiveModel (`model.insert(db)`) executes too — distinguished from the `EntityTrait`
+        // builder by the trait in the path (`ActiveModelTrait::`). (Found hardening on a
+        // sea_orm consumer app: `.all(db)` reads and `ActiveModel::insert` writes were pure.)
+        if crate_name == "sea_orm" {
+            if path.ends_with("::all")
+                || path.ends_with("::one")
+                || path.ends_with("::count")
+                || path.ends_with("::stream")
+                || path.ends_with("::exec")
+                || path.ends_with("::exec_with_returning")
+                || path.ends_with("::exec_without_returning")
+                || path.ends_with("::connect")
+                || path.ends_with("::execute")
+                || path.ends_with("::execute_unprepared")
+                || path.ends_with("::query_one")
+                || path.ends_with("::query_all")
+                || path.ends_with("::fetch_page")
+                || path.ends_with("::num_items")
+                || path.contains("ActiveModelTrait::")
+            {
+                return Some("Db");
+            }
+            return None;
+        }
+        const VERBS: [&str; 16] = [
+            "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
+            "::fetch_all", "::fetch_optional", "::fetch", "::connect", "::acquire",
+            "::begin", "::commit", "::rollback", "::load", "::get_result", "::get_results",
+        ];
+        if VERBS.iter().any(|v| path.ends_with(v)) {
+            return Some("Db");
+        }
+        return None;
+    }
+    // Filesystem. `tokio::fs`/`async_std::fs` are the async mirrors of `std::fs`; `async_fs` is
+    // smol's fs crate; `fs_err` is a drop-in `std::fs` wrapper (its whole surface is fs I/O).
+    if path.starts_with("std::fs::")
+        || path.starts_with("tokio::fs::")
+        || path.starts_with("async_std::fs::")
+        || crate_name == "async_fs"
+        || crate_name == "fs_err"
+        || crate_name == "memmap2"
+    {
+        return Some("Fs");
+    }
+    // tempfile: creating a temp file/dir touches the disk. Match the create/persist verbs (the
+    // `Builder` setters — prefix/suffix/rand_bytes — stay pure). `persist`/`keep` rename/retain
+    // the file on disk; `close` removes it.
+    if crate_name == "tempfile"
+        && (path.ends_with("::tempfile")
+            || path.ends_with("::tempfile_in")
+            || path.ends_with("::tempdir")
+            || path.ends_with("::tempdir_in")
+            || path.ends_with("NamedTempFile::new")
+            || path.ends_with("NamedTempFile::new_in")
+            || path.ends_with("TempDir::new")
+            || path.ends_with("TempDir::new_in")
+            || path.ends_with("::persist")
+            || path.ends_with("::persist_noclobber")
+            || path.ends_with("::keep"))
+    {
+        return Some("Fs");
+    }
+    // glob: walks the filesystem to expand a pattern (the returned iterator reads directories).
+    // `Pattern::matches` is pure string matching — match only the directory-walking entry points.
+    if crate_name == "glob" && (path.ends_with("::glob") || path.ends_with("::glob_with")) {
+        return Some("Fs");
+    }
+    // Randomness / entropy. `getrandom`/`fastrand` are effectful end-to-end. `rand` is NOT — it
+    // mixes entropy/generation (effectful) with *pure* distribution constructors (`Uniform::new`,
+    // `Normal::new`) and deterministic-seed constructors (`seed_from_u64`). Flagging the whole crate
+    // over-reported those as `Rand`; match only the calls that actually consume randomness — the
+    // entropy sources (`OsRng`, `thread_rng`/`rng`, `from_entropy`/`from_os_rng`) and the generation
+    // verbs (`gen*`/`random*`/`fill*`/`sample*`/`next_u*`). A `Uniform::new` is now correctly pure.
+    if crate_name == "getrandom" || crate_name == "fastrand" {
+        return Some("Rand");
+    }
+    if crate_name == "rand" {
+        let rng_verb = path.ends_with("::gen")
+            || path.ends_with("::gen_range")
+            || path.ends_with("::gen_bool")
+            || path.ends_with("::gen_ratio")
+            || path.ends_with("::random")
+            || path.ends_with("::random_range")
+            || path.ends_with("::random_bool")
+            || path.ends_with("::random_ratio")
+            || path.ends_with("::random_iter") // rand 0.9 iterator generator
+            || path.ends_with("::gen_iter")
+            || path.ends_with("::fill")
+            || path.ends_with("::fill_bytes")
+            || path.ends_with("::try_fill")
+            || path.ends_with("::try_fill_bytes")
+            || path.ends_with("::sample")
+            || path.ends_with("::sample_iter")
+            || path.ends_with("::next_u32")
+            || path.ends_with("::next_u64")
+            || path.ends_with("::thread_rng")
+            || path.ends_with("::rng")
+            || path.ends_with("::from_entropy")
+            || path.ends_with("::from_os_rng");
+        if rng_verb || path.contains("OsRng") {
+            return Some("Rand");
+        }
+        return None;
+    }
+    // Subprocess spawning. `tokio::process` is the async mirror of `std::process` — it exists
+    // only to spawn/control subprocesses (`Command`/`Child`, no pure data types like std's
+    // `Stdio`/`ExitStatus`/`exit`), so spawning through it is Exec just the same. Without this an
+    // async app's `tokio::process::Command::new(..).spawn()` classified pure — a silent under-report
+    // of subprocess execution, the dangerous direction (mirrors the tokio::fs/tokio::net coverage).
+    if path.starts_with("std::process::Command")
+        || path.starts_with("std::process::Child")
+        || path.starts_with("tokio::process::Command")
+        || path.starts_with("tokio::process::Child")
+        || path.starts_with("async_std::process::Command")
+        || path.starts_with("async_std::process::Child")
+        || crate_name == "async_process"
+        || crate_name == "portable_pty"
+    {
+        return Some("Exec");
+    }
+    // duct: a subprocess-orchestration crate. `cmd()`/`cmd!` only *build* an Expression; the
+    // spawn/wait happens at `run`/`read`/`start`. Match the execution verbs, not the builder.
+    if crate_name == "duct"
+        && (path.ends_with("::run")
+            || path.ends_with("::read")
+            || path.ends_with("::start")
+            || path.ends_with("::read_chars"))
+    {
+        return Some("Exec");
+    }
+    if path.starts_with("std::env::") {
+        return Some("Env");
+    }
+    // dotenvy / dotenv: load environment variables (reading a `.env` file and mutating the process
+    // environment). Match the load/read entry points; `Error`/builder types stay pure.
+    if matches!(crate_name, "dotenvy" | "dotenv")
+        && (path.ends_with("::dotenv")
+            || path.ends_with("::dotenv_override")
+            || path.ends_with("::from_path")
+            || path.ends_with("::from_path_override")
+            || path.ends_with("::from_filename")
+            || path.ends_with("::from_filename_override")
+            || path.ends_with("::from_read")
+            || path.ends_with("::from_read_override")
+            || path.ends_with("::load")
+            || path.ends_with("::var")
+            || path.ends_with("::vars"))
+    {
+        return Some("Env");
+    }
+    // Wall-clock reads. Match the `now` accessor precisely (ends_with), not any path
+    // containing the substring "now". The `time` crate (distinct from `std::time`/`chrono`)
+    // reads the clock via `now_utc`/`now_local` (and the deprecated `Instant::now`).
+    if (crate_name == "chrono" || path.starts_with("std::time::")) && path.ends_with("::now") {
+        return Some("Clock");
+    }
+    if crate_name == "time"
+        && (path.ends_with("::now_utc") || path.ends_with("::now_local") || path.ends_with("::now"))
+    {
+        return Some("Clock");
+    }
+    if crate_name == "tracing" {
+        return Some("Log");
+    }
+    // The `log` facade: its macros route through `log::__private_api`; the crate's types
+    // (`Level`, `LevelFilter`) are pure, so match the logging entry, not the whole crate.
+    if crate_name == "log" && path.contains("::__private_api") {
+        return Some("Log");
+    }
+    // Compiler diagnostic emission — the ONE genuinely effectful operation in the otherwise-pure
+    // rustc_* surface (a dylint lint's actual OUTPUT: it writes warnings/errors to the compiler's
+    // diagnostic sink). Classified `Log` (same family as `tracing`/`log` — program output). Match the
+    // emission verbs precisely; rustc_lint/rustc_errors are mostly pure types (Lint, LintId, the Diag
+    // BUILDERS), and only the terminal `emit`/`emit_span_lint` actually produces output.
+    if crate_name == "rustc_lint"
+        && (path.ends_with("::emit_span_lint")
+            || path.ends_with("::span_lint")
+            || path.ends_with("::span_lint_hir"))
+    {
+        return Some("Log");
+    }
+    if crate_name == "rustc_errors"
+        && (path.ends_with("::emit")
+            || path.ends_with("::emit_diagnostic")
+            || path.ends_with("::emit_now"))
+    {
+        return Some("Log");
+    }
+    if crate_name == "arboard" {
+        return Some("Clipboard");
+    }
+    None
+}
+
+pub fn cap_from_name(name: &str) -> Option<&'static str> {
+    EFFECTS.iter().copied().find(|e| *e == name)
+}
+
+/// Map a cap-std capability *type* to the effect it authorises. Holding one of these
+/// (e.g. `&Dir`) is the real, unforgeable right to perform that effect — so candor
+/// treats it as a declared capability, exactly like its own `&Fs` token.
+pub fn capstd_cap(crate_name: &str, type_name: &str) -> Option<&'static str> {
+    if !crate_name.starts_with("cap_") {
+        return None;
+    }
+    Some(match type_name {
+        "Dir" => "Fs",
+        "TcpListener" | "TcpStream" | "UdpSocket" | "Pool" => "Net",
+        "UnixListener" | "UnixStream" | "UnixDatagram" => "Ipc",
+        "SystemClock" | "MonotonicClock" => "Clock",
+        _ => return None,
+    })
+}

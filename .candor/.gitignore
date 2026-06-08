@@ -7,4 +7,5 @@
 !baseline.candor-version
 !baseline.candor.Cdylib.json
 !baseline.candor_report.Rlib.json
+!baseline.candor_classify.Rlib.json
 !baseline.build_script_build.Executable.json

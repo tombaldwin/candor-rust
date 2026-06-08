@@ -22,12 +22,20 @@ def main():
 
     entries = {}
     for f in glob.glob(d + "/r.*.*.json"):
+        # The lint writes report sidecars next to the report (e.g. `<crate>.<kind>.callgraph.json`)
+        # that this naive glob also matches but which are NOT effect reports; skip them.
+        if f.endswith(".callgraph.json"):
+            continue
         try:
             doc = json.load(open(f))
         except Exception:
             continue
         arr = doc.get("functions", doc) if isinstance(doc, dict) else doc
+        if not isinstance(arr, list):  # not a report shape (e.g. a sidecar dict) — skip defensively
+            continue
         for e in arr:
+            if not isinstance(e, dict):
+                continue
             leaf = e.get("fn", "").split("::")[-1]
             entries[leaf] = e.get("inferred", [])
 
