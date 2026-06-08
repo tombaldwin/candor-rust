@@ -2,3 +2,7 @@
 /sample/target
 /sample-capstd/target
 __pycache__/
+# candor's own analysis output (cargo candor / candor-scan write here)
+.candor/report.*
+.candor/*.scan.json
+.candor/*.callgraph.json
