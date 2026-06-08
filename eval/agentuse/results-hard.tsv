@@ -1,0 +1,21 @@
+trial	recall	missed	missed_rs	rs_broken	place_ok	used_candor	calls
+control-01	0.938	1	0	0	1	0	-
+control-02	0.938	1	0	0	1	0	-
+control-03	0.938	1	0	0	1	0	-
+control-04	0.938	1	0	0	1	0	-
+control-05	0.938	1	0	0	1	0	-
+control-06	0.938	1	0	0	1	0	-
+control-07	0.938	1	0	0	1	0	-
+control-08	0.938	1	0	0	1	0	-
+control-09	0.938	1	0	0	1	0	-
+control-10	0.938	1	0	0	1	0	-
+treatment-01	1.0	0	0	0	1	1	audit;callers apply_tax;callers line_total;callers priced;audit
+treatment-02	1.0	0	0	0	1	1	audit;callers apply_tax;map
+treatment-03	1.0	0	0	0	1	1	audit;callers tax::apply_tax;callers invoice::line_total;audit
+treatment-04	1.0	0	0	0	1	1	audit;callers apply_tax
+treatment-05	1.0	0	0	0	1	1	audit;callers tax::apply_tax
+treatment-06	1.0	0	0	0	1	1	audit;callers tax::apply_tax;callers invoice::line_total;audit
+treatment-07	1.0	0	0	0	1	1	audit;callers apply_tax
+treatment-08	1.0	0	0	0	1	1	audit;callers apply_tax
+treatment-09	0.938	1	0	0	1	1	audit;audit;audit --all
+treatment-10	1.0	0	0	0	1	1	audit;callers tax::apply_tax
