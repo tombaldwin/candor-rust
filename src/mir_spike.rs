@@ -98,6 +98,30 @@ fn facts_for(tcx: TyCtxt<'_>, did: LocalDefId) -> FnFacts {
     }
 }
 
+/// A standard-library OWNING container — one that drops its element type(s) via heap-indirected drop
+/// glue (so the element is hidden behind a raw pointer in its fields). Curated by name + crate (alloc /
+/// std / core), so a user type that merely shares a name isn't matched. `Rc`/`Arc` only drop on the
+/// last reference, but candor over-approximates (the drop CAN run), which is the sound direction.
+fn is_std_owning_container(tcx: TyCtxt<'_>, did: rustc_hir::def_id::DefId) -> bool {
+    if !matches!(tcx.crate_name(did.krate).as_str(), "alloc" | "std" | "core") {
+        return false;
+    }
+    matches!(
+        tcx.item_name(did).as_str(),
+        "Box"
+            | "Vec"
+            | "VecDeque"
+            | "Rc"
+            | "Arc"
+            | "BTreeMap"
+            | "BTreeSet"
+            | "HashMap"
+            | "HashSet"
+            | "LinkedList"
+            | "BinaryHeap"
+    )
+}
+
 /// Collect the LOCAL `Drop::drop` impls reachable when a value of `ty` is dropped: the type's own
 /// destructor, plus (transitively) those of its fields / elements that run via drop glue. References
 /// and raw pointers don't drop their pointee, so they're not followed. `seen` guards recursive types.
@@ -119,6 +143,18 @@ fn local_drop_impls<'tcx>(
             }
             for field in adt.all_fields() {
                 local_drop_impls(tcx, field.ty(tcx, args), out, seen);
+            }
+            // A std OWNING container (Box/Vec/Rc/Arc/HashMap/…) holds its element behind a heap pointer,
+            // so field-recursion stops at the raw pointer — yet dropping the container DOES drop the
+            // element (Rc/Arc: when the last ref goes — conservatively assume it can). Follow the type
+            // arguments for these curated types so a `Vec<Guard>` / `Box<Guard>` whose `Guard` has an
+            // effectful Drop is still caught. `seen` bounds recursion on cyclic types.
+            if is_std_owning_container(tcx, adt.did()) {
+                for arg in args.iter() {
+                    if let Some(t) = arg.as_type() {
+                        local_drop_impls(tcx, t, out, seen);
+                    }
+                }
             }
         }
         TyKind::Tuple(tys) => {

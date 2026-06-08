@@ -100,6 +100,13 @@ jobs:
       - name: Soundness fuzzer (cross-crate)
         run: bash soundness/run_cross.sh 40
 
+      # Drop variant: thread the effect through a `Guard`'s `Drop` and wrap the guard in random
+      # container forms (direct / field / tuple / array / Option / Box / Vec / Rc / Arc / HashMap /
+      # nested). Gates the implicit-Drop edge handling the Bet 4 spike added — including the heap
+      # owning-container cases (Vec<Guard>/Box<Guard>) that field-recursion alone would miss.
+      - name: Soundness fuzzer (drop)
+        run: bash soundness/run_drop.sh 40
+
       # Dynamic oracle (phase 2): RUN each generated program under strace and assert candor's static
       # prediction over-approximates the effects the kernel actually observed — ground truth that
       # trusts nothing about how the crate was generated. Catches a program that demonstrably performs

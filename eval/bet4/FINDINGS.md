@@ -64,5 +64,15 @@ cost and validates "marginal beats rewrite." **That fix is implemented alongside
 integration test, §9c): `via_drop` now correctly inherits `Net`, while a pure function gains nothing.
 Reverting it re-opens the hole — teeth, same as the rest of the harness.
 
+**Follow-up (hardening the fix).** `drop_edges` first resolved only value-embedded drops (the dropped
+type's own `Drop` impl plus its struct/tuple/array/enum fields), which *silently missed* a guard behind
+a heap pointer — `Vec<Guard>` / `Box<Guard>` came back pure. That was itself a trust-contract hole, so
+it's closed: `local_drop_impls` now also follows the curated std OWNING containers (Box/Vec/Rc/Arc/
+HashMap/…) into their element types. And the whole thing is now a CI **gate**, not a single example: a
+Drop-soundness fuzzer (`soundness/gen_drop.py` + `run_drop.sh`, 40 seeds/push) threads the effect
+through a `Guard`'s `Drop` and wraps it in random container forms, asserting every dropping function
+inherits the effect — teeth-verified (feed `drop_edges` an empty edge list and all forms fail
+`(pure/omitted)`).
+
 If a rewrite is ever revisited, do it for *real interprocedural taint* (where MIR's dataflow is the
 genuine enabler), not for call-form soundness — that battle is already won and fenced by the fuzzer.
