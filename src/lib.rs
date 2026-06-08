@@ -790,15 +790,6 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
         },
         // OVERLOADED OPERATORS desugar to a trait-method call but are NOT `Call`/`MethodCall` nodes:
         // `a + b` is `Binary`, `-a` / `*p` is `Unary`, `a[i]` is `Index`, `a += b` is `AssignOp`. typeck
-        // records the resolved trait method (`Add::add`, `Index::index`, `Deref::deref`, …) on the
-        // operator expr's OWN hir_id — but ONLY when it's overloaded (a user/std impl); a builtin op on
-        // primitives (`1 + 2`, `arr[i]` on a slice) has no `type_dependent_def_id`, so `None` = no call.
-        // Without this, an effectful `impl Add`/`Index`/`Deref` reached through operator sugar was
-        // invisible to the call graph — the caller looked pure though the impl performs I/O. A silent
-        // under-report; teeth: soundness/gen.py `op_add`/`index`/`deref` forms. Operator dispatch is
-        // static (the impl is selected by the operand types), never `dyn`, so `dynamic: false`.
-        // OVERLOADED OPERATORS desugar to a trait-method call but are NOT `Call`/`MethodCall` nodes:
-        // `a + b` is `Binary`, `-a` / `*p` is `Unary`, `a[i]` is `Index`, `a += b` is `AssignOp`. typeck
         // records the resolved TRAIT method (`core::ops::Add::add`, `Index::index`, `Deref::deref`, …)
         // on the operator expr's own hir_id — but ONLY when it's overloaded (a user/std impl); a builtin
         // op on primitives (`1 + 2`, slice `arr[i]`) has no `type_dependent_def_id`, so `None` = no call.
@@ -1094,6 +1085,15 @@ fn fs_path_covered(a: &str, r: &str) -> bool {
     if r.split(['/', '\\']).any(|c| c == "..") {
         return false;
     }
+    // An ABSOLUTE allow covers only absolute reached paths, and a relative allow only relative ones.
+    // Without this, `norm` (which drops the leading empty component of a `/`-rooted path) would let a
+    // relative entry `etc/app` cover the absolute `/etc/app` (they point at different filesystem
+    // locations — a relative path resolves against CWD), over-permitting the allowlist and suppressing
+    // an AS-EFF-008 violation. `/` and `\\` mark an absolute root; a leading `.`/bare name is relative.
+    let absolute = |s: &str| s.starts_with('/') || s.starts_with('\\');
+    if absolute(a) != absolute(r) {
+        return false;
+    }
     let norm = |s: &str| -> Vec<String> {
         s.split(['/', '\\'])
             .filter(|c| !c.is_empty() && *c != ".")
@@ -1101,7 +1101,7 @@ fn fs_path_covered(a: &str, r: &str) -> bool {
             .collect()
     };
     let (ac, rc) = (norm(a), norm(r));
-    // An empty allow ("/", ".") covers everything; otherwise `a`'s components must lead `r`'s.
+    // An empty allow ("/", ".") covers everything AT ITS ROOTEDNESS; otherwise `a`'s components lead `r`'s.
     ac.len() <= rc.len() && ac.iter().zip(&rc).all(|(x, y)| x == y)
 }
 
@@ -2787,6 +2787,13 @@ mod tests {
         assert!(!fs_path_covered("/etc/app", "/etc/app/../passwd"));
         // a root/empty allow covers everything.
         assert!(fs_path_covered("/", "/etc/app/x"));
+        // absolute vs relative must NOT be conflated (norm drops the leading empty component): a
+        // relative allow does not cover an absolute reached path, nor the reverse — they're different
+        // filesystem locations (a relative path resolves against CWD).
+        assert!(!fs_path_covered("etc/app", "/etc/app/cfg"));
+        assert!(!fs_path_covered("/etc/app", "etc/app/cfg"));
+        // …but matched rootedness still covers.
+        assert!(fs_path_covered("etc/app", "etc/app/cfg"));
         // wired through literal_allowed for Fs.
         let allow: BTreeSet<String> = ["/etc/app".to_string()].into_iter().collect();
         assert!(literal_allowed("Fs", "/etc/app/cfg", &allow));

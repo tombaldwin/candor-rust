@@ -247,8 +247,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             syn::Expr::Path(p) => {
                 // A local bound to a closure — `let f = |..| ..` — has its body walked LEXICALLY by this
                 // same visitor, so `f()` adds nothing and is NOT a blind spot. (Skip recording it as a
-                // phantom call to a free fn `f`, too.) Any other path is a normal call.
-                if !p.path.get_ident().is_some_and(|id| self.closure_vars.contains(&id.to_string())) {
+                // phantom call to a free fn `f`, too.) Any other path is a normal call. The
+                // `!is_empty()` short-circuit avoids allocating the ident String on the common path
+                // (most fns define no closures, so the set is empty).
+                let is_closure_call = !self.closure_vars.is_empty()
+                    && p.path.get_ident().is_some_and(|id| self.closure_vars.contains(&id.to_string()));
+                if !is_closure_call {
                     let path = expand(&path_to_string(&p.path), self.uses);
                     let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
                     self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false });
@@ -299,8 +303,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if matches!(&*init.expr, syn::Expr::Closure(_)) {
                     // `let f = |..| ..` — remember `f` so a later `f()` is seen as a closure call.
                     self.closure_vars.insert(id.ident.to_string());
-                } else if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
-                    self.vars.insert(id.ident.to_string(), ty);
+                } else {
+                    // Rebinding the name to a NON-closure (a fn-pointer, a value) — drop any stale
+                    // closure marking so a later `f()` isn't wrongly treated as a visible closure.
+                    self.closure_vars.remove(&id.ident.to_string());
+                    if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
+                        self.vars.insert(id.ident.to_string(), ty);
+                    }
                 }
             }
         }
