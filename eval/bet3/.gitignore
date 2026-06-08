@@ -1,3 +1,4 @@
-host-allowlist/target/
-host-allowlist/**/target/
-host-allowlist/r.*.json
+**/target/
+r.*.json
+**/r.*.json
+.candor.out

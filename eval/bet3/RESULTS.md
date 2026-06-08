@@ -7,18 +7,21 @@ scale**, where the offending code lives in a different crate the editor never op
 
 ## What shipped
 
-**1. Host-allowlist enforcement (AS-EFF-008).** A new policy directive:
+**1. Literal-allowlist enforcement (AS-EFF-008).** A new policy directive, over the three effects that
+carry a literal surface:
 
 ```
-allow Net [in <scope>] <host>...
+allow Net  [in <scope>] <host>...     # billing may only talk to Stripe
+allow Exec [in <scope>] <cmd>...      # build may only run git
+allow Fs   [in <scope>] <path>...     # config may only read /etc/app
 ```
 
-"In `<scope>`, `Net` may reach ONLY these hosts." A function in scope that reaches any other endpoint
-is flagged; so is one whose endpoint candor can't see at all (a fully dynamic host). It is checked
-against **transitive** hosts — the literal endpoint can be buried any number of calls deep. This is
-the supply-chain boundary a model structurally cannot self-check: editing `billing`, it has no way to
-know which host a helper three frames down actually `connect`s to. candor already tracked transitive
-Net hosts; Bet 3 turns that telemetry into an enforced boundary.
+"In `<scope>`, that effect may reach ONLY these values." A function in scope that reaches any other —
+or whose value candor can't see at all (a fully dynamic one) — is flagged. Checked against the
+**transitive** literal surface, matched per effect (host by name, command by basename, path by prefix).
+This is the supply-chain boundary a model structurally cannot self-check: editing `billing`, it has no
+way to know which host a helper three frames down actually `connect`s to. candor already tracked
+transitive Net hosts; Bet 3 adds command/path tracking and turns all three into enforced boundaries.
 
 The semantics deliberately certify the **visible host surface**: a function that reaches a known,
 allowed host but also makes an `Unknown` call is *not* flagged by AS-EFF-008 (that residual risk is
@@ -35,10 +38,12 @@ forbid <A> -> <B>
 "A function in scope `A` must not transitively call into scope `B`" — *the domain layer must not reach
 into infra, even through a chain of helpers.* This is the one check that reads the **call graph**, not
 the effect lattice: a layer can be forbidden from *depending on* another even when neither performs an
-effect. Computed by reverse-reachability over the local call graph (within-crate layering — the common
-case; cross-crate dependency edges are a documented optional extension). Together the three rule kinds
-make `CANDOR_POLICY` a real architecture-as-code layer: `deny`/`pure` (*what* a layer does), `allow Net`
-(*which* endpoints), `forbid ->` (*who* it depends on).
+effect. Computed by reverse-reachability, seeded both from local `B`-functions' callers and from local
+functions that **directly call a sibling-crate `B`-function** — so `forbid app -> infra` catches a
+dependency on a whole sibling **crate** (`infra`), not just an intra-crate module. (A dependency
+laundered through a *third* crate — `A -> util -> B` — isn't followed; that needs `util`'s call graph.)
+Together the three rule kinds make `CANDOR_POLICY` a real architecture-as-code layer: `deny`/`pure`
+(*what* a layer does), `allow Net/Exec/Fs` (*which* values), `forbid ->` (*who* it depends on).
 
 **2. Cross-crate host propagation + workspace-scale enforcement.** Two gaps blocked enforcing any
 boundary across a workspace:
@@ -84,7 +89,9 @@ on the same cross-crate violation. This is the case a developer (or their agent)
   transitively through a helper, not the allowed-host path; §9b — AS-EFF-009 flags the forbidden
   cross-layer dependency reached transitively, not a sibling that doesn't reach it. (70/70 pass.)
 - Soundness harness: unchanged and green (20/20) — the enforcement additions don't touch inference.
-- End-to-end cross-crate + single-command teeth: `eval/bet3/verify.sh`.
+- End-to-end teeth (both in CI): `eval/bet3/verify.sh` (host allowlist cross-crate + single-command
+  gate) and `eval/bet3/verify-layering.sh` (cross-crate `forbid` catching a dependency on a sibling
+  crate, and not flagging a pure function).
 
 ## Why this is the right Bet 3
 
@@ -101,9 +108,8 @@ surface, can *block the PR*. That is the repositioning: from "help your agent un
   strongest where endpoints are literals (the common case for SDK calls).
 - AS-EFF-008 certifies the visible host surface only (see semantics above); pair it with `deny Unknown
   <scope>` if you also want to forbid unverifiable Net in a scope.
-- **Layering (AS-EFF-009) is within-crate**: it reasons over the local call graph, so a dependency that
-  routes *into and back out of* a sibling crate isn't followed. Within-crate layering is the common case
-  (layers are modules of one crate); cross-crate `forbid` is a documented future extension. (Effect and
-  host boundaries, by contrast, already span crates.)
-- Host/effect allowlists for non-`Net` effects (Fs path prefixes, Exec command names) need literal
-  tracking analogous to `hosts` and are the next extension — deliberately deferred, not implemented.
+- **Layering (AS-EFF-009) follows direct cross-crate dependencies** (`forbid app -> infra`, infra a
+  sibling crate) and transitive paths within the depending crate, but does **not** follow a dependency
+  *laundered through a third crate* (`A -> util -> B` where `util` is a separate crate): that needs
+  `util`'s call graph, which isn't loaded. The common cases (within-crate layers, and a crate depending
+  on another crate) are covered.

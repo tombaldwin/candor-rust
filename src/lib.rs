@@ -217,6 +217,11 @@ pub struct Candor {
     allow_rules: Vec<AllowRule>,
     /// CANDOR_POLICY: declared module-layering rules to enforce (AS-EFF-009). Parsed from the same file.
     layer_rules: Vec<LayerRule>,
+    /// Cross-crate layering hits: a local function that DIRECTLY calls a sibling-crate function whose
+    /// path matches some `forbid <A> -> <B>` rule's `to` scope. `caller -> [(rule index, callee path)]`.
+    /// Lets AS-EFF-009 catch a dependency on another crate (`forbid app -> infra` where `infra` is a
+    /// sibling crate), seeding the same reverse-reachability the within-crate case uses.
+    layer_cross_hits: HashMap<LocalDefId, Vec<(usize, String)>>,
     /// CANDOR_TAINT: flag effects whose argument derives from a function parameter (AS-EFF-007).
     taint: bool,
     /// Per-function effects performed on a parameter-derived (caller-controlled) argument.
@@ -301,6 +306,7 @@ impl Candor {
             policy,
             allow_rules,
             layer_rules,
+            layer_cross_hits: HashMap::new(),
             taint: std::env::var("CANDOR_TAINT").is_ok(),
             tainted: HashMap::new(),
         }
@@ -1939,18 +1945,38 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             {
                 self.tainted.entry(caller).or_default().insert(effect);
             }
-        } else if !def_id.is_local() && !self.cross.is_empty() {
+        } else if !def_id.is_local() {
             // Cross-crate: a call into one of THIS project's other crates (its lib, a sibling
-            // workspace member). Inherit the callee's already-transitive effects, looked up by its
-            // stable DefPathHash (matches whether the dependency emitted it locally or we see it
-            // externally). For a TRAIT-method call the callee `def_id` is the trait method, but the
-            // dependency keyed its report by the concrete IMPL method — so devirtualize to that
+            // workspace member). For a TRAIT-method call the callee `def_id` is the trait method, but
+            // the dependency keyed its report by the concrete IMPL method — so devirtualize to that
             // impl first (when the receiver is concrete), else the lookup would always miss.
             let key_did = devirtualize(cx, expr, def_id).unwrap_or(def_id);
+            // Layering across crates (AS-EFF-009): if the callee's path matches a `forbid -> B` target
+            // scope (e.g. B is a sibling crate name), the caller directly depends on B. Record it as a
+            // reachability seed. Computed from the callee PATH alone, so it works even with no sibling
+            // report loaded. (Collect first to avoid borrowing self mutably while iterating layer_rules.)
+            if !self.layer_rules.is_empty() {
+                let callee_path = cx.tcx.def_path_str(key_did);
+                let hits: Vec<(usize, String)> = self
+                    .layer_rules
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| scope_matches(&callee_path, &r.to))
+                    .map(|(ri, _)| (ri, callee_path.clone()))
+                    .collect();
+                if !hits.is_empty() {
+                    self.layer_cross_hits.entry(caller).or_default().extend(hits);
+                }
+            }
+            if self.cross.is_empty() {
+                return;
+            }
+            // Inherit the callee's already-transitive effects, looked up by its stable DefPathHash
+            // (matches whether the dependency emitted it locally or we see it externally), plus its
+            // literal detail (hosts / commands / paths) into the caller's direct sets, so within-crate
+            // propagation carries them up to every transitive caller — the allowlists then see a value
+            // that physically lives in another crate.
             let cross_key = dph(cx.tcx, key_did);
-            // Inherit the cross-crate callee's literal detail (hosts / commands / paths) into the
-            // caller's direct sets, so within-crate propagation carries them up to every transitive
-            // caller — the allowlists then see a value that physically lives in another crate.
             if let Some(hs) = self.cross_hosts.get(&cross_key) {
                 self.net_hosts_direct.entry(caller).or_default().extend(hs.iter().cloned());
             }
@@ -2146,8 +2172,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // AS-EFF-009 layering: precompute, per offending function, which forbidden layer it reaches.
         // A `forbid A -> B` rule is violated by any function in scope A that *transitively* calls into
         // scope B. We reverse-BFS from every function matching B over the LOCAL call graph and record
-        // each ancestor in scope A (with one reached B-target, for the message). Cross-crate dependency
-        // edges are not loaded — layering is within-crate (the common case; documented limitation).
+        // each ancestor in scope A (with one reached B-target, for the message). The seeds are local
+        // B-functions' callers AND any local function that DIRECTLY calls a sibling-crate B-function
+        // (`layer_cross_hits`), so a cross-crate dependency (`forbid app -> infra`, infra a sibling
+        // crate) is caught too. (A dependency laundered through a THIRD crate — A→util→B where util is
+        // a separate crate — is not followed: that needs util's call graph; documented limitation.)
         let mut layer_viol: HashMap<LocalDefId, Vec<(String, String)>> = HashMap::new();
         if !self.layer_rules.is_empty() {
             let name_of = |g: LocalDefId| cx.tcx.def_path_str(g.to_def_id());
@@ -2158,12 +2187,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     rev.entry(*c).or_default().push(*caller);
                 }
             }
-            for rule in &self.layer_rules {
+            for (ri, rule) in self.layer_rules.iter().enumerate() {
                 let targets: Vec<LocalDefId> =
                     eff.keys().copied().filter(|g| scope_matches(&name_of(*g), &rule.to)).collect();
-                if targets.is_empty() {
-                    continue;
-                }
                 let mut seen: HashSet<LocalDefId> = HashSet::new();
                 let mut stack: Vec<(LocalDefId, String)> = Vec::new();
                 for t in &targets {
@@ -2175,6 +2201,18 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             }
                         }
                     }
+                }
+                // cross-crate seeds: a local fn that directly calls a sibling fn matching scope B is
+                // itself a reaching node (flagged if it's in scope A, then its ancestors explored).
+                for (caller, hits) in &self.layer_cross_hits {
+                    for (hri, callee_name) in hits {
+                        if *hri == ri && seen.insert(*caller) {
+                            stack.push((*caller, callee_name.clone()));
+                        }
+                    }
+                }
+                if stack.is_empty() {
+                    continue;
                 }
                 while let Some((node, tgt)) = stack.pop() {
                     if scope_matches(&name_of(node), &rule.from) {

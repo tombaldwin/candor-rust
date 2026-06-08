@@ -1,0 +1,2 @@
+# Architecture-as-code: the domain layer must not depend on the infra CRATE — not even transitively.
+forbid domain -> infra

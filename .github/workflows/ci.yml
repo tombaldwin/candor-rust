@@ -60,6 +60,10 @@ jobs:
       - name: Host-allowlist cross-crate enforcement
         run: bash eval/bet3/verify.sh
 
+      # Cross-crate layering: AS-EFF-009 `forbid <A> -> <B>` catching a dependency on a SIBLING crate.
+      - name: Cross-crate layering enforcement
+        run: bash eval/bet3/verify-layering.sh
+
       # The Claude Code receipt is plain bash (no Rust test reaches it) and has shipped real
       # bugs (the sidecar/report glob collision). Guard its coverage/freshness/count logic.
       - name: Receipt logic tests (Claude Code integration)
