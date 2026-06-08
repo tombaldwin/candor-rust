@@ -1,0 +1,17 @@
+trial	arm	blast_recall	missed_health_probe	pricing_pure	used_candor	decision
+control-01	control	0.833	0	1	0	relocated: invoice::line
+control-02	control	0.833	0	1	0	relocated: invoice::line
+control-03	control	0.833	0	1	0	relocated: invoice::line
+control-04	control	0.833	0	1	0	relocated: invoice::line
+control-05	control	0.833	0	1	0	relocated: invoice::line
+control-06	control	0.833	0	1	0	relocated: invoice::line
+control-07	control	0.833	0	1	0	relocated: invoice::line
+control-08	control	0.833	0	1	0	relocated: invoice::line
+treatment-01	treatment	1.000	0	1	1	relocated: invoice::line
+treatment-02	treatment	1.000	0	1	1	relocated: invoice::line
+treatment-03	treatment	1.000	0	1	1	relocated: invoice::line
+treatment-04	treatment	1.000	0	1	1	relocated: invoice::line
+treatment-05	treatment	1.000	0	1	1	relocated: invoice::line
+treatment-06	treatment	1.000	0	1	1	relocated: invoice::line
+treatment-07	treatment	1.000	0	1	1	relocated: invoice::line
+treatment-08	treatment	1.000	0	1	1	relocated: invoice::line

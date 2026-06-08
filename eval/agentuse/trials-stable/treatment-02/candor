@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# candor — project effect-analysis tool. (Instrumented: logs each call, forces the STABLE backend.)
+echo "$(date +%s)|$*" >> "$(cd "$(dirname "$0")" && pwd)/.candor-usage.log"
+exec env CANDOR_BACKEND=scan bash /Users/tom/git/candor/cargo-candor "$@"
