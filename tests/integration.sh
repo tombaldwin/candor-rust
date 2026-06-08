@@ -248,6 +248,19 @@ want   "the effectful Drop propagates to the dropping fn (via_drop gains Net)" "
 absent "a genuinely pure fn is NOT given a phantom effect (pure_fn)"           "$out" '`pure_fn` effects'
 rm -rf "$(dirname "$DR")"
 
+# ── 9d. Layering with a CRATE-NAME from-scope (the real-world fix: not a silent no-op) ──
+echo "== layering crate-name from-scope (AS-EFF-009) =="
+LC=$(mktemp -d)/lc; mkdir -p "$LC/src"
+printf '[package]\nname="appcrate"\nversion="0.1.0"\nedition="2021"\n' > "$LC/Cargo.toml"
+# `worker` reaches the `infra` module. The from-scope is the CRATE name `appcrate` — which a crate's own
+# functions DON'T carry in def_path_str, so without the crate-prefix fix this rule would match nothing.
+printf 'mod infra { pub fn save(){ let _=std::fs::write("/tmp/x",""); } }\nfn worker(){ infra::save(); }\nfn helper()->u32{ 1 }\nfn main(){ worker(); let _=helper(); }\n' > "$LC/src/main.rs"
+echo "forbid appcrate -> infra" > "$LC/policy"
+out=$(dl "$LC" env CANDOR_POLICY="$LC/policy")
+want   "crate-name from-scope matches the crate's own fns (worker flagged)" "$out" '[AS-EFF-009] `worker`'
+absent "a fn that doesn't reach infra is not flagged (helper)"              "$out" '[AS-EFF-009] `helper`'
+rm -rf "$(dirname "$LC")"
+
 # ── 10. Taint heuristic: an effect on caller-derived input (AS-EFF-007, P0′ §7) ──
 echo "== taint heuristic / AS-EFF-007 (CANDOR_TAINT) =="
 TZ=$(mktemp -d)/tz; mkdir -p "$TZ/src"

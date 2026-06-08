@@ -2247,7 +2247,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // (for the diagnostic); only the scope set participates in propagation.
         let mut layer_viol: HashMap<LocalDefId, Vec<(String, String)>> = HashMap::new();
         if !self.layer_rules.is_empty() {
-            let name_of = |g: LocalDefId| cx.tcx.def_path_str(g.to_def_id());
+            // Scope-match against the CRATE-PREFIXED path (`<crate>::<path>`), because a crate's own
+            // functions' `def_path_str` omits the crate name — so a `from`/`to` scope spelled as the
+            // crate name would otherwise match nothing (a silent no-op). Module/type-name scopes still
+            // match (the segment is present either way). Cross-crate callee paths already carry the
+            // crate, so those (in `cross_callees`) are matched as-is, not through `name_of`.
+            let name_of = |g: LocalDefId| format!("{krate}::{}", cx.tcx.def_path_str(g.to_def_id()));
             let tos: BTreeSet<&str> = self.layer_rules.iter().map(|r| r.to.as_str()).collect();
             // Seed: scopes each function reaches via a DIRECT callee (local path match, cross path match,
             // or cross callee's sidecar reach). Track an example path per (fn, scope) for the message.
@@ -2330,6 +2335,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
             let effs = &eff[&f];
             let name = cx.tcx.def_path_str(f.to_def_id());
+            // Crate-prefixed form for policy scope matching (so a crate-name scope isn't a silent
+            // no-op — see the layering note above). `name` itself stays unprefixed for display.
+            let scope_name = format!("{krate}::{name}");
             let declared = declared_caps(cx.tcx, f);
             let direct = self.direct.get(&f).cloned().unwrap_or_default();
             let has_unknown = effs.contains(UNKNOWN);
@@ -2498,7 +2506,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // putting I/O in a layer that's meant to be pure, which it can't see from a local edit.
             for rule in &self.policy {
                 if let Some(scope) = &rule.scope {
-                    if !scope_matches(&name, scope) {
+                    if !scope_matches(&scope_name, scope) {
                         continue;
                     }
                 }
@@ -2546,7 +2554,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // only runs git" / "config only reads /etc/app" boundary a local edit can't verify.
             for rule in &self.allow_rules {
                 if let Some(scope) = &rule.scope {
-                    if !scope_matches(&name, scope) {
+                    if !scope_matches(&scope_name, scope) {
                         continue;
                     }
                 }
