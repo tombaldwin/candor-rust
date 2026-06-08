@@ -113,11 +113,18 @@ cargo candor scan      # STABLE: a syntactic scan on stock `cargo` — no nightl
 cargo candor audit     # NIGHTLY lint: the full rustc-backed analysis with the soundness contract
 ```
 
-`cargo candor scan` is the friction-killer. It walks the crate's `.rs` files, parses them with
-[`syn`](https://docs.rs/syn), resolves `use`-aliased call paths, and classifies them through the **same
-[`candor-classify`](crates/candor-classify) the lint uses** — one source of truth, so the two backends
-can't drift on what counts as an effect. It needs nothing but a stable toolchain, so it runs anywhere
-`cargo` does (CI without a nightly, `cargo install`, a locked-down box).
+The stable scanner is the friction-killer, and it's a **one-line install** — no clone, no nightly:
+
+```sh
+cargo install candor-scan          # https://crates.io/crates/candor-scan
+candor-scan .                      # writes .candor/report.<crate>.scan.json   (or --json to stdout)
+```
+
+It walks the crate's `.rs` files, parses them with [`syn`](https://docs.rs/syn), resolves `use`-aliased
+call paths, and classifies them through the **same [`candor-classify`](crates/candor-classify) the lint
+uses** — one source of truth, so the two backends can't drift on what counts as an effect. It needs
+nothing but a stable toolchain, so it runs anywhere `cargo` does (CI without a nightly, a locked-down
+box). Within a full candor install it's also `cargo candor scan`.
 
 **Stable by default — you don't pick the backend.** The read-only queries (`show`/`where`/`callers`/`map`/
 `audit`) and the [Claude Code receipt](integrations/claude-code/) prefer the nightly lint when it's

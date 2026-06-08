@@ -1,5 +1,8 @@
 # Publishing the stable crates to crates.io
 
+**Status: `candor-report` / `candor-classify` / `candor-scan` v0.3.0 are published.**
+`cargo install candor-scan` works. The steps below are the runbook for future releases.
+
 Goal: make the zero-install path a one-liner — `cargo install candor-scan`. Three crates publish (all
 stable, no `rustc_private`); the root `candor` lint stays `publish = false` (it needs the pinned nightly
 + `rustc-dev` to build, so it can't live on crates.io as an installable).
