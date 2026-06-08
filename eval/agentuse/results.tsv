@@ -1,0 +1,21 @@
+trial	compiles	blast_recall	missed_hp	dir_err	pricing_pure	used_candor	candor_calls
+control-01	1	1.0	0	0	1	0	-
+control-02	1	1.0	0	0	1	0	-
+control-03	1	0.833	0	0	1	0	-
+control-04	1	0.833	0	0	1	0	-
+control-05	1	1.0	0	0	1	0	-
+control-06	1	0.833	0	0	1	0	-
+control-07	1	0.833	0	0	1	0	-
+control-08	1	0.833	0	0	1	0	-
+control-09	1	0.833	0	0	1	0	-
+control-10	1	0.833	0	0	1	0	-
+treatment-01	1	0.833	0	0	1	1	callers compute_price;audit;map
+treatment-02	1	0.833	0	0	1	1	audit;callers pricing::compute_price;map
+treatment-03	1	0.833	0	0	1	1	audit;callers compute_price;map
+treatment-04	1	1.0	0	0	1	1	audit;callers pricing::compute_price
+treatment-05	1	1.0	0	0	1	1	audit;callers compute_price;map
+treatment-06	1	0.833	0	0	1	1	audit;callers pricing::compute_price
+treatment-07	1	1.0	0	0	1	1	audit;callers pricing::compute_price;map
+treatment-08	1	0.833	0	0	1	1	audit;callers pricing::compute_price
+treatment-09	1	0.833	0	0	1	1	audit;callers compute_price
+treatment-10	1	0.833	0	0	1	1	callers compute_price;audit
