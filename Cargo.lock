@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "candor-scan"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "candor-classify",
  "candor-report",
