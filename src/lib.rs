@@ -687,16 +687,18 @@ fn load_layer_reach(prefix: &str) -> HashMap<(u64, u64), BTreeSet<String>> {
 }
 
 
-/// Load a baseline candor JSON into `fn name -> inferred effect set`.
+/// Load a baseline candor JSON into `fn name -> inferred effect set`. Same-named entries (e.g. `main`
+/// across an rlib+bin, or distinct monomorphizations sharing a path) are UNIONed, not last-write-wins:
+/// the baseline is the over-approximation of what a name was already permitted to reach, so dropping
+/// any colliding entry's effects would let a gained effect slip past the guard unflagged.
 fn load_baseline(path: &str) -> Option<HashMap<String, BTreeSet<String>>> {
     let text = std::fs::read_to_string(path).ok()?;
     let entries = report_entries(&text)?;
-    Some(
-        entries
-            .into_iter()
-            .map(|e| (e.func, e.inferred.into_iter().collect()))
-            .collect(),
-    )
+    let mut out: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for e in entries {
+        out.entry(e.func).or_default().extend(e.inferred);
+    }
+    Some(out)
 }
 
 
@@ -941,14 +943,35 @@ fn cmd_base(c: &str) -> &str {
     c.rsplit(['/', '\\']).next().unwrap_or(c)
 }
 
+/// Whether an allowed dir `a` covers the reached path `r` — at a *path boundary*, not a raw string
+/// prefix. `allow … /etc/app` must cover `/etc/app` and `/etc/app/cfg`, but NOT `/etc/apppwned`
+/// (a sibling that merely shares a textual prefix). We compare component-wise: every component of `a`
+/// must be a prefix-run of `r`'s components. A `..` in the reached path is never covered (it can climb
+/// out of the allowed dir), so paths containing `..` are rejected outright.
+fn fs_path_covered(a: &str, r: &str) -> bool {
+    if r.split(['/', '\\']).any(|c| c == "..") {
+        return false;
+    }
+    let norm = |s: &str| -> Vec<String> {
+        s.split(['/', '\\'])
+            .filter(|c| !c.is_empty() && *c != ".")
+            .map(|c| c.to_string())
+            .collect()
+    };
+    let (ac, rc) = (norm(a), norm(r));
+    // An empty allow ("/", ".") covers everything; otherwise `a`'s components must lead `r`'s.
+    ac.len() <= rc.len() && ac.iter().zip(&rc).all(|(x, y)| x == y)
+}
+
 /// Whether a *reached* literal is covered by an allowlist, with effect-appropriate matching: `Net`
 /// hosts match by hostname (port-insensitive); `Exec` commands match by basename; `Fs` paths match by
-/// path-prefix (an allowed directory covers everything beneath it). Unknown effects: exact match.
+/// path-prefix at a component boundary (an allowed directory covers everything beneath it, but not a
+/// sibling sharing a textual prefix). Unknown effects: exact match.
 fn literal_allowed(effect: &str, reached: &str, allow: &BTreeSet<String>) -> bool {
     match effect {
         "Net" => allow.iter().any(|a| host_part(a) == host_part(reached)),
         "Exec" => allow.iter().any(|a| cmd_base(a) == cmd_base(reached)),
-        "Fs" => allow.iter().any(|a| reached == a || reached.starts_with(a.as_str())),
+        "Fs" => allow.iter().any(|a| fs_path_covered(a, reached)),
         _ => allow.contains(reached),
     }
 }
@@ -1695,6 +1718,17 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             || !self.layer_rules.is_empty()
             || self.taint;
 
+        // CANDOR_JSON takes the report path below and `continue`s past every enforcement gate, so an
+        // enforcement var set ALONGSIDE it is silently a no-op — a CI step that means to fail on a
+        // violation would pass green. Make that loud instead of letting it pass unnoticed.
+        if json_path.is_some() && any_enforce {
+            eprintln!(
+                "candor: CANDOR_JSON is set, so this run only WRITES a report — enforcement \
+                 (CANDOR_STRICT/POLICY/BASELINE/NO_AMBIENT/taint) is NOT applied. Run the enforcing \
+                 mode WITHOUT CANDOR_JSON to actually gate."
+            );
+        }
+
         // Stable ordering for reproducible output.
         let mut items: Vec<LocalDefId> = eff.keys().copied().collect();
         items.sort_by_cached_key(|f| cx.tcx.def_path_str(f.to_def_id()));
@@ -2181,12 +2215,25 @@ fn in_scope(var: Option<&str>, name: &str) -> bool {
     }
 }
 
-/// A CANDOR_POLICY rule's scope (`deny Net domain`) matches a function when any path SEGMENT *starts
-/// with* the scope — so `domain` matches the `domain` module (`app::domain::f`) and a `domain_logic`
-/// fn, but NOT `app::subdomain::f` (the segment `subdomain` doesn't start with `domain`). Bare
-/// `contains` over-fired on any path that merely contained the scope text mid-word (the substring bug).
+/// A CANDOR_POLICY rule's scope matches a function path by SEGMENT, supporting MULTI-segment scopes:
+/// `deny Net domain` matches `app::domain::f` (and the `domain_logic` fn); `forbid api::handlers -> infra::db`
+/// matches a fn under `…::infra::db::…`. Intermediate scope segments must match a path segment EXACTLY
+/// (so `infra` does NOT match `infrastructure` — avoids the substring bug); the LAST scope segment may be
+/// a prefix (so `domain` matches the `domain_logic` fn). A single-segment scope is just the last-segment
+/// rule, preserving the old behavior. (Before: `name.split("::").any(|s| s.starts_with(scope))` — a single
+/// segment can never `starts_with` a `scope` containing `::`, so EVERY multi-segment rule was a silent
+/// no-op: a whole class of `forbid a::b -> c::d` / `allow Net in x::y …` rules never enforced.)
 fn scope_matches(name: &str, scope: &str) -> bool {
-    name.split("::").any(|seg| seg.starts_with(scope))
+    let segs: Vec<&str> = name.split("::").collect();
+    let parts: Vec<&str> = scope.split("::").collect();
+    if parts.is_empty() || parts.len() > segs.len() {
+        return false;
+    }
+    let (last, init) = parts.split_last().unwrap();
+    segs.windows(parts.len()).any(|w| {
+        let (w_last, w_init) = w.split_last().unwrap();
+        w_init == init && w_last.starts_with(last)
+    })
 }
 
 #[test]
@@ -2541,6 +2588,44 @@ mod tests {
         // the substring bug: `subdomain` (scope mid-word) must NOT match scope `domain`.
         assert!(!scope_matches("app::subdomain::handle", "domain"));
         assert!(!scope_matches("app::not_my_domain::f", "domain"));
+    }
+
+    #[test]
+    fn scope_matches_multi_segment() {
+        // A multi-segment scope (`a::b`) must match a contiguous run of segments, with the LAST
+        // segment allowed to prefix-match a fn name and INTERMEDIATE segments matched exactly.
+        assert!(scope_matches("crate::net::client::send", "net::client"));
+        assert!(scope_matches("crate::net::client", "net::client"));
+        assert!(scope_matches("crate::net::client_pool::get", "net::client")); // last seg prefix
+        // wrong intermediate segment: `net::server` must not satisfy scope `net::client`.
+        assert!(!scope_matches("crate::net::server::send", "net::client"));
+        // intermediates are NOT prefix-matched: `network::client` ≠ scope `net::client`.
+        assert!(!scope_matches("crate::network::client::send", "net::client"));
+        // segments must be CONTIGUOUS: `net::x::client` is not `net::client`.
+        assert!(!scope_matches("crate::net::x::client", "net::client"));
+        // a scope longer than the path can never match.
+        assert!(!scope_matches("net", "net::client"));
+    }
+
+    #[test]
+    fn fs_path_covered_respects_boundaries() {
+        // an allowed dir covers itself and anything beneath it…
+        assert!(fs_path_covered("/etc/app", "/etc/app"));
+        assert!(fs_path_covered("/etc/app", "/etc/app/cfg.toml"));
+        assert!(fs_path_covered("/etc/app/", "/etc/app/cfg")); // trailing slash on allow is fine
+        // …but NOT a sibling that merely shares a textual prefix (the old `starts_with` bug).
+        assert!(!fs_path_covered("/etc/app", "/etc/apppwned"));
+        assert!(!fs_path_covered("/etc/app", "/etc/application/x"));
+        // a deeper dir does not cover its parent.
+        assert!(!fs_path_covered("/etc/app/cfg", "/etc/app"));
+        // `..` in the reached path can climb out → never covered.
+        assert!(!fs_path_covered("/etc/app", "/etc/app/../passwd"));
+        // a root/empty allow covers everything.
+        assert!(fs_path_covered("/", "/etc/app/x"));
+        // wired through literal_allowed for Fs.
+        let allow: BTreeSet<String> = ["/etc/app".to_string()].into_iter().collect();
+        assert!(literal_allowed("Fs", "/etc/app/cfg", &allow));
+        assert!(!literal_allowed("Fs", "/etc/apppwned", &allow));
     }
 
     #[test]
