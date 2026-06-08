@@ -250,6 +250,12 @@ fn has_cfg(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("cfg"))
 }
 
+/// True if a file stem names a conventional `#[cfg(test)] mod` FILE module (`tests.rs`, `foo_tests.rs`,
+/// `foo_test.rs`) — whose test-ness is declared at the `mod` site, invisible when walking the file.
+fn is_test_file_stem(stem: &str) -> bool {
+    stem == "tests" || stem == "test" || stem.ends_with("_tests") || stem.ends_with("_test")
+}
+
 /// True if an item carries `#[cfg(test)]` (or `#[cfg(any(test, ...))]`) — a test-only module the
 /// default scan skips, since its effects describe the crate's TESTS, not the crate.
 fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
@@ -480,7 +486,17 @@ fn main() {
         if !p.is_file() || p.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        if p.components().any(|c| matches!(c.as_os_str().to_str(), Some("target") | Some(".git"))) {
+        // All path-shape filters run on the path RELATIVE to the scan root — an absolute prefix can itself
+        // contain `target`/`.cargo`/… (a vendored crate lives under `~/.cargo/registry/...`), which must
+        // not trip them.
+        let rel = p.strip_prefix(root).unwrap_or(p);
+        // target/ build artifacts; hidden dirs (`.git`, `.github`, `.cargo`, …) holding tooling/CI scripts,
+        // not library code (smol_str's `.github/ci.rs` otherwise reported a phantom `Exec`).
+        if rel.components().any(|c| {
+            c.as_os_str()
+                .to_str()
+                .is_some_and(|s| s == "target" || (s.starts_with('.') && s != "." && s != ".."))
+        }) {
             continue;
         }
         // The build script runs at COMPILE time (ring's build.rs execs nasm) — never the crate's runtime
@@ -491,11 +507,9 @@ fn main() {
         // Cargo's non-library compilation targets (tests/, benches/, examples/) — and the common nonstandard
         // singular `test/` tree (e.g. nix) — describe what the crate's HARNESS does (spawn a server, read
         // fixtures, seed RNG), not what the crate itself does. Scanning them conflates the two (redis's bench
-        // harness alone showed Exec/Net/Fs/Env/Rand on 200+ fns). A `#[cfg(test)] mod foo;` FILE module is
-        // also invisible here — its test-ness is declared at the `mod` site, not in foo.rs — so matching the
-        // directory name is the only syntactic signal we have. Skip by default; `--include-tests` keeps them.
+        // harness alone showed Exec/Net/Fs/Env/Rand on 200+ fns). Skip by default; `--include-tests` keeps them.
         if !include_tests
-            && p.components().any(|c| {
+            && rel.components().any(|c| {
                 matches!(
                     c.as_os_str().to_str(),
                     Some("tests") | Some("test") | Some("benches") | Some("examples")
@@ -504,9 +518,19 @@ fn main() {
         {
             continue;
         }
+        // A `#[cfg(test)] mod tests;` FILE module is invisible here — its test-ness is declared at the
+        // `mod` site, not in the file — so a `tests.rs` / `*_tests.rs` / `*_test.rs` file's effects (a
+        // seeded RNG, a temp file) would be mis-read as the crate's. By convention these stems are test
+        // modules; skip them by default. (base64's `engine/tests.rs` otherwise reported a phantom `Rand`.)
+        if !include_tests {
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                if is_test_file_stem(stem) {
+                    continue;
+                }
+            }
+        }
         let Ok(text) = std::fs::read_to_string(p) else { continue };
         let Ok(file) = syn::parse_file(&text) else { continue };
-        let rel = p.strip_prefix(root).unwrap_or(p);
         parsed.push((rel.to_string_lossy().into_owned(), file));
     }
 
@@ -864,6 +888,19 @@ mod tests {
         // and both classify as Net through the shared classifier
         assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::send"), Some("Net"));
         assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::execute"), Some("Net"));
+    }
+
+    #[test]
+    fn test_file_stems_are_recognised() {
+        assert!(is_test_file_stem("tests")); // src/foo/tests.rs
+        assert!(is_test_file_stem("test"));
+        assert!(is_test_file_stem("decoder_tests")); // base64's read/decoder_tests.rs
+        assert!(is_test_file_stem("engine_test"));
+        // legitimate non-test modules must NOT be excluded
+        assert!(!is_test_file_stem("latest")); // not `_test`-suffixed (no underscore boundary)
+        assert!(!is_test_file_stem("request"));
+        assert!(!is_test_file_stem("contest"));
+        assert!(!is_test_file_stem("lib"));
     }
 
     #[test]

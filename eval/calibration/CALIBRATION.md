@@ -1,4 +1,4 @@
-# candor-scan calibration on 35 real third-party crates
+# candor-scan calibration on real third-party crates (35 deep + 1294 wide)
 
 **What this is.** The stable scanner (`candor-scan`) is syntactic — it sees what's *written*, not what
 the compiler *resolves*. This is the first calibration of how accurate it actually is, run against
@@ -11,8 +11,9 @@ crypto, time, parsing, channels, logging). For each, the newest version on disk 
 [`sweep.py`](sweep.py). Raw output: [`results-notest.json`](results-notest.json). 2 crates (ureq, zip)
 weren't on disk.
 
-This run **drove six fixes** (four scanner, two classifier); the numbers here are post-fix. The last —
-receiver-type inference for method dispatch — is written up in its own section below.
+This work **drove eight fixes** (six scanner, two classifier); the numbers here are post-fix. The
+method-dispatch one (receiver-type inference) and the two found by the 1294-crate wide sweep are
+written up in their own sections below.
 
 > **Update (FFI tiers + macros).** After the libc table below, two more C-library tables were added —
 > **libsqlite3** (rusqlite) and **libgit2** (git2) — matched by the distinctive C leaf name
@@ -155,10 +156,47 @@ Without inference all three effectful functions report **nothing** — the exact
 agent eval ([EVAL.md](../../EVAL.md)) measured. This is the frontier moving: not full type resolution,
 but the reliable local slice of it, kept honest by excluding the cases where a coarse rule would lie.
 
+## Wide sweep — all 1294 vendored crates
+
+To harden the above beyond a hand-picked 35, the scanner was run over **every crate vendored on disk**
+(`~/.cargo/registry`, newest version each) — 1294 crates. Without hand labels, two signals are still
+automatable and decisive ([`widesweep.py`](widesweep.py), [`wide_analyze.py`](wide_analyze.py)):
+
+- **False positives on a curated-pure set** (76 crates: encoders, data structures, text/parse, hashing,
+  math, token manipulation — `itoa`/`base64`/`smallvec`/`memchr`/`sha2`/`serde`/`syn`/…). Any effect on
+  these is a misclassification.
+- **Explosion detection** — effectful functions per direct source. A high ratio means one effect is
+  smearing across the graph (an over-connection bug) or genuinely pervasive.
+
+Results:
+
+- **Robustness: 0 crashes / parse errors across 1294 crates.** The scanner handles the real ecosystem.
+- **Coverage: 394 crates (30%) report ≥1 effect, 900 report none.** Per-effect crate counts: Fs 206,
+  Env 180, Clock 97, Rand 76, Exec 59, Net 49, Ipc 26, Log 14, Db 4.
+- The sweep **found two real bugs**, both now fixed:
+  - **`base64 → Rand`** — its `src/engine/tests.rs` / `decoder_tests.rs` are `#[cfg(test)] mod` FILE
+    modules; their test-ness is declared at the `mod` site, invisible when walking the file. Fix: skip
+    `tests.rs` / `*_tests.rs` / `*_test.rs` stems (the file analogue of the `tests/`-dir rule).
+  - **`smol_str → Exec`** — from `.github/ci.rs`, a CI script. Fix: skip hidden dirs (`.git`, `.github`,
+    `.cargo`, …), not just `.git`. (Both filters run on the root-relative path — an absolute prefix like
+    `~/.cargo/...` must not trip them.)
+- **After the fixes: zero false positives across all 76 pure crates.**
+- The remaining explosion outliers were each **verified real, not misclassification**: `gix` (gitoxide —
+  a pure-Rust git impl, genuinely Fs-pervasive: `write_file`/`load_config`/`worktree_file_to_object`);
+  `aws-sdk-*` (`Rand` from `IdempotencyTokenProvider::random`, which every operation calls — real, though
+  it dwarfs the SDK's actual `Net`, hidden behind smithy/hyper method dispatch); `arboard` (real X11
+  backend reading `$DISPLAY`). `der` was removed from the pure list — it genuinely has
+  `Document::read_der_file`/`write_der_file`.
+
+Net: across 1294 real crates the scanner crashes on none, fabricates effects on none of the 76 pure
+ones, and its only large counts are genuinely effect-heavy crates. The honest-under-report contract
+holds at ecosystem scale.
+
 ## Takeaways for the project
 
-1. **The classifier is sound on what it sees.** Across 35 real crates, every library-code effect the
-   scanner reported was real. It under-claims; it does not over-claim. That's the right direction for a
+1. **The classifier is sound on what it sees.** Across 35 real crates — and 1294 in the wide sweep —
+   every library-code effect the scanner reported was real. It under-claims; it does not over-claim.
+   That's the right direction for a
    trust tool — and it validates the curated-allowlist classifier on code it was never tuned against.
 2. **The biggest accuracy lever found here was non-code, not classification** — excluding test/build
    noise. Shipped.
