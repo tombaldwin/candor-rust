@@ -25,7 +25,7 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 47] = [
+pub const CALIBRATED_CRATES: [&str; 48] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
@@ -42,8 +42,9 @@ pub const CALIBRATED_CRATES: [&str; 47] = [
     "chrono", "time", "tracing", "log", "arboard",
     // compiler diagnostic emission (a dylint lint's output) — see the Log rules in classify
     "rustc_lint", "rustc_errors",
-    // raw syscalls via FFI — the syscall-name table that lights up the FFI-thin tier (nix etc.)
-    "libc",
+    // raw syscalls via FFI — the syscall-name table that lights up the FFI-thin tier (nix is routed
+    // through the same table by leaf name, so a consumer of nix is covered without nix's own source)
+    "libc", "nix",
 ];
 
 pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
@@ -108,7 +109,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // socket, or pipe — so a fixed label would mis-categorise as often as it helps. An honest
     // no-classify (under-report) beats emitting the WRONG effect. Pure conversions (htons/inet_pton/
     // gmtime) are also skipped.
-    if crate_name == "libc" {
+    //
+    // `nix` (the idiomatic SAFE libc wrapper, in ~every Rust systems/CLI crate) is routed through the
+    // SAME table: its functions keep the syscall leaf name (`nix::fcntl::open`, `nix::sys::socket::connect`,
+    // `nix::unistd::execvp`). Without this, a CONSUMER of nix analysed without nix's own source (the
+    // stable scanner, single-crate) sees `nix::*` cross-crate and under-reports — serialport-rs opens its
+    // device via `nix::fcntl::open` and reported ZERO Fs. The nightly lint reaches `libc::*` THROUGH nix's
+    // body; this gives the scanner the same coverage directly. (Found sweeping serialport-rs.)
+    if crate_name == "libc" || crate_name == "nix" {
         let f = path.rsplit("::").next().unwrap_or(path);
         // path / directory / metadata syscalls (incl. *64 and *at variants)
         const FS: &[&str] = &[
@@ -769,6 +777,12 @@ mod tests {
         assert_eq!(classify("reqwest", "reqwest::blocking::get"), Some("Net"));
         assert_eq!(classify("reqwest", "reqwest::Client::get"), None);
         assert_eq!(classify("reqwest", "reqwest::RequestBuilder::header"), None);
+        // nix routes through the libc syscall table (same leaves): I/O classified, generic fd ops skipped.
+        assert_eq!(classify("nix", "nix::fcntl::open"), Some("Fs"));
+        assert_eq!(classify("nix", "nix::sys::socket::connect"), Some("Net"));
+        assert_eq!(classify("nix", "nix::unistd::execvp"), Some("Exec"));
+        assert_eq!(classify("nix", "nix::unistd::write"), None); // generic fd op — deliberately unclassified
+        assert_eq!(classify("nix", "nix::unistd::getpid"), None); // not I/O
         assert_eq!(classify("rusqlite", "rusqlite::Connection::execute"), Some("Db"));
         assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
         // FFI tiers (matched by distinctive leaf, alias-independent)
