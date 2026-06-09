@@ -25,12 +25,14 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 50] = [
+pub const CALIBRATED_CRATES: [&str; 51] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer;
     // pnet is raw L2/L3 packet capture)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
     "async_nats", "lapin", "lettre", "tungstenite", "elasticsearch", "tonic", "rdkafka", "pnet",
+    // directory traversal (ignore = gitignore-aware walker, powers ripgrep/fd; its walk executors are Fs)
+    "ignore",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
@@ -421,6 +423,22 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // Directory traversal — `ignore` (BurntSushi's gitignore-aware walker; powers ripgrep, fd). The walk
+    // EXECUTORS read the directory tree from disk = Fs. Type-precise on purpose: the configuration builders
+    // (`OverrideBuilder::build`, `GitignoreBuilder::build`, the `WalkBuilder` setters) and `DirEntry`
+    // accessors are PURE — only `WalkBuilder::build`/`build_parallel` (which kick off the walk) and
+    // `WalkParallel::run` (which drives it) touch the filesystem. A bare `build` would wrongly flag the
+    // config builders. (Found scanning fd — a file finder — which reported Fs 2: its own `fs::read_dir`
+    // was caught, but the `ignore`-based traversal that IS fd was invisible cross-crate.)
+    if crate_name == "ignore" {
+        if path == "ignore::WalkBuilder::build"
+            || path == "ignore::WalkBuilder::build_parallel"
+            || path.ends_with("::WalkParallel::run")
+        {
+            return Some("Fs");
+        }
+        return None;
+    }
     // Raw sockets. Match the I/O *types* only — `std::net` also holds pure data types
     // (SocketAddr, IpAddr, …) whose construction must NOT be flagged.
     if path.starts_with("std::net::TcpStream")
@@ -770,6 +788,7 @@ mod tests {
                 format!("{c}::X::fetch_one"),
                 format!("{c}::Remote::fetch"),
                 format!("{c}::datalink::channel"),
+                format!("{c}::WalkBuilder::build_parallel"),
                 format!("{c}::X::connect"),
                 format!("{c}::Utc::now"),
                 format!("{c}::X::load"),
@@ -820,6 +839,13 @@ mod tests {
         assert_eq!(classify("pnet_datalink", "pnet_datalink::channel"), Some("Net"));
         assert_eq!(classify("pnet", "pnet::packet::ethernet::EthernetPacket::new"), None);
         assert_eq!(classify("pnet_base", "pnet_base::MacAddr::new"), None);
+        // ignore (gitignore-aware walker): walk executors are Fs, config builders stay pure.
+        assert_eq!(classify("ignore", "ignore::WalkBuilder::build_parallel"), Some("Fs"));
+        assert_eq!(classify("ignore", "ignore::WalkBuilder::build"), Some("Fs"));
+        assert_eq!(classify("ignore", "ignore::WalkParallel::run"), Some("Fs"));
+        assert_eq!(classify("ignore", "ignore::overrides::OverrideBuilder::build"), None); // pure config
+        assert_eq!(classify("ignore", "ignore::gitignore::GitignoreBuilder::build"), None); // pure config
+        assert_eq!(classify("ignore", "ignore::DirEntry::path"), None); // pure accessor
         assert_eq!(classify("rusqlite", "rusqlite::Connection::execute"), Some("Db"));
         assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
         // FFI tiers (matched by distinctive leaf, alias-independent)
