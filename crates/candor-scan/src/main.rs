@@ -13,12 +13,15 @@
 //! under-reports relative to the lint. Use the lint when you need the soundness contract; use this when
 //! you need zero-friction, stable, installable triage. Shares the lint's classifier — one source of truth.
 //!
-//! CALL RESOLUTION. The local call graph is name-resolved, not type-resolved. A `Type::method` call is
-//! matched on its qualified tail (`RequestBuilder::new`), which keeps same-named methods on different
-//! types distinct; a bare `.method()` call (no type qualifier) is linked only when the name is
-//! UNAMBIGUOUS across the crate. We deliberately do NOT link a many-way-ambiguous bare name: on a real
-//! crate that would link every `.new()` to all 100+ `*::new` defs and smear one type's effect across the
-//! whole graph (a false-positive blow-up). Under-reporting an ambiguous edge is the honest failure mode.
+//! CALL RESOLUTION. The local call graph is name-resolved, not type-resolved. A qualified `Type::method`
+//! call (or an associated-fn call `RequestBuilder::new()`) is matched on its 2-segment tail, but ONLY when
+//! that tail is UNAMBIGUOUS, which keeps same-named methods on different types distinct. A bare
+//! free-function call falls back to a unique leaf. A bare `.method()` call carries no type into the local
+//! index, so it names no definite target and under-reports rather than guess (recovering it would risk
+//! linking `range.start()` to a unique local `Clipboard::start`). We deliberately do NOT link a
+//! many-way-ambiguous name: on a real crate that would link every `.new()` to all 100+ `*::new` defs and
+//! smear one type's effect across the whole graph. Under-reporting an ambiguous edge is the honest failure
+//! mode; fabricating one is never ok. The shared resolver is `resolve_target`.
 //!
 //! Usage:  candor-scan [<crate-dir>] [--out <prefix>] [--json] [--include-tests]
 //!   default dir = ".", default prefix = "<dir>/.candor/report"; writes <prefix>.<crate>.scan.json (+ a
@@ -777,9 +780,9 @@ fn main() {
     // segment (`new`); `by_tail2` keys on the last TWO segments (`RequestBuilder::new`). The leaf index
     // alone catastrophically over-connects on real crates: every call to *some* `new()` would link to
     // ALL `*::new` defs (in reqwest, 181 of them), smearing one type's effect across the whole graph.
-    // So we prefer the qualified-tail match, which keeps `RequestBuilder::new` distinct from `Body::new`,
-    // and fall back to the leaf only when it's UNAMBIGUOUS (exactly one def) — under-reporting (the honest
-    // failure mode) rather than fabricating edges. See the precision note in the module doc.
+    // So a `Type::method`/`mod::fn` call matches the qualified tail (keeping `RequestBuilder::new` distinct
+    // from `Body::new`) and a bare free call matches the leaf — BOTH only when the match is UNAMBIGUOUS
+    // (exactly one def), under-reporting rather than fabricating. See `resolve_target` + the module doc.
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
     for f in &fns {
@@ -817,28 +820,14 @@ fn main() {
                 }
             }
             if !c.typed && !matches!(cr, "std" | "core" | "alloc") {
-                // Resolve the call to local definitions. The bare-leaf fallback is sound ONLY for an
-                // unqualified free-function call: a qualifier (`Type::`/`mod::`) is authoritative and an
-                // unresolved-receiver method names no definite target, so neither may fall back to a leaf.
-                // Typed (receiver-inferred) calls are skipped here — they're for external classification,
-                // and their synthetic `Type::method` tail could mis-link to a same-named local method.
-                let targets: Option<&Vec<String>> = if c.path.contains("::") {
-                    // QUALIFIED call (`Value::bool`, `m::helper`): the qualifier is authoritative. Match the
-                    // qualified tail only — NEVER fall back to a bare leaf, which would discard the
-                    // qualifier and link an external `Value::bool` to an unrelated local `random::bool::bool`,
-                    // fabricating that fn's effect (found on nushell: `Value::bool(..)` → Rand on 146 fns).
-                    tail2(&c.path).and_then(|t2| by_tail2.get(&t2))
-                } else if c.method {
-                    // UNQUALIFIED method call (`range.start()`) whose receiver type we couldn't infer: we
-                    // don't know which type's method it targets, so a bare-leaf match would GUESS — e.g.
-                    // `range.start()` linking to the only local `ClipboardResidentThread::start`, fabricating
-                    // Clipboard onto `random float`/`int`. Under-report instead. Resolved-receiver method
-                    // calls are still linked via the separate `typed` call through the qualified-tail index.
-                    None
-                } else {
-                    // UNQUALIFIED free-function call (`helper()`): link only when the leaf is UNAMBIGUOUS.
-                    by_leaf.get(&c.leaf).filter(|v| v.len() == 1)
-                };
+                // Resolve the call to a local definition via the precise, uniqueness-filtered index — see
+                // `resolve_target`. Typed (receiver-inferred) calls are skipped: they're for external
+                // classification, and their synthetic `Type::method` tail could mis-link an external
+                // `reqwest::Client::send` to a same-named local `Client::send` (an inverse fabrication).
+                // The cost is that a `self.helper()` method call to a crate-unique helper under-reports
+                // (its only route was the bare leaf, now closed) — honest, but a real recall gap; the
+                // associated-function form `Type::helper()` still resolves via the qualified tail below.
+                let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf);
                 if let Some(targets) = targets {
                     for t in targets {
                         if t != &f.qual {
@@ -928,7 +917,8 @@ fn main() {
 
 /// The last two `::`-segments of a path (`a::b::Type::new` → `Type::new`), the key used to resolve a
 /// `Type::method` call to its definition without colliding every same-named method. `None` for a path
-/// with fewer than two segments (a bare method leaf — resolved by unique-leaf fallback instead).
+/// with fewer than two segments (a bare leaf — only an unqualified FREE call resolves by leaf; a bare
+/// method call with an unresolved receiver under-reports, see `resolve_target`).
 fn tail2(path: &str) -> Option<String> {
     let segs: Vec<&str> = path.split("::").collect();
     let n = segs.len();
@@ -936,6 +926,31 @@ fn tail2(path: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}::{}", segs[n - 2], segs[n - 1]))
+}
+
+/// Resolve a call to the local definition(s) it links to in the intra-crate graph, or `None` to
+/// under-report. A QUALIFIED path (`a::Job::run`, `mod::helper`, or an associated-fn call `Type::new()`)
+/// matches on its precise 2-segment tail, but ONLY when that tail is UNAMBIGUOUS — two same-named types in
+/// different modules share a tail (`a::Job::run` / `b::Job::run`), so linking a many-way tail would
+/// fabricate one type's effect onto the other's caller (the same flood the bare-leaf index causes, one
+/// level up). An UNQUALIFIED free-function call falls back to a unique bare leaf. An UNQUALIFIED method
+/// call with an unresolved receiver names no definite target, so it under-reports rather than guess —
+/// this is what stops `range.start()` linking to a unique local `Clipboard::start`. NB the caller gates
+/// receiver-typed (`c.typed`) calls out before reaching here, so a `self.method()` tail never arrives.
+fn resolve_target<'a>(
+    path: &str,
+    leaf: &str,
+    method: bool,
+    by_tail2: &'a HashMap<String, Vec<String>>,
+    by_leaf: &'a HashMap<String, Vec<String>>,
+) -> Option<&'a Vec<String>> {
+    if path.contains("::") {
+        tail2(path).and_then(|t2| by_tail2.get(&t2)).filter(|v| v.len() == 1)
+    } else if method {
+        None
+    } else {
+        by_leaf.get(leaf).filter(|v| v.len() == 1)
+    }
 }
 
 fn host_part(h: &str) -> String {
@@ -1119,15 +1134,11 @@ mod tests {
             by_leaf.entry("new".into()).or_default().push(q.into());
             by_tail2.entry(tail2(q).unwrap()).or_default().push(q.into());
         }
-        // a `RequestBuilder::new(...)` call
-        let resolved: Option<&Vec<String>> = tail2("api::RequestBuilder::new")
-            .and_then(|t2| by_tail2.get(&t2))
-            .or_else(|| by_leaf.get("new").filter(|v| v.len() == 1));
-        assert_eq!(resolved, Some(&vec!["http::RequestBuilder::new".to_string()]));
+        // a `RequestBuilder::new(...)` call — routed through PRODUCTION `resolve_target` (qualified tail).
+        assert_eq!(resolve_target("api::RequestBuilder::new", "new", false, &by_tail2, &by_leaf),
+                   Some(&vec!["http::RequestBuilder::new".to_string()]));
         // a bare `.new()`-by-leaf with two candidates resolves to NEITHER (ambiguous → under-report)
-        let bare: Option<&Vec<String>> =
-            tail2("new").and_then(|t2| by_tail2.get(&t2)).or_else(|| by_leaf.get("new").filter(|v| v.len() == 1));
-        assert_eq!(bare, None);
+        assert_eq!(resolve_target("new", "new", true, &by_tail2, &by_leaf), None);
     }
 
     #[test]
@@ -1313,45 +1324,31 @@ mod tests {
         assert_eq!(candor_classify::classify("std", "std::process::Command::new"), Some("Exec"));
     }
 
-    // Mirrors the call→def resolution in `run`. A bare-leaf fallback may ONLY fire for an unqualified
-    // FREE-function call. It must NOT fire for (a) a qualified call whose tail misses locally — the
-    // qualifier is authoritative — nor (b) an unqualified method call with an unresolved receiver. Both
-    // were real fabrications found on nushell: `Value::bool(..)`→`random::bool::bool` (Rand on 146 fns)
-    // and `range.start()`→`ClipboardResidentThread::start` (Clipboard on `random float`/`int`).
-    fn resolve<'a>(
-        by_leaf: &'a HashMap<String, Vec<String>>,
-        by_tail2: &'a HashMap<String, Vec<String>>,
-        path: &str,
-        leaf: &str,
-        method: bool,
-    ) -> Option<&'a Vec<String>> {
-        if path.contains("::") {
-            tail2(path).and_then(|t2| by_tail2.get(&t2))
-        } else if method {
-            None
-        } else {
-            by_leaf.get(leaf).filter(|v| v.len() == 1)
-        }
-    }
-
     #[test]
-    fn qualified_and_method_calls_never_fall_back_to_a_bare_leaf() {
-        // One unique `bool` free fn and one unique `start` method def in the crate.
+    fn resolve_target_is_precise_and_never_fabricates() {
+        // Exercises the PRODUCTION `resolve_target` (not a copy) so a regression in `run`'s resolution is
+        // caught here. Defs: a unique `bool` free fn, a unique `start` method, a unique `Worker::run`
+        // method, and TWO same-named `Job::run` methods in different modules (an ambiguous 2-segment tail).
         let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
         let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
-        for q in ["random::bool::bool", "clip::ClipboardThread::start", "util::helper"] {
+        for q in ["random::bool::bool", "clip::ClipboardThread::start", "util::helper",
+                  "app::Worker::run", "a::Job::run", "b::Job::run"] {
             by_leaf.entry(q.rsplit("::").next().unwrap().into()).or_default().push(q.into());
             by_tail2.entry(tail2(q).unwrap()).or_default().push(q.into());
         }
-        // (a) qualified `Value::bool(..)` — external `Value`, tail `Value::bool` absent locally → NONE,
-        // never the unique-leaf `random::bool::bool`.
-        assert_eq!(resolve(&by_leaf, &by_tail2, "Value::bool", "bool", false), None);
-        // (b) unqualified method `range.start()` — unresolved receiver → NONE, never `ClipboardThread::start`.
-        assert_eq!(resolve(&by_leaf, &by_tail2, "start", "start", true), None);
-        // (c) unqualified free call `helper()` with a unique def still resolves (legit edge preserved).
-        assert_eq!(
-            resolve(&by_leaf, &by_tail2, "helper", "helper", false),
-            Some(&vec!["util::helper".to_string()])
-        );
+        // (a) qualified `Value::bool(..)` — external `Value`, tail absent locally → NONE (never the
+        // unique-leaf `random::bool::bool`; the original nushell Rand-on-146-fns fabrication).
+        assert_eq!(resolve_target("Value::bool", "bool", false, &by_tail2, &by_leaf), None);
+        // (b) unresolved-receiver method `range.start()` → NONE (never the unique `ClipboardThread::start`).
+        assert_eq!(resolve_target("start", "start", true, &by_tail2, &by_leaf), None);
+        // (c) unqualified free call `helper()` with a unique def → resolves.
+        assert_eq!(resolve_target("helper", "helper", false, &by_tail2, &by_leaf),
+                   Some(&vec!["util::helper".to_string()]));
+        // (d) associated-fn call `Worker::run()` (qualified, unique tail) → resolves to the one local def.
+        assert_eq!(resolve_target("Worker::run", "run", false, &by_tail2, &by_leaf),
+                   Some(&vec!["app::Worker::run".to_string()]));
+        // (e) AMBIGUOUS tail `Job::run` (two types, two modules) → NONE: linking both would fabricate one
+        // type's effect onto the other's caller (the bug the `len()==1` filter on the tail2 branch fixes).
+        assert_eq!(resolve_target("Job::run", "run", false, &by_tail2, &by_leaf), None);
     }
 }
