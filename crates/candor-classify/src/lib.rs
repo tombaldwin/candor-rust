@@ -242,7 +242,17 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // I/O. (Found by the eval: ebman's reqwest calls to the Anthropic API + webhooks
     // were silently classified network-free because reqwest wasn't recognized.)
     if crate_name == "reqwest" || crate_name == "isahc" {
-        if path.ends_with("::send") || path.ends_with("::execute") {
+        // The builder chain is pure; the dispatch (`::send`/`::execute`) is the I/O. PLUS the one-shot
+        // CONVENIENCE functions `reqwest::get` / `reqwest::blocking::get` / `isahc::get`, which send
+        // immediately — they're not the `Client::get` builder (a different path, `reqwest::Client::get`),
+        // so an exact match avoids false-positiving the builder. (Found running on `xh`: a one-shot
+        // `reqwest::get(url)` was classified network-free.)
+        if path.ends_with("::send")
+            || path.ends_with("::execute")
+            || path == "reqwest::get"
+            || path == "reqwest::blocking::get"
+            || path == "isahc::get"
+        {
             return Some("Net");
         }
         return None;
@@ -754,6 +764,11 @@ mod tests {
         assert_eq!(classify("std", "std::process::Command::new"), Some("Exec"));
         assert_eq!(classify("std", "std::env::var"), Some("Env"));
         assert_eq!(classify("reqwest", "reqwest::Client::execute"), Some("Net"));
+        // one-shot convenience fns send immediately → Net; the `Client::get` builder stays pure.
+        assert_eq!(classify("reqwest", "reqwest::get"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::blocking::get"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::Client::get"), None);
+        assert_eq!(classify("reqwest", "reqwest::RequestBuilder::header"), None);
         assert_eq!(classify("rusqlite", "rusqlite::Connection::execute"), Some("Db"));
         assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
         // FFI tiers (matched by distinctive leaf, alias-independent)
