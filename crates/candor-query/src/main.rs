@@ -838,9 +838,17 @@ fn cmd_map(args: &[String]) -> i32 {
             .flatten()
             .min()
             .unwrap_or(stripped.len());
-        let m = match stripped[..end].trim() {
-            "" => "(root)".to_string(),
-            s => s.to_string(),
+        // A name with NO module separator is a crate-root free function: it buckets into `(root)`,
+        // NOT its own one-function pseudo-module (SPEC §6.1 — matches the containment layer rule and
+        // the JVM engine, which groups root methods under their class). Without this a flat crate of
+        // free functions showed every function as its own "module" — a useless overview.
+        let m = if end == stripped.len() {
+            "(root)".to_string()
+        } else {
+            match stripped[..end].trim() {
+                "" => "(root)".to_string(),
+                s => s.to_string(),
+            }
         };
         let v = mods.entry(m).or_default();
         v.0.extend(e.inferred.iter().filter(|x| *x != "Unknown").cloned());
@@ -1957,21 +1965,28 @@ mod tests {
 
     #[test]
     fn whatif_scope_and_policy_parse() {
-        // scope match mirrors the lint exactly: segment-aware, last segment prefix, never mid-word.
-        assert!(wi_scope_matches("app::domain::handle", "domain"));
-        assert!(wi_scope_matches("crate::domain_logic", "domain")); // segment-prefixed
-        assert!(!wi_scope_matches("app::subdomain::handle", "domain")); // mid-word must NOT match
-        assert!(wi_scope_matches("api::handle", "api"));
+        // whatif parses policy through the SHARED canonical parser (candor_classify::policy, SPEC §6.2),
+        // so its pre-edit verdict can't diverge from the real gate. Spot-check that path here.
+        use candor_classify::policy::{parse_policy, scope_matches};
+        // scope match is segment-aware: last segment prefix, intermediates exact, never mid-word.
+        assert!(scope_matches("app::domain::handle", "domain"));
+        assert!(scope_matches("crate::domain_logic", "domain")); // segment-prefixed
+        assert!(!scope_matches("app::subdomain::handle", "domain")); // mid-word must NOT match
+        assert!(scope_matches("api::handle", "api"));
 
         // `deny Net Db api` -> forbid {Net,Db} in scope `api`; `pure parse` -> forbid ALL in `parse`;
-        // `deny Exec` -> forbid Exec crate-wide (no scope); allow/forbid lines ignored.
-        let rules = wi_parse_deny("deny Net Db api\npure parse\ndeny Exec\nallow Net in billing x\nforbid a -> b\n# c");
+        // `deny Exec` -> forbid Exec crate-wide (no scope). allow/forbid go to separate rule sets.
+        let p = parse_policy("deny Net Db api\npure parse\ndeny Exec\nallow Net in billing x\nforbid a -> b\n# c");
+        let rules = &p.rules;
         assert_eq!(rules.len(), 3);
-        assert_eq!(rules[0].0.iter().cloned().collect::<Vec<_>>(), vec!["Db", "Net"]);
-        assert_eq!(rules[0].1.as_deref(), Some("api"));
-        assert!(rules[1].0.is_empty()); // pure = all effects
-        assert_eq!(rules[1].1.as_deref(), Some("parse"));
-        assert_eq!(rules[2].1, None); // crate-wide deny Exec
+        assert_eq!(rules[0].effects.iter().copied().collect::<Vec<_>>(), vec!["Db", "Net"]);
+        assert_eq!(rules[0].scope.as_deref(), Some("api"));
+        assert!(rules[1].effects.is_empty()); // pure = all effects
+        assert_eq!(rules[1].scope.as_deref(), Some("parse"));
+        assert_eq!(rules[2].scope, None); // crate-wide deny Exec
+        // the allow/forbid lines landed in their own rule sets, not in `rules`.
+        assert_eq!(p.allow_rules.len(), 1);
+        assert_eq!(p.layer_rules.len(), 1);
     }
 
     #[test]

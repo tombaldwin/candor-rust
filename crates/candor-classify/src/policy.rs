@@ -114,12 +114,14 @@ pub fn scope_matches(name: &str, scope: &str) -> bool {
 
 /// Parse a CANDOR_POLICY file (SPEC §6.2). One rule per line; `#` comments and blanks ignored:
 ///
-///     deny Net Db  domain     # functions whose path contains segment "domain" must not perform Net or Db
-///     deny Exec               # no function anywhere may perform Exec
-///     deny Unknown  api        # functions in "api" must be fully resolvable (forbid the unverifiable)
-///     pure         parse      # functions whose path contains segment "parse" must be effect-free
-///     allow Net in billing  api.stripe.com
-///     forbid domain -> infra
+/// ```text
+/// deny Net Db  domain     # functions whose path contains segment "domain" must not perform Net or Db
+/// deny Exec               # no function anywhere may perform Exec
+/// deny Unknown  api        # functions in "api" must be fully resolvable (forbid the unverifiable)
+/// pure         parse      # functions whose path contains segment "parse" must be effect-free
+/// allow Net in billing  api.stripe.com
+/// forbid domain -> infra
+/// ```
 ///
 /// In a `deny` rule, leading tokens that name a known effect (or `Unknown`) are forbidden; the FIRST
 /// non-effect token is the scope and ends the rule. A `deny` naming no known effect is dropped (it is
