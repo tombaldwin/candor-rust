@@ -163,6 +163,29 @@ fn local_drop_impls<'tcx>(
             }
         }
         TyKind::Array(t, _) | TyKind::Slice(t) => local_drop_impls(tcx, *t, out, seen),
+        // Dropping a TRAIT OBJECT (`Box<dyn Trait>` etc.) runs the CONCRETE type's destructor through
+        // the vtable — statically unknown. Sound over-approximation (the §4 trust contract): CHA the
+        // impls of the object's principal trait and follow each self type's LOCAL Drop, so a local
+        // effectful-Drop type behind a `Box<dyn Trait>` is caught exactly as behind a concrete
+        // `Box<T>` (otherwise it was a silent under-report — pure despite an I/O-on-drop guard). This
+        // matches candor only ever tracking LOCAL Drops: a std concrete type's Drop isn't followed,
+        // dyn or not. No flood — most trait objects (`Box<dyn Error/Any/Fn…>`) have no local impl
+        // carrying a Drop, so produce no edge.
+        TyKind::Dynamic(preds, ..) => {
+            if let Some(principal) = preds.principal_def_id() {
+                let impls = tcx.trait_impls_of(principal);
+                for impl_did in impls
+                    .non_blanket_impls()
+                    .values()
+                    .flatten()
+                    .chain(impls.blanket_impls())
+                    .copied()
+                {
+                    let self_ty = tcx.type_of(impl_did).instantiate_identity();
+                    local_drop_impls(tcx, self_ty, out, seen);
+                }
+            }
+        }
         _ => {}
     }
 }

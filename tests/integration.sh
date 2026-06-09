@@ -253,6 +253,14 @@ printf 'struct Guard;\nimpl Drop for Guard { fn drop(&mut self){ let _=std::net:
 lout=$(dl "$DR")
 want   "Drop laundered through Vec<Guard> still propagates (via_vec gains Net)"  "$lout" '`via_vec` effects: { Net'
 want   "Drop laundered through Box<Guard> still propagates (via_box gains Net)"  "$lout" '`via_box` effects: { Net'
+# Through a TRAIT OBJECT: dropping `Box<dyn Job>` runs the concrete type's destructor via the vtable —
+# statically unknown. candor CHAs local impls of the principal trait and follows their Drops, so a local
+# effectful-Drop type behind `dyn Job` is caught (was a silent under-report). A `Box<dyn Error>` whose
+# impls carry NO local Drop must stay pure — the over-approximation must not flood the common case.
+printf 'trait Job {}\nstruct G;\nimpl Job for G {}\nimpl Drop for G { fn drop(&mut self){ let _=std::net::TcpStream::connect("10.0.0.2:9"); } }\nfn via_dyn(){ let b: Box<dyn Job> = Box::new(G); let _ = b; }\nfn drops_err(){ let _e: Box<dyn std::error::Error> = "x".into(); }\nfn main(){ via_dyn(); drops_err(); }\n' > "$DR/src/main.rs"
+dout=$(dl "$DR")
+want   "Drop through a trait object propagates (dyn Job with effectful Drop)"   "$dout" '`via_dyn` effects: { Net'
+absent "trait-object drop with no local Drop impl does NOT flood (drops_err)"   "$dout" '`drops_err` effects'
 rm -rf "$(dirname "$DR")"
 
 # ── 9d. Layering with a CRATE-NAME from-scope (the real-world fix: not a silent no-op) ──
