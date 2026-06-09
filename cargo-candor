@@ -149,7 +149,7 @@ cmd="${1:-audit}"; shift || true
 # or broken dylib first.
 case "$cmd" in
   setup|install|-h|--help|help|scan) LIB="" ;;
-  audit|show|where|callers|map|containment)
+  audit|show|where|callers|map|containment|reachable)
     # Read-only queries: prefer the nightly lint (soundness, Unknown), but DON'T hard-fail without it —
     # fall back to the stable scanner so these work zero-install. Use an existing dylib if present; only
     # attempt a build when one's already around to refresh. If none, LIB stays empty and the command's
@@ -461,6 +461,17 @@ case "$cmd" in
     for a in "$@"; do case "$a" in --json) cargs+=("--json") ;; -*) ;; *) cargs+=("$a") ;; esac; done
     ensure_report || exit 1
     query containment "${cargs[@]}"
+    exit 0 ;;
+
+  reachable)
+    # What the program PERFORMS at runtime: the union of effects over the entry points (main /
+    # #[no_mangle] here; the whole reflective surface on the JVM port). `inferred` is already
+    # transitive, so a root's set is its full reachable surface. `--json` for machines.
+    #   cargo candor reachable
+    rargs=(.candor/report)
+    for a in "$@"; do case "$a" in --json) rargs+=("--json") ;; -*) ;; *) rargs+=("$a") ;; esac; done
+    ensure_report || exit 1
+    query reachable "${rargs[@]}"
     exit 0 ;;
 
   explain)
