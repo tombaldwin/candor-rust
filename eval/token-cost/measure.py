@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Measure the INFORMATION cost of candor's blast-radius answer vs reading the source for it.
+"""Measure candor's token cost for the blast-radius question vs a REALISTIC manual baseline.
 
 The recurring claim is "candor saves AI tokens." This makes it falsifiable and reproducible for the one
 question where candor's value is real — the transitive blast radius ("who is affected if I add an effect to
 X?"). For each sampled function it compares:
 
-  - candor's answer  = the tokens of `candor-query callers <fn>` (one query, the complete transitive set)
-  - the manual cost  = the tokens of source an agent must read to trace the SAME answer by hand
+  - candor       = tokens of `candor-query callers <fn>` (one query -> the complete transitive caller set)
+  - grep-trace   = tokens an agent spends tracing the SAME complete set by hand: grep each function in the
+                   transitive closure (`grep -rn <fn> src`). This is the realistic baseline — agents grep,
+                   they do NOT read the whole crate.
 
-The manual figure is the COMPLETE-answer ceiling: total crate source. That's the honest comparison, because
-candor's value IS completeness — agents that don't pay it get ~6% of the blast radius (see eval/scaled). It
-is NOT a claim about the cheapest possible grep; it's the cost of being *exhaustive*, which is what the
-question demands and what candor makes cheap.
+Earlier versions of this script compared against reading the ENTIRE crate (~700-2000x); that's a strawman
+denominator — no competent agent does it. The grep-trace below is the honest baseline. (`--ceiling` also
+prints the full-source figure, but as an INFORMATION-COMPRESSION number, not a token-savings claim.)
 
-Usage:  python3 eval/token-cost/measure.py <crate-dir> [sample_size]
-Token estimate: chars/4 (model-agnostic; ratios are stable under any fixed tokenizer)."""
+Usage:  python3 eval/token-cost/measure.py <crate-dir> [sample_size] [--ceiling]
+Token estimate: chars/4 (model-agnostic; ratios stable under any fixed tokenizer)."""
 import glob, json, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,7 +30,8 @@ def main():
         print(__doc__)
         sys.exit(2)
     crate = sys.argv[1]
-    k = int(sys.argv[2]) if len(sys.argv) > 2 else 12
+    k = next((int(a) for a in sys.argv[2:] if a.isdigit()), 12)
+    ceiling = "--ceiling" in sys.argv
 
     subprocess.run([SCAN, crate], capture_output=True)
     reps = [f for f in glob.glob(f"{crate}/**/.candor/report.*.scan.json", recursive=True) if "callgraph" not in f]
@@ -37,33 +39,48 @@ def main():
         print(f"no report produced for {crate}")
         sys.exit(1)
     rep = reps[0]
-    prefix = rep.rsplit(".", 3)[0]  # <dir>/.candor/report  (strip .<crate>.scan.json)
-
-    src = glob.glob(f"{crate}/**/*.rs", recursive=True)
-    src = [f for f in src if "/.candor/" not in f and "/target/" not in f]
-    src_tokens = sum(tok(open(f, encoding="utf-8", errors="ignore").read()) for f in src)
+    prefix = rep.rsplit(".", 3)[0]
 
     fns = [e["fn"] for e in json.load(open(rep))["functions"]]
     seen, leaves = set(), []
-    for f in fns:                       # dedupe by leaf, keep a stable sample
+    for f in fns:
         leaf = f.split("::")[-1]
         if leaf not in seen:
             seen.add(leaf)
             leaves.append(leaf)
     sample = leaves[:k]
 
-    answers = []
+    print(f"crate: {crate}")
+    print(f"{'fn':18s} {'closure':>7s} {'candor':>7s} {'grep-trace':>10s} {'ratio':>6s}")
+    cand_tot = grep_tot = 0
+    ratios = []
     for leaf in sample:
-        out = subprocess.run([QUERY, "callers", prefix, leaf, "0"], capture_output=True, text=True).stdout
-        answers.append(tok(out))
-    avg = sum(answers) // max(1, len(answers))
+        cand = tok(subprocess.run([QUERY, "callers", prefix, leaf, "0"], capture_output=True, text=True).stdout)
+        j = subprocess.run([QUERY, "callers", prefix, leaf, "1"], capture_output=True, text=True).stdout
+        try:
+            o = json.loads(j)
+            closure = o.get("transitive", []) or o.get("direct", [])
+        except Exception:
+            closure = []
+        members = {leaf} | {c.split("::")[-1] for c in closure}
+        grep = sum(tok(subprocess.run(["grep", "-rn", m, f"{crate}/src"], capture_output=True, text=True).stdout)
+                   for m in members)
+        r = grep / max(1, cand)
+        ratios.append(r)
+        cand_tot += cand
+        grep_tot += grep
+        print(f"{leaf:18s} {len(members):7d} {cand:7d} {grep:10d} {r:5.1f}x")
 
-    print(f"crate:           {crate}")
-    print(f"source:          {len(src)} files, ~{src_tokens:,} tokens (the complete-trace ceiling)")
-    print(f"candor answer:   ~{avg} tokens (avg `callers <fn>` over {len(sample)} functions)")
-    print(f"compression:     ~{src_tokens // max(1, avg)}x for a COMPLETE blast-radius answer")
-    print(f"\ncaveat: this is the blast-radius/graph question (candor's strength). For 'what does this one")
-    print(f"function do', reading it is cheap and candor saves ~nothing — the value is question-specific.")
+    ratios.sort()
+    med = ratios[len(ratios) // 2] if ratios else 0
+    print(f"\ncandor total {cand_tot} tok  vs  grep-trace total {grep_tot} tok"
+          f"   (median per-fn ratio ~{med:.0f}x, range {min(ratios):.1f}-{max(ratios):.0f}x)")
+    print("candor's edge is largest where the closure has COMMON-named functions — exactly where grep is")
+    print("also noisiest and least reliable (it can't tell a real call from a coincidental name match).")
+    if ceiling:
+        src = [f for f in glob.glob(f"{crate}/**/*.rs", recursive=True) if "/.candor/" not in f and "/target/" not in f]
+        st = sum(tok(open(f, encoding="utf-8", errors="ignore").read()) for f in src)
+        print(f"\n[ceiling] full crate source ~{st:,} tok (INFORMATION compression vs candor, NOT a savings claim)")
 
 
 if __name__ == "__main__":

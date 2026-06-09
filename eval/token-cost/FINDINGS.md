@@ -1,53 +1,51 @@
-# Does candor save AI tokens? — a measurement
+# Does candor save AI tokens or time? — a measurement
 
-The claim "candor saves tokens" was, until now, an inference. This makes it falsifiable and reproducible
-for the one question where candor's value is real: the **transitive blast radius** — *"who is affected if I
-add an effect to function X?"* Run it yourself: `python3 eval/token-cost/measure.py <crate-dir>`.
+The claim "candor saves tokens" was an inference. This makes it falsifiable and reproducible for the one
+question where candor's value is real — the **transitive blast radius** (*"who is affected if I add an
+effect to X?"*). Run it: `python3 eval/token-cost/measure.py <crate-dir>`.
 
-## What is measured
+## The real value is reliable COMPLETENESS, not a token ratio
 
-For a sample of functions in a real crate, the **information cost** of two ways to get the *complete*
-blast radius:
+Lead with this, because it's the load-bearing result (`eval/scaled`): on a blast-radius task whose effect
+propagates to 16 functions across 9 files, agents who trace by hand get **~6%** of the radius (1 of 16) —
+**even at the frontier** — because enumerating five layers of transitive callers is tedious work they don't
+volunteer. candor's `callers`/`diff` hands over the complete set, taking completeness to **79–100%**. The
+value is *getting the complete, correct answer at all*; tokens are secondary.
 
-- **candor** — the tokens of `candor-query callers <fn>` (one query → the full transitive caller set).
-- **manual ceiling** — the tokens of the crate's source, i.e. what an agent reads to trace the same answer
-  exhaustively by hand. (Callers are spread across the whole crate; to be *complete* you must read it.)
+## Token cost, measured honestly (vs a realistic grep-trace)
 
-Token estimate = chars/4 (model-agnostic; the ratio is stable under any fixed tokenizer).
+For the *complete* blast radius, candor is one query; the manual equivalent is a recursive `grep` over every
+function in the transitive closure. Across a 10-function sample of `atuin-client`:
 
-## Result (5 real crates)
-
-| crate | source (tokens) | candor answer (tokens, avg) | compression |
+| | candor | grep-trace | ratio |
 |---|---:|---:|---:|
-| fd | 63,000 | 74 | ~850× |
-| gitoxide-core | 99,000 | 50 | ~1,970× |
-| atuin-client | 104,000 | 149 | ~700× |
-| helix-term | 312,000 | 218 | ~1,430× |
-| zellij-utils | 696,000 | 371 | ~1,875× |
+| typical (distinctive names, small closure) | 20–120 tok | 30–4,000 tok | **~1–30×** |
+| common-named / deep closure | 0.1–1K tok | 8K–78K tok | **~75–225×** |
+| **median** | | | **~17×** |
 
-candor answers the complete blast-radius question in **~50–370 tokens** where reading the source for the
-same complete answer is **~60K–700K tokens** — **roughly 700×–2000×** less, and the ratio *grows* with
-codebase size (the answer stays small; the source doesn't).
+So: **single-digit to ~30× for typical functions, more when the closure has common names** — *exactly where
+grep is also noisiest and least reliable* (it can't distinguish a real call from a coincidental name match,
+so a grep-trace there is both expensive and wrong). candor's cost is name-independent: it has the real call
+graph.
 
-## Honest caveats — what this does and doesn't show
+> An earlier version of this doc compared candor against reading the **entire crate** (~700–2,000×). That's
+> a strawman denominator — no competent agent reads the whole crate; they grep. That number is *information
+> compression* (the answer is ~3 orders of magnitude denser than the source), **not** a token-savings claim.
+> Pass `--ceiling` to see it, clearly labelled as such.
 
-1. **It's the COMPLETE-answer comparison.** The manual figure is the cost of being *exhaustive*. A cheap
-   `grep` is far less — but `eval/scaled` shows that agents who don't pay the full cost get **~6%** of the
-   blast radius (1 of 16), *even at the frontier*. So the real choice isn't "candor vs a cheap grep"; it's
-   "candor's complete answer for ~0.2K tokens" vs "an incomplete grep, or ~100K tokens to be exhaustive."
-   candor makes *completeness* cheap.
+## Honest bounds — what this does and doesn't show
 
-2. **It measures information cost, not reasoning tokens.** The *behavioral* question — does candor change
-   outcomes — is answered separately in `eval/scaled` (completeness 6% → 79–100%) and `eval/agentuse`
-   (10/10 adoption). This doc adds the missing token dimension; together they make the case.
-
-3. **It is question-specific.** Blast radius / call-graph traversal is candor's strength. For *"what does
-   this one function do,"* reading the function is cheap and candor saves ~nothing. The value is real but
-   **narrow** — it shows up on graph questions over non-trivial codebases, not on local reading.
+1. **It's the COMPLETE-answer comparison.** A cheap one-level grep is far less than the grep-trace above —
+   but it gets you the ~6% incomplete answer. The honest framing isn't "candor vs grep on equal work"; it's
+   "candor is the only **cheap *and* complete** option" (grep = cheap+incomplete; read-all = complete+dear).
+2. **It measures information cost, not reasoning.** The behavioural question — does candor change outcomes —
+   is `eval/scaled` (6% → 79–100%). This doc adds the token dimension; together they make the case.
+3. **It's question-specific.** Blast radius / call-graph traversal is candor's strength. For *"what does this
+   one function do,"* reading the function is cheap and candor saves ~nothing. The value is real but narrow.
 
 ## Bottom line
 
-For the blast-radius question on a real codebase, candor delivers the **complete** answer at **~2–3 orders
-of magnitude** lower token cost than reading the source for it — *and* the complete answer is one agents
-otherwise skip (6%). So: yes, it saves tokens — but specifically by making *exhaustive graph answers* cheap,
-not by helping with code an agent can just read.
+candor's durable value is **reliable, complete blast-radius answers** that agents otherwise get ~6% of — at
+a token cost typically **~1.5 orders of magnitude** below a manual grep-trace, and most lopsided exactly
+where the manual trace is also least reliable. It is *not* a broad token-saver; it wins on graph questions
+over non-trivial codebases, where being exhaustive is the whole point.
