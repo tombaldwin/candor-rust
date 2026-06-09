@@ -105,6 +105,7 @@ dependencies = [
 name = "candor-query"
 version = "0.3.0"
 dependencies = [
+ "candor-classify",
  "candor-report",
  "regex",
  "serde",

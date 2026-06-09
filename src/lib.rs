@@ -39,6 +39,11 @@ use candor_classify::{
     cap_from_name, capstd_cap, classify, classify_extra, CALIBRATED_CRATES, CALIBRATED_PREFIXES,
     CALIBRATION_PROBE_TAILS, PATH_CALIBRATED_CRATES,
 };
+// The CANDOR_POLICY DSL parser is the SHARED canonical one (candor-spec SPEC §6.2), so the nightly
+// gate, stable candor-query (whatif/parsepolicy), and the JVM engine can't drift on the grammar.
+use candor_classify::policy::{
+    literal_allowed, parse_policy, scope_matches, AllowRule, LayerRule, ParsedPolicy, PolicyRule,
+};
 
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -393,152 +398,6 @@ fn parse_config(text: &str) -> Vec<(&'static str, bool, String)> {
                 }
             }
             _ => {}
-        }
-    }
-    out
-}
-
-/// One declared effect-boundary rule (`CANDOR_POLICY`). `effects` empty ⇒ a `pure` rule (ANY effect
-/// is forbidden). `scope` is a path substring the rule applies to (None = the whole crate). Checked
-/// against a function's *transitive* (inferred) effects — so "domain must not do Net" catches domain
-/// code that reaches the network through a helper, the boundary violation an agent can't see.
-struct PolicyRule {
-    effects: BTreeSet<&'static str>,
-    scope: Option<String>,
-    raw: String,
-}
-
-/// One declared *literal allowlist* rule (`allow <Effect> [in <scope>] <literal>…`). A function in
-/// `scope` that performs `effect` may reach ONLY the listed literals; reaching any other — or one
-/// candor cannot see (a dynamically-built value) — is AS-EFF-008. Checked against the *transitive*
-/// literal surface, so it catches a value buried in a deep or cross-crate callee that a local edit
-/// can't see. Three effects carry a literal surface: `Net` hosts ("billing may only talk to Stripe"),
-/// `Exec` commands ("this layer may only run git"), and `Fs` paths ("config may only read /etc/app").
-/// Matching is effect-specific (`literal_allowed`): host by name, command by basename, path by prefix.
-struct AllowRule {
-    effect: &'static str,
-    scope: Option<String>,
-    literals: BTreeSet<String>,
-    raw: String,
-}
-
-/// One module-layering rule (`forbid <A> -> <B>`): a function in scope `A` must not *transitively*
-/// call into scope `B`. This is the dependency-direction half of architecture-as-code — "the domain
-/// layer must not reach into infra" — complementing the effect rules (which constrain *what* a layer
-/// does, not *who* it may depend on). AS-EFF-009. Checked over the local call graph (see the §6
-/// limitation note: cross-crate dependency edges are not yet loaded).
-struct LayerRule {
-    from: String,
-    to: String,
-    raw: String,
-}
-
-/// The rule kinds parsed from a `CANDOR_POLICY` file: effect-boundary rules (`deny`/`pure`,
-/// AS-EFF-006), host-allowlist rules (`allow Net …`, AS-EFF-008), and module-layering rules
-/// (`forbid <A> -> <B>`, AS-EFF-009).
-#[derive(Default)]
-struct ParsedPolicy {
-    rules: Vec<PolicyRule>,
-    allow_rules: Vec<AllowRule>,
-    layer_rules: Vec<LayerRule>,
-}
-
-/// The hostname part of a `host[:port]` literal (everything before the first `:`). Host-allowlist
-/// matching is by hostname so `api.stripe.com` in a rule accepts a reached `api.stripe.com:443`.
-fn host_part(h: &str) -> &str {
-    h.split(':').next().unwrap_or(h)
-}
-
-/// Parse a `CANDOR_POLICY` file. One rule per line; `#` comments and blanks ignored:
-///
-///     deny Net Db  domain     # functions whose path contains "domain" must not perform Net or Db
-///     deny Exec               # no function anywhere may perform Exec
-///     pure         parse      # functions whose path contains "parse" must be effect-free
-///
-/// In a `deny` rule, leading tokens that name a known effect are forbidden; the first non-effect
-/// token (if any) is the scope. `pure <scope>` forbids all effects in scope.
-fn parse_policy(text: &str) -> ParsedPolicy {
-    let mut out = ParsedPolicy::default();
-    for raw_line in text.lines() {
-        let line = raw_line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut toks = line.split_whitespace();
-        match toks.next().unwrap_or("") {
-            // `allow <Effect> [in <scope>] <literal>…` — a literal allowlist (AS-EFF-008). Effects that
-            // carry a literal surface are Net (hosts), Exec (commands), Fs (paths); any other is rejected
-            // loudly (silent acceptance would let a caller believe a boundary is enforced when it isn't).
-            "allow" => {
-                let effect = match toks.next().unwrap_or("") {
-                    "Net" => "Net",
-                    "Exec" => "Exec",
-                    "Fs" => "Fs",
-                    _ => {
-                        eprintln!(
-                            "candor: ignoring policy rule (allow supports only Net hosts / Exec commands / Fs paths): {line}"
-                        );
-                        continue;
-                    }
-                };
-                let mut rest: Vec<&str> = toks.collect();
-                // optional `in <scope>` prefix; without it the rule applies to the whole crate.
-                let scope = if rest.first() == Some(&"in") {
-                    let s = rest.get(1).map(|s| s.to_string());
-                    rest.drain(..2.min(rest.len()));
-                    s
-                } else {
-                    None
-                };
-                let literals: BTreeSet<String> = rest.iter().map(|h| h.to_string()).collect();
-                if literals.is_empty() {
-                    eprintln!("candor: ignoring policy rule (allow {effect} names no values): {line}");
-                    continue;
-                }
-                out.allow_rules.push(AllowRule { effect, scope, literals, raw: line.to_string() });
-            }
-            "deny" => {
-                let mut effects = BTreeSet::new();
-                let mut scope = None;
-                for t in toks {
-                    let e = if t == UNKNOWN { Some(UNKNOWN) } else { cap_from_name(t) };
-                    match e {
-                        Some(e) => {
-                            effects.insert(e);
-                        }
-                        None => {
-                            scope = Some(t.to_string());
-                            break;
-                        }
-                    }
-                }
-                if effects.is_empty() {
-                    eprintln!("candor: ignoring policy rule (no known effect named): {line}");
-                    continue;
-                }
-                out.rules.push(PolicyRule { effects, scope, raw: line.to_string() });
-            }
-            "pure" => out.rules.push(PolicyRule {
-                effects: BTreeSet::new(),
-                scope: toks.next().map(str::to_string),
-                raw: line.to_string(),
-            }),
-            // `forbid <A> -> <B>` — a module-layering rule (AS-EFF-009).
-            "forbid" => {
-                let a = toks.next().unwrap_or("");
-                let arrow = toks.next().unwrap_or("");
-                let b = toks.next().unwrap_or("");
-                if a.is_empty() || arrow != "->" || b.is_empty() {
-                    eprintln!("candor: ignoring layering rule (want `forbid <scope> -> <scope>`): {line}");
-                    continue;
-                }
-                out.layer_rules.push(LayerRule {
-                    from: a.to_string(),
-                    to: b.to_string(),
-                    raw: line.to_string(),
-                });
-            }
-            other => eprintln!("candor: ignoring policy rule (unknown kind `{other}`): {line}"),
         }
     }
     out
@@ -1094,57 +953,6 @@ fn first_str_lit_arg(expr: &Expr<'_>) -> Option<String> {
     }
     None
 }
-
-/// The basename of a command (`/usr/bin/git` → `git`), so `allow Exec … git` accepts an absolute path
-/// to the same program. A bare name is returned unchanged.
-fn cmd_base(c: &str) -> &str {
-    c.rsplit(['/', '\\']).next().unwrap_or(c)
-}
-
-/// Whether an allowed dir `a` covers the reached path `r` — at a *path boundary*, not a raw string
-/// prefix. `allow … /etc/app` must cover `/etc/app` and `/etc/app/cfg`, but NOT `/etc/apppwned`
-/// (a sibling that merely shares a textual prefix). We compare component-wise: every component of `a`
-/// must be a prefix-run of `r`'s components. A `..` in the reached path is never covered (it can climb
-/// out of the allowed dir), so paths containing `..` are rejected outright.
-fn fs_path_covered(a: &str, r: &str) -> bool {
-    if r.split(['/', '\\']).any(|c| c == "..") {
-        return false;
-    }
-    // An ABSOLUTE allow covers only absolute reached paths, and a relative allow only relative ones.
-    // Without this, `norm` (which drops the leading empty component of a `/`-rooted path) would let a
-    // relative entry `etc/app` cover the absolute `/etc/app` (they point at different filesystem
-    // locations — a relative path resolves against CWD), over-permitting the allowlist and suppressing
-    // an AS-EFF-008 violation. `/` and `\\` mark an absolute root; a leading `.`/bare name is relative.
-    let absolute = |s: &str| s.starts_with('/') || s.starts_with('\\');
-    if absolute(a) != absolute(r) {
-        return false;
-    }
-    let norm = |s: &str| -> Vec<String> {
-        s.split(['/', '\\'])
-            .filter(|c| !c.is_empty() && *c != ".")
-            .map(|c| c.to_string())
-            .collect()
-    };
-    let (ac, rc) = (norm(a), norm(r));
-    // An empty allow ("/", ".") covers everything AT ITS ROOTEDNESS; otherwise `a`'s components lead `r`'s.
-    ac.len() <= rc.len() && ac.iter().zip(&rc).all(|(x, y)| x == y)
-}
-
-/// Whether a *reached* literal is covered by an allowlist, with effect-appropriate matching: `Net`
-/// hosts match by hostname (port-insensitive); `Exec` commands match by basename; `Fs` paths match by
-/// path-prefix at a component boundary (an allowed directory covers everything beneath it, but not a
-/// sibling sharing a textual prefix). Unknown effects: exact match.
-fn literal_allowed(effect: &str, reached: &str, allow: &BTreeSet<String>) -> bool {
-    match effect {
-        "Net" => allow.iter().any(|a| host_part(a) == host_part(reached)),
-        "Exec" => allow.iter().any(|a| cmd_base(a) == cmd_base(reached)),
-        "Fs" => allow.iter().any(|a| fs_path_covered(a, reached)),
-        _ => allow.contains(reached),
-    }
-}
-
-
-
 
 /// Conventionally-pure std/core/alloc traits. Dynamic dispatch over these (e.g.
 /// `.to_string()` / `.source()` on a `&dyn std::error::Error`) is overwhelmingly
@@ -2450,27 +2258,6 @@ fn in_scope(var: Option<&str>, name: &str) -> bool {
     }
 }
 
-/// A CANDOR_POLICY rule's scope matches a function path by SEGMENT, supporting MULTI-segment scopes:
-/// `deny Net domain` matches `app::domain::f` (and the `domain_logic` fn); `forbid api::handlers -> infra::db`
-/// matches a fn under `…::infra::db::…`. Intermediate scope segments must match a path segment EXACTLY
-/// (so `infra` does NOT match `infrastructure` — avoids the substring bug); the LAST scope segment may be
-/// a prefix (so `domain` matches the `domain_logic` fn). A single-segment scope is just the last-segment
-/// rule, preserving the old behavior. (Before: `name.split("::").any(|s| s.starts_with(scope))` — a single
-/// segment can never `starts_with` a `scope` containing `::`, so EVERY multi-segment rule was a silent
-/// no-op: a whole class of `forbid a::b -> c::d` / `allow Net in x::y …` rules never enforced.)
-fn scope_matches(name: &str, scope: &str) -> bool {
-    let segs: Vec<&str> = name.split("::").collect();
-    let parts: Vec<&str> = scope.split("::").collect();
-    if parts.is_empty() || parts.len() > segs.len() {
-        return false;
-    }
-    let (last, init) = parts.split_last().unwrap();
-    segs.windows(parts.len()).any(|w| {
-        let (w_last, w_init) = w.split_last().unwrap();
-        w_init == init && w_last.starts_with(last)
-    })
-}
-
 #[test]
 fn ui() {
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
@@ -2479,6 +2266,10 @@ fn ui() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only helpers of the shared policy parser (not called by the gate itself, which uses the
+    // higher-level `literal_allowed`); these duplicate-coverage tests double as a smoke check that the
+    // shared module is wired in on the nightly side too.
+    use candor_classify::policy::{cmd_base, fs_path_covered};
 
     #[test]
     fn classify_network_precisely() {

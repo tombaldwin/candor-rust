@@ -44,10 +44,11 @@ fn main() {
         "locate" => cmd_locate(rest),
         "engine-version" => cmd_engine_version(rest),
         "merge-hook" => cmd_merge_hook(rest),
+        "parsepolicy" => cmd_parsepolicy(rest),
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|whatif|rewire|receipt|gains|state|reports|locate|engine-version|merge-hook)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|whatif|rewire|parsepolicy|receipt|gains|state|reports|locate|engine-version|merge-hook)"
             );
             2
         }
@@ -557,51 +558,49 @@ fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str, want_json:
 /// Segment-aware scope match, IDENTICAL to the lint's `scope_matches` (src/lib.rs) so a `whatif` verdict
 /// matches what the policy gate would actually do — `domain` matches `app::domain::f` and `domain_logic`,
 /// but NOT `subdomain`. Keep in lockstep with the lint.
-fn wi_scope_matches(name: &str, scope: &str) -> bool {
-    let segs: Vec<&str> = name.split("::").collect();
-    let parts: Vec<&str> = scope.split("::").collect();
-    if parts.is_empty() || parts.len() > segs.len() {
-        return false;
-    }
-    let (last, init) = parts.split_last().unwrap();
-    segs.windows(parts.len()).any(|w| {
-        let (w_last, w_init) = w.split_last().unwrap();
-        w_init == init && w_last.starts_with(last)
-    })
-}
-
-/// The `deny`/`pure` rules from a CANDOR_POLICY file: (forbidden effects — empty = `pure` = all, scope —
-/// None = whole crate). `allow`/`forbid` lines are ignored (whatif simulates effect-boundary deny only).
-fn wi_parse_deny(text: &str) -> Vec<(BTreeSet<String>, Option<String>)> {
-    const EFFECTS: [&str; 10] =
-        ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"];
-    let mut out = Vec::new();
-    for raw in text.lines() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut toks = line.split_whitespace();
-        match toks.next().unwrap_or("") {
-            "deny" => {
-                let mut effects = BTreeSet::new();
-                let mut scope = None;
-                for t in toks {
-                    if scope.is_none() && EFFECTS.contains(&t) {
-                        effects.insert(t.to_string());
-                    } else if scope.is_none() {
-                        scope = Some(t.to_string());
-                    }
-                }
-                if !effects.is_empty() {
-                    out.push((effects, scope));
-                }
-            }
-            "pure" => out.push((BTreeSet::new(), toks.next().map(str::to_string))),
-            _ => {}
-        }
-    }
-    out
+/// `parsepolicy <file>` — dump the parsed CANDOR_POLICY as canonical JSON (deny/allow/forbid), using
+/// the SHARED parser (`candor_classify::policy`, SPEC §6.2). Not a user workflow: it exists so the
+/// cross-impl conformance suite can diff this engine's policy parse against the JVM engine and prove the
+/// grammar means the same thing in both. A `pure` rule appears as a deny with empty `effects`; whole-unit
+/// scope is the empty string (matching the JVM dump). Rules are sorted so the comparison is order-free.
+fn cmd_parsepolicy(args: &[String]) -> i32 {
+    let Some(path) = args.first() else {
+        eprintln!("usage: candor-query parsepolicy <policy-file>");
+        return 2;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        eprintln!("candor: cannot read policy {path}");
+        return 2;
+    };
+    let p = candor_classify::policy::parse_policy(&text);
+    let mut deny: Vec<serde_json::Value> = p
+        .rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "effects": r.effects.iter().copied().collect::<Vec<&str>>(),
+                "scope": r.scope.as_deref().unwrap_or(""),
+            })
+        })
+        .collect();
+    let mut allow: Vec<serde_json::Value> = p
+        .allow_rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "effect": r.effect,
+                "scope": r.scope.as_deref().unwrap_or(""),
+                "values": r.literals.iter().map(String::as_str).collect::<Vec<&str>>(),
+            })
+        })
+        .collect();
+    let mut forbid: Vec<serde_json::Value> =
+        p.layer_rules.iter().map(|r| serde_json::json!({ "from": r.from, "to": r.to })).collect();
+    deny.sort_by_key(|v| v.to_string());
+    allow.sort_by_key(|v| v.to_string());
+    forbid.sort_by_key(|v| v.to_string());
+    println!("{}", serde_json::json!({ "deny": deny, "allow": allow, "forbid": forbid }));
+    0
 }
 
 /// `whatif <prefix> <fn> <Effect> [policy] [0|1]` — the PRE-EDIT verdict. Computes the blast radius of
@@ -661,18 +660,25 @@ fn cmd_whatif(args: &[String]) -> i32 {
     }
 
     // The verdict: affected functions sitting in a `deny <effect>` / `pure` scope would violate.
-    let rules = policy_path.as_deref().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| wi_parse_deny(&t));
+    // Parsed by the SHARED canonical DSL parser (candor_classify::policy, SPEC §6.2) — the SAME one the
+    // nightly gate uses — so the pre-edit verdict can never diverge from the real gate's. (Only the
+    // deny/pure rules are simulated here; allow/forbid are not pre-edit effect-introduction concerns.)
+    let rules = policy_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| candor_classify::policy::parse_policy(&t).rules);
     let mut violations: Vec<(&str, String)> = Vec::new();
     if let Some(rules) = &rules {
         for fname in &affected {
-            for (effects, scope) in rules {
-                let denies = effects.is_empty() || effects.contains(effect.as_str());
-                let in_scope = scope.as_deref().map_or(true, |s| wi_scope_matches(fname, s));
+            for rule in rules {
+                let denies = rule.effects.is_empty() || rule.effects.contains(effect.as_str());
+                let in_scope =
+                    rule.scope.as_deref().map_or(true, |s| candor_classify::policy::scope_matches(fname, s));
                 if denies && in_scope {
-                    let r = if effects.is_empty() {
-                        format!("pure{}", scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
+                    let r = if rule.effects.is_empty() {
+                        format!("pure{}", rule.scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
                     } else {
-                        format!("deny {effect}{}", scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
+                        format!("deny {effect}{}", rule.scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
                     };
                     violations.push((fname, r));
                     break;
