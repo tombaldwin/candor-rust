@@ -1,0 +1,4 @@
+# the order-entry/admin surface must stay off the network
+deny Net api
+deny Net admin
+pure pricing::line_item
