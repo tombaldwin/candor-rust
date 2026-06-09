@@ -28,11 +28,11 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 52] = [
+pub const CALIBRATED_CRATES: [&str; 53] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer;
     // pnet is raw L2/L3 packet capture)
-    "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
+    "reqwest", "isahc", "ureq", "curl", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
     "async_nats", "lapin", "lettre", "tungstenite", "elasticsearch", "tonic", "rdkafka", "pnet",
     // directory traversal (ignore = gitignore-aware walker, powers ripgrep/fd; its walk executors are Fs)
     // + filesystem watching (notify = inotify/FSEvents/kqueue wrapper; powers watchexec/cargo-watch)
@@ -314,6 +314,21 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         return None;
     }
     if crate_name == "ureq" && path.ends_with("::call") {
+        return Some("Net");
+    }
+    // The `curl` crate (libcurl's safe binding — cargo's own HTTP client): the dispatch verbs are
+    // `perform` (Easy/Easy2/Transfer/Multi), raw-socket `send`/`recv`, the keepalive `upkeep`, and the
+    // multi-interface `action` (socket_action). The big setopt-style builder surface stays pure.
+    // `Multi::timeout` is deliberately NOT matched: `Easy::timeout` is a pure CURLOPT_TIMEOUT setter
+    // sharing the leaf — an under-report on the rare event-loop kick beats mis-tagging every consumer
+    // that sets a timeout. (Consumer-side companion to the curl_* FFI tier, same A/B finding.)
+    if crate_name == "curl"
+        && (path.ends_with("::perform")
+            || path.ends_with("::send")
+            || path.ends_with("::recv")
+            || path.ends_with("::upkeep")
+            || path.ends_with("::action"))
+    {
         return Some("Net");
     }
     // Message-queue clients fully encapsulate the socket (the underlying tokio::net lives
@@ -906,6 +921,12 @@ mod tests {
         assert_eq!(classify("curl_sys", "curl_sys::curl_easy_setopt"), None); // in-memory option write
         assert_eq!(classify("curl_sys", "curl_sys::curl_easy_init"), None); // handle alloc
         assert_eq!(classify("curl_sys", "curl_sys::curl_multi_wait"), None); // readiness wait, no payload
+        // consumer-side `curl` crate rule: the dispatch verbs are Net, the setopt builders pure.
+        assert_eq!(classify("curl", "curl::easy::Easy::perform"), Some("Net"));
+        assert_eq!(classify("curl", "curl::multi::Multi::perform"), Some("Net"));
+        assert_eq!(classify("curl", "curl::easy::Easy::send"), Some("Net"));
+        assert_eq!(classify("curl", "curl::easy::Easy::url"), None); // CURLOPT setter — pure
+        assert_eq!(classify("curl", "curl::easy::Easy::timeout"), None); // pure setter; Multi::timeout under-reported by design
         assert_eq!(classify("ffi", "ffi::SSL_connect"), Some("Net"));
         // pure crates stay pure
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
