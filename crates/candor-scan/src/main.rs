@@ -29,7 +29,8 @@
 //!   default dir = ".", default prefix = "<dir>/.candor/report"; writes <prefix>.<crate>.scan.json (+ a
 //!   callgraph sidecar so `cargo candor callers <fn>` works on the stable report too). `--json` prints
 //!   the report to stdout instead. By DEFAULT only the crate's library/binary source is scanned —
-//!   `tests/`, `benches/`, `examples/`, `test/`, `build.rs`, and `#[cfg(test)]` modules are skipped, so
+//!   `tests/`, `benches/`, `examples/`, `test/`, the root `build.rs` (the Cargo build script — but NOT a
+//!   `src/build.rs` source module), and `#[cfg(test)]` modules are skipped, so
 //!   the report describes what the CRATE does, not what its harness does (`--include-tests` keeps them).
 //!   See eval/calibration for accuracy on 35 real crates.
 
