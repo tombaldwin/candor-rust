@@ -962,8 +962,14 @@ fn cmd_reachable(args: &[String]) -> i32 {
         println!("  (no entry points in this report — nothing is marked runtime-invoked)");
         return 0;
     }
-    let order: Vec<&str> =
-        CONTAINED.iter().chain(AMBIENT.iter()).copied().chain(std::iter::once("Unknown")).collect();
+    // Boundary effects first, then ambient, then Clipboard (a peripheral capability in neither set),
+    // then the Unknown caveat. Any other effect trails.
+    let order: Vec<&str> = CONTAINED
+        .iter()
+        .chain(AMBIENT.iter())
+        .copied()
+        .chain(["Clipboard", "Unknown"])
+        .collect();
     let mut seen: Vec<&String> = by_eff.keys().collect();
     seen.sort_by_key(|e| order.iter().position(|o| *o == e.as_str()).unwrap_or(order.len()));
     for eff in seen {
@@ -972,10 +978,11 @@ fn cmd_reachable(args: &[String]) -> i32 {
             who.iter().take(3).map(|s| reachable_leaf(s)).collect::<Vec<_>>().join(", ");
         let more = if who.len() > 3 { ", …" } else { "" };
         let tag = if eff == "Unknown" { "   ← visibility caveat, not a performed effect" } else { "" };
-        println!("  {eff:<8} {:>3}  ({examples}{more}){tag}", who.len());
+        println!("  {eff:<10} {:>3}  ({examples}{more}){tag}", who.len());
     }
     let pure = roots.iter().filter(|e| e.inferred.is_empty()).count();
-    println!("\n  {} entry points; {pure} perform no effect (pure roots).", roots.len());
+    let n = roots.len();
+    println!("\n  {n} entry point{}; {pure} perform no effect (pure roots).", if n == 1 { "" } else { "s" });
     0
 }
 
