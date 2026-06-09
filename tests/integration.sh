@@ -246,6 +246,13 @@ printf 'struct Guard;\nimpl Drop for Guard { fn drop(&mut self){ let _=std::net:
 out=$(dl "$DR")
 want   "the effectful Drop propagates to the dropping fn (via_drop gains Net)" "$out" '`via_drop` effects: { Net'
 absent "a genuinely pure fn is NOT given a phantom effect (pure_fn)"           "$out" '`pure_fn` effects'
+# LAUNDERED through a heap container: dropping a `Vec<Guard>` / `Box<Guard>` runs `Guard::drop` via the
+# container's drop glue — hidden behind a raw pointer, so naive field-recursion would miss it. The
+# curated owning-container type-arg walk (local_drop_impls) must still reach the element's effectful Drop.
+printf 'struct Guard;\nimpl Drop for Guard { fn drop(&mut self){ let _=std::net::TcpStream::connect("10.0.0.2:9"); } }\nfn via_vec(){ let v = vec![Guard]; let _ = v; }\nfn via_box(){ let b = Box::new(Guard); let _ = b; }\nfn main(){ via_vec(); via_box(); }\n' > "$DR/src/main.rs"
+lout=$(dl "$DR")
+want   "Drop laundered through Vec<Guard> still propagates (via_vec gains Net)"  "$lout" '`via_vec` effects: { Net'
+want   "Drop laundered through Box<Guard> still propagates (via_box gains Net)"  "$lout" '`via_box` effects: { Net'
 rm -rf "$(dirname "$DR")"
 
 # ── 9d. Layering with a CRATE-NAME from-scope (the real-world fix: not a silent no-op) ──
