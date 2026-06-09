@@ -835,6 +835,10 @@ fn main() {
             } else {
                 Vec::new()
             },
+            // candor-spec §2 `entryPoint`: syntactically we can only spot `main` (the program root). The
+            // lint also flags `#[no_mangle]`; the scanner can't see attributes, so it under-marks — the
+            // sound direction for an optional reachability hint.
+            entry_point: q.rsplit("::").next() == Some("main"),
         });
     }
     entries.sort_by(|a, b| a.func.cmp(&b.func));

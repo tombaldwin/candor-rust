@@ -379,6 +379,8 @@ cfc=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" closure_hof 0 2
 want   "closure-flow: named-only HOF resolves to Net" "$cfa" "Net"
 absent "closure-flow: resolved HOF drops the Unknown" "$cfa" "Unknown"
 want   "closure-flow: closure-passed HOF stays Unknown" "$cfc" "Unknown"
+# candor-spec §2 entryPoint: the program `main` is a reachability root.
+want   "report flags main as an entry point (entryPoint)" "$( cd "$CF"; cat r.*.json 2>/dev/null )" '"entryPoint": true'
 # SOUNDNESS regression guard: a HOF passed a NON-LOCAL named fn must keep the honest Unknown — it must
 # NOT be silently dropped to pure (the non-local fn isn't edge-resolvable, so we can't certify purity).
 printf 'fn nlhof(f: impl Fn(&str) -> String){ let _=f("x"); }\nfn nluser(){ nlhof(str::to_string); }\nfn main(){ nluser(); }\n' > "$CF/src/main.rs"

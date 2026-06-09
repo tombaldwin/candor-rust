@@ -824,6 +824,24 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
     }
 }
 
+/// Is `did` a runtime/external entry point — invoked from outside project Rust code, so a reachability
+/// ROOT (candor-spec §2 `entryPoint`)? The program `main`, or an exported symbol (`#[no_mangle]` /
+/// `#[export_name]`) the linker/C/FFI calls. Far narrower than the JVM port's reflective surface — Rust
+/// has no framework-reflection entry points — which the spec explicitly allows (population is
+/// runtime-specific).
+fn rust_is_entry_point(cx: &LateContext<'_>, did: DefId, entry_fn: Option<DefId>) -> bool {
+    if Some(did) == entry_fn {
+        return true;
+    }
+    if !matches!(cx.tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn) {
+        return false;
+    }
+    use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags as F;
+    // `#[no_mangle]` exports the symbol under its own name for the linker / C / FFI to call — an
+    // external entry point. (`#[export_name]` is rarer and not separately flagged here.)
+    cx.tcx.codegen_fn_attrs(did).flags.contains(F::NO_MANGLE)
+}
+
 /// Class Hierarchy Analysis: the impl methods a (trait) call could dispatch to. Scoped
 /// to traits defined in THIS crate — we can enumerate their impls and see the bodies,
 /// and they're the project's own effectful traits. For non-local traits (std/deps) we
@@ -2072,6 +2090,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     undeclared: owned(&undeclared),
                     overdeclared: owned(&unused),
                     unresolved: has_unknown,
+                    entry_point: rust_is_entry_point(cx, f.to_def_id(), entry_fn),
                     hash: dph_hex(cx.tcx, f.to_def_id()),
                     // Empty when the kind is incomplete (FS_UNKNOWN — Fs reached cross-crate with no
                     // recorded detail): present no read/write claim rather than a misleading partial.

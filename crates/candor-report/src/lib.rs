@@ -79,6 +79,12 @@ pub struct ReportEntry {
     pub overdeclared: Vec<String>,
     #[serde(default)]
     pub unresolved: bool,
+    /// True if the RUNTIME invokes this function rather than (only) project code — a reachability ROOT
+    /// with no in-project caller (`main`, a `#[test]`, a `#[no_mangle]`/exported fn). candor-spec §2
+    /// `entryPoint`. Far richer on a reflection/framework runtime (the JVM port marks Spring/servlet
+    /// callbacks); on Rust it's the language's external-invocation surface. Omitted when false.
+    #[serde(default, rename = "entryPoint", skip_serializing_if = "std::ops::Not::not")]
+    pub entry_point: bool,
     /// Stable cross-crate identity (hex `DefPathHash`); empty in older reports.
     #[serde(default)]
     pub hash: String,
@@ -226,6 +232,7 @@ mod tests {
                 func: "f".into(),
                 inferred: vec!["Db".into(), "Unknown".into()],
                 unknown_why: vec!["dispatch:foo::Bar".into()],
+                entry_point: true,
                 ..Default::default()
             }],
         };
@@ -237,9 +244,13 @@ mod tests {
         // `unknownWhy` round-trips under its JSON name and survives deserialization.
         assert!(s.contains("\"unknownWhy\":[\"dispatch:foo::Bar\"]"), "unknownWhy must serialize: {s}");
         assert_eq!(back[0].unknown_why, vec!["dispatch:foo::Bar".to_string()]);
-        // …and is omitted entirely when empty (the common case).
+        // `entryPoint` round-trips under its JSON name and is omitted when false.
+        assert!(s.contains("\"entryPoint\":true"), "entryPoint must serialize when set: {s}");
+        assert!(back[0].entry_point);
+        // …and is omitted entirely when empty/false (the common case).
         let empty = serde_json::to_string(&ReportEntry { func: "g".into(), ..Default::default() }).unwrap();
         assert!(!empty.contains("unknownWhy"), "empty unknownWhy must be omitted: {empty}");
+        assert!(!empty.contains("entryPoint"), "false entryPoint must be omitted: {empty}");
         // the spec contract version (§2.1) is emitted in the envelope header.
         assert!(s.contains("\"spec\":\"0.3\""), "envelope must carry the spec version: {s}");
         assert_eq!(SPEC_VERSION, "0.3");
