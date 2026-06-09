@@ -59,6 +59,19 @@ pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
 /// treat them as *covered* — otherwise it would mislabel the most common async crates as blind spots.
 pub const PATH_CALIBRATED_CRATES: [&str; 3] = ["tokio", "async_std", "mio"];
 
+/// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
+/// liveness test probes: at least one must match for every `CALIBRATED_CRATES` entry, else the entry is
+/// dead. Exported as ONE source of truth because the nightly lint crate (`src/lib.rs`) runs the SAME
+/// liveness test — when the two probe lists were duplicated they drifted, and a rule keyed on a
+/// distinctive tail (pnet `::datalink::channel`, ignore `::WalkBuilder::build_parallel`, notify
+/// `::RecommendedWatcher::new`) added to only one list silently broke the other crate's `cargo test`.
+pub const CALIBRATION_PROBE_TAILS: &[&str] = &[
+    "::X::send", "::X::execute", "::X::call", "::X::query", "::X::fetch_one", "::Remote::fetch",
+    "::datalink::channel", "::WalkBuilder::build_parallel", "::RecommendedWatcher::new",
+    "::X::connect", "::Utc::now", "::X::load", "::__private_api::log", "::tempfile", "::glob",
+    "::X::run", "::dotenv", "::random", "::emit", "::X::emit_span_lint", "::X::anything",
+];
+
 /// Database client crates whose execution verbs are I/O (see the DB branch in `classify`).
 /// Module-level so `db_crates_are_calibrated` can enforce `DB_CRATES ⊆ CALIBRATED_CRATES`.
 pub const DB_CRATES: [&str; 11] = [
@@ -797,31 +810,8 @@ mod tests {
         // Conversely, every crate advertised as calibrated must actually be matched by classify() for
         // some representative path — a dead entry would silently suppress a real coverage warning.
         for c in CALIBRATED_CRATES {
-            let probes = [
-                format!("{c}::X::send"),
-                format!("{c}::X::execute"),
-                format!("{c}::X::call"),
-                format!("{c}::X::query"),
-                format!("{c}::X::fetch_one"),
-                format!("{c}::Remote::fetch"),
-                format!("{c}::datalink::channel"),
-                format!("{c}::WalkBuilder::build_parallel"),
-                format!("{c}::RecommendedWatcher::new"),
-                format!("{c}::X::connect"),
-                format!("{c}::Utc::now"),
-                format!("{c}::X::load"),
-                format!("{c}::__private_api::log"),
-                format!("{c}::tempfile"),
-                format!("{c}::glob"),
-                format!("{c}::X::run"),
-                format!("{c}::dotenv"),
-                format!("{c}::random"),
-                format!("{c}::emit"),
-                format!("{c}::X::emit_span_lint"),
-                format!("{c}::X::anything"),
-            ];
             assert!(
-                probes.iter().any(|p| classify(c, p).is_some()),
+                CALIBRATION_PROBE_TAILS.iter().any(|t| classify(c, &format!("{c}{t}")).is_some()),
                 "calibrated crate `{c}` is matched by no path in classify() — dead list entry"
             );
         }

@@ -37,7 +37,7 @@ use candor_report::{
 // by a consistency test, qualified at the use site.)
 use candor_classify::{
     cap_from_name, capstd_cap, classify, classify_extra, CALIBRATED_CRATES, CALIBRATED_PREFIXES,
-    PATH_CALIBRATED_CRATES,
+    CALIBRATION_PROBE_TAILS, PATH_CALIBRATED_CRATES,
 };
 
 use rustc_hir::def::DefKind;
@@ -2679,29 +2679,12 @@ mod tests {
         // Conversely, every crate we advertise as calibrated must actually be matched by
         // classify() for some representative path — a dead entry would silently suppress a
         // real coverage warning.
+        // Probe tails are the SHARED `CALIBRATION_PROBE_TAILS` const (candor-classify) — not a local copy —
+        // so this test and candor-classify's own copy can't drift (they did once: pnet/ignore/notify rules
+        // use distinctive tails this list was missing, silently breaking the invariant here).
         for c in CALIBRATED_CRATES {
-            let probes = [
-                format!("{c}::X::send"),
-                format!("{c}::X::execute"),
-                format!("{c}::X::call"),
-                format!("{c}::X::query"),
-                format!("{c}::X::fetch_one"),
-                format!("{c}::Remote::fetch"),
-                format!("{c}::X::connect"),
-                format!("{c}::Utc::now"),
-                format!("{c}::X::load"),
-                format!("{c}::__private_api::log"),
-                format!("{c}::tempfile"),    // tempfile
-                format!("{c}::glob"),        // glob
-                format!("{c}::X::run"),      // duct
-                format!("{c}::dotenv"),      // dotenvy / dotenv
-                format!("{c}::random"),      // rand (verb-gated)
-                format!("{c}::emit"),        // rustc_errors diagnostic emission
-                format!("{c}::X::emit_span_lint"), // rustc_lint diagnostic emission
-                format!("{c}::X::anything"),
-            ];
             assert!(
-                probes.iter().any(|p| classify(c, p).is_some()),
+                CALIBRATION_PROBE_TAILS.iter().any(|t| classify(c, &format!("{c}{t}")).is_some()),
                 "calibrated crate `{c}` is matched by no path in classify() — dead list entry"
             );
         }
