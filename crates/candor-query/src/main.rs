@@ -35,6 +35,7 @@ fn main() {
         "reachable" => cmd_reachable(rest),
         "path" => cmd_path(rest),
         "impact" => cmd_impact(rest),
+        "whatif" => cmd_whatif(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
         "state" => cmd_state(rest),
@@ -45,7 +46,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|receipt|gains|state|reports|locate|engine-version|merge-hook)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|whatif|receipt|gains|state|reports|locate|engine-version|merge-hook)"
             );
             2
         }
@@ -548,6 +549,168 @@ fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str, want_json:
         println!("      {c}{mark}");
     }
     0
+}
+
+// ── whatif ──────────────────────────────────────────────────────────────────────────────────────
+
+/// Segment-aware scope match, IDENTICAL to the lint's `scope_matches` (src/lib.rs) so a `whatif` verdict
+/// matches what the policy gate would actually do — `domain` matches `app::domain::f` and `domain_logic`,
+/// but NOT `subdomain`. Keep in lockstep with the lint.
+fn wi_scope_matches(name: &str, scope: &str) -> bool {
+    let segs: Vec<&str> = name.split("::").collect();
+    let parts: Vec<&str> = scope.split("::").collect();
+    if parts.is_empty() || parts.len() > segs.len() {
+        return false;
+    }
+    let (last, init) = parts.split_last().unwrap();
+    segs.windows(parts.len()).any(|w| {
+        let (w_last, w_init) = w.split_last().unwrap();
+        w_init == init && w_last.starts_with(last)
+    })
+}
+
+/// The `deny`/`pure` rules from a CANDOR_POLICY file: (forbidden effects — empty = `pure` = all, scope —
+/// None = whole crate). `allow`/`forbid` lines are ignored (whatif simulates effect-boundary deny only).
+fn wi_parse_deny(text: &str) -> Vec<(BTreeSet<String>, Option<String>)> {
+    const EFFECTS: [&str; 10] =
+        ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"];
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        match toks.next().unwrap_or("") {
+            "deny" => {
+                let mut effects = BTreeSet::new();
+                let mut scope = None;
+                for t in toks {
+                    if scope.is_none() && EFFECTS.contains(&t) {
+                        effects.insert(t.to_string());
+                    } else if scope.is_none() {
+                        scope = Some(t.to_string());
+                    }
+                }
+                if !effects.is_empty() {
+                    out.push((effects, scope));
+                }
+            }
+            "pure" => out.push((BTreeSet::new(), toks.next().map(str::to_string))),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `whatif <prefix> <fn> <Effect> [policy] [0|1]` — the PRE-EDIT verdict. Computes the blast radius of
+/// introducing `Effect` into `fn` (the fn + every transitive caller, all of which would gain it), then —
+/// given a policy — reports which of them would VIOLATE a `deny <Effect>` / `pure` boundary. Answers
+/// "if I add a network call here, what happens and is it allowed?" BEFORE the edit, instead of edit →
+/// run the gate → revert. Read-only over the call-graph sidecar + the policy file.
+fn cmd_whatif(args: &[String]) -> i32 {
+    if args.len() < 3 {
+        eprintln!("usage: candor-query whatif <prefix> <fn> <Effect> [policy-file] [0|1]");
+        return 2;
+    }
+    let (prefix, target, effect) = (&args[0], &args[1], &args[2]);
+    let mut policy_path: Option<String> = None;
+    let mut want_json = false;
+    for a in &args[3..] {
+        match a.as_str() {
+            "0" => want_json = false,
+            "1" | "--json" => want_json = true,
+            other => policy_path = Some(other.to_string()),
+        }
+    }
+    if policy_path.is_none() {
+        policy_path = std::env::var("CANDOR_POLICY").ok();
+    }
+
+    let cg = load_callgraph(prefix);
+    if cg.is_empty() {
+        eprintln!("candor: no call-graph sidecar for `{prefix}` — scan the crate first.");
+        return 2;
+    }
+    let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (caller, callees) in &cg {
+        for c in callees {
+            rev.entry(c.as_str()).or_default().push(caller.as_str());
+        }
+    }
+    let names: BTreeSet<&str> =
+        cg.keys().map(|s| s.as_str()).chain(cg.values().flatten().map(|s| s.as_str())).collect();
+    let exact = names.contains(target.as_str());
+    let targets: Vec<&str> = names.iter().copied().filter(|n| q_match(n, target, exact)).collect();
+    if targets.is_empty() {
+        eprintln!("candor: no function matching `{target}` in the call graph.");
+        return 2;
+    }
+    // The affected set: the target(s) + every transitive caller — all gain `effect` after the edit.
+    let mut affected: BTreeSet<&str> = targets.iter().copied().collect();
+    let mut stack: Vec<&str> = targets.clone();
+    while let Some(n) = stack.pop() {
+        if let Some(cs) = rev.get(n) {
+            for &c in cs {
+                if affected.insert(c) {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+
+    // The verdict: affected functions sitting in a `deny <effect>` / `pure` scope would violate.
+    let rules = policy_path.as_deref().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| wi_parse_deny(&t));
+    let mut violations: Vec<(&str, String)> = Vec::new();
+    if let Some(rules) = &rules {
+        for fname in &affected {
+            for (effects, scope) in rules {
+                let denies = effects.is_empty() || effects.contains(effect.as_str());
+                let in_scope = scope.as_deref().map_or(true, |s| wi_scope_matches(fname, s));
+                if denies && in_scope {
+                    let r = if effects.is_empty() {
+                        format!("pure{}", scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
+                    } else {
+                        format!("deny {effect}{}", scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
+                    };
+                    violations.push((fname, r));
+                    break;
+                }
+            }
+        }
+    }
+
+    if want_json {
+        let out = serde_json::json!({
+            "of": targets,
+            "effect": effect,
+            "affected": affected.iter().collect::<Vec<_>>(),
+            "violations": violations.iter().map(|(f, r)| serde_json::json!({"fn": f, "rule": r})).collect::<Vec<_>>(),
+            "ok": violations.is_empty(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return if violations.is_empty() { 0 } else { 1 };
+    }
+
+    println!("whatif: adding `{effect}` to `{}`", targets.join(", "));
+    println!("  → propagates to {} function(s) (the blast radius):", affected.len());
+    for f in &affected {
+        println!("      {f}");
+    }
+    if rules.is_none() {
+        println!("  (no policy given — pass a policy file or set CANDOR_POLICY for the gate verdict)");
+        return 0;
+    }
+    if violations.is_empty() {
+        println!("  ✓ within policy — this edit introduces no `deny`/`pure` boundary violation.");
+        0
+    } else {
+        println!("  ⚠ WOULD VIOLATE policy ({}) — run BEFORE the edit:", violations.len());
+        for (f, r) in &violations {
+            println!("      [AS-EFF-006] `{f}`  (rule: `{r}`)");
+        }
+        1
+    }
 }
 
 /// Load + merge every `<prefix>.*.callgraph.json` sidecar into one `caller -> [callees]` map (by path).
@@ -1702,6 +1865,25 @@ fn two(args: &[String]) -> Option<(&str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whatif_scope_and_policy_parse() {
+        // scope match mirrors the lint exactly: segment-aware, last segment prefix, never mid-word.
+        assert!(wi_scope_matches("app::domain::handle", "domain"));
+        assert!(wi_scope_matches("crate::domain_logic", "domain")); // segment-prefixed
+        assert!(!wi_scope_matches("app::subdomain::handle", "domain")); // mid-word must NOT match
+        assert!(wi_scope_matches("api::handle", "api"));
+
+        // `deny Net Db api` -> forbid {Net,Db} in scope `api`; `pure parse` -> forbid ALL in `parse`;
+        // `deny Exec` -> forbid Exec crate-wide (no scope); allow/forbid lines ignored.
+        let rules = wi_parse_deny("deny Net Db api\npure parse\ndeny Exec\nallow Net in billing x\nforbid a -> b\n# c");
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].0.iter().cloned().collect::<Vec<_>>(), vec!["Db", "Net"]);
+        assert_eq!(rules[0].1.as_deref(), Some("api"));
+        assert!(rules[1].0.is_empty()); // pure = all effects
+        assert_eq!(rules[1].1.as_deref(), Some("parse"));
+        assert_eq!(rules[2].1, None); // crate-wide deny Exec
+    }
 
     #[test]
     fn containment_layer_derivation() {
