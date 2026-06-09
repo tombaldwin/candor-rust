@@ -36,6 +36,7 @@ fn main() {
         "path" => cmd_path(rest),
         "impact" => cmd_impact(rest),
         "whatif" => cmd_whatif(rest),
+        "rewire" => cmd_rewire(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
         "state" => cmd_state(rest),
@@ -46,7 +47,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|whatif|receipt|gains|state|reports|locate|engine-version|merge-hook)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|whatif|rewire|receipt|gains|state|reports|locate|engine-version|merge-hook)"
             );
             2
         }
@@ -711,6 +712,72 @@ fn cmd_whatif(args: &[String]) -> i32 {
         }
         1
     }
+}
+
+// ── rewire ──────────────────────────────────────────────────────────────────────────────────────
+
+/// Per caller, the callees it had in the BASELINE call graph but no longer has now (the dropped edges).
+fn dropped_edges<'a>(
+    cur: &'a BTreeMap<String, Vec<String>>,
+    base: &'a BTreeMap<String, Vec<String>>,
+) -> BTreeMap<&'a str, Vec<&'a str>> {
+    let mut dropped: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (caller, base_callees) in base {
+        let now: BTreeSet<&str> =
+            cur.get(caller).map(|v| v.iter().map(String::as_str).collect()).unwrap_or_default();
+        let gone: Vec<&str> = base_callees.iter().map(String::as_str).filter(|c| !now.contains(c)).collect();
+        if !gone.is_empty() {
+            dropped.insert(caller.as_str(), gone);
+        }
+    }
+    dropped
+}
+
+/// `rewire <cur_prefix> <base_prefix> [0|1]` — the de-wiring detector. Compares the current call graph to
+/// a baseline and reports edges a function DROPPED — a call it made in the baseline and no longer makes.
+/// The effect gate (`policy`/`whatif`) checks effect BOUNDARIES, not correctness, so it can be satisfied by
+/// *disconnecting* functionality: an agent "fixes" a `deny Net api` violation by making `api::handle` stop
+/// calling the pricing chain — the gate passes, the feature is broken. That removal is invisible to the
+/// effect diff (a pure fn dropping a call changes no effect) but it IS in the call graph. This surfaces it:
+/// a passing gate PLUS dropped edges = verify a fix didn't gut the feature. Reads the callgraph sidecars.
+fn cmd_rewire(args: &[String]) -> i32 {
+    if args.len() < 2 {
+        eprintln!("usage: candor-query rewire <cur_prefix> <base_prefix> [0|1]");
+        return 2;
+    }
+    let (cur_pre, base_pre) = (&args[0], &args[1]);
+    let want_json = args.get(2).map(|s| s == "1").unwrap_or(false);
+    let cur = load_callgraph(cur_pre);
+    let base = load_callgraph(base_pre);
+    if base.is_empty() {
+        eprintln!("candor: no baseline call graph at `{base_pre}` (need its `.callgraph.json` sidecar).");
+        return 2;
+    }
+
+    let dropped = dropped_edges(&cur, &base);
+
+    if want_json {
+        let out = serde_json::json!({
+            "dropped": dropped.iter().map(|(c, g)| serde_json::json!({"caller": c, "no_longer_calls": g}))
+                .collect::<Vec<_>>(),
+            "ok": dropped.is_empty(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return if dropped.is_empty() { 0 } else { 1 };
+    }
+    if dropped.is_empty() {
+        println!("  no call edges dropped vs the baseline — nothing de-wired.");
+        return 0;
+    }
+    println!(
+        "  {} function(s) DROPPED a call they made in the baseline — a 'fix' may have disconnected \
+         functionality (the effect gate can pass while the feature is broken; verify it still works):",
+        dropped.len()
+    );
+    for (caller, gone) in &dropped {
+        println!("      {caller}  ⊘  no longer calls: {}", gone.join(", "));
+    }
+    1
 }
 
 /// Load + merge every `<prefix>.*.callgraph.json` sidecar into one `caller -> [callees]` map (by path).
@@ -1865,6 +1932,22 @@ fn two(args: &[String]) -> Option<(&str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewire_flags_dropped_edges_not_added_ones() {
+        let cg = |pairs: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
+            pairs.iter().map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect())).collect()
+        };
+        let base = cg(&[("api::handle", &["service::place_order"]), ("cart::total", &["pricing::quote"])]);
+        // gamed: api::handle dropped its call into the pricing chain; cart::total unchanged; a NEW edge added.
+        let cur = cg(&[("cart::total", &["pricing::quote"]), ("main", &["api::handle"])]);
+        let d = dropped_edges(&cur, &base);
+        assert_eq!(d.get("api::handle"), Some(&vec!["service::place_order"])); // the de-wiring is flagged
+        assert!(!d.contains_key("cart::total")); // unchanged edge → not flagged
+        assert!(!d.contains_key("main")); // a purely-ADDED edge is not a drop
+        // a correct fix that only ADDS edges yields nothing dropped.
+        assert!(dropped_edges(&base, &base).is_empty());
+    }
 
     #[test]
     fn whatif_scope_and_policy_parse() {

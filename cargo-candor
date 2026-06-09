@@ -13,6 +13,7 @@
 #   cargo candor where    Net                 # which functions perform an effect, INSTANT
 #   cargo candor callers  my_function         # which functions call this one, INSTANT (who depends on it)
 #   cargo candor whatif   my_function Net      # PRE-EDIT: if I add Net here, what propagates + does it break policy?
+#   cargo candor rewire   <baseline-prefix>    # did a 'fix' DE-WIRE the feature to pass the gate? (run with policy)
 #   cargo candor map                          # a module -> effects overview of the project, INSTANT
 #   cargo candor containment [baseline]       # effect-leakage diagnostic; with a baseline, a CI ratchet
 #   cargo candor reachable                    # what the program does at runtime (union over entry points)
@@ -512,6 +513,20 @@ case "$cmd" in
     query whatif .candor/report "${wargs[@]}" ${json:+"$json"}
     exit "$?" ;;
 
+  rewire)
+    # DE-WIRING detector: which functions DROPPED a call they made in the baseline. The effect gate
+    # (policy/whatif) checks effect BOUNDARIES, not correctness — it can be satisfied by *disconnecting*
+    # functionality (an agent "fixes" a `deny Net api` violation by making api stop calling the offending
+    # chain; the gate passes, the feature is broken). Run alongside `policy`: a green gate PLUS dropped
+    # edges = verify a fix didn't gut the feature. Baseline = a prior scan's report prefix (e.g. of HEAD).
+    #   cargo candor scan ../pre-edit-copy && cargo candor rewire ../pre-edit-copy/.candor/report
+    json=""; base=""
+    for a in "$@"; do case "$a" in --json) json="1" ;; -*) ;; *) [ -z "$base" ] && base="$a" ;; esac; done
+    [ -n "$base" ] || { echo "usage: cargo candor rewire <baseline-report-prefix> [--json]  (a prior scan's .candor/report)" >&2; exit 2; }
+    ensure_report || exit 1
+    query rewire .candor/report "$base" ${json:+"$json"}
+    exit "$?" ;;
+
   explain)
     # Trace WHY a function has each effect: the call path from it to the source of each effect (the
     # leaf call + location). `<query>` is a substring of the fully-qualified function name.
@@ -614,6 +629,6 @@ case "$cmd" in
     sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|whatif|map|explain|policy|risk|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' (setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|whatif|rewire|map|explain|policy|risk|strict|no-ambient|update)" >&2
     exit 2 ;;
 esac
