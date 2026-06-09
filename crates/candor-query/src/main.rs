@@ -32,6 +32,7 @@ fn main() {
         "map" => cmd_map(rest),
         "diff" => cmd_diff(rest),
         "containment" => cmd_containment(rest),
+        "reachable" => cmd_reachable(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
         "state" => cmd_state(rest),
@@ -42,7 +43,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|receipt|gains|state|reports|locate|engine-version|merge-hook)"
+                 (audit|show|where|callers|map|diff|containment|reachable|receipt|gains|state|reports|locate|engine-version|merge-hook)"
             );
             2
         }
@@ -920,6 +921,71 @@ fn layer_of(name: &str, prefix_len: usize) -> String {
 /// in a layer it wasn't in ("Db → actions"), and NOTE when one leaves a layer ("✓ Db ⊘ legacy").
 /// Deliberately a diagnostic + trend gate, NOT a single gameable "score".
 /// Args: `<prefix> [baseline_prefix] [--json]`.
+/// `reachable` — the effects the program performs at runtime: the union of `inferred` over the ENTRY
+/// POINTS (reachability roots — `main`, `#[no_mangle]` exports; far richer on the JVM port). Since
+/// `inferred` is already transitive, a root's set IS its full reachable surface, so the union answers
+/// "what does this binary actually do" without a per-fn dump. Mirrors the JVM port's `reachable`.
+fn cmd_reachable(args: &[String]) -> i32 {
+    let want_json = args.iter().any(|a| a == "--json");
+    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
+    let Some(pre) = pos.first() else {
+        eprintln!("usage: candor-query reachable <prefix> [--json]");
+        return 2;
+    };
+    let entries = load_entries(pre);
+    let roots: Vec<&ReportEntry> = entries.iter().filter(|e| e.entry_point).collect();
+    let mut by_eff: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for e in &roots {
+        for eff in &e.inferred {
+            by_eff.entry(eff.clone()).or_default().push(e.func.clone());
+        }
+    }
+
+    if want_json {
+        let effects: serde_json::Map<String, serde_json::Value> = by_eff
+            .iter()
+            .map(|(eff, who)| {
+                (eff.clone(), serde_json::json!({ "count": who.len(), "via": who }))
+            })
+            .collect();
+        let out = serde_json::json!({ "entryPoints": roots.len(), "effects": effects });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return 0;
+    }
+
+    println!(
+        "candor reachable — effects the program performs at runtime (union over {} entry point{})",
+        roots.len(),
+        if roots.len() == 1 { "" } else { "s" }
+    );
+    if roots.is_empty() {
+        println!("  (no entry points in this report — nothing is marked runtime-invoked)");
+        return 0;
+    }
+    let order: Vec<&str> =
+        CONTAINED.iter().chain(AMBIENT.iter()).copied().chain(std::iter::once("Unknown")).collect();
+    let mut seen: Vec<&String> = by_eff.keys().collect();
+    seen.sort_by_key(|e| order.iter().position(|o| *o == e.as_str()).unwrap_or(order.len()));
+    for eff in seen {
+        let who = &by_eff[eff];
+        let examples =
+            who.iter().take(3).map(|s| reachable_leaf(s)).collect::<Vec<_>>().join(", ");
+        let more = if who.len() > 3 { ", …" } else { "" };
+        let tag = if eff == "Unknown" { "   ← visibility caveat, not a performed effect" } else { "" };
+        println!("  {eff:<8} {:>3}  ({examples}{more}){tag}", who.len());
+    }
+    let pure = roots.iter().filter(|e| e.inferred.is_empty()).count();
+    println!("\n  {} entry points; {pure} perform no effect (pure roots).", roots.len());
+    0
+}
+
+/// Last two `::`-segments of a fully-qualified path, for compact examples.
+fn reachable_leaf(fname: &str) -> String {
+    let mut segs: Vec<&str> = fname.rsplitn(3, "::").take(2).collect();
+    segs.reverse();
+    segs.join("::")
+}
+
 fn cmd_containment(args: &[String]) -> i32 {
     let want_json = args.iter().any(|a| a == "--json");
     let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
