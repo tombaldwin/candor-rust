@@ -25,7 +25,7 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 48] = [
+pub const CALIBRATED_CRATES: [&str; 49] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
@@ -44,7 +44,7 @@ pub const CALIBRATED_CRATES: [&str; 48] = [
     "rustc_lint", "rustc_errors",
     // raw syscalls via FFI — the syscall-name table that lights up the FFI-thin tier (nix is routed
     // through the same table by leaf name, so a consumer of nix is covered without nix's own source)
-    "libc", "nix",
+    "libc", "nix", "rustix",
 ];
 
 pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
@@ -116,7 +116,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // stable scanner, single-crate) sees `nix::*` cross-crate and under-reports — serialport-rs opens its
     // device via `nix::fcntl::open` and reported ZERO Fs. The nightly lint reaches `libc::*` THROUGH nix's
     // body; this gives the scanner the same coverage directly. (Found sweeping serialport-rs.)
-    if crate_name == "libc" || crate_name == "nix" {
+    // `rustix` is the same shape as nix but does RAW syscalls (no libc underneath), so its functions MUST
+    // be classified directly. Its leaf names are the syscall names too (`rustix::time::clock_settime`,
+    // `rustix::fs::mkfifoat`/`symlink`/`stat`, `rustix::net::connect`) — route it through the same table.
+    // The rustix-specific `*at`/variant leaves it doesn't share with libc just under-report (the safe
+    // direction). VALIDATED, not speculative: coreutils' `date` reads/sets the clock via
+    // `rustix::time::clock_getres`/`clock_settime` and reported Clock=0; the file I/O that goes through
+    // std::fs was already correct, which is why only the rustix-only effects (Clock/Ipc) were missing.
+    if crate_name == "libc" || crate_name == "nix" || crate_name == "rustix" {
         let f = path.rsplit("::").next().unwrap_or(path);
         // path / directory / metadata syscalls (incl. *64 and *at variants)
         const FS: &[&str] = &[
@@ -154,8 +161,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             "mq_send", "mq_receive", "mq_timedsend", "mq_timedreceive", "mq_close", "mq_unlink",
         ];
         const ENV: &[&str] = &["getenv", "secure_getenv", "setenv", "putenv", "unsetenv", "clearenv"];
-        const CLOCK: &[&str] =
-            &["time", "gettimeofday", "clock_gettime", "clock_getres", "nanosleep", "clock_nanosleep"];
+        const CLOCK: &[&str] = &[
+            "time", "gettimeofday", "clock_gettime", "clock_getres", "nanosleep", "clock_nanosleep",
+            // SETTING the system clock is a clock effect too (was unclassified — found on coreutils `date`,
+            // which sets it via `clock_settime`).
+            "clock_settime", "settimeofday", "stime", "adjtime", "adjtimex", "clock_adjtime",
+        ];
         const RAND: &[&str] = &["getrandom", "getentropy", "arc4random", "arc4random_buf", "arc4random_uniform"];
         if FS.contains(&f) {
             return Some("Fs");
@@ -783,6 +794,11 @@ mod tests {
         assert_eq!(classify("nix", "nix::unistd::execvp"), Some("Exec"));
         assert_eq!(classify("nix", "nix::unistd::write"), None); // generic fd op — deliberately unclassified
         assert_eq!(classify("nix", "nix::unistd::getpid"), None); // not I/O
+        // rustix does raw syscalls (no libc underneath) → classified directly by leaf, same table.
+        assert_eq!(classify("rustix", "rustix::time::clock_settime"), Some("Clock"));
+        assert_eq!(classify("rustix", "rustix::fs::symlink"), Some("Fs"));
+        assert_eq!(classify("rustix", "rustix::net::connect"), Some("Net"));
+        assert_eq!(classify("rustix", "rustix::io::read"), None); // generic fd op
         assert_eq!(classify("rusqlite", "rusqlite::Connection::execute"), Some("Db"));
         assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
         // FFI tiers (matched by distinctive leaf, alias-independent)
