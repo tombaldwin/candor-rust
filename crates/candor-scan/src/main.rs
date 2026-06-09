@@ -43,6 +43,12 @@ struct Call {
     /// external-crate classification ONLY — excluded from local call-graph edges, since its `Type::method`
     /// tail could spuriously link to a same-named LOCAL method the call doesn't actually target.
     typed: bool,
+    /// A METHOD call (`x.foo()`) vs a free-function/path call (`foo()`, `m::foo()`). When the receiver type
+    /// can't be inferred, an unqualified method call has NO sound bare-leaf target — linking it to a
+    /// same-named def would guess (`.bool()`→free `random::bool::bool`, `range.start()`→`Clipboard::start`),
+    /// fabricating that def's effect. So such calls resolve to nothing; only the receiver-typed/qualified
+    /// form (the `typed` call) links a method edge. Found on nushell (Rand/Clipboard on the random cmds).
+    method: bool,
 }
 
 /// One function the scan found: its module-qualified name, where, and the calls in its body.
@@ -255,7 +261,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if !is_closure_call {
                     let path = expand(&path_to_string(&p.path), self.uses);
                     let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
-                    self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false });
+                    self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method: false });
                 }
             }
             // The callee is a COMPUTED value, not a path or a visible local closure: `(self.handler)()`,
@@ -269,7 +275,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let leaf = node.method.to_string();
         let str_arg = first_str_lit(&node.args);
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
-        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false });
+        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true });
         // Typed call: if the receiver's type resolves, form `Type::method` so the existing per-crate
         // method rules (reqwest/sqlx/redis/…) — unreachable from a bare method name — can fire. This is
         // the method-dispatch frontier: light, local type inference, no compiler.
@@ -284,7 +290,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let cr = ty.split("::").next().unwrap_or("");
             if !matches!(cr, "std" | "core" | "alloc") {
                 let path = format!("{ty}::{leaf}");
-                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true });
+                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true });
             }
         }
         syn::visit::visit_expr_method_call(self, node);
@@ -811,13 +817,28 @@ fn main() {
                 }
             }
             if !c.typed && !matches!(cr, "std" | "core" | "alloc") {
-                // Resolve the call to local definitions: a qualified-tail match first (`Type::method`),
-                // else a leaf match ONLY when it's unique. Never link to a many-way-ambiguous bare leaf.
+                // Resolve the call to local definitions. The bare-leaf fallback is sound ONLY for an
+                // unqualified free-function call: a qualifier (`Type::`/`mod::`) is authoritative and an
+                // unresolved-receiver method names no definite target, so neither may fall back to a leaf.
                 // Typed (receiver-inferred) calls are skipped here — they're for external classification,
                 // and their synthetic `Type::method` tail could mis-link to a same-named local method.
-                let targets: Option<&Vec<String>> = tail2(&c.path)
-                    .and_then(|t2| by_tail2.get(&t2))
-                    .or_else(|| by_leaf.get(&c.leaf).filter(|v| v.len() == 1));
+                let targets: Option<&Vec<String>> = if c.path.contains("::") {
+                    // QUALIFIED call (`Value::bool`, `m::helper`): the qualifier is authoritative. Match the
+                    // qualified tail only — NEVER fall back to a bare leaf, which would discard the
+                    // qualifier and link an external `Value::bool` to an unrelated local `random::bool::bool`,
+                    // fabricating that fn's effect (found on nushell: `Value::bool(..)` → Rand on 146 fns).
+                    tail2(&c.path).and_then(|t2| by_tail2.get(&t2))
+                } else if c.method {
+                    // UNQUALIFIED method call (`range.start()`) whose receiver type we couldn't infer: we
+                    // don't know which type's method it targets, so a bare-leaf match would GUESS — e.g.
+                    // `range.start()` linking to the only local `ClipboardResidentThread::start`, fabricating
+                    // Clipboard onto `random float`/`int`. Under-report instead. Resolved-receiver method
+                    // calls are still linked via the separate `typed` call through the qualified-tail index.
+                    None
+                } else {
+                    // UNQUALIFIED free-function call (`helper()`): link only when the leaf is UNAMBIGUOUS.
+                    by_leaf.get(&c.leaf).filter(|v| v.len() == 1)
+                };
                 if let Some(targets) = targets {
                     for t in targets {
                         if t != &f.qual {
@@ -1290,5 +1311,47 @@ mod tests {
         // guards the shared-classifier contract the scanner relies on: an expanded std::fs path is Fs.
         assert_eq!(candor_classify::classify("std", "std::fs::read_to_string"), Some("Fs"));
         assert_eq!(candor_classify::classify("std", "std::process::Command::new"), Some("Exec"));
+    }
+
+    // Mirrors the call→def resolution in `run`. A bare-leaf fallback may ONLY fire for an unqualified
+    // FREE-function call. It must NOT fire for (a) a qualified call whose tail misses locally — the
+    // qualifier is authoritative — nor (b) an unqualified method call with an unresolved receiver. Both
+    // were real fabrications found on nushell: `Value::bool(..)`→`random::bool::bool` (Rand on 146 fns)
+    // and `range.start()`→`ClipboardResidentThread::start` (Clipboard on `random float`/`int`).
+    fn resolve<'a>(
+        by_leaf: &'a HashMap<String, Vec<String>>,
+        by_tail2: &'a HashMap<String, Vec<String>>,
+        path: &str,
+        leaf: &str,
+        method: bool,
+    ) -> Option<&'a Vec<String>> {
+        if path.contains("::") {
+            tail2(path).and_then(|t2| by_tail2.get(&t2))
+        } else if method {
+            None
+        } else {
+            by_leaf.get(leaf).filter(|v| v.len() == 1)
+        }
+    }
+
+    #[test]
+    fn qualified_and_method_calls_never_fall_back_to_a_bare_leaf() {
+        // One unique `bool` free fn and one unique `start` method def in the crate.
+        let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
+        let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["random::bool::bool", "clip::ClipboardThread::start", "util::helper"] {
+            by_leaf.entry(q.rsplit("::").next().unwrap().into()).or_default().push(q.into());
+            by_tail2.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        // (a) qualified `Value::bool(..)` — external `Value`, tail `Value::bool` absent locally → NONE,
+        // never the unique-leaf `random::bool::bool`.
+        assert_eq!(resolve(&by_leaf, &by_tail2, "Value::bool", "bool", false), None);
+        // (b) unqualified method `range.start()` — unresolved receiver → NONE, never `ClipboardThread::start`.
+        assert_eq!(resolve(&by_leaf, &by_tail2, "start", "start", true), None);
+        // (c) unqualified free call `helper()` with a unique def still resolves (legit edge preserved).
+        assert_eq!(
+            resolve(&by_leaf, &by_tail2, "helper", "helper", false),
+            Some(&vec!["util::helper".to_string()])
+        );
     }
 }
