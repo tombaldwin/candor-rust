@@ -464,6 +464,26 @@ fn fninfo(
     fields: &FieldIndex,
     returns: &ReturnIndex,
 ) -> FnInfo {
+    // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
+    // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
+    // fails to resolve to its crate and is under-reported (found on coreutils `date`: its rustix clock
+    // read is imported by a fn-local `use`). Merge them in. (Top-level body stmts — the overwhelmingly
+    // common placement; a `use` buried in a nested block is rare and left to the module fallback.)
+    let mut local_uses = HashMap::new();
+    for stmt in &block.stmts {
+        if let syn::Stmt::Item(syn::Item::Use(u)) = stmt {
+            collect_use(&u.tree, String::new(), &mut local_uses);
+        }
+    }
+    let merged: HashMap<String, String>;
+    let uses: &HashMap<String, String> = if local_uses.is_empty() {
+        uses
+    } else {
+        let mut m = uses.clone();
+        m.extend(local_uses);
+        merged = m;
+        &merged
+    };
     let vars = seed_vars(sig, self_ty, uses);
     let mut c = CallCollector {
         uses,
