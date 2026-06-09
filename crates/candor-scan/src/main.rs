@@ -598,8 +598,13 @@ fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap<String, St
 fn module_path(rel: &Path) -> String {
     let mut comps: Vec<String> =
         rel.components().filter_map(|c| c.as_os_str().to_str().map(String::from)).collect();
-    if comps.first().map(String::as_str) == Some("src") {
-        comps.remove(0);
+    // Anchor at the LAST `src/` component, not just a leading one. A workspace member's code lives at
+    // `crates/<name>/src/…`, so the module path is what FOLLOWS that `src` — otherwise the filesystem path
+    // from the scan root mangles `crates/cli/src/decompress.rs` into `crates::cli::src::decompress`, which
+    // ALSO breaks intra-crate call resolution (call sites use the real module path, not the dir path).
+    // Found scanning ripgrep's workspace root — every name came out `crates::…::src::…` and `main` was lost.
+    if let Some(i) = comps.iter().rposition(|c| c == "src") {
+        comps.drain(..=i);
     }
     if let Some(last) = comps.last() {
         let stem = last.trim_end_matches(".rs").to_string();
@@ -1008,6 +1013,11 @@ mod tests {
             module_path(Path::new("src/generated/envoy.service.auth.v3.rs")),
             "generated::envoy::service::auth::v3"
         );
+        // a WORKSPACE member's path anchors at its OWN `src/`, not the scan root — otherwise the dir
+        // path (`crates/cli/src/decompress.rs`) mangles into `crates::cli::src::decompress`.
+        assert_eq!(module_path(Path::new("crates/cli/src/decompress.rs")), "decompress");
+        assert_eq!(module_path(Path::new("crates/ignore/src/walk.rs")), "walk");
+        assert_eq!(module_path(Path::new("crates/core/src/main.rs")), "");
     }
 
     #[test]
