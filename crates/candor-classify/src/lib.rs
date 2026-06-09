@@ -236,10 +236,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             return DB.contains(&leaf).then_some("Db");
         }
         if leaf.starts_with("git_") {
-            // libgit2: remote/transport operations contact the network …
+            // libgit2: remote/transport operations contact the network … (incl. submodule clone/update,
+            // which `git_clone`/fetch the subrepo over its remote — `allow_fetch` defaults on; an A/B on
+            // git2 0.20 caught `Submodule::update`/`clone` reporting no `Net`).
             const NET: &[&str] = &[
                 "git_clone", "git_remote_connect", "git_remote_connect_ext", "git_remote_fetch",
                 "git_remote_download", "git_remote_upload", "git_remote_push", "git_remote_ls",
+                "git_submodule_clone", "git_submodule_update",
             ];
             // … and repository/index/odb/checkout/ref/config operations touch the on-disk .git store.
             const FS: &[&str] = &[
@@ -872,6 +875,13 @@ mod tests {
         assert_eq!(classify("libc", "libc::read"), None); // generic fd op — deliberately unclassified
         assert_eq!(classify("ffi", "ffi::sqlite3_step"), Some("Db"));
         assert_eq!(classify("raw", "raw::git_remote_fetch"), Some("Net"));
+        // libgit2 clone + submodule clone/update fetch over the network (an A/B on git2 0.20 caught
+        // `Submodule::update`/`clone` and `Repository::clone` reporting no Net — the latter because the
+        // `src/build.rs` module was being dropped as if it were the Cargo build script).
+        assert_eq!(classify("raw", "raw::git_clone"), Some("Net"));
+        assert_eq!(classify("raw", "raw::git_submodule_clone"), Some("Net"));
+        assert_eq!(classify("raw", "raw::git_submodule_update"), Some("Net"));
+        assert_eq!(classify("raw", "raw::git_submodule_open"), None); // local subrepo open — not Net
         assert_eq!(classify("ffi", "ffi::SSL_connect"), Some("Net"));
         // pure crates stay pure
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);

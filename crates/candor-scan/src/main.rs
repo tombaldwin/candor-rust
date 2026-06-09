@@ -353,6 +353,14 @@ fn is_test_file_stem(stem: &str) -> bool {
     stem == "tests" || stem == "test" || stem.ends_with("_tests") || stem.ends_with("_test")
 }
 
+/// True if a crate-root-RELATIVE path is the Cargo BUILD SCRIPT — i.e. exactly `build.rs` at the root.
+/// It runs at COMPILE time, never the crate's runtime behaviour, so it's skipped. A nested `src/build.rs`
+/// is NOT the build script — it's an ordinary source module that merely shares the name (git2's
+/// `src/build.rs` is `RepoBuilder`, the clone/fetch NETWORK surface) and must be scanned.
+fn is_build_script(rel: &std::path::Path) -> bool {
+    rel == std::path::Path::new("build.rs")
+}
+
 /// True if `test` is POSITIVELY required by this cfg predicate node (recursing through `any`/`all` to
 /// any depth, but NOT through `not` — a `test` under `not()` means "compile when NOT testing", i.e.
 /// production code that must NOT be skipped).
@@ -723,9 +731,12 @@ fn main() {
         }) {
             continue;
         }
-        // The build script runs at COMPILE time (ring's build.rs execs nasm) — never the crate's runtime
-        // behaviour, so skip it always.
-        if p.file_name().and_then(|s| s.to_str()) == Some("build.rs") {
+        // The Cargo BUILD SCRIPT is `<crate-root>/build.rs` — it runs at COMPILE time (ring's build.rs
+        // execs nasm), never the crate's runtime behaviour, so skip it. But ONLY at the root: a nested
+        // `src/build.rs` is an ordinary source module that merely shares the name (git2's `src/build.rs`
+        // is `RepoBuilder` — the whole clone/fetch NETWORK surface), and dropping it silently under-reports
+        // (an A/B found `git2::Repository::clone` reporting no `Net` because its module had vanished).
+        if is_build_script(rel) {
             continue;
         }
         // Cargo's non-library compilation targets (tests/, benches/, examples/) — and the common nonstandard
@@ -1289,6 +1300,18 @@ mod tests {
         assert!(!is_test_file_stem("request"));
         assert!(!is_test_file_stem("contest"));
         assert!(!is_test_file_stem("lib"));
+    }
+
+    #[test]
+    fn only_root_build_rs_is_the_build_script() {
+        use std::path::Path;
+        // the Cargo build script — crate-root `build.rs` — IS skipped
+        assert!(is_build_script(Path::new("build.rs")));
+        // a nested `build.rs` is an ordinary source module and must NOT be skipped (the regression:
+        // git2's `src/build.rs` is `RepoBuilder`, the whole clone/fetch network surface)
+        assert!(!is_build_script(Path::new("src/build.rs")));
+        assert!(!is_build_script(Path::new("src/foo/build.rs")));
+        assert!(!is_build_script(Path::new("build/mod.rs"))); // a `build` module dir, not the script
     }
 
     #[test]
