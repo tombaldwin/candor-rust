@@ -207,8 +207,22 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
         let mut impls = std::collections::HashSet::new();
         for bb in body.basic_blocks.iter() {
             let Some(term) = &bb.terminator else { continue };
-            if let TerminatorKind::Drop { place, .. } = &term.kind {
-                let ty = place.ty(&body.local_decls, tcx).ty;
+            // The type whose Drop runs at this terminator: an IMPLICIT scope-exit `Drop`, or an EXPLICIT
+            // `core::ptr::drop_in_place::<T>(p)` — the canonical way a hand-written container (smart
+            // pointer / arena) drops its element through a raw pointer. The latter is just a call to a
+            // non-local std fn (no effect, no edge), so without this its element's effectful Drop is
+            // silently lost; recover `T` from the call's type arg and follow its local Drop identically.
+            let drop_ty = match &term.kind {
+                TerminatorKind::Drop { place, .. } => Some(place.ty(&body.local_decls, tcx).ty),
+                TerminatorKind::Call { func, .. } => match func.ty(&body.local_decls, tcx).kind() {
+                    TyKind::FnDef(d, args) if Some(*d) == tcx.lang_items().drop_in_place_fn() => {
+                        args.types().next()
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(ty) = drop_ty {
                 let mut seen = std::collections::HashSet::new();
                 local_drop_impls(tcx, ty, &mut impls, &mut seen);
             }

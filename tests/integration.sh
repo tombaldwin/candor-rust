@@ -261,6 +261,13 @@ printf 'trait Job {}\nstruct G;\nimpl Job for G {}\nimpl Drop for G { fn drop(&m
 dout=$(dl "$DR")
 want   "Drop through a trait object propagates (dyn Job with effectful Drop)"   "$dout" '`via_dyn` effects: { Net'
 absent "trait-object drop with no local Drop impl does NOT flood (drops_err)"   "$dout" '`drops_err` effects'
+# Through a hand-written container's `ptr::drop_in_place::<Guard>`: a raw-pointer container (smart
+# pointer / arena) drops its element via the intrinsic, a non-local std call that carries no effect —
+# so the element's Drop would be lost. The drop_in_place lang-item arm recovers `Guard` from the call's
+# type arg and follows its local Drop, so the container's Drop (and its caller) gain Net.
+printf 'use std::ptr::NonNull;\nstruct Guard;\nimpl Drop for Guard { fn drop(&mut self){ let _=std::net::TcpStream::connect("10.0.0.2:9"); } }\nstruct MyBox { p: NonNull<Guard> }\nimpl Drop for MyBox { fn drop(&mut self){ unsafe { std::ptr::drop_in_place(self.p.as_ptr()); } } }\nfn via_mybox(m: MyBox){ let _ = m; }\nfn main(){ let b = Box::new(Guard); via_mybox(MyBox{ p: NonNull::from(Box::leak(b)) }); }\n' > "$DR/src/main.rs"
+pout=$(dl "$DR")
+want   "Drop via ptr::drop_in_place propagates (MyBox::drop gains Net)"  "$pout" 'MyBox as std::ops::Drop>::drop` effects: { Net'
 rm -rf "$(dirname "$DR")"
 
 # ── 9d. Layering with a CRATE-NAME from-scope (the real-world fix: not a silent no-op) ──
