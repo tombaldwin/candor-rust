@@ -25,14 +25,15 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 51] = [
+pub const CALIBRATED_CRATES: [&str; 52] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer;
     // pnet is raw L2/L3 packet capture)
     "reqwest", "isahc", "ureq", "aws_config", "git2", "tokio_tcp", "tokio_udp", "async_net",
     "async_nats", "lapin", "lettre", "tungstenite", "elasticsearch", "tonic", "rdkafka", "pnet",
     // directory traversal (ignore = gitignore-aware walker, powers ripgrep/fd; its walk executors are Fs)
-    "ignore",
+    // + filesystem watching (notify = inotify/FSEvents/kqueue wrapper; powers watchexec/cargo-watch)
+    "ignore", "notify",
     // database (see DB_CRATES in classify)
     "sqlx", "rusqlite", "postgres", "tokio_postgres", "diesel", "redis", "mongodb",
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
@@ -439,6 +440,22 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // Filesystem watching — `notify` (the de-facto fs-watch crate: watchexec, cargo-watch, mdbook). A
+    // watcher opens an OS notification handle (inotify / FSEvents / kqueue / ReadDirectoryChanges) and
+    // registers paths — observing filesystem state changes = Fs. The lifecycle boundary: any
+    // `*Watcher::new` constructor (RecommendedWatcher/PollWatcher/INotifyWatcher/FsEventWatcher/…), the
+    // `recommended_watcher` convenience fn, and the `watch`/`unwatch` registration verbs. `Config`/`Event`/
+    // `EventKind` data types stay pure. (Found scanning watchexec: its watcher-`create` read Fs 0.)
+    if crate_name == "notify" {
+        if path.ends_with("Watcher::new")
+            || path.ends_with("::recommended_watcher")
+            || path.ends_with("::watch")
+            || path.ends_with("::unwatch")
+        {
+            return Some("Fs");
+        }
+        return None;
+    }
     // Raw sockets. Match the I/O *types* only — `std::net` also holds pure data types
     // (SocketAddr, IpAddr, …) whose construction must NOT be flagged.
     if path.starts_with("std::net::TcpStream")
@@ -789,6 +806,7 @@ mod tests {
                 format!("{c}::Remote::fetch"),
                 format!("{c}::datalink::channel"),
                 format!("{c}::WalkBuilder::build_parallel"),
+                format!("{c}::RecommendedWatcher::new"),
                 format!("{c}::X::connect"),
                 format!("{c}::Utc::now"),
                 format!("{c}::X::load"),
@@ -846,6 +864,13 @@ mod tests {
         assert_eq!(classify("ignore", "ignore::overrides::OverrideBuilder::build"), None); // pure config
         assert_eq!(classify("ignore", "ignore::gitignore::GitignoreBuilder::build"), None); // pure config
         assert_eq!(classify("ignore", "ignore::DirEntry::path"), None); // pure accessor
+        // notify fs-watching: watcher constructors + watch/unwatch are Fs, data types stay pure.
+        assert_eq!(classify("notify", "notify::RecommendedWatcher::new"), Some("Fs"));
+        assert_eq!(classify("notify", "notify::PollWatcher::new"), Some("Fs"));
+        assert_eq!(classify("notify", "notify::recommended_watcher"), Some("Fs"));
+        assert_eq!(classify("notify", "notify::INotifyWatcher::watch"), Some("Fs"));
+        assert_eq!(classify("notify", "notify::Config::default"), None); // pure config
+        assert_eq!(classify("notify", "notify::Event::new"), None); // pure data type
         assert_eq!(classify("rusqlite", "rusqlite::Connection::execute"), Some("Db"));
         assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
         // FFI tiers (matched by distinctive leaf, alias-independent)
