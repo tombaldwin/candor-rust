@@ -385,6 +385,13 @@ want   "report flags main as an entry point (entryPoint)" "$( cd "$CF"; cat r.*.
 rch=$( cd "$CF"; "$ROOT/target/debug/candor-query" reachable "$PWD/r" 2>&1 )
 want   "reachable: surfaces the program runtime effects from roots" "$rch" "Net"
 want   "reachable: reports the entry-point union"                   "$rch" "union over"
+# `path`: the provenance chain from a fn to an effect's direct source (handle -> mid -> leaf_net).
+printf 'fn leaf_net(){ let _=std::net::TcpStream::connect("h:1"); }\nfn mid(){ leaf_net(); }\nfn handle(){ mid(); }\nfn main(){ handle(); }\n' > "$CF/src/main.rs"
+( cd "$CF"; rm -f r.*.json; CANDOR_JSON="$PWD/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
+pth=$( cd "$CF"; "$ROOT/target/debug/candor-query" path "$PWD/r" handle Net 2>&1 )
+want   "path: traces through the middle fn"        "$pth" "mid"
+want   "path: marks the direct source"             "$pth" "Net source"
+want   "path: honest when fn lacks the effect"     "$( cd "$CF"; "$ROOT/target/debug/candor-query" path "$PWD/r" handle Db 2>&1 )" "does not perform Db"
 # SOUNDNESS regression guard: a HOF passed a NON-LOCAL named fn must keep the honest Unknown — it must
 # NOT be silently dropped to pure (the non-local fn isn't edge-resolvable, so we can't certify purity).
 printf 'fn nlhof(f: impl Fn(&str) -> String){ let _=f("x"); }\nfn nluser(){ nlhof(str::to_string); }\nfn main(){ nluser(); }\n' > "$CF/src/main.rs"

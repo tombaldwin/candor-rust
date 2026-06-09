@@ -13,7 +13,7 @@
 //!   candor-query diff    <cur_prefix> <base_prefix> <0|1> <baseline_ver> <engine_ver>
 //! The trailing 0|1 is the want-JSON flag (the wrapper computes it from `--json`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use candor_report::{report_entries, report_files, ReportEntry, EFFECTS};
@@ -33,6 +33,7 @@ fn main() {
         "diff" => cmd_diff(rest),
         "containment" => cmd_containment(rest),
         "reachable" => cmd_reachable(rest),
+        "path" => cmd_path(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
         "state" => cmd_state(rest),
@@ -43,7 +44,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|receipt|gains|state|reports|locate|engine-version|merge-hook)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|receipt|gains|state|reports|locate|engine-version|merge-hook)"
             );
             2
         }
@@ -921,6 +922,102 @@ fn layer_of(name: &str, prefix_len: usize) -> String {
 /// in a layer it wasn't in ("Db → actions"), and NOTE when one leaves a layer ("✓ Db ⊘ legacy").
 /// Deliberately a diagnostic + trend gate, NOT a single gameable "score".
 /// Args: `<prefix> [baseline_prefix] [--json]`.
+/// `path` — the call chain by which a function comes to perform an effect: a shortest-path BFS over the
+/// effect-relevant `calls` graph from <fn> to the nearest function that performs <effect> DIRECTLY (the
+/// source), through callees that carry the effect. Answers "this performs Net — through WHAT?", the chain
+/// `where`/`callers` describe the ends of but don't connect. Mirrors the JVM port's `path`. Read-only.
+fn cmd_path(args: &[String]) -> i32 {
+    let want_json = args.iter().any(|a| a == "--json");
+    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
+    let (Some(pre), Some(fn_arg), Some(effect)) = (pos.first(), pos.get(1), pos.get(2)) else {
+        eprintln!("usage: candor-query path <prefix> <fn-substring> <Effect> [--json]");
+        return 2;
+    };
+    let effect = effect.as_str();
+    let entries = load_entries(pre);
+    let by_name: HashMap<&str, &ReportEntry> =
+        entries.iter().map(|e| (e.func.as_str(), e)).collect();
+    let start = entries
+        .iter()
+        .find(|e| &e.func == *fn_arg)
+        .or_else(|| entries.iter().find(|e| e.func.contains(fn_arg.as_str())));
+    let Some(start) = start else {
+        eprintln!("candor-query path: no function matching '{fn_arg}'");
+        return 2;
+    };
+    if !start.inferred.iter().any(|e| e == effect) {
+        println!("{} does not perform {effect}  (inferred: {:?})", start.func, start.inferred);
+        return 0;
+    }
+    // BFS through effect-carrying callees to the first DIRECT source.
+    let mut prev: HashMap<&str, Option<&str>> = HashMap::new();
+    let mut q: VecDeque<&str> = VecDeque::new();
+    q.push_back(start.func.as_str());
+    prev.insert(start.func.as_str(), None);
+    let mut source: Option<&str> = None;
+    while let Some(cur) = q.pop_front() {
+        let Some(f) = by_name.get(cur) else { continue };
+        if f.direct.iter().any(|e| e == effect) {
+            source = Some(cur);
+            break;
+        }
+        for c in &f.calls {
+            if let Some(cf) = by_name.get(c.as_str()) {
+                if cf.inferred.iter().any(|e| e == effect) && !prev.contains_key(c.as_str()) {
+                    prev.insert(c.as_str(), Some(cur));
+                    q.push_back(c.as_str());
+                }
+            }
+        }
+    }
+    let Some(source) = source else {
+        println!(
+            "{} performs {effect} but its source is not a local function \
+             (cross-crate, or via Unknown) — not statically traceable.",
+            start.func
+        );
+        return 0;
+    };
+    let mut chain: Vec<&str> = Vec::new();
+    let mut n = Some(source);
+    while let Some(name) = n {
+        chain.push(name);
+        n = *prev.get(name).unwrap();
+    }
+    chain.reverse();
+
+    if want_json {
+        let steps: Vec<_> = chain
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let loc = by_name.get(name).map(|e| e.loc.clone()).unwrap_or_default();
+                serde_json::json!({ "fn": name, "loc": loc, "source": i == chain.len() - 1 })
+            })
+            .collect();
+        let out = serde_json::json!({ "fn": start.func, "effect": effect, "path": steps });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return 0;
+    }
+    println!("candor path — how `{}` comes to perform {effect}:\n", start.func);
+    for (i, name) in chain.iter().enumerate() {
+        let indent = "  ".repeat(i + 1);
+        let arrow = if i == 0 { "" } else { "→ " };
+        let tag = if i == chain.len() - 1 {
+            let loc = by_name.get(name).map(|e| e.loc.as_str()).unwrap_or("");
+            if loc.is_empty() {
+                format!("   [{effect} source]")
+            } else {
+                format!("   [{effect} source @ {loc}]")
+            }
+        } else {
+            String::new()
+        };
+        println!("{indent}{arrow}{name}{tag}");
+    }
+    0
+}
+
 /// `reachable` — the effects the program performs at runtime: the union of `inferred` over the ENTRY
 /// POINTS (reachability roots — `main`, `#[no_mangle]` exports; far richer on the JVM port). Since
 /// `inferred` is already transitive, a root's set IS its full reachable surface, so the union answers
