@@ -392,6 +392,10 @@ pth=$( cd "$CF"; "$ROOT/target/debug/candor-query" path "$PWD/r" handle Net 2>&1
 want   "path: traces through the middle fn"        "$pth" "mid"
 want   "path: marks the direct source"             "$pth" "Net source"
 want   "path: honest when fn lacks the effect"     "$( cd "$CF"; "$ROOT/target/debug/candor-query" path "$PWD/r" handle Db 2>&1 )" "does not perform Db"
+# `impact`: blast radius — who transitively calls leaf_net, and which entry point (main) is downstream.
+imp=$( cd "$CF"; "$ROOT/target/debug/candor-query" impact "$PWD/r" leaf_net 2>&1 )
+want   "impact: counts transitive callers"         "$imp" "transitively call it"
+want   "impact: surfaces the downstream entry point" "$imp" "main"
 # SOUNDNESS regression guard: a HOF passed a NON-LOCAL named fn must keep the honest Unknown — it must
 # NOT be silently dropped to pure (the non-local fn isn't edge-resolvable, so we can't certify purity).
 printf 'fn nlhof(f: impl Fn(&str) -> String){ let _=f("x"); }\nfn nluser(){ nlhof(str::to_string); }\nfn main(){ nluser(); }\n' > "$CF/src/main.rs"

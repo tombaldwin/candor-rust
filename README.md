@@ -99,7 +99,7 @@ macro-generated code invisible) is marked by `Unknown` and coverage warnings and
 | `crates/candor-classify` | the effect classifier (`crate × path → effect`) — pure string logic, no `rustc`; the one source of truth the lint **and** the stable scanner both call |
 | `crates/candor-scan` | the **stable-Rust** backend: a `syn`-based scanner that produces the same report JSON on stock `cargo`, no nightly/dylint (see below) |
 | `crates/candor-report` | the report types + parsing, shared by every backend and the CLI (no `rustc_private`) |
-| `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`/`containment`/`reachable`/`path`) as one typed binary |
+| `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`/`containment`/`reachable`/`path`/`impact`) as one typed binary |
 | `cargo-candor` | the CLI wrapper — thin bash that orchestrates the backend (`cargo dylint` or `candor-scan`) and dispatches queries to `candor-query` |
 | `sample/` | a small crate written in the capability discipline, for trying conformance mode |
 | `rust-toolchain` | pins the nightly the lint links against (`rustc-dev`) |
@@ -186,6 +186,7 @@ cargo candor explain  my_function       # trace WHY a function has each effect (
 cargo candor containment [baseline]     # effect-leakage diagnostic; with a baseline, a CI ratchet
 cargo candor reachable                  # what the program does at runtime (union over entry points)
 cargo candor path     my_fn Net         # the call chain by which a fn comes to perform an effect
+cargo candor impact   my_fn             # blast radius: transitive callers + downstream entry points
 cargo candor policy   .candor/policy     # enforce effect boundaries (deny/pure rules)
 cargo candor risk                       # heuristic: effects on caller-derived input (advisory)
 cargo candor strict   my_module         # conformance, scoped to a module

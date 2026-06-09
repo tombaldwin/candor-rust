@@ -151,7 +151,7 @@ cmd="${1:-audit}"; shift || true
 # or broken dylib first.
 case "$cmd" in
   setup|install|-h|--help|help|scan) LIB="" ;;
-  audit|show|where|callers|map|containment|reachable|path)
+  audit|show|where|callers|map|containment|reachable|path|impact)
     # Read-only queries: prefer the nightly lint (soundness, Unknown), but DON'T hard-fail without it —
     # fall back to the stable scanner so these work zero-install. Use an existing dylib if present; only
     # attempt a build when one's already around to refresh. If none, LIB stays empty and the command's
@@ -484,6 +484,16 @@ case "$cmd" in
     for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) pargs+=("$a") ;; esac; done
     ensure_report || exit 1
     query path .candor/report "${pargs[@]}" ${json:+$json}
+    exit 0 ;;
+
+  impact)
+    # Blast RADIUS: every effectful fn that transitively calls <fn>, and which entry points are
+    # downstream — "if I change this, what surfaces at runtime?". The backward dual of `path`.
+    #   cargo candor impact my_function
+    json=""; iargs=()
+    for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) iargs+=("$a") ;; esac; done
+    ensure_report || exit 1
+    query impact .candor/report "${iargs[@]}" ${json:+$json}
     exit 0 ;;
 
   explain)

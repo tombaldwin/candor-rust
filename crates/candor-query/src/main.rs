@@ -13,7 +13,7 @@
 //!   candor-query diff    <cur_prefix> <base_prefix> <0|1> <baseline_ver> <engine_ver>
 //! The trailing 0|1 is the want-JSON flag (the wrapper computes it from `--json`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use candor_report::{report_entries, report_files, ReportEntry, EFFECTS};
@@ -34,6 +34,7 @@ fn main() {
         "containment" => cmd_containment(rest),
         "reachable" => cmd_reachable(rest),
         "path" => cmd_path(rest),
+        "impact" => cmd_impact(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
         "state" => cmd_state(rest),
@@ -44,7 +45,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|receipt|gains|state|reports|locate|engine-version|merge-hook)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|receipt|gains|state|reports|locate|engine-version|merge-hook)"
             );
             2
         }
@@ -922,6 +923,96 @@ fn layer_of(name: &str, prefix_len: usize) -> String {
 /// in a layer it wasn't in ("Db → actions"), and NOTE when one leaves a layer ("✓ Db ⊘ legacy").
 /// Deliberately a diagnostic + trend gate, NOT a single gameable "score".
 /// Args: `<prefix> [baseline_prefix] [--json]`.
+/// `impact` — the blast radius of a function: every effectful fn that TRANSITIVELY calls it, and which
+/// ENTRY POINTS are downstream ("if I change this, what surfaces at runtime?"). Backward dual of `path`;
+/// the transitive, entry-point-scoped `callers`. Reverses the effect-relevant `calls` graph. Read-only.
+/// Scoped to effectful targets (the report's `calls` records only effect-carrying edges — honest limit).
+fn cmd_impact(args: &[String]) -> i32 {
+    let want_json = args.iter().any(|a| a == "--json");
+    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
+    let (Some(pre), Some(fn_arg)) = (pos.first(), pos.get(1)) else {
+        eprintln!("usage: candor-query impact <prefix> <fn-substring> [--json]");
+        return 2;
+    };
+    let entries = load_entries(pre);
+    let by_name: HashMap<&str, &ReportEntry> =
+        entries.iter().map(|e| (e.func.as_str(), e)).collect();
+    let target = entries
+        .iter()
+        .find(|e| &e.func == *fn_arg)
+        .or_else(|| entries.iter().find(|e| e.func.contains(fn_arg.as_str())));
+    let Some(target) = target else {
+        eprintln!("candor-query impact: no function matching '{fn_arg}'");
+        return 2;
+    };
+    // Reverse the effect-relevant call graph, then BFS backward from the target.
+    let mut rev: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in &entries {
+        for c in &e.calls {
+            rev.entry(c.as_str()).or_default().push(e.func.as_str());
+        }
+    }
+    let mut affected = 0usize;
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut q: VecDeque<&str> = VecDeque::new();
+    q.push_back(target.func.as_str());
+    seen.insert(target.func.as_str());
+    while let Some(cur) = q.pop_front() {
+        if let Some(callers) = rev.get(cur) {
+            for &caller in callers {
+                if seen.insert(caller) {
+                    affected += 1;
+                    q.push_back(caller);
+                }
+            }
+        }
+    }
+    let mut roots: Vec<&ReportEntry> = Vec::new();
+    if target.entry_point {
+        roots.push(target);
+    }
+    let mut downstream: Vec<&ReportEntry> = seen
+        .iter()
+        .filter(|n| **n != target.func.as_str())
+        .filter_map(|n| by_name.get(n).copied())
+        .filter(|e| e.entry_point)
+        .collect();
+    downstream.sort_by(|a, b| a.func.cmp(&b.func));
+    roots.extend(downstream);
+
+    if want_json {
+        let eps: Vec<_> = roots
+            .iter()
+            .map(|r| serde_json::json!({ "fn": r.func, "inferred": r.inferred }))
+            .collect();
+        let out = serde_json::json!({
+            "fn": target.func, "affectedCount": affected, "entryPoints": eps
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return 0;
+    }
+    println!("candor impact — what changing `{}` affects:\n", target.func);
+    println!(
+        "  {affected} effectful function{} transitively call it.",
+        if affected == 1 { "" } else { "s" }
+    );
+    if roots.is_empty() {
+        println!(
+            "  No entry point reaches it — not on a runtime path (dead, or a library fn called only externally)."
+        );
+        return 0;
+    }
+    println!(
+        "  {} entry point{} downstream (a change here surfaces at runtime via):",
+        roots.len(),
+        if roots.len() == 1 { "" } else { "s" }
+    );
+    for r in &roots {
+        println!("    {}   {{ {} }}", r.func, r.inferred.join(", "));
+    }
+    0
+}
+
 /// `path` — the call chain by which a function comes to perform an effect: a shortest-path BFS over the
 /// effect-relevant `calls` graph from <fn> to the nearest function that performs <effect> DIRECTLY (the
 /// source), through callees that carry the effect. Answers "this performs Net — through WHAT?", the chain
