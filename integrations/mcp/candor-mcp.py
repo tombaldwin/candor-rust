@@ -46,12 +46,32 @@ TOOLS = [
     },
     {
         "name": "candor_callers",
-        "description": "Which functions call a given function (INSTANT) — who depends on it. Use before "
-                       "changing a function's behaviour or signature. Faster than grepping for call sites.",
+        "description": "The blast radius of a function (INSTANT) — every function that TRANSITIVELY calls "
+                       "it, i.e. who is affected if you change it. Works for ANY function, including a "
+                       "PURE one you're about to make effectful. Use before changing behaviour/signature. "
+                       "Enumerating 3-5 layers of callers by hand is exactly what's easy to under-count.",
         "inputSchema": {
             "type": "object",
             "properties": {"function": {"type": "string", "description": "function name (a substring of the fully-qualified path)"}},
             "required": ["function"],
+        },
+    },
+    {
+        "name": "candor_whatif",
+        "description": "PRE-EDIT VERDICT (INSTANT): before you add a side effect to a function, ask what it "
+                       "would do. Given a function and an effect you're about to introduce (e.g. a network "
+                       "call), returns the blast radius (every transitive caller that would gain the effect) "
+                       "AND — against the project's policy — which functions would VIOLATE a deny/pure "
+                       "architecture boundary. Answers 'if I make this network call here, does it break the "
+                       "architecture?' deterministically, WITHOUT writing code. Call this before introducing "
+                       "Net/Fs/Db/Exec/Env to a function instead of editing, running the gate, and reverting.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function": {"type": "string", "description": "the function you're about to add the effect to (name substring)"},
+                "effect": {"type": "string", "description": "the effect you'd introduce: Net Fs Db Exec Env Clock Ipc Log Rand Clipboard"},
+            },
+            "required": ["function", "effect"],
         },
     },
     {
@@ -80,6 +100,8 @@ def dispatch(name, args):
         return run_query(["where", args.get("effect", ""), "--json"])
     if name == "candor_callers":
         return run_query(["callers", args.get("function", ""), "--json"])
+    if name == "candor_whatif":
+        return run_query(["whatif", args.get("function", ""), args.get("effect", ""), "--json"])
     if name == "candor_diff":
         return run_query(["diff", "--json"])
     return None

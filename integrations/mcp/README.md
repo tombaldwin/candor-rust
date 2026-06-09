@@ -11,8 +11,12 @@ run `cargo candor watch &` in the project to keep the report fresh as you edit.
 |---|---|---|
 | `candor_effects(function)` | a function's effect set (transitive + direct) | reading its source |
 | `candor_where(effect)` | which functions perform an effect (sources vs inheritors) | grepping the codebase |
-| `candor_callers(function)` | who calls a function (who depends on it) | grepping for call sites |
+| `candor_callers(function)` | the **blast radius** — every transitive caller (who's affected if you change it), incl. pure ones | tracing callers across files by hand |
+| `candor_whatif(function, effect)` | **PRE-EDIT VERDICT** — if I add this effect here, what propagates *and* does it break the deny/pure policy? | edit → run the gate → revert |
 | `candor_diff()` | how recent edits changed the effect surface (incl. non-local blast radius) | tracing callers by hand |
+
+`candor_whatif` is the one to reach for *before* introducing a side effect: it crosses the blast radius
+with the architecture policy and returns the boundary violations deterministically, without writing code.
 
 ## Register
 
