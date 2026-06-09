@@ -599,7 +599,18 @@ fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap<String, St
     match tree {
         syn::UseTree::Path(p) => collect_use(&p.tree, join(&prefix, &p.ident.to_string()), out),
         syn::UseTree::Name(n) => {
-            out.insert(n.ident.to_string(), join(&prefix, &n.ident.to_string()));
+            let id = n.ident.to_string();
+            if id == "self" {
+                // `use a::b::{self, ..}` imports the MODULE `b` itself under name `b` → map `b -> a::b`
+                // so a later `b::func()` resolves. Without this, `self` was mapped uselessly as
+                // `b::self` and the module alias was lost. (Found on coreutils `ls`: `use std::fs::{self,
+                // Metadata}` then `fs::read_dir` was unresolved → a file lister reporting ZERO Fs.)
+                if let Some(last) = prefix.rsplit("::").next() {
+                    out.insert(last.to_string(), prefix.clone());
+                }
+            } else {
+                out.insert(id.clone(), join(&prefix, &id));
+            }
         }
         syn::UseTree::Rename(r) => {
             out.insert(r.rename.to_string(), join(&prefix, &r.ident.to_string()));
@@ -1019,6 +1030,12 @@ mod tests {
         collect_use(&tree, String::new(), &mut out);
         assert_eq!(out.get("Command").map(String::as_str), Some("std::process::Command"));
         assert_eq!(out.get("Pipe").map(String::as_str), Some("std::process::Stdio"));
+        // `use std::fs::{self, Metadata}` imports the MODULE `fs` itself → map `fs -> std::fs`.
+        let mut o2 = HashMap::new();
+        collect_use(&syn::parse_str("std::fs::{self, Metadata}").unwrap(), String::new(), &mut o2);
+        assert_eq!(o2.get("fs").map(String::as_str), Some("std::fs"));
+        assert_eq!(o2.get("Metadata").map(String::as_str), Some("std::fs::Metadata"));
+        assert_eq!(o2.get("self"), None); // not the useless `fs::self`
     }
 
     #[test]
