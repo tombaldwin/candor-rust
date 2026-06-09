@@ -16,11 +16,13 @@
 //! CALL RESOLUTION. The local call graph is name-resolved, not type-resolved. A qualified `Type::method`
 //! call (or an associated-fn call `RequestBuilder::new()`) is matched on its 2-segment tail, but ONLY when
 //! that tail is UNAMBIGUOUS, which keeps same-named methods on different types distinct. A bare
-//! free-function call falls back to a unique leaf. A bare `.method()` call carries no type into the local
-//! index, so it names no definite target and under-reports rather than guess (recovering it would risk
-//! linking `range.start()` to a unique local `Clipboard::start`). We deliberately do NOT link a
-//! many-way-ambiguous name: on a real crate that would link every `.new()` to all 100+ `*::new` defs and
-//! smear one type's effect across the whole graph. Under-reporting an ambiguous edge is the honest failure
+//! free-function call falls back to a unique leaf. A `.method()` call whose receiver type is inferred to a
+//! LOCAL type resolves through that type's `Type::method` tail (so `x.go()` reaches a local `S::go`); an
+//! external or un-inferrable receiver leaves the bare `.method()` with no definite target, so it
+//! under-reports rather than guess (this is what stops `range.start()` — on the external `FloatRange` —
+//! linking to a unique local `Clipboard::start`). We deliberately do NOT link a many-way-ambiguous name:
+//! on a real crate that would link every `.new()` to all 100+ `*::new` defs and smear one type's effect
+//! across the whole graph. Under-reporting an ambiguous edge is the honest failure
 //! mode; fabricating one is never ok. The shared resolver is `resolve_target`.
 //!
 //! Usage:  candor-scan [<crate-dir>] [--out <prefix>] [--json] [--include-tests]
@@ -785,9 +787,18 @@ fn main() {
     // (exactly one def), under-reporting rather than fabricating. See `resolve_target` + the module doc.
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+    // Type names with a LOCAL definition — the penultimate `Type` segment of a `Type::method` qual. A
+    // receiver-typed method call resolves to a local method ONLY if its type is in here, so an external
+    // `reqwest::Client::send` can't mis-link to a same-named local `Client::send` (an inverse fabrication).
+    let mut local_types: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in &fns {
         by_leaf.entry(f.leaf.clone()).or_default().push(f.qual.clone());
         if let Some(t2) = tail2(&f.qual) {
+            if let Some(ty) = t2.split("::").next() {
+                if ty.chars().next().is_some_and(|c| c.is_uppercase()) {
+                    local_types.insert(ty.to_string());
+                }
+            }
             by_tail2.entry(t2).or_default().push(f.qual.clone());
         }
     }
@@ -819,14 +830,20 @@ fn main() {
                     }
                 }
             }
-            if !c.typed && !matches!(cr, "std" | "core" | "alloc") {
-                // Resolve the call to a local definition via the precise, uniqueness-filtered index — see
-                // `resolve_target`. Typed (receiver-inferred) calls are skipped: they're for external
-                // classification, and their synthetic `Type::method` tail could mis-link an external
-                // `reqwest::Client::send` to a same-named local `Client::send` (an inverse fabrication).
-                // The cost is that a `self.helper()` method call to a crate-unique helper under-reports
-                // (its only route was the bare leaf, now closed) — honest, but a real recall gap; the
-                // associated-function form `Type::helper()` still resolves via the qualified tail below.
+            // Resolve the call to a local definition via the precise, uniqueness-filtered `resolve_target`.
+            // A receiver-typed `Type::method` call (`x.go()` inferred to `S::go`) resolves to the local
+            // method ONLY when `Type` is locally defined — this recovers the common `x.method()` edge that
+            // a bare leaf can't safely provide, while an external `reqwest::Client::send` is left to the
+            // classifier (its type isn't local, so it can't mis-link to a same-named local `Client::send`).
+            // A non-typed call uses the leaf/qualified-tail routes; std/core/alloc are the classifier's.
+            let resolvable = if c.typed {
+                tail2(&c.path)
+                    .and_then(|t2| t2.split("::").next().map(str::to_string))
+                    .is_some_and(|ty| local_types.contains(&ty))
+            } else {
+                !matches!(cr, "std" | "core" | "alloc")
+            };
+            if resolvable {
                 let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf);
                 if let Some(targets) = targets {
                     for t in targets {
@@ -935,8 +952,9 @@ fn tail2(path: &str) -> Option<String> {
 /// fabricate one type's effect onto the other's caller (the same flood the bare-leaf index causes, one
 /// level up). An UNQUALIFIED free-function call falls back to a unique bare leaf. An UNQUALIFIED method
 /// call with an unresolved receiver names no definite target, so it under-reports rather than guess —
-/// this is what stops `range.start()` linking to a unique local `Clipboard::start`. NB the caller gates
-/// receiver-typed (`c.typed`) calls out before reaching here, so a `self.method()` tail never arrives.
+/// this is what stops `range.start()` linking to a unique local `Clipboard::start`. NB a receiver-typed
+/// `Type::method` call DOES arrive here (via the qualified-tail branch) — but only after the caller has
+/// confirmed `Type` is locally defined, so an external `reqwest::Client::send` is filtered out upstream.
 fn resolve_target<'a>(
     path: &str,
     leaf: &str,
