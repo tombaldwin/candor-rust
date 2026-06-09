@@ -267,6 +267,20 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             }
             return None;
         }
+        if leaf.starts_with("curl_") {
+            // libcurl (under the `curl` crate, called `curl_sys::curl_*`). Only the entry points that
+            // PERFORM network I/O: the blocking transfer (`curl_easy_perform`), raw socket send/recv,
+            // the HTTP/2 keepalive PING (`upkeep`), and the multi-interface transfer pumps. The large
+            // pure surface (setopt/init/cleanup/reset/getinfo/escape/multi_add_handle/fdset/info_read)
+            // stays unclassified, as do `curl_multi_wait`/`poll` (readiness WAIT on sockets, no payload —
+            // the loop's `perform` is the tagged boundary, per the I/O-boundary principle). An A/B on
+            // curl 0.4 caught the whole crate reporting ZERO Net (`Easy::perform` read as pure).
+            const NET: &[&str] = &[
+                "curl_easy_perform", "curl_easy_send", "curl_easy_recv", "curl_easy_upkeep",
+                "curl_multi_perform", "curl_multi_socket_action",
+            ];
+            return NET.contains(&leaf).then_some("Net");
+        }
         if let Some(op) = leaf.strip_prefix("SSL_") {
             // OpenSSL (libssl, under the `openssl`/`native-tls` crates, called `ffi::SSL_*`). The TLS
             // handshake and record I/O run over the peer socket -> Net. Unlike libc read/write, an SSL_*
@@ -882,6 +896,16 @@ mod tests {
         assert_eq!(classify("raw", "raw::git_submodule_clone"), Some("Net"));
         assert_eq!(classify("raw", "raw::git_submodule_update"), Some("Net"));
         assert_eq!(classify("raw", "raw::git_submodule_open"), None); // local subrepo open — not Net
+        // libcurl: the transfer/raw-socket entry points are Net (an A/B on curl 0.4 caught the whole
+        // crate reporting ZERO Net); the big setopt/init/getinfo surface — and the readiness-wait
+        // multi_wait/poll — stay unclassified (the loop's perform is the boundary).
+        assert_eq!(classify("curl_sys", "curl_sys::curl_easy_perform"), Some("Net"));
+        assert_eq!(classify("curl_sys", "curl_sys::curl_easy_send"), Some("Net"));
+        assert_eq!(classify("curl_sys", "curl_sys::curl_multi_perform"), Some("Net"));
+        assert_eq!(classify("curl_sys", "curl_sys::curl_multi_socket_action"), Some("Net"));
+        assert_eq!(classify("curl_sys", "curl_sys::curl_easy_setopt"), None); // in-memory option write
+        assert_eq!(classify("curl_sys", "curl_sys::curl_easy_init"), None); // handle alloc
+        assert_eq!(classify("curl_sys", "curl_sys::curl_multi_wait"), None); // readiness wait, no payload
         assert_eq!(classify("ffi", "ffi::SSL_connect"), Some("Net"));
         // pure crates stay pure
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
