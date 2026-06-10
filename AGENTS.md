@@ -35,6 +35,33 @@ It is *syntactic*, so it under-reports relative to the lint (it misses method-st
 dispatch, macros, and cross-crate propagation, and does **not** emit `Unknown`) — good for fast triage,
 not for the soundness contract. Everything below works identically against its report.
 
+## 1a. Staying current — candor can't check for you, *you* can
+
+candor never makes a network call to see if it's out of date: its own policy is `deny Net` (it's an
+effect auditor — phoning home would make it perform the exact effect it exists to forbid). So the
+version check is *your* job, not the tool's. You have network access; it doesn't.
+
+```sh
+candor-scan --version                                                   # what's installed, e.g. "candor-scan 0.3.3"
+# crates.io REQUIRES a User-Agent header (it rejects requests without one):
+curl -s -H 'User-Agent: candor-version-check' https://crates.io/api/v1/crates/candor-scan \
+  | grep -o '"max_version":"[^"]*"'                                      # -> "max_version":"0.3.3"
+```
+
+If they differ, upgrade by the path you installed with:
+
+- **Installed from crates.io** (`cargo install candor-scan`): `cargo install candor-scan --force`.
+- **Using the git clone above** (`/tmp/candor` or `~/.candor` via `install.sh`): `cargo candor update`
+  — it runs `git pull --ff-only`, rebuilds the engine + integration scripts + this AGENTS.md at one
+  commit, then **restamps `.candor/baseline` and tells you whether the new engine classifies your own
+  code differently** (the thing to actually check after a tool bump — a verdict change is the upgrade's
+  doing, not your code's). If the clone is at `/tmp/candor`, just re-run the `git pull` + `cargo build`
+  from §1.
+
+Pin for reproducibility: PROVE-IT.md requires **0.3.2 or later** (earlier published builds have
+since-fixed resolution bugs). The report's `version` field records the exact engine build, so a report
+you commit is traceable to the engine that produced it.
+
 ## 2. Read the report
 
 Each entry:
