@@ -1,6 +1,6 @@
 import os, glob, subprocess, json, re, sys
 REG="/Users/tom/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f"
-SCAN="/Users/tom/git/candor/target/release/candor-scan"
+SCAN="/Users/tom/git/candor-rust/target/release/candor-scan"
 SAMPLE = [
  ("reqwest","Net (HTTP client)"),("hyper","Net (HTTP)"),("ureq","Net (blocking HTTP)"),
  ("tokio","Net/Fs/Clock (async runtime)"),("mio","Net/Ipc (low-level IO)"),("tonic","Net (gRPC)"),

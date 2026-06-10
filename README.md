@@ -38,7 +38,7 @@ for itself: hold the whole effect graph and **block the PR**.
 Give your coding agent (Claude Code, Cursor, …) this:
 
 ```text
-Read https://github.com/tombaldwin/candor/blob/main/AGENTS.md and follow it to map this repo's effects.
+Read https://github.com/tombaldwin/candor-rust/blob/main/AGENTS.md and follow it to map this repo's effects.
 ```
 
 [AGENTS.md](AGENTS.md) is self-contained — it installs candor, runs it on this project, and explains
@@ -325,7 +325,7 @@ toolchain). This is dylint's equivalent of a dependency; dylint loads libraries 
 ```toml
 [workspace.metadata.dylint]
 # clone-free — pin a tag/rev for reproducibility:
-libraries = [{ git = "https://github.com/tombaldwin/candor", tag = "v0.3.0" }]
+libraries = [{ git = "https://github.com/tombaldwin/candor-rust", tag = "v0.3.0" }]
 # …or a local checkout:
 libraries = [{ path = "/abs/path/to/candor" }]
 ```

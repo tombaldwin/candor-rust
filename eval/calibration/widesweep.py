@@ -1,7 +1,7 @@
 import json, subprocess, glob, os, re, sys
 from collections import Counter
 REG="/Users/tom/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f"
-SCAN="/Users/tom/git/candor/target/release/candor-scan"
+SCAN="/Users/tom/git/candor-rust/target/release/candor-scan"
 
 # Curated HIGH-CONFIDENCE pure crates: encoders, data structures, text/parse, hashing-compute, math,
 # token manipulation. These should report ~0 effects — any effect is a false-positive candidate.

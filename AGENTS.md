@@ -12,7 +12,7 @@ Rust nightly and builds the lint — expect a few minutes; it's not stuck.)
 
 ```sh
 cargo install cargo-dylint dylint-link 2>/dev/null || true            # the lint runner
-git clone --depth 1 https://github.com/tombaldwin/candor /tmp/candor 2>/dev/null \
+git clone --depth 1 https://github.com/tombaldwin/candor-rust /tmp/candor 2>/dev/null \
   || (cd /tmp/candor && git pull -q)
 ( cd /tmp/candor && cargo build )
 LIB=$(ls /tmp/candor/target/debug/libcandor@*.dylib \

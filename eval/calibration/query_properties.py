@@ -2,8 +2,8 @@
 """Property-test candor-query across MANY real crates. Any FAIL is a query-layer bug lead."""
 import json, subprocess, sys, collections, glob, os, re, tempfile, shutil
 
-SCAN = "/Users/tom/git/candor/target/release/candor-scan"
-QUERY = "/Users/tom/git/candor/target/debug/candor-query"
+SCAN = "/Users/tom/git/candor-rust/target/release/candor-scan"
+QUERY = "/Users/tom/git/candor-rust/target/debug/candor-query"
 REG = glob.glob(os.path.expanduser("~/.cargo/registry/src/index.crates.io-*"))[0]
 
 CRATES = ["gix", "git2", "tempfile", "which", "nix", "rusqlite", "curl", "ignore",

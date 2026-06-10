@@ -46,7 +46,7 @@ STEP 5 — Diff and VERIFY. Compare the two lists.
   site is real, quoting the file:line. These are real, verifiable edges — not tool assertions.
 - For each function YOU listed that candor did not: check whether it's a real caller candor missed
   (candor-scan is deliberately conservative — it under-reports rather than fabricates; a miss here
-  is worth reporting at https://github.com/tombaldwin/candor/issues) or a mistake in the trace.
+  is worth reporting at https://github.com/tombaldwin/candor-rust/issues) or a mistake in the trace.
 
 STEP 6 — Scorecard. Report, honestly:
 - target function, and the size of its true radius
@@ -84,4 +84,4 @@ Do not soften either direction. The point is what's true on THIS repo.
 | information cost of the complete answer | median **~17×** fewer tokens than a grep-trace ([measured](eval/token-cost/FINDINGS.md)) |
 
 If your scorecard disagrees with these in either direction, we'd genuinely like to see it —
-[open an issue](https://github.com/tombaldwin/candor/issues) with the scorecard.
+[open an issue](https://github.com/tombaldwin/candor-rust/issues) with the scorecard.

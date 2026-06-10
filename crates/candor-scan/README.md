@@ -14,7 +14,7 @@ candor-scan path/to/crate              # writes <crate>/.candor/report.<crate>.s
 candor-scan . --json                   # print the report to stdout instead
 ```
 
-The report is the same JSON the full [candor](https://github.com/tombaldwin/candor) nightly lint
+The report is the same JSON the full [candor](https://github.com/tombaldwin/candor-rust) nightly lint
 produces, so the candor CLI's read-only queries (`show`/`where`/`callers`/`map`) read it identically.
 
 ## What it does well, and where it stops
@@ -41,7 +41,7 @@ under-report, never a wrong label.
   `deref`/`try_from`/`await_poll`/`drop`/`iterator`/`eq`/`add_assign`).
 
 For the soundness contract (`Unknown` over-approximation), conformance checking, and the policy/guard
-CI gates, use the full nightly [candor](https://github.com/tombaldwin/candor) lint. The two share one
+CI gates, use the full nightly [candor](https://github.com/tombaldwin/candor-rust) lint. The two share one
 classifier, so they never disagree on what counts as an effect.
 
 ## Usage
@@ -59,5 +59,5 @@ candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests]
 
 Requires a reasonably recent stable Rust (edition 2024 → Rust 1.85+).
 
-Licensed under MIT OR Apache-2.0. Part of [candor](https://github.com/tombaldwin/candor); see the repo
+Licensed under MIT OR Apache-2.0. Part of [candor](https://github.com/tombaldwin/candor-rust); see the repo
 for the calibration (`eval/calibration/`) and the full effect model.

@@ -15,7 +15,7 @@ lead with the concrete thing, be upfront about the limits — the audience is sk
 
 > `cargo install candor-scan` → a map of which functions in a Rust crate reach the network, filesystem,
 > a database, or a subprocess — *transitively*, across the call graph — and the blast radius of editing
-> any one of them. Stable Rust, no nightly. https://github.com/tombaldwin/candor
+> any one of them. Stable Rust, no nightly. https://github.com/tombaldwin/candor-rust
 
 ---
 
@@ -66,7 +66,7 @@ It's MIT/Apache-2.0, built for the agent era but useful to humans. The classifie
 ~50 common effectful crates + the libc/libsqlite3/libgit2/libssl FFI tiers), so coverage is honest about
 its gaps rather than guessing.
 
-Repo: https://github.com/tombaldwin/candor · crate: https://crates.io/crates/candor-scan
+Repo: https://github.com/tombaldwin/candor-rust · crate: https://crates.io/crates/candor-scan
 
 I'd genuinely like to know where it under-reports on *your* code — that's the feedback that moves it.
 

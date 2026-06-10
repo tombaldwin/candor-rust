@@ -16,7 +16,7 @@ import json, subprocess, glob, os, re, sys, tempfile, shutil
 from collections import Counter
 
 REG = glob.glob(os.path.expanduser("~/.cargo/registry/src/index.crates.io-*"))[0]
-SCAN = "/Users/tom/git/candor/target/release/candor-scan"
+SCAN = "/Users/tom/git/candor-rust/target/release/candor-scan"
 
 # keyword (substring of crate name, '_'-normalized) -> effect the name implies
 IMPLIES = [
