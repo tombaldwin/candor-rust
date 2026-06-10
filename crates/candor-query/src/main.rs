@@ -323,8 +323,30 @@ struct ShowJson {
 /// Match a function name against a query. EXACT-wins: if some candidate equals `q` verbatim, only
 /// exact names match (`show foo` returns `foo`, not `foobar`); otherwise fall back to substring so a
 /// partial query still searches. `exact_exists` is precomputed over the candidate set.
-fn q_match(name: &str, q: &str, exact_exists: bool) -> bool {
-    if exact_exists { name == q } else { name.contains(q) }
+/// Name-match tier: 3 = exact, 2 = SEGMENT-SUFFIX (`Pricing::quote` matches `pricing::Pricing::quote`
+/// but NOT `…::quote_bulk` — the boundary before the query must be `::`), 1 = substring, 0 = none.
+/// Queries resolve at the BEST tier any candidate reaches, so a partial-but-segment-precise name no
+/// longer silently widens to substring cousins (found by the speed-eval red-team: `whatif
+/// Pricing::quote` seeded the blast radius from `quote_bulk` too).
+fn match_tier(name: &str, q: &str) -> u8 {
+    if name == q {
+        3
+    } else if name.ends_with(q) && name[..name.len() - q.len()].ends_with("::") {
+        2
+    } else if name.contains(q) {
+        1
+    } else {
+        0
+    }
+}
+
+/// The best tier `q` reaches over the candidate names (0 = no match anywhere).
+fn best_tier<'a>(names: impl Iterator<Item = &'a str>, q: &str) -> u8 {
+    names.map(|n| match_tier(n, q)).max().unwrap_or(0)
+}
+
+fn q_match(name: &str, q: &str, tier: u8) -> bool {
+    tier > 0 && match_tier(name, q) >= tier
 }
 
 fn cmd_show(args: &[String]) -> i32 {
@@ -336,8 +358,8 @@ fn cmd_show(args: &[String]) -> i32 {
         }
     };
     let all = load_entries(pre);
-    let exact = all.iter().any(|e| e.func == q);
-    let mut fns: Vec<ReportEntry> = all.into_iter().filter(|e| q_match(&e.func, q, exact)).collect();
+    let tier = best_tier(all.iter().map(|e| e.func.as_str()), q);
+    let mut fns: Vec<ReportEntry> = all.into_iter().filter(|e| q_match(&e.func, q, tier)).collect();
     fns.sort_by(|a, b| a.func.cmp(&b.func));
 
     if want_json {
@@ -462,11 +484,11 @@ fn cmd_callers(args: &[String]) -> i32 {
 
     // Fallback (no call-graph sidecar): the older effect-relevant, direct-only view.
     let entries = load_entries(pre);
-    let exact = entries.iter().any(|e| e.calls.iter().any(|c| c == q));
+    let tier = best_tier(entries.iter().flat_map(|e| e.calls.iter().map(String::as_str)), q);
     let mut hits: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for e in &entries {
         for callee in &e.calls {
-            if q_match(callee, q, exact) {
+            if q_match(callee, q, tier) {
                 hits.entry(callee.clone()).or_default().insert(e.func.clone());
             }
         }
@@ -503,8 +525,8 @@ fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str, want_json:
     // resolve `q` to the actual node name(s): exact path, or a unique basename / `::q` suffix match.
     let names: BTreeSet<&str> =
         cg.keys().map(|s| s.as_str()).chain(cg.values().flatten().map(|s| s.as_str())).collect();
-    let exact = names.contains(q);
-    let targets: Vec<&str> = names.iter().copied().filter(|n| q_match(n, q, exact)).collect();
+    let tier = best_tier(names.iter().copied(), q);
+    let targets: Vec<&str> = names.iter().copied().filter(|n| q_match(n, q, tier)).collect();
     if targets.is_empty() {
         if want_json {
             println!("{{}}");
@@ -640,8 +662,8 @@ fn cmd_whatif(args: &[String]) -> i32 {
     }
     let names: BTreeSet<&str> =
         cg.keys().map(|s| s.as_str()).chain(cg.values().flatten().map(|s| s.as_str())).collect();
-    let exact = names.contains(target.as_str());
-    let targets: Vec<&str> = names.iter().copied().filter(|n| q_match(n, target, exact)).collect();
+    let tier = best_tier(names.iter().copied(), target);
+    let targets: Vec<&str> = names.iter().copied().filter(|n| q_match(n, target, tier)).collect();
     if targets.is_empty() {
         eprintln!("candor: no function matching `{target}` in the call graph.");
         return 2;
@@ -1971,6 +1993,28 @@ mod tests {
         assert!(!d.contains_key("main")); // a purely-ADDED edge is not a drop
         // a correct fix that only ADDS edges yields nothing dropped.
         assert!(dropped_edges(&base, &base).is_empty());
+    }
+
+    #[test]
+    fn match_tier_ladder() {
+        // exact > segment-suffix > substring; suffix requires a `::` boundary (the red-team find:
+        // `Pricing::quote` must not widen to `quote_bulk`).
+        assert_eq!(match_tier("pricing::Pricing::quote", "pricing::Pricing::quote"), 3);
+        assert_eq!(match_tier("pricing::Pricing::quote", "Pricing::quote"), 2);
+        assert_eq!(match_tier("pricing::Pricing::quote", "quote"), 2);
+        assert_eq!(match_tier("pricing::Pricing::quote_bulk", "quote"), 1); // substring only
+        assert_eq!(match_tier("pricing::Pricing::quote", "ricing::quote"), 1); // mid-segment ≠ suffix
+        assert_eq!(match_tier("pricing::Pricing::quote", "zzz"), 0);
+        // selection: with both present, best tier 2 excludes the substring cousin.
+        let names = ["pricing::Pricing::quote", "pricing::Pricing::quote_bulk"];
+        let t = best_tier(names.iter().copied(), "Pricing::quote");
+        assert_eq!(t, 2);
+        assert!(q_match(names[0], "Pricing::quote", t));
+        assert!(!q_match(names[1], "Pricing::quote", t));
+        // with NO suffix candidate, substring still works (browsing).
+        let t2 = best_tier(names.iter().copied(), "ricing");
+        assert_eq!(t2, 1);
+        assert!(q_match(names[0], "ricing", t2) && q_match(names[1], "ricing", t2));
     }
 
     #[test]
