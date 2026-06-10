@@ -477,39 +477,16 @@ fn cmd_callers(args: &[String]) -> i32 {
     // alongside the report). It records EVERY function's callees — including pure ones — so we can
     // answer "who TRANSITIVELY calls X" for any function: the blast radius an agent needs *before*
     // adding an effect to X. The report alone only records effect-relevant edges (can't see a pure X).
-    let cg = load_callgraph(pre);
-    if !cg.is_empty() {
-        return callers_via_callgraph(&cg, q, want_json);
+    let mut cg = load_callgraph(pre);
+    // Fallback (no call-graph sidecar): build a graph from the report's effect-relevant `calls` edges
+    // and run the SAME query, so the output shape ({of,direct,transitive}) and JSON contract are
+    // identical to the sidecar path. The old fallback emitted a {callee:[callers]} map — diverging from
+    // the pinned SPEC §3.1 shape (/code-review). Transitive is necessarily incomplete here (effectful
+    // edges only); the sidecar exists to fix that.
+    if cg.is_empty() {
+        cg = load_entries(pre).into_iter().map(|e| (e.func, e.calls)).collect();
     }
-
-    // Fallback (no call-graph sidecar): the older effect-relevant, direct-only view.
-    let entries = load_entries(pre);
-    let tier = best_tier(entries.iter().flat_map(|e| e.calls.iter().map(String::as_str)), q);
-    let mut hits: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for e in &entries {
-        for callee in &e.calls {
-            if q_match(callee, q, tier) {
-                hits.entry(callee.clone()).or_default().insert(e.func.clone());
-            }
-        }
-    }
-    if want_json {
-        let out: BTreeMap<String, Vec<String>> =
-            hits.iter().map(|(c, cs)| (c.clone(), cs.iter().cloned().collect())).collect();
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
-        return 0;
-    }
-    if hits.is_empty() {
-        println!("candor: nothing matching `{q}` is called by an effectful function (callers of pure functions aren't tracked).");
-        return 0;
-    }
-    for (callee, cs) in &hits {
-        println!("  {callee}  ← called by {}:", cs.len());
-        for c in cs {
-            println!("      {c}");
-        }
-    }
-    0
+    callers_via_callgraph(&cg, q, want_json)
 }
 
 /// "Who reaches `q`?" over the full call graph: the DIRECT callers and the full TRANSITIVE set (the
@@ -636,6 +613,13 @@ fn cmd_whatif(args: &[String]) -> i32 {
         return 2;
     }
     let (prefix, target, effect) = (&args[0], &args[1], &args[2]);
+    // Validate the effect against the vocabulary: a typo'd/lowercase effect (`net`) matches no deny
+    // rule and would print an authoritative-looking clean verdict — a false green light for the very
+    // edit the policy forbids (/code-review). Reject it as a usage error, not a pass.
+    if candor_classify::cap_from_name(effect).is_none() && effect.as_str() != "Unknown" {
+        eprintln!("candor: unknown effect `{effect}` (expected a candor effect name, e.g. Net/Fs/Db/Exec, or Unknown)");
+        return 2;
+    }
     let mut policy_path: Option<String> = None;
     let mut want_json = false;
     for a in &args[3..] {
@@ -685,10 +669,19 @@ fn cmd_whatif(args: &[String]) -> i32 {
     // Parsed by the SHARED canonical DSL parser (candor_classify::policy, SPEC §6.2) — the SAME one the
     // nightly gate uses — so the pre-edit verdict can never diverge from the real gate's. (Only the
     // deny/pure rules are simulated here; allow/forbid are not pre-edit effect-introduction concerns.)
-    let rules = policy_path
-        .as_deref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|t| candor_classify::policy::parse_policy(&t).rules);
+    // A SPECIFIED-but-unreadable policy must FAIL LOUD, not silently yield ok:true — a typo'd
+    // CANDOR_POLICY path otherwise reads as "no violations" and an agent proceeds with a forbidden
+    // edit believing the boundary was checked (/code-review; mirrors cmd_diff's loud no-files check).
+    let rules = match policy_path.as_deref() {
+        None => None,
+        Some(p) => match std::fs::read_to_string(p) {
+            Ok(t) => Some(candor_classify::policy::parse_policy(&t).rules),
+            Err(e) => {
+                eprintln!("candor: policy `{p}` could not be read ({e}) — verdict NOT computed.");
+                return 2;
+            }
+        },
+    };
     let mut violations: Vec<(&str, String)> = Vec::new();
     if let Some(rules) = &rules {
         for fname in &affected {
@@ -779,6 +772,13 @@ fn cmd_rewire(args: &[String]) -> i32 {
     let base = load_callgraph(base_pre);
     if base.is_empty() {
         eprintln!("candor: no baseline call graph at `{base_pre}` (need its `.callgraph.json` sidecar).");
+        return 2;
+    }
+    // The CURRENT side must be guarded too: a missing/typo'd current prefix loaded an empty graph and
+    // reported EVERY baseline edge as "dropped" (a wall of false de-wiring, exit 1) — a CI alarm on a
+    // path typo. Fail loud, matching the baseline-side and cmd_diff's no-files check. (/code-review.)
+    if cur.is_empty() {
+        eprintln!("candor: no current call graph at `{cur_pre}` (need its `.callgraph.json` sidecar).");
         return 2;
     }
 

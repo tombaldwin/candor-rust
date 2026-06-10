@@ -51,9 +51,19 @@ pub struct ParsedPolicy {
     pub layer_rules: Vec<LayerRule>,
 }
 
-/// The hostname part of a `host[:port]` literal (everything before the first `:`). Host-allowlist
-/// matching is by hostname so `api.stripe.com` in a rule accepts a reached `api.stripe.com:443`.
+/// The hostname part of a `host[:port]` literal, port stripped — so `api.stripe.com` in a rule accepts
+/// a reached `api.stripe.com:443`. IPv6-aware: a bracketed `[host]:port` yields the bracketed host, and
+/// a BARE IPv6 literal (>1 colon, no brackets) has no port to strip and is returned whole — a naive
+/// first-colon split collapsed every `2001:db8::*` to `2001`, so one allowed IPv6 accepted any address
+/// in that block (/code-review). A hostname/IPv4 `host` or `host:port` (≤1 colon) splits at the colon.
 pub fn host_part(h: &str) -> &str {
+    if let Some(rest) = h.strip_prefix('[') {
+        // `[ipv6]` or `[ipv6]:port` — the host is between the brackets.
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    if h.matches(':').count() > 1 {
+        return h; // bare IPv6 literal — no port suffix to strip
+    }
     h.split(':').next().unwrap_or(h)
 }
 
@@ -263,6 +273,15 @@ mod tests {
 
         let set = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
         assert!(literal_allowed("Net", "api.stripe.com:443", &set(&["api.stripe.com"])));
+        // IPv6: a bare literal is matched WHOLE (no first-colon collapse), so a different address in the
+        // same block is NOT accepted; a bracketed `[host]:port` matches the bare host. (/code-review.)
+        assert!(literal_allowed("Net", "2001:db8::aa", &set(&["2001:db8::aa"])));
+        assert!(!literal_allowed("Net", "2001:db8::ff", &set(&["2001:db8::aa"])));
+        assert!(!literal_allowed("Net", "2001:dead::1", &set(&["2001:db8::aa"])));
+        assert!(literal_allowed("Net", "[2001:db8::aa]:443", &set(&["2001:db8::aa"])));
+        assert_eq!(host_part("2001:db8::aa"), "2001:db8::aa");
+        assert_eq!(host_part("[2001:db8::aa]:443"), "2001:db8::aa");
+        assert_eq!(host_part("api.stripe.com:443"), "api.stripe.com");
         assert!(literal_allowed("Exec", "/usr/bin/git", &set(&["git"])));
         assert!(!literal_allowed("Exec", "/usr/bin/curl", &set(&["git"])));
         assert!(literal_allowed("Fs", "/etc/app/conf.toml", &set(&["/etc/app"])));
