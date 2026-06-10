@@ -69,3 +69,55 @@ serial-round elimination (control: 2–3 read/trace rounds; treatment: 1 query).
 cuts the other way for the headline claims: a frontier model asked the explicit blast-radius question
 gets it right from source — candor's completeness value is for *implicit* propagation awareness and
 weaker models; its speed/cost value is what remains for explicit questions.
+
+---
+
+## Red-team addendum (self-review, same day)
+
+The result was given a deliberate kicking. What survives, what's bruised:
+
+**1. CORRECTION — the marginal-ratio gloss was wrong.** The body says the marginal token cost
+(~5,555 vs ~58) is "consistent with the per-question ~17×". It isn't — that ratio is **~96×**, which
+sits *above* token-cost's typical band (1–30×) for a fixture this small/distinctive. Likely cause:
+the two measurements count different quantities — token-cost's grep-trace estimator counts the *text
+an agent must ingest*, while the marginal here also includes the agent's reasoning/output tokens for
+the trace. Favorable to candor, but mis-stated precision is mis-stated precision.
+
+**2. Circularity in treatment completeness.** The ground truth is candor-derived, and 7/8 treatment
+agents returned candor's output verbatim — treatment's 16/16 is near-tautological. It is rescued
+**only** by the control arm: 8/8 *independent source-only traces* converged on exactly the same 16,
+which is simultaneously the strongest external validation of candor's answer this eval produced.
+Treatment completeness should be read as "tool trusted and tool correct," not "agent verified."
+
+**3. Best-case adoption.** The treatment prompt handed the agent the literal commands. This measures
+the tool's ceiling, not discovery-and-adoption in the wild (the 33.1s outlier — an agent exploring
+before querying — hints at the variance the spoon-feeding suppressed). Deployment-realistic speed
+sits somewhere between the arms.
+
+**4. Measurement conditions.** Durations were taken under 8-way concurrent agent load (balanced
+across arms within each batch, so the *ratio* is fair, but absolute seconds are not isolated-run
+times). A visible batch effect (batch 2 faster in both arms) suggests warm caches.
+
+**5. Statistics.** Exact U = 59/64 control>treatment pairs; permutation test on the median gap
+(13.5s) gives **p ≈ 0.036**. Significant, but N=8/arm on ONE fixture in two correlated batches —
+adequate for the direction, thin for the magnitude.
+
+**6. The control-100% finding inherits fixture cleanliness.** "A frontier model traces correctly when
+explicitly asked" was demonstrated on a synthetic, perfectly-layered, distinctively-named 10-module
+crate with no distractors. It does NOT establish that control stays at 100% on real codebases (common
+names, dead code, macro noise) — where the speed gap should also widen. Both headline numbers are
+easy-case numbers.
+
+**7. Tool footnote the fixture masked.** `whatif pricing::Pricing::quote` substring-matched
+`quote_bulk` too, seeding the radius from both. Harmless here (quote_bulk is in quote's radius
+anyway) but on other names whatif's substring matching could inflate a blast radius — worth an
+exact-match flag on the tool.
+
+**8. Token accounting.** `subagent_tokens`' exact composition (input/output/cache split) was not
+verified; within-metric ratios are sound, absolute interpretations less so.
+
+**Post-kicking verdict.** The defensible sentence shrinks to: *on the easy case, under best-case
+adoption, candor answered ~1.8× faster (p≈.04) at equal completeness, by replacing a 2–3-round serial
+trace with one query — and the 8/8 control convergence independently validated the report itself.*
+The magnitude is condition-specific; the mechanism and direction are solid; the strongest new fact is
+arguably the control arm validating candor's ground truth, not the speedup.
