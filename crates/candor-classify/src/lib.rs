@@ -542,12 +542,28 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // only BUILDS — it keeps the narrow set below. (Found by running on a real
         // tokio-postgres app, pgman: candor had reported only 4 of ~20 DB call sites.)
         if matches!(crate_name, "postgres" | "tokio_postgres" | "deadpool_postgres" | "rusqlite") {
-            const PG: [&str; 13] = [
+            const PG: [&str; 19] = [
                 "::query", "::query_one", "::query_opt", "::query_raw", "::execute",
                 "::batch_execute", "::simple_query", "::prepare", "::prepare_typed",
                 "::copy_in", "::copy_out", "::transaction", "::connect",
+                // rusqlite's dialect of the same verbs (a verb-probe found the CANONICAL rusqlite
+                // consumer API classifying pure): `query_row` is the one-row read, `query_map`/
+                // `query_and_then` the many-row reads, `execute_batch` is rusqlite's name for
+                // batch_execute, `prepare_cached` round-trips like prepare. `query_typed` is
+                // tokio_postgres 0.7.10+.
+                "::query_row", "::query_map", "::query_and_then", "::execute_batch",
+                "::prepare_cached", "::query_typed",
             ];
             if PG.iter().any(|v| path.ends_with(v)) {
+                return Some("Db");
+            }
+            // rusqlite only: opening the database IS the connection establishment (`Connection::
+            // open`/`open_in_memory`/`open_with_flags` — the embedded analog of `::connect`).
+            if crate_name == "rusqlite"
+                && (path.ends_with("::open")
+                    || path.ends_with("::open_in_memory")
+                    || path.ends_with("::open_with_flags"))
+            {
                 return Some("Db");
             }
             return None;
@@ -633,10 +649,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             }
             return None;
         }
-        const VERBS: [&str; 16] = [
+        // (Reached by sqlx + diesel — the build-vs-execute-split crates.) `first` is diesel's
+        // LIMIT-1 round trip and `load_iter` its 2.x streaming execution; `fetch_many` is sqlx's
+        // multi-result stream. All crate-gated, so a std `Vec::first` never resolves here.
+        const VERBS: [&str; 19] = [
             "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
-            "::fetch_all", "::fetch_optional", "::fetch", "::connect", "::acquire",
-            "::begin", "::commit", "::rollback", "::load", "::get_result", "::get_results",
+            "::fetch_all", "::fetch_optional", "::fetch", "::fetch_many", "::connect",
+            "::acquire", "::begin", "::commit", "::rollback", "::load", "::load_iter",
+            "::first", "::get_result", "::get_results",
         ];
         if VERBS.iter().any(|v| path.ends_with(v)) {
             return Some("Db");
@@ -921,6 +941,22 @@ mod tests {
         assert_eq!(classify("notify", "notify::Config::default"), None); // pure config
         assert_eq!(classify("notify", "notify::Event::new"), None); // pure data type
         assert_eq!(classify("rusqlite", "rusqlite::Connection::execute"), Some("Db"));
+        // the rusqlite verb DIALECT (a verb probe found the canonical consumer API classifying pure):
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::query_row"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Statement::query_map"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::execute_batch"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::prepare_cached"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::open"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::open_in_memory"), Some("Db"));
+        // …but `open` stays rusqlite-only (postgres has no open; nothing else may borrow it):
+        assert_eq!(classify("postgres", "postgres::Client::open"), None);
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Client::query_typed"), Some("Db"));
+        // diesel's LIMIT-1 + streaming executions; sqlx's multi-result stream:
+        assert_eq!(classify("diesel", "diesel::RunQueryDsl::first"), Some("Db"));
+        assert_eq!(classify("diesel", "diesel::RunQueryDsl::load_iter"), Some("Db"));
+        assert_eq!(classify("sqlx", "sqlx::query::Query::fetch_many"), Some("Db"));
+        // sqlx's bare `query()` builder must STAY pure (the original sqlx lesson):
+        assert_eq!(classify("sqlx", "sqlx::query"), None);
         assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
         // FFI tiers (matched by distinctive leaf, alias-independent)
         assert_eq!(classify("libc", "libc::open"), Some("Fs"));
