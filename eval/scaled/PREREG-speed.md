@@ -32,7 +32,7 @@ once and note it).
 
 - **control** — the prompt + "Work from the source code."
 - **treatment** — the prompt + "candor is set up: an effect report and call-graph sidecar are in
-  `<DIR>/.candor/`, and the query binary `/Users/tom/git/candor/target/debug/candor-query` answers
+  `<DIR>/.candor/`, and the query binary `/Users/tom/git/candor-rust/target/debug/candor-query` answers
   e.g. `candor-query callers <DIR>/.candor/report <fn>` (transitive callers) or
   `candor-query whatif <DIR>/.candor/report <fn> Net` (the blast radius). Use them."
 

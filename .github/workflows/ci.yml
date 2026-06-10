@@ -97,6 +97,13 @@ jobs:
             exit 1
           fi
 
+      # SELF-GATE (candor-spec §7.12): candor analyzes ITSELF with the STABLE scanner (the adopter's
+      # path) and holds its own declared `deny Net Db Exec Ipc` boundary from .candor/policy. An
+      # effect-gate vendor whose own gate is red has no business gating anyone else. (Complements the
+      # nightly Self-guard above, which is a baseline-drift check, not a policy assertion.)
+      - name: Self-gate (candor on candor)
+        run: bash ci/self-gate.sh
+
       # Adversarial SOUNDNESS check: generate crates that thread a known effect through every call
       # form known to produce silent under-reports (closures, dyn dispatch, generic/boxed callbacks,
       # the receiving side), and assert candor never reports a reachable function PURE (effect or

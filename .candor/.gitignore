@@ -4,6 +4,7 @@
 # regenerated on every run and stays untracked.
 *
 !.gitignore
+!policy
 !baseline.candor-version
 !baseline.candor.Cdylib.json
 !baseline.candor_report.Rlib.json

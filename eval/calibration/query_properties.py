@@ -2,9 +2,16 @@
 """Property-test candor-query across MANY real crates. Any FAIL is a query-layer bug lead."""
 import json, subprocess, sys, collections, glob, os, re, tempfile, shutil
 
-SCAN = "/Users/tom/git/candor-rust/target/release/candor-scan"
-QUERY = "/Users/tom/git/candor-rust/target/debug/candor-query"
-REG = glob.glob(os.path.expanduser("~/.cargo/registry/src/index.crates.io-*"))[0]
+# Resolve binaries relative to this file (eval/calibration/ -> repo root), env-overridable — NOT
+# hardcoded machine paths (which broke after the candor->candor-rust rename; /code-review). Use the
+# same build profile for both so a stale release/debug mix can't screen against the wrong binary.
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCAN = os.environ.get("CANDOR_SCAN_BIN") or f"{_ROOT}/target/release/candor-scan"
+QUERY = os.environ.get("CANDOR_QUERY_BIN") or f"{_ROOT}/target/release/candor-query"
+for _b in (SCAN, QUERY):
+    if not os.path.exists(_b):
+        sys.exit(f"FATAL: {_b} not built — cargo build --release -p candor-scan -p candor-query, or set CANDOR_*_BIN.")
+REG = sorted(glob.glob(os.path.expanduser("~/.cargo/registry/src/index.crates.io-*")))[-1]
 
 CRATES = ["gix", "git2", "tempfile", "which", "nix", "rusqlite", "curl", "ignore",
           "tokio-postgres", "redis", "mongodb", "tower-http", "hickory-resolver",
@@ -56,11 +63,13 @@ for name in CRATES:
         return seen
 
     n_props = 0
-    # P1 diff(self) empty
+    # P1 diff(self) empty — the diff JSON is the {baseline_version, engine_version, changes} envelope,
+    # so the property is "changes == []". (Was checking top-level gained/lost, which never exist in the
+    # envelope, so P1 could never fail — a vacuous assertion, found by /code-review.)
     rc, out, _ = q("diff", prefix, prefix, "1", "v", "v")
     try:
         dd = json.loads(out)
-        if (dd.get("gained") or dd.get("lost")):
+        if dd.get("changes"):
             fail(name, "diff(self)!=empty", out[:160])
     except Exception as ex:
         if fns: fail(name, "diff(self) unparseable", f"rc={rc} {ex} {out[:120]}")

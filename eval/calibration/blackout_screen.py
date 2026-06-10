@@ -15,8 +15,14 @@ Usage: python3 blackout_screen.py [out.json]
 import json, subprocess, glob, os, re, sys, tempfile, shutil
 from collections import Counter
 
-REG = glob.glob(os.path.expanduser("~/.cargo/registry/src/index.crates.io-*"))[0]
-SCAN = "/Users/tom/git/candor-rust/target/release/candor-scan"
+REG = sorted(glob.glob(os.path.expanduser("~/.cargo/registry/src/index.crates.io-*")))[-1]
+# Resolve the scanner relative to this file (eval/calibration/ -> repo root), env-overridable — NOT a
+# hardcoded machine path (which broke silently after the candor->candor-rust rename; /code-review).
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCAN = os.environ.get("CANDOR_SCAN_BIN") or f"{_ROOT}/target/release/candor-scan"
+if not os.path.exists(SCAN):
+    sys.exit(f"FATAL: candor-scan not at {SCAN} — build it (cargo build --release -p candor-scan) or set "
+             f"CANDOR_SCAN_BIN. (The screen would otherwise silently report '0 suspects'.)")
 
 # keyword (substring of crate name, '_'-normalized) -> effect the name implies
 IMPLIES = [

@@ -165,8 +165,13 @@ fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, returns: &ReturnI
 /// a snake_case variable or SCREAMING_SNAKE const yields None (no inference; honest under-report).
 fn type_from_value_path(full: &str, uses: &HashMap<String, String>) -> Option<String> {
     let camel = |s: &str| {
+        // CamelCase = UpperCamel start, and either a single CHARACTER (`S`) or containing a lowercase
+        // (distinguishes a type from a SCREAMING_SNAKE const). `chars().count()`, not `s.len()`: a
+        // single-codepoint non-ASCII type ident (`struct É;`) is multi-BYTE and must still count as one
+        // character. (/code-review.)
         let mut ch = s.chars();
-        ch.next().is_some_and(|c| c.is_uppercase()) && (s.len() == 1 || s.chars().any(|c| c.is_lowercase()))
+        ch.next().is_some_and(|c| c.is_uppercase())
+            && (s.chars().count() == 1 || s.chars().any(|c| c.is_lowercase()))
     };
     let segs: Vec<&str> = full.split("::").collect();
     let last = segs.last()?;

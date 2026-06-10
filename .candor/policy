@@ -1,0 +1,3 @@
+# candor-rust self-gate (candor-spec §7.12): the engine reads source and writes reports — Fs/Env/Clock
+# are its job. It must never grow network, database, subprocess, or local-IPC behaviour.
+deny Net Db Exec Ipc

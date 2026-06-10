@@ -29,7 +29,7 @@ TOOLS = [
                        "Returns its transitive `inferred` effects and the `direct` ones it performs itself.",
         "inputSchema": {
             "type": "object",
-            "properties": {"function": {"type": "string", "description": "function name (a substring of the fully-qualified path)"}},
+            "properties": {"function": {"type": "string", "description": "function name — resolved exact > segment-suffix (`Type::method`) > substring; pass a more specific name to narrow, a bare leaf to browse"}},
             "required": ["function"],
         },
     },
@@ -52,7 +52,7 @@ TOOLS = [
                        "Enumerating 3-5 layers of callers by hand is exactly what's easy to under-count.",
         "inputSchema": {
             "type": "object",
-            "properties": {"function": {"type": "string", "description": "function name (a substring of the fully-qualified path)"}},
+            "properties": {"function": {"type": "string", "description": "function name — resolved exact > segment-suffix (`Type::method`) > substring; pass a more specific name to narrow, a bare leaf to browse"}},
             "required": ["function"],
         },
     },
@@ -68,7 +68,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "function": {"type": "string", "description": "the function you're about to add the effect to (name substring)"},
+                "function": {"type": "string", "description": "the function you're about to add the effect to (name; exact/segment-suffix preferred over substring)"},
                 "effect": {"type": "string", "description": "the effect you'd introduce: Net Fs Db Exec Env Clock Ipc Log Rand Clipboard"},
             },
             "required": ["function", "effect"],
