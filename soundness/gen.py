@@ -126,6 +126,30 @@ def edge_forms(callee, i=0):
                 f"async fn aw{i:02d}() {{ Fut{i:02d}(()).await; }}",
             ],
         ),
+        # THREAD SPAWN: the effect is inside a closure handed to `std::thread::spawn` — the runtime
+        # invokes it on another thread. SEMANTICS §2 attributes a closure's call sites to the nearest
+        # enclosing fn, so the SPAWNING fn must inherit (the JVM twin of this — an anonymous Runnable
+        # handed to Thread — was a real under-report, candor-java bug fixed 2026-06-10). `.join()` so
+        # the effect runs before exit (keeps the strace oracle honest).
+        "spawn":      (f"{{ let h = std::thread::spawn(|| {callee}()); let _ = h.join(); }}", [], [], []),
+        # RAII DROP: the effect lives in `Drop::drop`, run at SCOPE END — there is NO call expression
+        # in HIR (drop elaboration happens in MIR), so a HIR-walking lint sees nothing unless it
+        # special-cases locals whose type has a local effectful Drop impl.
+        "drop":       (f"{{ let _g = Dp{i:02d}; }}", [], [], [
+            f"struct Dp{i:02d};\nimpl Drop for Dp{i:02d} {{ fn drop(&mut self) {{ {callee}(); }} }}"]),
+        # FOR-LOOP over a custom Iterator: the effect is in `next()`, reached via the loop desugar
+        # (`IntoIterator::into_iter` + `Iterator::next` calls candor must resolve to the local impl).
+        "iterator":   (f"for _ in It{i:02d}(true) {{}}", [], [], [
+            f"struct It{i:02d}(bool);\nimpl Iterator for It{i:02d} {{ type Item = (); "
+            f"fn next(&mut self) -> Option<()> {{ if self.0 {{ self.0 = false; {callee}(); Some(()) }} else {{ None }} }} }}"]),
+        # OVERLOADED `==`: `ExprKind::Binary(Eq)` → `PartialEq::eq` — same operator-node family as
+        # op_add but a different binop, locked separately.
+        "eq":         (f"{{ let _ = Qe{i:02d} == Qe{i:02d}; }}", [], [], [
+            f"struct Qe{i:02d};\nimpl PartialEq for Qe{i:02d} {{ fn eq(&self, _: &Self) -> bool {{ {callee}(); true }} }}"]),
+        # COMPOUND ASSIGN `+=`: `ExprKind::AssignOp` → `AddAssign::add_assign` — a DIFFERENT HIR node
+        # than Binary (op_add), so it needs its own operator-node handling or the edge is invisible.
+        "add_assign": (f"{{ let mut a{i:02d} = As{i:02d}; a{i:02d} += As{i:02d}; }}", [], [], [
+            f"struct As{i:02d};\nimpl std::ops::AddAssign for As{i:02d} {{ fn add_assign(&mut self, _: Self) {{ {callee}(); }} }}"]),
     }
 
 

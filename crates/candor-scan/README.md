@@ -34,8 +34,11 @@ under-report, never a wrong label.
   the receipt's unresolved count is truthful, not a hardcoded 0). A LOCAL closure whose body IS visible
   (`let f = |..| ..; f()`) is NOT flagged — its effects were already walked lexically.
 - **Misses (silently):** effects reached only through trait-object (`dyn`) dispatch on an uninferrable
-  receiver, overloaded operators / `?` / `.await` desugars, and cross-crate propagation by stable
-  identity. These need the semantic resolution only the nightly lint has.
+  receiver, overloaded operators / `?` / `.await` desugars, RAII drops (an effectful `Drop::drop` has no
+  call expression — it runs at scope end), a custom `Iterator::next` reached only via a `for`-loop
+  desugar, and cross-crate propagation by stable identity. These need the semantic resolution only the
+  nightly lint has (the soundness fuzzer locks all of them against the lint: forms `op_add`/`index`/
+  `deref`/`try_from`/`await_poll`/`drop`/`iterator`/`eq`/`add_assign`).
 
 For the soundness contract (`Unknown` over-approximation), conformance checking, and the policy/guard
 CI gates, use the full nightly [candor](https://github.com/tombaldwin/candor) lint. The two share one
