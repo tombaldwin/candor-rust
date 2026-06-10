@@ -8,8 +8,8 @@ file:line. Either outcome is informative — including "candor didn't help here"
 that too, and says why).
 
 **Requirements:** a Rust crate, `cargo install candor-scan` (stable toolchain, ~15s build), any
-agentic coding tool (Claude Code, Cursor, …). JVM project? Same flow with
-[candor-java](https://github.com/tombaldwin/candor-java) (`jbang candor@tombaldwin/candor-java`).
+agentic coding tool (Claude Code, Cursor, …). JVM project (Java/Kotlin/Scala/Groovy)? Use the
+[JVM variant of this prompt](https://github.com/tombaldwin/candor-java/blob/main/PROVE-IT.md).
 
 **Paste this prompt into your agent at the repo root:**
 
