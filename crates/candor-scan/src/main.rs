@@ -294,7 +294,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // honest miss on a std method beats a wrong effect on a pure one.
         if let Some(ty) = self.resolve_recv_type(&node.receiver) {
             let cr = ty.split("::").next().unwrap_or("");
-            if !matches!(cr, "std" | "core" | "alloc") {
+            // EXCEPTION to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
+            // the classifier has a VERB-PRECISE stat-family rule for them (metadata/read_dir/exists/…
+            // → Fs; the pure join/file_name surface returns None), so the coarse-prefix mis-fire risk
+            // doesn't apply. Without this an entire directory walker reads as pure (gix-dir: zero Fs).
+            let std_path_recv = ty == "std::path::Path" || ty == "std::path::PathBuf";
+            if !matches!(cr, "std" | "core" | "alloc") || std_path_recv {
                 let path = format!("{ty}::{leaf}");
                 self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true });
             }

@@ -1,18 +1,19 @@
 {
- "scanned": 1294,
+ "scanned": 1337,
  "errors": 0,
- "with_effects": 394,
+ "with_effects": 519,
  "pure_checked": 76,
+ "pure_effect_fps": [],
  "crates_per_effect": {
-  "Fs": 206,
-  "Env": 180,
-  "Clock": 97,
-  "Rand": 76,
-  "Exec": 59,
-  "Net": 49,
+  "Unknown": 231,
+  "Fs": 226,
+  "Env": 186,
+  "Clock": 101,
+  "Rand": 77,
+  "Exec": 65,
+  "Net": 53,
   "Ipc": 26,
   "Log": 14,
   "Db": 4
- },
- "explosions_note": "gix(Fs, real git impl), aws-sdk-*(Rand, real idempotency tokens), arboard(real X11 internals) \u2014 all verified real, no misclassification"
+ }
 }

@@ -643,6 +643,22 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // std::path::Path / PathBuf STAT-family methods hit the filesystem (each is a stat/readlink/
+    // readdir syscall) — unlike the rest of the std::path surface, which is pure string manipulation
+    // (join/file_name/extension/parent/…). Verb-precise so the scanner's receiver inference can safely
+    // route a `path.symlink_metadata()` method call here. (A blackout screen caught gix-dir — an entire
+    // directory WALKER — reporting ZERO Fs because all its I/O is Path-method calls; same class as
+    // fd's residual `Path::symlink_metadata` under-report.)
+    if let Some(m) = path
+        .strip_prefix("std::path::Path::")
+        .or_else(|| path.strip_prefix("std::path::PathBuf::"))
+    {
+        const STAT: &[&str] = &[
+            "metadata", "symlink_metadata", "canonicalize", "read_link", "read_dir", "exists",
+            "try_exists", "is_file", "is_dir", "is_symlink",
+        ];
+        return STAT.contains(&m).then_some("Fs");
+    }
     // Filesystem. `tokio::fs`/`async_std::fs` are the async mirrors of `std::fs`; `async_fs` is
     // smol's fs crate; `fs_err` is a drop-in `std::fs` wrapper (its whole surface is fs I/O).
     if path.starts_with("std::fs::")
@@ -857,6 +873,14 @@ mod tests {
         // A representative smoke test of the classifier's main families, so the published crate is not
         // shipped untested (these used to live only in the nightly-only src/lib.rs).
         assert_eq!(classify("std", "std::fs::read_to_string"), Some("Fs"));
+        // std::path stat-family methods are Fs (each is a stat/readdir syscall); the pure
+        // string-manipulation surface stays unclassified (the blackout screen's gix-dir find).
+        assert_eq!(classify("std", "std::path::Path::symlink_metadata"), Some("Fs"));
+        assert_eq!(classify("std", "std::path::PathBuf::read_dir"), Some("Fs"));
+        assert_eq!(classify("std", "std::path::Path::exists"), Some("Fs"));
+        assert_eq!(classify("std", "std::path::Path::join"), None); // pure string manipulation
+        assert_eq!(classify("std", "std::path::PathBuf::file_name"), None);
+        assert_eq!(classify("std", "std::path::Path::parent"), None);
         assert_eq!(classify("std", "std::process::Command::new"), Some("Exec"));
         assert_eq!(classify("std", "std::env::var"), Some("Env"));
         assert_eq!(classify("reqwest", "reqwest::Client::execute"), Some("Net"));
