@@ -2203,12 +2203,24 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // an effect ("I'm about to touch X; who depends on it?"). The main report only records
             // effect-relevant edges, so it can't answer that for a pure X. 3-segment name ⇒ report_files
             // ignores it. (Surfaced by the agent-use eval, eval/agentuse.)
+            // SPEC §2.2: EVERY analyzed function is a key — a LEAF with no local callees gets an empty
+            // list (iterating `eff`, which is seeded with every reportable item, not just `self.calls`,
+            // which only holds fns that make a call). Omitting leaves made an uncalled leaf invisible
+            // to `whatif`/`callers`, and an always-present key distinguishes "no callers" from "no such
+            // function".
             let mut cg: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-            for (caller, callees) in &self.calls {
-                let mut cs: Vec<String> =
-                    callees.iter().map(|c| cx.tcx.def_path_str(c.to_def_id())).collect();
-                cs.sort();
-                cg.insert(cx.tcx.def_path_str(caller.to_def_id()), cs);
+            for f in eff.keys() {
+                let cs: Vec<String> = self
+                    .calls
+                    .get(f)
+                    .map(|callees| {
+                        let mut v: Vec<String> =
+                            callees.iter().map(|c| cx.tcx.def_path_str(c.to_def_id())).collect();
+                        v.sort();
+                        v
+                    })
+                    .unwrap_or_default();
+                cg.insert(cx.tcx.def_path_str(f.to_def_id()), cs);
             }
             let cgfile = format!("{prefix}.{krate}.{kinds}.callgraph.json");
             if let Ok(body) = serde_json::to_string(&cg) {

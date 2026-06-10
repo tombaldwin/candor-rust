@@ -882,9 +882,11 @@ fn main() {
     let mut entries: Vec<ReportEntry> = Vec::new();
     let mut cg: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for q in &all {
-        if let Some(cs) = calls.get(q) {
-            cg.insert(q.clone(), cs.iter().cloned().collect());
-        }
+        // SPEC §2.2: the sidecar records EVERY analyzed function — including a LEAF with no local
+        // callees, as an empty list. Omitting leaves made an uncalled FFI-only fn (nix `unistd::pipe`)
+        // invisible to `whatif`/`callers` ("no function matching") even though it's in the report;
+        // an always-present key also lets a consumer distinguish "no callers" from "no such function".
+        cg.insert(q.clone(), calls.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default());
         let inf = inferred.get(q).cloned().unwrap_or_default();
         if inf.is_empty() {
             continue;
