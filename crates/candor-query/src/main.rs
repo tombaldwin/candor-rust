@@ -937,6 +937,16 @@ fn cmd_diff(args: &[String]) -> i32 {
     let (cur_pre, base_pre, want_json, bver, ever) =
         (&args[0], &args[1], args[2] == "1", args[3].as_str(), args[4].as_str());
 
+    // A prefix that matches NO report files must fail LOUD, not read as an empty report: a typo'd
+    // `cur` would otherwise show zero gains (a gained-effect gate built on this output would silently
+    // PASS with the wrong path), and a typo'd baseline would show every effect as newly gained. A
+    // legitimately effect-free crate still writes a report file, so "no files" is always an error.
+    for (which, pre) in [("current", cur_pre), ("baseline", base_pre)] {
+        if glob_reports(pre).is_empty() {
+            eprintln!("candor: no report files at {which} prefix `{pre}` — check the path.");
+            return 2;
+        }
+    }
     let cur = load_fninfo(cur_pre);
     let base = load_fninfo(base_pre);
     let empty = BTreeSet::new();
