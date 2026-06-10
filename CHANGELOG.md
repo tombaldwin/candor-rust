@@ -4,6 +4,23 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [0.3.3] — 2026-06-10 (crates: candor-report / candor-classify / candor-scan, lockstep)
+
+Republish so the crates.io artifacts carry the fixes committed after 0.3.2 (the published 0.3.2 had
+diverged from the 0.3.2 source tree). Surfaced by a maximum-effort multi-agent `/code-review`.
+
+### Fixed — precision / correctness
+
+- **`candor-classify`: IPv6-aware policy host matching** — `host_part` now keeps a bracketed
+  `[::1]:8080` host and a bare `2001:db8::1` intact instead of truncating at the first `:` (which had
+  mangled IPv6 endpoints in `allow Net in <scope> <host>` rules into a useless prefix).
+- **`candor-scan`: single-codepoint type idents** — the CamelCase test in `type_from_value_path` uses
+  `chars().count()`, not byte `len()`, so a one-character non-ASCII type ident (`struct É;`) still
+  counts as a single character (a snake/SCREAMING const still yields `None` — honest under-report).
+
+report is bumped in lockstep (unchanged content) to keep the three crates' shared version and their
+inter-crate `version =` dependencies resolvable on crates.io.
+
 ## [0.3.2] — 2026-06-10 (crates: candor-report / candor-classify / candor-scan, lockstep)
 
 The "validated everywhere" release: 18 product fixes found by systematic validation (blackout screens,
