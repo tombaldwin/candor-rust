@@ -1,6 +1,6 @@
 [package]
 name = "candor-classify"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2021"
 description = "candor's curated effect classifier (crate+path -> effect) — pure, stable Rust."
 license = "MIT OR Apache-2.0"
@@ -11,4 +11,4 @@ keywords = ["candor", "effects", "classifier", "capabilities", "audit"]
 categories = ["development-tools"]
 
 [dependencies]
-candor-report = { path = "../candor-report", version = "0.3.0" }
+candor-report = { path = "../candor-report", version = "0.3.2" }

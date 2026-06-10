@@ -203,6 +203,16 @@ that's the narrow, modest-value axis. Diminishing returns.
       low-signal (especially for TUIs); would add noise without authority-level value. Reconsider if
       a use case appears. `stdin` (real input) could be added later as its own effect.
 
+- [ ] **(candor-java) Validate Scala and Groovy on real bytecode.** The README claims them by
+      bytecode-lowering only; the validation pass Kotlin got (real okhttp/ktor/coroutines bytecode,
+      dispatcher entry points flagged, no crashes on coroutine state machines) hasn't been run for
+      either. Do the same: one real Scala codebase (lambda/`Future`-heavy — closures lower to
+      `invokedynamic`; traits/mixins) and one Groovy one (a Gradle plugin is a natural fixture —
+      Groovy's MOP/dynamic dispatch should land in `Unknown`, verify it does rather than silently
+      passing). Document the result in the README either way. Until this lands, the marketing page
+      (candor.poly.io) deliberately lists Scala/Groovy at lowering-confidence only — promote them to
+      the validated tier when it does.
+
 ## P2 — depth / precision
 
 ### From the critical-assessment pushback — "fundamental" was too strong (these are buildable)

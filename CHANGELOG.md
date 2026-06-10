@@ -4,6 +4,43 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [0.3.2] — 2026-06-10 (crates: candor-report / candor-classify / candor-scan, lockstep)
+
+The "validated everywhere" release: 18 product fixes found by systematic validation (blackout screens,
+report-vs-source A/B audits, query property harnesses, fuzzer extensions) since 0.3.1.
+
+### Fixed — soundness / recall (the dangerous direction)
+
+- **`src/build.rs` modules are scanned** (only the crate-root Cargo build script is skipped) — git2's
+  `RepoBuilder` module had vanished entirely, so `Repository::clone` reported no `Net`.
+- **Struct-literal bindings infer their type** (`let s = S;` / `let s = S{..};` — previously only
+  annotated lets), CamelCase-gated; `Enum::Variant` types as the enum.
+- **Classifier tiers added:** libcurl FFI (`curl_easy_perform`/send/recv/upkeep + multi pumps → Net)
+  + the `curl` consumer crate rule; libgit2 submodule clone/update → Net; `std::path::Path`/`PathBuf`
+  stat family → Fs (gix-dir, a directory walker, had reported zero Fs); DB verb dialects — rusqlite's
+  canonical API (`query_row`/`query_map`/`execute_batch`/`prepare_cached`/`open`…) had classified
+  PURE for consumers, plus `tokio_postgres::query_typed`, diesel `first`/`load_iter`, sqlx `fetch_many`.
+- **Report fields:** `spec` (the contract version — required by SPEC §2.1), `unknownWhy`, `entryPoint`
+  now emitted by the report crate (published 0.3.0/0.3.1 artifacts predated them).
+
+### Fixed — precision / correctness
+
+- **Callgraph sidecar completeness (SPEC §2.2):** every analyzed function is a key (uncalled leaves
+  were invisible to `whatif`/`callers`, conflating "no callers" with "no such function").
+- **Name-query matching ladder:** exact > segment-suffix > substring — a precise partial name
+  (`Pricing::quote`) no longer silently widens a blast radius to substring cousins (`quote_bulk`).
+- **`map` buckets crate-root free functions into `(root)`** per SPEC §6.1 (was one pseudo-module per
+  function on flat crates).
+- **`diff` fails loud on a prefix matching no reports** (a typo'd current path previously showed zero
+  gains — silently passing a gained-effect gate).
+- **The shared `CANDOR_POLICY` parser** (SPEC §6.2) — one canonical implementation for the gate,
+  `whatif`, and the new `parsepolicy` dump; `deny Unknown <scope>` now parses everywhere.
+
+### Added
+
+- `PROVE-IT.md` — a self-experiment prompt an adopter's agent runs on their own repo (this release is
+  its minimum version: earlier published binaries exhibit the since-fixed resolution bugs above).
+
 ## [0.3.0] — 2026-06-08
 
 The "enforce, soundly, at scale" release. candor goes from *describing* effects to **enforcing**

@@ -1,6 +1,6 @@
 [package]
 name = "candor-scan"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "candor's STABLE-Rust effect scanner — syntactic call-graph + effect report, no nightly."
 license = "MIT OR Apache-2.0"
@@ -11,8 +11,8 @@ keywords = ["effects", "capabilities", "static-analysis", "audit", "security"]
 categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-candor-report = { path = "../candor-report", version = "0.3.0" }
-candor-classify = { path = "../candor-classify", version = "0.3.0" }
+candor-report = { path = "../candor-report", version = "0.3.2" }
+candor-classify = { path = "../candor-classify", version = "0.3.2" }
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 proc-macro2 = "1"
 walkdir = "2"
