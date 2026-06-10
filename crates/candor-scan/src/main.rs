@@ -150,8 +150,34 @@ fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, returns: &ReturnI
             // a local factory function call — its recorded (unambiguous) return type
             returns.get(leaf).cloned()
         }
+        // `let s = S {..};` — a struct literal names its type directly.
+        syn::Expr::Struct(s) => type_from_value_path(&path_to_string(&s.path), uses),
+        // `let s = S;` — a UNIT-struct literal (or `let c = Color::Red;`, a unit enum variant, whose
+        // value is typed as the ENUM). Gated by CamelCase so `let a = b;` (a variable copy) and
+        // `let m = MAX_SIZE;` (a SCREAMING_SNAKE const) never mis-infer a type.
+        syn::Expr::Path(p) => type_from_value_path(&path_to_string(&p.path), uses),
         _ => None,
     }
+}
+
+/// The type a VALUE path denotes, for `let` inference: `S` → `S`; `m::S` → `m::S`; `Color::Red`
+/// (UpperCamel::UpperCamel = a unit enum variant) → `Color`. Only CamelCase leaves count as types —
+/// a snake_case variable or SCREAMING_SNAKE const yields None (no inference; honest under-report).
+fn type_from_value_path(full: &str, uses: &HashMap<String, String>) -> Option<String> {
+    let camel = |s: &str| {
+        let mut ch = s.chars();
+        ch.next().is_some_and(|c| c.is_uppercase()) && (s.len() == 1 || s.chars().any(|c| c.is_lowercase()))
+    };
+    let segs: Vec<&str> = full.split("::").collect();
+    let last = segs.last()?;
+    if !camel(last) {
+        return None;
+    }
+    // `Enum::Variant` — two trailing CamelCase segments: the VALUE's type is the enum (the penultimate).
+    if segs.len() >= 2 && camel(segs[segs.len() - 2]) {
+        return Some(expand(&segs[..segs.len() - 1].join("::"), uses));
+    }
+    Some(expand(full, uses))
 }
 
 /// Peel `Result<T, _>` / `Option<T>` / `io::Result<T>` to the inner `T` — a fallible constructor's
@@ -1364,6 +1390,24 @@ mod tests {
         assert_eq!(ctor_type(&modcall, &u, &r), None);
         let typecall: syn::Expr = syn::parse_str("reqwest::Client::new()").unwrap();
         assert_eq!(ctor_type(&typecall, &u, &r).as_deref(), Some("reqwest::Client"));
+    }
+
+    #[test]
+    fn struct_literal_bindings_infer_their_type() {
+        // `let s = S;` / `let s = S{..};` must type `s` so `s.go()` resolves (was the last named
+        // receiver-inference gap: both read pure while `let s: S = S;` worked).
+        let u = HashMap::new();
+        let r = ReturnIndex::new();
+        let t = |src: &str| ctor_type(&syn::parse_str::<syn::Expr>(src).unwrap(), &u, &r);
+        assert_eq!(t("S").as_deref(), Some("S")); // unit-struct literal
+        assert_eq!(t("S { a: 1 }").as_deref(), Some("S")); // struct literal
+        assert_eq!(t("m::S { a: 1 }").as_deref(), Some("m::S")); // module-qualified
+        assert_eq!(t("Color::Red").as_deref(), Some("Color")); // unit ENUM variant → the enum
+        assert_eq!(t("Color::Red { x: 1 }").as_deref(), Some("Color")); // struct enum variant → the enum
+        // negative gates: a variable copy and a SCREAMING_SNAKE const must NOT infer a type.
+        assert_eq!(t("other_var"), None);
+        assert_eq!(t("MAX_SIZE"), None);
+        assert_eq!(t("config::MAX_SIZE"), None);
     }
 
     #[test]
