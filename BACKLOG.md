@@ -418,7 +418,7 @@ sound over-approximation (`Unknown`), which candor already does.
          purpose-limitation as a deny rule; an unparseable stage = `Unknown`, never silently clean).
       4. Access control is the existence proof at org scale (IAM reachability analysis — same math).
       Contracts/SOPs fail test (a) today. Decision: nothing beyond the agent-fleet exploration
-      until the code-candor launch lands.
+      until the launch of candor-for-code (this product — the Rust/JVM/TS engines) lands.
 
 - [~] Controlled eval of *edit quality* (not just analysis cost) with independent ground truth and
       multiple trials — **the gate on P0** (see P0 §5). The pilot (`EVAL.md`) showed consumability +
