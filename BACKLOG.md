@@ -228,12 +228,17 @@ unbuilt third-party crates from `~/.cargo/registry/src` — add a `--deps` mode 
 lockfile's tree and emits sibling reports; (2) candor-ts: scan node_modules dist JS via --allow-js
 (half the ecosystem ships JS — its `require("fs")` calls are exactly the builtin frontier);
 (3) JVM: analyze the dep jars on the classpath, not just project classes (it's the same ASM pass).
-Risks to measure first: dist-JS minification, registry-source macro surface, scan-time on big
-trees, and version pinning (the §2.1 downgrade rule already covers staleness). Also: the JVM needs
-the LEDGER first (external-package calls with zero classification, named in its receipt — the
-Rust/TS move replayed), and candor-ts should get the scan-side interface-CHA the Rust engine grew
-(resolve interface-typed calls to local implementing classes; today they read honest Unknown via
-`dispatch:<Type>`).
+**SLICE 1 SHIPPED (2026-06-11 late):** candor-scan now emits `hash` (`crate#qual`) and CONSUMES
+`CANDOR_DEPS` (files/dirs of sibling reports; unambiguous tail2-then-leaf join; stale-version →
+Unknown per §2.1; inherited effects + all four literal surfaces; a chained dep counts as covered in
+the κ ledger). End-to-end verified: the ledger names the blind spot → one dep scan closes it →
+`settle` inherits Db+tables, `check_rates` Net+host across the crate boundary, on stable. The JVM
+ledger and TS interface-CHA also landed same-day. REMAINING: a `--deps` convenience mode (walk the
+lockfile, scan the registry sources, emit a report dir automatically — today it's manual per-dep);
+TS CJS-dist units (`module.exports = function` isn't a unit, so dist-JS dep scans are Unknown-thin —
+measured on jsonwebtoken: 0.7s, valid hashes, but only 4 shallow fns; the require()-resolution and
+export-form work is the blocker for the npm half); JVM classpath-jar scanning. Risks still open:
+dist-JS minification, registry-source macro surface, scan-time on big trees.
 
 ### From the critical-assessment pushback — "fundamental" was too strong (these are buildable)
 

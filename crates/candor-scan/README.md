@@ -54,6 +54,13 @@ under-report, never a wrong label.
   calls that the classifier knows nothing about (`κ doesn't know N dependencies… effects through
   them are INVISIBLE (not Unknown)`). The curated-classifier caveat as per-scan evidence instead of
   a doc footnote: never conclude "no effect" through a crate that line names.
+- **Close a named blind spot by CHAINING (`CANDOR_DEPS`):** scan the dependency itself (the scanner
+  reads unbuilt source — `~/.cargo/registry/src/...` works directly), then point `CANDOR_DEPS` at
+  its report (a `:`-separated list of files and/or directories): an unclassified call into a crate
+  a report covers inherits that function's recorded effects AND literal surfaces (hosts/cmds/paths/
+  tables) across the crate boundary, joined unambiguous-tail-first like every other resolution
+  (spec §2; reports from a different scanner version are downgraded to `Unknown`, §2.1). The ledger
+  names what's invisible; one dep scan closes it — κ only ever has to know the std/builtin frontier.
 
 **The policy gate floor.** `candor-scan <dir> --policy <file>` (or `CANDOR_POLICY=…`) enforces a
 spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid` — parsed by the same shared grammar as the nightly and

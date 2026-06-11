@@ -126,6 +126,124 @@ fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
 }
 
+/// A loaded sibling-report function: the effects + literal surfaces a consumer's call inherits.
+#[derive(Clone, Default)]
+struct DepFn {
+    effects: Vec<&'static str>,
+    hosts: Vec<String>,
+    cmds: Vec<String>,
+    paths: Vec<String>,
+    tables: Vec<String>,
+}
+
+/// The CANDOR_DEPS index: `crate#tail2` and `crate#leaf` keys (UNAMBIGUOUS only — a key two dep
+/// functions share is dropped, the same under-report-don't-guess rule as `resolve_target`), plus
+/// the covered crate set. A report whose producing version differs from this binary's is
+/// DOWNGRADED to `Unknown` rather than silently trusted (spec §2.1).
+#[derive(Default)]
+struct DepIndex {
+    by_key: HashMap<String, DepFn>,
+    crates: std::collections::HashSet<String>,
+    files: usize,
+}
+
+fn load_dep_reports(spec: Option<&str>) -> DepIndex {
+    let mut idx = DepIndex::default();
+    let Some(spec) = spec else { return idx };
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for tok in spec.split(':').filter(|t| !t.is_empty()) {
+        let p = Path::new(tok);
+        if p.is_dir() {
+            for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
+                let f = e.path();
+                let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.ends_with(".json") && !name.contains("callgraph") {
+                    files.push(f);
+                }
+            }
+        } else if p.is_file() {
+            files.push(p.to_path_buf());
+        } else {
+            eprintln!("candor-scan: CANDOR_DEPS entry not found, skipped: {tok}");
+        }
+    }
+    let my_version = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+    let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in &files {
+        let Ok(text) = std::fs::read_to_string(f) else {
+            eprintln!("candor-scan: CANDOR_DEPS report unreadable, skipped: {}", f.display());
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            eprintln!("candor-scan: CANDOR_DEPS report unparsable, skipped: {}", f.display());
+            continue;
+        };
+        // v0.2+ envelope or the v0.1 bare array; the producing version comes from the envelope.
+        let version = v.pointer("/candor/version").and_then(|x| x.as_str()).unwrap_or("");
+        let stale = version != my_version;
+        let Some(fns) = v.get("functions").and_then(|x| x.as_array()).or_else(|| v.as_array()) else { continue };
+        // The crate a report covers: the entries' `hash` prefix (`crate#qual`), else the filename
+        // (`report.<crate>.scan.json`).
+        let file_crate = f
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".scan.json"))
+            .and_then(|n| n.rsplit('.').next())
+            .map(str::to_string);
+        idx.files += 1;
+        for e in fns {
+            let Some(qual) = e.get("fn").and_then(|x| x.as_str()) else { continue };
+            let krate = e
+                .get("hash")
+                .and_then(|x| x.as_str())
+                .and_then(|h| h.split_once('#'))
+                .map(|(c, _)| c.to_string())
+                .or_else(|| file_crate.clone());
+            let Some(krate) = krate else { continue };
+            idx.crates.insert(krate.clone());
+            let mut de = DepFn::default();
+            if stale {
+                de.effects.push("Unknown"); // §2.1: a different producer version is not trusted
+            } else {
+                for s in e.get("inferred").and_then(|x| x.as_array()).into_iter().flatten() {
+                    if let Some(s) = s.as_str() {
+                        // unknown vocabulary (a future spec's effect) is honestly Unknown
+                        de.effects.push(candor_classify::cap_from_name(s).unwrap_or("Unknown"));
+                    }
+                }
+                let strs = |k: &str| -> Vec<String> {
+                    e.get(k)
+                        .and_then(|x| x.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|s| s.as_str().map(str::to_string))
+                        .collect()
+                };
+                de.hosts = strs("hosts");
+                de.cmds = strs("cmds");
+                de.paths = strs("paths");
+                de.tables = strs("tables");
+            }
+            let mut keys = vec![format!("{krate}#{}", qual.rsplit("::").next().unwrap_or(qual))];
+            if let Some(t2) = tail2(qual) {
+                keys.push(format!("{krate}#{t2}"));
+            }
+            for k in keys {
+                if ambiguous.contains(&k) {
+                    continue;
+                }
+                if idx.by_key.contains_key(&k) {
+                    idx.by_key.remove(&k); // two dep fns share the key — drop it, never guess
+                    ambiguous.insert(k);
+                } else {
+                    idx.by_key.insert(k, de.clone());
+                }
+            }
+        }
+    }
+    idx
+}
+
 /// Dependency names declared in `<dir>/Cargo.toml`, normalized to crate-root form (`-` -> `_`).
 /// Line-based on purpose (no toml dependency): `[dependencies]` and `[target.….dependencies]`
 /// sections, plus `[dependencies.name]` headers. dev-/build-dependencies are the harness's and the
@@ -1035,6 +1153,11 @@ fn main() {
                 println!("                    over this scan; exit 1 on violation. ADVISORY FLOOR: the syntactic");
                 println!("                    backend under-reports, so a miss can pass — the nightly engine is");
                 println!("                    the sound gate. (CANDOR_POLICY env is honoured when flag absent.)");
+                println!();
+                println!("  CANDOR_DEPS=<p:…> chain sibling reports (files or directories of *.json): an");
+                println!("                    unclassified call into a crate a report covers inherits that");
+                println!("                    function's effects + literal surfaces (spec §2). Scan the dep");
+                println!("                    once, chain it everywhere; the κ ledger names what to scan next.");
                 println!("  -V, --version     print version");
                 println!();
                 println!("Syntactic, so it under-reports vs the full candor nightly lint (no Unknown). It never");
@@ -1046,6 +1169,11 @@ fn main() {
     }
     let root = Path::new(&dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
+    // Cross-crate report chaining (spec §2): CANDOR_DEPS names sibling reports (a `:`-separated
+    // list of files and/or directories of *.json); an unclassified qualified call into a crate one
+    // of them covers inherits that function's recorded effects + literal surfaces. The stable
+    // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
+    let deps_idx = load_dep_reports(std::env::var("CANDOR_DEPS").ok().as_deref());
 
     // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below).
     let mut parsed: Vec<(String, syn::File)> = Vec::new();
@@ -1191,6 +1319,25 @@ fn main() {
                     dep_classified.insert(cr.to_string());
                 }
             }
+            // Cross-crate chaining (spec §2): an UNCLASSIFIED qualified call into a crate a
+            // CANDOR_DEPS sibling report covers inherits that function's recorded effects and
+            // literal surfaces — joined unambiguous-tail2-first, then unambiguous leaf, like
+            // `resolve_target`. A chained dep is covered, not a κ blind spot.
+            if classified.is_none() && c.path.contains("::") && deps_idx.crates.contains(cr) {
+                let hit = tail2(&c.path)
+                    .and_then(|t2| deps_idx.by_key.get(&format!("{cr}#{t2}")))
+                    .or_else(|| deps_idx.by_key.get(&format!("{cr}#{}", c.leaf)));
+                if let Some(de) = hit {
+                    for e in &de.effects {
+                        direct.entry(f.qual.clone()).or_default().insert(e);
+                    }
+                    hosts.entry(f.qual.clone()).or_default().extend(de.hosts.iter().cloned());
+                    cmds.entry(f.qual.clone()).or_default().extend(de.cmds.iter().cloned());
+                    paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
+                    tables.entry(f.qual.clone()).or_default().extend(de.tables.iter().cloned());
+                    dep_classified.insert(cr.to_string());
+                }
+            }
             if let Some(eff) = classified {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
                 if let Some(s) = &c.str_arg {
@@ -1262,7 +1409,9 @@ fn main() {
             // see through. Mirrors the lint's `unresolved = has Unknown`, so the receipt's unresolved
             // count is truthful for the stable backend too — not a hardcoded 0.
             unresolved: inf.contains("Unknown"),
-            hash: String::new(),
+            // The cross-crate join key (spec §2): `crate#qual`, derivable by any consumer from its
+            // own syntactic view of the call — what CANDOR_DEPS chaining matches against.
+            hash: format!("{crate_name}#{q}"),
             fs: Vec::new(),
             hosts: hostsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             cmds: cmdsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
@@ -1759,6 +1908,37 @@ mod tests {
         // and both classify as Net through the shared classifier
         assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::send"), Some("Net"));
         assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::execute"), Some("Net"));
+    }
+
+    #[test]
+    fn dep_report_chaining_joins_unambiguously_and_distrusts_stale_versions() {
+        let d = std::env::temp_dir().join(format!("candor-deps-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // same-version report: effects + surfaces join; two fns sharing a leaf drop that key
+        std::fs::write(d.join("report.billing.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.3"}},
+            "functions": [
+              {{"fn": "ledger::Ledger::post", "inferred": ["Db"], "tables": ["ledger.entries"], "hash": "billing#ledger::Ledger::post"}},
+              {{"fn": "a::dup", "inferred": ["Net"], "hash": "billing#a::dup"}},
+              {{"fn": "b::dup", "inferred": ["Fs"], "hash": "billing#b::dup"}}
+            ]}}"#)).unwrap();
+        // a STALE producer version: §2.1 — downgraded to Unknown, never silently trusted
+        std::fs::write(d.join("report.old_dep.scan.json"), r#"{
+            "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
+            "functions": [{"fn": "io::go", "inferred": ["Exec"], "hash": "old_dep#io::go"}]}"#).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        assert_eq!(idx.files, 2);
+        assert!(idx.crates.contains("billing") && idx.crates.contains("old_dep"));
+        let post = idx.by_key.get("billing#Ledger::post").expect("tail2 key");
+        assert_eq!(post.effects, vec!["Db"]);
+        assert_eq!(post.tables, vec!["ledger.entries"]);
+        assert!(idx.by_key.contains_key("billing#post"), "unambiguous leaf key");
+        assert!(!idx.by_key.contains_key("billing#dup"), "shared leaf must be dropped, never guessed");
+        assert!(idx.by_key.contains_key("billing#a::dup"), "tail2 still disambiguates the dups");
+        let old = idx.by_key.get("old_dep#go").expect("stale entry present");
+        assert_eq!(old.effects, vec!["Unknown"], "stale version must downgrade to Unknown");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
