@@ -161,7 +161,11 @@ what the compiler *resolves*. It catches path-qualified effect calls (`std::fs::
 `reqwest::Client::execute`), `use`-aliases, intra-crate transitive propagation, and **local-trait
 dispatch** (a `&dyn Store`/`impl Store`/`S: Store` receiver resolves to the trait's local implementors —
 syntactic CHA, bounded like the JVM engine's — or reads honest `Unknown` when the trait has no visible
-impl or too many). It **misses** —
+impl or too many). For dependencies, the receipt **names what the classifier can't see** (the
+κ-coverage ledger: `κ doesn't know N dependencies this code calls into…`) and `--deps` **closes it**:
+scan the whole `Cargo.lock` tree once (unbuilt registry sources, ~0.23s/dep measured) and the root
+scan chains over the reports — effects cross every crate boundary without the classifier knowing the
+crates (spec §2 report chaining). It **misses** —
 *silently*, without emitting `Unknown` — effects reached only through a method call on a non-path-qualified
 receiver, dispatch through an EXTERNAL trait, closures/fn-pointers, macros, and cross-crate propagation by
 stable identity. So on resolution-heavy code it **under-reports** relative to the lint. Use `scan` for
