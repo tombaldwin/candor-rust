@@ -33,7 +33,7 @@ Write the complete list to /tmp/candor-manual.txt — one function per line, nam
 the way a callgraph would key it (`module::Type::method`). Also note
 roughly how many file-reads/searches it took you.
 
-STEP 3 — Run candor. `cargo install candor-scan` if not present (version 0.3.2 or later — earlier
+STEP 3 — Run candor. `cargo install candor-scan` if not present (version 0.3.5 or later — earlier
 published versions have known resolution bugs fixed since), then run `candor-scan .` — it writes
 .candor/report.<crate>.scan.json (per-function transitive effects) and
 .candor/report.<crate>.scan.callgraph.json (every function's direct callees, pure ones included).

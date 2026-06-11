@@ -84,7 +84,7 @@ If they differ, upgrade by the path you installed with:
   differently** (the thing to actually check after a tool bump — a verdict change is the upgrade's
   doing, not your code's). Without `install.sh`, just re-run the `git pull` + `cargo build` from §1.
 
-Pin for reproducibility: PROVE-IT.md requires **0.3.2 or later** (earlier published builds have
+Pin for reproducibility: PROVE-IT.md requires **0.3.5 or later** (earlier published builds have
 since-fixed resolution bugs). The report's `version` field records the exact engine build, so a report
 you commit is traceable to the engine that produced it.
 
