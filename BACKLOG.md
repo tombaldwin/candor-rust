@@ -233,12 +233,16 @@ lockfile's tree and emits sibling reports; (2) candor-ts: scan node_modules dist
 Unknown per §2.1; inherited effects + all four literal surfaces; a chained dep counts as covered in
 the κ ledger). End-to-end verified: the ledger names the blind spot → one dep scan closes it →
 `settle` inherits Db+tables, `check_rates` Net+host across the crate boundary, on stable. The JVM
-ledger and TS interface-CHA also landed same-day. REMAINING: a `--deps` convenience mode (walk the
-lockfile, scan the registry sources, emit a report dir automatically — today it's manual per-dep);
-TS CJS-dist units (`module.exports = function` isn't a unit, so dist-JS dep scans are Unknown-thin —
-measured on jsonwebtoken: 0.7s, valid hashes, but only 4 shallow fns; the require()-resolution and
-export-form work is the blocker for the npm half); JVM classpath-jar scanning. Risks still open:
-dist-JS minification, registry-source macro surface, scan-time on big trees.
+ledger and TS interface-CHA also landed same-day. SLICES 2+3 SHIPPED (same night): `--deps` walks Cargo.lock, scans every
+registry dependency's unbuilt source in-process (the self-gate's own `deny Exec` forbade the
+spawn-yourself shortcut) into `.candor/deps/`, then chains the root scan — MEASURED on pgman:
+328/328 deps in 75s one-time (~0.23s/dep, cached thereafter), the κ ledger dropping 12 unlisted →
+1 (the path dep, the documented skip), 7 fns gaining effects through the chain. An all-pure dep's
+EMPTY report registers as covered (its emptiness is the purity claim — serde_json was briefly
+misnamed a blind spot). TS CJS units shipped too (`module.exports`/`exports.foo`/object-literal
+exports are units named the way consumers resolve; jsonwebtoken 4→8 fns, sign reads Clock; the
+@types/<pkg> join mismatch fixed). REMAINING: JVM classpath-jar scanning + chaining verification;
+path/git deps need manual scans (no registry checkout); dist-JS minified bundles unprobed.
 
 ### From the critical-assessment pushback — "fundamental" was too strong (these are buildable)
 

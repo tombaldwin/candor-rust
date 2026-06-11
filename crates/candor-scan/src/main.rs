@@ -190,6 +190,11 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             .and_then(|n| n.strip_suffix(".scan.json"))
             .and_then(|n| n.rsplit('.').next())
             .map(str::to_string);
+        // Register the crate at FILE level: an all-pure crate's report has zero entries, and that
+        // emptiness is its honest claim — the crate is covered, not invisible.
+        if let Some(c) = &file_crate {
+            idx.crates.insert(c.clone());
+        }
         idx.files += 1;
         for e in fns {
             let Some(qual) = e.get("fn").and_then(|x| x.as_str()) else { continue };
@@ -1127,6 +1132,7 @@ fn main() {
     let mut want_json = false;
     let mut include_tests = false;
     let mut policy_path: Option<String> = None;
+    let mut deps_mode = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1134,6 +1140,7 @@ fn main() {
             "--json" => want_json = true,
             "--include-tests" => include_tests = true,
             "--policy" => policy_path = it.next().cloned(),
+            "--deps" => deps_mode = true,
             "-V" | "--version" => {
                 println!("candor-scan {}", env!("CARGO_PKG_VERSION"));
                 return;
@@ -1149,6 +1156,10 @@ fn main() {
                 println!("  --json            print the report to stdout instead of writing files");
                 println!("  --include-tests   also scan tests/ benches/ examples/ and #[cfg(test)] modules");
                 println!("                    (off by default → the report describes the crate, not its harness)");
+                println!("  --deps            scan the Cargo.lock dependency tree first (registry sources from");
+                println!("                    ~/.cargo/registry/src) into <dir>/.candor/deps/, then scan <dir>");
+                println!("                    CHAINED over those reports — effects cross every crate boundary");
+                println!("                    without κ needing to know the crates.");
                 println!("  --policy <file>   enforce a CANDOR_POLICY file (deny/pure/allow/forbid, spec §6.2)");
                 println!("                    over this scan; exit 1 on violation. ADVISORY FLOOR: the syntactic");
                 println!("                    backend under-reports, so a miss can pass — the nightly engine is");
@@ -1167,13 +1178,30 @@ fn main() {
             _ => dir = a.clone(),
         }
     }
-    let root = Path::new(&dir);
-    let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
+    if deps_mode {
+        std::process::exit(run_with_deps(&dir, want_json, include_tests, policy_path));
+    }
     // Cross-crate report chaining (spec §2): CANDOR_DEPS names sibling reports (a `:`-separated
     // list of files and/or directories of *.json); an unclassified qualified call into a crate one
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
     let deps_idx = load_dep_reports(std::env::var("CANDOR_DEPS").ok().as_deref());
+    std::process::exit(scan_one(&dir, prefix, want_json, include_tests, policy_path, &deps_idx));
+}
+
+/// One crate scan, end to end (parse -> passes -> report -> receipt -> policy gate). Returns the
+/// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
+/// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
+fn scan_one(
+    dir: &str,
+    prefix: String,
+    want_json: bool,
+    include_tests: bool,
+    policy_path: Option<String>,
+    deps_idx: &DepIndex,
+) -> i32 {
+    let root = Path::new(dir);
+    let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
 
     // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below).
     let mut parsed: Vec<(String, syn::File)> = Vec::new();
@@ -1264,7 +1292,7 @@ fn main() {
     // dep the calls actually reach whose classification never fires — and that isn't in a calibrated
     // tier — is a named blind spot (invisible, not Unknown: the curated-κ caveat). Counted here,
     // disclosed in the receipt, so the caveat is per-scan evidence instead of a doc footnote.
-    let deps = cargo_deps(&dir);
+    let deps = cargo_deps(dir);
     let mut dep_seen: HashMap<String, usize> = HashMap::new(); // dep crate root -> call-site count
     let mut dep_classified: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1468,6 +1496,10 @@ fn main() {
         .iter()
         .filter(|(cr, _)| {
             !dep_classified.contains(*cr)
+                // A crate with a loaded sibling report is COVERED even when no join fired: the
+                // report omits pure functions, so join-less calls are its honest purity claim —
+                // the opposite of invisible. (Without this, --deps named serde_json a blind spot.)
+                && !deps_idx.crates.contains(cr.as_str())
                 && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
@@ -1497,7 +1529,7 @@ fn main() {
         let Ok(text) = std::fs::read_to_string(&pp) else {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
             eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
-            std::process::exit(2);
+            return 2;
         };
         let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc);
         for line in &v {
@@ -1507,9 +1539,97 @@ fn main() {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
         } else {
             eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
-            std::process::exit(1);
+            return 1;
         }
     }
+    0
+}
+
+/// `--deps`: read Cargo.lock, scan every REGISTRY dependency's unbuilt source from
+/// `~/.cargo/registry/src/<index>/` into `<dir>/.candor/deps/`, then scan the root crate chained
+/// over those reports (plus anything CANDOR_DEPS already names). Path/git/workspace deps have no
+/// registry checkout and are skipped with a note — chain them by scanning them yourself.
+fn run_with_deps(dir: &str, want_json: bool, include_tests: bool, policy_path: Option<String>) -> i32 {
+    let lock = match std::fs::read_to_string(format!("{dir}/Cargo.lock")) {
+        Ok(t) => t,
+        Err(_) => {
+            eprintln!("candor-scan: --deps needs {dir}/Cargo.lock (run `cargo generate-lockfile` first)");
+            return 2;
+        }
+    };
+    // [[package]] blocks: name + version + source. Only registry deps have a checkout to scan;
+    // the root crate itself has no `source` line and is naturally skipped.
+    let mut pkgs: Vec<(String, String)> = Vec::new();
+    let (mut name, mut version, mut registry) = (String::new(), String::new(), false);
+    let flush = |name: &mut String, version: &mut String, registry: &mut bool, pkgs: &mut Vec<(String, String)>| {
+        if *registry && !name.is_empty() && !version.is_empty() {
+            pkgs.push((name.clone(), version.clone()));
+        }
+        name.clear();
+        version.clear();
+        *registry = false;
+    };
+    for line in lock.lines() {
+        let l = line.trim();
+        if l == "[[package]]" {
+            flush(&mut name, &mut version, &mut registry, &mut pkgs);
+        } else if let Some(v) = l.strip_prefix("name = ") {
+            name = v.trim_matches('"').to_string();
+        } else if let Some(v) = l.strip_prefix("version = ") {
+            version = v.trim_matches('"').to_string();
+        } else if l.starts_with("source = ") && l.contains("registry+") {
+            registry = true;
+        }
+    }
+    flush(&mut name, &mut version, &mut registry, &mut pkgs);
+
+    let registry_roots: Vec<std::path::PathBuf> = dirs_cargo_registry_src();
+    let deps_dir = format!("{dir}/.candor/deps");
+    let _ = std::fs::create_dir_all(&deps_dir);
+    let (mut scanned, mut missing) = (0usize, Vec::new());
+    let no_deps = DepIndex::default();
+    for (n, v) in &pkgs {
+        let Some(src) = registry_roots.iter().map(|r| r.join(format!("{n}-{v}"))).find(|p| p.is_dir()) else {
+            missing.push(format!("{n}-{v}"));
+            continue;
+        };
+        // Dep scans are quiet, unchained, report-only (no policy): their job is the report files.
+        scan_one(&src.to_string_lossy(), format!("{deps_dir}/report"), false, false, None, &no_deps);
+        scanned += 1;
+    }
+    eprintln!(
+        "candor-scan: --deps scanned {scanned} of {} registry dependencies into {deps_dir}{}",
+        pkgs.len(),
+        if missing.is_empty() {
+            String::new()
+        } else {
+            format!(" ({} without a local checkout: {}{})", missing.len(),
+                missing.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
+                if missing.len() > 5 { ", …" } else { "" })
+        }
+    );
+    // Chain the fresh dep reports (plus anything CANDOR_DEPS already names) under the root scan.
+    let spec = match std::env::var("CANDOR_DEPS") {
+        Ok(extra) if !extra.is_empty() => format!("{deps_dir}:{extra}"),
+        _ => deps_dir.clone(),
+    };
+    let idx = load_dep_reports(Some(&spec));
+    scan_one(dir, String::new(), want_json, include_tests, policy_path, &idx)
+}
+
+/// The cargo registry source roots (`~/.cargo/registry/src/<index-hash>/`), where unbuilt
+/// dependency sources live. CARGO_HOME is honoured.
+fn dirs_cargo_registry_src() -> Vec<std::path::PathBuf> {
+    let home = std::env::var("CARGO_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".cargo"));
+    std::fs::read_dir(home.join("registry").join("src"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 /// Evaluate a CANDOR_POLICY (parsed by the SHARED §6.2 parser in candor-classify, so this gate can
