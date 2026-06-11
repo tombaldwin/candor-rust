@@ -5,6 +5,7 @@ edition = "2021"
 description = "candor's curated effect classifier (crate+path -> effect) — pure, stable Rust."
 license = "MIT OR Apache-2.0"
 authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
+homepage = "https://candor.poly.io"
 repository = "https://github.com/tombaldwin/candor-rust"
 readme = "README.md"
 keywords = ["candor", "effects", "classifier", "capabilities", "audit"]

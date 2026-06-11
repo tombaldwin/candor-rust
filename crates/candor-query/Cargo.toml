@@ -4,6 +4,8 @@ version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "candor's read-only report queries (show/where/callers/map/diff) in Rust — used by cargo-candor."
+homepage = "https://candor.poly.io"
+repository = "https://github.com/tombaldwin/candor-rust"
 
 [[bin]]
 name = "candor-query"

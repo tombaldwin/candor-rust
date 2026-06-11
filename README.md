@@ -8,6 +8,9 @@ filesystem, a database, a subprocess, the clock, or the environment — *transit
 and turns invariants like *"this layer stays pure," "this service may only talk to Stripe," "the
 domain layer must not depend on infra"* into rules that **fail the PR** when an edit breaks them.
 
+**Site:** [candor.poly.io](https://candor.poly.io) — the measured case in five minutes: the
+exhibits, the pre-registered evals, and the prove-it-on-your-own-repo path.
+
 **Why this matters for AI-assisted development.** An agent's characteristic failure isn't a typo —
 it's a locally-reasonable edit that crosses a boundary it never sees. It adds a feature in
 `pricing.rs`, and the simplest way to get the data calls something that, three hops and one crate
