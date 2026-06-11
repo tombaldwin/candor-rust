@@ -4,6 +4,22 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [0.3.5] — 2026-06-11 (candor-scan only)
+
+### Fixed — resolution (under-reports recovered)
+
+- **`-> Self` constructors now type their locals.** `let agent = Agent::new_with_defaults();`
+  followed by `agent.run(..)` formed `Self::run` (no local def) and silently dropped the edge —
+  found by the PROVE-IT dogfood on `ureq`, where 3 public API entry points were missing from a
+  16-function blast radius. `Self` in an impl method's return position now resolves to the impl
+  type (also un-defeats the ambiguity check: two same-named `-> Self` ctors on different types no
+  longer collide as "Self" == "Self").
+- **Tuple-struct fields index by position**, so a newtype-wrapped receiver (`self.0.run()`,
+  chained `self.0.0`) resolves like a named field.
+- README "Misses" updated to the measured blind-spot list (Deref-coercion receivers and
+  generic-parameter fields are the ureq residual: 14/16 found, never fabricated); PROVE-IT.md
+  prompt aligned (callgraph naming convention, `#[cfg(test)]` scope).
+
 ## [Unreleased] (nightly lint)
 
 ### Fixed — soundness

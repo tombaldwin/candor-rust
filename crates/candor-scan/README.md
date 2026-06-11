@@ -34,11 +34,15 @@ under-report, never a wrong label.
   the receipt's unresolved count is truthful, not a hardcoded 0). A LOCAL closure whose body IS visible
   (`let f = |..| ..; f()`) is NOT flagged — its effects were already walked lexically.
 - **Misses (silently):** effects reached only through trait-object (`dyn`) dispatch on an uninferrable
-  receiver, overloaded operators / `?` / `.await` desugars, RAII drops (an effectful `Drop::drop` has no
-  call expression — it runs at scope end), a custom `Iterator::next` reached only via a `for`-loop
-  desugar, and cross-crate propagation by stable identity. These need the semantic resolution only the
-  nightly lint has (the soundness fuzzer locks all of them against the lint: forms `op_add`/`index`/
-  `deref`/`try_from`/`await_poll`/`drop`/`iterator`/`eq`/`add_assign`).
+  receiver, **`Deref`-coercion receivers** (`self.agent.run()` where the field is a wrapper that derefs
+  to the type owning `run`), **generic-parameter fields** (`struct B<S>(S)` — `self.0.method()` can't be
+  typed without instantiating `S`), overloaded operators / `?` / `.await` desugars, RAII drops (an
+  effectful `Drop::drop` has no call expression — it runs at scope end), a custom `Iterator::next`
+  reached only via a `for`-loop desugar, and cross-crate propagation by stable identity. These need the
+  semantic resolution only the nightly lint has (the soundness fuzzer locks the desugar forms against
+  the lint: `op_add`/`index`/`deref`/`try_from`/`await_poll`/`drop`/`iterator`/`eq`/`add_assign`).
+  The Deref and generic-field shapes are measured in the wild (the PROVE-IT dogfood on `ureq`): 14 of a
+  16-function blast radius found, those two shapes the remainder — under-reported, never fabricated.
 
 **The policy gate floor.** `candor-scan <dir> --policy <file>` (or `CANDOR_POLICY=…`) enforces a
 spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid` — parsed by the same shared grammar as the nightly and

@@ -21,14 +21,16 @@ you'd otherwise miss or take longer to find. Follow these steps IN ORDER — the
 experiment's integrity (your manual answer must be committed before the tool's answer exists).
 
 STEP 1 — Pick the target. Choose ONE function in this crate's PRODUCTION code (under src/ — not
-tests/, examples/, or benches/, which the scan deliberately excludes as harness code) that performs
+tests/, examples/, benches/, or a `#[cfg(test)]` module, all of which the scan deliberately
+excludes as harness code) that performs
 I/O (network, filesystem, database, subprocess) and is called from more than one place — ideally one
 I care about changing. If I named a function in my message, use that. State your choice.
 
 STEP 2 — MANUAL TRACE (commit before looking at any tool output). From source alone, answer:
 "Which functions in this crate would be affected if <target> changed its behavior — i.e. every
 TRANSITIVE caller, across all files and call-graph layers?" Work as you normally would (grep, read).
-Write the complete list to /tmp/candor-manual.txt — one fully-qualified function per line. Also note
+Write the complete list to /tmp/candor-manual.txt — one function per line, named module-relative
+the way a callgraph would key it (`module::Type::method`). Also note
 roughly how many file-reads/searches it took you.
 
 STEP 3 — Run candor. `cargo install candor-scan` if not present (version 0.3.2 or later — earlier
@@ -47,6 +49,8 @@ STEP 5 — Diff and VERIFY. Compare the two lists.
 - For each function YOU listed that candor did not: check whether it's a real caller candor missed
   (candor-scan is deliberately conservative — it under-reports rather than fabricates; a miss here
   is worth reporting at https://github.com/tombaldwin/candor-rust/issues) or a mistake in the trace.
+  Write both lists in the callgraph's own naming (crate-relative, typestate-erased — check a few of
+  its keys first) so the diff compares like with like.
 
 STEP 6 — Scorecard. Report, honestly:
 - target function, and the size of its true radius
@@ -56,8 +60,9 @@ STEP 6 — Scorecard. Report, honestly:
 - AND if the result is unflattering to candor, say so plainly: if your manual trace found everything
   (shallow radius, distinctive names — common in small crates), the honest conclusion is "on this
   codebase candor's value is speed/CI-gating, not completeness." If candor missed real callers
-  (trait-object dispatch and macro-generated calls are its documented blind spots — see
-  crates/candor-scan/README "Misses"), report that as candor's limitation.
+  (the documented blind spots — trait-object and Deref-coercion dispatch, generic-parameter fields,
+  macro-generated calls — are listed in crates/candor-scan/README "Misses"), report that as
+  candor's limitation.
 
 Do not soften either direction. The point is what's true on THIS repo.
 ```

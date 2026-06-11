@@ -265,9 +265,15 @@ impl<'a> CallCollector<'a> {
             }
             syn::Expr::Field(f) => {
                 let base = self.resolve_recv_type(&f.base)?;
-                let syn::Member::Named(field) = &f.member else { return None };
+                // Named field (`self.http`) or TUPLE field (`self.0`, incl. chained `self.0.0` via the
+                // recursion — newtype wrappers; found by the PROVE-IT dogfood on ureq's
+                // `ConfigBuilder(Scoped(..))`). Both index by the member's string form.
+                let key = match &f.member {
+                    syn::Member::Named(field) => field.to_string(),
+                    syn::Member::Unnamed(idx) => idx.index.to_string(),
+                };
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
-                self.fields.get(base_leaf)?.get(&field.to_string()).cloned()
+                self.fields.get(base_leaf)?.get(&key).cloned()
             }
             syn::Expr::Call(_) => ctor_type(expr, self.uses, self.returns),
             _ => None,
@@ -565,9 +571,26 @@ fn fninfo(
 /// Record `fn-leaf -> return type` into `rets`, tracking ambiguity: a leaf seen with two different
 /// return types is set to `None` (dropped later), so only UNAMBIGUOUS names survive. Result/Option are
 /// unwrapped to the success type.
-fn record_return(sig: &syn::Signature, uses: &HashMap<String, String>, rets: &mut HashMap<String, Option<String>>) {
+fn record_return(
+    sig: &syn::Signature,
+    uses: &HashMap<String, String>,
+    rets: &mut HashMap<String, Option<String>>,
+    self_ty: Option<&str>,
+) {
     let syn::ReturnType::Type(_, ty) = &sig.output else { return };
-    let Some(tp) = type_path(unwrap_result_option(ty), uses) else { return };
+    let Some(mut tp) = type_path(unwrap_result_option(ty), uses) else { return };
+    // An impl method returning `Self` (`fn new_with_defaults() -> Self`) must index its IMPL type,
+    // not the literal "Self": vars typed "Self" form `Self::method` calls that resolve to no local
+    // def — so an ordinary `let agent = Agent::new_with_defaults(); agent.run(..)` silently dropped
+    // its edge (found by the PROVE-IT dogfood on ureq: 3 public API entry points missing from a
+    // blast radius). Worse, two same-named ctors on DIFFERENT types both recording "Self" defeated
+    // the ambiguity check. `Result<Self>`/`Option<Self>` arrive here already unwrapped.
+    if tp == "Self" {
+        match self_ty {
+            Some(s) => tp = s.to_string(),
+            None => return, // `Self` outside an impl — nothing safe to record
+        }
+    }
     let leaf = sig.ident.to_string();
     match rets.get(&leaf) {
         None => {
@@ -599,29 +622,47 @@ fn collect_decls(
     for it in items {
         match it {
             syn::Item::Struct(s) => {
-                if let syn::Fields::Named(named) = &s.fields {
-                    let entry = fields.entry(s.ident.to_string()).or_default();
-                    for f in &named.named {
-                        // Skip `#[cfg(...)]`-gated fields: they aren't unconditionally present, so
-                        // inferring effects through them mis-fires. (tokio's `resource_span:
-                        // tracing::Span`, gated on the off-by-default `tracing` feature, otherwise made
-                        // every `self.resource_span.in_scope(..)` read as Log — 452 phantom functions.)
-                        if has_cfg(&f.attrs) {
-                            continue;
-                        }
-                        if let Some(name) = &f.ident {
-                            if let Some(ty) = type_path(&f.ty, uses) {
-                                entry.insert(name.to_string(), ty);
+                match &s.fields {
+                    syn::Fields::Named(named) => {
+                        let entry = fields.entry(s.ident.to_string()).or_default();
+                        for f in &named.named {
+                            // Skip `#[cfg(...)]`-gated fields: they aren't unconditionally present, so
+                            // inferring effects through them mis-fires. (tokio's `resource_span:
+                            // tracing::Span`, gated on the off-by-default `tracing` feature, otherwise made
+                            // every `self.resource_span.in_scope(..)` read as Log — 452 phantom functions.)
+                            if has_cfg(&f.attrs) {
+                                continue;
+                            }
+                            if let Some(name) = &f.ident {
+                                if let Some(ty) = type_path(&f.ty, uses) {
+                                    entry.insert(name.to_string(), ty);
+                                }
                             }
                         }
                     }
+                    // TUPLE structs index by position (`"0"`, `"1"`), so a newtype-wrapped receiver
+                    // (`self.0.run()`, chained `self.0.0`) resolves like a named field. Same
+                    // `#[cfg]` rule.
+                    syn::Fields::Unnamed(unnamed) => {
+                        let entry = fields.entry(s.ident.to_string()).or_default();
+                        for (i, f) in unnamed.unnamed.iter().enumerate() {
+                            if has_cfg(&f.attrs) {
+                                continue;
+                            }
+                            if let Some(ty) = type_path(&f.ty, uses) {
+                                entry.insert(i.to_string(), ty);
+                            }
+                        }
+                    }
+                    syn::Fields::Unit => {}
                 }
             }
-            syn::Item::Fn(f) => record_return(&f.sig, uses, rets),
+            syn::Item::Fn(f) => record_return(&f.sig, uses, rets, None),
             syn::Item::Impl(im) => {
+                let self_ty = impl_type_name(&im.self_ty);
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
-                        record_return(&m.sig, uses, rets);
+                        record_return(&m.sig, uses, rets, self_ty.as_deref());
                     }
                 }
             }
@@ -1560,6 +1601,46 @@ mod tests {
         assert_eq!(t("other_var"), None);
         assert_eq!(t("MAX_SIZE"), None);
         assert_eq!(t("config::MAX_SIZE"), None);
+    }
+
+    #[test]
+    fn self_returning_ctor_types_the_local_and_the_edge_survives() {
+        // The PROVE-IT-on-ureq miss: `fn new_with_defaults() -> Self` indexed the literal "Self", so
+        // `let agent = Agent::new_with_defaults(); agent.run(..)` formed `Self::run` — no local def,
+        // edge silently dropped, and the caller read pure though run() does I/O.
+        let src = r#"
+            pub struct Agent;
+            impl Agent {
+                pub fn new_with_defaults() -> Self { Agent }
+                pub fn run(&self) { let _ = std::fs::read("/tmp/x"); }
+            }
+            pub fn top() { let agent = Agent::new_with_defaults(); agent.run() }
+        "#;
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields: FieldIndex = HashMap::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets);
+        assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
+                   "Self must resolve to the impl type, not the literal");
+    }
+
+    #[test]
+    fn tuple_struct_fields_index_by_position() {
+        // The other PROVE-IT miss: `self.0.0.run()` (ureq's ConfigBuilder newtype chain) — tuple
+        // fields weren't in the FieldIndex, so the receiver never typed and the edge dropped.
+        let src = r#"
+            pub struct Inner;
+            pub struct Outer(Inner);
+            pub struct Stack(Outer);
+        "#;
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields: FieldIndex = HashMap::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets);
+        assert_eq!(fields["Outer"]["0"], "Inner");
+        assert_eq!(fields["Stack"]["0"], "Outer");
     }
 
     #[test]
