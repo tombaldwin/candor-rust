@@ -860,8 +860,92 @@ pub fn capstd_cap(crate_name: &str, type_name: &str) -> Option<&'static str> {
     })
 }
 
+/// Table names a SQL string literal STATICALLY reaches — the `Db` analog of the `Net` host /
+/// `Exec` command / `Fs` path literal surface (feeds `allow Db in <scope> <table>…`, AS-EFF-008).
+/// Conservative by construction, because a wrong capture here would FABRICATE: the string must
+/// open with a SQL statement keyword, and only identifiers in table position are taken —
+/// `FROM`/`JOIN` anywhere, `INTO` anywhere, statement-leading `UPDATE`/`TRUNCATE`, and
+/// `TABLE` (create/drop/alter), skipping `ONLY`/`IF NOT EXISTS`. `UPDATE` mid-statement is
+/// deliberately ignored (`FOR UPDATE SKIP LOCKED` must not yield a table "skip"). A
+/// dynamically-built query yields nothing — the gate's opaque case — never a guess.
+/// Output is lower-cased, quote/backtick-stripped, `schema.table` kept qualified, deduped.
+pub fn tables_in_sql(sql: &str) -> Vec<String> {
+    const STMT: &[&str] =
+        &["select", "insert", "update", "delete", "create", "drop", "alter", "truncate", "merge", "replace", "with"];
+    // Tokens that can FOLLOW a table-introducing keyword without being a table.
+    const SKIP: &[&str] = &["only", "if", "not", "exists", "table"];
+    // Identifier-position tokens that are grammar, not a table (subqueries, locking clauses…).
+    const STOP: &[&str] = &[
+        "select", "set", "where", "values", "on", "using", "group", "order", "by", "limit",
+        "returning", "as", "inner", "outer", "left", "right", "cross", "lateral", "natural",
+        "union", "all", "distinct", "case", "when", "null", "default", "skip", "nowait", "of",
+        "from", "join", "into", "update", "delete", "insert",
+    ];
+    let cleaned: String =
+        sql.to_lowercase().chars().map(|c| if matches!(c, '(' | ')' | ',' | ';') { ' ' } else { c }).collect();
+    let toks: Vec<&str> = cleaned.split_whitespace().collect();
+    let Some(first) = toks.first() else { return Vec::new() };
+    if !STMT.contains(first) {
+        return Vec::new(); // not SQL — nothing to certify, nothing fabricated
+    }
+    let ident = |t: &str| -> Option<String> {
+        let t = t.trim_matches(|c| matches!(c, '"' | '`' | '\''));
+        let mut chars = t.chars();
+        let ok_first = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        let ok_rest = t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$' | '"' | '`'));
+        (ok_first && ok_rest && !STOP.contains(&t)).then(|| t.replace(['"', '`'], ""))
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |t: Option<String>| {
+        if let Some(t) = t {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    };
+    for (i, tok) in toks.iter().enumerate() {
+        let table_pos = match *tok {
+            "from" | "join" | "into" | "table" => true,
+            // statement-leading only (see doc comment): `update t set …`, `truncate [table] t`.
+            "update" | "truncate" => i == 0,
+            _ => false,
+        };
+        if !table_pos {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < toks.len() && SKIP.contains(&toks[j]) {
+            j += 1;
+        }
+        if let Some(next) = toks.get(j) {
+            push(ident(next));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sql_table_extraction_is_conservative() {
+        use super::tables_in_sql as t;
+        assert_eq!(t("SELECT id FROM users WHERE x = 1"), vec!["users"]);
+        assert_eq!(t("select * from ledger.entries e join customers c on c.id = e.cid"),
+                   vec!["ledger.entries", "customers"]);
+        assert_eq!(t("INSERT INTO audit_log (a) VALUES (?1)"), vec!["audit_log"]);
+        assert_eq!(t("UPDATE accounts SET v = ?"), vec!["accounts"]);
+        assert_eq!(t("DELETE FROM sessions WHERE id = ?"), vec!["sessions"]);
+        assert_eq!(t("CREATE TABLE IF NOT EXISTS cache (k TEXT)"), vec!["cache"]);
+        assert_eq!(t("TRUNCATE TABLE staging"), vec!["staging"]);
+        // FOR UPDATE locking clause must not yield a phantom table (mid-statement update ignored)
+        assert_eq!(t("SELECT * FROM jobs FOR UPDATE SKIP LOCKED"), vec!["jobs"]);
+        // a subquery in FROM position yields nothing for that position
+        assert_eq!(t("SELECT * FROM (SELECT 1) q"), Vec::<String>::new());
+        // not SQL -> nothing (never fabricate)
+        assert_eq!(t("/tmp/some/path"), Vec::<String>::new());
+        assert_eq!(t("hello world from nowhere"), Vec::<String>::new());
+    }
+
     use super::*;
 
     #[test]

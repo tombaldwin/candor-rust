@@ -20,6 +20,22 @@ behavioural changes (always in the soundness-increasing direction — see the §
   generic-parameter fields are the ureq residual: 14/16 found, never fabricated); PROVE-IT.md
   prompt aligned (callgraph naming convention, `#[cfg(test)]` scope).
 
+## [Unreleased] (nightly lint + candor-scan + candor-classify + candor-query)
+
+### Added — the Db literal surface (`tables` + `allow Db`)
+
+- **`tables`** joins `hosts`/`cmds`/`paths` as the fourth literal-refinement surface (SPEC §2):
+  table-position identifiers extracted from SQL string literals at `Db`-classified calls
+  (`FROM`/`JOIN`/`INTO` anywhere; statement-leading `UPDATE`/`TRUNCATE`; `TABLE` — extraction is
+  conservative in the fabrication direction: non-SQL strings and `FOR UPDATE` locking clauses yield
+  nothing). Captured by the nightly lint AND candor-scan, propagated transitively, carried
+  cross-crate, rendered by `show` as `Db(table,…)`.
+- **`allow Db in <scope> <table>…`** (AS-EFF-008) gates it in both backends: case-insensitive
+  qualified-name match, `schema.*` covers a schema, an unqualified allow does NOT cover a qualified
+  reach. "Billing may only touch `ledger.*`" is now a deterministic CI rule. Both engines (the JVM
+  engine shipped the same change in lockstep); the conformance grammar battery covers the new rule.
+  This is also the zero-new-engine first step of the database-development transfer (BACKLOG P5).
+
 ## [Unreleased] (nightly lint)
 
 ### Fixed — soundness

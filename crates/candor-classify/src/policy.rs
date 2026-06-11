@@ -23,9 +23,10 @@ pub struct PolicyRule {
     pub raw: String,
 }
 
-/// One `allow <Effect> [in <scope>] <literal>…` rule (AS-EFF-008). The effect is one of the three
-/// that carry a literal surface (`Net`/`Exec`/`Fs`); a function in `scope` performing it may reach
-/// ONLY the listed literals. Matching is effect-specific (`literal_allowed`).
+/// One `allow <Effect> [in <scope>] <literal>…` rule (AS-EFF-008). The effect is one of the four
+/// that carry a literal surface (`Net` hosts / `Exec` commands / `Fs` paths / `Db` tables); a
+/// function in `scope` performing it may reach ONLY the listed literals. Matching is
+/// effect-specific (`literal_allowed`).
 #[derive(Debug, Clone)]
 pub struct AllowRule {
     pub effect: &'static str,
@@ -94,13 +95,28 @@ pub fn fs_path_covered(a: &str, r: &str) -> bool {
     ac.len() <= rc.len() && ac.iter().zip(&rc).all(|(x, y)| x == y)
 }
 
+/// Whether an allowed table entry `a` covers a reached table `r` (SPEC §6.2): case-insensitive
+/// exact match on the (possibly schema-qualified) name, or a `schema.*` entry covering every table
+/// in that schema. Strict on qualification — an allowed `entries` does NOT cover a reached
+/// `ledger.entries` (write both forms if your queries mix them); silent widening is the failure
+/// mode an allowlist exists to prevent.
+pub fn db_table_covered(a: &str, r: &str) -> bool {
+    let (a, r) = (a.to_lowercase(), r.to_lowercase());
+    if let Some(schema) = a.strip_suffix(".*") {
+        return r.strip_prefix(schema).is_some_and(|rest| rest.starts_with('.'));
+    }
+    a == r
+}
+
 /// Whether a reached literal is allowed under an effect-specific match (SPEC §6.2): `Net` host by
-/// name (port ignored), `Exec` command by basename, `Fs` path by boundary-respecting prefix.
+/// name (port ignored), `Exec` command by basename, `Fs` path by boundary-respecting prefix,
+/// `Db` table by qualified name or `schema.*`.
 pub fn literal_allowed(effect: &str, reached: &str, allow: &BTreeSet<String>) -> bool {
     match effect {
         "Net" => allow.iter().any(|a| host_part(a) == host_part(reached)),
         "Exec" => allow.iter().any(|a| cmd_base(a) == cmd_base(reached)),
         "Fs" => allow.iter().any(|a| fs_path_covered(a, reached)),
+        "Db" => allow.iter().any(|a| db_table_covered(a, reached)),
         _ => allow.contains(reached),
     }
 }
@@ -150,9 +166,10 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
                     "Net" => "Net",
                     "Exec" => "Exec",
                     "Fs" => "Fs",
+                    "Db" => "Db",
                     _ => {
                         eprintln!(
-                            "candor: ignoring policy rule (allow supports only Net hosts / Exec commands / Fs paths): {line}"
+                            "candor: ignoring policy rule (allow supports only Net hosts / Exec commands / Fs paths / Db tables): {line}"
                         );
                         continue;
                     }
@@ -220,6 +237,26 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn db_table_covering_is_strict() {
+        use super::db_table_covered as c;
+        assert!(c("ledger.entries", "Ledger.Entries")); // case-insensitive exact
+        assert!(c("ledger.*", "ledger.entries"));       // schema wildcard
+        assert!(!c("ledger.*", "ledgerx.entries"));     // boundary-respecting
+        assert!(!c("entries", "ledger.entries"));       // no silent qualification widening
+        assert!(c("entries", "entries"));
+    }
+
+    #[test]
+    fn allow_db_parses_and_gates() {
+        let p = super::parse_policy("allow Db in billing  ledger.* customers\n");
+        assert_eq!(p.allow_rules.len(), 1);
+        assert_eq!(p.allow_rules[0].effect, "Db");
+        assert!(super::literal_allowed("Db", "ledger.entries", &p.allow_rules[0].literals));
+        assert!(super::literal_allowed("Db", "customers", &p.allow_rules[0].literals));
+        assert!(!super::literal_allowed("Db", "audit.log", &p.allow_rules[0].literals));
+    }
+
     use super::*;
 
     #[test]
@@ -256,11 +293,11 @@ mod tests {
              allow Exec in ci  git\n\
              allow Fs in config  /etc/app\n\
              allow Net  github.com\n\
-             allow Db  whatever\n\
+             allow Clock  whatever\n\
              allow Net in nohosts\n\
              allow\n",
         );
-        assert_eq!(p.allow_rules.len(), 4);
+        assert_eq!(p.allow_rules.len(), 4); // Clock carries no literal surface — rejected; Db now does
         assert_eq!((p.allow_rules[0].effect, p.allow_rules[0].scope.as_deref()), ("Net", Some("billing")));
         assert_eq!(
             p.allow_rules[0].literals,

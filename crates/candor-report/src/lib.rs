@@ -110,6 +110,13 @@ pub struct ReportEntry {
     /// omitted when none are visible (a runtime-computed path, or no `Fs`). Never a completeness claim.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// Literal database tables statically visible from this function (table-position identifiers in
+    /// a SQL string literal — `FROM`/`JOIN`/`INTO`/leading `UPDATE`…). The decidable subset of "what
+    /// data does it touch". A non-breaking refinement of `Db`; omitted when none are visible (a
+    /// dynamically-built query, an ORM call with no SQL literal, or no `Db`). Never a completeness
+    /// claim — table-by-runtime-value is undecidable, so absence ≠ "touches nothing".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<String>,
     /// Effectful local functions this one calls — the effect-relevant call graph ("who calls X?").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,

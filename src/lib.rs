@@ -174,6 +174,11 @@ pub struct Candor {
     /// Propagated like `net_hosts_direct`; surfaced as the report's optional `paths` detail and enforced
     /// by `allow Fs …` (AS-EFF-008). Static-literal subset only — a runtime path is simply absent.
     fs_paths_direct: HashMap<LocalDefId, BTreeSet<String>>,
+    /// Literal database tables a function touches directly (table-position identifiers in a SQL string
+    /// literal at a built-in `Db` call). Propagated like `net_hosts_direct`; surfaced as the report's
+    /// optional `tables` detail and enforced by `allow Db …` (AS-EFF-008). Static-literal subset only —
+    /// a dynamically-built query (or an ORM call carrying no SQL) is simply absent.
+    db_tables_direct: HashMap<LocalDefId, BTreeSet<String>>,
     /// Local-crate functions each function calls, for transitive propagation.
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
     /// Closure-flow, *receiving* side (bounded). Per FREE fn, the parameter indices it INVOKES as a
@@ -219,6 +224,9 @@ pub struct Candor {
     /// Filesystem paths a sibling crate's function touches, keyed by `DefPathHash` (its report's
     /// `paths`). Lets `allow Fs …` see a path that lives across the crate boundary. Empty unless carried.
     cross_paths: HashMap<(u64, u64), BTreeSet<String>>,
+    /// Database tables a sibling crate's function touches, keyed by `DefPathHash` (its report's
+    /// `tables`). Lets `allow Db …` see a table that lives across the crate boundary. Empty unless carried.
+    cross_tables: HashMap<(u64, u64), BTreeSet<String>>,
     /// CANDOR_EXPLAIN=<query>: when set, record where each effect enters (the call + location) so
     /// `cargo candor explain` can trace the path from a function to the source of each effect.
     explain: Option<String>,
@@ -319,6 +327,7 @@ impl Candor {
             net_hosts_direct: HashMap::new(),
             exec_cmds_direct: HashMap::new(),
             fs_paths_direct: HashMap::new(),
+            db_tables_direct: HashMap::new(),
             param_calls: HashMap::new(),
             callback_named: HashMap::new(),
             callback_unknown: HashSet::new(),
@@ -331,6 +340,7 @@ impl Candor {
             cross_hosts: HashMap::new(),
             cross_cmds: HashMap::new(),
             cross_paths: HashMap::new(),
+            cross_tables: HashMap::new(),
             explain,
             sites: HashMap::new(),
             policy,
@@ -452,6 +462,7 @@ struct CrossData {
     hosts: HashMap<(u64, u64), BTreeSet<String>>,
     cmds: HashMap<(u64, u64), BTreeSet<String>>,
     paths: HashMap<(u64, u64), BTreeSet<String>>,
+    tables: HashMap<(u64, u64), BTreeSet<String>>,
 }
 
 fn load_cross_reports(prefix: &str, me: &str, me_kind: &str, trust_siblings: bool) -> CrossData {
@@ -459,6 +470,7 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str, trust_siblings: boo
     let mut hosts: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
     let mut cmds: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
     let mut paths: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
+    let mut tables: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
     for rf in report_files(prefix) {
         // Skip our OWN report (by crate name AND type); DefPathHash keys are globally unique so
         // all other crates merge into one map. (Own entries are local defs and the cross path is
@@ -527,10 +539,13 @@ fn load_cross_reports(prefix: &str, me: &str, me_kind: &str, trust_siblings: boo
                 if !e.paths.is_empty() {
                     paths.entry(key).or_default().extend(e.paths.iter().cloned());
                 }
+                if !e.tables.is_empty() {
+                    tables.entry(key).or_default().extend(e.tables.iter().cloned());
+                }
             }
         }
     }
-    CrossData { effects: out, hosts, cmds, paths }
+    CrossData { effects: out, hosts, cmds, paths, tables }
 }
 
 /// The on-disk name of a crate's layering-reachability sidecar (`<prefix>.<crate>.<kind>.layerreach.json`).
@@ -1271,6 +1286,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             self.cross_hosts = cd.hosts;
             self.cross_cmds = cd.cmds;
             self.cross_paths = cd.paths;
+            self.cross_tables = cd.tables;
             // Layering (AS-EFF-009): load the `forbid`-target scopes each sibling function reaches, from
             // the `layerreach` sidecars written earlier in this enforce pass (dependency-first order).
             if !self.layer_rules.is_empty() {
@@ -1535,6 +1551,18 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     self.fs_paths_direct.entry(caller).or_default().insert(p);
                 }
             }
+            // Non-breaking Db refinement: table-position identifiers in a SQL string literal are the
+            // tables this call statically reaches. Same posture as hosts/cmds/paths: the decidable
+            // subset only — `tables_in_sql` yields nothing for a dynamically-built query (the gate's
+            // opaque case), never a guess. Feeds `allow Db in <scope> <table>…` (AS-EFF-008).
+            if builtin == Some("Db") {
+                if let Some(sql) = first_str_lit_arg(expr) {
+                    let ts = candor_classify::tables_in_sql(&sql);
+                    if !ts.is_empty() {
+                        self.db_tables_direct.entry(caller).or_default().extend(ts);
+                    }
+                }
+            }
             if self.explain.is_some() {
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
                 self.sites.entry(caller).or_default().push(EffectSite { eff: effect, via: path.clone(), loc });
@@ -1581,6 +1609,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
             if let Some(ps) = self.cross_paths.get(&cross_key) {
                 self.fs_paths_direct.entry(caller).or_default().extend(ps.iter().cloned());
+            }
+            if let Some(ts) = self.cross_tables.get(&cross_key) {
+                self.db_tables_direct.entry(caller).or_default().extend(ts.iter().cloned());
             }
             if let Some(effs) = self.cross.get(&cross_key).cloned() {
                 for e in &effs {
@@ -1691,6 +1722,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let hostsacc = propagate(self.net_hosts_direct.clone(), &self.calls);
         let cmdsacc = propagate(self.exec_cmds_direct.clone(), &self.calls);
         let pathsacc = propagate(self.fs_paths_direct.clone(), &self.calls);
+        let tablesacc = propagate(self.db_tables_direct.clone(), &self.calls);
 
         // CANDOR_EXPLAIN=<query>: for each matching function, trace the call path to where each of
         // its effects originates (the leaf call + location). A dedicated query mode — print and
@@ -1940,6 +1972,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     // Literal subprocess commands / filesystem paths statically visible (empty = none).
                     cmds: cmdsacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
                     paths: pathsacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+                    tables: tablesacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
                     // Why this fn DIRECTLY introduces Unknown (origin tags), so a consumer can tell
                     // improvable opacity from irreducible. Only when `direct` actually carries Unknown
                     // (a cross-crate-inherited Unknown is transitive, not introduced here).
@@ -2131,6 +2164,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     "Net" => hostsacc.get(&f),
                     "Exec" => cmdsacc.get(&f),
                     "Fs" => pathsacc.get(&f),
+                    "Db" => tablesacc.get(&f),
                     _ => None,
                 };
                 // Literals reached that no allowlist entry covers (effect-specific match, see
@@ -2155,6 +2189,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     let noun = match rule.effect {
                         "Exec" => "a command",
                         "Fs" => "a path",
+                        "Db" => "a table",
                         _ => "a host",
                     };
                     let detail = if !bad.is_empty() {
@@ -2921,12 +2956,13 @@ mod tests {
              allow Exec in ci  git\n\
              allow Fs in config  /etc/app\n\
              allow Net  github.com\n\
-             allow Db  whatever\n\
+             allow Clock  whatever\n\
              allow Net in nohosts\n\
              allow\n",
         );
-        // The four well-formed Net/Exec/Fs rules survive; `allow Db` (unsupported effect), the
-        // scoped Net rule that names no hosts, and the bare `allow` are dropped.
+        // The four well-formed Net/Exec/Fs rules survive; `allow Clock` (no literal surface), the
+        // scoped Net rule that names no hosts, and the bare `allow` are dropped. (`allow Db <table>`
+        // is part of the grammar — see the candor-classify policy tests.)
         assert_eq!(p.allow_rules.len(), 4);
         // `allow Net in billing …`
         assert_eq!((p.allow_rules[0].effect, p.allow_rules[0].scope.as_deref()), ("Net", Some("billing")));

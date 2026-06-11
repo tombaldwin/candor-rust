@@ -902,6 +902,7 @@ fn main() {
     let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut cmds: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut paths: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut tables: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut loc: HashMap<String, String> = HashMap::new();
     for f in &fns {
@@ -921,6 +922,9 @@ fn main() {
                         "Net" => { hosts.entry(f.qual.clone()).or_default().insert(host_part(s)); }
                         "Exec" => { cmds.entry(f.qual.clone()).or_default().insert(s.clone()); }
                         "Fs" => { paths.entry(f.qual.clone()).or_default().insert(s.clone()); }
+                        // Table-position identifiers in a SQL string literal — the Db literal
+                        // surface (feeds `allow Db …`); a dynamically-built query yields nothing.
+                        "Db" => { tables.entry(f.qual.clone()).or_default().extend(candor_classify::tables_in_sql(s)); }
                         _ => {}
                     }
                 }
@@ -956,6 +960,7 @@ fn main() {
     let hostsacc = propagate_str(&hosts, &calls, &all);
     let cmdsacc = propagate_str(&cmds, &calls, &all);
     let pathsacc = propagate_str(&paths, &calls, &all);
+    let tablesacc = propagate_str(&tables, &calls, &all);
 
     let mut entries: Vec<ReportEntry> = Vec::new();
     let mut cg: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -986,6 +991,7 @@ fn main() {
             hosts: hostsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             cmds: cmdsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             paths: pathsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+            tables: tablesacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             calls: calls.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default(),
             // The syntactic backend has ONE Unknown origin: a call it couldn't see through (a closure /
             // fn-pointer value). Tag it directly-introduced Unknowns so the receipt matches the lint's
@@ -1038,7 +1044,7 @@ fn main() {
             eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
             std::process::exit(2);
         };
-        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc);
+        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc);
         for line in &v {
             println!("{line}");
         }
@@ -1054,8 +1060,9 @@ fn main() {
 /// Evaluate a CANDOR_POLICY (parsed by the SHARED §6.2 parser in candor-classify, so this gate can
 /// never disagree with the nightly/JVM gates on grammar) over a finished scan. Returns one line per
 /// violation: deny/pure (AS-EFF-006) against the transitive `inferred` sets, literal allowlists
-/// (AS-EFF-008) against the transitive hosts/cmds/paths surfaces, layering `forbid A -> B`
+/// (AS-EFF-008) against the transitive hosts/cmds/paths/tables surfaces, layering `forbid A -> B`
 /// (AS-EFF-009) by reachability over the local call graph.
+#[allow(clippy::too_many_arguments)]
 fn policy_violations(
     policy_text: &str,
     all: &[String],
@@ -1064,6 +1071,7 @@ fn policy_violations(
     hostsacc: &HashMap<String, BTreeSet<String>>,
     cmdsacc: &HashMap<String, BTreeSet<String>>,
     pathsacc: &HashMap<String, BTreeSet<String>>,
+    tablesacc: &HashMap<String, BTreeSet<String>>,
 ) -> Vec<String> {
     use candor_classify::policy::{literal_allowed, parse_policy, scope_matches};
     let p = parse_policy(policy_text);
@@ -1100,6 +1108,7 @@ fn policy_violations(
             let lits = match r.effect {
                 "Net" => hostsacc.get(q),
                 "Exec" => cmdsacc.get(q),
+                "Db" => tablesacc.get(q),
                 _ => pathsacc.get(q),
             };
             match lits {
@@ -1516,17 +1525,27 @@ mod tests {
         hosts.insert("api::handle".into(), ["evil.example.com".to_string()].into_iter().collect());
         let empty = HashMap::new();
         // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
+        let mut tables: HashMap<String, BTreeSet<String>> = HashMap::new();
+        tables.insert("db::run".into(), ["audit.log".to_string()].into_iter().collect());
+        // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
         let v = policy_violations(
             "deny Net api\nallow Net in api good.example.com\nforbid ui -> db\n",
-            &all, &inferred, &calls, &hosts, &empty, &empty,
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables,
         );
         assert_eq!(v.len(), 3, "{v:?}");
         assert!(v.iter().any(|l| l.contains("[AS-EFF-006]") && l.contains("api::handle")));
         assert!(v.iter().any(|l| l.contains("[AS-EFF-008]") && l.contains("evil.example.com")));
         assert!(v.iter().any(|l| l.contains("[AS-EFF-009]") && l.contains("ui::draw")));
         // clean policy -> no violations; `pure` flags ANY effect incl. the Db fn.
-        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty).is_empty());
-        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty).len(), 1);
+        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables).is_empty());
+        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables).len(), 1);
+        // the Db table allowlist: db::run reaches audit.log — outside `ledger.*` -> violation;
+        // covered by `audit.*` -> clean. ui::draw INHERITS Db but the literal propagation is the
+        // caller's tablesacc, supplied here only for db::run, so only db::run flags.
+        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables);
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        assert!(bad[0].contains("audit.log"));
+        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables).is_empty());
     }
 
     #[test]

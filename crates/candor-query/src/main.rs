@@ -339,6 +339,9 @@ struct ShowJson {
     /// Literal Net endpoints, omitted when none visible — see `ReportEntry::hosts`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     hosts: Vec<String>,
+    /// Literal Db tables, omitted when none visible — see `ReportEntry::tables`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tables: Vec<String>,
     unresolved: bool,
 }
 
@@ -396,6 +399,7 @@ fn cmd_show(args: &[String]) -> i32 {
                 direct: sorted(&e.direct),
                 fs: e.fs.clone(),
                 hosts: e.hosts.clone(),
+                tables: e.tables.clone(),
                 unresolved: e.unresolved,
             })
             .collect();
@@ -421,6 +425,8 @@ fn cmd_show(args: &[String]) -> i32 {
                     format!("Fs{star}({})", e.fs.join(","))
                 } else if x == "Net" && !e.hosts.is_empty() {
                     format!("Net{star}({})", e.hosts.join(","))
+                } else if x == "Db" && !e.tables.is_empty() {
+                    format!("Db{star}({})", e.tables.join(","))
                 } else {
                     format!("{x}{star}")
                 }
@@ -431,7 +437,9 @@ fn cmd_show(args: &[String]) -> i32 {
     }
     let fs_note = if any_fs { ";  Fs(read/write) = the filesystem access seen" } else { "" };
     let host_note = if any_hosts { ";  Net(host) = a literal endpoint seen (runtime addresses aren't shown)" } else { "" };
-    println!("  (* = performed in the function's own body; unmarked = via a callee{fs_note}{host_note})");
+    let any_tables = fns.iter().any(|e| !e.tables.is_empty());
+    let table_note = if any_tables { ";  Db(table) = a literal table seen (dynamic SQL isn't shown)" } else { "" };
+    println!("  (* = performed in the function's own body; unmarked = via a callee{fs_note}{host_note}{table_note})");
     0
 }
 

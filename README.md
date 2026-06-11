@@ -231,6 +231,7 @@ pure            parse                        # parsing must be side-effect-free
 deny Exec                                    # nothing may spawn a subprocess
 allow Net in billing  api.stripe.com         # billing may reach the network — but ONLY Stripe
 allow Exec in build   git                    # the build layer may run subprocesses — but ONLY git
+allow Db  in billing  ledger.*               # billing may touch the database — but ONLY the ledger schema
 forbid domain -> infra                       # the domain layer must not depend on infrastructure
 ```
 
