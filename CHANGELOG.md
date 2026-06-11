@@ -21,7 +21,7 @@ diverged from the 0.3.2 source tree). Surfaced by a maximum-effort multi-agent `
 report is bumped in lockstep (unchanged content) to keep the three crates' shared version and their
 inter-crate `version =` dependencies resolvable on crates.io.
 
-## [0.3.3] — 2026-06-11 (candor-scan only)
+## [0.3.4] — 2026-06-11 (candor-scan only)
 
 ### Added
 
@@ -31,6 +31,11 @@ inter-crate `version =` dependencies resolvable on crates.io.
   under-reports, so a clean run is necessary, never sufficient — the nightly engine remains the sound
   gate. Shares the §6.2 parser with the nightly and JVM gates (one grammar, everywhere); an unreadable
   policy file exits 2 loudly rather than silently not enforcing.
+
+## [0.3.3] — 2026-06-10 (candor-scan only)
+
+- Metadata release: repository URL moved to `tombaldwin/candor-rust` (the family umbrella now owns
+  `tombaldwin/candor`); includes all 0.3.2-era scanner fixes.
 
 ## [0.3.2] — 2026-06-10 (crates: candor-report / candor-classify / candor-scan, lockstep)
 

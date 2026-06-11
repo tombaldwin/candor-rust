@@ -1,6 +1,6 @@
 [package]
 name = "candor-scan"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 description = "candor's STABLE-Rust effect scanner — syntactic call-graph + effect report, no nightly."
 license = "MIT OR Apache-2.0"
