@@ -83,9 +83,11 @@ defending and an edit *would* cross one. If the code already affords a clean sea
 routes around the problem and candor is redundant — the same eval showed exactly that. It is
 deliberately *not* a few things: not a security boundary ([SECURITY.md](SECURITY.md)); not a
 codebase-quality grade (effect counts are domain-dependent — there is no "candor score" to chase);
-Rust-only; and the *sound* backend needs nightly — the zero-install [stable scanner](#two-backends-stable-scanner-zero-friction-vs-the-nightly-lint-soundness)
-is best-effort and under-reports. Residual unsoundness (generic dispatch assumed to honour its bound;
-macro-generated code invisible) is marked by `Unknown` and coverage warnings and listed under
+this repo is Rust-only (the JVM — Java/Kotlin/Scala/Groovy — has
+[candor-java](https://github.com/tombaldwin/candor-java), same spec, same report shape, same gate);
+and the *sound* backend needs nightly — the zero-install [stable scanner](#two-backends-stable-scanner-zero-friction-vs-the-nightly-lint-soundness)
+is best-effort and under-reports. Residual unsoundness (generic dispatch over non-local traits
+assumed to honour its bound) is marked by `Unknown` and coverage warnings and listed under
 [Known limitations](#known-limitations). A sharp, narrow, trustworthy instrument, not a quality platform.
 
 *Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
@@ -99,7 +101,7 @@ macro-generated code invisible) is marked by `Unknown` and coverage warnings and
 | `crates/candor-classify` | the effect classifier (`crate × path → effect`) — pure string logic, no `rustc`; the one source of truth the lint **and** the stable scanner both call |
 | `crates/candor-scan` | the **stable-Rust** backend: a `syn`-based scanner that produces the same report JSON on stock `cargo`, no nightly/dylint (see below) |
 | `crates/candor-report` | the report types + parsing, shared by every backend and the CLI (no `rustc_private`) |
-| `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`/`containment`/`reachable`/`path`/`impact`) as one typed binary |
+| `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`/`whatif`/`rewire`/`containment`/`reachable`/`path`/`impact`) as one typed binary |
 | `cargo-candor` | the CLI wrapper — thin bash that orchestrates the backend (`cargo dylint` or `candor-scan`) and dispatches queries to `candor-query` |
 | `sample/` | a small crate written in the capability discipline, for trying conformance mode |
 | `rust-toolchain` | pins the nightly the lint links against (`rustc-dev`) |
@@ -445,10 +447,10 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
   deliberate residual unsoundness to keep the report readable (see `CRITIQUE.md`).
 - **Advisory, not enforced**: a `&Fs` token doesn't actually gate `std::fs`; candor only reports.
   For real enforcement use [cap-std](https://github.com/bytecodealliance/cap-std).
-- **Macro-generated functions are invisible.** Items whose span is from a macro expansion are
-  skipped (to drop noise like tracing's `__CALLSITE` statics) — so a function *generated* by a macro
-  (`async_trait`, derive, a declarative macro) is not analyzed in any mode. Code you wrote by hand is
-  unaffected.
+- **Macro-generated consts/statics are skipped** (to drop noise like tracing's per-log-site
+  `__CALLSITE` statics). Macro-generated *functions* (an `async_trait` method, a derive-impl method,
+  a decl-macro fn) **are** analyzed and reported — the earlier blanket skip was a real under-report,
+  fixed and held by a fuzzer lane (`macro_call` / macro-defined sinks).
 - **Capabilities must be direct parameters.** `declared_caps` recognizes a capability (`&Fs`, a
   cap-std `&Dir`) only as a top-level parameter. A capability reached *through* a struct field
   (`fn f(ctx: &AppContext)` where `ctx` holds the `Dir`) is not counted as declared — that function
@@ -460,7 +462,10 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 ## Documentation
 
 - **[candor-spec](https://github.com/tombaldwin/candor-spec)** — the language-agnostic spec candor
-  implements (effect vocabulary, report schema, trust contract; the Java/C#/Go ports share it).
+  implements (effect vocabulary, report schema, trust contract). Shared by the
+  [JVM engine](https://github.com/tombaldwin/candor-java) and the from-spec-alone
+  [TS engine](https://github.com/tombaldwin/candor-ts); a CI conformance suite holds all three to the
+  same answers.
 - **[AGENTS.md](AGENTS.md)** — self-contained instructions for an AI agent (install → run → read).
 - **[PRINCIPLES.md](PRINCIPLES.md)** — the ideas candor (and its development) are built on.
 - **[CRITIQUE.md](CRITIQUE.md)** — an honest, critical self-assessment + comparison to prior art
@@ -484,10 +489,11 @@ fails *gracefully* (never an ICE) on expressions outside a typechecked body.
 The **soundness contract** — "never silently pure" — is its own gate, not a hope. An adversarial
 fuzzer ([`soundness/`](soundness/)) generates compilable crates that thread a *known* effect from a
 leaf up through a random chain of call forms, and asserts every reachable function is reported with
-that effect or `Unknown` (a pure/omitted function is the bug it hunts). Seven fuzzer lanes cover the
+that effect or `Unknown` (a pure/omitted function is the bug it hunts). The fuzzer lanes cover the
 forms that have historically hidden a call — direct/closure/generic/boxed callbacks, `dyn` and
-arbitrary-self dispatch, UFCS, overloaded operators, `?`, `.await`, macros, implicit `Drop`, and the
-cross-crate boundary — each *teeth-verified* (reverting the fix makes the lane fail). Two more
+arbitrary-self dispatch, UFCS, overloaded operators, `?`, `.await`, macros, implicit `Drop`, opaque
+`impl Trait` returns, and the cross-crate boundary — each *teeth-verified* (reverting the fix makes
+the lane fail). Two more
 lanes run each program under `strace` and confirm candor's static prediction over-approximates the
 effects the kernel actually observed — ground truth that trusts nothing about how the test was generated.
 
