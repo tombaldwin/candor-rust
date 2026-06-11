@@ -420,8 +420,18 @@ sound over-approximation (`Unknown`), which candor already does.
       3. **Data lineage / privacy** (dbt/Airflow DAGs; effects = data categories — PII/PHI;
          purpose-limitation as a deny rule; an unparseable stage = `Unknown`, never silently clean).
       4. Access control is the existence proof at org scale (IAM reachability analysis — same math).
-      Contracts/SOPs fail test (a) today. Decision: nothing beyond the agent-fleet exploration
-      until the launch of candor-for-code (this product — the Rust/JVM/TS engines) lands.
+      **Database development (assessed 2026-06-11, ranks between fleets and IaC):** the catalog IS
+      the graph (pg_depend; proc bodies via libpg_query — the engine's own parser), units =
+      functions/procs/views/triggers, the literal surface = per-relation read/write (the
+      hosts/cmds/paths analog), dynamic SQL = the reflection analog → Unknown, triggers need
+      clinit-style edge synthesis. The queries: "which procs transitively WRITE ledger.entries"
+      (append-only as a gate), whatif on migrations, rewire on dropped view edges. Prior-art gap is
+      real (lineage tools do pipelines, not the proc call graph + gate + Unknown). **Zero-new-engine
+      first step: app-side TABLE-literal capture in the existing classifiers** (the exact mechanic
+      behind hosts/cmds/paths) → `allow Db in billing ledger.*` policies + a future --link at the
+      Db boundary ("this handler transitively writes payments.ledger, through the app AND the
+      database"). Contracts/SOPs fail test (a) today. The launch landed 2026-06-11; these are now
+      eligible, in rank order, as capacity allows.
 
 - [~] Controlled eval of *edit quality* (not just analysis cost) with independent ground truth and
       multiple trials — **the gate on P0** (see P0 §5). The pilot (`EVAL.md`) showed consumability +
