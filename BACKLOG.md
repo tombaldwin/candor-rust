@@ -409,8 +409,11 @@ sound over-approximation (`Unknown`), which candor already does.
       pays. Ranked candidates:
       1. **Agent fleets** (orchestrators → subagents → tools; effects = tool capability classes;
          `tools:` declarations are static, delegation is CHA-shaped, an undeclared MCP tool is
-         `Unknown`) — same buyers, spec nearly ports as-is. **Exploration started: see
-         `~/git/candor-agents` (local).**
+         `Unknown`) — same buyers, spec nearly ports as-is. **Exploration PUBLISHED:
+         [candor-agents](https://github.com/tombaldwin/candor-agents) — tested (25 checks +
+         a teeth-verified soundness fuzzer), validated on the 36k-star wshobson/agents fleet
+         (headline: 182/192 agents run with ambient authority), combined fleet+code mode
+         linked via the Exec boundary.**
       2. **IaC / CI-CD** (Terraform modules, Actions workflows; effects = cloud-API classes;
          an unpinned third-party action = `Unknown`; OPA gates the plan, nothing gates the
          composition graph transitively).
