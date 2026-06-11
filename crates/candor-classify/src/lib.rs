@@ -883,8 +883,17 @@ pub fn tables_in_sql(sql: &str) -> Vec<String> {
         "union", "all", "distinct", "case", "when", "null", "default", "skip", "nowait", "of",
         "from", "join", "into", "update", "delete", "insert",
     ];
-    let cleaned: String =
-        sql.to_lowercase().chars().map(|c| if matches!(c, '(' | ')' | ',' | ';') { ' ' } else { c }).collect();
+    // `,` survives as its OWN token (not a space): it's what lets `FROM t1, t2` continue the table
+    // list without fabricating from other comma-ridden positions (column lists, ON clauses).
+    let cleaned: String = sql
+        .to_lowercase()
+        .chars()
+        .flat_map(|c| match c {
+            '(' | ')' | ';' => vec![' '],
+            ',' => vec![' ', ',', ' '],
+            _ => vec![c],
+        })
+        .collect();
     let toks: Vec<&str> = cleaned.split_whitespace().collect();
     let Some(first) = toks.first() else { return Vec::new() };
     if !STMT.contains(first) {
@@ -919,8 +928,17 @@ pub fn tables_in_sql(sql: &str) -> Vec<String> {
         while j < toks.len() && SKIP.contains(&toks[j]) {
             j += 1;
         }
-        if let Some(next) = toks.get(j) {
-            push(ident(next));
+        let Some(next) = toks.get(j) else { continue };
+        let Some(first) = ident(next) else { continue };
+        push(Some(first));
+        // Comma-ADJACENT continuation only: `FROM t1, t2, t3` takes all three, while an alias breaks
+        // the chain (`FROM t1 a, t2` keeps just t1 — an under-report, never a guess: skipping an
+        // alias to chase the comma would fabricate tables out of `INSERT INTO t (a, b)`'s column
+        // list, whose parens are spaces by the time we tokenize).
+        while j + 2 < toks.len() && toks[j + 1] == "," {
+            let Some(more) = ident(toks[j + 2]) else { break };
+            push(Some(more));
+            j += 2;
         }
     }
     out
@@ -946,6 +964,14 @@ mod tests {
         // not SQL -> nothing (never fabricate)
         assert_eq!(t("/tmp/some/path"), Vec::<String>::new());
         assert_eq!(t("hello world from nowhere"), Vec::<String>::new());
+        // comma-ADJACENT continuation: a FROM list takes every table in the chain…
+        assert_eq!(t("SELECT a FROM t1, t2, s.t3 WHERE x = 1"), vec!["t1", "t2", "s.t3"]);
+        // …but an alias breaks it (under-report, never a guess)…
+        assert_eq!(t("SELECT a FROM t1 a1, t2 WHERE x = 1"), vec!["t1"]);
+        // …which is exactly what keeps a column list from fabricating (parens are spaces by now).
+        assert_eq!(t("INSERT INTO t (a, b) VALUES (1, 2)"), vec!["t"]);
+        // a subquery after the comma stops the chain too
+        assert_eq!(t("SELECT a FROM t1, (SELECT 1) q"), vec!["t1"]);
     }
 
     use super::*;
