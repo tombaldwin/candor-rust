@@ -77,6 +77,20 @@ fn load_entries(prefix: &str) -> Vec<ReportEntry> {
     out
 }
 
+/// `load_entries`, but a prefix matching NO report files fails LOUD (exit 2) instead of reading as an
+/// empty report. A typo'd prefix otherwise yields an authoritative-looking empty answer — `map`/`where`
+/// printed `{}` and exited 0, which an agent (or a gate built on the output) reads as "no effects"
+/// rather than "wrong path" (found by dogfooding the umbrella AGENTS.md route; `diff`/`rewire` were
+/// already guarded). A legitimately effect-free crate still writes a report file, so "no files" is
+/// always an error, never an empty answer.
+fn load_entries_loud(prefix: &str) -> Result<Vec<ReportEntry>, i32> {
+    if glob_reports(prefix).is_empty() {
+        eprintln!("candor: no report files at prefix `{prefix}` — check the path.");
+        return Err(2);
+    }
+    Ok(load_entries(prefix))
+}
+
 // ── audit ───────────────────────────────────────────────────────────────────────────────────────
 
 /// The basename of a prefix (`.candor/report` → `report`), used to label per-crate report files.
@@ -174,7 +188,15 @@ fn cmd_audit(args: &[String]) -> i32 {
     // are inherited, not guessed) — so they're NOT classifier blind spots, even though the classifier
     // has no rule for them. (E.g. a workspace sibling like `candor_report`.)
     let mut analyzed: BTreeSet<String> = BTreeSet::new();
-    for rf in report_files(pre) {
+    let rfs = report_files(pre);
+    // NO report files is a path error, not an all-pure crate — without this guard the "everything
+    // pure" message below printed for a typo'd prefix, the worst possible misreading (same
+    // no-files-fails-loud rule as the query commands; an effect-free crate still writes a report).
+    if rfs.is_empty() {
+        eprintln!("candor: no report files at prefix `{pre}` — check the path.");
+        return 2;
+    }
+    for rf in rfs {
         let label = format!("{}.{}", rf.krate, rf.kind);
         analyzed.insert(rf.krate.clone());
         let es = std::fs::read_to_string(&rf.path).ok().and_then(|t| report_entries(&t)).unwrap_or_default();
@@ -357,7 +379,10 @@ fn cmd_show(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let all = load_entries(pre);
+    let all = match load_entries_loud(pre) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
     let tier = best_tier(all.iter().map(|e| e.func.as_str()), q);
     let mut fns: Vec<ReportEntry> = all.into_iter().filter(|e| q_match(&e.func, q, tier)).collect();
     fns.sort_by(|a, b| a.func.cmp(&b.func));
@@ -427,7 +452,10 @@ fn cmd_where(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let all = load_entries(pre);
+    let all = match load_entries_loud(pre) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
     let mut direct: Vec<String> =
         all.iter().filter(|e| e.direct.iter().any(|x| x == eff)).map(|e| e.func.clone()).collect();
     let mut inherit: Vec<String> = all
@@ -484,7 +512,10 @@ fn cmd_callers(args: &[String]) -> i32 {
     // the pinned SPEC §3.1 shape (/code-review). Transitive is necessarily incomplete here (effectful
     // edges only); the sidecar exists to fix that.
     if cg.is_empty() {
-        cg = load_entries(pre).into_iter().map(|e| (e.func, e.calls)).collect();
+        cg = match load_entries_loud(pre) {
+            Ok(v) => v.into_iter().map(|e| (e.func, e.calls)).collect(),
+            Err(c) => return c,
+        };
     }
     callers_via_callgraph(&cg, q, want_json)
 }
@@ -848,9 +879,13 @@ fn cmd_map(args: &[String]) -> i32 {
             return 2;
         }
     };
+    let entries = match load_entries_loud(pre) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
     // module -> (effects, count). Module = fn name with a leading '<' stripped, up to the first '::'.
     let mut mods: BTreeMap<String, (BTreeSet<String>, usize)> = BTreeMap::new();
-    for e in load_entries(pre) {
+    for e in entries {
         // Module = the first path component. For a qualified trait-impl path `<Type as Trait>::m`,
         // that's `Type` — stop at the first of ` as `, `>`, or `::` (whichever comes first) so the
         // bucket isn't the malformed `Type as Trait>`.
@@ -1210,7 +1245,10 @@ fn cmd_impact(args: &[String]) -> i32 {
         eprintln!("usage: candor-query impact <prefix> <fn-substring> [--json]");
         return 2;
     };
-    let entries = load_entries(pre);
+    let entries = match load_entries_loud(pre) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
     let by_name: HashMap<&str, &ReportEntry> =
         entries.iter().map(|e| (e.func.as_str(), e)).collect();
     let target = entries
@@ -1301,7 +1339,10 @@ fn cmd_path(args: &[String]) -> i32 {
         return 2;
     };
     let effect = effect.as_str();
-    let entries = load_entries(pre);
+    let entries = match load_entries_loud(pre) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
     let by_name: HashMap<&str, &ReportEntry> =
         entries.iter().map(|e| (e.func.as_str(), e)).collect();
     let start = entries
@@ -1396,7 +1437,10 @@ fn cmd_reachable(args: &[String]) -> i32 {
         eprintln!("usage: candor-query reachable <prefix> [--json]");
         return 2;
     };
-    let entries = load_entries(pre);
+    let entries = match load_entries_loud(pre) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
     let roots: Vec<&ReportEntry> = entries.iter().filter(|e| e.entry_point).collect();
     let mut by_eff: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for e in &roots {
@@ -1464,6 +1508,10 @@ fn cmd_containment(args: &[String]) -> i32 {
         eprintln!("usage: candor-query containment <prefix> [baseline_prefix] [--json]");
         return 2;
     };
+    if glob_reports(cur_pre).is_empty() {
+        eprintln!("candor: no report files at prefix `{cur_pre}` — check the path.");
+        return 2;
+    }
     let cur = load_fninfo(cur_pre);
     let names: Vec<&String> = cur.keys().collect();
     let pl = common_prefix_len(&names);
@@ -1609,7 +1657,10 @@ fn cmd_receipt(args: &[String]) -> i32 {
         return 2;
     };
     let base = prefix_base(pre);
-    let fns = load_entries(pre);
+    let fns = match load_entries_loud(pre) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
     let (tally, unresolved) = tally_effects(&fns);
     let unresolved = unresolved.len();
     // The receipt's own display order (Db-first), preserved byte-for-byte from the Python it replaces.
@@ -1655,6 +1706,15 @@ fn cmd_gains(args: &[String]) -> i32 {
             return 2;
         }
     };
+    // Same no-files-fails-loud rule as cmd_diff, and for the same reason: a typo'd current prefix
+    // shows zero gains (a gate built on this silently PASSES); a typo'd baseline shows every effect
+    // as newly gained.
+    for (which, pre) in [("current", cur_pre), ("baseline", base_pre)] {
+        if glob_reports(pre).is_empty() {
+            eprintln!("candor: no report files at {which} prefix `{pre}` — check the path.");
+            return 2;
+        }
+    }
     let cur = load_fninfo(cur_pre);
     let base = load_fninfo(base_pre);
     let empty = BTreeSet::new();
