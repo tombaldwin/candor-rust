@@ -715,12 +715,14 @@ fn main() {
     let mut prefix = String::new();
     let mut want_json = false;
     let mut include_tests = false;
+    let mut policy_path: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--out" => prefix = it.next().cloned().unwrap_or_default(),
             "--json" => want_json = true,
             "--include-tests" => include_tests = true,
+            "--policy" => policy_path = it.next().cloned(),
             "-V" | "--version" => {
                 println!("candor-scan {}", env!("CARGO_PKG_VERSION"));
                 return;
@@ -728,7 +730,7 @@ fn main() {
             "-h" | "--help" => {
                 println!("candor-scan {} — stable-Rust effect scanner (no nightly)", env!("CARGO_PKG_VERSION"));
                 println!();
-                println!("USAGE:  candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests]");
+                println!("USAGE:  candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests] [--policy <file>]");
                 println!();
                 println!("  <dir>             crate root to scan (default: .)");
                 println!("  --out <prefix>    report path prefix (default: <dir>/.candor/report);");
@@ -736,6 +738,10 @@ fn main() {
                 println!("  --json            print the report to stdout instead of writing files");
                 println!("  --include-tests   also scan tests/ benches/ examples/ and #[cfg(test)] modules");
                 println!("                    (off by default → the report describes the crate, not its harness)");
+                println!("  --policy <file>   enforce a CANDOR_POLICY file (deny/pure/allow/forbid, spec §6.2)");
+                println!("                    over this scan; exit 1 on violation. ADVISORY FLOOR: the syntactic");
+                println!("                    backend under-reports, so a miss can pass — the nightly engine is");
+                println!("                    the sound gate. (CANDOR_POLICY env is honoured when flag absent.)");
                 println!("  -V, --version     print version");
                 println!();
                 println!("Syntactic, so it under-reports vs the full candor nightly lint (no Unknown). It never");
@@ -980,6 +986,122 @@ fn main() {
             entries.len()
         );
     }
+
+    // The stable policy gate (spec §6.2 / AS-EFF-006/008/009) — the ADVISORY FLOOR. The syntactic
+    // backend under-reports (a missed effect can pass), so this is a floor, never the sound gate
+    // (that's the nightly engine / the JVM engine). It still catches every boundary crossing the
+    // scan CAN see, deterministically, with zero extra install.
+    if let Some(pp) = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok()) {
+        let Ok(text) = std::fs::read_to_string(&pp) else {
+            // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
+            eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
+            std::process::exit(2);
+        };
+        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc);
+        for line in &v {
+            println!("{line}");
+        }
+        if v.is_empty() {
+            eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
+        } else {
+            eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Evaluate a CANDOR_POLICY (parsed by the SHARED §6.2 parser in candor-classify, so this gate can
+/// never disagree with the nightly/JVM gates on grammar) over a finished scan. Returns one line per
+/// violation: deny/pure (AS-EFF-006) against the transitive `inferred` sets, literal allowlists
+/// (AS-EFF-008) against the transitive hosts/cmds/paths surfaces, layering `forbid A -> B`
+/// (AS-EFF-009) by reachability over the local call graph.
+fn policy_violations(
+    policy_text: &str,
+    all: &[String],
+    inferred: &HashMap<String, BTreeSet<&'static str>>,
+    calls: &HashMap<String, BTreeSet<String>>,
+    hostsacc: &HashMap<String, BTreeSet<String>>,
+    cmdsacc: &HashMap<String, BTreeSet<String>>,
+    pathsacc: &HashMap<String, BTreeSet<String>>,
+) -> Vec<String> {
+    use candor_classify::policy::{literal_allowed, parse_policy, scope_matches};
+    let p = parse_policy(policy_text);
+    let empty: BTreeSet<&'static str> = BTreeSet::new();
+    let mut out = Vec::new();
+    for q in all {
+        let inf = inferred.get(q).unwrap_or(&empty);
+        // AS-EFF-006 — deny/pure: forbidden effects in the transitive set.
+        for r in &p.rules {
+            if let Some(s) = &r.scope {
+                if !scope_matches(q, s) {
+                    continue;
+                }
+            }
+            let hits: Vec<&str> = if r.effects.is_empty() {
+                inf.iter().copied().collect() // `pure` — ANY effect (Unknown included: not certifiably pure)
+            } else {
+                inf.iter().copied().filter(|e| r.effects.contains(e)).collect()
+            };
+            if !hits.is_empty() {
+                out.push(format!("[AS-EFF-006] `{q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw));
+            }
+        }
+        // AS-EFF-008 — literal allowlists over the transitive literal surfaces.
+        for r in &p.allow_rules {
+            if let Some(s) = &r.scope {
+                if !scope_matches(q, s) {
+                    continue;
+                }
+            }
+            if !inf.contains(r.effect) {
+                continue;
+            }
+            let lits = match r.effect {
+                "Net" => hostsacc.get(q),
+                "Exec" => cmdsacc.get(q),
+                _ => pathsacc.get(q),
+            };
+            match lits {
+                Some(ls) if !ls.is_empty() => {
+                    let bad: Vec<&str> =
+                        ls.iter().filter(|l| !literal_allowed(r.effect, l, &r.literals)).map(String::as_str).collect();
+                    if !bad.is_empty() {
+                        out.push(format!("[AS-EFF-008] `{q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw));
+                    }
+                }
+                _ => out.push(format!(
+                    "[AS-EFF-008] `{q}` performs {} with no visible literal — the surface cannot be certified: `{}`",
+                    r.effect, r.raw
+                )),
+            }
+        }
+        // AS-EFF-009 — layering: no fn in scope A may transitively reach scope B.
+        for r in &p.layer_rules {
+            if !scope_matches(q, &r.from) {
+                continue;
+            }
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            let mut stack: Vec<&str> = calls.get(q).map(|cs| cs.iter().map(String::as_str).collect()).unwrap_or_default();
+            let mut hit: Option<&str> = None;
+            while let Some(n) = stack.pop() {
+                if !seen.insert(n) {
+                    continue;
+                }
+                if scope_matches(n, &r.to) {
+                    hit = Some(n);
+                    break;
+                }
+                if let Some(cs) = calls.get(n) {
+                    stack.extend(cs.iter().map(String::as_str));
+                }
+            }
+            if let Some(h) = hit {
+                out.push(format!("[AS-EFF-009] `{q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The last two `::`-segments of a path (`a::b::Type::new` → `Type::new`), the key used to resolve a
@@ -1339,6 +1461,31 @@ mod tests {
         assert!(!is_test_file_stem("request"));
         assert!(!is_test_file_stem("contest"));
         assert!(!is_test_file_stem("lib"));
+    }
+
+    #[test]
+    fn stable_policy_gate_evaluates_all_three_rule_kinds() {
+        let all = vec!["api::handle".to_string(), "db::run".to_string(), "ui::draw".to_string()];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inferred.insert("api::handle".into(), ["Net"].into_iter().collect());
+        inferred.insert("db::run".into(), ["Db"].into_iter().collect());
+        let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+        calls.insert("ui::draw".into(), ["db::run".to_string()].into_iter().collect());
+        let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
+        hosts.insert("api::handle".into(), ["evil.example.com".to_string()].into_iter().collect());
+        let empty = HashMap::new();
+        // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
+        let v = policy_violations(
+            "deny Net api\nallow Net in api good.example.com\nforbid ui -> db\n",
+            &all, &inferred, &calls, &hosts, &empty, &empty,
+        );
+        assert_eq!(v.len(), 3, "{v:?}");
+        assert!(v.iter().any(|l| l.contains("[AS-EFF-006]") && l.contains("api::handle")));
+        assert!(v.iter().any(|l| l.contains("[AS-EFF-008]") && l.contains("evil.example.com")));
+        assert!(v.iter().any(|l| l.contains("[AS-EFF-009]") && l.contains("ui::draw")));
+        // clean policy -> no violations; `pure` flags ANY effect incl. the Db fn.
+        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty).is_empty());
+        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty).len(), 1);
     }
 
     #[test]

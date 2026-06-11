@@ -21,6 +21,17 @@ diverged from the 0.3.2 source tree). Surfaced by a maximum-effort multi-agent `
 report is bumped in lockstep (unchanged content) to keep the three crates' shared version and their
 inter-crate `version =` dependencies resolvable on crates.io.
 
+## [0.3.3] — 2026-06-11 (candor-scan only)
+
+### Added
+
+- **`--policy <file>` / `CANDOR_POLICY` — the stable policy-gate floor.** The published scanner can now
+  enforce a spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid`; AS-EFF-006/008/009) over its own scan and
+  fail the build, with zero extra install. Explicitly the **advisory floor**: the syntactic backend
+  under-reports, so a clean run is necessary, never sufficient — the nightly engine remains the sound
+  gate. Shares the §6.2 parser with the nightly and JVM gates (one grammar, everywhere); an unreadable
+  policy file exits 2 loudly rather than silently not enforcing.
+
 ## [0.3.2] — 2026-06-10 (crates: candor-report / candor-classify / candor-scan, lockstep)
 
 The "validated everywhere" release: 18 product fixes found by systematic validation (blackout screens,

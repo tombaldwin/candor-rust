@@ -40,9 +40,16 @@ under-report, never a wrong label.
   nightly lint has (the soundness fuzzer locks all of them against the lint: forms `op_add`/`index`/
   `deref`/`try_from`/`await_poll`/`drop`/`iterator`/`eq`/`add_assign`).
 
-For the soundness contract (`Unknown` over-approximation), conformance checking, and the policy/guard
-CI gates, use the full nightly [candor](https://github.com/tombaldwin/candor-rust) lint. The two share one
-classifier, so they never disagree on what counts as an effect.
+**The policy gate floor.** `candor-scan <dir> --policy <file>` (or `CANDOR_POLICY=…`) enforces a
+spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid` — parsed by the same shared grammar as the nightly and
+JVM gates) over the scan and exits 1 on violation. It is the **advisory floor**: the syntactic backend
+under-reports, so a missed effect can pass — a clean run is necessary, never sufficient. It still
+catches every boundary crossing the scan *can* see, deterministically, with zero extra install.
+
+For the soundness contract (`Unknown` over-approximation), conformance checking, and the **sound**
+policy/guard CI gates, use the full nightly [candor](https://github.com/tombaldwin/candor-rust) lint. The
+two share one classifier and one policy parser, so they never disagree on what counts as an effect or
+what a rule means.
 
 ## Usage
 
