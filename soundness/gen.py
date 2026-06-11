@@ -142,6 +142,24 @@ def edge_forms(callee, i=0):
         "iterator":   (f"for _ in It{i:02d}(true) {{}}", [], [], [
             f"struct It{i:02d}(bool);\nimpl Iterator for It{i:02d} {{ type Item = (); "
             f"fn next(&mut self) -> Option<()> {{ if self.0 {{ self.0 = false; {callee}(); Some(()) }} else {{ None }} }} }}"]),
+        # OPAQUE RETURN (`impl Trait`), concrete hidden type: the effect is in a custom Iterator's
+        # `next()`, returned as `impl Iterator` and consumed via `.next()` ON THE OPAQUE. The analysis
+        # typing env can't resolve a trait method on an opaque Self (`Ok(None)`), so this fell into the
+        # unresolvable-generic-stays-pure calibration: no edge, no `Unknown` — bug #33, found dogfooding
+        # the `which` crate (`which_all(..).and_then(|mut i| i.next())`). devirtualize must RETRY with
+        # opaques revealed (post-analysis env) to pin the concrete local impl. (`mk` only CONSTRUCTS the
+        # iterator — it's correctly pure, so it is NOT in the expected set.)
+        "opaque_iter": (f"{{ let mut it = mk{i:02d}(); let _ = it.next(); }}", [], [], [
+            f"struct Oi{i:02d}(bool);\nimpl Iterator for Oi{i:02d} {{ type Item = (); "
+            f"fn next(&mut self) -> Option<()> {{ if self.0 {{ self.0 = false; {callee}(); Some(()) }} else {{ None }} }} }}",
+            f"fn mk{i:02d}() -> impl Iterator<Item = ()> {{ Oi{i:02d}(true) }}"]),
+        # OPAQUE RETURN hiding a `Box<dyn …>`: same call shape, but the hidden type is a trait object —
+        # is_dyn_receiver must REVEAL the local opaque and walk through the Box to see the `dyn`, or the
+        # call is neither edged nor `Unknown` (the other half of bug #33).
+        "opaque_dyn": (f"{{ let mut it = mkd{i:02d}(); let _ = it.next(); }}", [], [], [
+            f"struct Od{i:02d}(bool);\nimpl Iterator for Od{i:02d} {{ type Item = (); "
+            f"fn next(&mut self) -> Option<()> {{ if self.0 {{ self.0 = false; {callee}(); Some(()) }} else {{ None }} }} }}",
+            f"fn mkd{i:02d}() -> impl Iterator<Item = ()> {{ Box::new(Od{i:02d}(true)) as Box<dyn Iterator<Item = ()>> }}"]),
         # OVERLOADED `==`: `ExprKind::Binary(Eq)` → `PartialEq::eq` — same operator-node family as
         # op_add but a different binop, locked separately.
         "eq":         (f"{{ let _ = Qe{i:02d} == Qe{i:02d}; }}", [], [], [

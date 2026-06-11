@@ -607,7 +607,7 @@ enum Callee {
 /// `Arc<dyn Job>::run(self: Arc<Self>)` (common in actor / async-trait code). Walk through the
 /// std smart pointers (`Box`/`Rc`/`Arc`/`Pin`, which carry their pointee in the first type arg) so a
 /// `dyn` behind one is detected as dynamic — otherwise a non-local `dyn` call gets no honest `Unknown`.
-fn is_dyn_receiver(tcx: TyCtxt<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
+fn is_dyn_receiver<'tcx>(tcx: TyCtxt<'tcx>, ty: rustc_middle::ty::Ty<'tcx>) -> bool {
     use rustc_middle::ty::TyKind;
     let mut ty = ty.peel_refs();
     for _ in 0..8 {
@@ -621,6 +621,21 @@ fn is_dyn_receiver(tcx: TyCtxt<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
                     Some(inner) => ty = inner.peel_refs(),
                     None => return false,
                 }
+            }
+            // An OPAQUE alias (`impl Trait` in return position) whose defining use is in THIS crate:
+            // the hidden type is knowable — reveal it and keep walking. Without this, a method call on
+            // an `impl Iterator` that secretly IS a `Box<dyn Iterator>` fell into the unresolvable-
+            // generic-stays-pure calibration: no edge, no `Unknown` — a silent under-report through a
+            // completely ordinary API shape (`which`'s `all_results().and_then(|mut i| i.next())`;
+            // found by dogfooding the umbrella AGENTS.md route on the `which` crate).
+            TyKind::Alias(alias) => {
+                let rustc_middle::ty::AliasTyKind::Opaque { def_id } = alias.kind else {
+                    return false;
+                };
+                if def_id.as_local().is_none() {
+                    return false;
+                }
+                ty = tcx.type_of(def_id).instantiate(tcx, alias.args).peel_refs();
             }
             _ => return false,
         }
@@ -771,10 +786,24 @@ fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: Def
         | ExprKind::AssignOp(..) => typeck.node_args(expr.hir_id),
         _ => return None,
     };
-    let instance =
-        rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), method_did, args)
-            .ok()
-            .flatten()?;
+    // First under the ordinary analysis typing env; on failure, RETRY with opaques revealed
+    // (post-analysis — what codegen resolves under). The analysis env returns `Ok(None)` when the
+    // receiver's type is an OPAQUE alias (`impl Trait` in return position), so a method call on a
+    // returned `impl Iterator` resolved nowhere and fell into the unresolvable-generic-stays-pure
+    // calibration: no edge, no `Unknown` — a silent under-report through a completely ordinary API
+    // shape (`which`'s `which_all(..).and_then(|mut i| i.next())`, where the hidden type is a local
+    // effectful iterator; found by dogfooding the umbrella AGENTS.md route). Revealing pins the call
+    // to the one concrete impl; a still-generic or still-`dyn` reveal falls through to CHA/`Unknown`
+    // exactly as before, so the retry only ever ADDS resolution, never invents one.
+    let resolve = |env: rustc_middle::ty::TypingEnv<'tcx>,
+                   args: rustc_middle::ty::GenericArgsRef<'tcx>| {
+        rustc_middle::ty::Instance::try_resolve(cx.tcx, env, method_did, args).ok().flatten()
+    };
+    let instance = resolve(cx.typing_env(), args).or_else(|| {
+        let env = cx.typing_env().with_post_analysis_normalized(cx.tcx);
+        let args = cx.tcx.try_normalize_erasing_regions(env, args).unwrap_or(args);
+        resolve(env, args)
+    })?;
     // A `Virtual` instance means resolution did NOT devirtualize — the call is still vtable dispatch
     // (a `dyn` the structural `is_dyn_receiver` check didn't recognise, e.g. behind a custom smart
     // pointer with an arbitrary self type). `instance.def_id()` is then the BODYLESS trait method, so

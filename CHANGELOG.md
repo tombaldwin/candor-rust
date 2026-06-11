@@ -4,6 +4,19 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [Unreleased] (nightly lint)
+
+### Fixed — soundness
+
+- **Method calls on a returned `impl Trait` (opaque) receiver were silently dropped** (bug #33, found
+  by dogfooding the site's primary CTA on the `which` crate: `which()` reported `["Env"]` with
+  `unresolved: false` while truly reaching `Fs` through
+  `which_all(..).and_then(|mut i| i.next())`). Two halves: `devirtualize` now RETRIES resolution under
+  a post-analysis typing env (opaques revealed, as codegen resolves) so the call pins to the concrete
+  local impl — `which` now carries `Fs` via a real edge to `<WhichFindIterator as Iterator>::next`;
+  and `is_dyn_receiver` reveals a local opaque whose hidden type is a `Box<dyn …>` so the dispatch is
+  honestly `Unknown`. Teeth: soundness/gen.py `opaque_iter` + `opaque_dyn` forms.
+
 ## [0.3.3] — 2026-06-10 (crates: candor-report / candor-classify / candor-scan, lockstep)
 
 Republish so the crates.io artifacts carry the fixes committed after 0.3.2 (the published 0.3.2 had
