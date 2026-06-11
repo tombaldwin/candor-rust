@@ -426,11 +426,11 @@ sound over-approximation (`Unknown`), which candor already does.
       hosts/cmds/paths analog), dynamic SQL = the reflection analog → Unknown, triggers need
       clinit-style edge synthesis. The queries: "which procs transitively WRITE ledger.entries"
       (append-only as a gate), whatif on migrations, rewire on dropped view edges. Prior-art gap is
-      real (lineage tools do pipelines, not the proc call graph + gate + Unknown). **Zero-new-engine
-      first step: app-side TABLE-literal capture in the existing classifiers** (the exact mechanic
-      behind hosts/cmds/paths) → `allow Db in billing ledger.*` policies + a future --link at the
-      Db boundary ("this handler transitively writes payments.ledger, through the app AND the
-      database"). Contracts/SOPs fail test (a) today. The launch landed 2026-06-11; these are now
+      real (lineage tools do pipelines, not the proc call graph + gate + Unknown). **First step SHIPPED
+      (2026-06-11, `794ec38` + java `e3e6c55` + spec `9877b43`): the `tables` literal surface +
+      `allow Db in <scope> <table>` gate, both engines, conformance-locked.** Remaining: the
+      DB-side engine (pg_depend/libpg_query) and --link at the Db boundary ("this handler
+      transitively writes payments.ledger, through the app AND the database"). Contracts/SOPs fail test (a) today. The launch landed 2026-06-11; these are now
       eligible, in rank order, as capacity allows.
 
 - [~] Controlled eval of *edit quality* (not just analysis cost) with independent ground truth and
