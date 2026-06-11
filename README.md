@@ -1,5 +1,7 @@
 # candor
 
+<p align="center"><img src="https://raw.githubusercontent.com/tombaldwin/candor/main/assets/beaky.svg" alt="Beaky, the candor canary" width="180"></p>
+
 **Enforce the capability and architectural boundaries that AI-generated code silently crosses — as a
 CI gate you can trust.** candor is a Rust capability/effect checker built as a
 [dylint](https://github.com/trailofbits/dylint) lint (the reference implementation of
