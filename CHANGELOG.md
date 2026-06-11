@@ -20,7 +20,7 @@ behavioural changes (always in the soundness-increasing direction — see the §
   generic-parameter fields are the ureq residual: 14/16 found, never fabricated); PROVE-IT.md
   prompt aligned (callgraph naming convention, `#[cfg(test)]` scope).
 
-## [Unreleased] (nightly lint + candor-scan + candor-classify + candor-query)
+## [0.3.6] — 2026-06-11 (crates: candor-report / candor-classify / candor-scan, lockstep)
 
 ### Added — the Db literal surface (`tables` + `allow Db`)
 
