@@ -4,21 +4,42 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## [0.3.5] — 2026-06-11 (candor-scan only)
+## [0.3.7] — 2026-06-11 (crates: candor-classify / candor-scan lockstep; candor-report unchanged)
 
-### Fixed — resolution (under-reports recovered)
+### Added — the κ-coverage ledger + report chaining (the curation treadmill's exit; SPEC §7.14 / §2)
 
-- **`-> Self` constructors now type their locals.** `let agent = Agent::new_with_defaults();`
-  followed by `agent.run(..)` formed `Self::run` (no local def) and silently dropped the edge —
-  found by the PROVE-IT dogfood on `ureq`, where 3 public API entry points were missing from a
-  16-function blast radius. `Self` in an impl method's return position now resolves to the impl
-  type (also un-defeats the ambiguity check: two same-named `-> Self` ctors on different types no
-  longer collide as "Self" == "Self").
-- **Tuple-struct fields index by position**, so a newtype-wrapped receiver (`self.0.run()`,
-  chained `self.0.0`) resolves like a named field.
-- README "Misses" updated to the measured blind-spot list (Deref-coercion receivers and
-  generic-parameter fields are the ureq residual: 14/16 found, never fabricated); PROVE-IT.md
-  prompt aligned (callgraph naming convention, `#[cfg(test)]` scope).
+- **The κ-coverage ledger:** the receipt names every `Cargo.toml` dependency the code demonstrably
+  calls that the classifier knows nothing about — `κ doesn't know N dependencies … effects through
+  them are INVISIBLE (not Unknown)`. Per-scan evidence instead of a doc footnote. Exempt: the
+  platform frontier, calibrated crates, and crates a chained report covers (an all-pure dep's EMPTY
+  report registers as covered — its emptiness is the purity claim).
+- **`CANDOR_DEPS` chaining:** reports now carry the §2 join key (`hash: crate#qual`), and an
+  unclassified call into a crate a sibling report covers inherits its effects AND literal surfaces
+  (unambiguous tail-first join; a report from a different scanner version downgrades to `Unknown`,
+  §2.1).
+- **`--deps`:** scan the whole Cargo.lock dependency tree (unbuilt registry sources, in-process —
+  the self-gate's own `deny Exec` forbids the spawn-yourself shortcut) into `.candor/deps/`, then
+  scan the root chained over it. Measured on a real 328-dep app: 75s one-time (~0.23s/dep, cached
+  after), the ledger dropping 12 unlisted deps → 1 (the path dep), 7 fns gaining real effects.
+
+### Added — local-trait dispatch (syntactic CHA; SPEC §4 bounded-CHA discipline)
+
+- A dispatch-typed receiver — `&dyn T` / `impl T` / generic `X: T` (inline or where-clause), through
+  `Box`/`Rc`/`Arc`/`RefCell`/`Mutex`/`RwLock`, as a param, let, or STRUCT FIELD — resolves to the
+  trait's local implementors when narrow (≤12, the cross-engine bound), so the DI pattern
+  (`self.store.save()` → `PgStore::save`) carries its effects on the stable scanner. A local trait
+  with no visible impl (or too many, or an ambiguous name) reads honest `Unknown` — the previous
+  SILENT miss, closed. External traits stay out (no `impl Iterator` flood); A/B on six real crates:
+  five byte-identical, zero fabricated effects.
+
+### Added — classifier (candor-classify)
+
+- The **entropy tier**: `SaltString::generate` (argon2/scrypt/pbkdf2/password_hash), bcrypt's
+  `hash`/`hash_with_result`, and `rand_core`'s OsRng surface → `Rand` (the TS engine's CTA lesson,
+  found by the ledger's first probe).
+- **Comma-list FROM extraction**: `SELECT a FROM t1, t2, t3` yields all three tables
+  (comma-adjacent continuation; an alias breaks the chain — the fabrication guard for column
+  lists). Pinned three-way by the conformance vector battery (20 vectors).
 
 ## [0.3.6] — 2026-06-11 (crates: candor-report / candor-classify / candor-scan, lockstep)
 
@@ -35,6 +56,22 @@ behavioural changes (always in the soundness-increasing direction — see the §
   reach. "Billing may only touch `ledger.*`" is now a deterministic CI rule. Both engines (the JVM
   engine shipped the same change in lockstep); the conformance grammar battery covers the new rule.
   This is also the zero-new-engine first step of the database-development transfer (BACKLOG P5).
+
+## [0.3.5] — 2026-06-11 (candor-scan only)
+
+### Fixed — resolution (under-reports recovered)
+
+- **`-> Self` constructors now type their locals.** `let agent = Agent::new_with_defaults();`
+  followed by `agent.run(..)` formed `Self::run` (no local def) and silently dropped the edge —
+  found by the PROVE-IT dogfood on `ureq`, where 3 public API entry points were missing from a
+  16-function blast radius. `Self` in an impl method's return position now resolves to the impl
+  type (also un-defeats the ambiguity check: two same-named `-> Self` ctors on different types no
+  longer collide as "Self" == "Self").
+- **Tuple-struct fields index by position**, so a newtype-wrapped receiver (`self.0.run()`,
+  chained `self.0.0`) resolves like a named field.
+- README "Misses" updated to the measured blind-spot list (Deref-coercion receivers and
+  generic-parameter fields are the ureq residual: 14/16 found, never fabricated); PROVE-IT.md
+  prompt aligned (callgraph naming convention, `#[cfg(test)]` scope).
 
 ## [Unreleased] (nightly lint)
 
