@@ -33,8 +33,14 @@ under-report, never a wrong label.
   function `Unknown` rather than silently certifying it pure, and propagates that like any effect (so
   the receipt's unresolved count is truthful, not a hardcoded 0). A LOCAL closure whose body IS visible
   (`let f = |..| ..; f()`) is NOT flagged — its effects were already walked lexically.
-- **Misses (silently):** effects reached only through trait-object (`dyn`) dispatch on an uninferrable
-  receiver, **`Deref`-coercion receivers** (`self.agent.run()` where the field is a wrapper that derefs
+- **Local-trait dispatch (syntactic CHA):** a dispatch-typed receiver — `&dyn Store` / `impl Store` /
+  `S: Store` param, a `Box<dyn Store>` field or let — resolves to the trait's LOCAL implementors when
+  the dispatch is narrow (≤12 impls, the JVM engine's bound), so the DI pattern (`self.store.save()`
+  → `PgStore::save`) carries its effects. A local trait with no visible impl, an over-broad impl set,
+  or an ambiguous trait name reads honest `Unknown` instead. Dispatch through an EXTERNAL trait
+  (`impl Iterator`, serde's traits) is deliberately left out — flagging every combinator would flood.
+- **Misses (silently):** effects reached only through external-trait (`dyn`) dispatch or an
+  uninferrable receiver, **`Deref`-coercion receivers** (`self.agent.run()` where the field is a wrapper that derefs
   to the type owning `run`), **generic-parameter fields** (`struct B<S>(S)` — `self.0.method()` can't be
   typed without instantiating `S`), overloaded operators / `?` / `.await` desugars, RAII drops (an
   effectful `Drop::drop` has no call expression — it runs at scope end), a custom `Iterator::next`

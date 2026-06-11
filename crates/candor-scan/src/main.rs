@@ -81,11 +81,38 @@ type FieldIndex = HashMap<String, HashMap<String, String>>;
 /// (no guess), like the unique-leaf call-graph rule.
 type ReturnIndex = HashMap<String, String>;
 
+/// `trait leaf -> the local types that `impl Trait for Type` it` — the syntactic CHA universe for
+/// dispatch-typed receivers (the JVM engine's bounded-CHA move, done on syntax). Keyed by leaf like
+/// the other name indexes; includes impls of EXTERNAL traits for local types (the JVM resolves
+/// interface impls the same way regardless of where the interface is declared).
+type TraitImplIndex = HashMap<String, Vec<String>>;
+/// `struct leaf -> field name -> trait bound leaves` for dispatch-typed FIELDS (`store: Box<dyn
+/// Store>`) — the DI pattern `self.store.save()`, which `FieldIndex` can't carry (no concrete type).
+type TraitFieldIndex = HashMap<String, HashMap<String, Vec<String>>>;
+
+/// The trait indexes Pass A builds (impl universe, declaration counts, dispatch-typed fields),
+/// bundled so Pass B threads one handle instead of three more arguments.
+#[derive(Clone, Copy)]
+struct TraitIndexes<'a> {
+    impls: &'a TraitImplIndex,
+    decls: &'a HashMap<String, usize>,
+    fields: &'a TraitFieldIndex,
+}
+
 struct CallCollector<'a> {
     uses: &'a HashMap<String, String>,
     /// local variable / param / `self` -> expanded type path, grown as `let`s are visited in order.
     vars: HashMap<String, String>,
+    /// local variable / param -> trait bound leaves, for dispatch-typed receivers (`t: &dyn Store`,
+    /// `s: impl Store`, `x: X` under `X: Store`). Disjoint from `vars` (no concrete type to put there).
+    trait_vars: HashMap<String, Vec<String>>,
     fields: &'a FieldIndex,
+    trait_fields: &'a TraitFieldIndex,
+    /// trait leaf -> local impl types (None entries never exist; absent = no local impl).
+    trait_impls: &'a TraitImplIndex,
+    /// leaf -> how many local `trait` declarations share it (ambiguity check: two same-named local
+    /// traits would smear each other's impls — Unknown instead of a possibly-wrong edge).
+    local_traits: &'a HashMap<String, usize>,
     returns: &'a ReturnIndex,
     calls: Vec<Call>,
     /// locals bound to a closure (`let f = |..| ..`), so a later `f()` is recognised as a closure
@@ -97,6 +124,81 @@ struct CallCollector<'a> {
 
 fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
+}
+
+/// The trait leaves of a type-param-bound list (`T: Store + Send` -> ["Store", "Send"]). Marker
+/// bounds need no filtering here: a leaf only ever matters if it later matches a local trait or a
+/// local impl, and nobody locally declares `trait Send`.
+fn bound_leaves(bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>) -> Vec<String> {
+    bounds
+        .iter()
+        .filter_map(|b| match b {
+            syn::TypeParamBound::Trait(t) => t.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The trait bound leaves of a DISPATCH-typed `syn::Type`: `&dyn T`, `impl T`, `Box<dyn T>` (and the
+/// other single-arg smart pointers), or a bare generic param `X` declared `X: T`. Returns empty for
+/// a concrete type — `type_path` owns those.
+fn trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<String>>) -> Vec<String> {
+    match ty {
+        syn::Type::Reference(r) => trait_leaves(&r.elem, generic_bounds),
+        syn::Type::Paren(p) => trait_leaves(&p.elem, generic_bounds),
+        syn::Type::Group(g) => trait_leaves(&g.elem, generic_bounds),
+        syn::Type::TraitObject(t) => bound_leaves(&t.bounds),
+        syn::Type::ImplTrait(t) => bound_leaves(&t.bounds),
+        syn::Type::Path(p) => {
+            if let Some(id) = p.path.get_ident() {
+                return generic_bounds.get(&id.to_string()).cloned().unwrap_or_default();
+            }
+            // Box<dyn T> / Rc / Arc / RefCell / Mutex / RwLock — peel the wrapper, recurse on the arg.
+            let Some(seg) = p.path.segments.last() else { return Vec::new() };
+            let wrapper = matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc" | "RefCell" | "Mutex" | "RwLock" | "Cell");
+            if !wrapper {
+                return Vec::new();
+            }
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return Vec::new() };
+            args.args
+                .iter()
+                .find_map(|a| match a {
+                    syn::GenericArgument::Type(inner) => Some(trait_leaves(inner, generic_bounds)),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `X -> [trait leaves]` for a signature's generic params, from both inline bounds (`fn f<X: Store>`)
+/// and where-clauses (`where X: Store`).
+fn generic_bounds_of(sig: &syn::Signature) -> HashMap<String, Vec<String>> {
+    let mut m: HashMap<String, Vec<String>> = HashMap::new();
+    for gp in &sig.generics.params {
+        if let syn::GenericParam::Type(tp) = gp {
+            let leaves = bound_leaves(&tp.bounds);
+            if !leaves.is_empty() {
+                m.entry(tp.ident.to_string()).or_default().extend(leaves);
+            }
+        }
+    }
+    if let Some(w) = &sig.generics.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                if let syn::Type::Path(p) = &pt.bounded_ty {
+                    if let Some(id) = p.path.get_ident() {
+                        let leaves = bound_leaves(&pt.bounds);
+                        if !leaves.is_empty() {
+                            m.entry(id.to_string()).or_default().extend(leaves);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    m
 }
 
 /// The (use-expanded) type path of a `syn::Type`, ignoring references and generic args:
@@ -279,6 +381,35 @@ impl<'a> CallCollector<'a> {
             _ => None,
         }
     }
+
+    /// The trait bounds of a DISPATCH-typed receiver — a `&dyn T`/`impl T`/generic param (via
+    /// `trait_vars`) or a trait-typed field (`self.store` where `store: Box<dyn Store>`, via
+    /// `trait_fields`). Empty when the receiver has a concrete type (`resolve_recv_type` owns it)
+    /// or can't be resolved at all.
+    fn resolve_recv_traits(&self, expr: &syn::Expr) -> Vec<String> {
+        match expr {
+            syn::Expr::Reference(r) => self.resolve_recv_traits(&r.expr),
+            syn::Expr::Paren(p) => self.resolve_recv_traits(&p.expr),
+            syn::Expr::Group(g) => self.resolve_recv_traits(&g.expr),
+            syn::Expr::Try(t) => self.resolve_recv_traits(&t.expr),
+            syn::Expr::Await(a) => self.resolve_recv_traits(&a.base),
+            syn::Expr::Path(p) => p
+                .path
+                .get_ident()
+                .and_then(|id| self.trait_vars.get(&id.to_string()).cloned())
+                .unwrap_or_default(),
+            syn::Expr::Field(f) => {
+                let Some(base) = self.resolve_recv_type(&f.base) else { return Vec::new() };
+                let key = match &f.member {
+                    syn::Member::Named(field) => field.to_string(),
+                    syn::Member::Unnamed(idx) => idx.index.to_string(),
+                };
+                let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
@@ -340,6 +471,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 let path = format!("{ty}::{leaf}");
                 self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true });
             }
+        } else {
+            // DISPATCH-typed receiver (`&dyn T` / `impl T` / `X: T` / a `Box<dyn T>` field): no
+            // concrete type to classify against — previously a SILENT miss (the documented
+            // trait-object hole). The JVM engine's bounded-CHA lesson, done on syntax:
+            //  - the trait has local impls and the dispatch is narrow (≤12, the JVM's bound) →
+            //    resolve to every local implementor's method (an over-approximation, like CHA);
+            //  - too many impls, an ambiguous trait leaf, or a local trait with no visible impl →
+            //    honest `Unknown` (something implements it somewhere the scan can't see);
+            //  - an EXTERNAL trait with no local impls stays out entirely: flagging every
+            //    `impl Iterator` combinator would re-create the Unknown flood this engine
+            //    calibrated away.
+            for tr in self.resolve_recv_traits(&node.receiver) {
+                let ambiguous = self.local_traits.get(&tr).copied().unwrap_or(0) > 1;
+                match self.trait_impls.get(&tr) {
+                    Some(impls) if !ambiguous && impls.len() <= 12 => {
+                        for ty in impls {
+                            self.calls.push(Call {
+                                path: format!("{ty}::{leaf}"),
+                                leaf: leaf.clone(),
+                                str_arg: str_arg.clone(),
+                                typed: true,
+                                method: true,
+                            });
+                        }
+                    }
+                    Some(_) => self.unresolved = true,
+                    None if self.local_traits.contains_key(&tr) => self.unresolved = true,
+                    None => {}
+                }
+            }
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -348,7 +509,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // calls on `x` resolve. Visited in source order, before any use of `x` (Rust requires it).
         if let syn::Pat::Type(pt) = &node.pat {
             if let syn::Pat::Ident(id) = &*pt.pat {
-                if let Some(ty) = type_path(&pt.ty, self.uses) {
+                // Dispatch-typing first (`let s: Box<dyn Store>` reads as concrete `Box` otherwise).
+                let leaves = trait_leaves(&pt.ty, &HashMap::new());
+                if !leaves.is_empty() {
+                    self.trait_vars.insert(id.ident.to_string(), leaves);
+                } else if let Some(ty) = type_path(&pt.ty, self.uses) {
                     self.vars.insert(id.ident.to_string(), ty);
                 }
             }
@@ -452,6 +617,7 @@ fn scan_items(
     include_tests: bool,
     fields: &FieldIndex,
     returns: &ReturnIndex,
+    traits: TraitIndexes,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -465,7 +631,7 @@ fn scan_items(
         match it {
             syn::Item::Fn(f) => {
                 let n = f.sig.ident.to_string();
-                out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields, returns));
+                out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields, returns, traits));
             }
             syn::Item::Impl(im) => {
                 let tyname = impl_type_name(&im.self_ty);
@@ -476,7 +642,7 @@ fn scan_items(
                             Some(t) => qual(&format!("{t}::{n}")),
                             None => qual(&n),
                         };
-                        out.push(fninfo(&n, &q, file, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns));
+                        out.push(fninfo(&n, &q, file, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits));
                     }
                 }
             }
@@ -487,7 +653,7 @@ fn scan_items(
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, file, include_tests, fields, returns, &mut subuses, out);
+                    scan_items(inner, &sub, file, include_tests, fields, returns, traits, &mut subuses, out);
                 }
             }
             _ => {}
@@ -514,6 +680,24 @@ fn seed_vars(sig: &syn::Signature, self_ty: Option<&str>, uses: &HashMap<String,
     vars
 }
 
+/// The dispatch-typed counterpart of `seed_vars`: params whose type is a trait bound rather than a
+/// concrete path (`t: &dyn Store`, `s: impl Store`, `x: X` under `X: Store`) -> their bound leaves.
+fn seed_trait_vars(sig: &syn::Signature) -> HashMap<String, Vec<String>> {
+    let gb = generic_bounds_of(sig);
+    let mut m = HashMap::new();
+    for arg in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            if let syn::Pat::Ident(id) = &*pt.pat {
+                let leaves = trait_leaves(&pt.ty, &gb);
+                if !leaves.is_empty() {
+                    m.insert(id.ident.to_string(), leaves);
+                }
+            }
+        }
+    }
+    m
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fninfo(
     leaf: &str,
@@ -525,6 +709,7 @@ fn fninfo(
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
     returns: &ReturnIndex,
+    traits: TraitIndexes,
 ) -> FnInfo {
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
@@ -546,11 +731,22 @@ fn fninfo(
         merged = m;
         &merged
     };
-    let vars = seed_vars(sig, self_ty, uses);
+    // Dispatch-typing WINS where both could apply: `x: X` under `X: Store` also looks like a
+    // concrete type `X` to `type_path` (and `Box<dyn Store>` looks like `Box`), which would shadow
+    // the CHA route with a meaningless receiver type.
+    let trait_vars = seed_trait_vars(sig);
+    let mut vars = seed_vars(sig, self_ty, uses);
+    for k in trait_vars.keys() {
+        vars.remove(k);
+    }
     let mut c = CallCollector {
         uses,
         vars,
+        trait_vars,
         fields,
+        trait_fields: traits.fields,
+        trait_impls: traits.impls,
+        local_traits: traits.decls,
         returns,
         calls: Vec::new(),
         closure_vars: std::collections::HashSet::new(),
@@ -607,18 +803,23 @@ fn record_return(
 /// (`create_pool -> sqlx::Pool`), expanded via each module's `use` map. Recurses into modules like
 /// `scan_items`. Field index keyed by struct leaf; return map keyed by fn leaf (ambiguous names dropped
 /// by the caller). A name collision is rare and at worst yields a wrong (still verb-gated) classify.
+#[allow(clippy::too_many_arguments)]
 fn collect_decls(
     items: &[syn::Item],
     include_tests: bool,
     uses: &mut HashMap<String, String>,
     fields: &mut FieldIndex,
     rets: &mut HashMap<String, Option<String>>,
+    trait_impls: &mut TraitImplIndex,
+    local_traits: &mut HashMap<String, usize>,
+    trait_fields: &mut TraitFieldIndex,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
             collect_use(&u.tree, String::new(), uses);
         }
     }
+    let no_generics = HashMap::new();
     for it in items {
         match it {
             syn::Item::Struct(s) => {
@@ -634,7 +835,15 @@ fn collect_decls(
                                 continue;
                             }
                             if let Some(name) = &f.ident {
-                                if let Some(ty) = type_path(&f.ty, uses) {
+                                // Dispatch-typing first: `store: Box<dyn Store>` reads as concrete
+                                // `Box` to `type_path`, which would shadow the CHA route.
+                                let leaves = trait_leaves(&f.ty, &no_generics);
+                                if !leaves.is_empty() {
+                                    trait_fields
+                                        .entry(s.ident.to_string())
+                                        .or_default()
+                                        .insert(name.to_string(), leaves);
+                                } else if let Some(ty) = type_path(&f.ty, uses) {
                                     entry.insert(name.to_string(), ty);
                                 }
                             }
@@ -658,8 +867,17 @@ fn collect_decls(
                 }
             }
             syn::Item::Fn(f) => record_return(&f.sig, uses, rets, None),
+            syn::Item::Trait(t) => {
+                *local_traits.entry(t.ident.to_string()).or_insert(0) += 1;
+            }
             syn::Item::Impl(im) => {
                 let self_ty = impl_type_name(&im.self_ty);
+                // `impl Trait for Type` — a CHA edge from the trait leaf to the implementing type.
+                if let (Some((_, tr, _)), Some(ty)) = (&im.trait_, &self_ty) {
+                    if let Some(leaf) = tr.segments.last() {
+                        trait_impls.entry(leaf.ident.to_string()).or_default().push(ty.clone());
+                    }
+                }
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
                         record_return(&m.sig, uses, rets, self_ty.as_deref());
@@ -676,7 +894,7 @@ fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, rets);
+                    collect_decls(inner, include_tests, &mut subuses, fields, rets, trait_impls, local_traits, trait_fields);
                 }
             }
             _ => {}
@@ -854,23 +1072,30 @@ fn main() {
     }
 
     // Pass A — index struct field types and function return types crate-wide, so a method call on
-    // `self.field` or on the result of a local factory function can be typed and classified.
+    // `self.field` or on the result of a local factory function can be typed and classified. The
+    // trait indexes ride along: impl universe + declaration counts + dispatch-typed fields, for the
+    // syntactic-CHA resolution of `dyn`/`impl Trait`/generic-bound receivers.
     let mut fields: FieldIndex = HashMap::new();
     let mut rets_tmp: HashMap<String, Option<String>> = HashMap::new();
+    let mut trait_impls: TraitImplIndex = HashMap::new();
+    let mut trait_decls: HashMap<String, usize> = HashMap::new();
+    let mut trait_fields: TraitFieldIndex = HashMap::new();
     for (_, file) in &parsed {
         let mut uses = HashMap::new();
-        collect_decls(&file.items, include_tests, &mut uses, &mut fields, &mut rets_tmp);
+        collect_decls(&file.items, include_tests, &mut uses, &mut fields, &mut rets_tmp,
+                      &mut trait_impls, &mut trait_decls, &mut trait_fields);
     }
     // Keep only unambiguous fn-leaf -> return-type mappings (a name with conflicting return types was
     // marked `None`); a guessed type would mis-classify.
     let returns: ReturnIndex = rets_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+    let traits = TraitIndexes { impls: &trait_impls, decls: &trait_decls, fields: &trait_fields };
 
     // Pass B — collect each function's calls (now with receiver-type inference available).
     let mut fns: Vec<FnInfo> = Vec::new();
     for (rel, file) in &parsed {
         let modpath = module_path(Path::new(rel));
         let mut uses = HashMap::new();
-        scan_items(&file.items, &modpath, rel, include_tests, &fields, &returns, &mut uses, &mut fns);
+        scan_items(&file.items, &modpath, rel, include_tests, &fields, &returns, traits, &mut uses, &mut fns);
     }
 
     // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
@@ -1392,10 +1617,15 @@ mod tests {
         )
         .unwrap();
         let returns = ReturnIndex::new();
+        let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let mut c = CallCollector {
             uses: &uses,
             vars: HashMap::new(),
+            trait_vars: HashMap::new(),
             fields: &fields,
+            trait_fields: &tf,
+            trait_impls: &ti,
+            local_traits: &td,
             returns: &returns,
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -1421,12 +1651,17 @@ mod tests {
         vars.insert("client".to_string(), "reqwest::Client".to_string());
         vars.insert("self".to_string(), "App".to_string());
         let returns = ReturnIndex::new();
+        let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let block: syn::Block =
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
         let mut c = CallCollector {
             uses: &uses,
             vars,
+            trait_vars: HashMap::new(),
             fields: &fields,
+            trait_fields: &tf,
+            trait_impls: &ti,
+            local_traits: &td,
             returns: &returns,
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -1446,18 +1681,87 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_typed_receivers_resolve_via_local_impls_or_read_unknown() {
+        // The trait-object hole, closed: `t.save()` on a `&dyn Store` either edges to the LOCAL
+        // implementors (syntactic CHA, the JVM engine's bounded move) or reads honest Unknown —
+        // never silent-pure. External traits stay out (no Unknown flood on `impl Iterator`).
+        let uses = HashMap::new();
+        let fields = FieldIndex::new();
+        let returns = ReturnIndex::new();
+        let mut ti = TraitImplIndex::new();
+        ti.insert("Store".into(), vec!["PgStore".into(), "MemStore".into()]);
+        let mut td: HashMap<String, usize> = HashMap::new();
+        td.insert("Store".into(), 1);
+        td.insert("Sink".into(), 1); // local trait with NO impl in sight
+        let mut tf = TraitFieldIndex::new();
+        // struct App { store: Box<dyn Store> }
+        tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
+        let run = |src: &str, sig: &str| {
+            let sig: syn::Signature = syn::parse_str(sig).unwrap();
+            let blk: syn::Block = syn::parse_str(src).unwrap();
+            let trait_vars = seed_trait_vars(&sig);
+            let mut vars = seed_vars(&sig, Some("App"), &uses);
+            for k in trait_vars.keys() {
+                vars.remove(k); // same precedence as fninfo: dispatch-typing wins
+            }
+            vars.insert("self".to_string(), "App".to_string());
+            let mut c = CallCollector {
+                uses: &uses,
+                vars,
+                trait_vars,
+                fields: &fields,
+                trait_fields: &tf,
+                trait_impls: &ti,
+                local_traits: &td,
+                returns: &returns,
+                calls: Vec::new(),
+                closure_vars: std::collections::HashSet::new(),
+                unresolved: false,
+            };
+            for stmt in &blk.stmts {
+                c.visit_stmt(stmt);
+            }
+            (c.calls.iter().map(|c| c.path.clone()).collect::<Vec<_>>(), c.unresolved)
+        };
+        // &dyn param → typed edges to BOTH local impls, not unresolved
+        let (paths, unres) = run("{ t.save(x); }", "fn f(t: &dyn Store)");
+        assert!(paths.contains(&"PgStore::save".to_string()), "dyn param not CHA-resolved: {paths:?}");
+        assert!(paths.contains(&"MemStore::save".to_string()), "dyn param missed an impl: {paths:?}");
+        assert!(!unres, "narrow local dispatch must not read Unknown");
+        // impl-Trait param and generic bound take the same route
+        let (paths, _) = run("{ s.save(x); }", "fn f(s: impl Store)");
+        assert!(paths.contains(&"PgStore::save".to_string()), "impl-Trait param not resolved: {paths:?}");
+        let (paths, _) = run("{ x.save(y); }", "fn f<X: Store>(x: X)");
+        assert!(paths.contains(&"PgStore::save".to_string()), "generic bound not resolved: {paths:?}");
+        // the DI field: self.store is Box<dyn Store> via the trait-field index
+        let (paths, _) = run("{ self.store.save(x); }", "fn f(&self)");
+        assert!(paths.contains(&"PgStore::save".to_string()), "trait-typed field not resolved: {paths:?}");
+        // a LOCAL trait with no visible impl: something implements it somewhere — honest Unknown
+        let (_, unres) = run("{ k.flush(); }", "fn f(k: &dyn Sink)");
+        assert!(unres, "local trait without impls must read Unknown, not silent-pure");
+        // an EXTERNAL trait (not locally declared, no local impls): documented miss, NO flood
+        let (paths, unres) = run("{ it.next(); }", "fn f(it: impl Iterator)");
+        assert!(!unres && !paths.iter().any(|p| p.contains("::next")), "external trait must stay out: {paths:?}");
+    }
+
+    #[test]
     fn return_type_inference_flows_through_local_factories() {
         // `let p = create_pool()?; p.fetch_one(q)` — create_pool's recorded return type lets p resolve.
         let uses = HashMap::new();
         let fields = FieldIndex::new();
         let mut returns = ReturnIndex::new();
         returns.insert("create_pool".to_string(), "sqlx::PgPool".to_string());
+        let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let block: syn::Block =
             syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
         let mut c = CallCollector {
             uses: &uses,
             vars: HashMap::new(),
+            trait_vars: HashMap::new(),
             fields: &fields,
+            trait_fields: &tf,
+            trait_impls: &ti,
+            local_traits: &td,
             returns: &returns,
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -1477,7 +1781,11 @@ mod tests {
             let mut cc = CallCollector {
                 uses: &uses,
                 vars: HashMap::new(),
+                trait_vars: HashMap::new(),
                 fields: &fields,
+                trait_fields: &tf,
+                trait_impls: &ti,
+                local_traits: &td,
                 returns: &returns,
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -1639,7 +1947,8 @@ mod tests {
         let mut uses = HashMap::new();
         let mut fields: FieldIndex = HashMap::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets);
+        let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets, &mut ti, &mut td, &mut tf);
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -1657,7 +1966,8 @@ mod tests {
         let mut uses = HashMap::new();
         let mut fields: FieldIndex = HashMap::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets);
+        let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets, &mut ti, &mut td, &mut tf);
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }

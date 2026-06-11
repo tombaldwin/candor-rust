@@ -158,10 +158,13 @@ blocking a PR needs the soundness guarantee.
 
 The trade is **precision, stated honestly**. The scanner is syntactic, so it sees what's *written*, not
 what the compiler *resolves*. It catches path-qualified effect calls (`std::fs::read`, `Command::new`,
-`reqwest::Client::execute`), `use`-aliases, and intra-crate transitive propagation. It **misses** —
+`reqwest::Client::execute`), `use`-aliases, intra-crate transitive propagation, and **local-trait
+dispatch** (a `&dyn Store`/`impl Store`/`S: Store` receiver resolves to the trait's local implementors —
+syntactic CHA, bounded like the JVM engine's — or reads honest `Unknown` when the trait has no visible
+impl or too many). It **misses** —
 *silently*, without emitting `Unknown` — effects reached only through a method call on a non-path-qualified
-receiver, trait-object dispatch, closures/fn-pointers, macros, and cross-crate propagation by stable
-identity. So on resolution-heavy code it **under-reports** relative to the lint. Use `scan` for
+receiver, dispatch through an EXTERNAL trait, closures/fn-pointers, macros, and cross-crate propagation by
+stable identity. So on resolution-heavy code it **under-reports** relative to the lint. Use `scan` for
 zero-friction triage and CI on stable; use the nightly lint when you need the soundness contract
 (`Unknown` over-approximation, conformance, the policy/guard gates).
 
