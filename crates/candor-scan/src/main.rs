@@ -90,12 +90,22 @@ type TraitImplIndex = HashMap<String, Vec<String>>;
 /// Store>`) — the DI pattern `self.store.save()`, which `FieldIndex` can't carry (no concrete type).
 type TraitFieldIndex = HashMap<String, HashMap<String, Vec<String>>>;
 
-/// The trait indexes Pass A builds (impl universe, declaration counts, dispatch-typed fields),
+/// A locally-declared trait: how many declarations share the leaf (ambiguity check) and which
+/// method names the declaration itself carries — CHA resolves ONLY calls to a declared method of
+/// an unambiguous local trait (review found the wider rule fabricating: `impl Iterator for
+/// RowIter` + `fn f(it: impl Iterator)` charged pure `f` with RowIter's Db).
+#[derive(Default)]
+struct LocalTrait {
+    count: usize,
+    methods: std::collections::HashSet<String>,
+}
+
+/// The trait indexes Pass A builds (impl universe, local declarations, dispatch-typed fields),
 /// bundled so Pass B threads one handle instead of three more arguments.
 #[derive(Clone, Copy)]
 struct TraitIndexes<'a> {
     impls: &'a TraitImplIndex,
-    decls: &'a HashMap<String, usize>,
+    decls: &'a HashMap<String, LocalTrait>,
     fields: &'a TraitFieldIndex,
 }
 
@@ -110,9 +120,8 @@ struct CallCollector<'a> {
     trait_fields: &'a TraitFieldIndex,
     /// trait leaf -> local impl types (None entries never exist; absent = no local impl).
     trait_impls: &'a TraitImplIndex,
-    /// leaf -> how many local `trait` declarations share it (ambiguity check: two same-named local
-    /// traits would smear each other's impls — Unknown instead of a possibly-wrong edge).
-    local_traits: &'a HashMap<String, usize>,
+    /// leaf -> the local trait declaration(s) sharing it: ambiguity count + declared method names.
+    local_traits: &'a HashMap<String, LocalTrait>,
     returns: &'a ReturnIndex,
     calls: Vec<Call>,
     /// locals bound to a closure (`let f = |..| ..`), so a later `f()` is recognised as a closure
@@ -144,25 +153,35 @@ struct DepFn {
 struct DepIndex {
     by_key: HashMap<String, DepFn>,
     crates: std::collections::HashSet<String>,
-    files: usize,
 }
 
 fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     let mut idx = DepIndex::default();
     let Some(spec) = spec else { return idx };
+    // Canonical-path dedup: the same report loaded twice would self-collide on every key and be
+    // dropped as 'ambiguous', silently killing the chain (review: --deps + CANDOR_DEPS=.candor/deps
+    // — the natural combination — did exactly that). Directories walk RECURSIVELY: --deps writes
+    // one subdirectory per name@version.
     let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut seen_files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut push_file = |f: std::path::PathBuf, files: &mut Vec<std::path::PathBuf>| {
+        let canon = std::fs::canonicalize(&f).unwrap_or(f);
+        if seen_files.insert(canon.clone()) {
+            files.push(canon);
+        }
+    };
     for tok in spec.split(':').filter(|t| !t.is_empty()) {
         let p = Path::new(tok);
         if p.is_dir() {
-            for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
+            for e in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
                 let f = e.path();
                 let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.ends_with(".json") && !name.contains("callgraph") {
-                    files.push(f);
+                if f.is_file() && name.ends_with(".json") && !name.contains("callgraph") {
+                    push_file(f.to_path_buf(), &mut files);
                 }
             }
         } else if p.is_file() {
-            files.push(p.to_path_buf());
+            push_file(p.to_path_buf(), &mut files);
         } else {
             eprintln!("candor-scan: CANDOR_DEPS entry not found, skipped: {tok}");
         }
@@ -195,7 +214,6 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         if let Some(c) = &file_crate {
             idx.crates.insert(c.clone());
         }
-        idx.files += 1;
         for e in fns {
             let Some(qual) = e.get("fn").and_then(|x| x.as_str()) else { continue };
             let krate = e
@@ -249,23 +267,50 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     idx
 }
 
-/// Dependency names declared in `<dir>/Cargo.toml`, normalized to crate-root form (`-` -> `_`).
-/// Line-based on purpose (no toml dependency): `[dependencies]` and `[target.….dependencies]`
-/// sections, plus `[dependencies.name]` headers. dev-/build-dependencies are the harness's and the
+/// Dependency names declared by EVERY Cargo.toml under the scan root (a workspace's members each
+/// declare their own — review: reading only the root manifest left member-declared deps invisible
+/// to the κ ledger on the most common project layout), normalized to crate-root form (`-` -> `_`).
+/// Line-based on purpose (no toml dependency). dev-/build-dependencies are the harness's and the
 /// build script's universe, not the crate's runtime one — excluded, like tests/ and build.rs.
 fn cargo_deps(dir: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    let Ok(text) = std::fs::read_to_string(format!("{dir}/Cargo.toml")) else { return out };
+    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+        let p = entry.path();
+        if p.file_name().and_then(|n| n.to_str()) != Some("Cargo.toml") {
+            continue;
+        }
+        if p.components().any(|c| matches!(c.as_os_str().to_str(), Some("target") | Some(".git"))) {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(p) {
+            cargo_toml_deps(&text, &mut out);
+        }
+    }
+    out
+}
+
+/// One manifest's dependency names, all four header forms: `[dependencies]` /
+/// `[workspace.dependencies]` / `[target.….dependencies]` sections, and the table-header
+/// declarations `[dependencies.name]` / `[target.….dependencies.name]` (review: the old
+/// `ends_with("dependencies]")` gate made the header-form branch unreachable — a table-header
+/// dep was invisible to the ledger, execution-verified).
+fn cargo_toml_deps(text: &str, out: &mut std::collections::HashSet<String>) {
     let mut in_deps = false;
     for line in text.lines() {
         let l = line.trim();
         if l.starts_with('[') {
-            let runtime_deps = l.ends_with("dependencies]") && !l.contains("dev-") && !l.contains("build-");
-            in_deps = runtime_deps && !l.starts_with("[dependencies.");
-            // `[dependencies.serde]` declares the dep in its own header.
-            if runtime_deps {
-                if let Some(name) = l.strip_prefix("[dependencies.").and_then(|r| r.strip_suffix(']')) {
-                    out.insert(name.trim_matches('"').replace('-', "_"));
+            let inner = l.trim_start_matches('[').trim_end_matches(']');
+            let harness = inner.contains("dev-dependencies") || inner.contains("build-dependencies");
+            in_deps = !harness && (inner == "dependencies" || inner.ends_with(".dependencies"));
+            if !harness && !in_deps {
+                let name = inner
+                    .rfind(".dependencies.")
+                    .map(|i| &inner[i + ".dependencies.".len()..])
+                    .or_else(|| inner.strip_prefix("dependencies."));
+                if let Some(name) = name {
+                    if !name.is_empty() && !name.contains('.') {
+                        out.insert(name.trim_matches('"').replace('-', "_"));
+                    }
                 }
             }
             continue;
@@ -280,7 +325,6 @@ fn cargo_deps(dir: &str) -> std::collections::HashSet<String> {
             }
         }
     }
-    out
 }
 
 /// The trait leaves of a type-param-bound list (`T: Store + Send` -> ["Store", "Send"]). Marker
@@ -544,6 +588,11 @@ impl<'a> CallCollector<'a> {
     /// `trait_fields`). Empty when the receiver has a concrete type (`resolve_recv_type` owns it)
     /// or can't be resolved at all.
     fn resolve_recv_traits(&self, expr: &syn::Expr) -> Vec<String> {
+        // Hot-path guard: with no dispatch-typed vars or fields in scope (the overwhelmingly
+        // common case), every lookup below is a guaranteed miss — skip the recursive walk.
+        if self.trait_vars.is_empty() && self.trait_fields.is_empty() {
+            return Vec::new();
+        }
         match expr {
             syn::Expr::Reference(r) => self.resolve_recv_traits(&r.expr),
             syn::Expr::Paren(p) => self.resolve_recv_traits(&p.expr),
@@ -631,18 +680,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         } else {
             // DISPATCH-typed receiver (`&dyn T` / `impl T` / `X: T` / a `Box<dyn T>` field): no
             // concrete type to classify against — previously a SILENT miss (the documented
-            // trait-object hole). The JVM engine's bounded-CHA lesson, done on syntax:
-            //  - the trait has local impls and the dispatch is narrow (≤12, the JVM's bound) →
-            //    resolve to every local implementor's method (an over-approximation, like CHA);
-            //  - too many impls, an ambiguous trait leaf, or a local trait with no visible impl →
-            //    honest `Unknown` (something implements it somewhere the scan can't see);
-            //  - an EXTERNAL trait with no local impls stays out entirely: flagging every
-            //    `impl Iterator` combinator would re-create the Unknown flood this engine
-            //    calibrated away.
+            // trait-object hole). The JVM engine's bounded-CHA lesson, done on syntax, gated
+            // THREE ways (each gate review-earned):
+            //  - the trait must be LOCALLY DECLARED and unambiguous — resolving through local
+            //    impls of an EXTERNAL trait fabricated effects onto pure generic fns
+            //    (`impl Iterator for RowIter` + `fn f(it: impl Iterator)` charged f with
+            //    RowIter's Db — execution-verified); external dispatch stays a documented miss;
+            //  - the trait's own declaration must carry the called METHOD — a same-named method
+            //    on a non-dispatching bound (`T: Store + Default` hitting a Default impl's
+            //    `save`) is the same fabrication, and a supertrait call (`.clone()` on a bound
+            //    param) must not flood Unknown;
+            //  - the dispatch must be narrow (≤12 impls, the cross-engine bound) → edges to
+            //    every local implementor; otherwise (or with no impl visible) honest `Unknown`.
             for tr in self.resolve_recv_traits(&node.receiver) {
-                let ambiguous = self.local_traits.get(&tr).copied().unwrap_or(0) > 1;
+                let Some(lt) = self.local_traits.get(&tr) else { continue }; // external: documented miss
+                if !lt.methods.contains(&leaf) {
+                    continue; // supertrait/blanket call — not this trait's dispatch
+                }
+                if lt.count > 1 {
+                    self.unresolved = true; // ambiguous local leaf — never guess between traits
+                    continue;
+                }
                 match self.trait_impls.get(&tr) {
-                    Some(impls) if !ambiguous && impls.len() <= 12 => {
+                    Some(impls) if impls.len() <= 12 => {
                         for ty in impls {
                             self.calls.push(Call {
                                 path: format!("{ty}::{leaf}"),
@@ -653,9 +713,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             });
                         }
                     }
-                    Some(_) => self.unresolved = true,
-                    None if self.local_traits.contains_key(&tr) => self.unresolved = true,
-                    None => {}
+                    _ => self.unresolved = true, // >12, or no impl visible: honest indeterminacy
                 }
             }
         }
@@ -669,6 +727,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // Dispatch-typing first (`let s: Box<dyn Store>` reads as concrete `Box` otherwise).
                 let leaves = trait_leaves(&pt.ty, &HashMap::new());
                 if !leaves.is_empty() {
+                    self.vars.remove(&id.ident.to_string()); // a stale concrete binding must not shadow the rebind
                     self.trait_vars.insert(id.ident.to_string(), leaves);
                 } else if let Some(ty) = type_path(&pt.ty, self.uses) {
                     self.vars.insert(id.ident.to_string(), ty);
@@ -968,7 +1027,7 @@ fn collect_decls(
     fields: &mut FieldIndex,
     rets: &mut HashMap<String, Option<String>>,
     trait_impls: &mut TraitImplIndex,
-    local_traits: &mut HashMap<String, usize>,
+    local_traits: &mut HashMap<String, LocalTrait>,
     trait_fields: &mut TraitFieldIndex,
 ) {
     for it in items {
@@ -1025,7 +1084,13 @@ fn collect_decls(
             }
             syn::Item::Fn(f) => record_return(&f.sig, uses, rets, None),
             syn::Item::Trait(t) => {
-                *local_traits.entry(t.ident.to_string()).or_insert(0) += 1;
+                let e = local_traits.entry(t.ident.to_string()).or_default();
+                e.count += 1;
+                for ti in &t.items {
+                    if let syn::TraitItem::Fn(m) = ti {
+                        e.methods.insert(m.sig.ident.to_string());
+                    }
+                }
             }
             syn::Item::Impl(im) => {
                 let self_ty = impl_type_name(&im.self_ty);
@@ -1178,28 +1243,41 @@ fn main() {
             _ => dir = a.clone(),
         }
     }
+    // The policy source is resolved HERE, once (flag wins, CANDOR_POLICY env as fallback) — never
+    // inside scan_one, so --deps dependency scans can't inherit the root gate via the env.
+    let policy = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
     if deps_mode {
-        std::process::exit(run_with_deps(&dir, want_json, include_tests, policy_path));
+        std::process::exit(run_with_deps(&dir, prefix, want_json, include_tests, policy));
     }
     // Cross-crate report chaining (spec §2): CANDOR_DEPS names sibling reports (a `:`-separated
     // list of files and/or directories of *.json); an unclassified qualified call into a crate one
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
     let deps_idx = load_dep_reports(std::env::var("CANDOR_DEPS").ok().as_deref());
-    std::process::exit(scan_one(&dir, prefix, want_json, include_tests, policy_path, &deps_idx));
+    std::process::exit(scan_one(&dir, ScanOpts {
+        prefix, want_json, include_tests, policy, quiet: false, deps_idx: &deps_idx,
+    }));
+}
+
+/// Options for one crate scan. `policy` is RESOLVED by the caller (flag or CANDOR_POLICY env) —
+/// scan_one itself never reads the env, so dependency scans under --deps can genuinely run
+/// gate-free (review: the env fallback inside scan_one ran the root policy 328 times against
+/// dependency internals). `quiet` suppresses the per-scan receipts (dep scans; the --deps summary
+/// line speaks for them).
+struct ScanOpts<'a> {
+    prefix: String,
+    want_json: bool,
+    include_tests: bool,
+    policy: Option<String>,
+    quiet: bool,
+    deps_idx: &'a DepIndex,
 }
 
 /// One crate scan, end to end (parse -> passes -> report -> receipt -> policy gate). Returns the
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
-fn scan_one(
-    dir: &str,
-    prefix: String,
-    want_json: bool,
-    include_tests: bool,
-    policy_path: Option<String>,
-    deps_idx: &DepIndex,
-) -> i32 {
+fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
+    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, quiet, deps_idx } = opts;
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
 
@@ -1268,7 +1346,7 @@ fn scan_one(
     let mut fields: FieldIndex = HashMap::new();
     let mut rets_tmp: HashMap<String, Option<String>> = HashMap::new();
     let mut trait_impls: TraitImplIndex = HashMap::new();
-    let mut trait_decls: HashMap<String, usize> = HashMap::new();
+    let mut trait_decls: HashMap<String, LocalTrait> = HashMap::new();
     let mut trait_fields: TraitFieldIndex = HashMap::new();
     for (_, file) in &parsed {
         let mut uses = HashMap::new();
@@ -1352,9 +1430,16 @@ fn scan_one(
             // literal surfaces — joined unambiguous-tail2-first, then unambiguous leaf, like
             // `resolve_target`. A chained dep is covered, not a κ blind spot.
             if classified.is_none() && c.path.contains("::") && deps_idx.crates.contains(cr) {
-                let hit = tail2(&c.path)
-                    .and_then(|t2| deps_idx.by_key.get(&format!("{cr}#{t2}")))
-                    .or_else(|| deps_idx.by_key.get(&format!("{cr}#{}", c.leaf)));
+                // Join on the call path RELATIVE to the crate root: a multi-segment rel joins by
+                // its qualified tail ONLY (review: a bare-leaf fallback for qualified paths let a
+                // pure `MockDb::connect` inherit `Db::connect`'s effects — fabrication); a
+                // single-segment rel (a crate-root free fn) IS the dep's leaf key.
+                let rel = c.path.strip_prefix(&format!("{cr}::")).unwrap_or(&c.path);
+                let hit = if rel.contains("::") {
+                    tail2(rel).and_then(|t2| deps_idx.by_key.get(&format!("{cr}#{t2}")))
+                } else {
+                    deps_idx.by_key.get(&format!("{cr}#{rel}"))
+                };
                 if let Some(de) = hit {
                     for e in &de.effects {
                         direct.entry(f.qual.clone()).or_default().insert(e);
@@ -1481,10 +1566,12 @@ fn scan_one(
             format!("{prefix}.{crate_name}.scan.callgraph.json"),
             serde_json::to_string(&cg).unwrap_or_default(),
         );
-        eprintln!(
-            "candor-scan: wrote {} effectful functions to {file} (stable syntactic backend — see --help)",
-            entries.len()
-        );
+        if !quiet {
+            eprintln!(
+                "candor-scan: wrote {} effectful functions to {file} (stable syntactic backend — see --help)",
+                entries.len()
+            );
+        }
     }
 
     // The κ-coverage disclosure: dependencies the code demonstrably CALLS that the classifier knows
@@ -1506,7 +1593,7 @@ fn scan_one(
         })
         .map(|(cr, n)| (cr, *n))
         .collect();
-    if !unlisted.is_empty() {
+    if !unlisted.is_empty() && !quiet {
         unlisted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         let shown: Vec<String> =
             unlisted.iter().take(8).map(|(cr, n)| format!("{cr} ({n} call{})", if *n == 1 { "" } else { "s" })).collect();
@@ -1525,7 +1612,7 @@ fn scan_one(
     // backend under-reports (a missed effect can pass), so this is a floor, never the sound gate
     // (that's the nightly engine / the JVM engine). It still catches every boundary crossing the
     // scan CAN see, deterministically, with zero extra install.
-    if let Some(pp) = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok()) {
+    if let Some(pp) = policy_path {
         let Ok(text) = std::fs::read_to_string(&pp) else {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
             eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
@@ -1549,7 +1636,7 @@ fn scan_one(
 /// `~/.cargo/registry/src/<index>/` into `<dir>/.candor/deps/`, then scan the root crate chained
 /// over those reports (plus anything CANDOR_DEPS already names). Path/git/workspace deps have no
 /// registry checkout and are skipped with a note — chain them by scanning them yourself.
-fn run_with_deps(dir: &str, want_json: bool, include_tests: bool, policy_path: Option<String>) -> i32 {
+fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_tests: bool, policy: Option<String>) -> i32 {
     let lock = match std::fs::read_to_string(format!("{dir}/Cargo.lock")) {
         Ok(t) => t,
         Err(_) => {
@@ -1586,20 +1673,46 @@ fn run_with_deps(dir: &str, want_json: bool, include_tests: bool, policy_path: O
     let registry_roots: Vec<std::path::PathBuf> = dirs_cargo_registry_src();
     let deps_dir = format!("{dir}/.candor/deps");
     let _ = std::fs::create_dir_all(&deps_dir);
-    let (mut scanned, mut missing) = (0usize, Vec::new());
+    let (mut scanned, mut cached, mut missing) = (0usize, 0usize, Vec::new());
     let no_deps = DepIndex::default();
     for (n, v) in &pkgs {
         let Some(src) = registry_roots.iter().map(|r| r.join(format!("{n}-{v}"))).find(|p| p.is_dir()) else {
             missing.push(format!("{n}-{v}"));
             continue;
         };
-        // Dep scans are quiet, unchained, report-only (no policy): their job is the report files.
-        scan_one(&src.to_string_lossy(), format!("{deps_dir}/report"), false, false, None, &no_deps);
+        // One subdirectory PER name@version: two locked versions of one crate must not overwrite
+        // each other's report (review: last-write-wins silently fed the root the wrong version's
+        // effects); with both present, conflicting keys drop as ambiguous — never-guess intact.
+        let sub = format!("{deps_dir}/{n}@{v}");
+        let already = std::fs::read_dir(&sub).ok().is_some_and(|rd| {
+            rd.flatten().any(|e| {
+                let f = e.file_name();
+                let f = f.to_string_lossy();
+                f.ends_with(".scan.json") && !f.contains("callgraph")
+            })
+        });
+        if already {
+            cached += 1; // registry checkouts are immutable per name@version — the report stands
+            continue;
+        }
+        let _ = std::fs::create_dir_all(&sub);
+        // Dep scans are quiet, unchained, report-only, and POLICY-FREE (the resolved root policy
+        // is deliberately not passed): their job is the report files.
+        scan_one(&src.to_string_lossy(), ScanOpts {
+            prefix: format!("{sub}/report"),
+            want_json: false,
+            include_tests: false,
+            policy: None,
+            quiet: true,
+            deps_idx: &no_deps,
+        });
         scanned += 1;
     }
     eprintln!(
-        "candor-scan: --deps scanned {scanned} of {} registry dependencies into {deps_dir}{}",
+        "candor-scan: --deps scanned {scanned} of {} registry dependencies into {deps_dir}{}{} \
+(floor-engine reports: a dep's silent misses pass through — the κ caveat applies to the chain too)",
         pkgs.len(),
+        if cached > 0 { format!(" ({cached} already scanned — cached)") } else { String::new() },
         if missing.is_empty() {
             String::new()
         } else {
@@ -1609,12 +1722,13 @@ fn run_with_deps(dir: &str, want_json: bool, include_tests: bool, policy_path: O
         }
     );
     // Chain the fresh dep reports (plus anything CANDOR_DEPS already names) under the root scan.
+    // load_dep_reports dedups canonical paths, so deps_dir appearing in CANDOR_DEPS too is safe.
     let spec = match std::env::var("CANDOR_DEPS") {
         Ok(extra) if !extra.is_empty() => format!("{deps_dir}:{extra}"),
         _ => deps_dir.clone(),
     };
     let idx = load_dep_reports(Some(&spec));
-    scan_one(dir, String::new(), want_json, include_tests, policy_path, &idx)
+    scan_one(dir, ScanOpts { prefix, want_json, include_tests, policy, quiet: false, deps_idx: &idx })
 }
 
 /// The cargo registry source roots (`~/.cargo/registry/src/<index-hash>/`), where unbuilt
@@ -2031,6 +2145,21 @@ mod tests {
     }
 
     #[test]
+    fn cargo_toml_deps_handles_all_header_forms() {
+        let mut out = std::collections::HashSet::new();
+        cargo_toml_deps(
+            "[package]\nname = \"x\"\n\n[dependencies]\nserde_json = \"1\"\nleft-pad = \"1\"\n\n[dependencies.table-header]\nversion = \"1\"\n\n[target.'cfg(unix)'.dependencies.nix]\nversion = \"0.29\"\n\n[target.'cfg(windows)'.dependencies]\nwinapi = \"0.3\"\n\n[workspace.dependencies]\nshared-dep = \"2\"\n\n[dev-dependencies]\ncriterion = \"0.5\"\n\n[build-dependencies]\ncc = \"1\"\n\n[dev-dependencies.proptest]\nversion = \"1\"\n",
+            &mut out,
+        );
+        for d in ["serde_json", "left_pad", "table_header", "nix", "winapi", "shared_dep"] {
+            assert!(out.contains(d), "missing {d}: {out:?}");
+        }
+        for d in ["criterion", "cc", "proptest", "x"] {
+            assert!(!out.contains(d), "harness/package dep leaked: {d}");
+        }
+    }
+
+    #[test]
     fn dep_report_chaining_joins_unambiguously_and_distrusts_stale_versions() {
         let d = std::env::temp_dir().join(format!("candor-deps-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&d);
@@ -2048,7 +2177,6 @@ mod tests {
             "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
             "functions": [{"fn": "io::go", "inferred": ["Exec"], "hash": "old_dep#io::go"}]}"#).unwrap();
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
-        assert_eq!(idx.files, 2);
         assert!(idx.crates.contains("billing") && idx.crates.contains("old_dep"));
         let post = idx.by_key.get("billing#Ledger::post").expect("tail2 key");
         assert_eq!(post.effects, vec!["Db"]);
@@ -2071,9 +2199,9 @@ mod tests {
         let returns = ReturnIndex::new();
         let mut ti = TraitImplIndex::new();
         ti.insert("Store".into(), vec!["PgStore".into(), "MemStore".into()]);
-        let mut td: HashMap<String, usize> = HashMap::new();
-        td.insert("Store".into(), 1);
-        td.insert("Sink".into(), 1); // local trait with NO impl in sight
+        let mut td: HashMap<String, LocalTrait> = HashMap::new();
+        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect() });
+        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect() }); // no impl in sight
         let mut tf = TraitFieldIndex::new();
         // struct App { store: Box<dyn Store> }
         tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
@@ -2123,6 +2251,50 @@ mod tests {
         // an EXTERNAL trait (not locally declared, no local impls): documented miss, NO flood
         let (paths, unres) = run("{ it.next(); }", "fn f(it: impl Iterator)");
         assert!(!unres && !paths.iter().any(|p| p.contains("::next")), "external trait must stay out: {paths:?}");
+        // FABRICATION GUARD (review, execution-verified): an EXTERNAL trait with a LOCAL impl
+        // must STILL stay out — `impl Iterator for RowIter` + `f(it: impl Iterator)` must not
+        // charge f with RowIter's effects.
+        {
+            let mut ti2 = TraitImplIndex::new();
+            ti2.insert("Iterator".into(), vec!["RowIter".into()]);
+            let sig: syn::Signature = syn::parse_str("fn f(it: impl Iterator)").unwrap();
+            let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
+            let mut c = CallCollector {
+                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
+                fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
+                returns: &returns, calls: Vec::new(),
+                closure_vars: std::collections::HashSet::new(), unresolved: false,
+            };
+            for stmt in &blk.stmts { c.visit_stmt(stmt); }
+            assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
+                    "external-trait local impl must not resolve (fabrication)");
+            assert!(!c.unresolved, "external trait must not flood Unknown either");
+        }
+        // a method the LOCAL trait does NOT declare (supertrait/blanket call) — out, no flood
+        let (paths, unres) = run("{ t.clone(); }", "fn f(t: &dyn Store)");
+        assert!(!unres && !paths.iter().any(|p| p.ends_with("::clone")),
+                "undeclared method must neither edge nor flood: {paths:?}");
+        // the cross-engine CHA bound: 12 impls resolve, 13 read honest Unknown
+        {
+            let wide = |n: usize, src: &str, sig: &str| {
+                let mut ti2 = TraitImplIndex::new();
+                ti2.insert("Store".into(), (0..n).map(|i| format!("S{i}")).collect());
+                let sig: syn::Signature = syn::parse_str(sig).unwrap();
+                let blk: syn::Block = syn::parse_str(src).unwrap();
+                let mut c = CallCollector {
+                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
+                    fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
+                    returns: &returns, calls: Vec::new(),
+                    closure_vars: std::collections::HashSet::new(), unresolved: false,
+                };
+                for stmt in &blk.stmts { c.visit_stmt(stmt); }
+                (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
+            };
+            let (edges, unres) = wide(12, "{ t.save(x); }", "fn f(t: &dyn Store)");
+            assert!(edges == 12 && !unres, "12 impls must resolve (the shared bound)");
+            let (edges, unres) = wide(13, "{ t.save(x); }", "fn f(t: &dyn Store)");
+            assert!(edges == 0 && unres, "13 impls must read Unknown, not resolve");
+        }
     }
 
     #[test]
