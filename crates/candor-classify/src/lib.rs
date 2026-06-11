@@ -869,6 +869,8 @@ pub fn capstd_cap(crate_name: &str, type_name: &str) -> Option<&'static str> {
 /// deliberately ignored (`FOR UPDATE SKIP LOCKED` must not yield a table "skip"). A
 /// dynamically-built query yields nothing — the gate's opaque case — never a guess.
 /// Output is lower-cased, quote/backtick-stripped, `schema.table` kept qualified, deduped.
+/// SPEC §2 pins this algorithm token-for-token across engines; the cross-impl vector battery
+/// (candor-spec conformance/tables/vectors.json, run.sh Part 4b) enforces the JVM/TS mirrors.
 pub fn tables_in_sql(sql: &str) -> Vec<String> {
     const STMT: &[&str] =
         &["select", "insert", "update", "delete", "create", "drop", "alter", "truncate", "merge", "replace", "with"];
