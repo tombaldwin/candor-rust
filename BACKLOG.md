@@ -215,6 +215,26 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P2 — depth / precision
 
+### The κ-treadmill endgame: dep-tree scanning (κ → builtins-only frontier)
+
+The curated classifier's structural weakness is that κ tries to know the PACKAGE ECOSYSTEM. The
+2026-06-11 ledger work (the receipt now NAMES unlisted deps the code calls — Rust via Cargo.toml,
+TS via resolved imports) makes the blind spot visible; the endgame is to make most of it
+*derivable*: **scan the dependencies themselves and chain the reports** (the CANDOR_DEPS/hash
+mechanism that already exists, spec §2). A dep's effects derive from ITS calls into the builtin
+frontier (std/node:/java.*), which is bounded and slow-moving — κ then only has to know builtins +
+the FFI floor, and the treadmill becomes a cache-refresh. Pieces: (1) candor-scan already analyzes
+unbuilt third-party crates from `~/.cargo/registry/src` — add a `--deps` mode that scans the
+lockfile's tree and emits sibling reports; (2) candor-ts: scan node_modules dist JS via --allow-js
+(half the ecosystem ships JS — its `require("fs")` calls are exactly the builtin frontier);
+(3) JVM: analyze the dep jars on the classpath, not just project classes (it's the same ASM pass).
+Risks to measure first: dist-JS minification, registry-source macro surface, scan-time on big
+trees, and version pinning (the §2.1 downgrade rule already covers staleness). Also: the JVM needs
+the LEDGER first (external-package calls with zero classification, named in its receipt — the
+Rust/TS move replayed), and candor-ts should get the scan-side interface-CHA the Rust engine grew
+(resolve interface-typed calls to local implementing classes; today they read honest Unknown via
+`dispatch:<Type>`).
+
 ### From the critical-assessment pushback — "fundamental" was too strong (these are buildable)
 
 These were dismissed as hard limits; they're really *expensive or risky*, not impossible. The one

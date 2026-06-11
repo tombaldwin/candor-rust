@@ -126,6 +126,40 @@ fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
 }
 
+/// Dependency names declared in `<dir>/Cargo.toml`, normalized to crate-root form (`-` -> `_`).
+/// Line-based on purpose (no toml dependency): `[dependencies]` and `[target.….dependencies]`
+/// sections, plus `[dependencies.name]` headers. dev-/build-dependencies are the harness's and the
+/// build script's universe, not the crate's runtime one — excluded, like tests/ and build.rs.
+fn cargo_deps(dir: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(text) = std::fs::read_to_string(format!("{dir}/Cargo.toml")) else { return out };
+    let mut in_deps = false;
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            let runtime_deps = l.ends_with("dependencies]") && !l.contains("dev-") && !l.contains("build-");
+            in_deps = runtime_deps && !l.starts_with("[dependencies.");
+            // `[dependencies.serde]` declares the dep in its own header.
+            if runtime_deps {
+                if let Some(name) = l.strip_prefix("[dependencies.").and_then(|r| r.strip_suffix(']')) {
+                    out.insert(name.trim_matches('"').replace('-', "_"));
+                }
+            }
+            continue;
+        }
+        if !in_deps || l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = l.split('=').next() {
+            let name = name.trim().trim_matches('"');
+            if !name.is_empty() {
+                out.insert(name.replace('-', "_"));
+            }
+        }
+    }
+    out
+}
+
 /// The trait leaves of a type-param-bound list (`T: Store + Send` -> ["Store", "Send"]). Marker
 /// bounds need no filtering here: a leaf only ever matters if it later matches a local trait or a
 /// local impl, and nobody locally declares `trait Send`.
@@ -1098,6 +1132,14 @@ fn main() {
         scan_items(&file.items, &modpath, rel, include_tests, &fields, &returns, traits, &mut uses, &mut fns);
     }
 
+    // The κ-coverage ledger: Cargo.toml's [dependencies] are the crate's TRUE external universe, so a
+    // dep the calls actually reach whose classification never fires — and that isn't in a calibrated
+    // tier — is a named blind spot (invisible, not Unknown: the curated-κ caveat). Counted here,
+    // disclosed in the receipt, so the caveat is per-scan evidence instead of a doc footnote.
+    let deps = cargo_deps(&dir);
+    let mut dep_seen: HashMap<String, usize> = HashMap::new(); // dep crate root -> call-site count
+    let mut dep_classified: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
     // segment (`new`); `by_tail2` keys on the last TWO segments (`RequestBuilder::new`). The leaf index
     // alone catastrophically over-connects on real crates: every call to *some* `new()` would link to
@@ -1140,7 +1182,16 @@ fn main() {
         }
         for c in &f.calls {
             let cr = c.path.split("::").next().unwrap_or("");
-            if let Some(eff) = candor_classify::classify(cr, &c.path) {
+            let classified = candor_classify::classify(cr, &c.path);
+            // κ ledger: a qualified call into a declared dependency. (A bare leaf has no `::`, so it
+            // can't name a crate; a local module sharing a dep's name is the rare accepted ambiguity.)
+            if c.path.contains("::") && deps.contains(cr) {
+                *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                if classified.is_some() {
+                    dep_classified.insert(cr.to_string());
+                }
+            }
+            if let Some(eff) = classified {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
                 if let Some(s) = &c.str_arg {
                     match eff {
@@ -1256,6 +1307,36 @@ fn main() {
         eprintln!(
             "candor-scan: wrote {} effectful functions to {file} (stable syntactic backend — see --help)",
             entries.len()
+        );
+    }
+
+    // The κ-coverage disclosure: dependencies the code demonstrably CALLS that the classifier knows
+    // nothing about. Their effects are INVISIBLE — not Unknown — so the report's silence about them
+    // is not purity evidence. This turns the curated-κ caveat from a doc footnote into per-scan,
+    // named evidence (the argon2 lesson: the blind spot landed on exactly the call a security review
+    // cared about).
+    let mut unlisted: Vec<(&String, usize)> = dep_seen
+        .iter()
+        .filter(|(cr, _)| {
+            !dep_classified.contains(*cr)
+                && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
+                && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
+                && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
+        })
+        .map(|(cr, n)| (cr, *n))
+        .collect();
+    if !unlisted.is_empty() {
+        unlisted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let shown: Vec<String> =
+            unlisted.iter().take(8).map(|(cr, n)| format!("{cr} ({n} call{})", if *n == 1 { "" } else { "s" })).collect();
+        let more = if unlisted.len() > 8 { format!(" + {} more", unlisted.len() - 8) } else { String::new() };
+        eprintln!(
+            "candor-scan: κ doesn't know {} dependenc{} this code calls into — effects through {} are INVISIBLE (not Unknown): {}{}",
+            unlisted.len(),
+            if unlisted.len() == 1 { "y" } else { "ies" },
+            if unlisted.len() == 1 { "it" } else { "them" },
+            shown.join(", "),
+            more
         );
     }
 

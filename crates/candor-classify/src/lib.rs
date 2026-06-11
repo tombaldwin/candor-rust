@@ -28,7 +28,7 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 53] = [
+pub const CALIBRATED_CRATES: [&str; 59] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer;
     // pnet is raw L2/L3 packet capture)
@@ -44,6 +44,8 @@ pub const CALIBRATED_CRATES: [&str; 53] = [
     // subprocess (async_process = smol; duct) / env (dotenvy/dotenv) / clock (time) / log / clipboard
     "memmap2", "fs_err", "async_fs", "tempfile", "glob",
     "rand", "getrandom", "fastrand",
+    // entropy: the password-hashing tier (salt mints + bcrypt's internal salt) + the OsRng source
+    "argon2", "bcrypt", "scrypt", "pbkdf2", "password_hash", "rand_core",
     "portable_pty", "async_process", "duct",
     "dotenvy", "dotenv",
     "chrono", "time", "tracing", "log", "arboard",
@@ -73,6 +75,7 @@ pub const CALIBRATION_PROBE_TAILS: &[&str] = &[
     "::datalink::channel", "::WalkBuilder::build_parallel", "::RecommendedWatcher::new",
     "::X::connect", "::Utc::now", "::X::load", "::__private_api::log", "::tempfile", "::glob",
     "::X::run", "::dotenv", "::random", "::emit", "::X::emit_span_lint", "::X::anything",
+    "::SaltString::generate", "::hash", "::OsRng::fill_bytes",
 ];
 
 /// Database client crates whose execution verbs are I/O (see the DB branch in `classify`).
@@ -712,6 +715,34 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // `Pattern::matches` is pure string matching — match only the directory-walking entry points.
     if crate_name == "glob" && (path.ends_with("::glob") || path.ends_with("::glob_with")) {
         return Some("Fs");
+    }
+    // Password-hashing / KDF crates — the entropy tier (the TS engine's CTA lesson: an invisible
+    // argon2 landed on exactly the call a security review cares about). In this engine's
+    // verb-precise style the ENTROPY is the salt mint: `SaltString::generate(OsRng)` in the
+    // password-hash API family, and bcrypt's `hash`/`hash_with_result` (salt minted internally).
+    // Verification and explicit-salt hashing are deterministic recomputation — pure. `rand_core`
+    // carries the OsRng source itself (otherwise the most common salt mint is invisible).
+    if matches!(crate_name, "argon2" | "scrypt" | "pbkdf2" | "password_hash") {
+        if path.contains("SaltString::generate") {
+            return Some("Rand");
+        }
+        return None;
+    }
+    if crate_name == "bcrypt" {
+        if path.ends_with("::hash") || path.ends_with("::hash_with_result") {
+            return Some("Rand");
+        }
+        return None;
+    }
+    if crate_name == "rand_core" {
+        if path.contains("OsRng")
+            || path.ends_with("::next_u32")
+            || path.ends_with("::next_u64")
+            || path.ends_with("::fill_bytes")
+        {
+            return Some("Rand");
+        }
+        return None;
     }
     // Randomness / entropy. `getrandom`/`fastrand` are effectful end-to-end. `rand` is NOT — it
     // mixes entropy/generation (effectful) with *pure* distribution constructors (`Uniform::new`,

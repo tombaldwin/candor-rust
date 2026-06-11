@@ -50,6 +50,11 @@ under-report, never a wrong label.
   The Deref and generic-field shapes are measured in the wild (the PROVE-IT dogfood on `ureq`): 14 of a
   16-function blast radius found, those two shapes the remainder — under-reported, never fabricated.
 
+- **The κ-coverage ledger:** the receipt names every `Cargo.toml` dependency the code demonstrably
+  calls that the classifier knows nothing about (`κ doesn't know N dependencies… effects through
+  them are INVISIBLE (not Unknown)`). The curated-classifier caveat as per-scan evidence instead of
+  a doc footnote: never conclude "no effect" through a crate that line names.
+
 **The policy gate floor.** `candor-scan <dir> --policy <file>` (or `CANDOR_POLICY=…`) enforces a
 spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid` — parsed by the same shared grammar as the nightly and
 JVM gates) over the scan and exits 1 on violation. It is the **advisory floor**: the syntactic backend
