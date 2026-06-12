@@ -67,7 +67,10 @@ LIB=$(ls /tmp/candor/target/debug/libcandor@*.dylib \
 CANDOR_JSON=/tmp/candor-report cargo dylint --lib-path "$LIB"
 ```
 
-Either way you get one report file per crate: `<prefix>.<crate>.<type>.json`.
+Either way you get one report file per crate: `<prefix>.<crate>.<type>.json`. Rust entries never
+carry `unitKind` (every Rust unit is an ordinary function — the spec-0.5-draft field's default);
+sibling reports under a merged prefix may carry it (an accessor, a `<clinit>`, a fleet's agents) —
+it is informative only, read effects/edges identically.
 
 ## 1a. Staying current — candor can't check for you, *you* can
 
