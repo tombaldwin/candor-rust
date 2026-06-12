@@ -1,6 +1,6 @@
 [package]
 name = "candor-query"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "candor's read-only report queries (show/where/callers/map/diff) in Rust — used by cargo-candor."
@@ -12,8 +12,8 @@ name = "candor-query"
 path = "src/main.rs"
 
 [dependencies]
-candor-report = { path = "../candor-report" }
-candor-classify = { path = "../candor-classify" }
+candor-report = { path = "../candor-report", version = "0.4.1" }
+candor-classify = { path = "../candor-classify", version = "0.4.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
