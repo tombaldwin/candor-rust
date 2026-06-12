@@ -1292,6 +1292,27 @@ fn main() {
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
     let deps_idx = load_dep_reports(std::env::var("CANDOR_DEPS").ok().as_deref());
+    // A workspace root: each member is its own PACKAGE — one report per member, all under ONE
+    // prefix (candor-query's multi-crate merge consumes them together; the policy gates each).
+    // Scanning members as modules of the root collides same-named fns across packages.
+    let members = workspace_members(Path::new(&dir));
+    if !members.is_empty() {
+        let prefix = if prefix.is_empty() { format!("{dir}/.candor/report") } else { prefix };
+        let mut dirs: Vec<String> = Vec::new();
+        if read_crate_name(Path::new(&dir)).is_some() {
+            dirs.push(dir.clone()); // the workspace manifest also declares a root package
+        }
+        dirs.extend(members);
+        let mut rc = 0;
+        for d in &dirs {
+            rc = rc.max(scan_one(d, ScanOpts {
+                prefix: prefix.clone(), want_json, include_tests,
+                policy: policy.clone(), quiet: false, deps_idx: &deps_idx,
+            }));
+        }
+        eprintln!("candor-scan: workspace — {} package report(s) under one prefix", dirs.len());
+        std::process::exit(rc);
+    }
     std::process::exit(scan_one(&dir, ScanOpts {
         prefix, want_json, include_tests, policy, quiet: false, deps_idx: &deps_idx,
     }));
@@ -1321,7 +1342,17 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
 
     // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below).
     let mut parsed: Vec<(String, syn::File)> = Vec::new();
-    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        // A nested directory carrying its own Cargo.toml is a DIFFERENT package (Cargo's own
+        // semantics) — folding its files into this crate collides same-named fns across packages
+        // and cross-wires the merged call graph (the repo-root self-scan merged 194 eval-fixture
+        // `main`s into one unit). It gets its own scan: workspace member, --deps, or directly.
+        .filter_entry(|e| {
+            e.depth() == 0 || !e.file_type().is_dir() || !e.path().join("Cargo.toml").is_file()
+        })
+        .filter_map(Result::ok)
+    {
         let p = entry.path();
         if !p.is_file() || p.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
@@ -1953,6 +1984,76 @@ fn read_crate_name(root: &Path) -> Option<String> {
     None
 }
 
+/// The string entries of `key = [ ... ]` inside `[table]` — line-based (the manifest subset that
+/// matters), multi-line arrays included. No TOML dependency, same trade as the parsers above.
+fn toml_string_array(txt: &str, table: &str, key: &str) -> Vec<String> {
+    let header = format!("[{table}]");
+    let (mut in_table, mut collecting) = (false, false);
+    let mut out = Vec::new();
+    for line in txt.lines() {
+        let l = line.trim();
+        if l.starts_with('[') && !collecting {
+            in_table = l == header;
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        let rest = if let Some(r) = l.strip_prefix(key) {
+            let r = r.trim_start();
+            let Some(r) = r.strip_prefix('=') else { continue };
+            collecting = true;
+            r
+        } else if collecting {
+            l
+        } else {
+            continue;
+        };
+        let mut parts = rest.split('"');
+        parts.next();
+        while let Some(s) = parts.next() {
+            out.push(s.to_string());
+            if parts.next().is_none() {
+                break;
+            }
+        }
+        if rest.contains(']') {
+            collecting = false;
+        }
+    }
+    out
+}
+
+/// Member directories of the root manifest's `[workspace]` (explicit entries + trailing-`/*`
+/// globs, honouring `exclude`), joined to `root`. Empty when there is no workspace table — the
+/// single-crate path.
+fn workspace_members(root: &Path) -> Vec<String> {
+    let Ok(txt) = std::fs::read_to_string(root.join("Cargo.toml")) else { return Vec::new() };
+    let members = toml_string_array(&txt, "workspace", "members");
+    if members.is_empty() {
+        return Vec::new();
+    }
+    let exclude = toml_string_array(&txt, "workspace", "exclude");
+    let mut rels: Vec<String> = Vec::new();
+    for m in members {
+        if let Some(base) = m.strip_suffix("/*") {
+            if let Ok(rd) = std::fs::read_dir(root.join(base)) {
+                let mut found: Vec<String> = rd
+                    .filter_map(Result::ok)
+                    .filter(|e| e.path().join("Cargo.toml").is_file())
+                    .map(|e| format!("{base}/{}", e.file_name().to_string_lossy()))
+                    .collect();
+                found.sort();
+                rels.extend(found);
+            }
+        } else if root.join(&m).join("Cargo.toml").is_file() {
+            rels.push(m);
+        }
+    }
+    rels.retain(|m| !exclude.iter().any(|e| m == e || m.starts_with(&format!("{e}/"))));
+    rels.into_iter().map(|m| root.join(m).to_string_lossy().into_owned()).collect()
+}
+
 fn propagate(
     direct: &HashMap<String, BTreeSet<&'static str>>,
     calls: &HashMap<String, BTreeSet<String>>,
@@ -2578,6 +2679,69 @@ mod tests {
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets, &mut ti, &mut td, &mut tf);
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
+    }
+
+    #[test]
+    fn toml_string_array_reads_inline_and_multiline_members() {
+        let txt = "[package]\nname = \"x\"\n\n[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nexclude = [\n  \"eval\",\n  \"sample\",\n]\n";
+        assert_eq!(toml_string_array(txt, "workspace", "members"), vec!["crates/a", "crates/b"]);
+        assert_eq!(toml_string_array(txt, "workspace", "exclude"), vec!["eval", "sample"]);
+        assert!(toml_string_array(txt, "workspace", "default-members").is_empty());
+        assert!(toml_string_array("[dependencies]\nserde = \"1\"\n", "workspace", "members").is_empty());
+    }
+
+    #[test]
+    fn workspace_members_expand_globs_and_honour_exclude() {
+        let d = std::env::temp_dir().join(format!("candor-scan-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for m in ["crates/a", "crates/skipme", "tools/one", "crates/no-manifest"] {
+            std::fs::create_dir_all(d.join(m)).unwrap();
+            if m != "crates/no-manifest" {
+                std::fs::write(d.join(m).join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+            }
+        }
+        std::fs::write(
+            d.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\", \"tools/one\", \"gone/away\"]\nexclude = [\"crates/skipme\"]\n",
+        )
+        .unwrap();
+        let got: Vec<String> = workspace_members(&d)
+            .into_iter()
+            .map(|p| p.strip_prefix(&format!("{}/", d.to_string_lossy())).unwrap().to_string())
+            .collect();
+        assert_eq!(got, vec!["crates/a", "tools/one"], "glob expands, exclude + missing-manifest drop");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn nested_packages_are_not_modules_of_the_parent() {
+        // The repo-root self-scan merged 194 eval-fixture `main`s into ONE unit (un-namespaced
+        // collision -> cross-wired inheritance). A subtree with its own Cargo.toml is a different
+        // package: the parent's walk must not descend into it.
+        let d = std::env::temp_dir().join(format!("candor-scan-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("fixture/src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"outer\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub fn outer_eff() { let _ = std::fs::read(\"/x\"); }\n").unwrap();
+        std::fs::write(d.join("fixture/Cargo.toml"), "[package]\nname = \"inner\"\n").unwrap();
+        std::fs::write(
+            d.join("fixture/src/lib.rs"),
+            "pub fn inner_eff() { let _ = std::process::Command::new(\"x\"); }\n",
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let rc = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: prefix.clone(), want_json: false, include_tests: false,
+            policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let rep = std::fs::read_to_string(format!("{prefix}.outer.scan.json")).unwrap();
+        assert!(rep.contains("outer_eff"), "the parent's own fn must report: {rep}");
+        assert!(!rep.contains("inner_eff") && !rep.contains("Exec"),
+                "nested package's fn leaked into the parent report: {rep}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
