@@ -356,12 +356,27 @@ struct ShowJson {
 fn match_tier(name: &str, q: &str) -> u8 {
     if name == q {
         3
-    } else if name.ends_with(q) && name[..name.len() - q.len()].ends_with("::") {
+    } else if name.ends_with(q)
+        && (name[..name.len() - q.len()].ends_with("::") || name[..name.len() - q.len()].ends_with('.'))
+    {
+        // the boundary before the query must be a SEGMENT boundary in the report's own naming —
+        // `::` (Rust) or `.` (JVM/TS/Swift/fleet reports read by this same binary)
         2
     } else if name.contains(q) {
         1
     } else {
         0
+    }
+}
+
+/// Split a qualified name on the report's own separator: `::` when present, else `.` — the one
+/// query binary serves every engine's reports (Swift/JVM/TS names are dot-separated; the GRDB
+/// interop probe found `map` lumping 731 Swift functions into `(root)`).
+fn name_segments(name: &str) -> Vec<&str> {
+    if name.contains("::") {
+        name.split("::").collect()
+    } else {
+        name.split('.').collect()
     }
 }
 
@@ -898,11 +913,19 @@ fn cmd_map(args: &[String]) -> i32 {
         // that's `Type` — stop at the first of ` as `, `>`, or `::` (whichever comes first) so the
         // bucket isn't the malformed `Type as Trait>`.
         let stripped = e.func.strip_prefix('<').unwrap_or(&e.func);
-        let end = [stripped.find(" as "), stripped.find('>'), stripped.find("::")]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(stripped.len());
+        // `::` (Rust) or `.` (JVM/TS/Swift/fleet reports read by this same binary): the LAST dot
+        // bounds the module for dotted names (`src.db.save` -> `src.db`; `Statement.execute` ->
+        // `Statement`), the FIRST `::` for Rust paths — found by the Swift interop probe, where
+        // map lumped 731 dotted functions into `(root)`.
+        let end = if stripped.contains("::") {
+            [stripped.find(" as "), stripped.find('>'), stripped.find("::")]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(stripped.len())
+        } else {
+            stripped.rfind('.').unwrap_or(stripped.len())
+        };
         // A name with NO module separator is a crate-root free function: it buckets into `(root)`,
         // NOT its own one-function pseudo-module (SPEC §6.1 — matches the containment layer rule and
         // the JVM engine, which groups root methods under their class). Without this a flat crate of
@@ -1209,7 +1232,7 @@ fn norm_name(name: &str) -> &str {
 fn common_prefix_len(names: &[&String]) -> usize {
     let mut prefix: Option<Vec<&str>> = None;
     for n in names {
-        let segs: Vec<&str> = norm_name(n).split("::").collect();
+        let segs: Vec<&str> = name_segments(norm_name(n)).to_vec();
         match &mut prefix {
             None => prefix = Some(segs),
             Some(p) => {
@@ -1228,7 +1251,7 @@ fn common_prefix_len(names: &[&String]) -> usize {
 /// the root (`pgman::main`) has no module beyond the crate, so it buckets into `(root)` rather than
 /// becoming its own pseudo-layer — the layer is `segs[prefix_len]` only when a leaf follows it.
 fn layer_of(name: &str, prefix_len: usize) -> String {
-    let segs: Vec<&str> = norm_name(name).split("::").collect();
+    let segs: Vec<&str> = name_segments(norm_name(name));
     if prefix_len + 1 < segs.len() {
         segs[prefix_len].to_string()
     } else {
