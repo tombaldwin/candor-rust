@@ -141,6 +141,7 @@ The stable scanner is the friction-killer, and it's a **one-line install** — n
 ```sh
 cargo install candor-scan          # https://crates.io/crates/candor-scan
 candor-scan .                      # writes .candor/report.<crate>.scan.json   (or --json to stdout)
+                                   # (a workspace root: one report per member, same prefix)
 ```
 
 It walks the crate's `.rs` files, parses them with [`syn`](https://docs.rs/syn), resolves `use`-aliased

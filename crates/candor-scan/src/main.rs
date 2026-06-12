@@ -1253,7 +1253,10 @@ fn main() {
                 println!();
                 println!("USAGE:  candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests] [--policy <file>]");
                 println!();
-                println!("  <dir>             crate root to scan (default: .)");
+                println!("  <dir>             crate root to scan (default: .). A [workspace] root scans");
+                println!("                    every member: one report per member under the one prefix.");
+                println!("                    A nested dir with its own Cargo.toml is a different package");
+                println!("                    and is never folded into the parent's report.");
                 println!("  --out <prefix>    report path prefix (default: <dir>/.candor/report);");
                 println!("                    writes <prefix>.<crate>.scan.json + a call-graph sidecar");
                 println!("  --json            print the report to stdout instead of writing files");

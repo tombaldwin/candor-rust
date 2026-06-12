@@ -35,6 +35,8 @@ Both write the same report files; everything below reads either. Choose:
 ```sh
 cargo install candor-scan
 candor-scan . --out /tmp/candor-report     # writes /tmp/candor-report.<crate>.scan.json (+ callgraph sidecar)
+                                           # a workspace root writes ONE REPORT PER MEMBER under that prefix —
+                                           # point the query tools at the prefix and they merge all of them
 ```
 
 It can also enforce a policy file as a gate: `candor-scan . --policy .candor/policy` (exit 1 on

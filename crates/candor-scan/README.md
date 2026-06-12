@@ -12,6 +12,7 @@ crate**, so it can even analyze a dependency's source without compiling it.
 cargo install candor-scan
 candor-scan path/to/crate              # writes <crate>/.candor/report.<crate>.scan.json
 candor-scan . --json                   # print the report to stdout instead
+candor-scan workspace-root             # one report per workspace MEMBER, all under the same prefix
 ```
 
 The report is the same JSON the full [candor](https://github.com/tombaldwin/candor-rust) nightly lint
