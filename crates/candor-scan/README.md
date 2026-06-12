@@ -35,10 +35,13 @@ under-report, never a wrong label.
   (`let f = |..| ..; f()`) is NOT flagged — its effects were already walked lexically.
 - **Local-trait dispatch (syntactic CHA):** a dispatch-typed receiver — `&dyn Store` / `impl Store` /
   `S: Store` param, a `Box<dyn Store>` field or let — resolves to the trait's LOCAL implementors when
-  the dispatch is narrow (≤12 impls, the JVM engine's bound), so the DI pattern (`self.store.save()`
-  → `PgStore::save`) carries its effects. A local trait with no visible impl, an over-broad impl set,
-  or an ambiguous trait name reads honest `Unknown` instead. Dispatch through an EXTERNAL trait
-  (`impl Iterator`, serde's traits) is deliberately left out — flagging every combinator would flood.
+  the trait is locally declared, its declaration carries the called method, and the dispatch is
+  narrow (≤12 impls, the cross-engine bound) — so the DI pattern (`self.store.save()` →
+  `PgStore::save`) carries its effects. A local trait declaring the method but with no visible impl,
+  an over-broad impl set, or an ambiguous trait name reads honest `Unknown` instead. Dispatch through
+  an EXTERNAL trait (`impl Iterator`, serde's traits) is deliberately left out — even when a local
+  type implements it (resolving there fabricated effects onto pure generic fns) — and a call the
+  trait doesn't declare (`.clone()` on a bound param) neither edges nor floods.
 - **Misses (silently):** effects reached only through external-trait (`dyn`) dispatch or an
   uninferrable receiver, **`Deref`-coercion receivers** (`self.agent.run()` where the field is a wrapper that derefs
   to the type owning `run`), **generic-parameter fields** (`struct B<S>(S)` — `self.0.method()` can't be

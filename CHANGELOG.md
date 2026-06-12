@@ -18,19 +18,29 @@ behavioural changes (always in the soundness-increasing direction — see the §
   (unambiguous tail-first join; a report from a different scanner version downgrades to `Unknown`,
   §2.1).
 - **`--deps`:** scan the whole Cargo.lock dependency tree (unbuilt registry sources, in-process —
-  the self-gate's own `deny Exec` forbids the spawn-yourself shortcut) into `.candor/deps/`, then
-  scan the root chained over it. Measured on a real 328-dep app: 75s one-time (~0.23s/dep, cached
-  after), the ledger dropping 12 unlisted deps → 1 (the path dep), 7 fns gaining real effects.
+  the self-gate's own `deny Exec` forbids the spawn-yourself shortcut) into `.candor/deps/`
+  (one subdirectory per name@version, skip-if-already-scanned), then scan the root chained over
+  it. Measured on a real 328-dep app: 75s one-time (~0.23s/dep, cached after), the ledger dropping
+  12 unlisted deps → 1 (the path dep), 7 fns gaining real effects. The pre-release review closed
+  the trap cluster: the root policy no longer leaks into dep scans via CANDOR_POLICY; `--out` is
+  honoured; same-crate version pairs don't overwrite each other; the dep-dir + CANDOR_DEPS
+  double-load no longer drops every join as ambiguous; joins use the crate-relative path
+  (bare-leaf fallback removed — it fabricated); cargo_deps reads every workspace manifest and the
+  `[dependencies.name]` header forms.
 
 ### Added — local-trait dispatch (syntactic CHA; SPEC §4 bounded-CHA discipline)
 
 - A dispatch-typed receiver — `&dyn T` / `impl T` / generic `X: T` (inline or where-clause), through
   `Box`/`Rc`/`Arc`/`RefCell`/`Mutex`/`RwLock`, as a param, let, or STRUCT FIELD — resolves to the
-  trait's local implementors when narrow (≤12, the cross-engine bound), so the DI pattern
-  (`self.store.save()` → `PgStore::save`) carries its effects on the stable scanner. A local trait
-  with no visible impl (or too many, or an ambiguous name) reads honest `Unknown` — the previous
-  SILENT miss, closed. External traits stay out (no `impl Iterator` flood); A/B on six real crates:
-  five byte-identical, zero fabricated effects.
+  trait's local implementors when narrow (≤12, the cross-engine bound; both sides of the bound are
+  unit-tested), so the DI pattern (`self.store.save()` → `PgStore::save`) carries its effects on
+  the stable scanner. A local trait declaring the method but with no visible impl (or too many, or
+  an ambiguous name) reads honest `Unknown` — the previous SILENT miss, closed.
+- Resolution is gated to LOCALLY-DECLARED traits whose declaration carries the called METHOD
+  (the pre-release review execution-verified the wider rule fabricating: `impl Iterator for
+  RowIter` + `fn f(it: impl Iterator)` charged pure `f` with RowIter's `Db`; a same-named method
+  on a non-dispatching bound was the same wrongness). External-trait dispatch stays a documented
+  miss; `.clone()` on a bound param neither edges nor floods.
 
 ### Added — classifier (candor-classify)
 
