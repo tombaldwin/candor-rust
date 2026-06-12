@@ -4,7 +4,14 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## [0.3.7] — 2026-06-11 (crates: candor-classify / candor-scan lockstep; candor-report unchanged)
+## [0.3.7] — 2026-06-12 (crates: candor-report / candor-classify / candor-scan, lockstep)
+
+### Changed — spec 0.4 (conformance-breaking upgrade, wire-compatible)
+
+- Reports now declare **spec `0.4`** (candor-report's `SPEC_VERSION`). 0.4 upgrades four SHOULDs
+  to MUST — §2.1 version-trust at the chain join (missing version = unverifiable = Unknown), the
+  §7.14 κ-coverage ledger, universal `hash` emission, and literal surfaces when `allow` rules are
+  enforced. This engine already satisfies all four; the bump is the declaration.
 
 ### Added — the κ-coverage ledger + report chaining (the curation treadmill's exit; SPEC §7.14 / §2)
 
