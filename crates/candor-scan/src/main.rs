@@ -1289,7 +1289,16 @@ fn main() {
                 println!("fabricates an effect. See https://github.com/tombaldwin/candor");
                 return;
             }
-            _ => dir = a.clone(),
+            other => {
+                // An unknown flag must FAIL, not become a path: an agent following a newer doc
+                // against an older binary ran `candor-scan --agents` and scanned a directory
+                // literally named `--agents`; a typo'd `--polcy` would silently drop the gate.
+                if other.starts_with('-') {
+                    eprintln!("candor-scan: unknown flag '{other}' (see --help)");
+                    std::process::exit(2);
+                }
+                dir = a.clone();
+            }
         }
     }
     // The policy source is resolved HERE, once (flag wins, CANDOR_POLICY env as fallback) — never
