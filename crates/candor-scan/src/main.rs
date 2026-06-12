@@ -1248,6 +1248,14 @@ fn main() {
                 println!("candor-scan {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
+            // The agent contract for THE INSTALLED VERSION, embedded at build time — doc and
+            // binary cannot drift (the §2.1 version-trust rule applied to documentation). Agents
+            // are told to run this instead of trusting a vendored/remote copy.
+            "--agents" => {
+                println!("<!-- candor-scan {} · the agent contract for this installed version -->", env!("CARGO_PKG_VERSION"));
+                print!("{}", include_str!("../AGENTS.md"));
+                return;
+            }
             "-h" | "--help" => {
                 println!("candor-scan {} — stable-Rust effect scanner (no nightly)", env!("CARGO_PKG_VERSION"));
                 println!();
@@ -2682,6 +2690,18 @@ mod tests {
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets, &mut ti, &mut td, &mut tf);
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
+    }
+
+    #[test]
+    fn embedded_agents_contract_matches_the_repo_doc() {
+        // --agents prints the contract EMBEDDED at build time; this gate keeps the packaged copy
+        // (crates/candor-scan/AGENTS.md, the only file a crates.io tarball can carry) in lockstep
+        // with the repo-root AGENTS.md. If this fails: cp AGENTS.md crates/candor-scan/AGENTS.md
+        let embedded = include_str!("../AGENTS.md");
+        let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../AGENTS.md"))
+            .expect("repo-root AGENTS.md readable (workspace checkout)");
+        assert_eq!(embedded, root, "crate AGENTS.md drifted from the repo root — re-copy it");
+        assert!(embedded.contains("candor-scan"), "the contract must describe this tool");
     }
 
     #[test]

@@ -128,11 +128,21 @@ if [ -n "$SCANB" ]; then
   printf '[package]\nname="s"\nversion="0.1.0"\nedition="2021"\n[dependencies]\n' > "$S/Cargo.toml"
   printf 'use std::fs;\npub fn load(){ let _ = fs::read_to_string("/etc/hosts"); }\n' > "$S/src/lib.rs"
   # CANDOR_HOME points nowhere with a dylib; CANDOR_SCAN forces the scanner; no CANDOR_LIB.
-  outs=$(CANDOR_HOME="$(mktemp -d)" CANDOR_SCAN="$SCANB" "$RUN" --force "$S" 2>/dev/null)
+  outs=$(CANDOR_BACKEND=scan CANDOR_HOME="$(mktemp -d)" CANDOR_SCAN="$SCANB" "$RUN" --force "$S" 2>/dev/null)
   chk  "no-dylib: receipt falls back to the stable scanner (produces a report)" "$outs" '[0-9]+ fns'
   chk  "no-dylib: receipt detects the Fs effect via scan"                       "$outs" 'Fs'
   chk  "no-dylib: receipt is honestly marked as the stable backend"             "$outs" 'stable backend'
   chk  "no-dylib: a scan report file was written"                               "$(ls "$S/.candor/" 2>/dev/null)" 'report\..*\.scan\.json'
+
+  # Contract-refresh nudge: when the stored engine version differs from the running one, the
+  # receipt tells the agent to re-read `--agents`; same version -> no nudge; the stamp updates.
+  chk  "agents-nudge: first run stores the engine version"      "$(cat "$S/.candor/engine-version" 2>/dev/null)" 'scan'
+  outs=$(CANDOR_BACKEND=scan CANDOR_HOME="$(mktemp -d)" CANDOR_SCAN="$SCANB" "$RUN" --force "$S" 2>/dev/null)
+  nchk "agents-nudge: same engine version -> no refresh nudge"  "$outs" 're-read the contract'
+  printf 'old-version\n' > "$S/.candor/engine-version"
+  outs=$(CANDOR_BACKEND=scan CANDOR_HOME="$(mktemp -d)" CANDOR_SCAN="$SCANB" "$RUN" --force "$S" 2>/dev/null)
+  chk  "agents-nudge: version change -> re-read --agents nudge" "$outs" 'old-version→scan: re-read the contract'
+  chk  "agents-nudge: the stamp updates after the nudge"        "$(cat "$S/.candor/engine-version" 2>/dev/null)" 'scan'
   rm -rf "$(dirname "$S")"
 else
   echo "  skip scan-fallback check (candor-scan not built)"

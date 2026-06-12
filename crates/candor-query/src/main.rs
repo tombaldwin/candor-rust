@@ -45,10 +45,17 @@ fn main() {
         "engine-version" => cmd_engine_version(rest),
         "merge-hook" => cmd_merge_hook(rest),
         "parsepolicy" => cmd_parsepolicy(rest),
+        // The agent contract for THE INSTALLED VERSION, embedded at build time — doc and binary
+        // cannot drift (the §2.1 version-trust rule applied to documentation).
+        "--agents" | "agents" => {
+            println!("<!-- candor-query {} · the agent contract for this installed version -->", env!("CARGO_PKG_VERSION"));
+            print!("{}", include_str!("../AGENTS.md"));
+            0
+        }
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|whatif|rewire|parsepolicy|receipt|gains|state|reports|locate|engine-version|merge-hook)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|whatif|rewire|parsepolicy|receipt|gains|state|reports|locate|engine-version|merge-hook|--agents)"
             );
             2
         }
@@ -2069,6 +2076,17 @@ fn two(args: &[String]) -> Option<(&str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_agents_contract_matches_the_repo_doc() {
+        // The drift gate for `--agents`: the packaged copy (crates/candor-query/AGENTS.md — the
+        // only file a crates.io tarball can carry) must equal the repo-root AGENTS.md.
+        // If this fails: cp AGENTS.md crates/candor-query/AGENTS.md
+        let embedded = include_str!("../AGENTS.md");
+        let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../AGENTS.md"))
+            .expect("repo-root AGENTS.md readable (workspace checkout)");
+        assert_eq!(embedded, root, "crate AGENTS.md drifted from the repo root — re-copy it");
+    }
 
     #[test]
     fn rewire_flags_dropped_edges_not_added_ones() {

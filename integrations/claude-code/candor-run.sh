@@ -65,6 +65,9 @@ PREV=""; [ -f "$STATE" ] && PREV="$(cat "$STATE" 2>/dev/null)"
 # the previous `libcandor@<old>.dylib` lingers beside the new one and sorts first alphabetically; loading
 # it runs a stale engine — newest_of avoids that.
 find_lib() {
+  # CANDOR_BACKEND=scan forces the stable backend even when a dylib is findable (parity with
+  # cargo-candor; also makes tests deterministic on machines with a stray /tmp/candor clone).
+  [ "${CANDOR_BACKEND:-}" = "scan" ] && return 1
   [ -n "${CANDOR_LIB:-}" ] && [ -e "${CANDOR_LIB:-}" ] && { echo "$CANDOR_LIB"; return 0; }
   newest_of "${CANDOR_HOME:-}"/target/debug/libcandor@*.dylib "${CANDOR_HOME:-}"/target/debug/libcandor@*.so \
             "$DIR"/../candor/target/debug/libcandor@*.dylib "$DIR"/../candor/target/debug/libcandor@*.so \
@@ -346,6 +349,18 @@ if [ "${CANDOR_REVIEW:-0}" != 0 ] && [ "$ran_ok" = 1 ] && ! is_scan_report \
         }')"
     fi
   fi
+fi
+
+# ---- contract-refresh nudge: the engine changed since this project last read its AGENTS.md ----
+# The contract ships INSIDE the engine (`--agents`, SPEC §7.11); when the version stamp moves, the
+# agent should re-read it — new behavior arrives with the binary, not with a doc fetch.
+ENGINE_VER_FILE="$STATE_DIR/engine-version"
+if [ -n "$VER" ]; then
+  prev_ver="$(cat "$ENGINE_VER_FILE" 2>/dev/null || true)"
+  if [ -n "$prev_ver" ] && [ "$prev_ver" != "$VER" ]; then
+    NUDGE="$NUDGE · engine ${prev_ver}→${VER}: re-read the contract — candor-scan --agents"
+  fi
+  printf '%s\n' "$VER" > "$ENGINE_VER_FILE" 2>/dev/null || true
 fi
 
 # ---- emit ----
