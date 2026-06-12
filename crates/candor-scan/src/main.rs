@@ -272,8 +272,9 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
 /// to the κ ledger on the most common project layout), normalized to crate-root form (`-` -> `_`).
 /// Line-based on purpose (no toml dependency). dev-/build-dependencies are the harness's and the
 /// build script's universe, not the crate's runtime one — excluded, like tests/ and build.rs.
-fn cargo_deps(dir: &str) -> std::collections::HashSet<String> {
+fn cargo_deps(dir: &str) -> (std::collections::HashSet<String>, HashMap<String, String>) {
     let mut out = std::collections::HashSet::new();
+    let mut renames = HashMap::new();
     for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
         let p = entry.path();
         if p.file_name().and_then(|n| n.to_str()) != Some("Cargo.toml") {
@@ -283,10 +284,10 @@ fn cargo_deps(dir: &str) -> std::collections::HashSet<String> {
             continue;
         }
         if let Ok(text) = std::fs::read_to_string(p) {
-            cargo_toml_deps(&text, &mut out);
+            cargo_toml_deps(&text, &mut out, &mut renames);
         }
     }
-    out
+    (out, renames)
 }
 
 /// One manifest's dependency names, all four header forms: `[dependencies]` /
@@ -294,14 +295,31 @@ fn cargo_deps(dir: &str) -> std::collections::HashSet<String> {
 /// declarations `[dependencies.name]` / `[target.….dependencies.name]` (review: the old
 /// `ends_with("dependencies]")` gate made the header-form branch unreachable — a table-header
 /// dep was invisible to the ledger, execution-verified).
-fn cargo_toml_deps(text: &str, out: &mut std::collections::HashSet<String>) {
+fn cargo_toml_deps(
+    text: &str,
+    out: &mut std::collections::HashSet<String>,
+    renames: &mut HashMap<String, String>,
+) {
+    // A dependency RENAME (`tui-common = { package = "tb-tui-common" }`) means the manifest KEY is
+    // what the code imports while the registry/report knows the REAL package — without the map,
+    // --deps scanned the real crate and the join/ledger missed it under the key (found live on
+    // ebman: tui_common stayed "invisible" with its report sitting right there).
+    let pkg_re = |l: &str| -> Option<String> {
+        let i = l.find("package")?;
+        let rest = l[i + "package".len()..].trim_start();
+        let rest = rest.strip_prefix('=')?.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        rest.split('"').next().map(|s| s.replace('-', "_"))
+    };
     let mut in_deps = false;
+    let mut header_key: Option<String> = None; // the `[dependencies.name]` we're inside, if any
     for line in text.lines() {
         let l = line.trim();
         if l.starts_with('[') {
             let inner = l.trim_start_matches('[').trim_end_matches(']');
             let harness = inner.contains("dev-dependencies") || inner.contains("build-dependencies");
             in_deps = !harness && (inner == "dependencies" || inner.ends_with(".dependencies"));
+            header_key = None;
             if !harness && !in_deps {
                 let name = inner
                     .rfind(".dependencies.")
@@ -309,19 +327,39 @@ fn cargo_toml_deps(text: &str, out: &mut std::collections::HashSet<String>) {
                     .or_else(|| inner.strip_prefix("dependencies."));
                 if let Some(name) = name {
                     if !name.is_empty() && !name.contains('.') {
-                        out.insert(name.trim_matches('"').replace('-', "_"));
+                        let key = name.trim_matches('"').replace('-', "_");
+                        out.insert(key.clone());
+                        header_key = Some(key);
                     }
                 }
             }
             continue;
         }
-        if !in_deps || l.is_empty() || l.starts_with('#') {
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        // inside a `[dependencies.name]` table: a `package = "real"` line is the rename
+        if let Some(key) = &header_key {
+            if l.starts_with("package") {
+                if let Some(real) = pkg_re(l) {
+                    renames.insert(key.clone(), real);
+                }
+            }
+            continue;
+        }
+        if !in_deps {
             continue;
         }
         if let Some(name) = l.split('=').next() {
             let name = name.trim().trim_matches('"');
             if !name.is_empty() {
-                out.insert(name.replace('-', "_"));
+                let key = name.replace('-', "_");
+                if let Some(real) = pkg_re(l) {
+                    if real != key {
+                        renames.insert(key.clone(), real);
+                    }
+                }
+                out.insert(key);
             }
         }
     }
@@ -1370,7 +1408,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
     // dep the calls actually reach whose classification never fires — and that isn't in a calibrated
     // tier — is a named blind spot (invisible, not Unknown: the curated-κ caveat). Counted here,
     // disclosed in the receipt, so the caveat is per-scan evidence instead of a doc footnote.
-    let deps = cargo_deps(dir);
+    let (deps, dep_renames) = cargo_deps(dir);
     let mut dep_seen: HashMap<String, usize> = HashMap::new(); // dep crate root -> call-site count
     let mut dep_classified: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1429,16 +1467,19 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
             // CANDOR_DEPS sibling report covers inherits that function's recorded effects and
             // literal surfaces — joined unambiguous-tail2-first, then unambiguous leaf, like
             // `resolve_target`. A chained dep is covered, not a κ blind spot.
-            if classified.is_none() && c.path.contains("::") && deps_idx.crates.contains(cr) {
+            // a renamed dependency: the call's crate root is the manifest KEY; reports/registry
+            // know the REAL package — join and cover under the real name
+            let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
+            if classified.is_none() && c.path.contains("::") && deps_idx.crates.contains(cr_real) {
                 // Join on the call path RELATIVE to the crate root: a multi-segment rel joins by
                 // its qualified tail ONLY (review: a bare-leaf fallback for qualified paths let a
                 // pure `MockDb::connect` inherit `Db::connect`'s effects — fabrication); a
                 // single-segment rel (a crate-root free fn) IS the dep's leaf key.
                 let rel = c.path.strip_prefix(&format!("{cr}::")).unwrap_or(&c.path);
                 let hit = if rel.contains("::") {
-                    tail2(rel).and_then(|t2| deps_idx.by_key.get(&format!("{cr}#{t2}")))
+                    tail2(rel).and_then(|t2| deps_idx.by_key.get(&format!("{cr_real}#{t2}")))
                 } else {
-                    deps_idx.by_key.get(&format!("{cr}#{rel}"))
+                    deps_idx.by_key.get(&format!("{cr_real}#{rel}"))
                 };
                 if let Some(de) = hit {
                     for e in &de.effects {
@@ -1586,7 +1627,8 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
                 // A crate with a loaded sibling report is COVERED even when no join fired: the
                 // report omits pure functions, so join-less calls are its honest purity claim —
                 // the opposite of invisible. (Without this, --deps named serde_json a blind spot.)
-                && !deps_idx.crates.contains(cr.as_str())
+                // A RENAMED dep is covered under its real package name.
+                && !deps_idx.crates.contains(dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str()))
                 && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
@@ -2147,9 +2189,11 @@ mod tests {
     #[test]
     fn cargo_toml_deps_handles_all_header_forms() {
         let mut out = std::collections::HashSet::new();
+        let mut renames = HashMap::new();
         cargo_toml_deps(
             "[package]\nname = \"x\"\n\n[dependencies]\nserde_json = \"1\"\nleft-pad = \"1\"\n\n[dependencies.table-header]\nversion = \"1\"\n\n[target.'cfg(unix)'.dependencies.nix]\nversion = \"0.29\"\n\n[target.'cfg(windows)'.dependencies]\nwinapi = \"0.3\"\n\n[workspace.dependencies]\nshared-dep = \"2\"\n\n[dev-dependencies]\ncriterion = \"0.5\"\n\n[build-dependencies]\ncc = \"1\"\n\n[dev-dependencies.proptest]\nversion = \"1\"\n",
             &mut out,
+            &mut renames,
         );
         for d in ["serde_json", "left_pad", "table_header", "nix", "winapi", "shared_dep"] {
             assert!(out.contains(d), "missing {d}: {out:?}");
@@ -2157,6 +2201,17 @@ mod tests {
         for d in ["criterion", "cc", "proptest", "x"] {
             assert!(!out.contains(d), "harness/package dep leaked: {d}");
         }
+        // dependency RENAMES, both forms (found live: ebman's `tui-common = { package = "tb-tui-common" }`)
+        let mut out2 = std::collections::HashSet::new();
+        let mut ren2 = HashMap::new();
+        cargo_toml_deps(
+            "[dependencies]\ntui-common = { version = \"0.1\", package = \"tb-tui-common\" }\n\n[dependencies.short-name]\nversion = \"1\"\npackage = \"the-real-crate\"\n",
+            &mut out2,
+            &mut ren2,
+        );
+        assert!(out2.contains("tui_common") && out2.contains("short_name"), "{out2:?}");
+        assert_eq!(ren2.get("tui_common").map(String::as_str), Some("tb_tui_common"));
+        assert_eq!(ren2.get("short_name").map(String::as_str), Some("the_real_crate"));
     }
 
     #[test]
