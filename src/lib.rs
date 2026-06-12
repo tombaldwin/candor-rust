@@ -29,8 +29,7 @@ extern crate rustc_span;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use candor_report::{
-    report_entries, report_files, report_has_envelope, report_version, to_report_json, ReportEntry,
-    ReportMeta,
+    report_entries, report_files, report_has_envelope, report_version, ReportEntry, ReportMeta,
 };
 // The curated effect classifier lives in a STABLE crate (candor-classify), shared with the stable
 // `candor-scan` backend so there is one source of truth (no drift). (`DB_CRATES` is referenced only
@@ -308,14 +307,16 @@ impl Candor {
         };
         let paranoid = std::env::var("CANDOR_PARANOID").is_ok();
         let explain = std::env::var("CANDOR_EXPLAIN").ok().filter(|s| !s.is_empty());
-        // A set-but-unreadable CANDOR_POLICY must be loud — silently passing would let a violation
-        // through while the user believes the boundary is enforced.
+        // A set-but-unreadable CANDOR_POLICY FAILS the run (spec §6.2 MUST): proceeding gateless on
+        // a typo'd path is a gate that silently passes everything. Exiting the compiler process is
+        // blunt, but it is the only path here that makes `cargo dylint` exit nonzero — a stderr
+        // line alone left CI green (the java engine shipped exactly that bug).
         let parsed_policy = match std::env::var("CANDOR_POLICY") {
             Ok(p) => match std::fs::read_to_string(&p) {
                 Ok(s) => parse_policy(&s),
                 Err(e) => {
-                    eprintln!("candor: CANDOR_POLICY={p:?} could not be read ({e}); policy NOT enforced");
-                    ParsedPolicy::default()
+                    eprintln!("candor: CANDOR_POLICY={p:?} could not be read ({e}) — failing (exit 2), policy NOT evaluated");
+                    std::process::exit(2);
                 }
             },
             Err(_) => ParsedPolicy::default(),
@@ -2254,7 +2255,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 toolchain: CANDOR_TOOLCHAIN.into(),
                 spec: candor_report::SPEC_VERSION.into(),
             };
-            match to_report_json(&meta, &json_entries) {
+            match candor_report::to_packaged_report_json(&meta, krate.as_str(), &json_entries) {
                 Ok(body) => match std::fs::write(&file, body) {
                     Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
                     Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),

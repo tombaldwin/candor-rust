@@ -179,12 +179,25 @@ pub fn report_entries(text: &str) -> Option<Vec<ReportEntry>> {
 /// Serialize a v0.2 report from a header + entries, borrowing both so the caller keeps ownership
 /// (the lint logs the entry count after writing). Pretty-printed.
 pub fn to_report_json(candor: &ReportMeta, functions: &[ReportEntry]) -> serde_json::Result<String> {
+    to_packaged_report_json(candor, "", functions)
+}
+
+/// Like [`to_report_json`], with the envelope's `package` field (spec §2, 0.4-amended SHOULD):
+/// name what the report covers, so an all-pure EMPTY report's coverage is readable without
+/// parsing entry hash prefixes. An empty `package` omits the field (the pre-amendment shape).
+pub fn to_packaged_report_json(
+    candor: &ReportMeta,
+    package: &str,
+    functions: &[ReportEntry],
+) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
         candor: &'a ReportMeta,
+        #[serde(skip_serializing_if = "str::is_empty")]
+        package: &'a str,
         functions: &'a [ReportEntry],
     }
-    serde_json::to_string_pretty(&Out { candor, functions })
+    serde_json::to_string_pretty(&Out { candor, package, functions })
 }
 
 /// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy

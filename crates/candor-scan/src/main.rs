@@ -1635,7 +1635,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
         toolchain: "stable".into(),
         spec: candor_report::SPEC_VERSION.into(),
     };
-    let body = candor_report::to_report_json(&meta, &entries).unwrap_or_default();
+    let body = candor_report::to_packaged_report_json(&meta, &crate_name, &entries).unwrap_or_default();
     if want_json {
         println!("{body}");
     } else {
