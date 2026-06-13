@@ -282,7 +282,17 @@ sound over-approximation (`Unknown`), which candor already does.
       invokers (not genuine dynamic dispatch / FFI), prototype the per-mono route behind a flag against
       a 3-shape fixture corpus. *(Pushback was right that "needs a MIR engine" framed a road as a wall;
       scoping then showed the road isn't worth walking until the noise is shown to matter.)*
-- [ ] **Macro-generated effects — narrow the blanket filter.** Today `span.from_expansion()` skips
+- [x] **Macro-generated effects — narrow the blanket filter. DONE + VALIDATED (2026-06-13).** The
+      blanket skip was already narrowed (skip macro-generated consts/statics — where the tracing
+      `__CALLSITE` static flood lives — but ANALYZE macro-generated FUNCTIONS). Validated on a real
+      macro-heavy crate (tracing + async_trait + serde derive): an `async_trait` method's inner I/O
+      shows Fs; a `tracing`-using fn that ALSO does Fs shows both (not hidden); a pure tracing fn shows
+      only Log (correct — it IS a log framework); a `#[derive(Serialize)]` struct is pure with no false
+      effects. The DefKind heuristic aligns with the noise/real boundary in practice (the flooding
+      macros generate statics; the fn-generating ones — async_trait/serde — are real), so the
+      ExpnData-identity allowlist below is NOT needed: it would add complexity + re-flood risk for no
+      measured benefit. (Validation answered the "tune against a corpus" question: current is sufficient.)
+- [ ] **Macro-generated effects — narrow the blanket filter (original framing, superseded above).** Today `span.from_expansion()` skips
       *all* macro output (added because compiler-internal/`tracing __CALLSITE` expansions flooded the
       report). But every expansion carries its macro's identity (`ExpnData`/`DefId`), so we can filter
       **only known-noise macros** and analyze the rest (so an `async_trait`/derive/decl-macro that
