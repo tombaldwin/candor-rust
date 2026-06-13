@@ -1304,7 +1304,6 @@ fn cmd_impact(args: &[String]) -> i32 {
             rev.entry(c.as_str()).or_default().push(e.func.as_str());
         }
     }
-    let mut affected = 0usize;
     let mut seen: HashSet<&str> = HashSet::new();
     let mut q: VecDeque<&str> = VecDeque::new();
     q.push_back(target.func.as_str());
@@ -1313,12 +1312,16 @@ fn cmd_impact(args: &[String]) -> i32 {
         if let Some(callers) = rev.get(cur) {
             for &caller in callers {
                 if seen.insert(caller) {
-                    affected += 1;
                     q.push_back(caller);
                 }
             }
         }
     }
+    // The affected set: every effectful fn that transitively calls the target (the report holds only
+    // effectful units, so every reverse-reachable node is one). Sorted for a stable cross-engine shape.
+    let mut affected_names: Vec<&str> =
+        seen.iter().copied().filter(|n| *n != target.func.as_str()).collect();
+    affected_names.sort_unstable();
     let mut roots: Vec<&ReportEntry> = Vec::new();
     if target.entry_point {
         roots.push(target);
@@ -1338,15 +1341,19 @@ fn cmd_impact(args: &[String]) -> i32 {
             .map(|r| serde_json::json!({ "fn": r.func, "inferred": r.inferred }))
             .collect();
         let out = serde_json::json!({
-            "fn": target.func, "affectedCount": affected, "entryPoints": eps
+            "fn": target.func,
+            "affectedCount": affected_names.len(),
+            "affected": affected_names,
+            "entryPoints": eps
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
     println!("candor impact — what changing `{}` affects:\n", target.func);
     println!(
-        "  {affected} effectful function{} transitively call it.",
-        if affected == 1 { "" } else { "s" }
+        "  {} effectful function{} transitively call it.",
+        affected_names.len(),
+        if affected_names.len() == 1 { "" } else { "s" }
     );
     if roots.is_empty() {
         println!(
