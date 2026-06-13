@@ -36,7 +36,7 @@ use candor_report::{
 // by a consistency test, qualified at the use site.)
 use candor_classify::{
     cap_from_name, capstd_cap, classify, classify_extra, CALIBRATED_CRATES, CALIBRATED_PREFIXES,
-    CALIBRATION_PROBE_TAILS, PATH_CALIBRATED_CRATES,
+    PATH_CALIBRATED_CRATES,
 };
 // The CANDOR_POLICY DSL parser is the SHARED canonical one (candor-spec SPEC §6.2), so the nightly
 // gate, stable candor-query (whatif/parsepolicy), and the JVM engine can't drift on the grammar.
@@ -2552,7 +2552,9 @@ mod tests {
         // use distinctive tails this list was missing, silently breaking the invariant here).
         for c in CALIBRATED_CRATES {
             assert!(
-                CALIBRATION_PROBE_TAILS.iter().any(|t| classify(c, &format!("{c}{t}")).is_some()),
+                candor_classify::CALIBRATION_PROBE_TAILS
+                    .iter()
+                    .any(|t| classify(c, &format!("{c}{t}")).is_some()),
                 "calibrated crate `{c}` is matched by no path in classify() — dead list entry"
             );
         }
