@@ -142,8 +142,10 @@ With the Path B clone installed, `cargo candor <cmd>` answers the common questio
   its source is trusted," not as proof of a bug.
 - **Which functions touch the network (or any effect)?** → `cargo candor where Net` (splits the
   direct sources from the functions that inherit it). Faster than grepping the codebase.
-- **Who calls this function? (before editing it)** → `cargo candor callers <fn>` (direct + transitive
-  callers from the callgraph — the blast radius). Faster than grepping for call sites.
+- **Blast radius of editing this function** → `cargo candor impact <fn>` — the `affected` list (every
+  effectful fn that transitively calls it) + the downstream `entryPoints` (the runtime roots a change
+  surfaces through). `cargo candor callers <fn>` is the lower-level raw direct+transitive callers.
+  Either beats grepping for call sites.
 - **If I add an effect here, what breaks?** → `cargo candor whatif <fn> Net` (pre-edit: what the
   effect propagates to, and whether it would violate the policy).
 - **Safe to treat as pure (e.g. unit-test without mocks)?** → use the §2 rule: in the callgraph
@@ -158,9 +160,11 @@ args; the trailing `0|1` is the want-JSON flag:
 candor-query show     <prefix> <fn-query>  <0|1>
 candor-query where    <prefix> <Effect>    <0|1>
 candor-query callers  <prefix> <fn-query>  <0|1>
+candor-query impact   <prefix> <fn-query>  [--json]   # the blast radius: {fn,affectedCount,affected,entryPoints}
 candor-query map      <prefix>             <0|1>
 candor-query whatif   <prefix> <fn> <Effect> [policy-file] [0|1]
 candor-query path     <prefix> <fn> <Effect> [--json]
+candor-query gains    <cur_prefix> <base_prefix> [--json]   # supply-chain alarm: effects a surface gained
 candor-query diff     <cur_prefix> <base_prefix> <0|1> <baseline_ver> <engine_ver>
 ```
 
