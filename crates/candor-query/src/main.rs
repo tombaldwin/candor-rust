@@ -1239,7 +1239,7 @@ fn norm_name(name: &str) -> &str {
 fn common_prefix_len(names: &[&String]) -> usize {
     let mut prefix: Option<Vec<&str>> = None;
     for n in names {
-        let segs: Vec<&str> = name_segments(norm_name(n)).to_vec();
+        let segs: Vec<&str> = name_segments(norm_name(n)); // already a Vec — no redundant .to_vec()
         match &mut prefix {
             None => prefix = Some(segs),
             Some(p) => {

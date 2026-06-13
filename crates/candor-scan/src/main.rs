@@ -267,20 +267,57 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     idx
 }
 
+// ── shared Cargo.toml line primitives (line-based on purpose — no toml dependency) ────────────────
+// The ONE place table-header and scalar parsing live, so a manifest-syntax quirk (`[ spaced ]`
+// headers, a trailing `# comment`) is handled once across the three readers below rather than
+// drifting between them.
+
+/// A `[section]` header line → its inner name, surrounding spaces tolerated (`[ workspace ]` →
+/// "workspace"); None for any non-header line.
+fn toml_section(line: &str) -> Option<&str> {
+    let l = line.trim();
+    Some(l.strip_prefix('[')?.strip_suffix(']')?.trim())
+}
+
+/// A scalar `key = "value"` / `key = value` on this line — `key` matched as the WHOLE key (then `=`),
+/// the value quote-trimmed and an out-of-quotes trailing `# comment` stripped. None if not this key.
+fn toml_scalar<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = line.trim().strip_prefix(key)?.trim_start().strip_prefix('=')?.trim();
+    Some(if let Some(q) = rest.strip_prefix('"') {
+        q.split('"').next().unwrap_or(q)
+    } else {
+        rest.split('#').next().unwrap_or(rest).trim()
+    })
+}
+
 /// Dependency names declared by EVERY Cargo.toml under the scan root (a workspace's members each
 /// declare their own — review: reading only the root manifest left member-declared deps invisible
 /// to the κ ledger on the most common project layout), normalized to crate-root form (`-` -> `_`).
-/// Line-based on purpose (no toml dependency). dev-/build-dependencies are the harness's and the
-/// build script's universe, not the crate's runtime one — excluded, like tests/ and build.rs.
+/// dev-/build-dependencies are the harness's and the build script's universe, not the crate's
+/// runtime one — excluded, like tests/ and build.rs.
 fn cargo_deps(dir: &str) -> (std::collections::HashSet<String>, HashMap<String, String>) {
     let mut out = std::collections::HashSet::new();
     let mut renames = HashMap::new();
-    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+    // Honour the SAME nested-package rule as the source walk (filter_entry above): a subdir with its
+    // own Cargo.toml is a different package whose deps are ITS universe, not this crate's — scan_target
+    // scans it separately. Without this, a nested fixture/path-dep's deps polluted the parent's κ
+    // ledger (the source walk skips the nested sources, so the two had drifted out of agreement).
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 || !e.file_type().is_dir() {
+                return true;
+            }
+            let name = e.file_name().to_str().unwrap_or("");
+            if name == "target" || (name.starts_with('.') && name != "." && name != "..") {
+                return false;
+            }
+            !e.path().join("Cargo.toml").is_file()
+        })
+        .filter_map(Result::ok)
+    {
         let p = entry.path();
         if p.file_name().and_then(|n| n.to_str()) != Some("Cargo.toml") {
-            continue;
-        }
-        if p.components().any(|c| matches!(c.as_os_str().to_str(), Some("target") | Some(".git"))) {
             continue;
         }
         if let Ok(text) = std::fs::read_to_string(p) {
@@ -328,8 +365,7 @@ fn cargo_toml_deps(
     let mut header_key: Option<String> = None; // the `[dependencies.name]` we're inside, if any
     for line in text.lines() {
         let l = line.trim();
-        if l.starts_with('[') {
-            let inner = l.trim_start_matches('[').trim_end_matches(']');
+        if let Some(inner) = toml_section(line) {
             let harness = inner.contains("dev-dependencies") || inner.contains("build-dependencies");
             in_deps = !harness && (inner == "dependencies" || inner.ends_with(".dependencies"));
             header_key = None;
@@ -1366,7 +1402,20 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // and cross-wires the merged call graph (the repo-root self-scan merged 194 eval-fixture
         // `main`s into one unit). It gets its own scan: workspace member, --deps, or directly.
         .filter_entry(|e| {
-            e.depth() == 0 || !e.file_type().is_dir() || !e.path().join("Cargo.toml").is_file()
+            if e.depth() == 0 || !e.file_type().is_dir() {
+                return true;
+            }
+            // Prune build/tooling dirs by NAME first — cheap, and it skips DESCENT into huge `target/`
+            // and `.git/` trees (the dominant cost on a warm checkout) before the per-dir Cargo.toml
+            // stat. A name starting with `.` is a hidden tooling dir (`.git`/`.github`/`.cargo`/…).
+            let name = e.file_name().to_str().unwrap_or("");
+            if name == "target" || (name.starts_with('.') && name != "." && name != "..") {
+                return false;
+            }
+            // A nested dir carrying its own Cargo.toml is a DIFFERENT package (Cargo's own semantics):
+            // folding its files into this crate collides same-named fns across packages and cross-wires
+            // the merged call graph. It gets its own scan (workspace member, --deps, or directly).
+            !e.path().join("Cargo.toml").is_file()
         })
         .filter_map(Result::ok)
     {
@@ -2045,19 +2094,14 @@ fn read_crate_name(root: &Path) -> Option<String> {
     let txt = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
     let mut in_package = false;
     for line in txt.lines() {
-        let l = line.trim();
-        if l.starts_with('[') {
-            in_package = l == "[package]"; // only the [package] table's `name` is the crate name
+        if let Some(section) = toml_section(line) {
+            in_package = section == "package"; // only [package]'s `name` is the crate name
             continue;
         }
-        // Match the key `name` exactly — `name =` / `name=` — not `namespace`/`name-server`, and only
-        // inside `[package]` (a `name = ` in `[[bin]]`/`[dependencies]` is not the crate name).
+        // `name` inside `[package]` only (a `name =` in `[[bin]]`/`[dependencies]` is not the crate name).
         if in_package {
-            if let Some(rest) = l.strip_prefix("name") {
-                let rest = rest.trim_start();
-                if let Some(v) = rest.strip_prefix('=') {
-                    return Some(v.trim().trim_matches('"').replace('-', "_"));
-                }
+            if let Some(v) = toml_scalar(line, "name") {
+                return Some(v.replace('-', "_"));
             }
         }
     }
@@ -2067,14 +2111,15 @@ fn read_crate_name(root: &Path) -> Option<String> {
 /// The string entries of `key = [ ... ]` inside `[table]` — line-based (the manifest subset that
 /// matters), multi-line arrays included. No TOML dependency, same trade as the parsers above.
 fn toml_string_array(txt: &str, table: &str, key: &str) -> Vec<String> {
-    let header = format!("[{table}]");
     let (mut in_table, mut collecting) = (false, false);
     let mut out = Vec::new();
     for line in txt.lines() {
         let l = line.trim();
-        if l.starts_with('[') && !collecting {
-            in_table = l == header;
-            continue;
+        if !collecting {
+            if let Some(section) = toml_section(line) {
+                in_table = section == table;
+                continue;
+            }
         }
         if !in_table {
             continue;
@@ -2819,6 +2864,45 @@ mod tests {
             }
             _ => { /* not a workspace checkout (registry/vendor layout) — drift gate N/A */ }
         }
+    }
+
+    #[test]
+    fn toml_primitives_tolerate_spacing_and_comments() {
+        // The shared toml_section/toml_scalar fix a latent inconsistency: a `[ spaced ]` header and a
+        // trailing `# comment` are now handled uniformly across all three manifest readers.
+        assert_eq!(toml_section("[ workspace ]"), Some("workspace"));
+        assert_eq!(toml_section("[package]"), Some("package"));
+        assert_eq!(toml_section("name = \"x\""), None);
+        assert_eq!(toml_scalar("name = \"my-crate\"  # the name", "name"), Some("my-crate"));
+        assert_eq!(toml_scalar("name=bare # c", "name"), Some("bare"));
+        assert_eq!(toml_scalar("namespace = \"x\"", "name"), None); // key is whole, not a prefix
+        // read_crate_name through a spaced header + comment.
+        let d = std::env::temp_dir().join(format!("candor-scan-tomlhdr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[ package ]\nname = \"spaced-crate\"  # trailing\n").unwrap();
+        assert_eq!(read_crate_name(&d).as_deref(), Some("spaced_crate"));
+        // toml_string_array through a spaced [ workspace ] header.
+        assert_eq!(
+            toml_string_array("[ workspace ]\nmembers = [\"a\", \"b\"]\n", "workspace", "members"),
+            vec!["a", "b"]
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cargo_deps_excludes_nested_package_manifests() {
+        // The κ dep universe is the crate's OWN deps — a nested package (fixture, path-dep) is scanned
+        // separately, so its deps must not pollute the parent's ledger (matching the source walk).
+        let d = std::env::temp_dir().join(format!("candor-scan-nesteddeps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("fixture")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"outer\"\n[dependencies]\nserde = \"1\"\n").unwrap();
+        std::fs::write(d.join("fixture/Cargo.toml"), "[package]\nname = \"inner\"\n[dependencies]\nreqwest = \"0.12\"\n").unwrap();
+        let (deps, _) = cargo_deps(&d.to_string_lossy());
+        assert!(deps.contains("serde"), "the crate's own dep is present: {deps:?}");
+        assert!(!deps.contains("reqwest"), "a nested package's dep leaked into the parent: {deps:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
