@@ -1747,7 +1747,7 @@ fn cmd_gains(args: &[String]) -> i32 {
     let (cur_pre, base_pre) = match args {
         [a, b, ..] => (a.as_str(), b.as_str()),
         _ => {
-            eprintln!("usage: candor-query gains <cur_prefix> <base_prefix>");
+            eprintln!("usage: candor-query gains <cur_prefix> <base_prefix> [--json]");
             return 2;
         }
     };
@@ -1771,6 +1771,22 @@ fn cmd_gains(args: &[String]) -> i32 {
         }
     }
     out.sort();
+    if args.iter().any(|a| a == "--json" || a == "1") {
+        // The package-level supply-chain alarm (spec §5.1): `gained` is the UNION of effects the
+        // surface gained between the two reports — a dependency that grew a Net/Exec reach between
+        // releases — with the per-function detail under `byFunction`. Machine-readable so a CI gate
+        // can alarm on a dependency update that quietly gains a capability.
+        let mut gained: Vec<&str> = out.iter().map(|(_, e)| e.as_str()).collect();
+        gained.sort_unstable();
+        gained.dedup();
+        let by_function: Vec<_> = out
+            .iter()
+            .map(|(f, e)| serde_json::json!({ "fn": f, "effect": e }))
+            .collect();
+        let v = serde_json::json!({ "gained": gained, "byFunction": by_function });
+        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+        return 0;
+    }
     for (func, e) in out {
         println!("{func}\t{e}");
     }
@@ -2115,6 +2131,17 @@ mod tests {
         assert!(!d.contains_key("main")); // a purely-ADDED edge is not a drop
         // a correct fix that only ADDS edges yields nothing dropped.
         assert!(dropped_edges(&base, &base).is_empty());
+    }
+
+    #[test]
+    fn gains_flags_a_supply_chain_capability_gain() {
+        // The supply-chain alarm core (spec §5.1): an effect PRESENT in the new surface and ABSENT
+        // from the old is a gained capability — a dependency that grew a Net/Exec reach between
+        // releases. Only growth alarms: an unchanged or shrunk surface gains nothing.
+        let set = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>();
+        assert_eq!(gained_effects(&set(&["Fs", "Net"]), &set(&["Fs"])), vec!["Net"]); // gained Net
+        assert!(gained_effects(&set(&["Fs"]), &set(&["Fs"])).is_empty()); // stable → no alarm
+        assert!(gained_effects(&set(&["Fs"]), &set(&["Fs", "Net"])).is_empty()); // a LOSS is not a gain
     }
 
     #[test]
