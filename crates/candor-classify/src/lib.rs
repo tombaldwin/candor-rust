@@ -875,6 +875,30 @@ pub fn cap_from_name(name: &str) -> Option<&'static str> {
     EFFECTS.iter().copied().find(|e| *e == name)
 }
 
+/// Refine the `Exec` cliff (spec §4 ⟨0.5⟩): the effects a *literal, statically-known* subprocess
+/// head implies, matched by basename (`/usr/bin/curl` → `curl`). The head's effects are ADDED to a
+/// caller that already carries `Exec` (a subprocess is still spawned — `Exec` is never dropped); an
+/// unrecognised or dynamically-built head returns `&[]` and keeps the bare cliff (never guess). A
+/// **candor engine** reads `Fs`/`Env` only — spec §7 item 12 (the analyzer self-boundary) guarantees
+/// that, so that case is spec-supplied, not curation. The rest is a small curated table under the
+/// same under-report rule as the crate classifier. INVARIANT: every head here is an external tool
+/// that does NOT run the analysed project's own code (so `make`/`npm`/`cargo` are deliberately
+/// absent — they stay the cliff). The reference engines share this table so the `Exec` boundary —
+/// the one boundary every engine hits — refines identically (the §4-consistency argument).
+pub fn classify_command_head(cmd: &str) -> &'static [&'static str] {
+    // Only UNAMBIGUOUS single-effect tools belong here. A multi-modal head (`git status` is local,
+    // `git push` is Net; `rsync` local-vs-remote) would FABRICATE the effect for its common case —
+    // the under-report rule forbids it, so such heads keep the bare cliff.
+    match cmd.rsplit(['/', '\\']).next().unwrap_or(cmd) {
+        "curl" | "wget" | "http" | "ssh" | "scp" => &["Net"],
+        "psql" | "mysql" | "sqlite3" | "mongosh" | "redis-cli" => &["Db"],
+        // candor engines — Fs/Env only, guaranteed by spec §7 item 12 (the analyzer self-boundary)
+        "candor" | "candor-run.sh" | "candor-scan" | "candor-query" | "candor-java"
+        | "candor-classify" | "candor-report" | "cargo-candor" => &["Env", "Fs"],
+        _ => &[],
+    }
+}
+
 /// Map a cap-std capability *type* to the effect it authorises. Holding one of these
 /// (e.g. `&Dir`) is the real, unforgeable right to perform that effect — so candor
 /// treats it as a declared capability, exactly like its own `&Fs` token.
@@ -1134,5 +1158,24 @@ mod tests {
         // pure crates stay pure
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
         assert_eq!(classify("std", "std::vec::Vec::push"), None);
+    }
+
+    #[test]
+    fn command_head_refines_the_exec_cliff() {
+        use super::classify_command_head as h;
+        // unambiguous external tools classify by basename (spec §4 ⟨0.5⟩)
+        assert_eq!(h("curl"), &["Net"]);
+        assert_eq!(h("/usr/local/bin/psql"), &["Db"]); // basename match strips the path
+        // a candor engine is Fs/Env — spec-SUPPLIED by §7 item 12, not curation
+        assert_eq!(h("candor-scan"), &["Env", "Fs"]);
+        assert_eq!(h("candor-run.sh"), &["Env", "Fs"]);
+        // an unrecognised head adds nothing — the bare Exec cliff stands (never guess). `make`/`npm`
+        // run the project's own code; `git`/`rsync` are multi-modal (local vs remote) — all keep the
+        // cliff rather than fabricate an effect for the common case.
+        assert_eq!(h("some-unknown-tool"), &[] as &[&str]);
+        assert_eq!(h("make"), &[] as &[&str]);
+        assert_eq!(h("npm"), &[] as &[&str]);
+        assert_eq!(h("git"), &[] as &[&str]);
+        assert_eq!(h("rsync"), &[] as &[&str]);
     }
 }

@@ -6,7 +6,12 @@ fn read_file() -> std::io::Result<String> {
 }
 
 fn run_cmd() {
-    let _ = std::process::Command::new("true").status(); // Exec
+    let _ = std::process::Command::new("true").status(); // Exec ("true" is an unknown head → bare cliff)
+}
+
+fn run_curl() {
+    // Spec §4 ⟨0.5⟩: a literal subprocess head refines the cliff — `curl` adds Net, Exec stays.
+    let _ = std::process::Command::new("curl").arg("https://x").status(); // Exec + Net
 }
 
 fn read_env() -> Result<String, std::env::VarError> {

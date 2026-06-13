@@ -35,8 +35,8 @@ use candor_report::{
 // `candor-scan` backend so there is one source of truth (no drift). (`DB_CRATES` is referenced only
 // by a consistency test, qualified at the use site.)
 use candor_classify::{
-    cap_from_name, capstd_cap, classify, classify_extra, CALIBRATED_CRATES, CALIBRATED_PREFIXES,
-    PATH_CALIBRATED_CRATES,
+    cap_from_name, capstd_cap, classify, classify_command_head, classify_extra, CALIBRATED_CRATES,
+    CALIBRATED_PREFIXES, PATH_CALIBRATED_CRATES,
 };
 // The CANDOR_POLICY DSL parser is the SHARED canonical one (candor-spec SPEC §6.2), so the nightly
 // gate, stable candor-query (whatif/parsepolicy), and the JVM engine can't drift on the grammar.
@@ -1544,6 +1544,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // allowlists, exactly as host literals feed `allow Net …`.
             if builtin == Some("Exec") {
                 if let Some(cmd) = first_str_lit_arg(expr) {
+                    // Refine the cliff (spec §4 ⟨0.5⟩): a known literal head adds its effects
+                    // (`curl`→Net, `candor`→Fs/Env); `Exec` stays, an unknown head adds nothing.
+                    self.direct
+                        .entry(caller)
+                        .or_default()
+                        .extend(classify_command_head(&cmd).iter().copied());
                     self.exec_cmds_direct.entry(caller).or_default().insert(cmd);
                 }
             }

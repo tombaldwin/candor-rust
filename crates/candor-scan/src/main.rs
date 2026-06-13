@@ -1594,7 +1594,13 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 if let Some(s) = &c.str_arg {
                     match eff {
                         "Net" => { hosts.entry(f.qual.clone()).or_default().insert(host_part(s)); }
-                        "Exec" => { cmds.entry(f.qual.clone()).or_default().insert(s.clone()); }
+                        "Exec" => {
+                            cmds.entry(f.qual.clone()).or_default().insert(s.clone());
+                            // Refine the cliff (spec §4 ⟨0.5⟩): a known literal head adds its effects
+                            // (`curl`→Net, `candor`→Fs/Env); `Exec` stays, an unknown head adds nothing.
+                            direct.entry(f.qual.clone()).or_default()
+                                .extend(candor_classify::classify_command_head(s).iter().copied());
+                        }
                         "Fs" => { paths.entry(f.qual.clone()).or_default().insert(s.clone()); }
                         // Table-position identifiers in a SQL string literal — the Db literal
                         // surface (feeds `allow Db …`); a dynamically-built query yields nothing.
