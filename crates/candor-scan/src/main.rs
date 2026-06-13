@@ -1595,13 +1595,13 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     match eff {
                         "Net" => { hosts.entry(f.qual.clone()).or_default().insert(host_part(s)); }
                         "Exec" => {
-                            cmds.entry(f.qual.clone()).or_default().insert(s.clone());
-                            // Refine the cliff (spec §4 ⟨0.5⟩) ONLY at a program-NAMING call, not a
-                            // builder modifier (`.arg`/`.env`): a whole-crate-Exec crate (portable_pty/
-                            // duct) classifies every method, and an arg/env literal matching a head
-                            // would FABRICATE its effect (§1 under-report). Method = path's last segment.
-                            let method = c.path.rsplit("::").next().unwrap_or("");
-                            if !candor_classify::is_cmd_builder_method(method) {
+                            // Capture the program head + refine the cliff (spec §4 ⟨0.5⟩) ONLY at a
+                            // program-NAMING call, not a builder modifier (`.arg`/`.env`): a whole-crate-
+                            // Exec crate (portable_pty/duct) classifies every method, so an arg/env
+                            // literal would both POLLUTE the `cmds` surface (a false `allow Exec` match)
+                            // and FABRICATE a head's effect. Method = the path's last segment.
+                            if !candor_classify::is_cmd_builder_method(c.path.rsplit("::").next().unwrap_or("")) {
+                                cmds.entry(f.qual.clone()).or_default().insert(s.clone());
                                 direct.entry(f.qual.clone()).or_default()
                                     .extend(candor_classify::classify_command_head(s).iter().copied());
                             }

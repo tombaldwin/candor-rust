@@ -1544,16 +1544,17 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // allowlists, exactly as host literals feed `allow Net …`.
             if builtin == Some("Exec") {
                 if let Some(cmd) = first_str_lit_arg(expr) {
-                    // Refine the cliff (spec §4 ⟨0.5⟩) ONLY at a program-NAMING call, not a builder
-                    // modifier (`.arg`/`.env`): a whole-crate-Exec crate classifies every method, and
-                    // an arg/env literal matching a head would FABRICATE its effect (§1 under-report).
+                    // Capture the program head + refine the cliff (spec §4 ⟨0.5⟩) ONLY at a program-
+                    // NAMING call, not a builder modifier (`.arg`/`.env`): a whole-crate-Exec crate
+                    // classifies every method, so an arg/env literal would both pollute the `cmds`
+                    // surface (a false `allow Exec` match) and fabricate a head's effect (§1).
                     if !is_cmd_builder_method(path.rsplit("::").next().unwrap_or("")) {
                         self.direct
                             .entry(caller)
                             .or_default()
                             .extend(classify_command_head(&cmd).iter().copied());
+                        self.exec_cmds_direct.entry(caller).or_default().insert(cmd);
                     }
-                    self.exec_cmds_direct.entry(caller).or_default().insert(cmd);
                 }
             }
             if builtin == Some("Fs") {
