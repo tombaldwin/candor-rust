@@ -203,6 +203,13 @@ that's the narrow, modest-value axis. Diminishing returns.
       low-signal (especially for TUIs); would add noise without authority-level value. Reconsider if
       a use case appears. `stdin` (real input) could be added later as its own effect.
 
+- [x] **(candor-java) Validate Scala and Groovy on real bytecode. DONE (2026-06-13).** Scanned
+      scala-library 2.13.8 + cats (Scala) and the groovy 4.0.28 runtime + groovy-json (Groovy): both
+      parse without crashing; the dynamic surface (Scala broad-collection dispatch, Groovy MOP) lands
+      in honest Unknown; real effects attributed to genuine sources. Fixed two engine bugs found en
+      route — System.getProperty miscounted as Env, and unbounded CHA over deep hierarchies (now the
+      §4 ≤12-or-Unknown bound applies to ALL dispatch). App-level cats = all-Unknown, ZERO fabricated
+      effects; groovy-json = 9 real Fs. Promoted to the validated tier in the README. Original item:
 - [ ] **(candor-java) Validate Scala and Groovy on real bytecode.** The README claims them by
       bytecode-lowering only; the validation pass Kotlin got (real okhttp/ktor/coroutines bytecode,
       dispatcher entry points flagged, no crashes on coroutine state machines) hasn't been run for
