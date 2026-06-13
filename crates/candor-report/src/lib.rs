@@ -182,6 +182,21 @@ pub fn to_report_json(candor: &ReportMeta, functions: &[ReportEntry]) -> serde_j
     to_packaged_report_json(candor, "", functions)
 }
 
+/// Write a report file ATOMICALLY: serialize to a sibling temp file, then `rename` it into place.
+/// Both backends (the lint and the stable scanner) write reports that a concurrent reader — a `cargo
+/// candor` query, or a `watch` loop re-scanning while a query reads — may open at any moment. An
+/// in-place `fs::write` leaves a window where the reader observes a half-written file and its JSON
+/// parse fails (which `load_entries` then silently skips → the report's effectful functions read as
+/// "no effect", a silent under-report against the never-silently-pure promise). `rename(2)` is atomic
+/// within a filesystem, so a reader sees either the old report or the new one whole. The temp name
+/// carries the PID so two concurrent writers (unlikely, but cheap to make safe) don't collide. Falls
+/// back to nothing on error — callers already tolerate a failed write (they only `eprintln!`).
+pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Like [`to_report_json`], with the envelope's `package` field (spec §2, 0.4-amended SHOULD):
 /// name what the report covers, so an all-pure EMPTY report's coverage is readable without
 /// parsing entry hash prefixes. An empty `package` omits the field (the pre-amendment shape).

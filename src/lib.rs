@@ -2266,7 +2266,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 spec: candor_report::SPEC_VERSION.into(),
             };
             match candor_report::to_packaged_report_json(&meta, krate.as_str(), &json_entries) {
-                Ok(body) => match std::fs::write(&file, body) {
+                Ok(body) => match candor_report::write_atomic(std::path::Path::new(&file), body.as_bytes()) {
                     Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
                     Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),
                 },
@@ -2299,7 +2299,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
             let cgfile = format!("{prefix}.{krate}.{kinds}.callgraph.json");
             if let Ok(body) = serde_json::to_string(&cg) {
-                let _ = std::fs::write(&cgfile, body);
+                let _ = candor_report::write_atomic(std::path::Path::new(&cgfile), body.as_bytes());
             }
             // Emit candor's calibrated crate set alongside the report, so downstream
             // coverage checks read it from the engine rather than a duplicated copy. Also stamp

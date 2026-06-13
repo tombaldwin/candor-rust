@@ -1713,11 +1713,11 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             let _ = std::fs::create_dir_all(parent);
         }
         let file = format!("{prefix}.{crate_name}.scan.json");
-        let _ = std::fs::write(&file, &body);
-        let _ = std::fs::write(
-            format!("{prefix}.{crate_name}.scan.callgraph.json"),
-            serde_json::to_string(&cg).unwrap_or_default(),
-        );
+        // Atomic write (temp + rename): a concurrent `candor-query` / `cargo candor watch` reader must
+        // never see a half-written report (see candor_report::write_atomic).
+        let _ = candor_report::write_atomic(Path::new(&file), body.as_bytes());
+        let cgfile = format!("{prefix}.{crate_name}.scan.callgraph.json");
+        let _ = candor_report::write_atomic(Path::new(&cgfile), serde_json::to_string(&cg).unwrap_or_default().as_bytes());
         if !quiet {
             eprintln!(
                 "candor-scan: wrote {} effectful functions to {file} (stable syntactic backend — see --help)",
@@ -3019,6 +3019,37 @@ mod tests {
         assert!(rep.contains("outer_eff"), "the parent's own fn must report: {rep}");
         assert!(!rep.contains("inner_eff") && !rep.contains("Exec"),
                 "nested package's fn leaked into the parent report: {rep}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn report_is_written_atomically_no_tmp_leftovers() {
+        // A concurrent `candor-query` / `cargo candor watch` reader must never observe a half-written
+        // report (write_atomic: temp + rename). We assert the rename discipline by its observable
+        // effect: the scan leaves NO `.tmp.*` file behind, and both written files are WHOLE valid JSON.
+        let d = std::env::temp_dir().join(format!("candor-scan-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"atomiccrate\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub fn eff() { let _ = std::fs::read(\"/x\"); }\n").unwrap();
+        let idx = load_dep_reports(None);
+        let outdir = d.join("out");
+        let prefix = outdir.join("r").to_string_lossy().into_owned();
+        let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: false, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        // no temp turds: every output file ends in `.json`, never `.tmp.<pid>`.
+        let leftovers: Vec<String> = std::fs::read_dir(&outdir).unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.contains(".tmp")).collect();
+        assert!(leftovers.is_empty(), "atomic write left temp files behind: {leftovers:?}");
+        // both files parse as a whole — the post-rename invariant a concurrent reader relies on.
+        for name in ["r.atomiccrate.scan.json", "r.atomiccrate.scan.callgraph.json"] {
+            let body = std::fs::read_to_string(outdir.join(name)).unwrap();
+            serde_json::from_str::<serde_json::Value>(&body)
+                .unwrap_or_else(|e| panic!("{name} is not whole JSON ({e}): {body}"));
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

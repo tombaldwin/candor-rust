@@ -72,13 +72,24 @@ fn glob_reports(prefix: &str) -> Vec<PathBuf> {
     report_files(prefix).into_iter().map(|r| r.path).collect()
 }
 
-/// All report entries across the matching files (skipping unreadable / unparsable ones, like Python).
+/// All report entries across the matching files. A report file that is present but won't parse is
+/// DISCLOSED on stderr (not silently skipped): dropping it silently would make its effectful functions
+/// read as "no effect" — a silent under-report against the never-silently-pure promise. Still tolerant
+/// (one corrupt file doesn't kill the merged query), but the blind spot is now visible. With atomic
+/// report writes (candor_report::write_atomic) this only fires on genuine corruption, not a mid-write race.
 fn load_entries(prefix: &str) -> Vec<ReportEntry> {
     let mut out = Vec::new();
     for path in glob_reports(prefix) {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        if let Some(es) = report_entries(&text) {
-            out.extend(es);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("candor: report {} could not be read — its functions are OMITTED from this query", path.display());
+            continue;
+        };
+        match report_entries(&text) {
+            Some(es) => out.extend(es),
+            None => eprintln!(
+                "candor: report {} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan",
+                path.display()
+            ),
         }
     }
     out
