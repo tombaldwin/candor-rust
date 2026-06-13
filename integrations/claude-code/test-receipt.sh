@@ -134,16 +134,42 @@ if [ -n "$SCANB" ]; then
   chk  "no-dylib: receipt is honestly marked as the stable backend"             "$outs" 'stable backend'
   chk  "no-dylib: a scan report file was written"                               "$(ls "$S/.candor/" 2>/dev/null)" 'report\..*\.scan\.json'
 
-  # Contract-refresh nudge: when the stored engine version differs from the running one, the
-  # receipt tells the agent to re-read `--agents`; same version -> no nudge; the stamp updates.
-  chk  "agents-nudge: first run stores the engine version"      "$(cat "$S/.candor/engine-version" 2>/dev/null)" 'scan'
+  # Contract-refresh nudge: the stamp must hold candor-scan's real SEMVER on the scan backend (not
+  # the literal "scan"), so a `cargo install` upgrade actually moves it and fires the nudge.
+  chk  "agents-nudge: stamp holds the scan SEMVER (not the literal 'scan')" "$(cat "$S/.candor/engine-version" 2>/dev/null)" 'candor-scan [0-9]'
   outs=$(CANDOR_BACKEND=scan CANDOR_HOME="$(mktemp -d)" CANDOR_SCAN="$SCANB" "$RUN" --force "$S" 2>/dev/null)
   nchk "agents-nudge: same engine version -> no refresh nudge"  "$outs" 're-read the contract'
-  printf 'old-version\n' > "$S/.candor/engine-version"
+  printf 'candor-scan 0.0.1\n' > "$S/.candor/engine-version"   # simulate an OLD installed version
   outs=$(CANDOR_BACKEND=scan CANDOR_HOME="$(mktemp -d)" CANDOR_SCAN="$SCANB" "$RUN" --force "$S" 2>/dev/null)
-  chk  "agents-nudge: version change -> re-read --agents nudge" "$outs" 'old-version→scan: re-read the contract'
-  chk  "agents-nudge: the stamp updates after the nudge"        "$(cat "$S/.candor/engine-version" 2>/dev/null)" 'scan'
+  chk  "agents-nudge: a scan version change fires the re-read nudge" "$outs" 'candor-scan 0.0.1 → candor-scan.*re-read the contract'
+  chk  "agents-nudge: the stamp updates after the nudge"        "$(cat "$S/.candor/engine-version" 2>/dev/null)" 'candor-scan [0-9]'
   rm -rf "$(dirname "$S")"
+
+  # REVIEW + contract-refresh on the SAME turn: the nudge must ride the exit-11 review prompt, never
+  # be swallowed (the stamp advances regardless, so a swallowed nudge is lost forever). The review
+  # only fires on the LINT backend (by design — §2 self-review needs the lint's soundness), so this
+  # uses a built dylib via CANDOR_LIB (deterministic; skips when none is built) + lint-named reports.
+  DYLIB=""
+  for d in "$HERE/../../target/debug"/libcandor@*.dylib "$HERE/../../target/debug"/libcandor@*.so; do
+    [ -e "$d" ] && { DYLIB="$d"; break; }
+  done
+  if [ -n "$DYLIB" ]; then
+    VERX="$("$QUERY" engine-version "$DYLIB" 2>/dev/null || echo lintver)"
+    SR=$(mktemp -d)/sr; mkdir -p "$SR/src" "$SR/.candor"
+    printf '[package]\nname="sr"\nversion="0.1.0"\nedition="2021"\n[dependencies]\n' > "$SR/Cargo.toml"
+    printf 'fn worker(){}\n' > "$SR/src/lib.rs"
+    echo "CANDOR_REVIEW=1" > "$SR/.candor/config"
+    echo '{"candor":{"version":"v1"},"functions":[{"fn":"worker","inferred":["Fs"],"direct":["Fs"],"unresolved":false}]}' > "$SR/.candor/baseline.sr.Rlib.json"
+    echo '{"candor":{"version":"v1"},"functions":[{"fn":"worker","inferred":["Fs","Net"],"direct":["Fs","Net"],"unresolved":false}]}' > "$SR/.candor/report.sr.Rlib.json"
+    "$QUERY" state "$SR" > "$SR/.candor/state"
+    printf 'stale-engine-xyz\n' > "$SR/.candor/engine-version"   # != VERX -> nudge must fire
+    outsr=$(CANDOR_LIB="$DYLIB" CANDOR_HOME="$(mktemp -d)" "$RUN" "$SR" 2>/dev/null); codsr=$?
+    chk  "review+nudge: exits 11 on the review"                            "$codsr" '^11$'
+    chk  "review+nudge: the contract-refresh nudge rides the review prompt" "$outsr" 're-read the contract'
+    rm -rf "$(dirname "$SR")"
+  else
+    echo "  skip review+nudge check (no dylib built)"
+  fi
 else
   echo "  skip scan-fallback check (candor-scan not built)"
 fi

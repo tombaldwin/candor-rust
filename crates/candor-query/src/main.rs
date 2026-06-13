@@ -2083,9 +2083,15 @@ mod tests {
         // only file a crates.io tarball can carry) must equal the repo-root AGENTS.md.
         // If this fails: cp AGENTS.md crates/candor-query/AGENTS.md
         let embedded = include_str!("../AGENTS.md");
-        let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../AGENTS.md"))
-            .expect("repo-root AGENTS.md readable (workspace checkout)");
-        assert_eq!(embedded, root, "crate AGENTS.md drifted from the repo root — re-copy it");
+        // The root doc exists only in a workspace checkout; in a published-crate / `cargo vendor`
+        // layout `../../AGENTS.md` is absent or unrelated, so `cargo test` on the shipped crate
+        // would fail spuriously. Gate the comparison on the root doc being present AND candor's own.
+        match std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../AGENTS.md")) {
+            Ok(root) if root.contains("instructions for an AI coding agent") => {
+                assert_eq!(embedded, root, "crate AGENTS.md drifted from the repo root — re-copy it");
+            }
+            _ => { /* registry/vendor layout — drift gate N/A; include_str proves the copy compiles */ }
+        }
     }
 
     #[test]

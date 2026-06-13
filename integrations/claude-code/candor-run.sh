@@ -138,6 +138,10 @@ report_exists || need_run=1
 # available, regenerate with the lint — otherwise the receipt would attribute the syntactic scan report
 # to the nightly engine (and never self-correct until the source changes).
 [ -n "$LIBP" ] && is_scan_report && need_run=1
+# The reverse, forced: CANDOR_BACKEND=scan (CI/reproducibility) makes find_lib decline the dylib, so a
+# CACHED LINT report would otherwise be served unchanged — attributed to a clone HEAD no loaded binary
+# produced. Regenerate it with the scanner so the served report and its @scan stamp are truthful.
+[ "${CANDOR_BACKEND:-}" = scan ] && report_exists && ! is_scan_report && need_run=1
 
 # Touch every workspace member's crate root (mtime only) to force `cargo dylint` to
 # recompile — dylint emits the report ONLY on recompilation, so an already-built
@@ -212,6 +216,17 @@ fi
 if [ -z "$LIBP" ] && is_scan_report; then
   [ -z "$BACKEND" ] && BACKEND=" · stable backend (syntactic — install the nightly lint for Unknown/soundness)"
   VER="scan"; VERSTAMP=" @scan"
+fi
+
+# The engine IDENTITY used for the contract-refresh nudge — DISTINCT from the @-stamp shown to the
+# user. On the stable backend the display stamp is the honest literal `@scan`, but the nudge needs
+# candor-scan's real SEMVER so a `cargo install` upgrade (0.4.2→0.4.3) actually moves it (comparing
+# the constant "scan" against itself could never fire — the primary install channel for --agents).
+# On the lint backend the dylib build id (VER) is already the right identity.
+if [ "$VER" = scan ]; then
+  ENGINE_ID="$("${SCAN:-$SCANP}" --version 2>/dev/null || echo scan)"   # e.g. "candor-scan 0.4.2"
+else
+  ENGINE_ID="$VER"
 fi
 
 # ---- aggregate the report (candor-query preferred; degrade gracefully without it) ----
@@ -352,15 +367,17 @@ if [ "${CANDOR_REVIEW:-0}" != 0 ] && [ "$ran_ok" = 1 ] && ! is_scan_report \
 fi
 
 # ---- contract-refresh nudge: the engine changed since this project last read its AGENTS.md ----
-# The contract ships INSIDE the engine (`--agents`, SPEC §7.11); when the version stamp moves, the
-# agent should re-read it — new behavior arrives with the binary, not with a doc fetch.
+# The contract ships INSIDE the engine (`--agents`, SPEC §7.11); when the engine identity moves, the
+# agent should re-read it — new behavior arrives with the binary, not with a doc fetch. The stamp is
+# advanced ONLY when the nudge is actually DELIVERED (every emit branch below carries $NUDGE) — a
+# branch that swallowed it while advancing the stamp would lose the one-shot signal forever.
 ENGINE_VER_FILE="$STATE_DIR/engine-version"
-if [ -n "$VER" ]; then
+if [ -n "$ENGINE_ID" ]; then
   prev_ver="$(cat "$ENGINE_VER_FILE" 2>/dev/null || true)"
-  if [ -n "$prev_ver" ] && [ "$prev_ver" != "$VER" ]; then
-    NUDGE="$NUDGE · engine ${prev_ver}→${VER}: re-read the contract — candor-scan --agents"
+  if [ -n "$prev_ver" ] && [ "$prev_ver" != "$ENGINE_ID" ]; then
+    NUDGE="$NUDGE · engine ${prev_ver} → ${ENGINE_ID}: re-read the contract — run --agents"
   fi
-  printf '%s\n' "$VER" > "$ENGINE_VER_FILE" 2>/dev/null || true
+  printf '%s\n' "$ENGINE_ID" > "$ENGINE_VER_FILE" 2>/dev/null || true
 fi
 
 # ---- emit ----
@@ -369,7 +386,9 @@ if [ "$need_run" = 1 ] && [ "$ran_ok" = 0 ]; then
   exit "${surfaced:-0}"
 fi
 if [ -n "$REVIEW" ]; then
-  printf 'candor — functions have effects NOT in the committed .candor baseline (surfaced once):\n%s\n\nA local edit can change the effect surface non-locally — a new effect propagates to every caller. For each: was it intended? If a function gained Net/Db/Exec/Fs/Env/Ipc it lacked, confirm it is necessary, and prefer threading a capability over reaching for ambient authority. A gained `Unknown` means candor can no longer prove that function complete — read it. If all are intended, just finish; this will not re-prompt for these.\n' "$REVIEW"
+  # $NUDGE is appended so a contract-refresh signal is never swallowed when a review also fires this
+  # turn (the stamp was already advanced above — without this the nudge would be lost permanently).
+  printf 'candor — functions have effects NOT in the committed .candor baseline (surfaced once):\n%s\n\nA local edit can change the effect surface non-locally — a new effect propagates to every caller. For each: was it intended? If a function gained Net/Db/Exec/Fs/Env/Ipc it lacked, confirm it is necessary, and prefer threading a capability over reaching for ambient authority. A gained `Unknown` means candor can no longer prove that function complete — read it. If all are intended, just finish; this will not re-prompt for these.%s\n' "$REVIEW" "$NUDGE"
   exit 11
 fi
 echo "candor$VERSTAMP · ${FNS} fns · ${EFFS} · ${UNRES} unresolved · ${FRESH} · ${COV} · report: .candor/report.*.json$BACKEND$NUDGE"

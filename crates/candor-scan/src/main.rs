@@ -304,12 +304,25 @@ fn cargo_toml_deps(
     // what the code imports while the registry/report knows the REAL package — without the map,
     // --deps scanned the real crate and the join/ledger missed it under the key (found live on
     // ebman: tui_common stayed "invisible" with its report sitting right there).
+    // Match `package` only as a KEY (`{ … package = "real" }`), not as a substring of a dependency
+    // KEY (`my-package = "1.2"` previously parsed its own version as a rename target) or a value:
+    // `package` must sit at a token boundary and be followed by `=`.
     let pkg_re = |l: &str| -> Option<String> {
-        let i = l.find("package")?;
-        let rest = l[i + "package".len()..].trim_start();
-        let rest = rest.strip_prefix('=')?.trim_start();
-        let rest = rest.strip_prefix('"')?;
-        rest.split('"').next().map(|s| s.replace('-', "_"))
+        let bytes = l.as_bytes();
+        let mut search = 0;
+        while let Some(rel) = l[search..].find("package") {
+            let i = search + rel;
+            let boundary = i == 0 || matches!(bytes[i - 1], b'{' | b',' | b' ' | b'\t');
+            if boundary {
+                if let Some(rest) = l[i + "package".len()..].trim_start().strip_prefix('=') {
+                    if let Some(rest) = rest.trim_start().strip_prefix('"') {
+                        return rest.split('"').next().map(|s| s.replace('-', "_"));
+                    }
+                }
+            }
+            search = i + "package".len();
+        }
+        None
     };
     let mut in_deps = false;
     let mut header_key: Option<String> = None; // the `[dependencies.name]` we're inside, if any
@@ -354,9 +367,14 @@ fn cargo_toml_deps(
             let name = name.trim().trim_matches('"');
             if !name.is_empty() {
                 let key = name.replace('-', "_");
-                if let Some(real) = pkg_re(l) {
-                    if real != key {
-                        renames.insert(key.clone(), real);
+                // A rename only appears in an INLINE TABLE value (`key = { … package = "real" }`),
+                // never as a bare `package = "0.1"` (which is a dependency NAMED package) — so search
+                // only inside the braces.
+                if let Some(brace) = l.find('{') {
+                    if let Some(real) = pkg_re(&l[brace..]) {
+                        if real != key {
+                            renames.insert(key.clone(), real);
+                        }
                     }
                 }
                 out.insert(key);
@@ -1312,30 +1330,9 @@ fn main() {
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
     let deps_idx = load_dep_reports(std::env::var("CANDOR_DEPS").ok().as_deref());
-    // A workspace root: each member is its own PACKAGE — one report per member, all under ONE
-    // prefix (candor-query's multi-crate merge consumes them together; the policy gates each).
-    // Scanning members as modules of the root collides same-named fns across packages.
-    let members = workspace_members(Path::new(&dir));
-    if !members.is_empty() {
-        let prefix = if prefix.is_empty() { format!("{dir}/.candor/report") } else { prefix };
-        let mut dirs: Vec<String> = Vec::new();
-        if read_crate_name(Path::new(&dir)).is_some() {
-            dirs.push(dir.clone()); // the workspace manifest also declares a root package
-        }
-        dirs.extend(members);
-        let mut rc = 0;
-        for d in &dirs {
-            rc = rc.max(scan_one(d, ScanOpts {
-                prefix: prefix.clone(), want_json, include_tests,
-                policy: policy.clone(), quiet: false, deps_idx: &deps_idx,
-            }));
-        }
-        eprintln!("candor-scan: workspace — {} package report(s) under one prefix", dirs.len());
-        std::process::exit(rc);
-    }
-    std::process::exit(scan_one(&dir, ScanOpts {
-        prefix, want_json, include_tests, policy, quiet: false, deps_idx: &deps_idx,
-    }));
+    // scan_target handles both a single crate and a `[workspace]` root (one report per member under
+    // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
+    std::process::exit(scan_target(&dir, prefix, want_json, include_tests, policy, &deps_idx));
 }
 
 /// Options for one crate scan. `policy` is RESOLVED by the caller (flag or CANDOR_POLICY env) —
@@ -1355,7 +1352,7 @@ struct ScanOpts<'a> {
 /// One crate scan, end to end (parse -> passes -> report -> receipt -> policy gate). Returns the
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
-fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
+fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let ScanOpts { prefix, want_json, include_tests, policy: policy_path, quiet, deps_idx } = opts;
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
@@ -1645,8 +1642,11 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
         spec: candor_report::SPEC_VERSION.into(),
     };
     let body = candor_report::to_packaged_report_json(&meta, &crate_name, &entries).unwrap_or_default();
-    if want_json {
-        println!("{body}");
+    // With want_json the body is RETURNED to the caller (which prints one document for a single
+    // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave
+    // concatenated, unparseable JSON for a workspace scan.
+    let json_body = if want_json {
+        Some(body.clone())
     } else {
         let prefix = if prefix.is_empty() { format!("{dir}/.candor/report") } else { prefix };
         if let Some(parent) = Path::new(&prefix).parent() {
@@ -1664,7 +1664,8 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
                 entries.len()
             );
         }
-    }
+        None
+    };
 
     // The κ-coverage disclosure: dependencies the code demonstrably CALLS that the classifier knows
     // nothing about. Their effects are INVISIBLE — not Unknown — so the report's silence about them
@@ -1709,7 +1710,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
         let Ok(text) = std::fs::read_to_string(&pp) else {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
             eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
-            return 2;
+            return (2, json_body);
         };
         let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc);
         for line in &v {
@@ -1719,10 +1720,66 @@ fn scan_one(dir: &str, opts: ScanOpts) -> i32 {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
         } else {
             eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
-            return 1;
+            return (1, json_body);
         }
     }
-    0
+    (0, json_body)
+}
+
+/// Scan a TARGET — a single crate, or a `[workspace]` root fanned out into one report per member
+/// under the shared prefix. The one place both the plain and `--deps` paths funnel through, so a
+/// workspace is never scanned as one merged package (colliding same-named fns) nor pruned to an
+/// empty report by the nested-package filter. With `want_json`, prints ONE JSON document for a
+/// single crate and a JSON ARRAY for a workspace — never concatenated documents. Returns the exit code.
+fn scan_target(
+    dir: &str,
+    prefix: String,
+    want_json: bool,
+    include_tests: bool,
+    policy: Option<String>,
+    deps_idx: &DepIndex,
+) -> i32 {
+    let members = workspace_members(Path::new(dir));
+    if members.is_empty() {
+        if has_workspace_table(Path::new(dir)) {
+            // A [workspace] with zero RESOLVED members: scanning the root as one crate would let the
+            // nested-package filter prune every member into an empty report that passes any gate
+            // vacuously (§6.2's forbidden state). Warn loudly; the single-crate scan below still
+            // covers the root package's own sources, if any.
+            eprintln!("candor-scan: `{dir}` declares [workspace] but no members resolved — \
+                       check `members`/globs; scan member crates directly to gate them");
+        }
+        let (code, json) = scan_one(dir, ScanOpts {
+            prefix, want_json, include_tests, policy, quiet: false, deps_idx,
+        });
+        if let Some(b) = json {
+            println!("{b}");
+        }
+        return code;
+    }
+    let prefix = if prefix.is_empty() { format!("{dir}/.candor/report") } else { prefix };
+    let mut dirs: Vec<String> = Vec::new();
+    if read_crate_name(Path::new(dir)).is_some() {
+        dirs.push(dir.to_string()); // the workspace manifest also declares a root package
+    }
+    dirs.extend(members);
+    let mut rc = 0;
+    let mut bodies: Vec<String> = Vec::new();
+    for d in &dirs {
+        let (code, json) = scan_one(d, ScanOpts {
+            prefix: prefix.clone(), want_json, include_tests, policy: policy.clone(), quiet: false, deps_idx,
+        });
+        rc = rc.max(code);
+        if let Some(b) = json {
+            bodies.push(b);
+        }
+    }
+    if want_json {
+        println!("[{}]", bodies.join(","));
+    } else {
+        eprintln!("candor-scan: workspace — {} package report(s) under one prefix", dirs.len());
+    }
+    rc
 }
 
 /// `--deps`: read Cargo.lock, scan every REGISTRY dependency's unbuilt source from
@@ -1790,8 +1847,9 @@ fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_tests: bool
         }
         let _ = std::fs::create_dir_all(&sub);
         // Dep scans are quiet, unchained, report-only, and POLICY-FREE (the resolved root policy
-        // is deliberately not passed): their job is the report files.
-        scan_one(&src.to_string_lossy(), ScanOpts {
+        // is deliberately not passed): their job is the report files. A registry dep is a single
+        // published package, so scan_one (not scan_target) is right; the json body is unused.
+        let _ = scan_one(&src.to_string_lossy(), ScanOpts {
             prefix: format!("{sub}/report"),
             want_json: false,
             include_tests: false,
@@ -1821,7 +1879,9 @@ fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_tests: bool
         _ => deps_dir.clone(),
     };
     let idx = load_dep_reports(Some(&spec));
-    scan_one(dir, ScanOpts { prefix, want_json, include_tests, policy, quiet: false, deps_idx: &idx })
+    // The final root scan goes through scan_target so `--deps <workspace>` fans out over members
+    // too — the nested-package filter would otherwise prune them all into an empty, gate-passing report.
+    scan_target(dir, prefix, want_json, include_tests, policy, &idx)
 }
 
 /// The cargo registry source roots (`~/.cargo/registry/src/<index-hash>/`), where unbuilt
@@ -2044,9 +2104,20 @@ fn toml_string_array(txt: &str, table: &str, key: &str) -> Vec<String> {
     out
 }
 
-/// Member directories of the root manifest's `[workspace]` (explicit entries + trailing-`/*`
-/// globs, honouring `exclude`), joined to `root`. Empty when there is no workspace table — the
-/// single-crate path.
+/// True if the manifest declares a `[workspace]` table at all (distinct from "has members"): a
+/// workspace root with zero RESOLVED members must warn, not silently fall through to a single-crate
+/// scan whose nested-package filter then prunes every member into an empty report.
+fn has_workspace_table(root: &Path) -> bool {
+    std::fs::read_to_string(root.join("Cargo.toml"))
+        .map(|t| t.lines().any(|l| l.trim() == "[workspace]"))
+        .unwrap_or(false)
+}
+
+/// Member directories of the root manifest's `[workspace]`, joined to `root`, honouring `exclude`,
+/// expanding globs (a bare `*` = root's immediate children, `prefix/*` = a dir's children), and
+/// DEDUPLICATED (a member listed explicitly AND matched by a glob otherwise scans/prints twice).
+/// Empty when there is no `members` key. A `*`-pattern this simple matcher can't expand is WARNED,
+/// never silently dropped (a dropped member yields a vacuous gate, the §6.2 forbidden state).
 fn workspace_members(root: &Path) -> Vec<String> {
     let Ok(txt) = std::fs::read_to_string(root.join("Cargo.toml")) else { return Vec::new() };
     let members = toml_string_array(&txt, "workspace", "members");
@@ -2054,23 +2125,38 @@ fn workspace_members(root: &Path) -> Vec<String> {
         return Vec::new();
     }
     let exclude = toml_string_array(&txt, "workspace", "exclude");
+    // Expand a `<base>/*` (base "" for a bare `*`) to its child dirs carrying a Cargo.toml.
+    let expand = |base: &str| -> Vec<String> {
+        let dir = if base.is_empty() { root.to_path_buf() } else { root.join(base) };
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().join("Cargo.toml").is_file())
+            .map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if base.is_empty() { n } else { format!("{base}/{n}") }
+            })
+            .collect();
+        found.sort();
+        found
+    };
     let mut rels: Vec<String> = Vec::new();
     for m in members {
-        if let Some(base) = m.strip_suffix("/*") {
-            if let Ok(rd) = std::fs::read_dir(root.join(base)) {
-                let mut found: Vec<String> = rd
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().join("Cargo.toml").is_file())
-                    .map(|e| format!("{base}/{}", e.file_name().to_string_lossy()))
-                    .collect();
-                found.sort();
-                rels.extend(found);
-            }
+        if m == "*" {
+            rels.extend(expand(""));
+        } else if let Some(base) = m.strip_suffix("/*") {
+            rels.extend(expand(base));
+        } else if m.contains('*') {
+            eprintln!("candor-scan: workspace member glob `{m}` is not a trailing `*` — not expanded; \
+                       scan its crates directly or list them explicitly");
         } else if root.join(&m).join("Cargo.toml").is_file() {
             rels.push(m);
         }
     }
     rels.retain(|m| !exclude.iter().any(|e| m == e || m.starts_with(&format!("{e}/"))));
+    rels.sort();
+    rels.dedup();
     rels.into_iter().map(|m| root.join(m).to_string_lossy().into_owned()).collect()
 }
 
@@ -2333,6 +2419,20 @@ mod tests {
         assert!(out2.contains("tui_common") && out2.contains("short_name"), "{out2:?}");
         assert_eq!(ren2.get("tui_common").map(String::as_str), Some("tb_tui_common"));
         assert_eq!(ren2.get("short_name").map(String::as_str), Some("the_real_crate"));
+        // A dep whose KEY contains "package" must NOT parse its own version as a rename, and a dep
+        // literally NAMED `package` is a dependency, not a rename (the substring-match regression).
+        let mut out3 = std::collections::HashSet::new();
+        let mut ren3 = HashMap::new();
+        cargo_toml_deps(
+            "[dependencies]\nmy-package = \"1.2\"\nfoo-package = { version = \"2\" }\npackage = \"0.1\"\nreal = { version = \"1\", package = \"renamed-crate\" }\n",
+            &mut out3,
+            &mut ren3,
+        );
+        assert!(out3.contains("my_package") && out3.contains("foo_package") && out3.contains("package"));
+        assert!(ren3.get("my_package").is_none(), "key-substring 'package' fabricated a rename: {ren3:?}");
+        assert!(ren3.get("foo_package").is_none(), "{ren3:?}");
+        assert!(ren3.get("package").is_none(), "a dep named `package` is not a rename: {ren3:?}");
+        assert_eq!(ren3.get("real").map(String::as_str), Some("renamed_crate"), "real rename lost: {ren3:?}");
     }
 
     #[test]
@@ -2707,10 +2807,18 @@ mod tests {
         // (crates/candor-scan/AGENTS.md, the only file a crates.io tarball can carry) in lockstep
         // with the repo-root AGENTS.md. If this fails: cp AGENTS.md crates/candor-scan/AGENTS.md
         let embedded = include_str!("../AGENTS.md");
-        let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../AGENTS.md"))
-            .expect("repo-root AGENTS.md readable (workspace checkout)");
-        assert_eq!(embedded, root, "crate AGENTS.md drifted from the repo root — re-copy it");
         assert!(embedded.contains("candor-scan"), "the contract must describe this tool");
+        // The repo-root doc exists ONLY in a workspace checkout. In a published-crate / `cargo
+        // vendor` layout `../../AGENTS.md` is absent (panic) or an UNRELATED file (false diff), so
+        // `cargo test` on the shipped crate would fail spuriously. Only assert the drift gate when
+        // the root doc is actually present AND is candor's own (contains the marker) — otherwise
+        // skip: the include_str above already proves the packaged copy compiles in.
+        match std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../AGENTS.md")) {
+            Ok(root) if root.contains("instructions for an AI coding agent") => {
+                assert_eq!(embedded, root, "crate AGENTS.md drifted from the repo root — re-copy it");
+            }
+            _ => { /* not a workspace checkout (registry/vendor layout) — drift gate N/A */ }
+        }
     }
 
     #[test]
@@ -2746,6 +2854,49 @@ mod tests {
     }
 
     #[test]
+    fn workspace_members_bare_star_and_dedup() {
+        let d = std::env::temp_dir().join(format!("candor-scan-ws2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for m in ["a", "b"] {
+            std::fs::create_dir_all(d.join(m)).unwrap();
+            std::fs::write(d.join(m).join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+        }
+        // bare `*` = immediate children; AND `a` listed explicitly too — must dedup, not double-scan.
+        std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"*\", \"a\"]\n").unwrap();
+        let got: Vec<String> = workspace_members(&d)
+            .into_iter()
+            .map(|p| p.strip_prefix(&format!("{}/", d.to_string_lossy())).unwrap().to_string())
+            .collect();
+        assert_eq!(got, vec!["a", "b"], "bare * expands to children, deduped against the explicit `a`");
+        assert!(has_workspace_table(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn workspace_root_scans_members_even_under_deps_filter() {
+        // The --deps × workspace regression: the nested-package filter prunes member dirs, so a
+        // workspace root scanned as one crate yields an empty report. scan_target must fan out.
+        let d = std::env::temp_dir().join(format!("candor-scan-wsfan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for (m, body) in [("a", "pub fn ea() { let _ = std::fs::read(\"/x\"); }"),
+                          ("b", "pub fn eb() { let _ = std::process::Command::new(\"x\"); }")] {
+            std::fs::create_dir_all(d.join(m).join("src")).unwrap();
+            std::fs::write(d.join(m).join("Cargo.toml"), format!("[package]\nname = \"{m}\"\n")).unwrap();
+            std::fs::write(d.join(m).join("src/lib.rs"), body).unwrap();
+        }
+        std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\n").unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, &idx);
+        assert_eq!(rc, 0);
+        let ra = std::fs::read_to_string(format!("{prefix}.a.scan.json")).unwrap();
+        let rb = std::fs::read_to_string(format!("{prefix}.b.scan.json")).unwrap();
+        assert!(ra.contains("ea") && ra.contains("Fs"), "member a not scanned: {ra}");
+        assert!(rb.contains("eb") && rb.contains("Exec"), "member b not scanned: {rb}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn nested_packages_are_not_modules_of_the_parent() {
         // The repo-root self-scan merged 194 eval-fixture `main`s into ONE unit (un-namespaced
         // collision -> cross-wired inheritance). A subtree with its own Cargo.toml is a different
@@ -2764,7 +2915,7 @@ mod tests {
         .unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
-        let rc = scan_one(&d.to_string_lossy(), ScanOpts {
+        let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: prefix.clone(), want_json: false, include_tests: false,
             policy: None, quiet: true, deps_idx: &idx,
         });
