@@ -26,7 +26,7 @@ serde_json = "1"
 # `version` alongside `path`: cargo builds against the local path here, but a crates.io publish uses
 # the version (publish candor-report first). Carrying the version keeps candor publish-ready.
 candor-report = { path = "crates/candor-report", version = "0.4.0" }
-candor-classify = { path = "crates/candor-classify", version = "0.4.0" }
+candor-classify = { path = "crates/candor-classify", version = "0.4.1" }
 
 [dev-dependencies]
 dylint_testing = "6.0.1"
