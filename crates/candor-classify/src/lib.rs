@@ -890,8 +890,8 @@ pub fn classify_command_head(cmd: &str) -> &'static [&'static str] {
     // `git push` is Net; `rsync` local-vs-remote) would FABRICATE the effect for its common case —
     // the under-report rule forbids it, so such heads keep the bare cliff.
     match cmd.rsplit(['/', '\\']).next().unwrap_or(cmd) {
-        "curl" | "wget" | "http" | "ssh" | "scp" => &["Net"],
-        "psql" | "mysql" | "sqlite3" | "mongosh" | "redis-cli" => &["Db"],
+        "curl" | "wget" | "http" | "ssh" | "scp" | "sftp" | "ftp" | "telnet" => &["Net"],
+        "psql" | "mysql" | "sqlite3" | "mongosh" | "mongo" | "redis-cli" | "cqlsh" | "influx" => &["Db"],
         // candor engines — Fs/Env only, guaranteed by spec §7 item 12 (the analyzer self-boundary)
         "candor" | "candor-run.sh" | "candor-scan" | "candor-query" | "candor-java"
         | "candor-classify" | "candor-report" | "cargo-candor" => &["Env", "Fs"],
@@ -1165,7 +1165,11 @@ mod tests {
         use super::classify_command_head as h;
         // unambiguous external tools classify by basename (spec §4 ⟨0.5⟩)
         assert_eq!(h("curl"), &["Net"]);
+        assert_eq!(h("telnet"), &["Net"]);
+        assert_eq!(h("sftp"), &["Net"]);
         assert_eq!(h("/usr/local/bin/psql"), &["Db"]); // basename match strips the path
+        assert_eq!(h("mongo"), &["Db"]);
+        assert_eq!(h("cqlsh"), &["Db"]);
         // a candor engine is Fs/Env — spec-SUPPLIED by §7 item 12, not curation
         assert_eq!(h("candor-scan"), &["Env", "Fs"]);
         assert_eq!(h("candor-run.sh"), &["Env", "Fs"]);
