@@ -899,6 +899,21 @@ pub fn classify_command_head(cmd: &str) -> &'static [&'static str] {
     }
 }
 
+/// Whether a subprocess-builder method only MODIFIES the command (`.arg`, `.env`, `.current_dir`)
+/// rather than NAMING the program (`Command::new`, `duct::cmd`). A WHOLE-CRATE-Exec crate
+/// (`portable_pty`, `duct`, `async_process`) classifies *every* method as `Exec`, so the
+/// head-refinement must skip these: an arg or env-var-name literal that happened to match a head
+/// (`.env("psql", …)`, `.arg("curl")`) would FABRICATE that effect — the §1 under-report rule. The
+/// method is the call path's last segment.
+pub fn is_cmd_builder_method(method: &str) -> bool {
+    matches!(
+        method,
+        "arg" | "args" | "arg0" | "env" | "envs" | "env_clear" | "env_remove" | "current_dir"
+            | "cwd" | "stdin" | "stdout" | "stderr" | "pre_exec" | "creation_flags" | "uid" | "gid"
+            | "groups" | "process_group"
+    )
+}
+
 /// Map a cap-std capability *type* to the effect it authorises. Holding one of these
 /// (e.g. `&Dir`) is the real, unforgeable right to perform that effect — so candor
 /// treats it as a declared capability, exactly like its own `&Fs` token.
@@ -1181,5 +1196,10 @@ mod tests {
         assert_eq!(h("npm"), &[] as &[&str]);
         assert_eq!(h("git"), &[] as &[&str]);
         assert_eq!(h("rsync"), &[] as &[&str]);
+        // a builder MODIFIER (`.arg`/`.env`) names no program — its literal must NOT refine (a
+        // whole-crate-Exec crate classifies every method; `.env("psql",..)` must not fabricate Db).
+        assert!(is_cmd_builder_method("env") && is_cmd_builder_method("arg") && is_cmd_builder_method("current_dir"));
+        assert!(!is_cmd_builder_method("new")); // Command::new NAMES the program
+        assert!(!is_cmd_builder_method("cmd")); // duct::cmd NAMES the program
     }
 }
