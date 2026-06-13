@@ -36,7 +36,7 @@ use candor_report::{
 // by a consistency test, qualified at the use site.)
 use candor_classify::{
     cap_from_name, capstd_cap, classify, classify_command_head, classify_extra,
-    is_cmd_builder_method, CALIBRATED_CRATES, CALIBRATED_PREFIXES, PATH_CALIBRATED_CRATES,
+    is_cmd_naming_method, CALIBRATED_CRATES, CALIBRATED_PREFIXES, PATH_CALIBRATED_CRATES,
 };
 // The CANDOR_POLICY DSL parser is the SHARED canonical one (candor-spec SPEC §6.2), so the nightly
 // gate, stable candor-query (whatif/parsepolicy), and the JVM engine can't drift on the grammar.
@@ -1545,10 +1545,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             if builtin == Some("Exec") {
                 if let Some(cmd) = first_str_lit_arg(expr) {
                     // Capture the program head + refine the cliff (spec §4 ⟨0.5⟩) ONLY at a program-
-                    // NAMING call, not a builder modifier (`.arg`/`.env`): a whole-crate-Exec crate
-                    // classifies every method, so an arg/env literal would both pollute the `cmds`
-                    // surface (a false `allow Exec` match) and fabricate a head's effect (§1).
-                    if !is_cmd_builder_method(path.rsplit("::").next().unwrap_or("")) {
+                    // NAMING call (`new`/`cmd`), an ALLOWLIST — not "any method except a known modifier".
+                    // A whole-crate-Exec crate classifies EVERY method as Exec, so a denylist leaked a
+                    // getter (`get_env("psql")` reads a KEY) → fabricated Db + polluted `cmds` (review find).
+                    if is_cmd_naming_method(path.rsplit("::").next().unwrap_or("")) {
                         self.direct
                             .entry(caller)
                             .or_default()

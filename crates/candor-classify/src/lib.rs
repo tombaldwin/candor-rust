@@ -914,6 +914,19 @@ pub fn is_cmd_builder_method(method: &str) -> bool {
     )
 }
 
+/// Whether a subprocess method NAMES the program (so its first string literal IS the command head to
+/// refine): `Command::new("curl")`, `duct::cmd("curl", …)`. The head-refinement must fire ONLY here —
+/// an ALLOWLIST, not "any method except known modifiers". A whole-crate-Exec crate classifies EVERY
+/// method as `Exec`, so a denylist leaked NON-naming methods that aren't modifiers — a getter like
+/// `CommandBuilder::get_env("psql")` (reading back an env-var KEY, not a program) fed `"psql"` to the
+/// head classifier and FABRICATED `Db` (review find). Only `new`/`cmd` name a program; everything else
+/// (modifiers, getters `get_*`, custom builder methods) keeps the bare `Exec` cliff — under-refine
+/// (safe) rather than fabricate. `std::process::Command` is verb-precise so getters never fire `Exec`
+/// there anyway; the allowlist makes the whole-crate-Exec crates safe too.
+pub fn is_cmd_naming_method(method: &str) -> bool {
+    matches!(method, "new" | "cmd")
+}
+
 /// Map a cap-std capability *type* to the effect it authorises. Holding one of these
 /// (e.g. `&Dir`) is the real, unforgeable right to perform that effect — so candor
 /// treats it as a declared capability, exactly like its own `&Fs` token.
@@ -1201,5 +1214,13 @@ mod tests {
         assert!(is_cmd_builder_method("env") && is_cmd_builder_method("arg") && is_cmd_builder_method("current_dir"));
         assert!(!is_cmd_builder_method("new")); // Command::new NAMES the program
         assert!(!is_cmd_builder_method("cmd")); // duct::cmd NAMES the program
+        // The gate that ADMITS a literal to classify_command_head is an ALLOWLIST of program-NAMING
+        // methods, not the builder denylist. Inversion matters: a whole-crate-Exec crate (portable_pty)
+        // classifies EVERY method as Exec, so a getter like `cmd.get_env("psql")` — absent from the
+        // builder denylist — would have leaked "psql" to the head and FABRICATED Db. Only `new`/`cmd`
+        // name a program, so only they may refine.
+        assert!(is_cmd_naming_method("new") && is_cmd_naming_method("cmd"));
+        assert!(!is_cmd_naming_method("get_env")); // a GETTER, not a namer — the leak this closes
+        assert!(!is_cmd_naming_method("arg") && !is_cmd_naming_method("env") && !is_cmd_naming_method("current_dir"));
     }
 }
