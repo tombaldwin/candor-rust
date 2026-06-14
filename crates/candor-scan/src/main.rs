@@ -41,32 +41,51 @@ use candor_report::ReportEntry;
 use syn::visit::Visit;
 
 /// A call observed in a function body: the (use-expanded) path string and the leaf name.
+//
+// The serde attributes are PURELY a cache-wire-format optimization (short field names + omit the common
+// defaults): they shrink the consolidated cache, which is read+written every incremental scan. They do
+// NOT change any in-memory behaviour — the deserialized value is identical, and `serde(default)` restores
+// the omitted fields. The equivalence fuzzer guards that this representation round-trips exactly.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Call {
+    #[serde(rename = "p")]
     path: String,            // "std::fs::read", "compute_price", "pricing::priced"
+    #[serde(rename = "l")]
     leaf: String,            // last segment
+    #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
     str_arg: Option<String>, // first string-literal argument (host/cmd/path detail)
     /// Synthesized from receiver-type inference (`reqwest::Client::send` from `client.send()`). Used for
     /// external-crate classification ONLY — excluded from local call-graph edges, since its `Type::method`
     /// tail could spuriously link to a same-named LOCAL method the call doesn't actually target.
+    #[serde(rename = "t", default, skip_serializing_if = "std::ops::Not::not")]
     typed: bool,
     /// A METHOD call (`x.foo()`) vs a free-function/path call (`foo()`, `m::foo()`). When the receiver type
     /// can't be inferred, an unqualified method call has NO sound bare-leaf target — linking it to a
     /// same-named def would guess (`.bool()`→free `random::bool::bool`, `range.start()`→`Clipboard::start`),
     /// fabricating that def's effect. So such calls resolve to nothing; only the receiver-typed/qualified
     /// form (the `typed` call) links a method edge. Found on nushell (Rand/Clipboard on the random cmds).
+    #[serde(rename = "m", default, skip_serializing_if = "std::ops::Not::not")]
     method: bool,
 }
 
 /// One function the scan found: its module-qualified name, where, and the calls in its body.
+// The serde attributes are a cache-wire-format optimization only (see `Call`); in-memory behaviour is
+// unchanged and the equivalence fuzzer guards the round-trip.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct FnInfo {
+    #[serde(rename = "q")]
     qual: String,
+    #[serde(rename = "l")]
     leaf: String,
+    #[serde(rename = "f")]
     loc: String,
+    #[serde(rename = "c", default, skip_serializing_if = "Vec::is_empty")]
     calls: Vec<Call>,
     /// The body invoked a callable the syntactic scan can't see through — a closure / fn-pointer value
     /// (`(cb)()`, `arr[i]()`, a local bound to a closure). The target could perform ANY effect, so the
     /// function can't honestly be certified pure: it's marked `Unknown` (matching the nightly lint's
     /// soundness fallback) rather than silently reported clean.
+    #[serde(rename = "u", default, skip_serializing_if = "std::ops::Not::not")]
     unresolved: bool,
 }
 
@@ -1809,6 +1828,303 @@ fn module_path(rel: &Path) -> String {
     comps.join("::")
 }
 
+// ── INCREMENTAL SCAN CACHE ────────────────────────────────────────────────────────────────────────
+//
+// The biggest clock-time lever for the agent edit-loop (edit one file → re-query) is to STOP re-parsing
+// the whole crate every scan: `syn::parse_file` is ~77% of wall-clock, and an unchanged file's parse is
+// pure waste. This cache skips the parse (and the per-file Pass A / Pass B derivation) for files whose
+// content hasn't changed — opt-in via `--incremental`.
+//
+// CORRECTNESS IS THE WHOLE JOB. An incremental scan MUST produce a report BYTE-FOR-BYTE IDENTICAL to a
+// full scan-from-scratch for ANY sequence of edits. The invalidation model:
+//
+//   * PARSE + Pass A (`collect_decls`: a file's struct fields, enum variants, trait impls, return
+//     types) depend ONLY on that file's bytes → cacheable by CONTENT HASH alone.
+//   * Pass B (`CallCollector` → each fn's `Call`s) consults the WHOLE-CRATE merged decl index (a struct
+//     field added in file Y changes a method-call resolution in unchanged file X). So a file's FnInfos
+//     are valid to reuse only when BOTH its content_hash matches AND the merged decl index is unchanged
+//     — gated on a canonical DECL_INDEX_HASH stored beside the cached FnInfos.
+//
+// A body-only edit leaves the decl index unchanged → every other file reuses its FnInfos (and its parse).
+// A decl-changing edit bumps the decl index hash → every file re-runs Pass B (still cheap; the parse of
+// unchanged files is STILL reused). Either way the assembled FnInfo set is identical to a from-scratch
+// run, so the downstream classify/resolve/propagate (deliberately re-run in full every scan — it is the
+// cheap, non-parse remainder) produces a byte-identical report. The classify stage is NOT cached: it
+// reads no file, only the in-memory FnInfo set + the merged indexes, so re-deriving it is correct by
+// construction and far simpler to keep sound than a third cache layer.
+//
+// VERSIONING: every cache file carries CACHE_SCHEMA (scanner version + format rev + include-tests). A
+// mismatch invalidates the entry, so a candor-scan upgrade or a classifier-rules change can never serve
+// stale results. A deleted file's entry is simply never consulted (we key by the CURRENT path set) and
+// is pruned. A new file has no entry → it parses + derives + caches transparently.
+
+thread_local! {
+    /// Whether `--incremental` was passed (set once in `main`). Thread-local rather than a parameter
+    /// so the cache opt-in reaches `scan_one` without rewiring `scan_target`/`run_with_deps`; the
+    /// process is single-threaded by the time `scan_one` runs (rayon is used only inside the parse).
+    static INCREMENTAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The cache-format identity. Bump the trailing rev whenever the cached representation OR any analysis
+/// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
+/// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
+fn cache_schema(include_tests: bool) -> String {
+    format!("scan-{}/rev4/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+}
+
+/// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
+/// (unlike `DefaultHasher`, which is randomized). Used for both file content and the canonical merged
+/// decl-index digest, so the cache key never depends on process-random state.
+fn fnv1a(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// One source file's Pass A contribution, in ISOLATION (collected against fresh per-file maps), so it
+/// can be cached by content hash and re-merged into the crate-wide index without re-parsing. Every map
+/// here is exactly what `collect_decls` would have written for this one file's items. The merge
+/// (`merge_decls`) replays the original accumulation semantics in WALK ORDER, so the assembled crate
+/// index is byte-identical to the sequential pass — this equivalence is the cache's correctness linchpin.
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+struct FileDecls {
+    fields: FieldIndex,
+    field_elem: FieldElemIndex,
+    /// `leaf -> Some(ty)` or `None` (this file alone already saw conflicting return types for the leaf).
+    rets: HashMap<String, Option<String>>,
+    enum_tmp: HashMap<String, Option<String>>,
+    trait_impls: TraitImplIndex,
+    /// `trait leaf -> (decl count in this file, declared method names)` — `LocalTrait` flattened for serde.
+    trait_decls: HashMap<String, (usize, Vec<String>)>,
+    trait_fields: TraitFieldIndex,
+}
+
+/// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`).
+fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
+    let mut uses = HashMap::new();
+    let mut fields = HashMap::new();
+    let mut field_elem = HashMap::new();
+    let mut rets = HashMap::new();
+    let mut enum_tmp = HashMap::new();
+    let mut trait_impls = HashMap::new();
+    let mut trait_decls: HashMap<String, LocalTrait> = HashMap::new();
+    let mut trait_fields = HashMap::new();
+    collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                  &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields);
+    FileDecls {
+        fields,
+        field_elem,
+        rets,
+        enum_tmp,
+        trait_impls,
+        trait_decls: trait_decls
+            .into_iter()
+            .map(|(k, v)| (k, (v.count, v.methods.into_iter().collect())))
+            .collect(),
+        trait_fields,
+    }
+}
+
+/// The assembled crate-wide decl index (Pass A output), ready for Pass B — exactly the seven structures
+/// `scan_one` built inline before, now produced from per-file `FileDecls` so unchanged files contribute
+/// from cache. `rets`/`enum_tmp` keep the `Option` ambiguity marker until the caller filters them.
+#[derive(Default)]
+struct MergedDecls {
+    fields: FieldIndex,
+    field_elem: FieldElemIndex,
+    rets: HashMap<String, Option<String>>,
+    enum_tmp: HashMap<String, Option<String>>,
+    trait_impls: TraitImplIndex,
+    trait_decls: HashMap<String, LocalTrait>,
+    trait_fields: TraitFieldIndex,
+}
+
+/// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics
+/// `collect_decls` used when it wrote a shared map directly — so calling this over the per-file decls in
+/// WALK ORDER yields a result byte-identical to the old sequential `collect_decls` loop:
+///   * `fields`/`field_elem`/`trait_fields`: nested `insert` (last writer in walk order wins) — same as
+///     the original `entry().or_default().insert(..)`.
+///   * `rets`/`enum_tmp`: the `record_return` ambiguity rule — a leaf seen with two DIFFERENT types (or
+///     already `None` in any contributor) collapses to `None`. Order-independent in result.
+///   * `trait_impls`: append in walk order (the Vec's order is preserved exactly as the original push).
+///   * `trait_decls`: sum counts, union method names (commutative).
+fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
+    for (s, fmap) in &fd.fields {
+        let e = acc.fields.entry(s.clone()).or_default();
+        for (k, v) in fmap {
+            e.insert(k.clone(), v.clone());
+        }
+    }
+    for (s, fmap) in &fd.field_elem {
+        let e = acc.field_elem.entry(s.clone()).or_default();
+        for (k, v) in fmap {
+            e.insert(k.clone(), v.clone());
+        }
+    }
+    let merge_amb = |dst: &mut HashMap<String, Option<String>>, src: &HashMap<String, Option<String>>| {
+        for (leaf, val) in src {
+            match val {
+                None => {
+                    dst.insert(leaf.clone(), None); // contributor already ambiguous → ambiguous
+                }
+                Some(tp) => match dst.get(leaf) {
+                    None => {
+                        dst.insert(leaf.clone(), Some(tp.clone()));
+                    }
+                    Some(Some(prev)) if prev != tp => {
+                        dst.insert(leaf.clone(), None); // conflicting types — drop
+                    }
+                    Some(Some(_)) => {} // same type — keep
+                    Some(None) => {}    // already ambiguous — stays
+                },
+            }
+        }
+    };
+    merge_amb(&mut acc.rets, &fd.rets);
+    merge_amb(&mut acc.enum_tmp, &fd.enum_tmp);
+    for (tr, tys) in &fd.trait_impls {
+        acc.trait_impls.entry(tr.clone()).or_default().extend(tys.iter().cloned());
+    }
+    for (tr, (count, methods)) in &fd.trait_decls {
+        let e = acc.trait_decls.entry(tr.clone()).or_default();
+        e.count += count;
+        for m in methods {
+            e.methods.insert(m.clone());
+        }
+    }
+    for (s, fmap) in &fd.trait_fields {
+        let e = acc.trait_fields.entry(s.clone()).or_default();
+        for (k, v) in fmap {
+            e.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// A CANONICAL, order-stable digest of the merged decl index — the gate that decides whether a cached
+/// file's FnInfos (Pass B output) are still valid. Every map is rendered with SORTED keys (and sorted
+/// inner keys / value lists) so the digest depends only on the index's CONTENT, never on `HashMap`
+/// iteration order or which files happened to contribute. If this digest is unchanged, every fn's
+/// `Call`s resolve identically, so a cached FnInfo set is sound to reuse; if it moves, all files re-run
+/// Pass B. `trait_impls`'s Vec order is load-bearing (CHA), so it is hashed in order, NOT sorted.
+fn decl_index_digest(m: &MergedDecls) -> String {
+    let mut s = String::new();
+    let nested = |s: &mut String, tag: &str, map: &HashMap<String, HashMap<String, String>>| {
+        s.push_str(tag);
+        let mut keys: Vec<&String> = map.keys().collect();
+        keys.sort();
+        for k in keys {
+            s.push('|');
+            s.push_str(k);
+            let inner = &map[k];
+            let mut ik: Vec<&String> = inner.keys().collect();
+            ik.sort();
+            for f in ik {
+                s.push(';');
+                s.push_str(f);
+                s.push('=');
+                s.push_str(&inner[f]);
+            }
+        }
+        s.push('\n');
+    };
+    nested(&mut s, "fields", &m.fields);
+    nested(&mut s, "field_elem", &m.field_elem);
+    let amb = |s: &mut String, tag: &str, map: &HashMap<String, Option<String>>| {
+        s.push_str(tag);
+        let mut keys: Vec<&String> = map.keys().collect();
+        keys.sort();
+        for k in keys {
+            s.push('|');
+            s.push_str(k);
+            s.push('=');
+            s.push_str(map[k].as_deref().unwrap_or("\u{0}AMBIG"));
+        }
+        s.push('\n');
+    };
+    amb(&mut s, "rets", &m.rets);
+    amb(&mut s, "enum", &m.enum_tmp);
+    // trait_impls — Vec order is significant (CHA), hash in stored order, keys sorted.
+    s.push_str("trait_impls");
+    let mut tik: Vec<&String> = m.trait_impls.keys().collect();
+    tik.sort();
+    for k in tik {
+        s.push('|');
+        s.push_str(k);
+        for ty in &m.trait_impls[k] {
+            s.push(';');
+            s.push_str(ty);
+        }
+    }
+    s.push('\n');
+    // trait_decls — count + sorted method names.
+    s.push_str("trait_decls");
+    let mut tdk: Vec<&String> = m.trait_decls.keys().collect();
+    tdk.sort();
+    for k in tdk {
+        let lt = &m.trait_decls[k];
+        s.push('|');
+        s.push_str(k);
+        s.push(':');
+        s.push_str(&lt.count.to_string());
+        let mut ms: Vec<&String> = lt.methods.iter().collect();
+        ms.sort();
+        for mname in ms {
+            s.push(';');
+            s.push_str(mname);
+        }
+    }
+    s.push('\n');
+    nested_tf(&mut s, &m.trait_fields);
+    fnv1a(s.as_bytes())
+}
+
+/// `trait_fields` digest (`HashMap<String, HashMap<String, Vec<String>>>`) — sorted struct keys, sorted
+/// field keys, bound-leaf lists in stored order (the bound order is what `resolve_recv_traits` returns).
+fn nested_tf(s: &mut String, map: &TraitFieldIndex) {
+    s.push_str("trait_fields");
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    for k in keys {
+        s.push('|');
+        s.push_str(k);
+        let inner = &map[k];
+        let mut ik: Vec<&String> = inner.keys().collect();
+        ik.sort();
+        for f in ik {
+            s.push(';');
+            s.push_str(f);
+            s.push('=');
+            s.push_str(&inner[f].join(","));
+        }
+    }
+    s.push('\n');
+}
+
+/// The cache entry for ONE source file: its content hash, its isolated Pass A decls, and (gated on the
+/// decl-index digest captured when they were computed) its Pass B FnInfos. `fninfos` is reusable only
+/// when BOTH `content_hash` matches the file on disk AND `decl_index_hash` matches the current merged
+/// index; `decls` is reusable on `content_hash` alone.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FileCache {
+    content_hash: String,
+    decls: FileDecls,
+    decl_index_hash: String,
+    fninfos: Vec<FnInfo>,
+}
+
+/// The whole on-disk cache: one file (`<crate>/.candor/cache/scan-cache.json`) holding the schema id and
+/// every source file's entry keyed by crate-relative path. A SINGLE consolidated file means one read +
+/// one atomic write per scan instead of one syscall per source file (the per-file-file design spent ~19ms
+/// just opening + parsing tokio's 337 entries). A schema mismatch discards the whole cache.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ScanCache {
+    schema: String,
+    files: HashMap<String, FileCache>,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = ".".to_string();
@@ -1817,12 +2133,14 @@ fn main() {
     let mut include_tests = false;
     let mut policy_path: Option<String> = None;
     let mut deps_mode = false;
+    let mut incremental = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--out" => prefix = it.next().cloned().unwrap_or_default(),
             "--json" => want_json = true,
             "--include-tests" => include_tests = true,
+            "--incremental" => incremental = true,
             "--policy" => policy_path = it.next().cloned(),
             "--deps" => deps_mode = true,
             "-V" | "--version" => {
@@ -1851,6 +2169,10 @@ fn main() {
                 println!("  --json            print the report to stdout instead of writing files");
                 println!("  --include-tests   also scan tests/ benches/ examples/ and #[cfg(test)] modules");
                 println!("                    (off by default → the report describes the crate, not its harness)");
+                println!("  --incremental     reuse a per-file parse/decl cache under <dir>/.candor/cache so an");
+                println!("                    edit-then-rescan skips re-parsing unchanged files (~7x on a one-file");
+                println!("                    edit). Produces a BYTE-IDENTICAL report to a full scan; a candor-scan");
+                println!("                    upgrade or a decl-changing edit invalidates the cache automatically.");
                 println!("  --deps            scan the Cargo.lock dependency tree first (registry sources from");
                 println!("                    ~/.cargo/registry/src) into <dir>/.candor/deps/, then scan <dir>");
                 println!("                    CHAINED over those reports — effects cross every crate boundary");
@@ -1888,6 +2210,11 @@ fn main() {
     if deps_mode {
         std::process::exit(run_with_deps(&dir, prefix, want_json, include_tests, policy));
     }
+    // Incremental is OPT-IN and SAFE: a full scan (no flag) never reads the cache, and `--incremental`
+    // with no/invalid cache transparently does a full scan + populates it (the gates downgrade any
+    // stale entry to a re-derivation). The flag rides in a thread-local so it doesn't thread through
+    // every signature between `main` and `scan_one` (scan_target/run_with_deps are unchanged).
+    INCREMENTAL.with(|c| c.set(incremental));
     // Cross-crate report chaining (spec §2): CANDOR_DEPS names sibling reports (a `:`-separated
     // list of files and/or directories of *.json); an unclassified qualified call into a crate one
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
@@ -2006,61 +2333,199 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned()));
     }
 
-    // Parallel READ + PARSE, order-preserving. Each file is independent: read it, `syn::parse_file` it,
-    // yield `Some((rel, file))` or `None` on a read/parse failure — EXACTLY the old per-file behaviour,
-    // where `read_to_string`/`parse_file` errors hit `else { continue }` and the file was silently
-    // skipped. `par_iter().map(..).collect::<Vec<_>>()` keeps each result at its source index regardless
-    // of which thread finishes first; flattening then drops the `None`s while preserving the survivors'
-    // walk order. So the produced `parsed` is identical to the sequential version, every run.
+    // ── PARSE + Pass A + Pass B, with an OPTIONAL per-file cache (`--incremental`) ──────────────────
+    // The non-incremental path is the original: parallel parse every file, run Pass A then Pass B over
+    // all. The incremental path reuses an unchanged file's cached Pass A decls (skipping its parse) and,
+    // when the merged decl index is unchanged, its cached Pass B FnInfos too — producing a byte-identical
+    // assembled FnInfo set (the merges below replay the original walk-order accumulation exactly). See
+    // the cache section above for the soundness argument.
     use rayon::prelude::*;
-    let slots: Vec<Option<(String, SendFile)>> = paths
+    let incremental = INCREMENTAL.with(|c| c.get());
+    let schema = cache_schema(include_tests);
+    let cache_dir = Path::new(dir).join(".candor").join("cache");
+    let cache_path = cache_dir.join("scan-cache.json");
+
+    // Load the SINGLE consolidated cache file (`rel -> FileCache`) in one read+deserialize — far cheaper
+    // than 1 open per source file. A cache whose schema doesn't match this binary is discarded wholesale.
+    let mut prior: HashMap<String, FileCache> = if incremental {
+        std::fs::read(&cache_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<ScanCache>(&b).ok())
+            .filter(|c| c.schema == schema)
+            .map(|c| c.files)
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
+    // CONTENT HASHES (cheap parallel reads, no parse). The cached entry for a file is reusable iff its
+    // stored content_hash matches the bytes on disk now.
+    let hashes: Vec<(String, String)> = paths
         .par_iter()
-        .map(|(p, rel)| {
-            let text = std::fs::read_to_string(p).ok()?;
-            let file = syn::parse_file(&text).ok()?;
-            // SAFETY: `syn::File` is `!Send` only because `proc_macro2::TokenStream` holds an `Rc`. This
-            // `file` is FRESHLY parsed and SOLELY owned by this closure — there are no other `Rc` handles
-            // to it anywhere, so no refcount is touched concurrently. We move it ONCE (worker → collector)
-            // and from then on every access (Pass A, Pass B) is single-threaded. A one-time move of a
-            // uniquely-owned value across a thread boundary is sound; see `SendFile`.
-            Some((rel.clone(), SendFile(file)))
+        .map(|(p, rel)| (rel.clone(), std::fs::read(p).map(|b| fnv1a(&b)).unwrap_or_default()))
+        .collect();
+    let per_file: Vec<(String, String, Option<FileCache>)> = hashes
+        .into_iter()
+        .map(|(rel, content_hash)| {
+            let cached = prior
+                .remove(&rel)
+                .filter(|fc| fc.content_hash == content_hash);
+            (rel, content_hash, cached)
         })
         .collect();
-    // Order-preserving: each slot stays at its source index regardless of completion order; flattening
-    // drops the read/parse failures (the old `else { continue }`) while keeping the survivors' walk
-    // order, so `parsed` is byte-identical to the old sequential push.
-    let parsed: Vec<(String, syn::File)> =
-        slots.into_iter().flatten().map(|(rel, f)| (rel, f.0)).collect();
 
-    // Pass A — index struct field types and function return types crate-wide, so a method call on
-    // `self.field` or on the result of a local factory function can be typed and classified. The
-    // trait indexes ride along: impl universe + declaration counts + dispatch-typed fields, for the
-    // syntactic-CHA resolution of `dyn`/`impl Trait`/generic-bound receivers.
-    let mut fields: FieldIndex = HashMap::new();
-    let mut field_elem: FieldElemIndex = HashMap::new();
-    let mut rets_tmp: HashMap<String, Option<String>> = HashMap::new();
-    let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
-    let mut trait_impls: TraitImplIndex = HashMap::new();
-    let mut trait_decls: HashMap<String, LocalTrait> = HashMap::new();
-    let mut trait_fields: TraitFieldIndex = HashMap::new();
-    for (_, file) in &parsed {
-        let mut uses = HashMap::new();
-        collect_decls(&file.items, include_tests, &mut uses, &mut fields, &mut field_elem,
-                      &mut rets_tmp, &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields);
+    // ROUND 1 PARSE (parallel): every file whose Pass A decls are NOT validly cached. A read/parse
+    // failure yields `None` (the original `else { continue }`), so its slot carries no parsed file and
+    // contributes nothing — identical to before.
+    let round1: Vec<Option<SendFile>> = per_file
+        .par_iter()
+        .map(|(rel, _, cached)| {
+            if cached.is_some() {
+                return None; // decls reusable from cache — defer the parse (it may not be needed at all)
+            }
+            let p = &paths.iter().find(|(_, r)| r == rel)?.0;
+            let text = std::fs::read_to_string(p).ok()?;
+            // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
+            Some(SendFile(syn::parse_file(&text).ok()?))
+        })
+        .collect();
+
+    // Per-file Pass A decls (cache or fresh) + a place to hold a parsed file for Pass B. A file dropped
+    // by a read/parse failure (no cache AND round-1 parse failed) is excluded entirely, preserving the
+    // original survivor set + walk order.
+    let mut decls_per_file: Vec<(String, String, FileDecls)> = Vec::new(); // (rel, content_hash, decls)
+    let mut parsed_files: HashMap<String, syn::File> = HashMap::new();     // rel -> parsed (round 1)
+    let mut cached_fninfos: HashMap<String, (String, Vec<FnInfo>)> = HashMap::new(); // rel -> (decl_index_hash, fninfos)
+    // Files whose on-disk entry was already valid for BOTH content + the decl index it recorded — no
+    // re-write needed unless the merged index moves (checked after the digest). Lets a no-op / body-only
+    // re-scan skip rewriting the whole cache dir (the dominant cost when nothing changed).
+    let mut disk_decl_hash: HashMap<String, String> = HashMap::new();
+    for ((rel, ch, cached), r1) in per_file.into_iter().zip(round1.into_iter()) {
+        match cached {
+            Some(fc) => {
+                // Decls reusable; the FnInfos are CONDITIONALLY reusable (checked after the digest).
+                disk_decl_hash.insert(rel.clone(), fc.decl_index_hash.clone());
+                decls_per_file.push((rel.clone(), ch, fc.decls));
+                cached_fninfos.insert(rel, (fc.decl_index_hash, fc.fninfos));
+            }
+            None => {
+                // A freshly-parsed file (or a parse failure → skip the file entirely, as before).
+                let Some(sf) = r1 else { continue };
+                let fd = file_decls(&sf.0.items, include_tests);
+                decls_per_file.push((rel.clone(), ch, fd));
+                parsed_files.insert(rel, sf.0);
+            }
+        }
     }
-    // Keep only unambiguous fn-leaf -> return-type mappings (a name with conflicting return types was
-    // marked `None`); a guessed type would mis-classify. Same rule for enum-variant payload types.
-    let returns: ReturnIndex = rets_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
-    let enum_variants: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
-    let traits = TraitIndexes { impls: &trait_impls, decls: &trait_decls, fields: &trait_fields };
-    let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
 
-    // Pass B — collect each function's calls (now with receiver-type inference available).
+    // Pass A MERGE — replay the original accumulation in WALK ORDER over the per-file decls, so the
+    // crate-wide index is byte-identical to the old sequential `collect_decls` loop.
+    let mut merged = MergedDecls::default();
+    for (_, _, fd) in &decls_per_file {
+        merge_decls(&mut merged, fd);
+    }
+    let decl_index_hash = decl_index_digest(&merged);
+    // Keep only unambiguous fn-leaf -> return-type / enum-variant-payload mappings (the `None`s drop).
+    let returns: ReturnIndex =
+        merged.rets.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
+    let enum_variants: EnumVariantIndex =
+        merged.enum_tmp.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
+    let fields = &merged.fields;
+    let field_elem = &merged.field_elem;
+    let trait_impls = &merged.trait_impls;
+    let trait_decls = &merged.trait_decls;
+    let trait_fields = &merged.trait_fields;
+    let traits = TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields };
+    let elems = ElemIndexes { field_elem, enum_variants: &enum_variants };
+
+    // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
+    // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
+    // set is empty; on a decl edit it is "everything else", re-parsed in parallel (degrade-to-full).
+    let need_passb: Vec<&str> = decls_per_file
+        .iter()
+        .map(|(rel, _, _)| rel.as_str())
+        .filter(|rel| {
+            !parsed_files.contains_key(*rel)
+                && cached_fninfos.get(*rel).map(|(h, _)| h != &decl_index_hash).unwrap_or(true)
+        })
+        .collect();
+    let round2: Vec<(String, Option<SendFile>)> = need_passb
+        .par_iter()
+        .map(|rel| {
+            let parsed = paths
+                .iter()
+                .find(|(_, r)| r == rel)
+                .and_then(|(p, _)| std::fs::read_to_string(p).ok())
+                .and_then(|t| syn::parse_file(&t).ok())
+                .map(SendFile);
+            (rel.to_string(), parsed)
+        })
+        .collect();
+    for (rel, sf) in round2 {
+        if let Some(sf) = sf {
+            parsed_files.insert(rel, sf.0);
+        }
+    }
+
+    // Pass B — assemble each file's FnInfos in WALK ORDER: reuse the cached set when the decl index is
+    // unchanged, else re-derive from the (now parsed) file. Either way the concatenated `fns` is exactly
+    // what the old single Pass B loop produced.
     let mut fns: Vec<FnInfo> = Vec::new();
-    for (rel, file) in &parsed {
+    let mut fresh_fninfos: HashMap<String, Vec<FnInfo>> = HashMap::new();
+    for (rel, _, _) in &decls_per_file {
+        let reuse = cached_fninfos
+            .get(rel)
+            .filter(|(h, _)| *h == decl_index_hash)
+            .map(|(_, v)| v.clone());
+        if let Some(v) = reuse {
+            fns.extend(v.iter().cloned());
+            continue;
+        }
+        // Re-derive: the file is parsed (round 1 or round 2); if both parses failed it's simply absent.
+        let Some(file) = parsed_files.get(rel) else { continue };
         let modpath = module_path(Path::new(rel));
         let mut uses = HashMap::new();
-        scan_items(&file.items, &modpath, rel, include_tests, &fields, &returns, traits, elems, &mut uses, &mut fns);
+        let mut file_fns: Vec<FnInfo> = Vec::new();
+        scan_items(&file.items, &modpath, rel, include_tests, fields, &returns, traits, elems, &mut uses, &mut file_fns);
+        fns.extend(file_fns.iter().cloned());
+        fresh_fninfos.insert(rel.clone(), file_fns);
+    }
+
+    // WRITE BACK the cache (incremental only) as ONE consolidated file. Each entry persists {content_hash,
+    // decls, decl_index_hash, fninfos}; the FnInfos written are the CURRENT ones (reused or freshly
+    // derived) tagged with the CURRENT decl_index_hash, so the next scan's gate is exact. The map is
+    // rebuilt from the current path set, so deleted/renamed files drop out automatically (no pruning pass).
+    // The write is SKIPPED entirely when nothing changed — every file's decls came from cache AND already
+    // recorded this decl_index_hash AND no file was added/removed — so a no-edit re-scan does zero writes.
+    // Best-effort: a cache write failure never affects the report (it only costs a re-derivation later).
+    if incremental {
+        let unchanged = fresh_fninfos.is_empty()
+            && prior.is_empty() // every prior entry was consumed by a current file → none deleted
+            && decls_per_file.iter().all(|(rel, _, _)| disk_decl_hash.get(rel) == Some(&decl_index_hash));
+        if !unchanged {
+            let mut files: HashMap<String, FileCache> = HashMap::with_capacity(decls_per_file.len());
+            for (rel, ch, fd) in &decls_per_file {
+                let fninfos = fresh_fninfos
+                    .get(rel)
+                    .cloned()
+                    .or_else(|| cached_fninfos.get(rel).map(|(_, v)| v.clone()))
+                    .unwrap_or_default();
+                files.insert(
+                    rel.clone(),
+                    FileCache {
+                        content_hash: ch.clone(),
+                        decls: fd.clone(),
+                        decl_index_hash: decl_index_hash.clone(),
+                        fninfos,
+                    },
+                );
+            }
+            let cache = ScanCache { schema: schema.clone(), files };
+            let _ = std::fs::create_dir_all(&cache_dir);
+            if let Ok(bytes) = serde_json::to_vec(&cache) {
+                let _ = candor_report::write_atomic(&cache_path, &bytes);
+            }
+        }
     }
 
     // The κ-coverage ledger: Cargo.toml's [dependencies] are the crate's TRUE external universe, so a
