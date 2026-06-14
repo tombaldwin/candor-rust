@@ -171,6 +171,18 @@ CASES = [
         ("let _ = {r}.scheme();",   "returns the parsed scheme substring — contacts nothing"),
      ],
      [], None),
+
+    # ---- std unix domain sockets: connect/bind ARE local IPC; SocketAddr::from_pathname is a pure
+    # address ctor that opens no socket. The `std::os::unix::net` PREFIX rule would paint Ipc onto it
+    # unless carved out. (Found sweeping socket2: `SockAddr::as_unix` → `from_pathname` fabricated Ipc.)
+    ("std_unix_net", ["use std::os::unix::net::{UnixStream, SocketAddr};"], "_p: &str",
+     [
+        ("let _ = SocketAddr::from_pathname(\"/tmp/s\");",
+         "builds a unix-socket ADDRESS struct from a path — opens no socket"),
+     ],
+     [
+        ("let _ = UnixStream::connect(\"/tmp/s\");", "opens a unix-domain socket connection"),
+     ], "Ipc"),
 ]
 
 

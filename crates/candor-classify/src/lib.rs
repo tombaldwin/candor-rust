@@ -103,6 +103,10 @@ const PURE_FD_TRANSFER: &[&str] = &[
     "into_raw_fd", "into_raw_socket", "into_raw_handle",
     "as_raw_fd", "as_raw_socket", "as_raw_handle",
     "into_std",
+    // `SocketAddr::from_pathname` (std/async-std unix net) builds an address STRUCT from a path —
+    // it opens no socket. The `std::os::unix::net` prefix rule below would otherwise fabricate Ipc
+    // on it. (Found sweeping socket2: `SockAddr::as_unix` → `from_pathname` reported Ipc.)
+    "from_pathname",
 ];
 
 /// Classify a resolved callee by the crate it belongs to and its full path.
@@ -1396,6 +1400,8 @@ mod tests {
         assert_eq!(classify("std", "std::fs::File::into_raw_fd"), None);
         assert_eq!(classify("std", "std::fs::File::as_raw_handle"), None);
         assert_eq!(classify("std", "std::os::unix::net::UnixStream::from_raw_fd"), None);
+        // `SocketAddr::from_pathname` builds an address struct, opens no socket — pure. (socket2 sweep.)
+        assert_eq!(classify("std", "std::os::unix::net::SocketAddr::from_pathname"), None);
         assert_eq!(classify("tokio", "tokio::net::TcpStream::from_raw_fd"), None);
         assert_eq!(classify("tokio", "tokio::net::TcpStream::into_std"), None); // unwrap → std type, pure
         assert_eq!(classify("tokio", "tokio::fs::File::into_std"), None);
