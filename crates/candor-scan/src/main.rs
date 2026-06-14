@@ -4823,4 +4823,49 @@ mod tests {
         // type's effect onto the other's caller (the bug the `len()==1` filter on the tail2 branch fixes).
         assert_eq!(resolve_target("Job::run", "run", false, &by_tail2, &by_leaf), None);
     }
+
+    // A REFLECTIVE guard on the `--incremental` cache key. `decl_index_digest` decides whether a cached
+    // file's Pass-B FnInfos may be reused; a `MergedDecls` field that steers resolution but is MISSING
+    // from the digest = a stale cache silently returning unsound effect sets. Rust has no runtime field
+    // reflection, so this stands in for it two ways: (1) the exhaustive destructure below stops COMPILING
+    // the moment a field is added to `MergedDecls` until you bind it here — forcing the question "is it in
+    // the digest?"; (2) every field is then mutated in isolation and the digest MUST move, proving each is
+    // actually folded in. Add a field → add its `_` binding AND a mutator case, or the build/test fails.
+    #[test]
+    fn every_merged_decls_field_is_folded_into_the_digest() {
+        // (1) Compile-time exhaustiveness: no `..`, so a new field breaks this line until it's listed.
+        let MergedDecls {
+            fields: _,
+            field_elem: _,
+            rets: _,
+            enum_tmp: _,
+            trait_impls: _,
+            trait_decls: _,
+            trait_fields: _,
+            prim_aliases: _,
+        } = MergedDecls::default();
+
+        let empty = decl_index_digest(&MergedDecls::default());
+
+        // (2) One mutator per field — each touches exactly that field and nothing else.
+        let mutators: Vec<(&str, fn(&mut MergedDecls))> = vec![
+            ("fields", |m| { m.fields.entry("S".into()).or_default().insert("f".into(), "T".into()); }),
+            ("field_elem", |m| { m.field_elem.entry("S".into()).or_default().insert("f".into(), "E".into()); }),
+            ("rets", |m| { m.rets.insert("f".into(), Some("T".into())); }),
+            ("enum_tmp", |m| { m.enum_tmp.insert("v".into(), Some("E".into())); }),
+            ("trait_impls", |m| { m.trait_impls.entry("Tr".into()).or_default().push("Ty".into()); }),
+            ("trait_decls", |m| { m.trait_decls.entry("Tr".into()).or_default().count += 1; }),
+            ("trait_fields", |m| { m.trait_fields.entry("S".into()).or_default().insert("f".into(), vec!["b".into()]); }),
+            ("prim_aliases", |m| { m.prim_aliases.insert("A".into()); }),
+        ];
+        for (name, mutate) in mutators {
+            let mut m = MergedDecls::default();
+            mutate(&mut m);
+            assert_ne!(
+                decl_index_digest(&m), empty,
+                "MergedDecls.{name} changes the index but NOT the digest — the --incremental cache would \
+                 reuse stale FnInfos. Fold `{name}` into decl_index_digest().",
+            );
+        }
+    }
 }
