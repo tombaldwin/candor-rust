@@ -266,15 +266,35 @@ mod cfg {
 """, {
         "arr::make": True,            # the alias caller must be pure (no fabricated Clock)
         "cfg::Buf::default": False,   # the struct's real Default keeps Clock (control)
-    }),
+    }, ""),
+    # ---- cfg-feature block gating (the winnow debug-trace Env over-approximation) ----
+    # A `#[cfg(feature="off")]` BLOCK inside an active fn is compiled out under default features, so its
+    # effect is NOT the crate's behaviour. The matching ACTIVE-feature block IS (the control). Only inactive
+    # BLOCKS are skipped — a whole cfg-gated capability FUNCTION is kept (so an opt-in capability surface is
+    # not silently under-reported).
+    ("cfg_block_gating", """
+mod m {
+    pub fn active_fn() {
+        #[cfg(feature = "off")]
+        { let _ = std::env::var("X"); }   // 'off' not in default → compiled out → active_fn stays PURE
+    }
+    pub fn on_fn() {
+        #[cfg(feature = "on")]
+        { let _ = std::env::var("X"); }   // 'on' IS default → block kept → Env (control)
+    }
+}
+""", {
+        "m::active_fn": True,   # inactive-feature block skipped → pure
+        "m::on_fn": False,      # active-feature block kept → Env
+    }, '[features]\ndefault = ["on"]\non = []\noff = []\n'),
 ]
 
 
-def run_raw(scanner, cid, src, expect, workdir):
+def run_raw(scanner, cid, src, expect, manifest_extra, workdir):
     cdir = os.path.join(workdir, cid)
     os.makedirs(os.path.join(cdir, "src"), exist_ok=True)
     with open(os.path.join(cdir, "Cargo.toml"), "w") as f:
-        f.write(f'[package]\nname = "probe_{cid}"\nversion = "0.0.0"\nedition = "2021"\n')
+        f.write(f'[package]\nname = "probe_{cid}"\nversion = "0.0.0"\nedition = "2021"\n{manifest_extra}')
     with open(os.path.join(cdir, "src", "lib.rs"), "w") as f:
         f.write(src)
     proc = subprocess.run([scanner, cdir, "--json"], capture_output=True, text=True)
@@ -317,8 +337,8 @@ def main():
             fails, checked = run(scanner, case, work)
             total += checked
             all_failures += fails
-        for cid, src, expect in RAW_CASES:
-            fails, checked = run_raw(scanner, cid, src, expect, work)
+        for cid, src, expect, manifest_extra in RAW_CASES:
+            fails, checked = run_raw(scanner, cid, src, expect, manifest_extra, work)
             total += checked
             all_failures += fails
 

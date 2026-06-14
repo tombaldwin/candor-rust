@@ -1028,6 +1028,15 @@ impl<'a> CallCollector<'a> {
 }
 
 impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
+    fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
+        // A `#[cfg(feature="X")]`-gated statement/block that is compiled OUT under the active feature set
+        // contributes no effects to this fn — don't walk it (else its calls fabricate effects the default
+        // build never performs; winnow's debug-trace block reaching `std::env::var`).
+        if stmt_cfg_inactive(node) {
+            return;
+        }
+        syn::visit::visit_stmt(self, node);
+    }
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         // Peel `(..)`/`{..}` wrappers around the callee so `(f)()` is treated like `f()`.
         let mut func = &*node.func;
@@ -1399,6 +1408,205 @@ fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
             found
         }
     })
+}
+
+/// The crate's CFG-FEATURE picture, from Cargo.toml `[features]`: `active` = the transitive closure of
+/// `default` (features enabling features); `declared` = every feature name that appears. A
+/// `#[cfg(feature = "X")]` is KNOWN-FALSE when X is declared but not active (compiled out under a default
+/// build), KNOWN-TRUE when active, and UNKNOWN when X isn't declared (a dependent could enable it). Read
+/// once per scan from a OnceLock; empty ⇒ no feature info ⇒ nothing is skipped (no behaviour change).
+type FeatureSets = (std::collections::HashSet<String>, std::collections::HashSet<String>);
+static CFG_FEATURES: std::sync::OnceLock<std::sync::RwLock<FeatureSets>> = std::sync::OnceLock::new();
+
+fn cfg_cell() -> &'static std::sync::RwLock<FeatureSets> {
+    CFG_FEATURES.get_or_init(|| std::sync::RwLock::new((Default::default(), Default::default())))
+}
+
+/// Install the active/declared feature sets for the crate about to be scanned (called once per `scan_one`,
+/// which runs sequentially per workspace member, before its parallel Pass B reads them).
+fn set_cfg_features(f: FeatureSets) {
+    *cfg_cell().write().unwrap() = f;
+}
+
+/// A snapshot of the active feature set, sorted — folded into the decl-index digest so the Pass-B cache
+/// invalidates if the crate's enabled features change.
+fn active_features_sorted() -> Vec<String> {
+    let mut v: Vec<String> = cfg_cell().read().unwrap().0.iter().cloned().collect();
+    v.sort();
+    v
+}
+
+/// Pull every double-quoted token out of `s` into `out` (a manifest array's string entries).
+fn push_quoted(s: &str, out: &mut Vec<String>) {
+    let mut rest = s;
+    while let Some(i) = rest.find('"') {
+        rest = &rest[i + 1..];
+        if let Some(j) = rest.find('"') {
+            out.push(rest[..j].to_string());
+            rest = &rest[j + 1..];
+        } else {
+            break;
+        }
+    }
+}
+
+/// Parse Cargo.toml `[features]` → (active, declared). `active` = closure of `default` over LOCAL feature
+/// names (entries that are themselves feature keys); `dep:`/`?`/`crate/feat` entries enable dependencies,
+/// not local features, so they don't expand the active SET (but they ARE recorded as declared if they name
+/// a key). Line-based (no toml dep), tolerating multi-line arrays via bracket-depth tracking.
+fn parse_features(root: &std::path::Path) -> (std::collections::HashSet<String>, std::collections::HashSet<String>) {
+    use std::collections::{HashMap, HashSet};
+    let txt = match std::fs::read_to_string(root.join("Cargo.toml")) {
+        Ok(t) => t,
+        Err(_) => return (HashSet::new(), HashSet::new()),
+    };
+    let mut feats: HashMap<String, Vec<String>> = HashMap::new();
+    let mut in_features = false;
+    let mut cur: Option<(String, Vec<String>)> = None; // (key, accumulating entries) for an open `[ … ]`
+    for line in txt.lines() {
+        if let Some((k, vals)) = cur.as_mut() {
+            push_quoted(line, vals);
+            if line.contains(']') {
+                feats.insert(std::mem::take(k), std::mem::take(vals));
+                cur = None;
+            }
+            continue;
+        }
+        let t = line.trim();
+        if let Some(sec) = toml_section(line) {
+            in_features = sec == "features";
+            continue;
+        }
+        if !in_features || t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if let Some(eq) = t.find('=') {
+            let key = t[..eq].trim().trim_matches('"').to_string();
+            let rhs = t[eq + 1..].trim();
+            if let Some(arr) = rhs.strip_prefix('[') {
+                let mut vals = Vec::new();
+                push_quoted(arr, &mut vals);
+                if rhs.contains(']') {
+                    feats.insert(key, vals); // single-line array
+                } else {
+                    cur = Some((key, vals)); // multi-line — keep accumulating
+                }
+            }
+        }
+    }
+    let declared: HashSet<String> = feats.keys().cloned().collect();
+    // active = transitive closure of `default` over entries that are themselves local feature keys.
+    let mut active: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = feats.get("default").cloned().unwrap_or_default();
+    while let Some(f) = stack.pop() {
+        // a `dep:x` / `x/y` / `x?/y` entry enables a dependency, not a local feature — ignore for the SET.
+        if f.contains(':') || f.contains('/') {
+            continue;
+        }
+        if active.insert(f.clone()) {
+            if let Some(next) = feats.get(&f) {
+                stack.extend(next.iter().cloned());
+            }
+        }
+    }
+    (active, declared)
+}
+
+/// 3-valued cfg evaluation under the active feature set: `Some(true)` definitely compiled, `Some(false)`
+/// definitely compiled OUT, `None` unknown (a predicate we can't resolve — target_os, an undeclared
+/// feature, `test` left to is_cfg_test). Only `Some(false)` lets a caller SKIP. Conservative throughout:
+/// anything unrecognised is `None` (kept). `feature = "X"`: active⇒true, declared-but-inactive⇒false,
+/// undeclared⇒None. `not/all/any` fold with Kleene logic.
+fn cfg_eval(m: &syn::meta::ParseNestedMeta, active: &std::collections::HashSet<String>,
+            declared: &std::collections::HashSet<String>) -> Option<bool> {
+    if m.path.is_ident("feature") {
+        // `feature = "X"` → active⇒Some(true), declared-but-inactive⇒Some(false), undeclared⇒None.
+        let v = m.value().ok().and_then(|v| v.parse::<syn::LitStr>().ok());
+        return v.and_then(|lit| {
+            let name = lit.value();
+            if active.contains(&name) {
+                Some(true)
+            } else if declared.contains(&name) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+    }
+    if m.path.is_ident("not") {
+        let mut inner: Option<bool> = None;
+        let _ = m.parse_nested_meta(|n| { inner = cfg_eval(&n, active, declared); Ok(()) });
+        return inner.map(|b| !b);
+    }
+    if m.path.is_ident("all") {
+        // false if ANY child false; true only if ALL true; else None.
+        let (mut any_false, mut all_true, mut saw) = (false, true, false);
+        let _ = m.parse_nested_meta(|n| { saw = true; match cfg_eval(&n, active, declared) { Some(false) => any_false = true, Some(true) => {}, None => all_true = false }; Ok(()) });
+        if any_false { return Some(false); }
+        if saw && all_true { return Some(true); }
+        return None;
+    }
+    if m.path.is_ident("any") {
+        // true if ANY child true; false only if ALL false; else None.
+        let (mut any_true, mut all_false, mut saw) = (false, true, false);
+        let _ = m.parse_nested_meta(|n| { saw = true; match cfg_eval(&n, active, declared) { Some(true) => any_true = true, Some(false) => {}, None => all_false = false }; Ok(()) });
+        if any_true { return Some(true); }
+        if saw && all_false { return Some(false); }
+        return None;
+    }
+    None // target_os/unix/windows/test/… — unknown to a default-feature scan; keep the item.
+}
+
+/// True if an item/stmt's `#[cfg(...)]` is KNOWN-FALSE under the active feature set (compiled out, so its
+/// effects are not the crate's default behaviour). Multiple cfg attrs are AND-ed (any false ⇒ skip).
+fn is_cfg_inactive(attrs: &[syn::Attribute]) -> bool {
+    if !attrs.iter().any(|a| a.path().is_ident("cfg")) {
+        return false; // fast path: no cfg attrs (the overwhelming majority of items/stmts)
+    }
+    let guard = cfg_cell().read().unwrap();
+    let (active, declared) = &*guard;
+    if declared.is_empty() {
+        return false; // no [features] info — never skip
+    }
+    attrs.iter().any(|a| {
+        a.path().is_ident("cfg") && {
+            let mut verdict: Option<bool> = None;
+            let _ = a.parse_nested_meta(|m| { verdict = cfg_eval(&m, active, declared); Ok(()) });
+            verdict == Some(false)
+        }
+    })
+}
+
+/// The outer attributes of an expression that can appear in STATEMENT position carrying a `#[cfg(...)]`
+/// (e.g. `#[cfg(feature="debug")] { … }`). Variants that can't front a cfg in a body return `&[]`.
+fn expr_attrs(e: &syn::Expr) -> &[syn::Attribute] {
+    match e {
+        syn::Expr::Block(x) => &x.attrs,
+        syn::Expr::If(x) => &x.attrs,
+        syn::Expr::Match(x) => &x.attrs,
+        syn::Expr::Unsafe(x) => &x.attrs,
+        syn::Expr::ForLoop(x) => &x.attrs,
+        syn::Expr::While(x) => &x.attrs,
+        syn::Expr::Loop(x) => &x.attrs,
+        syn::Expr::Call(x) => &x.attrs,
+        syn::Expr::MethodCall(x) => &x.attrs,
+        syn::Expr::Macro(x) => &x.attrs,
+        syn::Expr::Async(x) => &x.attrs,
+        syn::Expr::Const(x) => &x.attrs,
+        _ => &[],
+    }
+}
+
+/// True if a statement is compiled out under the active feature set — a `#[cfg(feature="X")]`-gated block
+/// or stmt whose effects are NOT the crate's default behaviour, so the call-collector must not walk into it
+/// (winnow's `trace_result` reaches `std::env::var("COLUMNS")` only through a `#[cfg(feature="debug")]` block).
+fn stmt_cfg_inactive(stmt: &syn::Stmt) -> bool {
+    match stmt {
+        syn::Stmt::Local(l) => is_cfg_inactive(&l.attrs),
+        syn::Stmt::Macro(m) => is_cfg_inactive(&m.attrs),
+        syn::Stmt::Expr(e, _) => is_cfg_inactive(expr_attrs(e)),
+        syn::Stmt::Item(_) => false, // a local item carries its own effects, not the enclosing fn's
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2185,6 +2393,14 @@ fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(a);
     }
     s.push('\n');
+    // active cfg-features — items behind an inactive feature are skipped in Pass B, so a change to the
+    // crate's enabled features must invalidate the cached FnInfos (this digest gates that cache).
+    s.push_str("features");
+    for f in active_features_sorted() {
+        s.push('|');
+        s.push_str(&f);
+    }
+    s.push('\n');
     fnv1a(s.as_bytes())
 }
 
@@ -2353,6 +2569,11 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let ScanOpts { prefix, want_json, include_tests, policy: policy_path, quiet, deps_idx } = opts;
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
+    // Install this crate's cfg-feature picture (active = default closure, declared = all). A
+    // `#[cfg(feature="X")]` compiled OUT under the default build is then skipped, so its effects don't
+    // count as the crate's behaviour (winnow's debug-trace `std::env::var` fabricated Env). Set before the
+    // parallel Pass B reads it; scan_one runs sequentially per workspace member, so members don't race.
+    set_cfg_features(parse_features(root));
 
     // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below). The walk +
     // path-shape filters run SEQUENTIALLY (cheap directory traversal, and the filter set is the report's
