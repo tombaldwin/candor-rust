@@ -375,9 +375,15 @@ printf '[package]\nname="cf"\nversion="0.1.0"\nedition="2021"\n' > "$CF/Cargo.to
 printf 'fn named_hof(f: impl Fn()){ f(); }\nfn net_cb(){ let _=std::net::TcpStream::connect("h:1"); }\nfn user(){ named_hof(net_cb); }\nfn closure_hof(f: impl Fn()){ f(); }\nfn c2(){ closure_hof(|| { let _=std::net::TcpStream::connect("z:1"); }); }\nfn main(){ user(); c2(); }\n' > "$CF/src/main.rs"
 ( cd "$CF"; CANDOR_JSON="$PWD/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
 cfa=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" named_hof 0 2>&1 )
+cfu=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" user 0 2>&1 )
 cfc=$( cd "$CF"; "$ROOT/target/debug/candor-query" show "$PWD/r" closure_hof 0 2>&1 )
-want   "closure-flow: named-only HOF resolves to Net" "$cfa" "Net"
-absent "closure-flow: resolved HOF drops the Unknown" "$cfa" "Unknown"
+# A HOF that invokes a generic param is honestly Unknown from its OWN standpoint — its effect depends on
+# whatever callback the caller passes, so claiming a concrete effect was a leaky abstraction (and the
+# crate-wide union of all callbacks FABRICATED the effect onto pure callers of a shared HOF). The
+# per-call-site fix routes each callback's effect to the CALLER that passed it: `user` (passes net_cb)
+# is precisely Net, with NO effect under-reported. (See ui/callbacks.rs for the domain_calc fabrication.)
+want   "closure-flow: an invoked-param HOF is honestly Unknown (not a leaked caller effect)" "$cfa" "Unknown"
+want   "closure-flow: the CALLER gets the callback's effect per-site (no under-report)" "$cfu" "Net"
 want   "closure-flow: closure-passed HOF stays Unknown" "$cfc" "Unknown"
 # candor-spec §2 entryPoint: the program `main` is a reachability root.
 want   "report flags main as an entry point (entryPoint)" "$( cd "$CF"; cat r.*.json 2>/dev/null )" '"entryPoint": true'

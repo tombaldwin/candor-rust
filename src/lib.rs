@@ -182,18 +182,25 @@ pub struct Candor {
     calls: HashMap<LocalDefId, HashSet<LocalDefId>>,
     /// Closure-flow, *receiving* side (bounded). Per FREE fn, the parameter indices it INVOKES as a
     /// callback (`fn apply(f: impl Fn()) { f() }` → {0}). The honest `Unknown` for such a call is
-    /// DEFERRED, not inserted on the spot — resolved in `check_crate_post` from the concrete fns the
-    /// HOF is actually passed at its call sites (`callback_named`). If every call site passes a NAMED
-    /// fn, we edge the HOF to them and drop the redundant `Unknown`; if any passes an unresolvable
-    /// callback (a closure / fn-pointer), the `Unknown` stands (sound). Free fns only, so arg index
-    /// equals param index (a method's `self` would offset it).
+    /// DEFERRED, not inserted on the spot — resolved PER CALL SITE in `check_crate_post` from
+    /// `callback_sites` / `callback_site_unknown`: each callback's effects flow to the SPECIFIC caller
+    /// that passed it (not unioned onto the HOF), while the HOF keeps a non-propagating `Unknown` in its
+    /// own report (the honest standalone answer for invoking an opaque param). Free fns only, so arg index equals param
+    /// index (a method's `self` would offset it).
     param_calls: HashMap<LocalDefId, BTreeSet<usize>>,
-    /// Named fns passed at argument position `i` of a free fn `F`, over all call sites — the candidate
-    /// targets of `F`'s callback param `i`. (`DefId` isn't `Ord`, so a `HashSet`.)
-    callback_named: HashMap<(DefId, usize), HashSet<DefId>>,
-    /// `(F, i)` positions where an UNRESOLVABLE callback (closure / fn-ptr / generic value) was passed
-    /// — forces `F`'s param `i` back to `Unknown` (we can't enumerate its targets).
-    callback_unknown: HashSet<(DefId, usize)>,
+    /// PER-CALL-SITE closure flow: for each *calling* fn
+    /// that passes a LOCAL named fn at argument `i` of HOF `F`, the targets it passed THERE. Lets the
+    /// callback's effects flow to the SPECIFIC caller that passed it (`handler_io -> fetch_remote`),
+    /// instead of being unioned into `F` and then leaking to EVERY caller of `F` (the fabrication that
+    /// made a pure caller passing a pure callback inherit a sibling caller's effectful one). Keyed by
+    /// (caller, F, param) — caller is `LocalDefId` (always local), F is `DefId`. Free-fn HOFs only, so
+    /// arg index == param index.
+    callback_sites: HashMap<(LocalDefId, DefId, usize), HashSet<DefId>>,
+    /// PER-CALL-SITE unresolvable callbacks: (caller, F, param) where THIS caller passed an
+    /// unresolvable callback (closure / fn-ptr / non-local fn / generic value) at `F`'s invoked param.
+    /// The honest `Unknown` is attributed to THAT caller (it genuinely can't see what it passed),
+    /// not unioned onto `F`.
+    callback_site_unknown: HashSet<(LocalDefId, DefId, usize)>,
     /// Project-supplied classifier rules: (effect, is_crate_prefix, prefix).
     extra: Vec<(&'static str, bool, String)>,
     /// CANDOR_PARANOID: also treat generic static trait dispatch as Unknown.
@@ -330,8 +337,8 @@ impl Candor {
             fs_paths_direct: HashMap::new(),
             db_tables_direct: HashMap::new(),
             param_calls: HashMap::new(),
-            callback_named: HashMap::new(),
-            callback_unknown: HashSet::new(),
+            callback_sites: HashMap::new(),
+            callback_site_unknown: HashSet::new(),
             calls: HashMap::new(),
             extra,
             paranoid,
@@ -1314,7 +1321,29 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     if let (Some(local), Some(caller)) =
                         (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
                     {
-                        if matches!(cx.tcx.def_kind(*did), DefKind::Fn | DefKind::AssocFn) {
+                        // A `FnDef` path being CAST AWAY from callability (`fs_helper as usize`,
+                        // `f as *const ()`) is never invoked through that cast value — a `usize` /
+                        // raw-data-pointer can't be called — so propagating the callback's effects to
+                        // the casting fn is a fabrication. Suppress the edge ONLY when the parent is a
+                        // cast whose TARGET type is non-callable; a `fn`-pointer cast (`f as fn()`) stays
+                        // callable, so KEEP the edge there, exactly as for `vec![f]` / `map(f)` / a struct
+                        // field. (Soundness: this only ever DROPS an edge for a provably-uncallable cast
+                        // target — it can never hide a real call, which goes through `resolve_callee`
+                        // below, not this value-reference edge.)
+                        let cast_away = match cx.tcx.parent_hir_node(expr.hir_id) {
+                            rustc_hir::Node::Expr(p) => match p.kind {
+                                ExprKind::Cast(inner, _) if inner.hir_id == expr.hir_id => !matches!(
+                                    typeck.expr_ty(p).kind(),
+                                    rustc_middle::ty::TyKind::FnPtr(..)
+                                        | rustc_middle::ty::TyKind::FnDef(..)
+                                        | rustc_middle::ty::TyKind::Closure(..)
+                                ),
+                                _ => false,
+                            },
+                            _ => false,
+                        };
+                        if !cast_away && matches!(cx.tcx.def_kind(*did), DefKind::Fn | DefKind::AssocFn)
+                        {
                             self.calls.entry(caller).or_default().insert(local);
                         }
                     }
@@ -1415,21 +1444,28 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         // ONLY a LOCAL named fn is a resolvable callback target (we can edge to its
                         // body). A non-local fn-item, a closure, a fn-pointer, or any opaque/`dyn`
                         // callable (`impl Fn` return, `&dyn Fn`, `Box<dyn Fn>`) we can't enumerate —
-                        // mark the position `callback_unknown` so the deferred `Unknown` STANDS instead
-                        // of being silently dropped. (A non-callable value at a non-callback position
-                        // also lands here; harmless — that key is consulted only for an invoked param,
-                        // where the arg is necessarily a callable.) SOUNDNESS: routing a *non-local* fn
-                        // into `callback_named` let the resolver see a non-empty target set, filter it to
-                        // an empty `locals`, and add neither an edge nor the `Unknown` → a false `pure`.
+                        // record it as a PER-SITE unresolvable so this caller's deferred `Unknown`
+                        // STANDS instead of being silently dropped. (A non-callable value at a
+                        // non-callback position also lands here; harmless — that key is consulted only
+                        // for an invoked param, where the arg is necessarily a callable.) SOUNDNESS:
+                        // routing a *non-local* fn into the resolvable set would let the resolver see a
+                        // non-empty target set, filter it to an empty `locals`, and add neither an edge
+                        // nor the `Unknown` → a false `pure`; routing it to the unresolvable set is the
+                        // honest fallback. The flow is keyed by the CALLER (per call site) so a
+                        // callback's effects reach the specific fn that passed it, never every caller of
+                        // the HOF (the union fabrication — see `callback_sites`).
                         match typeck.expr_ty(arg).kind() {
                             rustc_middle::ty::TyKind::FnDef(t, _)
                                 if t.as_local().is_some()
                                     && matches!(cx.tcx.def_kind(*t), DefKind::Fn | DefKind::AssocFn) =>
                             {
-                                self.callback_named.entry((def_id, i)).or_default().insert(*t);
+                                self.callback_sites
+                                    .entry((caller, def_id, i))
+                                    .or_default()
+                                    .insert(*t);
                             }
                             _ => {
-                                self.callback_unknown.insert((def_id, i));
+                                self.callback_site_unknown.insert((caller, def_id, i));
                             }
                         }
                     }
@@ -1646,41 +1682,66 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             mir_spike::run(cx.tcx);
             return;
         }
-        // Closure-flow resolution (receiving side): turn each deferred callback-parameter invocation
-        // into either edges (when every call site passed a NAMED fn) or the honest `Unknown` (when any
-        // passed an unresolvable callback, or the HOF is never called locally so we can't tell). Runs
-        // BEFORE the fixpoint so the new edges / Unknowns participate in propagation.
+        // Closure-flow resolution (receiving side), PER CALL SITE. A HOF `H` that invokes a callback
+        // parameter doesn't perform the callback's effects ITSELF — the *caller* that passed the
+        // callback does. So instead of unioning every callback ever passed to `H` and edging `H` to all
+        // of them (which then leaked to EVERY caller of `H` — a pure caller passing a pure callback
+        // inheriting a sibling caller's effectful one, the fabrication this fixes), attribute each
+        // callback to the SPECIFIC caller that passed it: edge `caller -> callback_target`.
+        //
+        // The HOF stays HONEST in its OWN report (SPEC §4 trust contract: an unresolvable invocation is
+        // never silently pure). From `H`'s own standalone standpoint it invokes an opaque callable, so
+        // it ALWAYS carries `Unknown` for the invoked param — but a NON-PROPAGATING one (injected into
+        // the report AFTER the fixpoint, see `hof_param_unknown` below), so it never flows back down the
+        // normal `caller -> H` edge to re-pollute the precise local callers we just fixed. This is the
+        // crux of the per-site model: the HOF is honestly indeterminate standalone, while each caller
+        // gets the EXACT effect of the callback IT passed.
+        //
+        // No under-report: every concrete invocation of `H`'s param is attributed to SOME function that
+        // can't drop it — a local caller (edge to the resolvable target, or its own `Unknown` for an
+        // unresolvable callback, recorded in `callback_site_unknown`), AND `H` itself keeps the honest
+        // `Unknown` for any caller we can't see (an external crate, an entry point, or simply a HOF that
+        // is never called at all but still reported on its own).
         let param_calls = std::mem::take(&mut self.param_calls);
-        for (caller, indices) in &param_calls {
+        let callback_sites = std::mem::take(&mut self.callback_sites);
+        let callback_site_unknown = std::mem::take(&mut self.callback_site_unknown);
+        // HOFs that must carry the non-propagating, report-only `Unknown` for an invoked param.
+        let mut hof_param_unknown: HashSet<LocalDefId> = HashSet::new();
+        for (hof, indices) in &param_calls {
             for &i in indices {
-                let key = (caller.to_def_id(), i);
-                let unknown = self.callback_unknown.contains(&key);
-                match self.callback_named.get(&key) {
-                    Some(targets) if !unknown && !targets.is_empty() => {
-                        // Fully resolvable: edge the HOF to each LOCAL named target — its effects now
-                        // propagate into the HOF, and the redundant `Unknown` we deferred never appears.
+                // PER-SITE: edge each LOCAL caller to the resolvable named callback it passed HERE.
+                for ((caller, h, pi), targets) in &callback_sites {
+                    if *h == hof.to_def_id() && *pi == i {
                         let locals: Vec<LocalDefId> = targets
                             .iter()
                             .filter(|t| matches!(cx.tcx.def_kind(**t), DefKind::Fn | DefKind::AssocFn))
                             .filter_map(|t| t.as_local())
                             .collect();
-                        if locals.is_empty() {
-                            // Defensive: targets present but none local (recording now routes non-local
-                            // fns to `callback_unknown`, so this shouldn't fire — but if it ever did,
-                            // dropping the `Unknown` would be a silent under-report). Keep it honest.
-                            self.direct.entry(*caller).or_default().insert(UNKNOWN);
-                            self.unknown_why.entry(*caller).or_default().insert("callback:invoked param".to_string());
-                        } else {
+                        if !locals.is_empty() {
                             self.calls.entry(*caller).or_default().extend(locals);
                         }
                     }
-                    _ => {
-                        // An unresolvable callback was passed somewhere, or the HOF is never called
-                        // locally (external callers pass who-knows-what) → the deferred `Unknown` stands.
+                }
+                // PER-SITE: a caller that passed an UNRESOLVABLE callback (closure / fn-ptr / non-local
+                // fn / generic value) carries the honest `Unknown` ITSELF — it genuinely can't see what
+                // it handed over. (This DOES propagate to that caller's callers, correctly: they reach
+                // an indeterminate effect through it.)
+                for (caller, h, pi) in &callback_site_unknown {
+                    if *h == hof.to_def_id() && *pi == i {
                         self.direct.entry(*caller).or_default().insert(UNKNOWN);
-                        self.unknown_why.entry(*caller).or_default().insert("callback:invoked param".to_string());
+                        self.unknown_why
+                            .entry(*caller)
+                            .or_default()
+                            .insert("callback:unresolvable callback passed".to_string());
                     }
                 }
+                // The HOF itself: ALWAYS honest `Unknown` for the invocation (it invokes an opaque
+                // param). Report-only (non-propagating) so it never leaks to the precise local callers.
+                hof_param_unknown.insert(*hof);
+                self.unknown_why
+                    .entry(*hof)
+                    .or_default()
+                    .insert("callback:invoked param (opaque from the HOF's own standpoint)".to_string());
             }
         }
 
@@ -1709,7 +1770,15 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         }
 
-        let eff = propagate(eff, &self.calls);
+        let mut eff = propagate(eff, &self.calls);
+        // NON-PROPAGATING HOF param-invocation `Unknown`: injected AFTER the fixpoint so an exported
+        // HOF stays honest in its OWN report (an external caller can't be enumerated) without that
+        // `Unknown` flowing back down `caller -> HOF` to re-pollute the precise local callers, whose
+        // callbacks were already attributed per call site above. (If a HOF already carries a real
+        // `Unknown` from its body, this is a harmless no-op on the set.)
+        for hof in &hof_param_unknown {
+            eff.entry(*hof).or_default().insert(UNKNOWN);
+        }
 
         // Filesystem read/write detail rides the SAME propagation helper, in a separate set that never
         // touches `eff`:  fs[f] = fs_direct[f] ∪ ⋃ { fs[g] : g ∈ calls[f] }.  A function that reaches
@@ -1938,7 +2007,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // no-op — see the layering note above). `name` itself stays unprefixed for display.
             let scope_name = format!("{krate}::{name}");
             let declared = declared_caps(cx.tcx, f);
-            let direct = self.direct.get(&f).cloned().unwrap_or_default();
+            let mut direct = self.direct.get(&f).cloned().unwrap_or_default();
+            // A param-invoking HOF's own `Unknown` is DIRECT (the opacity originates in this fn's body,
+            // invoking an opaque callable) — but it is kept OUT of `self.direct` so it does NOT propagate
+            // down `caller -> HOF` and re-pollute the precise per-site callers. Re-add it HERE, for
+            // display/JSON only, so the report reads "{ Unknown }" (no `*`, not "via callee") and the
+            // `unknown_why` origin tag is emitted — matching the SPEC §4 trust contract for an opaque
+            // self-invocation.
+            if hof_param_unknown.contains(&f) {
+                direct.insert(UNKNOWN);
+            }
             let has_unknown = effs.contains(UNKNOWN);
             let undeclared = undeclared_effects(effs, &declared);
             let unused = overdeclared_effects(&declared, effs);
