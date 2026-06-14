@@ -14,7 +14,13 @@ categories = ["development-tools", "command-line-utilities"]
 [dependencies]
 candor-report = { path = "../candor-report", version = "0.4.1" }
 candor-classify = { path = "../candor-classify", version = "0.4.2" }
-syn = { version = "2", features = ["full", "visit", "extra-traits"] }
-proc-macro2 = "1"
+# `default-features = false` drops syn's (default-on) `proc-macro` feature, which would otherwise pull
+# `proc-macro2/proc-macro` and bake the non-`Send` real `proc_macro::Span` into `syn::File` — making the
+# parsed files un-sendable across rayon's worker threads. candor-scan is a standalone BINARY, never a
+# proc macro, so that feature is dead weight; everything else syn's default enabled is re-listed verbatim
+# (derive/parsing/printing/clone-impls) so parsing behaviour is byte-for-byte unchanged.
+syn = { version = "2", default-features = false, features = ["full", "visit", "extra-traits", "derive", "parsing", "printing", "clone-impls"] }
+proc-macro2 = { version = "1", default-features = false }
 walkdir = "2"
 serde_json = "1"
+rayon = "1"

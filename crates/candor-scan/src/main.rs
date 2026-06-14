@@ -168,6 +168,22 @@ struct CallCollector<'a> {
     unresolved: bool,
 }
 
+/// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely
+/// because `proc_macro2::TokenStream` holds an `Rc<Vec<TokenTree>>`; with `span-locations` OFF (our build
+/// — neither syn nor we enable it) a `Span` is a zero-size marker with no thread-local backing, so the
+/// ONLY thing that makes the type unsendable is that `Rc` refcount.
+///
+/// SAFETY CONTRACT: a `SendFile` is constructed from a `syn::parse_file` result that is UNIQUELY OWNED
+/// (never cloned) and is MOVED EXACTLY ONCE — from the rayon worker that parsed it to the collector — and
+/// thereafter accessed only single-threaded (the sequential Pass A / Pass B). No `Rc` clone is ever shared
+/// between threads, so no refcount is ever touched concurrently; a one-time move of a uniquely-owned value
+/// across a thread boundary races with nothing. This is exactly the case `unsafe impl Send` is sound for.
+struct SendFile(syn::File);
+// SAFETY: see the type doc — uniquely owned, moved once, then single-threaded. Sound for a parse result
+// that is never `Rc`-aliased across threads. (Would be UNSOUND if a clone of the inner `TokenStream`
+// were retained on the producing thread; we never clone before the move.)
+unsafe impl Send for SendFile {}
+
 fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
 }
@@ -1904,8 +1920,15 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
 
-    // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below).
-    let mut parsed: Vec<(String, syn::File)> = Vec::new();
+    // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below). The walk +
+    // path-shape filters run SEQUENTIALLY (cheap directory traversal, and the filter set is the report's
+    // scope contract); the per-file READ + `syn::parse_file` — profiled at ~77% parse + ~19% I/O of
+    // wall-clock, and embarrassingly parallel since each file parses independently — is fanned out across
+    // cores with rayon below. ORDER IS PRESERVED: paths are collected in walk order, `par_iter().collect()`
+    // writes each result back at its own index (completion order is irrelevant), and the post-filter of
+    // read/parse failures keeps the survivors' relative order — so `parsed` is byte-identical to the old
+    // sequential push, and the report's fn order (which derives from it) does not move.
+    let mut paths: Vec<(std::path::PathBuf, String)> = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
         // A nested directory carrying its own Cargo.toml is a DIFFERENT package (Cargo's own
@@ -1980,10 +2003,34 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 }
             }
         }
-        let Ok(text) = std::fs::read_to_string(p) else { continue };
-        let Ok(file) = syn::parse_file(&text) else { continue };
-        parsed.push((rel.to_string_lossy().into_owned(), file));
+        paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned()));
     }
+
+    // Parallel READ + PARSE, order-preserving. Each file is independent: read it, `syn::parse_file` it,
+    // yield `Some((rel, file))` or `None` on a read/parse failure — EXACTLY the old per-file behaviour,
+    // where `read_to_string`/`parse_file` errors hit `else { continue }` and the file was silently
+    // skipped. `par_iter().map(..).collect::<Vec<_>>()` keeps each result at its source index regardless
+    // of which thread finishes first; flattening then drops the `None`s while preserving the survivors'
+    // walk order. So the produced `parsed` is identical to the sequential version, every run.
+    use rayon::prelude::*;
+    let slots: Vec<Option<(String, SendFile)>> = paths
+        .par_iter()
+        .map(|(p, rel)| {
+            let text = std::fs::read_to_string(p).ok()?;
+            let file = syn::parse_file(&text).ok()?;
+            // SAFETY: `syn::File` is `!Send` only because `proc_macro2::TokenStream` holds an `Rc`. This
+            // `file` is FRESHLY parsed and SOLELY owned by this closure — there are no other `Rc` handles
+            // to it anywhere, so no refcount is touched concurrently. We move it ONCE (worker → collector)
+            // and from then on every access (Pass A, Pass B) is single-threaded. A one-time move of a
+            // uniquely-owned value across a thread boundary is sound; see `SendFile`.
+            Some((rel.clone(), SendFile(file)))
+        })
+        .collect();
+    // Order-preserving: each slot stays at its source index regardless of completion order; flattening
+    // drops the read/parse failures (the old `else { continue }`) while keeping the survivors' walk
+    // order, so `parsed` is byte-identical to the old sequential push.
+    let parsed: Vec<(String, syn::File)> =
+        slots.into_iter().flatten().map(|(rel, f)| (rel, f.0)).collect();
 
     // Pass A — index struct field types and function return types crate-wide, so a method call on
     // `self.field` or on the result of a local factory function can be typed and classified. The
