@@ -100,6 +100,10 @@ type FieldIndex = HashMap<String, HashMap<String, String>>;
 /// element's method calls classify, instead of silently dropping to pure (a §4 under-report).
 type FieldElemIndex = HashMap<String, HashMap<String, String>>;
 
+/// `var-name -> per-position element types of a tuple binding` (`None` = position not type-resolved),
+/// e.g. a `let (s, _) = pair` over a `(Sender, usize)` param records `pair -> [Some(Sender), None]`.
+type TupleElemIndex = HashMap<String, Vec<Option<String>>>;
+
 /// `enum-variant-leaf -> the single payload type` for SINGLE-payload tuple variants, e.g.
 /// `Active -> Sender` from `enum Conn { Active(Sender) }`. Lets a match-arm binding
 /// (`Conn::Active(s) => s.send()`) type `s` from the variant's payload. Only UNAMBIGUOUS variant
@@ -327,6 +331,10 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 if ambiguous.contains(&k) {
                     continue;
                 }
+                // Not the `entry` API: a collision REMOVES the key (and remembers it as ambiguous),
+                // so the present-vs-absent branches move `k` into different maps — clippy's map_entry
+                // rewrite (insert-or-modify in place) can't express the remove-on-collision.
+                #[allow(clippy::map_entry)]
                 if idx.by_key.contains_key(&k) {
                     idx.by_key.remove(&k); // two dep fns share the key — drop it, never guess
                     ambiguous.insert(k);
@@ -684,8 +692,10 @@ fn is_ctor(name: &str) -> bool {
 }
 
 /// The type a call expression produces (peeling `&`/`(..)`/`?`/`.await`), by two routes:
-///   1. a constructor `Path::ctor(..)` -> the `Path` type (`reqwest::Client::new()` -> `reqwest::Client`);
-///   2. a LOCAL free function whose return type the pre-pass recorded (`create_pool()` -> `sqlx::Pool`).
+///
+/// 1. a constructor `Path::ctor(..)` -> the `Path` type (`reqwest::Client::new()` -> `reqwest::Client`);
+/// 2. a LOCAL free function whose return type the pre-pass recorded (`create_pool()` -> `sqlx::Pool`).
+///
 /// Returns the expanded type path. `returns` is the crate-wide fn-leaf -> return-type index.
 fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, returns: &ReturnIndex) -> Option<String> {
     match expr {
@@ -1704,9 +1714,9 @@ fn seed_elem_of(
     sig: &syn::Signature,
     vars: &mut HashMap<String, String>,
     uses: &HashMap<String, String>,
-) -> (HashMap<String, String>, HashMap<String, Vec<Option<String>>>) {
+) -> (HashMap<String, String>, TupleElemIndex) {
     let mut elem_of = HashMap::new();
-    let mut tuple_of: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    let mut tuple_of: TupleElemIndex = HashMap::new();
     for arg in &sig.inputs {
         let syn::FnArg::Typed(pt) = arg else { continue };
         match &*pt.pat {
@@ -2728,7 +2738,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // re-write needed unless the merged index moves (checked after the digest). Lets a no-op / body-only
     // re-scan skip rewriting the whole cache dir (the dominant cost when nothing changed).
     let mut disk_decl_hash: HashMap<String, String> = HashMap::new();
-    for ((rel, ch, cached), r1) in per_file.into_iter().zip(round1.into_iter()) {
+    for ((rel, ch, cached), r1) in per_file.into_iter().zip(round1) {
         match cached {
             Some(fc) => {
                 // Decls reusable; the FnInfos are CONDITIONALLY reusable (checked after the digest).
@@ -3886,9 +3896,9 @@ mod tests {
             &mut ren3,
         );
         assert!(out3.contains("my_package") && out3.contains("foo_package") && out3.contains("package"));
-        assert!(ren3.get("my_package").is_none(), "key-substring 'package' fabricated a rename: {ren3:?}");
-        assert!(ren3.get("foo_package").is_none(), "{ren3:?}");
-        assert!(ren3.get("package").is_none(), "a dep named `package` is not a rename: {ren3:?}");
+        assert!(!ren3.contains_key("my_package"), "key-substring 'package' fabricated a rename: {ren3:?}");
+        assert!(!ren3.contains_key("foo_package"), "{ren3:?}");
+        assert!(!ren3.contains_key("package"), "a dep named `package` is not a rename: {ren3:?}");
         assert_eq!(ren3.get("real").map(String::as_str), Some("renamed_crate"), "real rename lost: {ren3:?}");
     }
 
@@ -4848,7 +4858,8 @@ mod tests {
         let empty = decl_index_digest(&MergedDecls::default());
 
         // (2) One mutator per field — each touches exactly that field and nothing else.
-        let mutators: Vec<(&str, fn(&mut MergedDecls))> = vec![
+        type Mutator = fn(&mut MergedDecls);
+        let mutators: Vec<(&str, Mutator)> = vec![
             ("fields", |m| { m.fields.entry("S".into()).or_default().insert("f".into(), "T".into()); }),
             ("field_elem", |m| { m.field_elem.entry("S".into()).or_default().insert("f".into(), "E".into()); }),
             ("rets", |m| { m.rets.insert("f".into(), Some("T".into())); }),

@@ -128,8 +128,8 @@ fn glob_encountered(prefix: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for ent in rd.flatten() {
-            if let Some(n) = ent.file_name().to_str() {
-                if let Some(mid) = n.strip_prefix(&needle).and_then(|m| m.strip_suffix(".json")) {
+            if let Some(n) = ent.file_name().to_str()
+                && let Some(mid) = n.strip_prefix(&needle).and_then(|m| m.strip_suffix(".json")) {
                     // an encountered sidecar is `<base>.encountered-<crate>-<kind>.json` — a SINGLE
                     // dotless segment. Excluding any further dot avoids mis-claiming the REPORT of a
                     // crate literally named `encountered-…` (`<base>.encountered-foo.lib.json`).
@@ -137,7 +137,6 @@ fn glob_encountered(prefix: &str) -> Vec<PathBuf> {
                         out.push(ent.path());
                     }
                 }
-            }
         }
     }
     out
@@ -167,11 +166,10 @@ fn tally_effects(fns: &[ReportEntry]) -> (BTreeMap<&'static str, usize>, Vec<Str
 fn encountered_set(prefix: &str) -> BTreeSet<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for path in glob_encountered(prefix) {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&text) {
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(arr) = serde_json::from_str::<Vec<String>>(&text) {
                 seen.extend(arr);
             }
-        }
     }
     seen
 }
@@ -760,7 +758,7 @@ fn cmd_whatif(args: &[String]) -> i32 {
             for rule in rules {
                 let denies = rule.effects.is_empty() || rule.effects.contains(effect.as_str());
                 let in_scope =
-                    rule.scope.as_deref().map_or(true, |s| candor_classify::policy::scope_matches(fname, s));
+                    rule.scope.as_deref().is_none_or(|s| candor_classify::policy::scope_matches(fname, s));
                 if denies && in_scope {
                     let r = if rule.effects.is_empty() {
                         format!("pure{}", rule.scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
@@ -1426,12 +1424,11 @@ fn cmd_path(args: &[String]) -> i32 {
             break;
         }
         for c in &f.calls {
-            if let Some(cf) = by_name.get(c.as_str()) {
-                if cf.inferred.iter().any(|e| e == effect) && !prev.contains_key(c.as_str()) {
+            if let Some(cf) = by_name.get(c.as_str())
+                && cf.inferred.iter().any(|e| e == effect) && !prev.contains_key(c.as_str()) {
                     prev.insert(c.as_str(), Some(cur));
                     q.push_back(c.as_str());
                 }
-            }
         }
     }
     let Some(source) = source else {
@@ -1669,7 +1666,7 @@ fn cmd_containment(args: &[String]) -> i32 {
     }
     println!("candor containment — how well each boundary effect stays in one layer");
     println!("(the signal is dispersion across layers, NOT effect count)\n");
-    println!("  {:<7} {:>9} {:>7}   {}", "effect", "contained", "layers", "owner  ← leaked into");
+    println!("  {:<7} {:>9} {:>7}   owner  ← leaked into", "effect", "contained", "layers");
     let mut any = false;
     for eff in CONTAINED {
         let Some(layers) = by_eff.get(eff) else { continue };

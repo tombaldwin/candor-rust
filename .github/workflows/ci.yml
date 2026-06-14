@@ -16,6 +16,8 @@ jobs:
       # the nightly pinned in `rust-toolchain`, which rustup fetches automatically
       # (including the rustc-dev component) when cargo runs in this repo.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -34,6 +36,14 @@ jobs:
       # dependency of the lint, so a bare `cargo build` would never compile it.
       - name: Build lint + tooling crates
         run: cargo build --workspace
+
+      # Lint gate (stable clippy, warnings = errors) on the four stable crates — the scanner/query/
+      # classifier/report surface the adopter actually builds. Scoped with -p (not --workspace) so the
+      # rustc_private dylint lib, which stable clippy can't compile, stays out. rustfmt is deliberately
+      # NOT gated: this code is hand-aligned (annotated comment columns, intentional breaks) and a blind
+      # reformat would churn thousands of cosmetic lines; clippy catches the anti-patterns that matter.
+      - name: Clippy (stable, -D warnings)
+        run: cargo clippy -p candor-report -p candor-query -p candor-classify -p candor-scan --all-targets -- -D warnings
 
       - name: Test (unit + smoke)
         run: cargo test --workspace
