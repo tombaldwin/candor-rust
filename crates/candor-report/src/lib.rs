@@ -65,19 +65,24 @@ pub fn report_files(prefix: &str) -> Vec<ReportFile> {
 pub struct ReportEntry {
     #[serde(rename = "fn")]
     pub func: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub loc: String,
+    // `inferred` (the effect-set payload) is kept ALWAYS present for clarity even when empty — every
+    // other field below is omitted when empty/default (`#[serde(default)]` means a reader defaults it,
+    // so omission is wire-compatible). The reconciliation trio (declared/undeclared/overdeclared) is
+    // populated only by the declaration-reconciliation pass (the deep/JVM engines); it is ALWAYS empty
+    // in the stable scanner's reports, where serializing it cost ~15% of the bytes for nothing.
     #[serde(default)]
     pub inferred: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub direct: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undeclared: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overdeclared: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unresolved: bool,
     /// True if the RUNTIME invokes this function rather than (only) project code — a reachability ROOT
     /// with no in-project caller (`main`, a `#[test]`, a `#[no_mangle]`/exported fn). candor-spec §2
