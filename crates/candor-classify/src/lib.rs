@@ -76,6 +76,9 @@ pub const CALIBRATION_PROBE_TAILS: &[&str] = &[
     "::X::connect", "::Utc::now", "::X::load", "::__private_api::log", "::tempfile", "::glob",
     "::X::run", "::dotenv", "::random", "::emit", "::X::emit_span_lint", "::X::anything",
     "::SaltString::generate", "::hash", "::OsRng::fill_bytes",
+    // verb-precise crates whose whole-crate rules were narrowed to the effectful surface (the pure
+    // accessors/ctors/data-types now return None), so the liveness probe must name an EFFECTFUL path:
+    "::Mmap::map", "::event", "::u32", "::Clipboard::get_text", "::spawn_command",
 ];
 
 /// Database client crates whose execution verbs are I/O (see the DB branch in `classify`).
@@ -689,9 +692,34 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         || path.starts_with("async_std::fs::")
         || crate_name == "async_fs"
         || crate_name == "fs_err"
-        || crate_name == "memmap2"
     {
         return Some("Fs");
+    }
+    // memmap2: only `MmapOptions::map*` (and the in-place `Mmap::flush`/`make_*` protection
+    // changes / `remap`) actually issue the mmap/msync/mprotect/mremap syscall = Fs. The rest of the
+    // crate is PURE: `MmapOptions::new`/setters BUILD the request, and once a region is mapped, reads
+    // over it (`Mmap::len`/`is_empty`/`as_ptr`/`as_mut_ptr`/`deref` into the byte slice) are plain
+    // memory access with no syscall. Whole-crate Fs fabricated Fs on those reads (a `m.len()` the
+    // scanner's receiver inference routes to `memmap2::Mmap::len`). Match the syscall-issuing verbs;
+    // everything else returns None (pure). `map*` covers `map`/`map_mut`/`map_exec`/`map_copy`/
+    // `map_copy_read_only`/`map_raw`/`map_raw_read_only`/`map_anon`.
+    if crate_name == "memmap2" {
+        let m = path.rsplit("::").next().unwrap_or(path);
+        if m.starts_with("map")
+            || m == "flush"
+            || m == "flush_async"
+            || m == "flush_range"
+            || m == "flush_async_range"
+            || m == "remap"
+            || m.starts_with("make_")
+            || m == "advise"
+            || m == "advise_range"
+            || m == "lock"
+            || m == "unlock"
+        {
+            return Some("Fs");
+        }
+        return None;
     }
     // tempfile: creating a temp file/dir touches the disk. Match the create/persist verbs (the
     // `Builder` setters — prefix/suffix/rand_bytes — stay pure). `persist`/`keep` rename/retain
@@ -750,7 +778,27 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // over-reported those as `Rand`; match only the calls that actually consume randomness — the
     // entropy sources (`OsRng`, `thread_rng`/`rng`, `from_entropy`/`from_os_rng`) and the generation
     // verbs (`gen*`/`random*`/`fill*`/`sample*`/`next_u*`). A `Uniform::new` is now correctly pure.
-    if crate_name == "getrandom" || crate_name == "fastrand" {
+    if crate_name == "getrandom" {
+        return Some("Rand");
+    }
+    // fastrand: like `rand`, it mixes entropy-consuming generation (effectful) with PURE deterministic
+    // pieces. `Rng::with_seed(42)` is a DETERMINISTIC seeded constructor (consumes no entropy — the same
+    // seed gives the same stream), and `Rng::fork`/`Rng::clone` just split/copy existing state. Those are
+    // PURE; whole-crate Rand fabricated Rand on them. The effect is the value-drawing methods (`u32`/
+    // `usize`/`bool`/`f64`/`char`/`alphanumeric`/`choice`/`choose_multiple`/`shuffle`/`fill`/the range
+    // forms) AND the entropy-seeded entry points: bare `Rng::new()` (seeds from the global entropy-backed
+    // generator), `fastrand::seed`, and the top-level `fastrand::u32(..)` free functions (which draw from
+    // the thread-local generator). `with_seed` is exempted explicitly; any other method on an `Rng`
+    // (i.e. a value draw) is Rand.
+    if crate_name == "fastrand" {
+        let m = path.rsplit("::").next().unwrap_or(path);
+        // Provably pure: deterministic seeded ctor + state split/copy.
+        if m == "with_seed" || m == "fork" || m == "clone" {
+            return None;
+        }
+        // Everything else fastrand exposes either draws a value or seeds from entropy → Rand. (The crate
+        // has no pure data types beyond the `Rng` handle itself, so a non-draw stray would have to be a
+        // method we don't recognise — keep the effect, the safe direction.)
         return Some("Rand");
     }
     if crate_name == "rand" {
@@ -792,9 +840,33 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         || path.starts_with("tokio::process::Child")
         || path.starts_with("async_std::process::Command")
         || path.starts_with("async_std::process::Child")
-        || crate_name == "async_process"
-        || crate_name == "portable_pty"
     {
+        return Some("Exec");
+    }
+    // portable_pty / async_process are whole-crate Exec EXCEPT for the proven-pure surface they expose:
+    // the `CommandBuilder` GETTERS (`get_argv`/`get_cwd`/`get_env`/`as_unix_command_line`…) read back
+    // configuration, and the PURE DATA types (`PtySize::default`, `ExitStatus`/`Stdio`/`CommandBuilder`
+    // construction/setters). The earlier `is_cmd_naming_method` fix stopped the head-refinement LEAK, but
+    // the BASE Exec still fabricated on these accessors (a `cmd.get_cwd()` the scanner routes to
+    // `portable_pty::CommandBuilder::get_cwd`). Subtract the read-back getters and the obvious pure
+    // ctors/setters; the spawn/wait/exec surface (`spawn_command`/`openpty`/`wait`/`kill`/`exec`…) keeps
+    // Exec. SUBTRACT only what is provably pure — when unrecognised, KEEP Exec (the safe direction).
+    if crate_name == "async_process" || crate_name == "portable_pty" {
+        let m = path.rsplit("::").next().unwrap_or(path);
+        // configuration read-back getters — pure (no spawn).
+        if m.starts_with("get_") || m == "as_unix_command_line" {
+            return None;
+        }
+        // pure data-type ctors/setters/derives that NAME no program and spawn nothing.
+        if matches!(
+            m,
+            "default" | "new" | "piped" | "null" | "inherit" | "from_raw_fd"
+                | "arg" | "args" | "arg0" | "env" | "envs" | "env_clear" | "env_remove"
+                | "cwd" | "current_dir" | "rows" | "cols"
+                | "clone" | "fmt" | "eq" | "ne" | "hash"
+        ) {
+            return None;
+        }
         return Some("Exec");
     }
     // duct: a subprocess-orchestration crate. `cmd()`/`cmd!` only *build* an Expression; the
@@ -838,8 +910,33 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     {
         return Some("Clock");
     }
+    // `tracing`: same principle as the `log` facade below — the crate's TYPES are pure data, so match
+    // the emit, not the whole crate. The actual program output is the macro-expanded
+    // `Subscriber::event`/`event!`/`Span::*enter*` dispatch and the `Span::new*`/`Span::record`
+    // recording path that drives the subscriber. The data-type accessors — `Level::as_str`,
+    // `Span::is_disabled`/`metadata`/`id`, and constructing/reading `Level`/`LevelFilter`/`Span`/
+    // `Event`/`Metadata`/`Field`/`FieldSet`/`Id` — are PURE (no output is produced), so whole-crate Log
+    // fabricated Log on them. Match the emit verbs; everything else returns None.
     if crate_name == "tracing" {
-        return Some("Log");
+        let m = path.rsplit("::").next().unwrap_or(path);
+        if m == "event"
+            || m == "new_span"
+            || m == "record"
+            || m == "record_follows_from"
+            || m == "enter"
+            || m == "exit"
+            || m == "in_scope"
+            || m == "entered"
+            || path.contains("::__macro_support")
+            || path.contains("::__tracing")
+            || path.contains("Subscriber::event")
+            || path.contains("Subscriber::new_span")
+            || path.contains("Subscriber::enter")
+            || path.contains("Subscriber::exit")
+        {
+            return Some("Log");
+        }
+        return None;
     }
     // The `log` facade: its macros route through `log::__private_api`; the crate's types
     // (`Level`, `LevelFilter`) are pure, so match the logging entry, not the whole crate.
@@ -865,8 +962,31 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     {
         return Some("Log");
     }
+    // arboard: the effectful surface is the `Clipboard` handle's read/write verbs (each talks to the
+    // OS clipboard / X11/Wayland/Win32/NSPasteboard server). The data types — chiefly `arboard::Error`
+    // (whose `Display`/`to_string` formatting is pure) and the `ImageData`/`GetExtLinux`/`SetExtLinux`
+    // option types — are PURE, so whole-crate Clipboard fabricated Clipboard on e.g. an error
+    // `to_string()`. Match the handle verbs; everything else returns None. `Clipboard::new` opens the
+    // connection to the clipboard server, so it's an effect too; `get`/`set` return the
+    // builder-then-read `Get`/`Set` cursors whose `text`/`image`/`html` terminals do the I/O.
     if crate_name == "arboard" {
-        return Some("Clipboard");
+        let m = path.rsplit("::").next().unwrap_or(path);
+        if m == "new"
+            || m == "get"
+            || m == "set"
+            || m == "clear"
+            || m == "get_text"
+            || m == "set_text"
+            || m == "set_html"
+            || m == "get_image"
+            || m == "set_image"
+            || m == "text"
+            || m == "image"
+            || m == "html"
+        {
+            return Some("Clipboard");
+        }
+        return None;
     }
     None
 }
@@ -1152,7 +1272,58 @@ mod tests {
         assert_eq!(classify("sqlx", "sqlx::query::Query::fetch_many"), Some("Db"));
         // sqlx's bare `query()` builder must STAY pure (the original sqlx lesson):
         assert_eq!(classify("sqlx", "sqlx::query"), None);
+        // tracing: the emit/span-lifecycle dispatch is Log; the pure DATA-type accessors are not
+        // (whole-crate Log fabricated Log on `Level::as_str` / `Span::is_disabled` — the data types are
+        // pure, same principle as the `log` facade).
         assert_eq!(classify("tracing", "tracing::event"), Some("Log"));
+        assert_eq!(classify("tracing", "tracing::Span::new_span"), Some("Log"));
+        assert_eq!(classify("tracing", "tracing::Span::record"), Some("Log"));
+        assert_eq!(classify("tracing", "tracing::Span::enter"), Some("Log"));
+        assert_eq!(classify("tracing", "tracing::Level::as_str"), None); // pure accessor
+        assert_eq!(classify("tracing", "tracing::Span::is_disabled"), None); // pure state read
+        assert_eq!(classify("tracing", "tracing::Span::metadata"), None); // pure accessor
+        assert_eq!(classify("tracing", "tracing::metadata::Level::TRACE"), None); // pure data type
+        assert_eq!(classify("tracing", "tracing::field::Field::name"), None); // pure data type
+        // memmap2: only the syscall-issuing map/flush/protect verbs are Fs; reads over an already-mapped
+        // region (len/as_ptr/is_empty) and the request builder are PURE (whole-crate Fs fabricated Fs).
+        assert_eq!(classify("memmap2", "memmap2::MmapOptions::map"), Some("Fs"));
+        assert_eq!(classify("memmap2", "memmap2::MmapOptions::map_mut"), Some("Fs"));
+        assert_eq!(classify("memmap2", "memmap2::Mmap::flush"), Some("Fs"));
+        assert_eq!(classify("memmap2", "memmap2::MmapMut::make_read_only"), Some("Fs"));
+        assert_eq!(classify("memmap2", "memmap2::Mmap::len"), None); // length read — pure
+        assert_eq!(classify("memmap2", "memmap2::Mmap::is_empty"), None); // pure
+        assert_eq!(classify("memmap2", "memmap2::Mmap::as_ptr"), None); // pointer — pure
+        assert_eq!(classify("memmap2", "memmap2::MmapOptions::new"), None); // request builder — pure
+        // arboard: the Clipboard handle's read/write verbs are Clipboard; `arboard::Error` formatting
+        // and option data types are PURE (whole-crate Clipboard fabricated Clipboard on `Error::to_string`).
+        assert_eq!(classify("arboard", "arboard::Clipboard::new"), Some("Clipboard"));
+        assert_eq!(classify("arboard", "arboard::Clipboard::get_text"), Some("Clipboard"));
+        assert_eq!(classify("arboard", "arboard::Clipboard::set_text"), Some("Clipboard"));
+        assert_eq!(classify("arboard", "arboard::Clipboard::clear"), Some("Clipboard"));
+        assert_eq!(classify("arboard", "arboard::Error::to_string"), None); // error formatting — pure
+        assert_eq!(classify("arboard", "arboard::Error::fmt"), None); // Display impl — pure
+        assert_eq!(classify("arboard", "arboard::ImageData::to_owned_img"), None); // pure data type
+        // fastrand: value draws + entropy-seeded entry points are Rand; the DETERMINISTIC seeded ctor
+        // `with_seed` and state split/copy (`fork`/`clone`) are PURE (whole-crate Rand fabricated Rand).
+        assert_eq!(classify("fastrand", "fastrand::u32"), Some("Rand")); // top-level draw
+        assert_eq!(classify("fastrand", "fastrand::Rng::usize"), Some("Rand"));
+        assert_eq!(classify("fastrand", "fastrand::Rng::shuffle"), Some("Rand"));
+        assert_eq!(classify("fastrand", "fastrand::Rng::new"), Some("Rand")); // entropy-seeded
+        assert_eq!(classify("fastrand", "fastrand::Rng::with_seed"), None); // deterministic ctor — pure
+        assert_eq!(classify("fastrand", "fastrand::Rng::fork"), None); // state split — pure
+        assert_eq!(classify("fastrand", "fastrand::Rng::clone"), None); // state copy — pure
+        // portable_pty / async_process: spawn/wait keep Exec; config GETTERS and pure data ctors/setters
+        // do NOT (base Exec fabricated on `CommandBuilder::get_cwd` / `PtySize::default` / `Stdio::piped`).
+        assert_eq!(classify("portable_pty", "portable_pty::PtySystem::openpty"), Some("Exec"));
+        assert_eq!(classify("portable_pty", "portable_pty::SlavePty::spawn_command"), Some("Exec"));
+        assert_eq!(classify("portable_pty", "portable_pty::CommandBuilder::get_argv"), None); // getter
+        assert_eq!(classify("portable_pty", "portable_pty::CommandBuilder::get_cwd"), None); // getter
+        assert_eq!(classify("portable_pty", "portable_pty::PtySize::default"), None); // pure data type
+        assert_eq!(classify("portable_pty", "portable_pty::CommandBuilder::new"), None); // builder ctor
+        assert_eq!(classify("async_process", "async_process::Command::spawn"), Some("Exec"));
+        assert_eq!(classify("async_process", "async_process::Command::output"), Some("Exec"));
+        assert_eq!(classify("async_process", "async_process::Stdio::piped"), None); // pure data type
+        assert_eq!(classify("async_process", "async_process::Stdio::null"), None); // pure data type
         // FFI tiers (matched by distinctive leaf, alias-independent)
         assert_eq!(classify("libc", "libc::open"), Some("Fs"));
         assert_eq!(classify("libc", "libc::connect"), Some("Net"));
