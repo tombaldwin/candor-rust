@@ -88,8 +88,30 @@ pub const DB_CRATES: [&str; 11] = [
     "mysql", "mysql_async", "sea_orm", "deadpool_postgres",
 ];
 
+/// Pure file-descriptor *ownership-transfer* leaves. These ADOPT an already-open descriptor
+/// (`from_raw_fd`/`from_raw_socket`/`from_raw_handle`), EXTRACT/BORROW one
+/// (`into_raw_fd`/`into_raw_socket`/`into_raw_handle`, `as_raw_fd`/`as_raw_socket`/`as_raw_handle`),
+/// or UNWRAP an async wrapper back to its std type (`into_std`) — none of them issue a syscall or
+/// perform I/O. candor's cardinal sin is calling a PURE function effectful, and these collide with the
+/// coarse std-type PREFIX rules (`std::net::TcpStream`/`std::fs::File`/`std::os::unix::net` → Net/Fs/Ipc)
+/// even though the descriptor was opened ELSEWHERE. The portable_pty/async_process Exec rule already
+/// exempts `from_raw_fd`; this generalises the same carve-out across the net/fs/ipc prefix rules.
+/// (Found by a real-world sweep of tokio: `TcpStream::into_std`, `*::from_raw_fd`, `*::as_raw_fd` all
+/// fabricated Net/Fs/Ipc.)
+const PURE_FD_TRANSFER: &[&str] = &[
+    "from_raw_fd", "from_raw_socket", "from_raw_handle",
+    "into_raw_fd", "into_raw_socket", "into_raw_handle",
+    "as_raw_fd", "as_raw_socket", "as_raw_handle",
+    "into_std",
+];
+
 /// Classify a resolved callee by the crate it belongs to and its full path.
 pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
+    // Pure fd ownership-transfer/extraction leaves are never an effect, regardless of which std I/O
+    // type they hang off — exempt them BEFORE the coarse prefix rules can fabricate Net/Fs/Ipc.
+    if PURE_FD_TRANSFER.contains(&path.rsplit("::").next().unwrap_or(path)) {
+        return None;
+    }
     if crate_name.starts_with("aws_sdk_") || crate_name.starts_with("aws_smithy") {
         // Only request dispatch is network I/O; builder setters/accessors are pure.
         if path.ends_with("::send") || path.ends_with("::send_with") {
@@ -1357,6 +1379,32 @@ mod tests {
         // pure crates stay pure
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
         assert_eq!(classify("std", "std::vec::Vec::push"), None);
+    }
+
+    #[test]
+    fn pure_fd_transfer_is_not_an_effect() {
+        // ADOPTING / EXTRACTING / BORROWING an already-open descriptor (or unwrapping an async type back
+        // to its std type) issues NO syscall — it must be PURE even though it hangs off a std I/O type
+        // whose prefix rule would otherwise fire Net/Fs/Ipc. (Real tokio sweep: `into_std`, `from_raw_fd`,
+        // `as_raw_fd` all fabricated effects.)
+        assert_eq!(classify("std", "std::net::TcpStream::from_raw_fd"), None);
+        assert_eq!(classify("std", "std::net::TcpStream::into_raw_fd"), None);
+        assert_eq!(classify("std", "std::net::TcpStream::as_raw_fd"), None);
+        assert_eq!(classify("std", "std::net::TcpListener::from_raw_fd"), None);
+        assert_eq!(classify("std", "std::net::UdpSocket::from_raw_socket"), None);
+        assert_eq!(classify("std", "std::fs::File::from_raw_fd"), None);
+        assert_eq!(classify("std", "std::fs::File::into_raw_fd"), None);
+        assert_eq!(classify("std", "std::fs::File::as_raw_handle"), None);
+        assert_eq!(classify("std", "std::os::unix::net::UnixStream::from_raw_fd"), None);
+        assert_eq!(classify("tokio", "tokio::net::TcpStream::from_raw_fd"), None);
+        assert_eq!(classify("tokio", "tokio::net::TcpStream::into_std"), None); // unwrap → std type, pure
+        assert_eq!(classify("tokio", "tokio::fs::File::into_std"), None);
+        // …but a REAL open/connect on the SAME types still fires the effect — the carve-out is leaf-precise.
+        assert_eq!(classify("std", "std::net::TcpStream::connect"), Some("Net"));
+        assert_eq!(classify("std", "std::fs::File::open"), Some("Fs"));
+        assert_eq!(classify("std", "std::fs::read"), Some("Fs"));
+        assert_eq!(classify("std", "std::os::unix::net::UnixStream::connect"), Some("Ipc"));
+        assert_eq!(classify("tokio", "tokio::net::TcpStream::connect"), Some("Net"));
     }
 
     #[test]

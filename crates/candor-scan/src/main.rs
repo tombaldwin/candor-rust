@@ -2605,6 +2605,23 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         }
     }
 
+    // Method leaves that name a LOCAL method definition (a `Type::method` qual whose `Type` is local).
+    // A bare-leaf method CALL (`x.fastrand()`, recorded path==leaf, no `::`) whose leaf matches one of
+    // these resolves to the project's OWN method, so the calibrated-crate classification of that leaf
+    // (`fastrand` → Rand, `now` → Clock) must be SUPPRESSED — the local definition is authoritative. This
+    // covers the case `resolve_target` deliberately leaves unresolved: a method on a receiver whose type
+    // the scanner can't infer (`Mutex::lock()`'s guard, `self.state.lock()` → `MutexGuard<FastRand>`),
+    // where no typed `FastRand::fastrand` sibling forms yet the leaf still names a local method. Suppress
+    // on PRESENCE of a same-named local method, not on a recorded edge — under-reporting on the rare
+    // ambiguous leaf beats fabricating an effect candor never observed (the cardinal sin). (Real tokio
+    // sweep: `RngSeedGenerator::next_seed` calls `rng.fastrand()` through a lock guard → bare leaf
+    // `fastrand` → Rand, propagated to ~14 fns incl `Runtime::new`.)
+    let local_method_leaves: std::collections::HashSet<String> = fns.iter()
+        .filter_map(|f| tail2(&f.qual))
+        .filter(|t2| t2.split("::").next().is_some_and(|ty| ty.chars().next().is_some_and(char::is_uppercase)))
+        .filter_map(|t2| t2.rsplit("::").next().map(str::to_string))
+        .collect();
+
     let mut direct: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
     let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut cmds: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -2660,7 +2677,41 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     dep_classified.insert(cr.to_string());
                 }
             }
-            if let Some(eff) = classified {
+            // Resolve the call to a local definition via the precise, uniqueness-filtered `resolve_target`.
+            // A receiver-typed `Type::method` call (`x.go()` inferred to `S::go`) resolves to the local
+            // method ONLY when `Type` is locally defined — this recovers the common `x.method()` edge that
+            // a bare leaf can't safely provide, while an external `reqwest::Client::send` is left to the
+            // classifier (its type isn't local, so it can't mis-link to a same-named local `Client::send`).
+            // A non-typed call uses the leaf/qualified-tail routes; std/core/alloc are the classifier's.
+            let resolvable = if c.typed {
+                tail2(&c.path)
+                    .and_then(|t2| t2.split("::").next().map(str::to_string))
+                    .is_some_and(|ty| local_types.contains(&ty))
+            } else {
+                !matches!(cr, "std" | "core" | "alloc")
+            };
+            if resolvable {
+                let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf);
+                if let Some(targets) = targets {
+                    for t in targets {
+                        if t != &f.qual {
+                            calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                        }
+                    }
+                }
+            }
+            // A BARE-LEAF method call (`self.fastrand()` → path == leaf, no `::`) carries no crate
+            // qualifier, so its `classify` consults the bare leaf against the calibrated crate/verb rules
+            // (`fastrand` → Rand, `now` → Clock, …). When that leaf names a LOCAL method definition
+            // (`local_method_leaves`), the call resolves to the project's OWN method — the local definition
+            // is AUTHORITATIVE — so a local method merely NAMED like a calibrated crate (tokio's pure
+            // `FastRand::fastrand` xorshift) must NOT inherit the crate's effect. Suppress the bare-leaf
+            // classification; the effect (if any) flows from the resolved target through propagation. The
+            // external-crate classification of a bare leaf still applies when NO local method shares the name
+            // (a genuine `fastrand::u32` dependency call). Qualified calls keep their type-precise rule.
+            let suppress_bare_leaf =
+                c.method && !c.path.contains("::") && local_method_leaves.contains(&c.leaf);
+            if let Some(eff) = classified.filter(|_| !suppress_bare_leaf) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
                 if let Some(s) = &c.str_arg {
                     match eff {
@@ -2683,29 +2734,6 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                         // surface (feeds `allow Db …`); a dynamically-built query yields nothing.
                         "Db" => { tables.entry(f.qual.clone()).or_default().extend(candor_classify::tables_in_sql(s)); }
                         _ => {}
-                    }
-                }
-            }
-            // Resolve the call to a local definition via the precise, uniqueness-filtered `resolve_target`.
-            // A receiver-typed `Type::method` call (`x.go()` inferred to `S::go`) resolves to the local
-            // method ONLY when `Type` is locally defined — this recovers the common `x.method()` edge that
-            // a bare leaf can't safely provide, while an external `reqwest::Client::send` is left to the
-            // classifier (its type isn't local, so it can't mis-link to a same-named local `Client::send`).
-            // A non-typed call uses the leaf/qualified-tail routes; std/core/alloc are the classifier's.
-            let resolvable = if c.typed {
-                tail2(&c.path)
-                    .and_then(|t2| t2.split("::").next().map(str::to_string))
-                    .is_some_and(|ty| local_types.contains(&ty))
-            } else {
-                !matches!(cr, "std" | "core" | "alloc")
-            };
-            if resolvable {
-                let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf);
-                if let Some(targets) = targets {
-                    for t in targets {
-                        if t != &f.qual {
-                            calls.entry(f.qual.clone()).or_default().insert(t.clone());
-                        }
                     }
                 }
             }
@@ -3935,6 +3963,65 @@ mod tests {
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf);
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
+    }
+
+    #[test]
+    fn local_method_named_like_a_crate_does_not_inherit_the_crate_effect() {
+        // A bare-leaf method call (`self.fastrand()`) is recorded path==leaf with no crate qualifier, so
+        // the classifier would consult the LEAF against the calibrated crate rules (`fastrand` → Rand,
+        // `time` → Clock). When that call RESOLVES TO A LOCAL DEFINITION, the local resolution is
+        // authoritative and the external bare-leaf classification must be SUPPRESSED — tokio's pure
+        // `FastRand::fastrand` xorshift must not fabricate Rand (it propagated to ~14 fns incl
+        // `Runtime::new` in a real sweep). A genuine external `fastrand::u32()` call — qualified, NOT
+        // local — must STILL classify Rand (no real effect dropped).
+        let d = std::env::temp_dir().join(format!("candor-scan-localcrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"localcrate\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            pub struct FastRand { one: u32 }
+            impl FastRand {
+                // a PURE local method merely NAMED like the `fastrand` crate (tokio's xorshift)
+                pub fn fastrand(&mut self) -> u32 { self.one ^= self.one << 1; self.one }
+                pub fn fastrand_n(&mut self, n: u32) -> u32 { self.fastrand() % n }
+                // a local method named like the `time`/`now` clock verb — also pure
+                pub fn time(&self) -> u32 { self.one }
+            }
+            pub fn uses_local(r: &mut FastRand) { let _ = r.fastrand_n(5); let _ = r.time(); }
+            // a REAL external dependency call — qualified, does NOT resolve locally → STILL Rand
+            pub fn uses_external() { let _ = fastrand::u32(0..10); }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // The report only emits EFFECTFUL functions (pure ones are omitted), so the effect key is
+        // `inferred`; a function ABSENT from the report carries no effect (the desired outcome here).
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // local `FastRand::fastrand`/`fastrand_n`/`time` and their callers carry NO crate effect.
+        for q in ["FastRand::fastrand", "FastRand::fastrand_n", "FastRand::time", "uses_local"] {
+            let eff = effects_of(q);
+            assert!(!eff.contains(&"Rand".to_string()) && !eff.contains(&"Clock".to_string()),
+                    "local method named like a crate fabricated an effect on {q}: {eff:?}\n{body}");
+        }
+        // the genuine external `fastrand::u32` call — unresolved locally — STILL classifies Rand.
+        assert!(effects_of("uses_external").contains(&"Rand".to_string()),
+                "a real external fastrand::u32 call must still report Rand:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
