@@ -75,6 +75,19 @@ struct FnInfo {
 /// classified by the existing per-crate method rules (`reqwest::Client::execute` -> Net).
 type FieldIndex = HashMap<String, HashMap<String, String>>;
 
+/// `struct-name-leaf -> { field -> ELEMENT-type-path }` for COLLECTION-typed fields, e.g.
+/// `Pool -> { senders: Sender }` (the element T of `Vec<Sender>`). Lets a loop/index/closure over a
+/// collection FIELD (`for c in &self.senders`, `self.senders[0].send()`) type its element so the
+/// element's method calls classify, instead of silently dropping to pure (a §4 under-report).
+type FieldElemIndex = HashMap<String, HashMap<String, String>>;
+
+/// `enum-variant-leaf -> the single payload type` for SINGLE-payload tuple variants, e.g.
+/// `Active -> Sender` from `enum Conn { Active(Sender) }`. Lets a match-arm binding
+/// (`Conn::Active(s) => s.send()`) type `s` from the variant's payload. Only UNAMBIGUOUS variant
+/// names are kept (a leaf two enums share with different payloads is dropped — never guess), mirroring
+/// the return-index ambiguity rule.
+type EnumVariantIndex = HashMap<String, String>;
+
 /// `fn-leaf -> expanded return-type-path`, e.g. `create_pool -> sqlx::Pool` (Result/Option unwrapped).
 /// Lets type inference flow through a LOCAL factory function: `let p = create_pool()?; p.fetch_one(q)`.
 /// Only UNAMBIGUOUS leaves are kept — a name with two different return types across the crate is dropped
@@ -109,6 +122,14 @@ struct TraitIndexes<'a> {
     fields: &'a TraitFieldIndex,
 }
 
+/// The collection/enum indexes Pass A builds (collection-field element types, single-payload enum
+/// variant types), bundled so Pass B threads one handle — the way `TraitIndexes` bundles the trait ones.
+#[derive(Clone, Copy)]
+struct ElemIndexes<'a> {
+    field_elem: &'a FieldElemIndex,
+    enum_variants: &'a EnumVariantIndex,
+}
+
 struct CallCollector<'a> {
     uses: &'a HashMap<String, String>,
     /// local variable / param / `self` -> expanded type path, grown as `let`s are visited in order.
@@ -123,6 +144,19 @@ struct CallCollector<'a> {
     /// leaf -> the local trait declaration(s) sharing it: ambiguity count + declared method names.
     local_traits: &'a HashMap<String, LocalTrait>,
     returns: &'a ReturnIndex,
+    /// `Type-leaf -> field -> element-type` for COLLECTION fields (`self.senders[0]`, `for c in
+    /// &self.senders`). The field counterpart of `elem_of`, the way `fields` is to `vars`.
+    field_elem: &'a FieldElemIndex,
+    /// `enum-variant-leaf -> single payload type` for match-arm binding (`Conn::Active(s) => s.send()`).
+    enum_variants: &'a EnumVariantIndex,
+    /// local var / param -> ELEMENT type of a COLLECTION it holds (a `Vec<T>`/`&[T]`/… binding), grown
+    /// as collection-typed `let`s/params are seen. Lets `for c in xs`, `xs[0]`, `xs.iter().for_each`
+    /// resolve the element's type. Scoped bindings (loop var, closure param) live in `vars`, not here.
+    elem_of: HashMap<String, String>,
+    /// local var / param -> the per-position types of a TUPLE it holds (`pair: (Sender, usize)` ->
+    /// `[Some("Sender"), Some("usize")]`). Lets a later `let (s, _) = pair;` type each binding from the
+    /// matching position. A `None` at a position = that element's type is unknown (binds nothing).
+    tuple_of: HashMap<String, Vec<Option<String>>>,
     calls: Vec<Call>,
     /// locals bound to a closure (`let f = |..| ..`), so a later `f()` is recognised as a closure
     /// invocation the scan can't see through — not a call to a free fn named `f`.
@@ -507,6 +541,57 @@ fn type_path(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<String> {
     }
 }
 
+/// The ELEMENT type path of a COLLECTION `syn::Type`: `Vec<T>` / `&[T]` / `[T; N]` / `HashSet<T>` /
+/// `BTreeSet<T>` / `VecDeque<T>` / `Box<[T]>` (and `Arc`/`Rc`-wrapped slices) -> the expanded type path
+/// of `T` (via `uses`, like `type_path`). `None` for a non-collection type. Used to type a loop /
+/// subscript / iterator-closure binding over a collection so the element's method calls classify —
+/// without it, a very common Rust shape (`for c in xs { c.send() }`, `xs[0].send()`) dropped its
+/// receiver to pure (a §4 under-report). Peels references/parens/groups around the collection.
+fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<String> {
+    match ty {
+        syn::Type::Reference(r) => elem_type(&r.elem, uses),
+        syn::Type::Paren(p) => elem_type(&p.elem, uses),
+        syn::Type::Group(g) => elem_type(&g.elem, uses),
+        // `[T]` (slice) and `[T; N]` (array) — the element is the type directly.
+        syn::Type::Slice(s) => type_path(&s.elem, uses),
+        syn::Type::Array(a) => type_path(&a.elem, uses),
+        syn::Type::Path(p) => {
+            let seg = p.path.segments.last()?;
+            let name = seg.ident.to_string();
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+            let first_ty = args.args.iter().find_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })?;
+            match name.as_str() {
+                // The single-type-arg sequence collections: their first generic arg IS the element.
+                "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
+                | "LinkedList" => type_path(first_ty, uses),
+                // Smart-pointer wrappers around a collection/slice (`Box<[T]>`, `Arc<Vec<T>>`,
+                // `Rc<[T]>`) — peel one layer and recurse so the inner collection's element surfaces.
+                "Box" | "Arc" | "Rc" => elem_type(first_ty, uses),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The per-position type paths of a TUPLE `syn::Type` (`(Sender, usize)` -> `[Some("Sender"),
+/// Some("usize")]`), peeling references/parens/groups. `None` for a non-tuple type — its elements
+/// are tracked so a later `let (s, _) = pair` (where `pair: (Sender, usize)`) types each binding.
+fn tuple_types(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<Vec<Option<String>>> {
+    match ty {
+        syn::Type::Reference(r) => tuple_types(&r.elem, uses),
+        syn::Type::Paren(p) => tuple_types(&p.elem, uses),
+        syn::Type::Group(g) => tuple_types(&g.elem, uses),
+        syn::Type::Tuple(t) if t.elems.len() >= 2 => {
+            Some(t.elems.iter().map(|e| type_path(e, uses)).collect())
+        }
+        _ => None,
+    }
+}
+
 /// Constructor-style associated function names: `let x = Foo::new(..)` (or `::connect().await?`) means
 /// `x: Foo`. Conservative set of names that return `Self` (or `Result<Self>`), so the inferred type is
 /// reliable. A non-constructor assoc call (`Foo::parse`) is NOT treated as producing a `Foo`.
@@ -631,6 +716,42 @@ fn first_str_lit(args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma
     None
 }
 
+/// The bound identifier of a simple binding pattern: `c` / `mut c` / `&c` / `(c)` -> "c". `None` for a
+/// destructuring/wildcard pattern (no single name to bind an element type to). Used for loop vars and
+/// closure params.
+fn single_pat_ident(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Ident(id) => Some(id.ident.to_string()),
+        syn::Pat::Reference(r) => single_pat_ident(&r.pat),
+        syn::Pat::Paren(p) => single_pat_ident(&p.pat),
+        // `|c: T|` — a type-annotated closure param; the inner pattern carries the name.
+        syn::Pat::Type(t) => single_pat_ident(&t.pat),
+        _ => None,
+    }
+}
+
+/// A single-payload enum-variant match pattern `Variant(x)` / `Enum::Variant(x)` -> the bound name and
+/// its payload type (looked up by the variant leaf in `enum_variants`; `None` type when the variant is
+/// unknown/ambiguous — the caller still SCOPES it, clearing any stale binding so nothing leaks in).
+/// `None` overall when the pattern isn't a single-field tuple-struct with a single-ident binding — a
+/// multi-field or destructuring payload has no single receiver to type, an honest under-report.
+fn arm_payload_binding(pat: &syn::Pat, enum_variants: &EnumVariantIndex) -> Option<(String, Option<String>)> {
+    let ts = match pat {
+        syn::Pat::TupleStruct(ts) => ts,
+        // `Some(Variant(x))`-style nesting is rare; peel a reference/paren wrapper only.
+        syn::Pat::Reference(r) => return arm_payload_binding(&r.pat, enum_variants),
+        syn::Pat::Paren(p) => return arm_payload_binding(&p.pat, enum_variants),
+        _ => return None,
+    };
+    if ts.elems.len() != 1 {
+        return None; // multi-field variant — no single receiver to type
+    }
+    let name = single_pat_ident(ts.elems.first()?)?;
+    let variant_leaf = ts.path.segments.last()?.ident.to_string();
+    let ty = enum_variants.get(&variant_leaf).cloned();
+    Some((name, ty))
+}
+
 impl<'a> CallCollector<'a> {
     /// Best-effort type of a method-call receiver, so `recv.method()` can be classified as
     /// `Type::method`. Resolves a bare variable/param/`self` (via `vars`), a `base.field` access (via
@@ -671,6 +792,57 @@ impl<'a> CallCollector<'a> {
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
             syn::Expr::Call(_) => ctor_type(expr, self.uses, self.returns),
+            // `xs[i].method()` / `self.senders[0].method()` — the receiver is the indexed BASE's
+            // element type. Composes through the recursion: a nested `grid[i][j]` resolves the inner
+            // index to its element collection, then this index to ITS element.
+            syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
+            _ => None,
+        }
+    }
+
+    /// The ELEMENT type of an expression that evaluates to a COLLECTION — a collection var/param (via
+    /// `elem_of`), a collection FIELD (`self.senders`, via `field_elem`), an iterator adapter that
+    /// preserves the element (`.iter()`/`.into_iter()`/`.iter_mut()`/`.clone()`), or another subscript
+    /// (`grid[i]` -> a row, whose own element types `grid[i][j]`). Peels the effect-transparent
+    /// wrappers. `None` when the element type can't be determined — honest under-report, never a guess.
+    fn resolve_elem_type(&self, expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Reference(r) => self.resolve_elem_type(&r.expr),
+            syn::Expr::Paren(p) => self.resolve_elem_type(&p.expr),
+            syn::Expr::Group(g) => self.resolve_elem_type(&g.expr),
+            syn::Expr::Try(t) => self.resolve_elem_type(&t.expr),
+            syn::Expr::Await(a) => self.resolve_elem_type(&a.base),
+            syn::Expr::Path(p) => {
+                let name = p.path.get_ident()?.to_string();
+                self.elem_of.get(&name).cloned()
+            }
+            syn::Expr::Field(f) => {
+                let base = self.resolve_recv_type(&f.base)?;
+                let key = match &f.member {
+                    syn::Member::Named(field) => field.to_string(),
+                    syn::Member::Unnamed(idx) => idx.index.to_string(),
+                };
+                let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                self.field_elem.get(base_leaf)?.get(&key).cloned()
+            }
+            // An element-PRESERVING iterator adapter (`xs.iter()`, `xs.into_iter()`, `&xs.iter_mut()`,
+            // `xs.clone()`) yields the same element type as its receiver — so `xs.iter().for_each(..)`
+            // and `for c in xs.iter()` both type the element. A transforming adapter (`.map`) changes
+            // the element, so it is deliberately NOT listed (its element is indeterminate → None).
+            syn::Expr::MethodCall(m) => {
+                let adapter = matches!(
+                    m.method.to_string().as_str(),
+                    "iter" | "into_iter" | "iter_mut" | "clone" | "drain" | "as_slice" | "as_mut_slice"
+                        | "to_vec" | "values" | "values_mut"
+                );
+                if adapter {
+                    self.resolve_elem_type(&m.receiver)
+                } else {
+                    None
+                }
+            }
+            // `grid[i]` is itself a collection (a row): its element type is the indexed base's element.
+            syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
             _ => None,
         }
     }
@@ -706,6 +878,55 @@ impl<'a> CallCollector<'a> {
                 self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()).unwrap_or_default()
             }
             _ => Vec::new(),
+        }
+    }
+}
+
+impl<'a> CallCollector<'a> {
+    /// Bind `name -> ty` in `vars` for the duration of `body`, then RESTORE the prior binding (or
+    /// remove it). ⚠️ `vars` is function-wide, NOT block-scoped — an unscoped binding leaks into a
+    /// later same-named, uninferable var and FABRICATES its effect (the candor-swift `vars`-leak bug).
+    /// Every binder that types a pattern (loop var, closure param, match payload, tuple element) MUST
+    /// route through here so the binding is torn down after its block. A `None` type still scopes: it
+    /// REMOVES any stale binding for the body and restores it after, so a prior effectful binding can't
+    /// leak in either.
+    fn scoped_var<R>(&mut self, name: &str, ty: Option<String>, body: impl FnOnce(&mut Self) -> R) -> R {
+        let prior = self.vars.remove(name);
+        if let Some(t) = ty {
+            self.vars.insert(name.to_string(), t);
+        }
+        let r = body(self);
+        match prior {
+            Some(p) => {
+                self.vars.insert(name.to_string(), p);
+            }
+            None => {
+                self.vars.remove(name);
+            }
+        }
+        r
+    }
+
+    /// Bind each single-ident element of a tuple PATTERN to the matching element of a tuple TYPE
+    /// (`let (s, _): (Sender, usize)` → `s: Sender`). A `_`/wildcard element is skipped. Each binding
+    /// CLEARS any prior `vars`/`elem_of` for the name first, so a stale effectful binding can't survive
+    /// a rebind — these are top-level `let` bindings (function-wide), so they're not torn down.
+    fn bind_tuple<'p>(
+        &mut self,
+        pats: &syn::punctuated::Punctuated<syn::Pat, syn::Token![,]>,
+        tys: impl Iterator<Item = &'p syn::Type>,
+    ) {
+        for (pat_el, ty_el) in pats.iter().zip(tys) {
+            if let Some(name) = single_pat_ident(pat_el) {
+                self.vars.remove(&name);
+                self.elem_of.remove(&name);
+                if let Some(ty) = type_path(ty_el, self.uses) {
+                    self.vars.insert(name.clone(), ty);
+                }
+                if let Some(e) = elem_type(ty_el, self.uses) {
+                    self.elem_of.insert(name, e);
+                }
+            }
         }
     }
 }
@@ -809,7 +1030,87 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
             }
         }
-        syn::visit::visit_expr_method_call(self, node);
+        // ITERATOR-ADAPTER CLOSURE: `xs.iter().for_each(|c| c.send())`, `.map(|c| ..)`, `.filter`, …
+        // pass each ELEMENT as the closure's first param. Type that param from the receiver's element
+        // type so the closure body — walked lexically below — resolves the element's method calls
+        // (else dropped to pure: a §4 under-report on a very common shape). SCOPED via `scoped_var`,
+        // so the binding can't leak into a later same-named uninferable var and fabricate (the
+        // candor-swift `vars`-leak lesson). When the element type is indeterminate, `scoped_var`
+        // still REMOVES any stale binding for the closure body — never leaks an effectful type in.
+        let elem_adapter = matches!(
+            leaf.as_str(),
+            "for_each" | "map" | "filter" | "filter_map" | "flat_map" | "find" | "find_map" | "any"
+                | "all" | "position" | "inspect" | "take_while" | "skip_while" | "map_while"
+                | "partition" | "fold" | "try_for_each" | "retain" | "sort_by" | "sort_by_key"
+                | "min_by_key" | "max_by_key" | "count"
+        );
+        // The single-ident closure param of the FIRST closure arg (`|c| ..` or `|c, ..| ..`). We
+        // only type the FIRST element param — `fold`'s accumulator is its first param so it is NOT a
+        // single-param closure and is skipped (would mis-type the accumulator); the common adapters
+        // take a single element param. Default-visit the rest; visit the typed closure under scope.
+        let elem_ty = if elem_adapter { self.resolve_elem_type(&node.receiver) } else { None };
+        let closure_param = if elem_adapter {
+            node.args.iter().find_map(|a| match a {
+                syn::Expr::Closure(cl) if cl.inputs.len() == 1 => single_pat_ident(cl.inputs.first()?),
+                _ => None,
+            })
+        } else {
+            None
+        };
+        // Visit the receiver and args. The receiver and non-closure args carry no element binding; the
+        // closure arg (if any) is visited under the scoped element binding so its body resolves `c`.
+        self.visit_expr(&node.receiver);
+        if let Some(name) = closure_param {
+            for a in &node.args {
+                if let syn::Expr::Closure(cl) = a {
+                    if cl.inputs.len() == 1 && single_pat_ident(cl.inputs.first().unwrap()).as_deref() == Some(name.as_str()) {
+                        self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
+                        continue;
+                    }
+                }
+                self.visit_expr(a);
+            }
+        } else {
+            for a in &node.args {
+                self.visit_expr(a);
+            }
+        }
+    }
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        // `for c in xs { c.send() }` / `for c in xs.iter()` / `for c in &self.senders` — type the
+        // loop variable from the iterated collection's element type so the body's `c.method()` calls
+        // resolve (else dropped to pure: a §4 under-report on the most common iteration shape). SCOPED
+        // to the BODY ONLY via `scoped_var`: `vars` is function-wide, so an unscoped binding would leak
+        // into a later same-named uninferable var and FABRICATE its effect (the candor-swift bug). When
+        // the element type is indeterminate, the binding is still cleared for the body, never leaked in.
+        // The iterated expr is visited FIRST (outside the binding — it's evaluated before the body).
+        self.visit_expr(&node.expr);
+        if let Some(name) = single_pat_ident(&node.pat) {
+            let elem = self.resolve_elem_type(&node.expr);
+            self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
+        } else {
+            // A destructuring loop pattern (`for (k, v) in ..`, `for [a, b] in ..`) — no single name
+            // to type; just walk the body. (Tuple-pair value typing is left to the under-report.)
+            self.visit_block(&node.body);
+        }
+    }
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        // ENUM-PAYLOAD MATCH BINDING: `match c { Conn::Active(s) => s.send() }` — the arm pattern
+        // `Conn::Active(s)` is a `Pat::TupleStruct` whose single field binds `s` to the variant's
+        // payload type. Type `s` from the Pass-A enum-variant index so `s.method()` resolves (else
+        // dropped to pure: a §4 under-report). SCOPED to the arm body + guard via `scoped_var`, so the
+        // binding can't leak into a later arm or a later same-named var (the `vars`-leak fabrication).
+        let binding = arm_payload_binding(&node.pat, self.enum_variants);
+        if let Some((name, ty)) = binding {
+            self.scoped_var(&name, ty, |s| {
+                if let Some((_, guard)) = &node.guard {
+                    s.visit_expr(guard);
+                }
+                s.visit_expr(&node.body);
+            });
+        } else {
+            syn::visit::visit_arm(self, node);
+        }
     }
     fn visit_local(&mut self, node: &'ast syn::Local) {
         // Record `let x: T = ..` (annotated) and `let x = T::new(..)` (constructor) so later method
@@ -824,6 +1125,55 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 } else if let Some(ty) = type_path(&pt.ty, self.uses) {
                     self.vars.insert(id.ident.to_string(), ty);
                 }
+                // A COLLECTION-typed let (`let xs: Vec<Sender> = ..`) — record its element type so a
+                // later `for c in xs`, `xs[0]`, `xs.iter().for_each(..)` resolves the element.
+                if let Some(e) = elem_type(&pt.ty, self.uses) {
+                    self.elem_of.insert(id.ident.to_string(), e);
+                }
+                // A TUPLE-typed let (`let pair: (Sender, usize) = ..`) — record its per-position types
+                // so a later `let (s, _) = pair;` types `s`.
+                self.tuple_of.remove(&id.ident.to_string());
+                if let Some(t) = tuple_types(&pt.ty, self.uses) {
+                    self.tuple_of.insert(id.ident.to_string(), t);
+                }
+            } else if let syn::Pat::Tuple(tup) = &*pt.pat {
+                // ANNOTATED TUPLE DESTRUCTURE: `let (s, _): (Sender, usize) = pair;` — bind each
+                // single-ident element to its annotated tuple element type so `s.send()` resolves.
+                if let syn::Type::Tuple(tty) = &*pt.ty {
+                    self.bind_tuple(&tup.elems, tty.elems.iter());
+                }
+            }
+        } else if let syn::Pat::Tuple(tup) = &node.pat {
+            // UNANNOTATED TUPLE DESTRUCTURE: `let (s, _) = pair;` / `let (s, _) = (svc, 0);` — type each
+            // binding from (a) a tuple-typed source VAR's recorded per-position types (`pair`'s
+            // `tuple_of`), or (b) a tuple LITERAL initializer's per-element exprs. A non-tuple, untyped
+            // source carries no per-element type — honest under-report. Each binding clears stale state.
+            let init = node.init.as_ref().map(|i| &*i.expr);
+            let src_tuple = match init {
+                Some(syn::Expr::Path(p)) => p
+                    .path
+                    .get_ident()
+                    .and_then(|id| self.tuple_of.get(&id.to_string()))
+                    .cloned(),
+                _ => None,
+            };
+            for (i, pat_el) in tup.elems.iter().enumerate() {
+                let Some(name) = single_pat_ident(pat_el) else { continue };
+                self.vars.remove(&name);
+                self.elem_of.remove(&name);
+                self.tuple_of.remove(&name);
+                let ty = src_tuple
+                    .as_ref()
+                    .and_then(|t| t.get(i).cloned().flatten())
+                    .or_else(|| match init {
+                        Some(syn::Expr::Tuple(it)) => {
+                            it.elems.iter().nth(i).and_then(|e| ctor_type(e, self.uses, self.returns))
+                        }
+                        _ => None,
+                    });
+                if let Some(ty) = ty {
+                    self.vars.insert(name, ty);
+                }
             }
         } else if let syn::Pat::Ident(id) = &node.pat {
             if let Some(init) = &node.init {
@@ -836,6 +1186,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.closure_vars.remove(&id.ident.to_string());
                     if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
                         self.vars.insert(id.ident.to_string(), ty);
+                    }
+                    // Carry an element type through an element-preserving rebind (`let xs =
+                    // self.senders.clone()`, `let xs = pool.conns()` factory) so `xs[0]`/`for c in xs`
+                    // still resolve. Drop any STALE element binding first — a rebind to a non-collection
+                    // must not leave the old element type to mis-type a later subscript/loop.
+                    self.elem_of.remove(&id.ident.to_string());
+                    if let Some(e) = self.resolve_elem_type(&init.expr) {
+                        self.elem_of.insert(id.ident.to_string(), e);
                     }
                 }
             }
@@ -926,6 +1284,7 @@ fn scan_items(
     fields: &FieldIndex,
     returns: &ReturnIndex,
     traits: TraitIndexes,
+    elems: ElemIndexes,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -939,7 +1298,7 @@ fn scan_items(
         match it {
             syn::Item::Fn(f) => {
                 let n = f.sig.ident.to_string();
-                out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields, returns, traits));
+                out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields, returns, traits, elems));
             }
             syn::Item::Impl(im) => {
                 let tyname = impl_type_name(&im.self_ty);
@@ -950,7 +1309,7 @@ fn scan_items(
                             Some(t) => qual(&format!("{t}::{n}")),
                             None => qual(&n),
                         };
-                        out.push(fninfo(&n, &q, file, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits));
+                        out.push(fninfo(&n, &q, file, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems));
                     }
                 }
             }
@@ -961,7 +1320,7 @@ fn scan_items(
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, file, include_tests, fields, returns, traits, &mut subuses, out);
+                    scan_items(inner, &sub, file, include_tests, fields, returns, traits, elems, &mut subuses, out);
                 }
             }
             _ => {}
@@ -986,6 +1345,53 @@ fn seed_vars(sig: &syn::Signature, self_ty: Option<&str>, uses: &HashMap<String,
         }
     }
     vars
+}
+
+/// The collection counterpart of `seed_vars`: a param whose type is a COLLECTION (`xs: &[Sender]`,
+/// `xs: Vec<Sender>`) seeds `name -> element type` so a `for c in xs` / `xs[0]` / `xs.iter().for_each`
+/// inside the body resolves the element. ALSO binds the single-ident elements of a TUPLE param
+/// (`fn f((s, _): (Sender, usize))` → `s: Sender` into `vars`) — a destructuring param pattern that
+/// `seed_vars` (Ident-only) misses. Also records the per-position types of a TUPLE-typed param into
+/// `tuple_of` (`fn f(pair: (Sender, usize))` → a later `let (s, _) = pair`). Returns
+/// `(elem_of, tuple_of)`; tuple-DESTRUCTURED param bindings are merged into `vars`.
+fn seed_elem_of(
+    sig: &syn::Signature,
+    vars: &mut HashMap<String, String>,
+    uses: &HashMap<String, String>,
+) -> (HashMap<String, String>, HashMap<String, Vec<Option<String>>>) {
+    let mut elem_of = HashMap::new();
+    let mut tuple_of: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    for arg in &sig.inputs {
+        let syn::FnArg::Typed(pt) = arg else { continue };
+        match &*pt.pat {
+            syn::Pat::Ident(id) => {
+                if let Some(e) = elem_type(&pt.ty, uses) {
+                    elem_of.insert(id.ident.to_string(), e);
+                }
+                // `fn f(pair: (Sender, usize))` — record positions for a later `let (s, _) = pair`.
+                if let Some(t) = tuple_types(&pt.ty, uses) {
+                    tuple_of.insert(id.ident.to_string(), t);
+                }
+            }
+            // `fn f((s, n): (Sender, usize))` — a tuple-destructured param.
+            syn::Pat::Tuple(tup) => {
+                if let syn::Type::Tuple(tty) = &*pt.ty {
+                    for (pat_el, ty_el) in tup.elems.iter().zip(tty.elems.iter()) {
+                        if let Some(name) = single_pat_ident(pat_el) {
+                            if let Some(ty) = type_path(ty_el, uses) {
+                                vars.insert(name.clone(), ty);
+                            }
+                            if let Some(e) = elem_type(ty_el, uses) {
+                                elem_of.insert(name, e);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (elem_of, tuple_of)
 }
 
 /// The dispatch-typed counterpart of `seed_vars`: params whose type is a trait bound rather than a
@@ -1018,6 +1424,7 @@ fn fninfo(
     fields: &FieldIndex,
     returns: &ReturnIndex,
     traits: TraitIndexes,
+    elems: ElemIndexes,
 ) -> FnInfo {
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
@@ -1047,6 +1454,9 @@ fn fninfo(
     for k in trait_vars.keys() {
         vars.remove(k);
     }
+    // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
+    // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
+    let (elem_of, tuple_of) = seed_elem_of(sig, &mut vars, uses);
     let mut c = CallCollector {
         uses,
         vars,
@@ -1056,6 +1466,10 @@ fn fninfo(
         trait_impls: traits.impls,
         local_traits: traits.decls,
         returns,
+        field_elem: elems.field_elem,
+        enum_variants: elems.enum_variants,
+        elem_of,
+        tuple_of,
         calls: Vec::new(),
         closure_vars: std::collections::HashSet::new(),
         unresolved: false,
@@ -1117,7 +1531,9 @@ fn collect_decls(
     include_tests: bool,
     uses: &mut HashMap<String, String>,
     fields: &mut FieldIndex,
+    field_elem: &mut FieldElemIndex,
     rets: &mut HashMap<String, Option<String>>,
+    enum_tmp: &mut HashMap<String, Option<String>>,
     trait_impls: &mut TraitImplIndex,
     local_traits: &mut HashMap<String, LocalTrait>,
     trait_fields: &mut TraitFieldIndex,
@@ -1154,6 +1570,14 @@ fn collect_decls(
                                 } else if let Some(ty) = type_path(&f.ty, uses) {
                                     entry.insert(name.to_string(), ty);
                                 }
+                                // A COLLECTION field (`senders: Vec<Sender>`) records its element type so
+                                // `self.senders[0].send()` / `for c in &self.senders` resolve the element.
+                                if let Some(e) = elem_type(&f.ty, uses) {
+                                    field_elem
+                                        .entry(s.ident.to_string())
+                                        .or_default()
+                                        .insert(name.to_string(), e);
+                                }
                             }
                         }
                     }
@@ -1169,12 +1593,44 @@ fn collect_decls(
                             if let Some(ty) = type_path(&f.ty, uses) {
                                 entry.insert(i.to_string(), ty);
                             }
+                            if let Some(e) = elem_type(&f.ty, uses) {
+                                field_elem
+                                    .entry(s.ident.to_string())
+                                    .or_default()
+                                    .insert(i.to_string(), e);
+                            }
                         }
                     }
                     syn::Fields::Unit => {}
                 }
             }
             syn::Item::Fn(f) => record_return(&f.sig, uses, rets, None),
+            // Enum SINGLE-PAYLOAD tuple variants (`enum Conn { Active(Sender) }`) — index `variant
+            // leaf -> payload type` so a match arm `Conn::Active(s) => s.send()` types `s`. Only the
+            // single-field tuple form is recorded; a leaf two enums share with conflicting payloads is
+            // marked ambiguous (None) and dropped by the caller — never guess (the return-index rule).
+            syn::Item::Enum(en) => {
+                for v in &en.variants {
+                    if has_cfg(&v.attrs) {
+                        continue;
+                    }
+                    let syn::Fields::Unnamed(unnamed) = &v.fields else { continue };
+                    if unnamed.unnamed.len() != 1 {
+                        continue;
+                    }
+                    let Some(tp) = type_path(&unnamed.unnamed[0].ty, uses) else { continue };
+                    let leaf = v.ident.to_string();
+                    match enum_tmp.get(&leaf) {
+                        None => {
+                            enum_tmp.insert(leaf, Some(tp));
+                        }
+                        Some(Some(prev)) if *prev != tp => {
+                            enum_tmp.insert(leaf, None); // conflicting payloads — ambiguous, drop
+                        }
+                        _ => {}
+                    }
+                }
+            }
             syn::Item::Trait(t) => {
                 let e = local_traits.entry(t.ident.to_string()).or_default();
                 e.count += 1;
@@ -1208,7 +1664,7 @@ fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, rets, trait_impls, local_traits, trait_fields);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields);
                 }
             }
             _ => {}
@@ -1479,26 +1935,30 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // trait indexes ride along: impl universe + declaration counts + dispatch-typed fields, for the
     // syntactic-CHA resolution of `dyn`/`impl Trait`/generic-bound receivers.
     let mut fields: FieldIndex = HashMap::new();
+    let mut field_elem: FieldElemIndex = HashMap::new();
     let mut rets_tmp: HashMap<String, Option<String>> = HashMap::new();
+    let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
     let mut trait_impls: TraitImplIndex = HashMap::new();
     let mut trait_decls: HashMap<String, LocalTrait> = HashMap::new();
     let mut trait_fields: TraitFieldIndex = HashMap::new();
     for (_, file) in &parsed {
         let mut uses = HashMap::new();
-        collect_decls(&file.items, include_tests, &mut uses, &mut fields, &mut rets_tmp,
-                      &mut trait_impls, &mut trait_decls, &mut trait_fields);
+        collect_decls(&file.items, include_tests, &mut uses, &mut fields, &mut field_elem,
+                      &mut rets_tmp, &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields);
     }
     // Keep only unambiguous fn-leaf -> return-type mappings (a name with conflicting return types was
-    // marked `None`); a guessed type would mis-classify.
+    // marked `None`); a guessed type would mis-classify. Same rule for enum-variant payload types.
     let returns: ReturnIndex = rets_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+    let enum_variants: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
     let traits = TraitIndexes { impls: &trait_impls, decls: &trait_decls, fields: &trait_fields };
+    let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
 
     // Pass B — collect each function's calls (now with receiver-type inference available).
     let mut fns: Vec<FnInfo> = Vec::new();
     for (rel, file) in &parsed {
         let modpath = module_path(Path::new(rel));
         let mut uses = HashMap::new();
-        scan_items(&file.items, &modpath, rel, include_tests, &fields, &returns, traits, &mut uses, &mut fns);
+        scan_items(&file.items, &modpath, rel, include_tests, &fields, &returns, traits, elems, &mut uses, &mut fns);
     }
 
     // The κ-coverage ledger: Cargo.toml's [dependencies] are the crate's TRUE external universe, so a
@@ -2388,6 +2848,7 @@ mod tests {
         .unwrap();
         let returns = ReturnIndex::new();
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
         let mut c = CallCollector {
             uses: &uses,
             vars: HashMap::new(),
@@ -2397,6 +2858,9 @@ mod tests {
             trait_impls: &ti,
             local_traits: &td,
             returns: &returns,
+            field_elem: &fe,
+            enum_variants: &ev,
+            elem_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             unresolved: false,
@@ -2422,6 +2886,7 @@ mod tests {
         vars.insert("self".to_string(), "App".to_string());
         let returns = ReturnIndex::new();
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
         let block: syn::Block =
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
         let mut c = CallCollector {
@@ -2433,6 +2898,9 @@ mod tests {
             trait_impls: &ti,
             local_traits: &td,
             returns: &returns,
+            field_elem: &fe,
+            enum_variants: &ev,
+            elem_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             unresolved: false,
@@ -2538,6 +3006,7 @@ mod tests {
         let mut tf = TraitFieldIndex::new();
         // struct App { store: Box<dyn Store> }
         tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
+        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
         let run = |src: &str, sig: &str| {
             let sig: syn::Signature = syn::parse_str(sig).unwrap();
             let blk: syn::Block = syn::parse_str(src).unwrap();
@@ -2556,6 +3025,9 @@ mod tests {
                 trait_impls: &ti,
                 local_traits: &td,
                 returns: &returns,
+                field_elem: &fe,
+                enum_variants: &ev,
+                elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
                 unresolved: false,
@@ -2595,7 +3067,8 @@ mod tests {
             let mut c = CallCollector {
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                returns: &returns, calls: Vec::new(),
+                returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), unresolved: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
@@ -2617,7 +3090,8 @@ mod tests {
                 let mut c = CallCollector {
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                    returns: &returns, calls: Vec::new(),
+                    returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                    calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), unresolved: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
@@ -2638,6 +3112,7 @@ mod tests {
         let mut returns = ReturnIndex::new();
         returns.insert("create_pool".to_string(), "sqlx::PgPool".to_string());
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
         let block: syn::Block =
             syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
         let mut c = CallCollector {
@@ -2649,6 +3124,9 @@ mod tests {
             trait_impls: &ti,
             local_traits: &td,
             returns: &returns,
+            field_elem: &fe,
+            enum_variants: &ev,
+            elem_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             unresolved: false,
@@ -2673,6 +3151,9 @@ mod tests {
                 trait_impls: &ti,
                 local_traits: &td,
                 returns: &returns,
+                field_elem: &fe,
+                enum_variants: &ev,
+                elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
                 unresolved: false,
@@ -2834,7 +3315,8 @@ mod tests {
         let mut fields: FieldIndex = HashMap::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets, &mut ti, &mut td, &mut tf);
+        let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf);
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -2853,9 +3335,192 @@ mod tests {
         let mut fields: FieldIndex = HashMap::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut rets, &mut ti, &mut td, &mut tf);
+        let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf);
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
+    }
+
+    /// Run the FULL pipeline (Pass A indexes + Pass B collection, with the same wiring as `scan_one`)
+    /// over a source string and return `fn-qual -> the typed `Type::method` call paths it produced`.
+    /// A receiver typed by one of the new idioms shows up as `Sender::send` here; a dropped receiver
+    /// would leave only the bare leaf `send` (no `Type::` qualifier) — the silent-under-report shape.
+    fn typed_calls_of(src: &str) -> HashMap<String, Vec<String>> {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut ti = TraitImplIndex::new();
+        let mut td: HashMap<String, LocalTrait> = HashMap::new();
+        let mut tf = TraitFieldIndex::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf);
+        let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let enum_variants: EnumVariantIndex =
+            enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
+        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let mut fns: Vec<FnInfo> = Vec::new();
+        let mut us2 = HashMap::new();
+        scan_items(&file.items, "", "lib.rs", false, &fields, &returns, traits, elems, &mut us2, &mut fns);
+        fns.into_iter()
+            .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
+            .collect()
+    }
+
+    /// Each of the six PROVEN-dropped idioms (the silent-under-report bug): a method call whose
+    /// receiver is reached via for-loop / iterator-adapter closure / subscript / nested field+subscript
+    /// / enum-payload match / tuple destructure. The effectful `Sender::send` must be TYPED (so it
+    /// classifies Net), mirroring the candor-swift sweep that fixed the same six.
+    #[test]
+    fn dropped_receiver_idioms_now_resolve() {
+        let prelude = "struct Sender; impl Sender { fn send(&self) {} }\n\
+                       struct Pool { senders: Vec<Sender> }\n\
+                       enum Conn { Active(Sender), Idle }\n";
+        let cases: &[(&str, &str)] = &[
+            // 1. for-loop over a Vec<Sender> param
+            ("fn f(xs: Vec<Sender>) { for c in xs { c.send(); } }", "f"),
+            // 1b. for-loop over a &[Sender] param
+            ("fn f(xs: &[Sender]) { for c in xs { c.send(); } }", "f"),
+            // 2. iterator-adapter closure (for_each / map)
+            ("fn f(xs: Vec<Sender>) { xs.iter().for_each(|c| c.send()); }", "f"),
+            ("fn f(xs: Vec<Sender>) { let _ = xs.iter().map(|c| c.send()).count(); }", "f"),
+            // 3. subscript
+            ("fn f(xs: Vec<Sender>) { xs[0].send(); }", "f"),
+            // 6. tuple destructure from a tuple-typed param
+            ("fn f(p: (Sender, usize)) { let (s, _) = p; s.send(); }", "f"),
+        ];
+        for (body, fnname) in cases {
+            let src = format!("{prelude}{body}");
+            let m = typed_calls_of(&src);
+            let calls = m.get(*fnname).cloned().unwrap_or_default();
+            assert!(
+                calls.iter().any(|c| c == "Sender::send"),
+                "idiom dropped the effectful receiver (silent under-report): {body}\n  typed calls: {calls:?}"
+            );
+        }
+        // nested field + subscript (`self.senders[0].send()`) and for-loop over a collection FIELD.
+        let m = typed_calls_of(&format!(
+            "{prelude}impl Pool {{ fn first(&self) {{ self.senders[0].send(); }} \
+             fn each(&self) {{ for c in &self.senders {{ c.send(); }} }} }}"
+        ));
+        assert!(m["Pool::first"].iter().any(|c| c == "Sender::send"), "nested field+subscript dropped: {:?}", m["Pool::first"]);
+        assert!(m["Pool::each"].iter().any(|c| c == "Sender::send"), "for-loop over field dropped: {:?}", m["Pool::each"]);
+        // 5. enum-payload match binding (`Conn::Active(s) => s.send()`).
+        let m = typed_calls_of(&format!(
+            "{prelude}fn g(c: Conn) {{ match c {{ Conn::Active(s) => s.send(), Conn::Idle => {{}} }} }}"
+        ));
+        assert!(m["g"].iter().any(|c| c == "Sender::send"), "enum-payload match binding dropped: {:?}", m["g"]);
+    }
+
+    /// NO FABRICATION (the cardinal sin): the same six idioms over a PURE element type, or over an
+    /// effect-irrelevant element, must NOT type a `Type::send` edge to anything effectful — the element
+    /// is pure, so the receiver typing must stay honest. We assert the effectful `Sender::send` never
+    /// appears; a pure `Pure::send` edge is fine (it classifies to nothing).
+    #[test]
+    fn idioms_never_fabricate_on_pure_elements() {
+        let prelude = "struct Pure; impl Pure { fn send(&self) {} }\n\
+                       struct Bag { items: Vec<Pure> }\n";
+        let bodies: &[&str] = &[
+            "fn f(xs: Vec<Pure>) { for c in xs { c.send(); } }",
+            "fn f(xs: Vec<Pure>) { xs.iter().for_each(|c| c.send()); }",
+            "fn f(xs: Vec<Pure>) { xs[0].send(); }",
+            "fn f(xs: Vec<i32>) { for c in xs { let _ = c + 1; } }",
+            "fn f(p: (Pure, usize)) { let (s, _) = p; s.send(); }",
+        ];
+        for body in bodies {
+            let m = typed_calls_of(&format!("{prelude}{body}"));
+            let calls = m.get("f").cloned().unwrap_or_default();
+            // the ONLY typed edge a pure element may form is `Pure::send` — never an effectful type's.
+            assert!(
+                calls.iter().all(|c| c != "Sender::send" && !c.contains("TcpStream")),
+                "fabricated an effectful edge on a pure element: {body}\n  typed: {calls:?}"
+            );
+        }
+    }
+
+    /// The candor-swift `vars`-leak lesson: a scoped binding (loop var, closure param, match payload)
+    /// must NOT leak past its block into a later same-named, uninferable var. Here the first loop binds
+    /// `c: Sender`; the second loop's `c` (a Pure) and a trailing free `c.send()` on an indeterminate
+    /// `c` must NOT inherit `Sender` and fabricate its edge.
+    #[test]
+    fn scoped_bindings_do_not_leak() {
+        let prelude = "struct Sender; impl Sender { fn send(&self) {} }\n\
+                       struct Pure; impl Pure { fn send(&self) {} }\n\
+                       fn mk() -> Pure { Pure }\n";
+        // second loop over Pure: `c` must be re-typed Pure, not the prior Sender.
+        let m = typed_calls_of(&format!(
+            "{prelude}fn f(xs: Vec<Sender>, ys: Vec<Pure>) {{ for c in xs {{ c.send(); }} for c in ys {{ c.send(); }} }}"
+        ));
+        let calls = &m["f"];
+        // exactly ONE Sender::send (the genuine first loop); the second loop's `c.send()` is Pure::send.
+        assert_eq!(
+            calls.iter().filter(|c| *c == "Sender::send").count(),
+            1,
+            "loop binding leaked into the next same-named loop (fabrication): {calls:?}"
+        );
+        // a closure param binding must not leak to a later free var of the same name.
+        let m = typed_calls_of(&format!(
+            "{prelude}fn f(xs: Vec<Sender>) {{ xs.iter().for_each(|c| c.send()); let c = mk(); c.send(); }}"
+        ));
+        let calls = &m["f"];
+        assert!(
+            !calls.iter().any(|c| *c == "Sender::send" && calls.iter().filter(|x| *x == "Sender::send").count() > 1),
+            "closure param leaked"
+        );
+        // the trailing `let c = mk(); c.send()` must be Pure::send, never Sender::send.
+        assert_eq!(calls.iter().filter(|c| *c == "Sender::send").count(), 1,
+                   "closure param binding leaked into a later same-named var: {calls:?}");
+        assert!(calls.iter().any(|c| c == "Pure::send"), "later c should type Pure::send: {calls:?}");
+    }
+
+    /// `elem_type` extracts T from every supported collection shape and resolves it through `uses`;
+    /// returns None for non-collections (so a non-collection receiver is never mis-typed as an element).
+    #[test]
+    fn elem_type_covers_the_collection_shapes() {
+        let u = uses(&[("Sender", "net::Sender")]);
+        let p = |s: &str| -> Option<String> {
+            let t: syn::Type = syn::parse_str(s).unwrap();
+            elem_type(&t, &u)
+        };
+        assert_eq!(p("Vec<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("&[Sender]").as_deref(), Some("net::Sender"));
+        assert_eq!(p("[Sender; 4]").as_deref(), Some("net::Sender"));
+        assert_eq!(p("HashSet<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("BTreeSet<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("VecDeque<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("Box<[Sender]>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("Arc<Vec<Sender>>").as_deref(), Some("net::Sender"));
+        // a non-collection is NOT an element source
+        assert_eq!(p("Sender"), None);
+        assert_eq!(p("Option<Sender>"), None);
+        // a map's value carries the element only via `.values()` (not the bare type here)
+        assert_eq!(p("HashMap<String, Sender>"), None);
+    }
+
+    /// The Pass-A enum-variant index keeps only UNAMBIGUOUS single-payload variant leaves; a leaf two
+    /// enums share with different payloads is dropped (never guess), like the return-index rule.
+    #[test]
+    fn enum_variant_index_drops_ambiguous_leaves() {
+        let src = "enum A { One(i32), Pair(i32, i32), Unit }\n\
+                   enum B { Two(String) }\n\
+                   enum C { Two(Vec<u8>) }\n"; // `Two` conflicts across B and C → ambiguous, dropped
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf);
+        let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
+        assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
+        assert_eq!(ev.get("Unit"), None);                           // unit variant: not indexed
+        assert_eq!(ev.get("Two"), None);                            // conflicting payloads: dropped
     }
 
     #[test]
