@@ -1423,13 +1423,25 @@ fn scan_items(
     for it in items {
         match it {
             syn::Item::Fn(f) => {
+                // A `#[cfg(test)]` FREE fn (or impl, below) at module scope is test-only — its effects are
+                // the tests', not the crate's, same as a `#[cfg(test)] mod`. The guard was on `mod` only,
+                // so a bare `#[cfg(test)] fn helper()` leaked into the default report.
+                if !include_tests && is_cfg_test(&f.attrs) {
+                    continue;
+                }
                 let n = f.sig.ident.to_string();
                 out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields, returns, traits, elems));
             }
             syn::Item::Impl(im) => {
+                if !include_tests && is_cfg_test(&im.attrs) {
+                    continue; // a `#[cfg(test)] impl` block — test-only
+                }
                 let tyname = impl_type_name(&im.self_ty);
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
+                        if !include_tests && is_cfg_test(&m.attrs) {
+                            continue; // a `#[cfg(test)]` method within an otherwise-production impl
+                        }
                         let n = m.sig.ident.to_string();
                         let q = match &tyname {
                             Some(t) => qual(&format!("{t}::{n}")),
@@ -4129,6 +4141,24 @@ mod tests {
         assert!(!m["caller"], "a normal free-fn call must not be flagged unresolved");
         let m = unresolved_of("struct T; impl T { fn m(&self) {} } fn f() { let x = T; let y = x; y.m(); }");
         assert!(!m["f"], "a normal value rebind must not be flagged unresolved");
+    }
+
+    /// A `#[cfg(test)]` free fn / impl block / impl method at module scope is test-only and must NOT
+    /// appear in the default (non-`--include-tests`) report — the guard was on `mod` only.
+    #[test]
+    fn cfg_test_items_excluded_from_default_report() {
+        let m = typed_calls_of(
+            "pub fn prod() {}\n\
+             #[cfg(test)] fn freefn() {}\n\
+             struct S;\n\
+             #[cfg(test)] impl S { fn blk(&self) {} }\n\
+             struct P; impl P { #[cfg(test)] fn meth(&self) {} fn keep(&self) {} }",
+        );
+        assert!(m.contains_key("prod"), "a production fn must be in the report");
+        assert!(m.keys().any(|k| k.ends_with("P::keep")), "a production method must be in the report");
+        for leaked in ["freefn", "S::blk", "P::meth"] {
+            assert!(!m.keys().any(|k| k.ends_with(leaked)), "a #[cfg(test)] item leaked: {leaked}");
+        }
     }
 
     /// Each of the six PROVEN-dropped idioms (the silent-under-report bug): a method call whose
