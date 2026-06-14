@@ -554,6 +554,14 @@ fn is_callable_type(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<String>
     }
 }
 
+/// The tail (value) expression of a block, if it ends in one (`{ … ; expr }` with no trailing `;`).
+fn block_tail_expr(b: &syn::Block) -> Option<&syn::Expr> {
+    match b.stmts.last() {
+        Some(syn::Stmt::Expr(e, None)) => Some(e),
+        _ => None,
+    }
+}
+
 /// The params of a signature that are invokable callbacks (`is_callable_type`) — so `cb()` on one reads
 /// the honest `Unknown` instead of being silently dropped as a phantom call to a free fn `cb`.
 fn seed_fn_typed_vars(sig: &syn::Signature) -> std::collections::HashSet<String> {
@@ -955,6 +963,22 @@ impl<'a> CallCollector<'a> {
 }
 
 impl<'a> CallCollector<'a> {
+    /// Whether an expression evaluates to a fn-typed (callback) value — a fn-typed binding, through
+    /// `&`/paren/group wrappers, or an `if` whose then-branch tail yields one. Lets `let g = cb`
+    /// propagate fn-typed-ness so a later `g()` reads the honest `Unknown` instead of a phantom free-fn
+    /// call. Over-approximating toward fn-typed only ever marks `g()` Unknown (the safe direction) — it
+    /// never fabricates a specific effect.
+    fn expr_is_fn_typed(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Path(p) => p.path.get_ident().is_some_and(|i| self.fn_typed_vars.contains(&i.to_string())),
+            syn::Expr::Paren(p) => self.expr_is_fn_typed(&p.expr),
+            syn::Expr::Group(g) => self.expr_is_fn_typed(&g.expr),
+            syn::Expr::Reference(r) => self.expr_is_fn_typed(&r.expr),
+            syn::Expr::If(e) => block_tail_expr(&e.then_branch).is_some_and(|t| self.expr_is_fn_typed(t)),
+            _ => false,
+        }
+    }
+
     /// Bind `name -> ty` in `vars` for the duration of `body`, then RESTORE the prior binding (or
     /// remove it). ⚠️ `vars` is function-wide, NOT block-scoped — an unscoped binding leaks into a
     /// later same-named, uninferable var and FABRICATES its effect (the candor-swift `vars`-leak bug).
@@ -1200,6 +1224,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if let syn::Pat::Type(pt) = &node.pat {
             if let syn::Pat::Ident(id) = &*pt.pat {
                 // Dispatch-typing first (`let s: Box<dyn Store>` reads as concrete `Box` otherwise).
+                // A fn-typed let (`let g: fn() = ..`, `: impl Fn() = ..`, `: Box<dyn Fn> = ..`): invoking
+                // `g()` calls an opaque body, so track it for the call-site `fn_typed_vars` check (else it
+                // resolves as a phantom free-fn `g` and is silently dropped — the max review's local-rebind
+                // find). Annotation wins over a stale binding from any source.
+                if is_callable_type(&pt.ty, &HashMap::new()) {
+                    self.fn_typed_vars.insert(id.ident.to_string());
+                    self.vars.remove(&id.ident.to_string());
+                } else {
+                    self.fn_typed_vars.remove(&id.ident.to_string()); // a non-callable annotation clears it
+                }
                 let leaves = trait_leaves(&pt.ty, &HashMap::new());
                 if !leaves.is_empty() {
                     self.vars.remove(&id.ident.to_string()); // a stale concrete binding must not shadow the rebind
@@ -1266,8 +1300,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // Rebinding the name to a NON-closure (a fn-pointer, a value) — drop any stale
                     // closure marking so a later `f()` isn't wrongly treated as a visible closure.
                     self.closure_vars.remove(&id.ident.to_string());
-                    if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
-                        self.vars.insert(id.ident.to_string(), ty);
+                    // Propagate fn-typed-ness through a rebind from a fn-typed binding (`let g = cb` where
+                    // `cb: fn()`/`impl Fn`): invoking `g()` is the same opaque-callback call as `cb()` →
+                    // Unknown, not a phantom free-fn `g` (the max review found the param-only seeding
+                    // missed this). A rebind to a non-fn clears the stale fn-typed marking.
+                    if self.expr_is_fn_typed(&init.expr) {
+                        self.fn_typed_vars.insert(id.ident.to_string());
+                        self.vars.remove(&id.ident.to_string());
+                    } else {
+                        self.fn_typed_vars.remove(&id.ident.to_string());
+                        if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
+                            self.vars.insert(id.ident.to_string(), ty);
+                        }
                     }
                     // Carry an element type through an element-preserving rebind (`let xs =
                     // self.senders.clone()`, `let xs = pool.conns()` factory) so `xs[0]`/`for c in xs`
@@ -3982,9 +4026,22 @@ mod tests {
             let m = unresolved_of(hof);
             assert!(m["h"], "fn-typed callback invocation silently dropped (not unresolved): {hof}");
         }
-        // NO over-report: a normal free-fn call stays resolved (not unresolved).
+        // A fn-typed binding REBOUND to a local must still be Unknown when invoked (the max review
+        // found the param-only seeding missed `let g = cb; g()`). Covers a plain rebind, an `if`-yield,
+        // and an annotated `let g: fn()`.
+        for hof in [
+            "fn h(cb: impl Fn()) { let g = cb; g(); }",
+            "fn h(cb: fn()) { let g = if true { cb } else { return }; g(); }",
+            "fn s() {} fn h() { let g: fn() = s; g(); }",
+        ] {
+            let m = unresolved_of(hof);
+            assert!(m["h"], "fn-typed callback rebound to a local silently dropped: {hof}");
+        }
+        // NO over-report: a normal free-fn call, AND a normal value rebind, stay resolved.
         let m = unresolved_of("fn helper() {} fn caller() { helper(); }");
         assert!(!m["caller"], "a normal free-fn call must not be flagged unresolved");
+        let m = unresolved_of("struct T; impl T { fn m(&self) {} } fn f() { let x = T; let y = x; y.m(); }");
+        assert!(!m["f"], "a normal value rebind must not be flagged unresolved");
     }
 
     /// Each of the six PROVEN-dropped idioms (the silent-under-report bug): a method call whose
