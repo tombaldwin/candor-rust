@@ -102,6 +102,54 @@ CI runs 60 construction + 40 cross-crate + 40 whole-program-oracle + 40 per-func
 have teeth: reintroducing the historical `resolve_callee` `_ => None` hole makes every `recv_boxed`
 seed fail with `recv_boxed(pure/omitted)`.
 
+## Fabrication probe (`fabrication_probe.py`) — the OTHER direction
+
+The fuzzer above guards **under-reporting** (a real effect reported pure). The fabrication probe guards
+the opposite, candor's CARDINAL SIN: **fabrication** — reporting a PURE function as effectful. The
+classifier's crate rules used to be whole-crate (one effect on EVERY path of an effect-bearing crate),
+which fabricated on those crates' pure accessors/builders/data-types (`Mmap::len`, `Level::as_str`,
+`Error::to_string`, `Rng::with_seed`, `CommandBuilder::get_cwd`, …). Those rules are now **verb-precise**;
+this probe pins that narrowing so it can never silently regress to whole-crate.
+
+For each effect-bearing crate it emits a tiny self-contained crate naming that crate's types + methods,
+with two kinds of `pub fn`:
+
+- **PURE** — a single bare call to a member that is provably free of I/O / entropy / clock-read. candor
+  MUST omit it from the report (effect-free fns are omitted). An `inferred` effect on it ⇒ FABRICATION.
+- **CTRL** — a single bare call to a genuinely-effectful member. candor MUST still report the effect; a
+  pure/omitted result ⇒ LOST CONTROL (an under-report — the other direction, also gated).
+
+candor-scan is **syntactic** (syn-based): it resolves a call's receiver type from the fixture's `use`
+imports + parameter type annotations *without compiling against the real crate*, so the probe ships
+**zero third-party dependencies** — `use memmap2::Mmap; fn f(m: &Mmap) { m.len(); }` classifies on the
+names alone. Two discipline rules keep it false-alarm-free: (1) a method is asserted pure ONLY when its
+semantics are verified pure (rationale in a comment beside each), else it's left out entirely; (2) every
+fixture body is a SINGLE bare call on a PARAMETER — no method chaining, because chaining `.map()`/
+`.to_owned()` onto a call's result makes the syntactic scanner re-resolve the trailing method against the
+same receiver type (an inference artifact unrelated to the classifier rule under test).
+
+Crates covered (10, 45 probe fns): **memmap2** (`len`/`is_empty`/`as_ptr`/`MmapOptions::new` pure vs
+`map`/`flush`=Fs), **tracing** (`Level::as_str`/`Span::is_disabled`/`metadata`/`id` pure vs `enter`=Log),
+**arboard** (`Error::to_string` pure vs `Clipboard::get_text`/`set_text`=Clipboard), **fastrand**
+(`with_seed`/`fork`/`clone` pure vs `u32`/`usize`=Rand), **portable_pty** (`get_argv`/`get_cwd`/
+`PtySize::default`/`CommandBuilder::new` pure vs `spawn_command`=Exec), **chrono** (`year`/`month`/`hour`/
+`timestamp` pure vs `Utc::now`/`Local::now`=Clock), **time** (`Date::year`/`ordinal` pure vs
+`now_utc`=Clock), **tempfile** (`TempDir::path`/`Builder` setters pure vs `TempDir::new`/`tempfile`=Fs),
+**reqwest** (`Client::new`/`header`/`query` pure vs `send`=Net), and **url** (`parse`/`host_str`/`path`/
+`scheme` pure — url has NO effectful surface candor models, so it's PURE-ONLY: a control there would be a
+lost-control false alarm, and the whole point is that a URL crate must never fabricate Net).
+
+```sh
+python3 soundness/fabrication_probe.py                 # build candor-scan if needed, run, gate
+CANDOR_SCAN=./target/debug/candor-scan python3 soundness/fabrication_probe.py   # prebuilt binary
+```
+
+Exits non-zero (and lists each `FABRICATION …` / `LOST CONTROL …`) on any failure, so it gates CI.
+Teeth-verified: temporarily widening the memmap2 rule back to whole-crate (`return Some("Fs")` at the
+top of its branch) makes the probe fail with 4 fabrications (`Mmap::len`/`is_empty`/`as_ptr`/
+`MmapOptions::new`) while the control still passes. The mirror probe for the JVM port lives at
+`candor-java/soundness/fabrication_probe.py`.
+
 ## Next (not yet built)
 
 - **Per-function attribution in the oracle:** instrument each fn to emit a marker at runtime, interleave
