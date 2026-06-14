@@ -244,6 +244,58 @@ def run(scanner, case, workdir):
     return failures, checked
 
 
+# RAW multi-module fixtures — a structured (uses/recv/pure/ctrl) case is one module, but some fabrications
+# need MORE than one module to reproduce (a name resolving across modules). Each raw case is a full lib.rs
+# plus a map `fn-qual -> must_be_pure` (True = candor MUST report it pure; False = MUST report effectful).
+RAW_CASES = [
+    # ---- primitive-alias / struct name collision (the sled IVec::inline/subslice fabrication) ----
+    # `type Buf = [u8; N]` (module `arr`) shares its NAME with `struct Buf` (module `cfg`) whose `Default`
+    # reads the clock. A call `Buf::default()` in `arr` means the ARRAY's default (pure, std) — it must NOT
+    # resolve to `cfg::Buf`'s effectful `Default`. The struct's own `default` body stays the effect control.
+    ("prim_alias_collision", """
+mod arr {
+    type Buf = [u8; 4];
+    pub fn make() -> Buf { Buf::default() }            // PURE — the array's std default, not cfg::Buf's
+}
+mod cfg {
+    pub struct Buf { x: u64 }
+    impl Default for Buf {
+        fn default() -> Self { let _ = std::time::SystemTime::now(); Buf { x: 0 } }   // Clock (own body)
+    }
+}
+""", {
+        "arr::make": True,            # the alias caller must be pure (no fabricated Clock)
+        "cfg::Buf::default": False,   # the struct's real Default keeps Clock (control)
+    }),
+]
+
+
+def run_raw(scanner, cid, src, expect, workdir):
+    cdir = os.path.join(workdir, cid)
+    os.makedirs(os.path.join(cdir, "src"), exist_ok=True)
+    with open(os.path.join(cdir, "Cargo.toml"), "w") as f:
+        f.write(f'[package]\nname = "probe_{cid}"\nversion = "0.0.0"\nedition = "2021"\n')
+    with open(os.path.join(cdir, "src", "lib.rs"), "w") as f:
+        f.write(src)
+    proc = subprocess.run([scanner, cdir, "--json"], capture_output=True, text=True)
+    if proc.returncode != 0 and not proc.stdout.strip():
+        return [f"SCAN FAILED for {cid}: {proc.stderr.strip()[:400]}"], 0
+    try:
+        report = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return [f"BAD REPORT for {cid}: {proc.stdout[:200]!r}"], 0
+    inferred = {e["fn"]: e.get("inferred", []) for e in report.get("functions", [])}
+    failures, checked = [], 0
+    for fn, must_be_pure in sorted(expect.items()):
+        checked += 1
+        inf = inferred.get(fn)  # None => omitted => pure
+        if must_be_pure and inf:
+            failures.append(f"FABRICATION {cid}::{fn} -> {inf}  (must be pure)")
+        if not must_be_pure and not inf:
+            failures.append(f"LOST CONTROL {cid}::{fn} -> pure/omitted  (must be effectful)")
+    return failures, checked
+
+
 def main():
     scanner = os.environ.get("CANDOR_SCAN")
     if not scanner:
@@ -265,8 +317,12 @@ def main():
             fails, checked = run(scanner, case, work)
             total += checked
             all_failures += fails
+        for cid, src, expect in RAW_CASES:
+            fails, checked = run_raw(scanner, cid, src, expect, work)
+            total += checked
+            all_failures += fails
 
-    print(f"fabrication-probe: {total} probe functions checked across {len(CASES)} crates")
+    print(f"fabrication-probe: {total} probe functions checked across {len(CASES) + len(RAW_CASES)} crates")
     if all_failures:
         print(f"fabrication-probe: {len(all_failures)} FAILURE(S):")
         for f in all_failures:

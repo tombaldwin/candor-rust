@@ -1683,6 +1683,7 @@ fn collect_decls(
     trait_impls: &mut TraitImplIndex,
     local_traits: &mut HashMap<String, LocalTrait>,
     trait_fields: &mut TraitFieldIndex,
+    prim_aliases: &mut std::collections::HashSet<String>,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
@@ -1777,6 +1778,18 @@ fn collect_decls(
                     }
                 }
             }
+            syn::Item::Type(it) => {
+                // A type alias to a NON-NOMINAL type (`type Inner = [u8; N]`, a slice/tuple/ptr/ref/fn,
+                // or a bare primitive) names a type that has NO local impl block — so a call
+                // `Inner::assoc()` resolves through the std/core inherent impl, NOT a same-named local
+                // STRUCT's associated fn. Recording the alias lets resolution SKIP the local link, which
+                // would otherwise fabricate the struct's effect: sled's `type Inner = [u8; CUTOFF]`
+                // collided with `struct Inner`'s effectful `Default` (gen_temp_path → Clock+Env), so the
+                // pure `IVec::inline`/`subslice` (calling the array's `Inner::default()`) inherited both.
+                if is_non_nominal_type(&it.ty) {
+                    prim_aliases.insert(it.ident.to_string());
+                }
+            }
             syn::Item::Trait(t) => {
                 let e = local_traits.entry(t.ident.to_string()).or_default();
                 e.count += 1;
@@ -1810,7 +1823,7 @@ fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases);
                 }
             }
             _ => {}
@@ -1823,6 +1836,27 @@ fn impl_type_name(ty: &syn::Type) -> Option<String> {
         return p.path.segments.last().map(|s| s.ident.to_string());
     }
     None
+}
+
+/// A NON-NOMINAL type: one with no user-definable inherent/trait impl that a local `Alias::method()` call
+/// could resolve to — an array/slice/tuple/pointer/reference/fn type, or a bare built-in primitive path
+/// (`u8`/`usize`/`bool`/…). A `type Alias = <non-nominal>` therefore can't legitimately link a
+/// `Alias::assoc()` call to a same-named local STRUCT's associated fn (see the `prim_aliases` use).
+fn is_non_nominal_type(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Array(_) | syn::Type::Slice(_) | syn::Type::Tuple(_)
+        | syn::Type::Ptr(_) | syn::Type::Reference(_) | syn::Type::BareFn(_) => true,
+        syn::Type::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+            const PRIMS: &[&str] = &[
+                "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
+                "isize", "f32", "f64", "bool", "char", "str",
+            ];
+            let seg = &p.path.segments[0];
+            matches!(seg.arguments, syn::PathArguments::None)
+                && PRIMS.contains(&seg.ident.to_string().as_str())
+        }
+        _ => false,
+    }
 }
 
 fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap<String, String>) {
@@ -1956,6 +1990,8 @@ struct FileDecls {
     /// `trait leaf -> (decl count in this file, declared method names)` — `LocalTrait` flattened for serde.
     trait_decls: HashMap<String, (usize, Vec<String>)>,
     trait_fields: TraitFieldIndex,
+    /// names aliased to a non-nominal type (`type Inner = [u8; N]`) — resolution skips local `Inner::assoc`.
+    prim_aliases: Vec<String>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`).
@@ -1968,8 +2004,9 @@ fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
     let mut trait_impls = HashMap::new();
     let mut trait_decls: HashMap<String, LocalTrait> = HashMap::new();
     let mut trait_fields = HashMap::new();
+    let mut prim_aliases = std::collections::HashSet::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                  &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields);
+                  &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases);
     FileDecls {
         fields,
         field_elem,
@@ -1981,6 +2018,7 @@ fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
             .map(|(k, v)| (k, (v.count, v.methods.into_iter().collect())))
             .collect(),
         trait_fields,
+        prim_aliases: prim_aliases.into_iter().collect(),
     }
 }
 
@@ -1996,6 +2034,7 @@ struct MergedDecls {
     trait_impls: TraitImplIndex,
     trait_decls: HashMap<String, LocalTrait>,
     trait_fields: TraitFieldIndex,
+    prim_aliases: std::collections::HashSet<String>,
 }
 
 /// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics
@@ -2056,6 +2095,9 @@ fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
         for (k, v) in fmap {
             e.insert(k.clone(), v.clone());
         }
+    }
+    for a in &fd.prim_aliases {
+        acc.prim_aliases.insert(a.clone()); // set union — order-independent
     }
 }
 
@@ -2134,6 +2176,15 @@ fn decl_index_digest(m: &MergedDecls) -> String {
     }
     s.push('\n');
     nested_tf(&mut s, &m.trait_fields);
+    // prim_aliases — sorted set of non-nominal alias names (resolution skips local `Alias::assoc`).
+    s.push_str("prim_aliases");
+    let mut pak: Vec<&String> = m.prim_aliases.iter().collect();
+    pak.sort();
+    for a in pak {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
     fnv1a(s.as_bytes())
 }
 
@@ -2702,7 +2753,14 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             } else {
                 !matches!(cr, "std" | "core" | "alloc")
             };
-            if resolvable {
+            // A `Type::assoc()` whose `Type` is a NON-NOMINAL alias (`type Inner = [u8; N]`) names a type
+            // with no local impl — its assoc fn is std/core's, NOT a same-named local STRUCT's. Skip the
+            // local link so the array alias's `Inner::default()` doesn't inherit `struct Inner`'s
+            // effectful `Default` (the sled IVec fabrication).
+            let aliased = tail2(&c.path)
+                .and_then(|t2| t2.split("::").next().map(str::to_string))
+                .is_some_and(|ty| merged.prim_aliases.contains(&ty));
+            if resolvable && !aliased {
                 let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf);
                 if let Some(targets) = targets {
                     for t in targets {
@@ -3972,7 +4030,7 @@ mod tests {
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf);
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -4051,7 +4109,7 @@ mod tests {
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf);
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -4071,7 +4129,7 @@ mod tests {
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf);
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -4097,7 +4155,7 @@ mod tests {
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf);
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -4306,7 +4364,7 @@ mod tests {
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf);
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
