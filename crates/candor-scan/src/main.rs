@@ -161,6 +161,9 @@ struct CallCollector<'a> {
     /// locals bound to a closure (`let f = |..| ..`), so a later `f()` is recognised as a closure
     /// invocation the scan can't see through — not a call to a free fn named `f`.
     closure_vars: std::collections::HashSet<String>,
+    /// params/locals of a fn-pointer / `impl`/`dyn Fn` / generic-`Fn`-bound type. Invoking one (`cb()`)
+    /// calls an opaque body → honest `Unknown`, not a silently-dropped phantom call to a free fn `cb`.
+    fn_typed_vars: std::collections::HashSet<String>,
     /// set once the body invokes a callable we can't resolve (see `FnInfo::unresolved`).
     unresolved: bool,
 }
@@ -497,6 +500,40 @@ fn trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<String>>) -
         }
         _ => Vec::new(),
     }
+}
+
+/// Whether a type is an INVOKABLE callback — a bare fn pointer (`fn()`), an `impl`/`dyn Fn[Mut/Once]`, a
+/// generic param bound by `Fn*`, or a `Box`/`Rc`/`Arc<dyn Fn*>`. A value of such a type called as `cb()`
+/// invokes a body the syntactic scan cannot see, so the enclosing fn can't be certified pure — it MUST
+/// read `Unknown`, never silently pure (SPEC §4). The non-bare forms are exactly where `trait_leaves`
+/// finds an `Fn`/`FnMut`/`FnOnce` leaf; `Type::BareFn` carries no trait so it's matched explicitly.
+fn is_callable_type(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<String>>) -> bool {
+    match ty {
+        syn::Type::BareFn(_) => true,
+        syn::Type::Reference(r) => is_callable_type(&r.elem, generic_bounds),
+        syn::Type::Paren(p) => is_callable_type(&p.elem, generic_bounds),
+        syn::Type::Group(g) => is_callable_type(&g.elem, generic_bounds),
+        _ => trait_leaves(ty, generic_bounds)
+            .iter()
+            .any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce")),
+    }
+}
+
+/// The params of a signature that are invokable callbacks (`is_callable_type`) — so `cb()` on one reads
+/// the honest `Unknown` instead of being silently dropped as a phantom call to a free fn `cb`.
+fn seed_fn_typed_vars(sig: &syn::Signature) -> std::collections::HashSet<String> {
+    let gb = generic_bounds_of(sig);
+    let mut s = std::collections::HashSet::new();
+    for arg in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            if let syn::Pat::Ident(id) = &*pt.pat {
+                if is_callable_type(&pt.ty, &gb) {
+                    s.insert(id.ident.to_string());
+                }
+            }
+        }
+    }
+    s
 }
 
 /// `X -> [trait leaves]` for a signature's generic params, from both inline bounds (`fn f<X: Store>`)
@@ -944,17 +981,27 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         match func {
             syn::Expr::Path(p) => {
-                // A local bound to a closure — `let f = |..| ..` — has its body walked LEXICALLY by this
-                // same visitor, so `f()` adds nothing and is NOT a blind spot. (Skip recording it as a
-                // phantom call to a free fn `f`, too.) Any other path is a normal call. The
-                // `!is_empty()` short-circuit avoids allocating the ident String on the common path
-                // (most fns define no closures, so the set is empty).
-                let is_closure_call = !self.closure_vars.is_empty()
-                    && p.path.get_ident().is_some_and(|id| self.closure_vars.contains(&id.to_string()));
-                if !is_closure_call {
-                    let path = expand(&path_to_string(&p.path), self.uses);
-                    let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
-                    self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method: false });
+                let ident = p.path.get_ident().map(|id| id.to_string());
+                // Invoking a fn-typed binding (`cb: fn()`/`impl Fn`/`dyn Fn`/generic `F: Fn`) calls a body
+                // the syntactic scan can't see — honest `Unknown`, never silently pure (SPEC §4). The
+                // computed/field form (`(self.f)()`, `arr[i]()`) already hits the `_ => unresolved` arm
+                // below; the bare-Path param/local form was silently dropped as a phantom call to a free
+                // fn `cb`. (Found by the cross-engine generative differential: java/ts/swift propagated or
+                // marked Unknown, candor-scan read pure.)
+                if ident.as_ref().is_some_and(|n| self.fn_typed_vars.contains(n)) {
+                    self.unresolved = true;
+                } else {
+                    // A local bound to a closure — `let f = |..| ..` — has its body walked LEXICALLY by
+                    // this same visitor, so `f()` adds nothing and is NOT a blind spot. (Skip recording it
+                    // as a phantom call to a free fn `f`, too.) Any other path is a normal call. The
+                    // `!is_empty()` short-circuit avoids allocating the ident String on the common path.
+                    let is_closure_call = !self.closure_vars.is_empty()
+                        && ident.as_ref().is_some_and(|n| self.closure_vars.contains(n));
+                    if !is_closure_call {
+                        let path = expand(&path_to_string(&p.path), self.uses);
+                        let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
+                        self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method: false });
+                    }
                 }
             }
             // The callee is a COMPUTED value, not a path or a visible local closure: `(self.handler)()`,
@@ -1450,8 +1497,15 @@ fn fninfo(
     // concrete type `X` to `type_path` (and `Box<dyn Store>` looks like `Box`), which would shadow
     // the CHA route with a meaningless receiver type.
     let trait_vars = seed_trait_vars(sig);
+    let fn_typed_vars = seed_fn_typed_vars(sig);
     let mut vars = seed_vars(sig, self_ty, uses);
     for k in trait_vars.keys() {
+        vars.remove(k);
+    }
+    // A fn-typed param (`cb: Box<dyn Fn()>` reads as `Box` via type_path; `impl Fn` lands in trait_vars)
+    // must not be treated as a concrete/dispatch receiver — `cb()` is an opaque-callback invocation, not
+    // a method call on it. Drop it from both so the call-site `fn_typed_vars` check owns it.
+    for k in &fn_typed_vars {
         vars.remove(k);
     }
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
@@ -1472,6 +1526,7 @@ fn fninfo(
         tuple_of,
         calls: Vec::new(),
         closure_vars: std::collections::HashSet::new(),
+        fn_typed_vars,
         unresolved: false,
     };
     for stmt in &block.stmts {
@@ -2863,6 +2918,7 @@ mod tests {
             elem_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -2903,6 +2959,7 @@ mod tests {
             elem_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -3030,6 +3087,7 @@ mod tests {
                 elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
+                fn_typed_vars: std::collections::HashSet::new(),
                 unresolved: false,
             };
             for stmt in &blk.stmts {
@@ -3069,7 +3127,7 @@ mod tests {
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), unresolved: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), unresolved: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -3092,7 +3150,7 @@ mod tests {
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), unresolved: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), unresolved: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -3129,6 +3187,7 @@ mod tests {
             elem_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -3156,6 +3215,7 @@ mod tests {
                 elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
+                fn_typed_vars: std::collections::HashSet::new(),
                 unresolved: false,
             };
             for stmt in &blk.stmts {
@@ -3368,6 +3428,51 @@ mod tests {
         fns.into_iter()
             .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
             .collect()
+    }
+
+    /// fn-name -> `unresolved` flag, through the same full pipeline — for the opacity/callback tests.
+    fn unresolved_of(src: &str) -> HashMap<String, bool> {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut ti = TraitImplIndex::new();
+        let mut td: HashMap<String, LocalTrait> = HashMap::new();
+        let mut tf = TraitFieldIndex::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf);
+        let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let enum_variants: EnumVariantIndex =
+            enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
+        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let mut fns: Vec<FnInfo> = Vec::new();
+        let mut us2 = HashMap::new();
+        scan_items(&file.items, "", "lib.rs", false, &fields, &returns, traits, elems, &mut us2, &mut fns);
+        fns.into_iter().map(|f| (f.qual, f.unresolved)).collect()
+    }
+
+    /// Invoking a fn-typed binding (`cb: fn()`/`impl Fn`/`dyn Fn`/generic `F: Fn`/`Box<dyn Fn>`) calls a
+    /// body the syntactic scan can't see, so the fn is `unresolved` (honest Unknown) — NOT silently pure.
+    /// Found by the cross-engine generative differential: candor-scan dropped these while java/ts/swift
+    /// propagated/Unknowned them. A normal free-fn call must NOT be flagged unresolved (no over-report).
+    #[test]
+    fn fn_typed_callback_invocation_is_unresolved() {
+        for hof in [
+            "fn h(cb: fn()) { cb(); }",
+            "fn h(cb: impl Fn()) { cb(); }",
+            "fn h<F: Fn()>(cb: F) { cb(); }",
+            "fn h(cb: &dyn Fn()) { cb(); }",
+            "fn h(cb: Box<dyn Fn()>) { cb(); }",
+        ] {
+            let m = unresolved_of(hof);
+            assert!(m["h"], "fn-typed callback invocation silently dropped (not unresolved): {hof}");
+        }
+        // NO over-report: a normal free-fn call stays resolved (not unresolved).
+        let m = unresolved_of("fn helper() {} fn caller() { helper(); }");
+        assert!(!m["caller"], "a normal free-fn call must not be flagged unresolved");
     }
 
     /// Each of the six PROVEN-dropped idioms (the silent-under-report bug): a method call whose
