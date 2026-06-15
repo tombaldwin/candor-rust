@@ -1,14 +1,14 @@
 {
   "candor": {
-    "version": "scan-0.4.6",
+    "version": "scan-0.5.0",
     "toolchain": "stable",
-    "spec": "0.4"
+    "spec": "0.5"
   },
   "package": "candor_query",
   "functions": [
     {
       "fn": "clear_other_reports",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1881:1",
       "inferred": [
         "Fs"
       ],
@@ -22,7 +22,7 @@
     },
     {
       "fn": "cmd_audit",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:183:1",
       "inferred": [
         "Fs"
       ],
@@ -40,7 +40,7 @@
     },
     {
       "fn": "cmd_callers",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:535:1",
       "inferred": [
         "Fs"
       ],
@@ -54,7 +54,7 @@
     },
     {
       "fn": "cmd_containment",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1572:1",
       "inferred": [
         "Fs"
       ],
@@ -68,7 +68,7 @@
     },
     {
       "fn": "cmd_diff",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1035:1",
       "inferred": [
         "Fs"
       ],
@@ -83,7 +83,7 @@
     },
     {
       "fn": "cmd_engine_version",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1985:1",
       "inferred": [
         "Fs"
       ],
@@ -94,7 +94,7 @@
     },
     {
       "fn": "cmd_gains",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1765:1",
       "inferred": [
         "Fs"
       ],
@@ -107,7 +107,7 @@
     },
     {
       "fn": "cmd_impact",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1278:1",
       "inferred": [
         "Fs"
       ],
@@ -118,7 +118,7 @@
     },
     {
       "fn": "cmd_locate",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1971:1",
       "inferred": [
         "Fs"
       ],
@@ -129,7 +129,7 @@
     },
     {
       "fn": "cmd_map",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:913:1",
       "inferred": [
         "Fs"
       ],
@@ -141,7 +141,7 @@
     },
     {
       "fn": "cmd_merge_hook",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:2009:1",
       "inferred": [
         "Fs"
       ],
@@ -152,7 +152,7 @@
     },
     {
       "fn": "cmd_parsepolicy",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:627:1",
       "inferred": [
         "Fs"
       ],
@@ -163,7 +163,7 @@
     },
     {
       "fn": "cmd_path",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1384:1",
       "inferred": [
         "Fs"
       ],
@@ -174,7 +174,7 @@
     },
     {
       "fn": "cmd_reachable",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1497:1",
       "inferred": [
         "Fs"
       ],
@@ -186,7 +186,7 @@
     },
     {
       "fn": "cmd_receipt",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1718:1",
       "inferred": [
         "Fs"
       ],
@@ -201,7 +201,7 @@
     },
     {
       "fn": "cmd_reports",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1911:1",
       "inferred": [
         "Fs"
       ],
@@ -213,7 +213,7 @@
     },
     {
       "fn": "cmd_rewire",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:827:1",
       "inferred": [
         "Fs"
       ],
@@ -225,7 +225,7 @@
     },
     {
       "fn": "cmd_show",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:408:1",
       "inferred": [
         "Fs"
       ],
@@ -240,7 +240,7 @@
     },
     {
       "fn": "cmd_state",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1819:1",
       "inferred": [
         "Fs"
       ],
@@ -254,7 +254,7 @@
     },
     {
       "fn": "cmd_whatif",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:675:1",
       "inferred": [
         "Env",
         "Fs"
@@ -272,7 +272,7 @@
     },
     {
       "fn": "cmd_where",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:486:1",
       "inferred": [
         "Fs"
       ],
@@ -284,7 +284,7 @@
     },
     {
       "fn": "collect_rs",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:2075:1",
       "inferred": [
         "Fs"
       ],
@@ -295,7 +295,7 @@
     },
     {
       "fn": "encountered_set",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:164:1",
       "inferred": [
         "Fs"
       ],
@@ -309,7 +309,7 @@
     },
     {
       "fn": "glob_encountered",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:119:1",
       "inferred": [
         "Fs"
       ],
@@ -323,7 +323,7 @@
     },
     {
       "fn": "load_calibrated",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:327:1",
       "inferred": [
         "Fs"
       ],
@@ -334,7 +334,7 @@
     },
     {
       "fn": "load_callgraph",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:881:1",
       "inferred": [
         "Fs"
       ],
@@ -345,7 +345,7 @@
     },
     {
       "fn": "load_entries",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:75:1",
       "inferred": [
         "Fs"
       ],
@@ -359,7 +359,7 @@
     },
     {
       "fn": "load_entries_loud",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:98:1",
       "inferred": [
         "Fs"
       ],
@@ -371,7 +371,7 @@
     },
     {
       "fn": "load_fninfo",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1001:1",
       "inferred": [
         "Fs"
       ],
@@ -382,7 +382,7 @@
     },
     {
       "fn": "locate_newest",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:1937:1",
       "inferred": [
         "Fs"
       ],
@@ -393,7 +393,7 @@
     },
     {
       "fn": "main",
-      "loc": "src/main.rs",
+      "loc": "src/main.rs:23:1",
       "inferred": [
         "Env",
         "Fs"
