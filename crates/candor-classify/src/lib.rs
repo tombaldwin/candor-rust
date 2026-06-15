@@ -610,7 +610,9 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 || path.contains("::get_connection")
                 || path.contains("::get_async_connection")
                 || path.contains("::get_multiplexed_async_connection")
-                || path.contains("ConnectionManager")
+                // a live `ConnectionManager` round-trips (Db), but `ConnectionManagerConfig` is a pure
+                // in-memory builder (set_number_of_retries/set_max_delay) — exclude it (adversarial review).
+                || (path.contains("ConnectionManager") && !path.contains("ConnectionManagerConfig"))
                 || path.ends_with("::query")
                 || path.ends_with("::query_async")
                 || path.ends_with("::req_command")
@@ -850,7 +852,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::rng")
             || path.ends_with("::from_entropy")
             || path.ends_with("::from_os_rng");
-        if rng_verb || path.contains("OsRng") {
+        // `OsRng` is the OS entropy SOURCE, but `clone`/`fork`/`default` just copy or construct the
+        // (zero-sized) handle and draw no entropy — pure, exactly like the `fastrand` arm's clone/fork
+        // exemption above. The actual draws (`fill_bytes`/`next_u*`/…) are caught by `rng_verb`. Without
+        // this exemption the blanket `contains("OsRng")` fabricated `Rand` on `OsRng::clone` (adversarial
+        // review: OsRng is a unit struct, cloning consumes nothing).
+        let m = path.rsplit("::").next().unwrap_or(path);
+        let os_rng = path.contains("OsRng") && !matches!(m, "clone" | "fork" | "default");
+        if rng_verb || os_rng {
             return Some("Rand");
         }
         return None;
@@ -1383,6 +1392,28 @@ mod tests {
         // pure crates stay pure
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
         assert_eq!(classify("std", "std::vec::Vec::push"), None);
+    }
+
+    #[test]
+    fn rand_osrng_handle_ops_are_pure_but_draws_are_rand() {
+        // Adversarial-review fabrication: the blanket `contains("OsRng")` tagged `OsRng::clone` Rand,
+        // but OsRng is a unit struct — clone/fork/default draw no entropy. The real draws still fire.
+        assert_eq!(classify("rand", "rand::rngs::OsRng::clone"), None);
+        assert_eq!(classify("rand", "rand::rngs::OsRng::default"), None);
+        assert_eq!(classify("rand", "rand::rngs::OsRng::fill_bytes"), Some("Rand")); // a real draw
+        assert_eq!(classify("rand", "rand::rngs::OsRng::next_u32"), Some("Rand"));
+        assert_eq!(classify("rand", "rand::Rng::gen"), Some("Rand")); // verb path unaffected
+        assert_eq!(classify("rand", "rand::distributions::Uniform::new"), None); // pure ctor still pure
+    }
+
+    #[test]
+    fn redis_connection_manager_config_builder_is_pure() {
+        // Adversarial-review fabrication: `contains("ConnectionManager")` hit the pure *Config* builder.
+        assert_eq!(classify("redis", "redis::aio::ConnectionManagerConfig::new"), None);
+        assert_eq!(classify("redis", "redis::aio::ConnectionManagerConfig::set_max_delay"), None);
+        // the LIVE manager still round-trips (Db).
+        assert_eq!(classify("redis", "redis::aio::ConnectionManager::new"), Some("Db"));
+        assert_eq!(classify("redis", "redis::Commands::get"), Some("Db"));
     }
 
     #[test]
