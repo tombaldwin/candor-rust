@@ -2752,6 +2752,24 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         })
         .collect();
 
+    // DISCLOSE files that failed to read/parse (no cache AND round-1 None): their effects are NOT in
+    // the report. A silent skip violates "never silently pure" — the query side already discloses an
+    // unparseable REPORT; mirror it for unparseable SOURCE (adversarial review).
+    let unparsed: Vec<&str> = per_file
+        .iter()
+        .zip(&round1)
+        .filter(|(pf, parsed)| pf.2.is_none() && parsed.is_none())
+        .map(|(pf, _)| pf.0.as_str())
+        .collect();
+    if !unparsed.is_empty() {
+        let shown = unparsed.iter().take(8).copied().collect::<Vec<_>>().join(", ");
+        let more = if unparsed.len() > 8 { format!(" + {} more", unparsed.len() - 8) } else { String::new() };
+        eprintln!(
+            "candor-scan: {} source file(s) failed to read/parse — effects in them are NOT in this report (re-check the source): {shown}{more}",
+            unparsed.len()
+        );
+    }
+
     // Per-file Pass A decls (cache or fresh) + a place to hold a parsed file for Pass B. A file dropped
     // by a read/parse failure (no cache AND round-1 parse failed) is excluded entirely, preserving the
     // original survivor set + walk order.
