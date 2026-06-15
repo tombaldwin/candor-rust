@@ -1679,6 +1679,30 @@ fn scan_items(
                     scan_items(inner, &sub, file, include_tests, fields, returns, traits, elems, &mut subuses, out);
                 }
             }
+            // A trait's PROVIDED (default) methods have bodies that can perform effects directly
+            // (`fn flush(&self) { fs::write(..); }`). Without this arm those bodies were never visited,
+            // so the effect — and every caller reaching it — was silently dropped (the "never silently
+            // pure" contract broken on a common idiom; adversarial review). A signature-only
+            // `fn f(&self);` has no `default` block and stays the impl's job (the Item::Impl arm).
+            syn::Item::Trait(tr) => {
+                if !include_tests && is_cfg_test(&tr.attrs) {
+                    continue;
+                }
+                let tname = tr.ident.to_string();
+                for ti in &tr.items {
+                    if let syn::TraitItem::Fn(m) = ti {
+                        let Some(block) = &m.default else { continue }; // no body ⇒ abstract, skip
+                        if !include_tests && is_cfg_test(&m.attrs) {
+                            continue;
+                        }
+                        let n = m.sig.ident.to_string();
+                        // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
+                        // resolve through the trait's CHA, exactly like an impl method's `self`.
+                        out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), file, &m.sig, block,
+                            Some(&tname), uses, fields, returns, traits, elems));
+                    }
+                }
+            }
             _ => {}
         }
     }
