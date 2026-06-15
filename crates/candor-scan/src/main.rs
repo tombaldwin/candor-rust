@@ -2498,6 +2498,24 @@ struct ScanCache {
 }
 
 fn main() {
+    // Deeply-nested expressions / method chains recurse in syn's parser AND the single-threaded visitor
+    // (Pass B) without depth limits; on the default ~8 MB stack a ~1000-deep file ABORTED the process
+    // (SIGABRT) instead of degrading (adversarial review). Run the whole scan on a generous stack — and
+    // give rayon's parse workers the same — so a pathological/generated file is handled, not a crash.
+    // (A truly adversarial million-deep file still aborts; that's a DoS edge, not real code.)
+    const BIG_STACK: usize = 256 * 1024 * 1024;
+    rayon::ThreadPoolBuilder::new().stack_size(BIG_STACK).build_global().ok();
+    let worker = std::thread::Builder::new()
+        .stack_size(BIG_STACK)
+        .spawn(scan_main)
+        .expect("spawn scan worker thread");
+    // scan_main drives its own exit codes via process::exit; a normal return → 0, a panic → 101.
+    if worker.join().is_err() {
+        std::process::exit(101);
+    }
+}
+
+fn scan_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = ".".to_string();
     let mut prefix = String::new();
