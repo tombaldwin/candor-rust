@@ -20,7 +20,13 @@ candor-classify = { path = "../candor-classify", version = "0.4.2" }
 # proc macro, so that feature is dead weight; everything else syn's default enabled is re-listed verbatim
 # (derive/parsing/printing/clone-impls) so parsing behaviour is byte-for-byte unchanged.
 syn = { version = "2", default-features = false, features = ["full", "visit", "extra-traits", "derive", "parsing", "printing", "clone-impls"] }
-proc-macro2 = { version = "1", default-features = false }
+# `span-locations` adds 1-based line / 0-based column tracking to the FALLBACK `Span` (byte offsets stored
+# inline + a thread-local source map populated at parse time) — it does NOT pull syn's `proc-macro` feature
+# and does NOT make `Span`/`syn::File` any less `Send` than before (the `Rc` in `TokenStream` was already the
+# sole `!Send` reason; `SendFile` stays sound). Used to fill each fn's `loc` with `file:line:col` (the spec
+# report-schema format). Spans MUST be resolved on the thread that parsed the file — the source map is
+# thread-local — which is why loc derivation runs in the rayon parse closures, not single-threaded Pass B.
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
 walkdir = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

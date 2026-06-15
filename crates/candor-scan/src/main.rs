@@ -192,9 +192,14 @@ struct CallCollector<'a> {
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely
-/// because `proc_macro2::TokenStream` holds an `Rc<Vec<TokenTree>>`; with `span-locations` OFF (our build
-/// — neither syn nor we enable it) a `Span` is a zero-size marker with no thread-local backing, so the
-/// ONLY thing that makes the type unsendable is that `Rc` refcount.
+/// because `proc_macro2::TokenStream` holds an `Rc<Vec<TokenTree>>`. We enable proc-macro2's
+/// `span-locations` feature (to fill each fn's `loc` with `file:line:col`): in fallback mode a `Span` then
+/// carries inline `u32` byte offsets and `start()`/`end()` resolve them against a THREAD-LOCAL source map
+/// populated when the file was parsed. Those byte offsets are plain `Copy` data and the source map is
+/// per-thread state we never move — so `span-locations` adds nothing `!Send`; the `Rc` refcount remains the
+/// ONLY thing that makes the type unsendable, and this `unsafe impl Send` stays sound. (The corollary the
+/// loc derivation depends on: a span's line/col is ONLY resolvable on the thread that parsed the file —
+/// after the move to the collector the source map is gone — so loc is computed in the parse closures.)
 ///
 /// SAFETY CONTRACT: a `SendFile` is constructed from a `syn::parse_file` result that is UNIQUELY OWNED
 /// (never cloned) and is MOVED EXACTLY ONCE — from the rayon worker that parsed it to the collector — and
@@ -206,6 +211,10 @@ struct SendFile(syn::File);
 // that is never `Rc`-aliased across threads. (Would be UNSOUND if a clone of the inner `TokenStream`
 // were retained on the producing thread; we never clone before the move.)
 unsafe impl Send for SendFile {}
+
+/// A parse worker's output for one file: the (Send-wrapped) parsed file plus its per-fn `file:line:col`s
+/// resolved on the worker (walk order; see `fn_locs`). Bundled so loc rides alongside the moved file.
+type ParsedFile = (SendFile, Vec<String>);
 
 fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
@@ -1638,7 +1647,11 @@ fn stmt_cfg_inactive(stmt: &syn::Stmt) -> bool {
 fn scan_items(
     items: &[syn::Item],
     modpath: &str,
-    file: &str,
+    // Pre-resolved `file:line:col` for each emitted fn IN WALK ORDER (see `fn_locs`): line/col can only be
+    // resolved on the parse thread, so Pass B threads them in. Consumed positionally via `loc_idx`, which
+    // advances exactly once per emitted FnInfo, in lockstep with `fn_locs`.
+    locs: &[String],
+    loc_idx: &mut usize,
     include_tests: bool,
     fields: &FieldIndex,
     returns: &ReturnIndex,
@@ -1663,7 +1676,8 @@ fn scan_items(
                     continue;
                 }
                 let n = f.sig.ident.to_string();
-                out.push(fninfo(&n, &qual(&n), file, &f.sig, &f.block, None, uses, fields, returns, traits, elems));
+                let loc = next_loc(locs, loc_idx);
+                out.push(fninfo(&n, &qual(&n), &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -1680,7 +1694,8 @@ fn scan_items(
                             Some(t) => qual(&format!("{t}::{n}")),
                             None => qual(&n),
                         };
-                        out.push(fninfo(&n, &q, file, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems));
+                        let loc = next_loc(locs, loc_idx);
+                        out.push(fninfo(&n, &q, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems));
                     }
                 }
             }
@@ -1691,7 +1706,7 @@ fn scan_items(
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, file, include_tests, fields, returns, traits, elems, &mut subuses, out);
+                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, &mut subuses, out);
                 }
             }
             // A trait's PROVIDED (default) methods have bodies that can perform effects directly
@@ -1711,10 +1726,90 @@ fn scan_items(
                             continue;
                         }
                         let n = m.sig.ident.to_string();
+                        let loc = next_loc(locs, loc_idx);
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
-                        out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), file, &m.sig, block,
+                        out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), &loc, &m.sig, block,
                             Some(&tname), uses, fields, returns, traits, elems));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Pop the next pre-resolved loc for an emitted fn, advancing the cursor. `locs` is produced by `fn_locs`
+/// in the SAME walk order, so the indices line up exactly. A `debug_assert!` trips if they ever drift
+/// (more fns emitted than locs precomputed); in release it falls back to the bare file path with the line
+/// stripped — wrong-but-not-crashing — so the scan still produces a report rather than panicking.
+fn next_loc(locs: &[String], loc_idx: &mut usize) -> String {
+    debug_assert!(*loc_idx < locs.len(), "fn_locs/scan_items walk-order drift: more fns than locs");
+    let l = locs.get(*loc_idx).cloned().unwrap_or_default();
+    *loc_idx += 1;
+    l
+}
+
+/// Resolve `file:line:col` for every fn `scan_items` will emit, in IDENTICAL walk order — the loc
+/// counterpart to `scan_items`. It MUST be called on the thread that PARSED `items`: proc-macro2's
+/// `span-locations` resolves a span's line/col against a THREAD-LOCAL source map populated at parse time,
+/// so a span moved to another thread (our single-threaded Pass B) resolves to nothing. Pass B can't derive
+/// loc; the parse closures call this and Pass B zips the result onto each FnInfo by position.
+///
+/// The fn-emitting structure here mirrors `scan_items` arm-for-arm (same `#[cfg(test)]` skips, same nested
+/// `mod` recursion, same impl/trait-default coverage), so the i-th loc lines up with the i-th FnInfo. A
+/// `debug_assert_eq!` in Pass B guards that the two counts agree (any future drift trips the 42 tests).
+/// Line is proc-macro2's 1-based line; column is its 0-based column + 1 (1-based, matching the deep
+/// engine's `build.rs:10:1` baselines). The span used is the whole item/method (its first token), not just
+/// the ident, so a `pub fn foo` at column 0 reports col 1, not the column of `foo`.
+fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out: &mut Vec<String>) {
+    use syn::spanned::Spanned;
+    let loc = |sp: proc_macro2::Span| {
+        let s = sp.start();
+        format!("{file}:{}:{}", s.line, s.column + 1)
+    };
+    for it in items {
+        match it {
+            syn::Item::Fn(f) => {
+                if !include_tests && is_cfg_test(&f.attrs) {
+                    continue;
+                }
+                out.push(loc(f.span()));
+            }
+            syn::Item::Impl(im) => {
+                if !include_tests && is_cfg_test(&im.attrs) {
+                    continue;
+                }
+                for ii in &im.items {
+                    if let syn::ImplItem::Fn(m) = ii {
+                        if !include_tests && is_cfg_test(&m.attrs) {
+                            continue;
+                        }
+                        out.push(loc(m.span()));
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    fn_locs(inner, file, include_tests, out);
+                }
+            }
+            syn::Item::Trait(tr) => {
+                if !include_tests && is_cfg_test(&tr.attrs) {
+                    continue;
+                }
+                for ti in &tr.items {
+                    if let syn::TraitItem::Fn(m) = ti {
+                        if m.default.is_none() {
+                            continue;
+                        }
+                        if !include_tests && is_cfg_test(&m.attrs) {
+                            continue;
+                        }
+                        out.push(loc(m.span()));
                     }
                 }
             }
@@ -1811,7 +1906,7 @@ fn seed_trait_vars(sig: &syn::Signature) -> HashMap<String, Vec<String>> {
 fn fninfo(
     leaf: &str,
     qual: &str,
-    file: &str,
+    loc: &str,
     sig: &syn::Signature,
     block: &syn::Block,
     self_ty: Option<&str>,
@@ -1883,7 +1978,7 @@ fn fninfo(
     FnInfo {
         qual: qual.to_string(),
         leaf: leaf.to_string(),
-        loc: file.to_string(),
+        loc: loc.to_string(),
         calls: c.calls,
         unresolved: c.unresolved,
     }
@@ -2772,7 +2867,11 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // ROUND 1 PARSE (parallel): every file whose Pass A decls are NOT validly cached. A read/parse
     // failure yields `None` (the original `else { continue }`), so its slot carries no parsed file and
     // contributes nothing — identical to before.
-    let round1: Vec<Option<SendFile>> = per_file
+    // Each entry is `Option<(SendFile, locs)>`: the `locs` are this file's `file:line:col`s in walk order,
+    // resolved HERE on the parse worker because proc-macro2's span line/col only resolves against the
+    // parsing thread's source map (see `fn_locs`/`SendFile`). They ride alongside the moved file so Pass B
+    // (single-threaded) can zip them onto each FnInfo without re-resolving a now-dead span.
+    let round1: Vec<Option<ParsedFile>> = per_file
         .par_iter()
         .map(|(rel, _, cached)| {
             if cached.is_some() {
@@ -2780,8 +2879,11 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             let p = &paths.iter().find(|(_, r)| r == rel)?.0;
             let text = std::fs::read_to_string(p).ok()?;
+            let file = syn::parse_file(&text).ok()?;
+            let mut locs = Vec::new();
+            fn_locs(&file.items, rel, include_tests, &mut locs);
             // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
-            Some(SendFile(syn::parse_file(&text).ok()?))
+            Some((SendFile(file), locs))
         })
         .collect();
 
@@ -2808,6 +2910,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // original survivor set + walk order.
     let mut decls_per_file: Vec<(String, String, FileDecls)> = Vec::new(); // (rel, content_hash, decls)
     let mut parsed_files: HashMap<String, syn::File> = HashMap::new();     // rel -> parsed (round 1)
+    let mut parsed_locs: HashMap<String, Vec<String>> = HashMap::new();    // rel -> per-fn loc (walk order)
     let mut cached_fninfos: HashMap<String, (String, Vec<FnInfo>)> = HashMap::new(); // rel -> (decl_index_hash, fninfos)
     // Files whose on-disk entry was already valid for BOTH content + the decl index it recorded — no
     // re-write needed unless the merged index moves (checked after the digest). Lets a no-op / body-only
@@ -2823,9 +2926,10 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             None => {
                 // A freshly-parsed file (or a parse failure → skip the file entirely, as before).
-                let Some(sf) = r1 else { continue };
+                let Some((sf, locs)) = r1 else { continue };
                 let fd = file_decls(&sf.0.items, include_tests);
                 decls_per_file.push((rel.clone(), ch, fd));
+                parsed_locs.insert(rel.clone(), locs);
                 parsed_files.insert(rel, sf.0);
             }
         }
@@ -2862,7 +2966,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 && cached_fninfos.get(*rel).map(|(h, _)| h != &decl_index_hash).unwrap_or(true)
         })
         .collect();
-    let round2: Vec<(String, Option<SendFile>)> = need_passb
+    let round2: Vec<(String, Option<ParsedFile>)> = need_passb
         .par_iter()
         .map(|rel| {
             let parsed = paths
@@ -2870,12 +2974,18 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 .find(|(_, r)| r == rel)
                 .and_then(|(p, _)| std::fs::read_to_string(p).ok())
                 .and_then(|t| syn::parse_file(&t).ok())
-                .map(SendFile);
+                .map(|file| {
+                    // Resolve loc on THIS parse worker (span line/col is thread-local) — same as round 1.
+                    let mut locs = Vec::new();
+                    fn_locs(&file.items, rel, include_tests, &mut locs);
+                    (SendFile(file), locs)
+                });
             (rel.to_string(), parsed)
         })
         .collect();
     for (rel, sf) in round2 {
-        if let Some(sf) = sf {
+        if let Some((sf, locs)) = sf {
+            parsed_locs.insert(rel.clone(), locs);
             parsed_files.insert(rel, sf.0);
         }
     }
@@ -2897,9 +3007,12 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // Re-derive: the file is parsed (round 1 or round 2); if both parses failed it's simply absent.
         let Some(file) = parsed_files.get(rel) else { continue };
         let modpath = module_path(Path::new(rel));
+        // Locs were resolved on the parse worker (spans are dead on this thread); reuse them positionally.
+        let locs = parsed_locs.get(rel).map(Vec::as_slice).unwrap_or(&[]);
+        let mut loc_idx = 0usize;
         let mut uses = HashMap::new();
         let mut file_fns: Vec<FnInfo> = Vec::new();
-        scan_items(&file.items, &modpath, rel, include_tests, fields, &returns, traits, elems, &mut uses, &mut file_fns);
+        scan_items(&file.items, &modpath, locs, &mut loc_idx, include_tests, fields, &returns, traits, elems, &mut uses, &mut file_fns);
         fns.extend(file_fns.iter().cloned());
         fresh_fninfos.insert(rel.clone(), file_fns);
     }
@@ -4480,7 +4593,10 @@ mod tests {
         let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
-        scan_items(&file.items, "", "lib.rs", false, &fields, &returns, traits, elems, &mut us2, &mut fns);
+        let mut locs = Vec::new();
+        fn_locs(&file.items, "lib.rs", false, &mut locs);
+        let mut loc_idx = 0usize;
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &mut us2, &mut fns);
         fns.into_iter()
             .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
             .collect()
@@ -4506,8 +4622,74 @@ mod tests {
         let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
-        scan_items(&file.items, "", "lib.rs", false, &fields, &returns, traits, elems, &mut us2, &mut fns);
+        let mut locs = Vec::new();
+        fn_locs(&file.items, "lib.rs", false, &mut locs);
+        let mut loc_idx = 0usize;
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.unresolved)).collect()
+    }
+
+    /// fn-qual -> its `loc` (`file:line:col`), through the same full pipeline — for the loc-fidelity test.
+    fn locs_of(src: &str) -> HashMap<String, String> {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut ti = TraitImplIndex::new();
+        let mut td: HashMap<String, LocalTrait> = HashMap::new();
+        let mut tf = TraitFieldIndex::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
+        let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let enum_variants: EnumVariantIndex =
+            enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
+        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let mut fns: Vec<FnInfo> = Vec::new();
+        let mut us2 = HashMap::new();
+        let mut locs = Vec::new();
+        fn_locs(&file.items, "lib.rs", false, &mut locs);
+        let mut loc_idx = 0usize;
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &mut us2, &mut fns);
+        fns.into_iter().map(|f| (f.qual, f.loc)).collect()
+    }
+
+    /// The `loc` field MUST be `file:line:col` (spec report schema), with the line being the fn's ACTUAL
+    /// source line — not the file-only `src/lib.rs` an adversarial cross-engine fidelity review found.
+    /// Line is 1-based; column is 1-based (proc-macro2's 0-based column + 1), pointing at the item's first
+    /// token, so a top-level `fn` at column 0 reads col 1 (matching the deep engine's `build.rs:10:1`). The
+    /// walk covers free fns, impl methods, nested-module fns, and trait default methods — the same set
+    /// `scan_items` emits — so every loc lines up with its FnInfo.
+    #[test]
+    fn loc_carries_actual_line_and_col() {
+        // Lines (1-based): blank=1, alpha=2, beta=4(`pub` indented?), … keep it explicit below.
+        let src = "\
+fn alpha() {}
+    fn beta() {}
+struct T;
+impl T {
+    fn gamma(&self) {}
+}
+mod inner {
+    fn delta() {}
+}
+trait G {
+    fn hello(&self) {}
+}
+";
+        let m = locs_of(src);
+        // alpha: line 1, first token `fn` at column 0 -> 1-based col 1.
+        assert_eq!(m["alpha"], "lib.rs:1:1");
+        // beta: line 2, indented 4 -> col 5 (1-based).
+        assert_eq!(m["beta"], "lib.rs:2:5");
+        // gamma: line 5 (inside impl), indented 4 -> col 5.
+        assert_eq!(m["T::gamma"], "lib.rs:5:5");
+        // delta: line 8 (inside `mod inner`), indented 4 -> col 5; qualified by the module path.
+        assert_eq!(m["inner::delta"], "lib.rs:8:5");
+        // hello: a trait DEFAULT method, line 11, indented 4 -> col 5.
+        assert_eq!(m["G::hello"], "lib.rs:11:5");
     }
 
     /// Invoking a fn-typed binding (`cb: fn()`/`impl Fn`/`dyn Fn`/generic `F: Fn`/`Box<dyn Fn>`) calls a
