@@ -170,6 +170,16 @@ jobs:
       - name: Soundness fuzzer (fmt)
         run: CANDOR_FUZZ_FORMS="display_fmt" bash soundness/run.sh 40
 
+      # Generic-receiver variant: the effect is in a custom `Iterator::next` consumed by a GENERIC
+      # consumer `fn gicons<I: Iterator>(it: I) { it.for_each(..) }` called at a CONCRETE site. Inside the
+      # consumer `I` is an unresolved `Param`, so candor reported it pure for itself AND lost the effect at
+      # the call site (the silent-pure generic-iterator hole). candor must recover the call-site substs
+      # (`I=Gi`) and resolve the consumer's internal `<I as Iterator>::next` to the LOCAL impl — the
+      # CALLING fn gets the precise effect, the generic consumer an honest report-only `Unknown`. A pure
+      # std/custom iterator must NOT gain an effect (no fabrication). Teeth-verified: reverting fails.
+      - name: Soundness fuzzer (generic iterator)
+        run: CANDOR_FUZZ_FORMS="generic_iter" bash soundness/run.sh 40
+
       # Cross-crate variant: the chain crosses a lib→bin boundary, exercising candor's DefPathHash
       # cross-crate propagation (its own bug-prone surface the single-crate fuzzer can't reach).
       - name: Soundness fuzzer (cross-crate)

@@ -204,6 +204,30 @@ def edge_forms(callee, i=0):
                 f"fn next(&mut self) -> Option<u64> {{ if self.0 == 0 {{ None }} else {{ self.0 -= 1; {callee}(); Some(1) }} }} }}"
             ],
         ),
+        # GENERIC-PARAM RECEIVER driving a LOCAL `Iterator::next`: a generic consumer
+        # `fn gicons<I: Iterator>(it: I) { it.for_each(..) }` is called at a CONCRETE site with a custom
+        # iterator (`Gi{i}`) whose `next()` performs the effect. INSIDE the consumer `I` is an unresolved
+        # `Param`, so candor reports it pure for itself (the silent-pure generic-iterator hole) AND loses
+        # the effect at the call site too. The fix recovers the call-site substs (`I=Gi{i}`) and resolves
+        # the consumer's internal `<I as Iterator>::next` to the LOCAL `Gi{i}::next` — so the CALLING fn
+        # (`f{i}`) gets the PRECISE effect, while the generic consumer carries a report-only honest
+        # `Unknown` (`generic-iter:<method>`). The `i`-derived rotation exercises for_each / map+collect /
+        # sum / a `for` over a generic-param `Map` adapter. Both the caller AND the consumer must be
+        # effect-or-Unknown, never pure. (`Gi{i}::next` performs the effect.) Teeth for the generic fix.
+        "generic_iter": (
+            f"gicons{i:02d}(Gi{i:02d}(2));",
+            [], [f"gicons{i:02d}"],
+            [
+                f"struct Gi{i:02d}(u8);\nimpl Iterator for Gi{i:02d} {{ type Item = u64; "
+                f"fn next(&mut self) -> Option<u64> {{ if self.0 == 0 {{ None }} else {{ self.0 -= 1; {callee}(); Some(1) }} }} }}",
+                [
+                    f"fn gicons{i:02d}<I: Iterator>(it: I) {{ it.for_each(|_| {{}}); }}",
+                    f"fn gicons{i:02d}<I: Iterator<Item = u64>>(it: I) {{ let _: Vec<u64> = it.collect(); }}",
+                    f"fn gicons{i:02d}<I: Iterator<Item = u64>>(it: I) {{ let _: u64 = it.sum(); }}",
+                    f"fn gicons{i:02d}<I: Iterator<Item = u64>>(it: I) {{ for _ in it.map(|x| x + 1) {{}} }}",
+                ][i % 4],
+            ],
+        ),
         # LOCAL `Display::fmt` reached via a `core::fmt` formatting macro: the effect is in an
         # `impl Display for T` whose `fmt()` does I/O; `format!("{}", t)` / `println!("{}", t)` reach it
         # through core::fmt's machinery — candor sees the std `Argument::new_display` / `write_fmt`, never

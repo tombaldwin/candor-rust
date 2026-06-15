@@ -188,6 +188,14 @@ pub struct Candor {
     /// own report (the honest standalone answer for invoking an opaque param). Free fns only, so arg index equals param
     /// index (a method's `self` would offset it).
     param_calls: HashMap<LocalDefId, BTreeSet<usize>>,
+    /// A fn that drives an iterator-family trait method (`Iterator`/`IntoIterator`/`Sum`/…) on one of its
+    /// OWN generic params (`fn run<I: Iterator>(it: I) { it.for_each(..) }`). Standalone it can't pin the
+    /// concrete `I::next` (could be a LOCAL effectful iterator), so it carries a REPORT-ONLY honest
+    /// `Unknown` (`generic-iter:<method>`), injected AFTER the fixpoint — exactly the HOF-param model:
+    /// honest standalone, but NON-propagating so it never re-pollutes the precise local callers that
+    /// monomorphized it (`caller`, resolved via `generic_callee_local_edges`). Maps to the why-tag.
+    /// Scoped to iter-driver traits ONLY — a `Clone`/`Display` generic dispatch is pure-std (no flood).
+    generic_iter_unknown: HashMap<LocalDefId, String>,
     /// PER-CALL-SITE closure flow: for each *calling* fn
     /// that passes a LOCAL named fn at argument `i` of HOF `F`, the targets it passed THERE. Lets the
     /// callback's effects flow to the SPECIFIC caller that passed it (`handler_io -> fetch_remote`),
@@ -337,6 +345,7 @@ impl Candor {
             fs_paths_direct: HashMap::new(),
             db_tables_direct: HashMap::new(),
             param_calls: HashMap::new(),
+            generic_iter_unknown: HashMap::new(),
             callback_sites: HashMap::new(),
             callback_site_unknown: HashSet::new(),
             calls: HashMap::new(),
@@ -998,6 +1007,26 @@ fn is_iter_driver_trait(crate_name: &str, trait_name: &str) -> bool {
         && matches!(trait_name, "Iterator" | "IntoIterator" | "FromIterator" | "Sum" | "Product")
 }
 
+/// True when an iter-driver call (`it.for_each(..)`, `it.sum()`) is dispatched on a receiver whose type
+/// is (or wraps, e.g. `Map<I, _>`) a GENERIC PARAM (`I` in `fn run<I: Iterator>(it: I)`) — the silent-pure
+/// generic-receiver shape. Standalone the impl can't be pinned (the concrete `I` could be a LOCAL
+/// effectful iterator), so the enclosing fn carries a report-only honest `Unknown`. A CONCRETE receiver
+/// (`Rows`, `vec.iter()`) is `false` here — HOLE 1 / the call-site monomorphization handle those — so this
+/// never floods ordinary iteration; and it's gated to iter-driver traits, so `Clone`/`Display` on a
+/// generic param (pure-std) is untouched.
+fn iter_receiver_is_generic_param<'tcx>(recv_ty: rustc_middle::ty::Ty<'tcx>) -> bool {
+    use rustc_middle::ty::TyKind;
+    // A generic-param (`I`) or associated-projection (`I::IntoIter`) anywhere in the receiver type — bare
+    // (`it: I`) or wrapped by a std adapter (`Map<I, F>`, `Chain<I, J>`) — means the concrete iterator
+    // can't be pinned at this site. (`Ty::walk` yields every nested generic arg.)
+    recv_ty.peel_refs().walk().any(|g| {
+        matches!(
+            g.as_type().map(|t| t.kind()),
+            Some(TyKind::Param(..)) | Some(TyKind::Alias(..))
+        )
+    })
+}
+
 /// Find the LOCAL effectful trait impls a std iterator-combinator call hides (HOLE 1). The call
 /// resolved to a std `Iterator`/`IntoIterator`/`Sum`/`Product`/`FromIterator` method whose body pulls
 /// the receiver's `Iterator::next` / `IntoIterator::into_iter` — a LOCAL impl candor can't see THROUGH
@@ -1014,7 +1043,6 @@ fn iter_combinator_local_edges<'tcx>(
     trait_did: DefId,
     callee_did: DefId,
 ) -> Option<CallbackEdges> {
-    use rustc_middle::ty::TyKind;
     let tk = cx.tcx.crate_name(trait_did.krate);
     let ti = cx.tcx.item_name(trait_did);
     if !is_iter_driver_trait(tk.as_str(), ti.as_str()) {
@@ -1033,9 +1061,33 @@ fn iter_combinator_local_edges<'tcx>(
     let method = cx.tcx.item_name(callee_did);
 
     // Peel std iterator adapters (`Map<I, F>` → `I`) down to the underlying user iterator ADT(s), then
-    // collect each one's LOCAL `Iterator::next` / `IntoIterator::into_iter` impl method. Bounded depth
-    // against any pathological adapter nesting. A single receiver can carry several inner iterators
-    // (`Chain<A, B>`, `Zip<A, B>`), so we walk a small worklist, not a single chain.
+    // collect each one's LOCAL `Iterator::next` / `IntoIterator::into_iter` impl method (shared with the
+    // generic-receiver recovery, which peels the same way on the monomorphized Self type).
+    let (edges, saw_local_iter) = peel_iter_to_local_next_seen(cx, recv_ty.peel_refs());
+    if !edges.is_empty() {
+        return Some(CallbackEdges::Local(edges));
+    }
+    // A driver method WAS hit. If the receiver contained a LOCAL iterator type but we couldn't pin its
+    // `next` impl, be honest (`Unknown`) rather than silently pure. A wholly-std receiver (`vec.iter()`,
+    // `0..n`) contributed no local ADT — correctly pure, no Unknown.
+    if saw_local_iter {
+        return Some(CallbackEdges::Unknown(format!("iter-combinator:{method}")));
+    }
+    None
+}
+
+/// Peel std iterator adapters (`Map<I, F>` → `I`, `Chain<A, B>` → `A`,`B`) off `recv_ty` down to the
+/// underlying user iterator ADT(s) and resolve each one's LOCAL `Iterator::next` / `IntoIterator::
+/// into_iter` impl method — the iterator's effectful body a std combinator/consumer drives internally.
+/// Bounded depth against pathological adapter nesting; a single receiver can carry several inner
+/// iterators, so a small worklist. Returns the local edges plus whether ANY local iterator ADT was seen
+/// (so the caller can choose honest `Unknown` over silent-pure when no impl could be pinned). A wholly-std
+/// receiver (`vec.iter()`, `0..n`) yields `(empty, false)` — pure, contributes nothing, no Unknown flood.
+fn peel_iter_to_local_next_seen<'tcx>(
+    cx: &LateContext<'tcx>,
+    recv_ty: rustc_middle::ty::Ty<'tcx>,
+) -> (Vec<DefId>, bool) {
+    use rustc_middle::ty::TyKind;
     let mut edges: Vec<DefId> = Vec::new();
     let mut saw_local_iter = false;
     let mut work = vec![(recv_ty.peel_refs(), 0u32)];
@@ -1050,14 +1102,11 @@ fn iter_combinator_local_edges<'tcx>(
         if is_std_iter_adapter(adt_name.as_str())
             && matches!(adt_krate.as_str(), "core" | "std" | "alloc")
         {
-            // A std adapter — descend into its iterator type argument(s) (the first type arg is the
-            // wrapped iterator; further iterator args, e.g. `Chain`/`Zip`, are also peeled).
             for arg in args.types() {
                 work.push((arg.peel_refs(), depth + 1));
             }
             continue;
         }
-        // A user (or other) ADT: resolve its LOCAL `Iterator::next` / `IntoIterator::into_iter` impls.
         if adt_did.is_local() {
             saw_local_iter = true;
             for (sym, trait_lang) in
@@ -1069,16 +1118,16 @@ fn iter_combinator_local_edges<'tcx>(
             }
         }
     }
-    if !edges.is_empty() {
-        return Some(CallbackEdges::Local(edges));
-    }
-    // A driver method WAS hit. If the receiver contained a LOCAL iterator type but we couldn't pin its
-    // `next` impl, be honest (`Unknown`) rather than silently pure. A wholly-std receiver (`vec.iter()`,
-    // `0..n`) contributed no local ADT — correctly pure, no Unknown.
-    if saw_local_iter {
-        return Some(CallbackEdges::Unknown(format!("iter-combinator:{method}")));
-    }
-    None
+    (edges, saw_local_iter)
+}
+
+/// As `peel_iter_to_local_next_seen` but returns only the local `next`/`into_iter` edges — used by the
+/// generic-receiver recovery, where the monomorphized Self type (`Rows`) replaces a `Param`.
+fn peel_iter_to_local_next<'tcx>(
+    cx: &LateContext<'tcx>,
+    recv_ty: rustc_middle::ty::Ty<'tcx>,
+) -> Vec<DefId> {
+    peel_iter_to_local_next_seen(cx, recv_ty).0
 }
 
 /// Resolve the concrete LOCAL impl method named `method_sym` of the std iterator trait `trait_lang`
@@ -1215,6 +1264,229 @@ fn fmt_impl_for<'tcx>(
     }
     let did = inst.def_id();
     did.is_local().then_some(did)
+}
+
+/// MONOMORPHIZATION-AWARE resolution of a generic callee's internal generic trait-method dispatches —
+/// the soundness recovery for the silent-pure GENERIC-RECEIVER hole. When `caller` calls a LOCAL generic
+/// fn/method `callee_did` with CONCRETE type args (`run_generic::<Rows>(Rows(3))`), the callee's body may
+/// drive a trait method on one of its OWN generic params (`it.for_each(..)` → internally `<I as
+/// Iterator>::next`). Inside the callee `I` is an unresolved `TyKind::Param`, so candor reports the callee
+/// pure for ITSELF — and the effect in the CONCRETE impl (`<Rows as Iterator>::next`, local + effectful) is
+/// silently lost at every monomorphizing call site too.
+///
+/// At THIS call site the concrete substs are known. We recover them (`run_generic`'s `[Rows]`), then walk
+/// the callee's HIR body for trait-method calls (`MethodCall`/UFCS `Call`/overloaded operators), and for
+/// each take the callee's OWN generic args for that inner call (expressed in terms of the callee's
+/// params, e.g. `[I]` for `<I as Iterator>::next`) and INSTANTIATE them with the call-site substs —
+/// `<I as Iterator>::next` under `I=Rows` becomes `<Rows as Iterator>::next`. Resolving that pinned
+/// instance lands on the LOCAL `Rows::next` impl → a precise edge from `caller`, so its `Fs` propagates.
+///
+/// PRECISION, NO FABRICATION, NO FLOOD: we edge ONLY where the pinned instance resolves to a LOCAL impl.
+/// A generic consumer used with a std/pure iterator (`run_generic(0..3)` / `run_generic(vec.iter())`)
+/// resolves `<Range as Iterator>::next` / `<slice::Iter as Iterator>::next` NON-local → no edge → stays
+/// pure (no fabricated effect it can't reach). A `g<T: Clone>(t){ t.clone() }` called with `T=u32`
+/// resolves `<u32 as Clone>::clone` non-local → no edge → no Unknown flood. Only a CONCRETE local
+/// effectful impl reached through the substitution gains an edge. We also RECURSE through an intermediate
+/// generic free-fn the callee forwards to (`forward<J>(j){ run_generic(j) }`): the inner `run_generic(j)`
+/// call's substs are monomorphized under THIS site's substs and re-walked, so a chain of generic
+/// forwarders down to the iterator driver is still resolved (bounded depth + a visited set against
+/// cycles). Returns the LOCAL impl methods to edge `caller` to. Teeth: soundness/gen.py `generic_iter` form.
+fn generic_callee_local_edges<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    callee_did: DefId,
+) -> Vec<DefId> {
+    let mut out: Vec<DefId> = Vec::new();
+    let Some(callee_local) = callee_did.as_local() else { return out };
+    if !matches!(cx.tcx.def_kind(callee_did), DefKind::Fn | DefKind::AssocFn) {
+        return out;
+    }
+    if !cx.tcx.generics_of(callee_did).requires_monomorphization(cx.tcx) {
+        return out;
+    }
+    // The CONCRETE call-site substs that pin the callee's generic params (`run_generic`'s `[Rows]`). A
+    // `Call`'s substs ride the callee path's `FnDef`; a `MethodCall`'s ride the expr's `node_args`.
+    let Some(caller_typeck) = cx.maybe_typeck_results() else { return out };
+    let site_args = match expr.kind {
+        ExprKind::Call(callee, _) => match caller_typeck.expr_ty(callee).kind() {
+            rustc_middle::ty::TyKind::FnDef(_, substs) => *substs,
+            _ => return out,
+        },
+        ExprKind::MethodCall(..) => caller_typeck.node_args(expr.hir_id),
+        _ => return out,
+    };
+    let mut visited = std::collections::HashSet::new();
+    collect_generic_callee_edges(cx, callee_local, site_args, 0, &mut visited, &mut out);
+    out.dedup();
+    out
+}
+
+/// True if any type in `args` is (or contains) a still-generic `Param` — the substitution didn't fully
+/// pin the instance, so it can't resolve to a concrete impl (it'd land on the bodyless trait method).
+fn args_still_generic<'tcx>(args: rustc_middle::ty::GenericArgsRef<'tcx>) -> bool {
+    args.iter().any(|a| {
+        a.as_type().is_some_and(|t| {
+            t.walk()
+                .any(|g| matches!(g.as_type().map(|x| x.kind()), Some(rustc_middle::ty::TyKind::Param(..))))
+        })
+    })
+}
+
+/// The recursive core of `generic_callee_local_edges`: walk LOCAL generic fn `callee`'s HIR body under the
+/// CONCRETE `site_args`, resolving each internal generic trait-method dispatch (and peeling iter-driver
+/// std defaults to the LOCAL `next`/`into_iter`), and recursing through an intermediate generic free-fn the
+/// body forwards to. Bounded depth + a `visited` set of `(fn, args)` so a recursive/mutually-recursive
+/// generic forwarder can't loop. Pushes LOCAL impl edges to `out`.
+fn collect_generic_callee_edges<'tcx>(
+    cx: &LateContext<'tcx>,
+    callee: rustc_span::def_id::LocalDefId,
+    site_args: rustc_middle::ty::GenericArgsRef<'tcx>,
+    depth: u32,
+    visited: &mut std::collections::HashSet<(rustc_span::def_id::LocalDefId, String)>,
+    out: &mut Vec<DefId>,
+) {
+    use rustc_hir::intravisit::Visitor;
+    if depth > 6 {
+        return;
+    }
+    // Nothing concrete to pin (the caller is itself generic and merely forwards its own param) — bail.
+    if args_still_generic(site_args) {
+        return;
+    }
+    if !cx.tcx.has_typeck_results(callee) {
+        return;
+    }
+    // Cycle/redundancy guard, keyed by (fn, monomorphized args).
+    if !visited.insert((callee, format!("{site_args:?}"))) {
+        return;
+    }
+    let callee_typeck = cx.tcx.typeck(callee);
+    let env = cx.typing_env();
+
+    // Monomorphize a callee-internal call's own generic args (`node_args`, bound by the callee's generics)
+    // with the concrete `site_args` for THIS instantiation.
+    let mono = |inner_args: rustc_middle::ty::GenericArgsRef<'tcx>| {
+        cx.tcx
+            .try_instantiate_and_normalize_erasing_regions(
+                site_args,
+                env,
+                rustc_middle::ty::EarlyBinder::bind(inner_args),
+            )
+            .unwrap_or(inner_args)
+    };
+    // Resolve an instance under the analysis env, retrying with opaques revealed.
+    let resolve = |did: DefId, args: rustc_middle::ty::GenericArgsRef<'tcx>| {
+        rustc_middle::ty::Instance::try_resolve(cx.tcx, env, did, args)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                let env2 = env.with_post_analysis_normalized(cx.tcx);
+                rustc_middle::ty::Instance::try_resolve(cx.tcx, env2, did, args).ok().flatten()
+            })
+    };
+
+    // A callee-internal trait-method dispatch (`<I as Iterator>::next`, an operator, a `<T as MyTrait>::m`):
+    // monomorphize + resolve. LOCAL impl → edge; a non-local iter-driver default → peel the (now concrete)
+    // Self type to the user iterator's LOCAL `next`/`into_iter` (the HOLE-1 recovery on a monomorphized Self).
+    let mut on_trait_call = |method_did: DefId, inner_args: rustc_middle::ty::GenericArgsRef<'tcx>| {
+        if !matches!(cx.tcx.def_kind(method_did), DefKind::Fn | DefKind::AssocFn) {
+            return;
+        }
+        let Some(trait_did) = cx.tcx.trait_of_assoc(method_did) else { return };
+        let mono_args = mono(inner_args);
+        if args_still_generic(mono_args) {
+            return;
+        }
+        if let Some(inst) = resolve(method_did, mono_args) {
+            if !matches!(inst.def, rustc_middle::ty::InstanceKind::Virtual(..)) {
+                let did = inst.def_id();
+                if did.is_local() && did != method_did {
+                    out.push(did);
+                    return;
+                }
+            }
+        }
+        // Non-local resolution: only an iter-driver default hides a LOCAL `next` behind it. Peel the
+        // concrete Self (`mono_args[0]`) to the user iterator's local `next`/`into_iter` (no fabrication
+        // for a wholly-std receiver, no flood for `Clone`/`Display`).
+        let tk = cx.tcx.crate_name(trait_did.krate);
+        let ti = cx.tcx.item_name(trait_did);
+        if is_iter_driver_trait(tk.as_str(), ti.as_str()) {
+            if let Some(self_ty) = mono_args.types().next() {
+                for m in peel_iter_to_local_next(cx, self_ty) {
+                    out.push(m);
+                }
+            }
+        }
+    };
+
+    // A callee-internal FREE-fn call. If it's a TRAIT method via UFCS, treat it as a trait dispatch. If
+    // it's an ordinary generic LOCAL fn the body FORWARDS to (`forward<J>(j){ run_generic(j) }`), recurse
+    // under its monomorphized substs so a chain of generic forwarders down to the driver is resolved.
+    let mut forward_targets: Vec<(rustc_span::def_id::LocalDefId, rustc_middle::ty::GenericArgsRef<'tcx>)> =
+        Vec::new();
+    {
+        struct V<'a, 'tcx, FT, FF> {
+            tcx: TyCtxt<'tcx>,
+            callee_typeck: &'a rustc_middle::ty::TypeckResults<'tcx>,
+            on_trait: FT,
+            on_free: FF,
+        }
+        impl<'a, 'tcx, FT, FF> Visitor<'tcx> for V<'a, 'tcx, FT, FF>
+        where
+            FT: FnMut(DefId, rustc_middle::ty::GenericArgsRef<'tcx>),
+            FF: FnMut(DefId, rustc_middle::ty::GenericArgsRef<'tcx>),
+        {
+            fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+                match e.kind {
+                    ExprKind::MethodCall(..)
+                    | ExprKind::Binary(..)
+                    | ExprKind::Unary(..)
+                    | ExprKind::Index(..)
+                    | ExprKind::AssignOp(..) => {
+                        if let Some(m) = self.callee_typeck.type_dependent_def_id(e.hir_id) {
+                            (self.on_trait)(m, self.callee_typeck.node_args(e.hir_id));
+                        }
+                    }
+                    // A `Call` to a `FnDef`: a UFCS trait method (→ trait dispatch), or an ordinary free
+                    // fn the body forwards to (→ recurse if it's a LOCAL generic fn). The `FnDef`'s substs
+                    // are the call's generic args.
+                    ExprKind::Call(callee, _) => {
+                        if let rustc_middle::ty::TyKind::FnDef(did, substs) =
+                            self.callee_typeck.expr_ty(callee).kind()
+                        {
+                            if self.tcx.trait_of_assoc(*did).is_some() {
+                                (self.on_trait)(*did, substs);
+                            } else {
+                                (self.on_free)(*did, substs);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                rustc_hir::intravisit::walk_expr(self, e);
+            }
+        }
+        let on_free = |did: DefId, substs: rustc_middle::ty::GenericArgsRef<'tcx>| {
+            if let Some(local) = did.as_local() {
+                if cx.tcx.generics_of(did).requires_monomorphization(cx.tcx) {
+                    forward_targets.push((local, mono(substs)));
+                }
+            }
+        };
+        let body = cx.tcx.hir_body_owned_by(callee);
+        let mut v = V {
+            tcx: cx.tcx,
+            callee_typeck,
+            on_trait: &mut on_trait_call,
+            on_free,
+        };
+        v.visit_expr(body.value);
+    }
+    // Recurse into the generic forwarders found, under their monomorphized substs.
+    for (next_fn, next_args) in forward_targets {
+        collect_generic_callee_edges(cx, next_fn, next_args, depth + 1, visited, out);
+    }
 }
 
 /// For a call already classified as `Fs`, the access *kind* its leaf verb implies: `["read"]`,
@@ -1828,7 +2100,30 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         });
                     }
                 }
-                None => {}
+                // No CONCRETE local iterator at this site. If the receiver is a GENERIC PARAM over an
+                // iter-driver trait (`fn run<I: Iterator>(it: I) { it.for_each(..) }`), the concrete `I`
+                // can't be pinned standalone — it could be a LOCAL effectful iterator. Record the
+                // enclosing fn for a REPORT-ONLY honest `Unknown` (injected post-fixpoint, NON-propagating)
+                // so it's honest standalone without re-polluting the precise local callers that
+                // monomorphize it. Scoped to iter-driver traits + a generic receiver: ordinary iteration
+                // (concrete/std receiver) and `Clone`/`Display` generic dispatch are untouched — no flood.
+                None => {
+                    let tk = cx.tcx.crate_name(td.krate);
+                    let ti = cx.tcx.item_name(td);
+                    if is_iter_driver_trait(tk.as_str(), ti.as_str()) {
+                        if let ExprKind::MethodCall(_, receiver, _, _) = expr.kind {
+                            if let Some(typeck) = cx.maybe_typeck_results() {
+                                let recv_ty = typeck.expr_ty_adjusted(receiver);
+                                if iter_receiver_is_generic_param(recv_ty) {
+                                    let method = cx.tcx.item_name(def_id);
+                                    self.generic_iter_unknown
+                                        .entry(caller)
+                                        .or_insert_with(|| format!("generic-iter:{method}"));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1841,6 +2136,18 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             for e in edges {
                 add_edge(self, e);
             }
+        }
+
+        // GENERIC-RECEIVER hole — a LOCAL generic callee whose body drives a trait method on one of its
+        // OWN generic params (`run_generic::<I>(it){ it.for_each(..) }` → internally `<I as Iterator>::
+        // next`). Inside the callee `I` is an unresolved `Param`, so candor reports it pure for itself and
+        // the CONCRETE impl's effect is lost at every monomorphizing call site too. At THIS site the
+        // concrete substs are known (`I=Rows`): re-resolve the callee's internal generic trait dispatches
+        // UNDER those substs (`<Rows as Iterator>::next` → the LOCAL `Rows::next`) and edge `caller` to
+        // each pinned LOCAL impl — precise, never fabricated (a std/pure iterator resolves non-local → no
+        // edge), no flood (`<u32 as Clone>::clone` resolves non-local → no edge). Adds soundness only.
+        for e in generic_callee_local_edges(cx, expr, def_id) {
+            add_edge(self, e);
         }
 
         // Closure-flow bookkeeping: record what's passed at each arg position of a FREE fn call, so a
@@ -2189,6 +2496,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         for hof in &hof_param_unknown {
             eff.entry(*hof).or_default().insert(UNKNOWN);
         }
+        // NON-PROPAGATING generic-iterator `Unknown`: a fn driving an iter-driver trait method on its OWN
+        // generic param (`fn run<I: Iterator>(it: I) { it.for_each(..) }`) can't pin the concrete `I`
+        // standalone (it could be a LOCAL effectful iterator), so it stays honest in its own report.
+        // Injected AFTER the fixpoint, exactly like the HOF case, so it never flows back down a precise
+        // local caller that already monomorphized it to the concrete impl (`caller`'s precise `Fs`).
+        let generic_iter_unknown = std::mem::take(&mut self.generic_iter_unknown);
+        for (f, why) in &generic_iter_unknown {
+            eff.entry(*f).or_default().insert(UNKNOWN);
+            self.unknown_why.entry(*f).or_default().insert(why.clone());
+        }
 
         // Filesystem read/write detail rides the SAME propagation helper, in a separate set that never
         // touches `eff`:  fs[f] = fs_direct[f] ∪ ⋃ { fs[g] : g ∈ calls[f] }.  A function that reaches
@@ -2425,6 +2742,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // `unknown_why` origin tag is emitted — matching the SPEC §4 trust contract for an opaque
             // self-invocation.
             if hof_param_unknown.contains(&f) {
+                direct.insert(UNKNOWN);
+            }
+            // Same for a generic-iterator driver: its `Unknown` ORIGINATES in this fn's body (driving an
+            // iter-driver method on its own generic param), kept out of `self.direct` so it doesn't
+            // propagate to precise callers. Re-add for display/JSON so the `unknown_why` origin tag
+            // (`generic-iter:<method>`) is emitted.
+            if generic_iter_unknown.contains_key(&f) {
                 direct.insert(UNKNOWN);
             }
             let has_unknown = effs.contains(UNKNOWN);
