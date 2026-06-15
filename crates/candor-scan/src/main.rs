@@ -857,12 +857,27 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Try(t) => self.resolve_recv_type(&t.expr),
             syn::Expr::Await(a) => self.resolve_recv_type(&a.base),
             syn::Expr::MethodCall(m) => {
-                // Walk through the chain to the base receiver's type. We deliberately do NOT consult the
-                // return-type index by method NAME here: a method name doesn't identify the method, so a
-                // single crate-wide `fn conn() -> redis::Connection` would otherwise hijack every
-                // `x.conn().get()` on an unrelated `x`, fabricating a Db effect. The return index is used
-                // only for free-function factory calls (the `Expr::Call` arm via `ctor_type`), where the
-                // name does identify the function.
+                // A method that returns a DIFFERENT (std) type — an iterator / slice / string / view
+                // producer — breaks the builder-chain assumption that the chain stays one crate's type.
+                // After `.iter()`/`.get_argv()`/`.as_slice()` the value is a std iterator/slice, so
+                // attributing the OUTER leaf to the BASE crate's type fabricates: `mmap.iter().map()` →
+                // `Mmap::map` → Fs, `cmd.get_argv().len()` → `CommandBuilder::len` → Exec (adversarial
+                // review). These names are UNIVERSALLY non-`Self` (no builder uses them as a fluent step,
+                // unlike `get`/`post`/`arg`/`bind`), so a hard type-change here → the chain's type is
+                // unknown → honest miss (the safe direction), never the base's coarse/whole-crate rule.
+                if matches!(
+                    m.method.to_string().as_str(),
+                    "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice"
+                        | "as_bytes" | "as_str" | "to_vec" | "keys" | "values" | "values_mut"
+                        | "chars" | "bytes" | "get_argv" | "into_inner" | "lines"
+                ) {
+                    return None;
+                }
+                // Otherwise walk through the chain to the base receiver's type. We deliberately do NOT
+                // consult the return-type index by method NAME here: a method name doesn't identify the
+                // method, so a single crate-wide `fn conn() -> redis::Connection` would otherwise hijack
+                // every `x.conn().get()` on an unrelated `x`, fabricating a Db effect. The return index
+                // is used only for free-function factory calls (the `Expr::Call` arm via `ctor_type`).
                 self.resolve_recv_type(&m.receiver)
             }
             syn::Expr::Path(p) => {
