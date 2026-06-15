@@ -79,7 +79,8 @@ effect auditor — phoning home would make it perform the exact effect it exists
 version check is *your* job, not the tool's. You have network access; it doesn't.
 
 ```sh
-candor-scan --version                                                   # what's installed, e.g. "candor-scan 0.3.4"
+candor-scan --version          # offline: "candor-scan <ver> (spec <SPEC>)" + the upgrade line; no network.
+# Then YOU (you have network; candor doesn't) compare against crates.io.
 # crates.io REQUIRES a User-Agent header (it rejects requests without one):
 curl -s -H 'User-Agent: candor-version-check' https://crates.io/api/v1/crates/candor-scan \
   | grep -o '"max_version":"[^"]*"'                                      # -> "max_version":"0.3.4"
