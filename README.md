@@ -144,6 +144,8 @@ candor-scan .                      # writes .candor/report.<crate>.scan.json   (
                                    # (a workspace root: one report per member, same prefix)
 ```
 
+**Staying current:** check your installed version and upgrade — [candor/AGENTS.md §2a](https://github.com/tombaldwin/candor/blob/main/AGENTS.md#2a-staying-current--check-the-version-upgrade). `candor-scan --version` prints the build, the spec, and the upgrade one-liner (offline; candor never phones home).
+
 It walks the crate's `.rs` files, parses them with [`syn`](https://docs.rs/syn), resolves `use`-aliased
 call paths, and classifies them through the **same [`candor-classify`](crates/candor-classify) the lint
 uses** — one source of truth, so the two backends can't drift on what counts as an effect. It needs
