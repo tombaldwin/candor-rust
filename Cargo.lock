@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "candor"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "candor-classify",
  "candor-report",
