@@ -2610,6 +2610,63 @@ fn main() {
     }
 }
 
+/// `true` iff semver string `a` is strictly newer than `b`, compared as numeric dotted tuples
+/// (so "0.10.0" > "0.9.9"). Non-numeric / missing components compare as 0; trailing components are
+/// padded. Pre-release / build metadata is ignored (this only ever sees crates.io max_stable_version
+/// and our own CARGO_PKG_VERSION, both plain x.y.z).
+fn version_gt(a: &str, b: &str) -> bool {
+    fn parts(s: &str) -> Vec<u64> {
+        s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect()
+    }
+    let (pa, pb) = (parts(a), parts(b));
+    let n = pa.len().max(pb.len());
+    for i in 0..n {
+        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// Fetch crates.io's `max_stable_version` for candor-scan, or `None` on ANY failure. Shells out to
+/// curl (no HTTP/JSON crate in our dep tree, by design) with a hard 4s timeout and the User-Agent
+/// crates.io requires. Failure modes — curl absent, non-2xx (curl -f → non-zero), timeout, missing
+/// field — all fold to `None`; the caller turns that into a graceful stderr notice.
+fn fetch_latest_stable() -> Option<String> {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-sf",
+            "--max-time",
+            "4",
+            "-H",
+            "User-Agent: candor-scan (https://github.com/tombaldwin/candor-rust)",
+            "https://crates.io/api/v1/crates/candor-scan",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&out.stdout);
+    parse_max_stable_version(&body)
+}
+
+/// Pull the value of `"max_stable_version":"X.Y.Z"` out of a crates.io crate response by simple
+/// string search — deliberately NOT a JSON parse, to keep serde_json/HTTP crates out of candor-scan.
+fn parse_max_stable_version(body: &str) -> Option<String> {
+    let key = "\"max_stable_version\":\"";
+    let start = body.find(key)? + key.len();
+    let rest = &body[start..];
+    let end = rest.find('"')?;
+    let v = &rest[..end];
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
 fn scan_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = ".".to_string();
@@ -2629,7 +2686,32 @@ fn scan_main() {
             "--policy" => policy_path = it.next().cloned(),
             "--deps" => deps_mode = true,
             "-V" | "--version" => {
-                println!("candor-scan {}", env!("CARGO_PKG_VERSION"));
+                // Two lines, fully OFFLINE: the installed build + the spec contract it speaks, then
+                // the upgrade incantation. <spec> reuses candor_report::SPEC_VERSION — the same source
+                // that stamps the report envelope's `spec` field, so the two can never drift.
+                println!("candor-scan {} (spec {})", env!("CARGO_PKG_VERSION"), candor_report::SPEC_VERSION);
+                println!("upgrade: cargo install candor-scan --force");
+                return;
+            }
+            "--check-update" => {
+                // OPT-IN network check — the ONLY arm that touches the network. candor's own policy is
+                // `deny Net`; this is the agent's affordance, not the scanner's, so it degrades to a
+                // one-line stderr notice on ANY failure (no curl, timeout, non-2xx, garbage JSON) and
+                // still exits 0. Never hangs (hard 4s timeout), never panics, never prints a backtrace.
+                println!("candor-scan {} (spec {})", env!("CARGO_PKG_VERSION"), candor_report::SPEC_VERSION);
+                let cur = env!("CARGO_PKG_VERSION");
+                match fetch_latest_stable() {
+                    Some(latest) if version_gt(&latest, cur) => {
+                        println!("candor-scan {cur} -> {latest} available");
+                        println!("run: cargo install candor-scan --force");
+                    }
+                    Some(latest) => {
+                        println!("up to date (latest is {latest})");
+                    }
+                    None => {
+                        eprintln!("candor-scan: could not reach crates.io to check for updates");
+                    }
+                }
                 return;
             }
             // The agent contract for THE INSTALLED VERSION, embedded at build time — doc and
@@ -2671,7 +2753,8 @@ fn scan_main() {
                 println!("                    unclassified call into a crate a report covers inherits that");
                 println!("                    function's effects + literal surfaces (spec §2). Scan the dep");
                 println!("                    once, chain it everywhere; the κ ledger names what to scan next.");
-                println!("  -V, --version     print version");
+                println!("  -V, --version     print the installed build + spec contract (offline) and the upgrade line");
+                println!("  --check-update    print the version, then ask crates.io (one 4s GET) if a newer build exists");
                 println!();
                 println!("Syntactic, so it under-reports vs the full candor nightly lint (no Unknown). It never");
                 println!("fabricates an effect. See https://github.com/tombaldwin/candor");
@@ -5172,5 +5255,28 @@ trait G {
                  reuse stale FnInfos. Fold `{name}` into decl_index_digest().",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::{parse_max_stable_version, version_gt};
+
+    #[test]
+    fn version_gt_cases() {
+        assert!(!version_gt("0.5.0", "0.5.0")); // equal → not greater
+        assert!(version_gt("0.5.1", "0.5.0")); // patch newer
+        assert!(version_gt("0.6.0", "0.5.9")); // minor newer beats higher patch
+        assert!(!version_gt("0.4.9", "0.5.0")); // older
+        assert!(version_gt("0.10.0", "0.9.9")); // numeric, not lexical
+        assert!(version_gt("1.0.0", "0.99.99")); // major newer
+    }
+
+    #[test]
+    fn parse_max_stable() {
+        let body = r#"{"crate":{"name":"candor-scan","max_stable_version":"0.5.0","max_version":"0.5.0"}}"#;
+        assert_eq!(parse_max_stable_version(body).as_deref(), Some("0.5.0"));
+        assert_eq!(parse_max_stable_version("{}"), None);
+        assert_eq!(parse_max_stable_version(r#"{"max_stable_version":""}"#), None);
     }
 }
