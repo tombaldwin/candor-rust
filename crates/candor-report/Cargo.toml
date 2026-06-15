@@ -1,6 +1,6 @@
 [package]
 name = "candor-report"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Shared candor report types + parsing (no rustc_private) — used by the lint and the CLI."
