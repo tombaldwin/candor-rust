@@ -10,9 +10,9 @@ tracing call chains by hand or guessing what code does.
 > copy, which can describe a different candor than the one you are running. If the receipt or
 > `-V` shows the engine version changed since you last read it, re-run `--agents`.
 
-## 0. Check what's already installed
+## 0. Check what's already installed — and tell the user
 
-Before installing anything:
+Before installing or scanning anything:
 
 ```sh
 command -v candor-scan && candor-scan -V          # the published stable scanner?
@@ -20,7 +20,18 @@ ls -d /tmp/candor ~/.candor 2>/dev/null            # an existing engine clone?
 command -v cargo-candor && echo "cargo candor available"
 ```
 
-Use what's there (§1a tells you how to check it's current). Otherwise pick a path in §1.
+**If candor is already present** (a `.candor/` report dir, or `candor-scan` on PATH), do *not* just
+silently scan with it — surface it to the user first:
+
+1. Run `candor-scan --version` (offline) and **tell the user, plainly, which version this project is
+   on** — e.g. "This project is on candor-scan 0.5.1 (spec 0.5)." On a build too old for the two-line
+   `--version`, read `candor.version` / `candor.spec` from an existing `.candor/report*.json` and
+   report those instead.
+2. Then do the §1a currency check (candor can't phone home; *you* have network) and, if it's behind,
+   **ask before upgrading** — never upgrade silently. See §1a.
+
+If candor is current, or the user declines the upgrade, proceed with what's there. Otherwise pick a
+path in §1 and install normally.
 
 ## 1. Get a report — two backends, one JSON shape
 
@@ -86,7 +97,10 @@ curl -s -H 'User-Agent: candor-version-check' https://crates.io/api/v1/crates/ca
   | grep -o '"max_version":"[^"]*"'                                      # -> "max_version":"0.3.4"
 ```
 
-If they differ, upgrade by the path you installed with:
+If they differ, **ask the user before upgrading** — e.g. "candor-scan 0.5.2 is available (you're on
+0.5.1) — upgrade before I scan?" — and only run the upgrade if they agree. Never upgrade silently:
+the engine version is part of the result's provenance (the report's `version` field), so a bump the
+user didn't sanction quietly changes what the scan means. Upgrade by the path you installed with:
 
 - **Path A** (`cargo install candor-scan`): `cargo install candor-scan --force`.
 - **Path B** (a clone at `/tmp/candor` or `~/.candor`): `cargo candor update` — it runs
