@@ -43,7 +43,10 @@ jobs:
       # NOT gated: this code is hand-aligned (annotated comment columns, intentional breaks) and a blind
       # reformat would churn thousands of cosmetic lines; clippy catches the anti-patterns that matter.
       - name: Clippy (stable, -D warnings)
-        run: cargo clippy -p candor-report -p candor-query -p candor-classify -p candor-scan --all-targets -- -D warnings
+        # +stable: the repo's `rust-toolchain` pins a nightly (for the dylint lib) that carries no clippy
+        # component, so a bare `cargo clippy` resolves to it and errors. Pin clippy to stable, like the
+        # build/scanner steps above.
+        run: cargo +stable clippy -p candor-report -p candor-query -p candor-classify -p candor-scan --all-targets -- -D warnings
 
       - name: Test (unit + smoke)
         run: cargo test --workspace
