@@ -96,6 +96,21 @@ def edge_forms(callee, i=0):
         # OVERLOADED DEREF: `*v` is `ExprKind::Unary(Deref)` → `Deref::deref`; same root cause.
         "deref":      (f"{{ let v = Dr{i:02d}(()); let _ = *v; }}", [], [], [
             f"struct Dr{i:02d}(());\nimpl std::ops::Deref for Dr{i:02d} {{ type Target = (); fn deref(&self) -> &() {{ {callee}(); &self.0 }} }}"]),
+        # IMPLICIT AUTO-DEREF: a method call on the wrapper (`w.tgt()`) auto-derefs `Aw -> AwI`, inserting
+        # an IMPLICIT `<Aw as Deref>::deref` as an `Adjust::Deref(Overloaded(..))` EXPRESSION ADJUSTMENT —
+        # NOT a `Call`/`MethodCall`/`Unary(Deref)` HIR node. The effectful local `deref` impl reached only
+        # this way was reported neither with its effect nor `Unknown`: silently pure (the smart-pointer
+        # hole). candor must walk `expr_adjustments` and edge to the overloaded deref. Teeth for the
+        # implicit-Deref fix.
+        "autoderef":  (f"{{ let w = Aw{i:02d}(AwI{i:02d}); w.tgt(); }}", [], [], [
+            f"struct AwI{i:02d}; impl AwI{i:02d} {{ fn tgt(&self) {{}} }}",
+            f"struct Aw{i:02d}(AwI{i:02d});\nimpl std::ops::Deref for Aw{i:02d} {{ type Target = AwI{i:02d}; fn deref(&self) -> &AwI{i:02d} {{ {callee}(); &self.0 }} }}"]),
+        # DEREF-COERCION AT A CALL SITE: passing `&Cw` where `&CwI` is expected coerces via an IMPLICIT
+        # `<Cw as Deref>::deref` adjustment at the ARG expression — again no HIR call node. Same hole as
+        # `autoderef` but reached through coercion rather than method auto-deref.
+        "deref_coerce": (f"{{ let w = Cw{i:02d}(CwI{i:02d}); cwtake{i:02d}(&w); }}", [], [], [
+            f"struct CwI{i:02d}; fn cwtake{i:02d}(_: &CwI{i:02d}) {{}}",
+            f"struct Cw{i:02d}(CwI{i:02d});\nimpl std::ops::Deref for Cw{i:02d} {{ type Target = CwI{i:02d}; fn deref(&self) -> &CwI{i:02d} {{ {callee}(); &self.0 }} }}"]),
         # `?` ERROR CONVERSION: the effect is reached through a custom `From<Ea> for Eb` impl invoked by
         # the `?` desugar's error path. candor sees the std `FromResidual::from_residual` call but not the
         # LOCAL `From::from` it dispatches to — so the edge must be recovered from the residual/Self types

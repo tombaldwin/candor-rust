@@ -838,6 +838,72 @@ fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: Def
     }
 }
 
+/// Where an overloaded-deref adjustment resolved, and whether to trust it as a pinned target.
+enum DerefStep {
+    /// Resolved statically to this concrete impl method (`<T as Deref>::deref` / `DerefMut::deref_mut`).
+    /// Local → real edge; non-local (std `Box`/`Rc`/`Arc`/`Pin`) → caller drops it (pure calibration).
+    Static(DefId),
+    /// The deref could not be pinned to a concrete impl (a generic/`dyn` smart pointer): honest
+    /// `Unknown`, never silent-pure.
+    Unresolved,
+}
+
+/// Recover the IMPLICIT `Deref::deref` / `DerefMut::deref_mut` calls the compiler inserts as expression
+/// ADJUSTMENTS — invisible to the HIR `ExprKind` walk. Auto-deref during method resolution (`w.ping()`
+/// where `W: Deref<Target=Inner>`), field access through a smart pointer (`s.field`), and deref-coercion
+/// at a call/arg/return/assignment site (`takes(&s)` coercing `&S → &Inner`) all desugar to overloaded
+/// `deref(_mut)` calls recorded NOT as `Call`/`MethodCall`/`Unary(Deref)` nodes but as
+/// `Adjust::Deref(DerefAdjustKind::Overloaded(OverloadedDeref))` in `typeck.expr_adjustments(expr)`. A
+/// LOCAL effectful `Deref` impl reached only this way was reported with NEITHER its effect NOR `Unknown`
+/// — silently pure (the explicit `*w` `Unary(Deref)` arm handled the visible case; this was the hole).
+///
+/// For each overloaded-deref step we resolve `<FromTy as Deref/DerefMut>::deref(_mut)` to its concrete
+/// impl via `Instance::try_resolve`, threading the from-type through the chain (a single expr can carry
+/// MULTIPLE deref steps — chained coercion `&A → &B → &C`). A LOCAL resolution is a real call edge; a
+/// non-local one (std `Box`/`Rc`/`Arc` deref) contributes nothing, matching the std-trait calibration —
+/// no fabrication; an unresolvable/generic deref is `Unresolved` (→ `Unknown`), never silent-pure.
+/// Teeth: soundness/gen.py `autoderef` form + /tmp/candor_probe p5/p5b/p5c/p8 repros.
+fn overloaded_deref_steps<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Vec<DerefStep> {
+    use rustc_middle::ty::adjustment::{Adjust, DerefAdjustKind};
+    let Some(typeck) = cx.maybe_typeck_results() else { return Vec::new() };
+    let adjustments = typeck.expr_adjustments(expr);
+    if adjustments.is_empty() {
+        return Vec::new();
+    }
+    let mut steps = Vec::new();
+    // The type FED INTO the next adjustment. Adjustments apply left-to-right starting from the expr's
+    // own (unadjusted) type; each adjustment's `.target` is the type AFTER it. An overloaded
+    // `deref(_mut)` has signature `&T -> &U`, so its `Self` (the impl's receiver type) is the pointee
+    // `T` — recovered by peeling references off the current input type.
+    let mut cur = typeck.expr_ty(expr);
+    for adj in adjustments {
+        if let Adjust::Deref(DerefAdjustKind::Overloaded(od)) = adj.kind {
+            // `<T as Deref>::deref` / `<T as DerefMut>::deref_mut` — the bodyless trait method.
+            let method_did = od.method_call(cx.tcx);
+            // Self = the pointee type T (peel the `&`/`&mut` the deref operates through).
+            let self_ty = cur.peel_refs();
+            // The Deref/DerefMut traits have a single generic param (Self); resolve to the concrete impl.
+            let gargs = cx.tcx.mk_args(&[self_ty.into()]);
+            let resolve = |env: rustc_middle::ty::TypingEnv<'tcx>| {
+                rustc_middle::ty::Instance::try_resolve(cx.tcx, env, method_did, gargs)
+                    .ok()
+                    .flatten()
+            };
+            let instance = resolve(cx.typing_env())
+                .or_else(|| resolve(cx.typing_env().with_post_analysis_normalized(cx.tcx)));
+            match instance.map(|i| (i.def, i.def_id())) {
+                // A real, static resolution: trust it (local → edge, non-local → dropped by caller).
+                Some((rustc_middle::ty::InstanceKind::Virtual(..), _)) | None => {
+                    steps.push(DerefStep::Unresolved)
+                }
+                Some((_, did)) => steps.push(DerefStep::Static(did)),
+            }
+        }
+        cur = adj.target;
+    }
+    steps
+}
+
 
 
 
@@ -1345,6 +1411,51 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         if !cast_away && matches!(cx.tcx.def_kind(*did), DefKind::Fn | DefKind::AssocFn)
                         {
                             self.calls.entry(caller).or_default().insert(local);
+                        }
+                    }
+                }
+            }
+        }
+
+        // IMPLICIT overloaded `Deref`/`DerefMut` calls the compiler inserts as expression ADJUSTMENTS
+        // (auto-deref during method resolution, field access through a smart pointer, deref-coercion at
+        // a call/arg/return/assignment site). These are NOT `Call`/`MethodCall`/`Unary(Deref)` HIR nodes
+        // — they live in `typeck.expr_adjustments(expr)` — so `resolve_callee` never sees them, and a
+        // LOCAL effectful `Deref` impl reached only this way was reported neither with its effect nor
+        // `Unknown`: silently pure (the smart-pointer hole). Add a call edge per overloaded-deref step
+        // EXACTLY as the explicit `Unary(Deref)` arm does. This runs for EVERY expr (a field access /
+        // coercion site is not a call, so the `resolve_callee` early-return below would skip it).
+        let deref_steps = overloaded_deref_steps(cx, expr);
+        if !deref_steps.is_empty() {
+            if let Some(caller) = enclosing_named_fn(cx.tcx, expr.hir_id) {
+                for step in deref_steps {
+                    match step {
+                        // Local impl → real edge (its body's effects propagate). Non-local std deref
+                        // (`Box`/`Rc`/`Arc`/`Pin`) → drop it: matches the std-trait pure calibration, no
+                        // fabrication.
+                        DerefStep::Static(did) => {
+                            if let Some(local) = did.as_local() {
+                                if matches!(cx.tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn) {
+                                    self.calls.entry(caller).or_default().insert(local);
+                                }
+                            }
+                        }
+                        // An unresolvable/generic overloaded deref: honest `Unknown`, never silent-pure.
+                        DerefStep::Unresolved => {
+                            self.direct.entry(caller).or_default().insert(UNKNOWN);
+                            self.unknown_why
+                                .entry(caller)
+                                .or_default()
+                                .insert("deref:unresolvable overloaded auto-deref".to_string());
+                            if self.explain.is_some() {
+                                let loc =
+                                    cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                                self.sites.entry(caller).or_default().push(EffectSite {
+                                    eff: UNKNOWN,
+                                    via: "unresolvable overloaded auto-deref".to_string(),
+                                    loc,
+                                });
+                            }
                         }
                     }
                 }
