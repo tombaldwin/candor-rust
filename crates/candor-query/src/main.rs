@@ -1408,7 +1408,15 @@ fn cmd_path(args: &[String]) -> i32 {
         return 2;
     };
     if !start.inferred.iter().any(|e| e == effect) {
-        println!("{} does not perform {effect}  (inferred: {:?})", start.func, start.inferred);
+        // An empty `path` is the honest "no local source on a path" answer (SPEC §3.1), NOT an error.
+        // In --json mode emit the documented {effect,fn,path:[]} object — printing human text here
+        // polluted stdout so a `jq` consumer crashed (adversarial fidelity review; Java/TS emit the JSON).
+        if want_json {
+            let out = serde_json::json!({ "fn": start.func, "effect": effect, "path": [] });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        } else {
+            println!("{} does not perform {effect}  (inferred: {:?})", start.func, start.inferred);
+        }
         return 0;
     }
     // BFS through effect-carrying callees to the first DIRECT source.
@@ -1432,11 +1440,18 @@ fn cmd_path(args: &[String]) -> i32 {
         }
     }
     let Some(source) = source else {
-        println!(
-            "{} performs {effect} but its source is not a local function \
-             (cross-crate, or via Unknown) — not statically traceable.",
-            start.func
-        );
+        // Reached via a cross-crate call or Unknown — the honest empty-path answer (SPEC §3.1), not an
+        // error. Emit the JSON object in --json mode (was human text → broke a `jq` consumer).
+        if want_json {
+            let out = serde_json::json!({ "fn": start.func, "effect": effect, "path": [] });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        } else {
+            println!(
+                "{} performs {effect} but its source is not a local function \
+                 (cross-crate, or via Unknown) — not statically traceable.",
+                start.func
+            );
+        }
         return 0;
     };
     let mut chain: Vec<&str> = Vec::new();
