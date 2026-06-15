@@ -224,7 +224,10 @@ fi
 # the constant "scan" against itself could never fire — the primary install channel for --agents).
 # On the lint backend the dylib build id (VER) is already the right identity.
 if [ "$VER" = scan ]; then
-  ENGINE_ID="$("${SCAN:-$SCANP}" --version 2>/dev/null || echo scan)"   # e.g. "candor-scan 0.4.2"
+  # `--version` is two lines now (identity + `upgrade:` one-liner); the stamp wants only the first,
+  # the engine-identity line — e.g. "candor-scan 0.5.1 (spec 0.5)".
+  ENGINE_ID="$("${SCAN:-$SCANP}" --version 2>/dev/null | head -1)"
+  [ -n "$ENGINE_ID" ] || ENGINE_ID="scan"
 else
   ENGINE_ID="$VER"
 fi
