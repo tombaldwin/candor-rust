@@ -72,23 +72,21 @@ carry `unitKind` (every Rust unit is an ordinary function — the spec-0.5-draft
 sibling reports under a merged prefix may carry it (an accessor, a `<clinit>`, a fleet's agents) —
 it is informative only, read effects/edges identically.
 
-## 1a. Staying current
+## 1a. Staying current — candor can't check for you, *you* can
 
-A normal scan never makes a network call — candor's own policy is `deny Net` (it's an effect auditor;
-phoning home would make it perform the exact effect it exists to forbid). But there is now ONE opt-in
-arm, `--check-update`, that you can run when you want the check, and it degrades gracefully offline:
+candor never makes a network call to see if it's out of date: its own policy is `deny Net` (it's an
+effect auditor — phoning home would make it perform the exact effect it exists to forbid). So the
+version check is *your* job, not the tool's. You have network access; it doesn't.
 
 ```sh
-candor-scan --version          # offline: "candor-scan 0.5.0 (spec 0.5)" + the upgrade line
-candor-scan --check-update     # one 4s GET to crates.io: "up to date (latest is 0.5.0)",
-                               # or "candor-scan 0.5.0 -> 0.6.0 available" + the install line.
-                               # On no network / timeout / no curl it prints a one-line notice to
-                               # stderr and still exits 0 — it never hangs and never panics.
+candor-scan --version          # offline: "candor-scan <ver> (spec <SPEC>)" + the upgrade line; no network.
+# Then YOU (you have network; candor doesn't) compare against crates.io.
+# crates.io REQUIRES a User-Agent header (it rejects requests without one):
+curl -s -H 'User-Agent: candor-version-check' https://crates.io/api/v1/crates/candor-scan \
+  | grep -o '"max_version":"[^"]*"'                                      # -> "max_version":"0.3.4"
 ```
 
-`--check-update` does the crates.io call *for* you (with the required User-Agent), so the old manual
-`curl … | grep max_version` dance is no longer needed. If a newer version is reported, upgrade by the
-path you installed with:
+If they differ, upgrade by the path you installed with:
 
 - **Path A** (`cargo install candor-scan`): `cargo install candor-scan --force`.
 - **Path B** (a clone at `/tmp/candor` or `~/.candor`): `cargo candor update` — it runs
