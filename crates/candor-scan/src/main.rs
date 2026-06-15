@@ -2974,6 +2974,20 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         }
     }
 
+    // Inverse of trait_impls (impl-TYPE leaf → the trait leaves it impls), for the trait-DEFAULT-method
+    // caller fallback below: a call `t.m()` on a concrete type T that does NOT declare `m` but impls a
+    // trait with a DEFAULT `m` should edge to that trait's `Trait::m` (the inherited default body — now
+    // scanned, via the Item::Trait arm). Without this the caller silently under-reported (`run()` calling
+    // `l.flush()` on a FileLogger that inherits `Logger::flush`'s Fs/Net — adversarial review).
+    let mut type_to_traits: HashMap<String, Vec<String>> = HashMap::new();
+    for (tr, types) in &merged.trait_impls {
+        let tr_leaf = tr.rsplit("::").next().unwrap_or(tr).to_string();
+        for ty in types {
+            let ty_leaf = ty.rsplit("::").next().unwrap_or(ty).to_string();
+            type_to_traits.entry(ty_leaf).or_default().push(tr_leaf.clone());
+        }
+    }
+
     // Method leaves that name a LOCAL method definition (a `Type::method` qual whose `Type` is local).
     // A bare-leaf method CALL (`x.fastrand()`, recorded path==leaf, no `::`) whose leaf matches one of
     // these resolves to the project's OWN method, so the calibrated-crate classification of that leaf
@@ -3072,6 +3086,29 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     for t in targets {
                         if t != &f.qual {
                             calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                        }
+                    }
+                } else if c.method && c.typed {
+                    // No `T::leaf` resolved (T doesn't declare `leaf`). If T impls EXACTLY ONE trait whose
+                    // DEFAULT `leaf` body exists (a `Trait::leaf` FnInfo), the call inherits it — edge there.
+                    // COLLISION-SAFE: zero or >1 distinct candidate → skip (the honest under-report; never
+                    // guess between traits — the keying-collision discipline that keeps this from FABRICATING
+                    // a wrong trait's effect onto the caller).
+                    if let Some(t_type) = tail2(&c.path).and_then(|t2| t2.split("::").next().map(str::to_string)) {
+                        if let Some(trs) = type_to_traits.get(&t_type) {
+                            let mut hits: Vec<&String> = Vec::new();
+                            for tr_leaf in trs {
+                                if let Some(ts) = by_tail2.get(&format!("{tr_leaf}::{}", c.leaf)) {
+                                    for t in ts {
+                                        if !hits.contains(&t) {
+                                            hits.push(t);
+                                        }
+                                    }
+                                }
+                            }
+                            if hits.len() == 1 && hits[0] != &f.qual {
+                                calls.entry(f.qual.clone()).or_default().insert(hits[0].clone());
+                            }
                         }
                     }
                 }
