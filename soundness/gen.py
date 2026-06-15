@@ -183,6 +183,43 @@ def edge_forms(callee, i=0):
         # than Binary (op_add), so it needs its own operator-node handling or the edge is invisible.
         "add_assign": (f"{{ let mut a{i:02d} = As{i:02d}; a{i:02d} += As{i:02d}; }}", [], [], [
             f"struct As{i:02d};\nimpl std::ops::AddAssign for As{i:02d} {{ fn add_assign(&mut self, _: Self) {{ {callee}(); }} }}"]),
+        # STD ITERATOR COMBINATOR / consumer driving a LOCAL `Iterator::next`: the effect is in a custom
+        # iterator's `next()`, consumed NOT by a bare `for`/`while let` (those desugar `next()` into the
+        # consumer's own HIR and are already sound) but through a std COMBINATOR — `.for_each(..)`,
+        # `.map(..).collect()`, `.sum()`, and a `for x in it.map(..)` over an ADAPTED iterator. candor
+        # resolves the outer call to the std method (pure for itself) and can't follow std's hidden
+        # `next()` callback to the local impl — so it must recover the edge to that local `next()`
+        # (HOLE 1) or the consumer looks silently pure. The `i`-derived rotation exercises all four
+        # consumer shapes across a chain. (The struct's `next()` performs the effect.)
+        "iter_combinator": (
+            [
+                f"Ic{i:02d}(2).for_each(|_| {{}});",                          # combinator/consumer: for_each
+                f"{{ let _: Vec<u64> = Ic{i:02d}(2).map(|x| x + 1).collect(); }}",  # map + collect
+                f"{{ let _: u64 = Ic{i:02d}(2).sum(); }}",                    # sum (Sum consumer)
+                f"for _ in Ic{i:02d}(2).map(|x| x + 1) {{}}",                # for over an ADAPTED iter
+            ][i % 4],
+            [], [],
+            [
+                f"struct Ic{i:02d}(u8);\nimpl Iterator for Ic{i:02d} {{ type Item = u64; "
+                f"fn next(&mut self) -> Option<u64> {{ if self.0 == 0 {{ None }} else {{ self.0 -= 1; {callee}(); Some(1) }} }} }}"
+            ],
+        ),
+        # LOCAL `Display::fmt` reached via a `core::fmt` formatting macro: the effect is in an
+        # `impl Display for T` whose `fmt()` does I/O; `format!("{}", t)` / `println!("{}", t)` reach it
+        # through core::fmt's machinery — candor sees the std `Argument::new_display` / `write_fmt`, never
+        # the local `fmt` call, so the caller looks silently pure (HOLE 2). The `i % 2` rotation covers
+        # both `format!` and `println!`. (`fmt` performs the effect, then writes a byte so it type-checks.)
+        "display_fmt": (
+            [
+                f'{{ let _ = format!("{{}}", Df{i:02d}); }}',
+                f'println!("{{}}", Df{i:02d});',
+            ][i % 2],
+            [], [],
+            [
+                f"struct Df{i:02d};\nimpl std::fmt::Display for Df{i:02d} {{ "
+                f"fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {callee}(); write!(f, \"x\") }} }}"
+            ],
+        ),
     }
 
 

@@ -154,6 +154,22 @@ jobs:
       - name: Soundness fuzzer (ufcs-dyn)
         run: CANDOR_FUZZ_FORMS="ufcs_dyn" bash soundness/run.sh 40
 
+      # Iterator-combinator variant: the effect is in a custom `Iterator::next`, consumed through a std
+      # COMBINATOR/consumer (`.for_each`, `.map(..).collect()`, `.sum()`, `for x in it.map(..)`). candor
+      # resolves the outer call to the std method (pure for itself) and can't follow std's hidden `next()`
+      # callback to the local impl — so it must recover the edge to that local `next()` (HOLE 1) or the
+      # consumer looks silently pure. (Bare `for`/`while let` desugar `next()` into the consumer's own HIR
+      # and are already sound — a separate, unregressed path.) Teeth-verified: reverting fails every seed.
+      - name: Soundness fuzzer (iterator combinators)
+        run: CANDOR_FUZZ_FORMS="iter_combinator" bash soundness/run.sh 40
+
+      # fmt variant: the effect is in a LOCAL `Display::fmt` reached via a `core::fmt` macro
+      # (`format!`/`println!`) — candor sees the std `Argument::new_display`, never the local `fmt` call,
+      # so the caller looks silently pure (HOLE 2). candor must edge from the `Argument::new_<kind>`
+      # constructor to the value's local fmt impl. Teeth-verified: reverting fails every seed.
+      - name: Soundness fuzzer (fmt)
+        run: CANDOR_FUZZ_FORMS="display_fmt" bash soundness/run.sh 40
+
       # Cross-crate variant: the chain crosses a lib→bin boundary, exercising candor's DefPathHash
       # cross-crate propagation (its own bug-prone surface the single-crate fuzzer can't reach).
       - name: Soundness fuzzer (cross-crate)

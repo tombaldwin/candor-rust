@@ -958,6 +958,265 @@ fn from_residual_local_edge<'tcx>(
     did.is_local().then_some(did)
 }
 
+/// The outcome of resolving a std iterator-combinator (or `core::fmt`) call to the LOCAL trait impl(s)
+/// its hidden std-internal callback reaches — the soundness recovery for those two silent-pure holes.
+enum CallbackEdges {
+    /// One or more LOCAL impl methods to edge to (e.g. the receiver's `Iterator::next`, or a value's
+    /// `Display::fmt`). Their body effects then propagate to the caller.
+    Local(Vec<DefId>),
+    /// A combinator/consumer WAS hit (so the caller really does drive the hidden callback) but the
+    /// concrete local impl couldn't be recovered — honest `Unknown`, never silent-pure. Carries the
+    /// `unknownWhy` reason tag.
+    Unknown(String),
+}
+
+/// The std `Iterator` adapter/wrapper ADTs that carry an inner iterator in a type argument (`Map<I, F>`,
+/// `Filter<I, P>`, `Take<I>`, `Enumerate<I>`, …). We peel through these to reach the user iterator that
+/// actually performs the I/O in its `next()`. Matched by `core`/`alloc` item name — std adapters all
+/// live in `core::iter::adapters` / `core::iter::sources`; a user type sharing one of these names lives
+/// in a non-std crate, so the crate check keeps them apart.
+fn is_std_iter_adapter(name: &str) -> bool {
+    matches!(
+        name,
+        "Map" | "Filter" | "FilterMap" | "Enumerate" | "Zip" | "Take" | "TakeWhile" | "Skip"
+            | "SkipWhile" | "StepBy" | "Peekable" | "Rev" | "Cloned" | "Copied" | "Cycle"
+            | "Chain" | "FlatMap" | "Flatten" | "Fuse" | "Inspect" | "Scan" | "MapWhile"
+            | "ByRefSized" | "Intersperse" | "IntersperseWith"
+    )
+}
+
+/// std iterator-family traits whose combinator/consumer methods drive the receiver's `Iterator::next`
+/// (or `IntoIterator::into_iter`) INTERNALLY — i.e. through a non-local std body candor can't follow.
+/// A call resolving to one of these (when its concrete impl is std, not a LOCAL override) is exactly the
+/// silent-pure hole: the outer method is pure for ITSELF, but the hidden `next()` it calls may be a
+/// LOCAL effectful impl. `Iterator` (for_each/map/collect/sum/count/fold/last/nth/…), the consumer
+/// traits `Sum`/`Product`/`FromIterator` (`.collect()`), and `IntoIterator` (whose `into_iter` may be a
+/// local effectful impl). `next`/`into_iter` themselves dispatch to the LOCAL impl directly and are
+/// resolved by the ordinary devirtualize path, so re-edging them here is a harmless no-op.
+fn is_iter_driver_trait(crate_name: &str, trait_name: &str) -> bool {
+    matches!(crate_name, "core" | "std" | "alloc")
+        && matches!(trait_name, "Iterator" | "IntoIterator" | "FromIterator" | "Sum" | "Product")
+}
+
+/// Find the LOCAL effectful trait impls a std iterator-combinator call hides (HOLE 1). The call
+/// resolved to a std `Iterator`/`IntoIterator`/`Sum`/`Product`/`FromIterator` method whose body pulls
+/// the receiver's `Iterator::next` / `IntoIterator::into_iter` — a LOCAL impl candor can't see THROUGH
+/// the std method, so an effect in that `next()` is silently lost (`It.for_each(..)`, `It.map(..).
+/// collect()`, `It.sum()`, `for x in it.map(..) {}`). From the receiver type we peel std adapters
+/// (`Map`/`Filter`/…) to the underlying user iterator ADT(s), then resolve their LOCAL `Iterator::next`
+/// (and `IntoIterator::into_iter`) impl methods. Returns `Local(edges)` when ≥1 local impl is recovered;
+/// `Unknown(reason)` when a driver method WAS hit but no local impl could be pinned (honest, never
+/// silent-pure); `None` when the receiver is wholly std (`vec.iter()` — pure, contributes nothing, NO
+/// Unknown flood). Teeth: soundness/gen.py `iter_combinator` form.
+fn iter_combinator_local_edges<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    trait_did: DefId,
+    callee_did: DefId,
+) -> Option<CallbackEdges> {
+    use rustc_middle::ty::TyKind;
+    let tk = cx.tcx.crate_name(trait_did.krate);
+    let ti = cx.tcx.item_name(trait_did);
+    if !is_iter_driver_trait(tk.as_str(), ti.as_str()) {
+        return None;
+    }
+    // Only when the OUTER method resolves to a NON-local (std) impl: a LOCAL combinator/consumer impl is
+    // an ordinary local edge already (handled by devirtualize/CHA), and re-driving it here would be
+    // redundant. A std combinator is precisely the body candor can't follow.
+    let resolved_local = matches!(devirtualize(cx, expr, callee_did), Some(Devirt::Static(t)) if t.is_local());
+    if resolved_local {
+        return None;
+    }
+    let ExprKind::MethodCall(_, receiver, _, _) = expr.kind else { return None };
+    let typeck = cx.maybe_typeck_results()?;
+    let recv_ty = typeck.expr_ty_adjusted(receiver);
+    let method = cx.tcx.item_name(callee_did);
+
+    // Peel std iterator adapters (`Map<I, F>` → `I`) down to the underlying user iterator ADT(s), then
+    // collect each one's LOCAL `Iterator::next` / `IntoIterator::into_iter` impl method. Bounded depth
+    // against any pathological adapter nesting. A single receiver can carry several inner iterators
+    // (`Chain<A, B>`, `Zip<A, B>`), so we walk a small worklist, not a single chain.
+    let mut edges: Vec<DefId> = Vec::new();
+    let mut saw_local_iter = false;
+    let mut work = vec![(recv_ty.peel_refs(), 0u32)];
+    while let Some((ty, depth)) = work.pop() {
+        if depth > 8 {
+            continue;
+        }
+        let TyKind::Adt(adt, args) = ty.kind() else { continue };
+        let adt_did = adt.did();
+        let adt_name = cx.tcx.item_name(adt_did);
+        let adt_krate = cx.tcx.crate_name(adt_did.krate);
+        if is_std_iter_adapter(adt_name.as_str())
+            && matches!(adt_krate.as_str(), "core" | "std" | "alloc")
+        {
+            // A std adapter — descend into its iterator type argument(s) (the first type arg is the
+            // wrapped iterator; further iterator args, e.g. `Chain`/`Zip`, are also peeled).
+            for arg in args.types() {
+                work.push((arg.peel_refs(), depth + 1));
+            }
+            continue;
+        }
+        // A user (or other) ADT: resolve its LOCAL `Iterator::next` / `IntoIterator::into_iter` impls.
+        if adt_did.is_local() {
+            saw_local_iter = true;
+            for (sym, trait_lang) in
+                [("next", rustc_span::sym::Iterator), ("into_iter", rustc_span::sym::IntoIterator)]
+            {
+                if let Some(m) = local_trait_method_for_self(cx, ty, sym, trait_lang) {
+                    edges.push(m);
+                }
+            }
+        }
+    }
+    if !edges.is_empty() {
+        return Some(CallbackEdges::Local(edges));
+    }
+    // A driver method WAS hit. If the receiver contained a LOCAL iterator type but we couldn't pin its
+    // `next` impl, be honest (`Unknown`) rather than silently pure. A wholly-std receiver (`vec.iter()`,
+    // `0..n`) contributed no local ADT — correctly pure, no Unknown.
+    if saw_local_iter {
+        return Some(CallbackEdges::Unknown(format!("iter-combinator:{method}")));
+    }
+    None
+}
+
+/// Resolve the concrete LOCAL impl method named `method_sym` of the std iterator trait `trait_lang`
+/// (`Iterator`/`IntoIterator`) for receiver self-type `self_ty` — the `next()` / `into_iter()` a std
+/// combinator drives internally. Returns the impl method `DefId` only when it's LOCAL (the real edge);
+/// a std/non-local impl (`vec.iter()`'s `next`) yields `None` so it contributes nothing.
+fn local_trait_method_for_self<'tcx>(
+    cx: &LateContext<'tcx>,
+    self_ty: rustc_middle::ty::Ty<'tcx>,
+    method_sym: &str,
+    trait_lang: rustc_span::Symbol,
+) -> Option<DefId> {
+    let trait_did = cx.tcx.get_diagnostic_item(trait_lang)?;
+    // The trait's assoc fn of the wanted name (`Iterator::next`, `IntoIterator::into_iter`).
+    let trait_fn = cx
+        .tcx
+        .associated_items(trait_did)
+        .in_definition_order()
+        .find(|a| a.is_fn() && a.name().as_str() == method_sym)?
+        .def_id;
+    // Resolve `<self_ty as Trait>::method` to its concrete impl. `IntoIterator`'s `into_iter` takes
+    // `self` by value, so the Self/receiver type is `self_ty` as-is.
+    let gargs = cx.tcx.mk_args(&[self_ty.into()]);
+    let inst = rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), trait_fn, gargs)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            let env = cx.typing_env().with_post_analysis_normalized(cx.tcx);
+            rustc_middle::ty::Instance::try_resolve(cx.tcx, env, trait_fn, gargs).ok().flatten()
+        })?;
+    if matches!(inst.def, rustc_middle::ty::InstanceKind::Virtual(..)) {
+        return None;
+    }
+    let did = inst.def_id();
+    did.is_local().then_some(did)
+}
+
+/// Find the LOCAL `Display`/`Debug`/… `fmt` impls a `core::fmt` formatting call hides (HOLE 2). The
+/// `println!`/`format!`/`write!` macros lower each formatted value to a `core::fmt::rt::Argument::
+/// new_<kind>(&value)` constructor; the actual `<kind>::fmt(&value, f)` call happens INSIDE the std
+/// `core::fmt` machinery, invisible to candor — so a LOCAL `impl Display for T` whose `fmt()` does I/O
+/// is reached silently. We detect the `Argument::new_<kind>` constructor, map `<kind>` to its fmt trait
+/// (`new_display`→`Display`, `new_debug`→`Debug`, hex/oct/bin/exp/pointer→the matching trait), and
+/// resolve the formatted value's LOCAL impl of that trait's `fmt`. A std `Display` (`i32`/`String`)
+/// resolves non-local → no edge → correctly pure. Teeth: soundness/gen.py `display_fmt` form.
+fn fmt_argument_local_edge<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    callee_did: DefId,
+) -> Option<CallbackEdges> {
+    // Must be a `core::fmt::rt::Argument::new_<kind>` (or `new_<kind>`-shaped) constructor in core/std.
+    let krate = cx.tcx.crate_name(callee_did.krate);
+    if !matches!(krate.as_str(), "core" | "std" | "alloc") {
+        return None;
+    }
+    let method = cx.tcx.item_name(callee_did);
+    if !method.as_str().starts_with("new_") {
+        return None;
+    }
+    // Confirm it's the fmt `Argument` inherent constructor, not an unrelated `new_*` fn elsewhere in
+    // core/std. The method lives in an inherent `impl Argument { … }`, so check the impl's SELF type is
+    // the `Argument` ADT. (Reading `item_name` on the parent `impl` DefId would ICE — an impl block has
+    // no name — so resolve the self type instead.)
+    let impl_did = cx.tcx.impl_of_assoc(callee_did)?;
+    let self_ty = cx.tcx.type_of(impl_did).instantiate_identity();
+    let rustc_middle::ty::TyKind::Adt(self_adt, _) = self_ty.kind() else { return None };
+    if cx.tcx.item_name(self_adt.did()).as_str() != "Argument" {
+        return None;
+    }
+    // The fmt trait this constructor formats through is exactly the bound on its single type param
+    // (`fn new_display<T: Display>(x: &T)`). Read it off the fn's predicates rather than mapping
+    // `new_<kind>` → a `sym::` item (only Display/Debug/Pointer have diagnostic-item symbols; the
+    // hex/oct/bin/exp traits don't), so EVERY fmt kind is covered uniformly.
+    let trait_did = fmt_constructor_trait(cx, callee_did)?;
+    let ExprKind::Call(_, args) = expr.kind else { return None };
+    let typeck = cx.maybe_typeck_results()?;
+    let arg = args.first()?; // `Argument::new_<kind>(&value)` — one arg, a reference to the value.
+    let val_ty = typeck.expr_ty(arg).peel_refs();
+    // Only a LOCAL ADT can carry a LOCAL fmt impl; a std type's fmt is non-local (pure, no edge).
+    if !matches!(val_ty.kind(), rustc_middle::ty::TyKind::Adt(adt, _) if adt.did().is_local()) {
+        return None;
+    }
+    match fmt_impl_for(cx, val_ty, trait_did) {
+        Some(m) => Some(CallbackEdges::Local(vec![m])),
+        // A local type whose fmt we couldn't pin (a blanket/derived impl resolved non-local) is pure —
+        // a derived `Debug` is generated and effect-free, and a std blanket Display is non-local. No
+        // Unknown here: that would flood every `format!` of a local type with a derived Debug.
+        None => None,
+    }
+}
+
+/// The fmt trait a `core::fmt::rt::Argument::new_<kind>` constructor formats through — the single trait
+/// bound on its type parameter `T` (`new_display<T: Display>` → the `Display` trait `DefId`). Reading it
+/// from the fn's predicates covers every fmt kind uniformly (Display/Debug/Octal/Hex/Binary/Exp/Pointer)
+/// without needing a `sym::` diagnostic item per trait (most don't have one).
+fn fmt_constructor_trait(cx: &LateContext<'_>, callee_did: DefId) -> Option<DefId> {
+    for (clause, _) in cx.tcx.predicates_of(callee_did).predicates {
+        if let Some(tp) = clause.as_trait_clause() {
+            let trait_did = tp.def_id();
+            // The fmt traits live in `core::fmt`; skip the implicit `Sized`/marker bounds.
+            if matches!(cx.tcx.crate_name(trait_did.krate).as_str(), "core" | "std" | "alloc")
+                && cx.tcx.def_path_str(trait_did).contains("fmt::")
+            {
+                return Some(trait_did);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve `<self_ty as FmtTrait>::fmt` to its concrete LOCAL impl method, or `None` for a non-local
+/// (std/blanket/derived-in-another-crate) impl. The fmt traits each have a single `fmt` assoc fn.
+fn fmt_impl_for<'tcx>(
+    cx: &LateContext<'tcx>,
+    self_ty: rustc_middle::ty::Ty<'tcx>,
+    trait_did: DefId,
+) -> Option<DefId> {
+    let fmt_fn = cx
+        .tcx
+        .associated_items(trait_did)
+        .in_definition_order()
+        .find(|a| a.is_fn() && a.name().as_str() == "fmt")?
+        .def_id;
+    let gargs = cx.tcx.mk_args(&[self_ty.into()]);
+    let inst = rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), fmt_fn, gargs)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            let env = cx.typing_env().with_post_analysis_normalized(cx.tcx);
+            rustc_middle::ty::Instance::try_resolve(cx.tcx, env, fmt_fn, gargs).ok().flatten()
+        })?;
+    if matches!(inst.def, rustc_middle::ty::InstanceKind::Virtual(..)) {
+        return None;
+    }
+    let did = inst.def_id();
+    did.is_local().then_some(did)
+}
+
 /// For a call already classified as `Fs`, the access *kind* its leaf verb implies: `["read"]`,
 /// `["write"]`, `["read","write"]` (e.g. `fs::copy`), or `&[]` when the verb doesn't say (so we make
 /// no claim). Keyed off the std::fs / `File` / `OpenOptions` verb vocabulary — a syntactic refinement
@@ -1542,6 +1801,46 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // that one edge from the call's types (see from_residual_local_edge). Adds soundness only.
         if let Some(from_did) = from_residual_local_edge(cx, expr, def_id) {
             add_edge(self, from_did);
+        }
+
+        // HOLE 1 — std ITERATOR-COMBINATOR / consumer driving a LOCAL `Iterator::next` / `into_iter`.
+        // `It.for_each(..)`, `It.map(..).collect()`, `It.sum()`, `for x in it.map(..) {}` resolve the
+        // OUTER call to a std `Iterator`/`Sum`/`FromIterator`/`IntoIterator` method (pure for itself),
+        // but its body pulls the receiver's LOCAL `next()` — invisible THROUGH the std body. Recover the
+        // edge to that local `next`/`into_iter` (precise), or honest `Unknown` if a driver was hit but
+        // the local impl couldn't be pinned. A wholly-std receiver (`vec.iter()`) contributes nothing.
+        if let Some(td) = trait_did {
+            match iter_combinator_local_edges(cx, expr, td, def_id) {
+                Some(CallbackEdges::Local(edges)) => {
+                    for e in edges {
+                        add_edge(self, e);
+                    }
+                }
+                Some(CallbackEdges::Unknown(why)) => {
+                    self.direct.entry(caller).or_default().insert(UNKNOWN);
+                    self.unknown_why.entry(caller).or_default().insert(why.clone());
+                    if self.explain.is_some() {
+                        let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                        self.sites.entry(caller).or_default().push(EffectSite {
+                            eff: UNKNOWN,
+                            via: why,
+                            loc,
+                        });
+                    }
+                }
+                None => {}
+            }
+        }
+
+        // HOLE 2 — `core::fmt` formatting (`println!`/`format!`/`write!`) reaching a LOCAL `Display`/
+        // `Debug`/… `fmt`. The macro lowers each value to `core::fmt::rt::Argument::new_<kind>(&value)`;
+        // the real `fmt(&value, f)` happens inside std's fmt machinery, invisible — so a local effectful
+        // `impl Display for T` is reached silently. Recover the edge to that local `fmt`. A std `Display`
+        // (`i32`/`String`) resolves non-local → no edge → pure.
+        if let Some(CallbackEdges::Local(edges)) = fmt_argument_local_edge(cx, expr, def_id) {
+            for e in edges {
+                add_edge(self, e);
+            }
         }
 
         // Closure-flow bookkeeping: record what's passed at each arg position of a FREE fn call, so a
