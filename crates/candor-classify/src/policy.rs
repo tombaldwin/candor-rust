@@ -152,14 +152,22 @@ pub fn scope_matches(name: &str, scope: &str) -> bool {
 /// In a `deny` rule, leading tokens that name a known effect (or `Unknown`) are forbidden; the FIRST
 /// non-effect token is the scope and ends the rule. A `deny` naming no known effect is dropped (it is
 /// NOT a `pure` rule). Malformed/unknown lines are ignored with a warning — never silently widened.
+/// The §6.2 token separator: ASCII whitespace ONLY (space/tab/CR/LF/VT/FF). `split_whitespace`/`trim`
+/// use Unicode `White_Space`, which would split a NBSP/ideographic space that Java drops — a gateless-
+/// green cross-engine divergence (adversarial DSL review). A non-ASCII space stays part of its token, so
+/// the rule is malformed and ignored, uniformly.
+fn is_ascii_ws(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r')
+}
+
 pub fn parse_policy(text: &str) -> ParsedPolicy {
     let mut out = ParsedPolicy::default();
     for raw_line in text.lines() {
-        let line = raw_line.split('#').next().unwrap_or("").trim();
+        let line = raw_line.split('#').next().unwrap_or("").trim_matches(is_ascii_ws);
         if line.is_empty() {
             continue;
         }
-        let mut toks = line.split_whitespace();
+        let mut toks = line.split(is_ascii_ws).filter(|s| !s.is_empty());
         match toks.next().unwrap_or("") {
             "allow" => {
                 let effect = match toks.next().unwrap_or("") {
