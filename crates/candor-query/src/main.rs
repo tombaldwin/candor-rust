@@ -215,7 +215,19 @@ fn cmd_audit(args: &[String]) -> i32 {
     for rf in rfs {
         let label = format!("{}.{}", rf.krate, rf.kind);
         analyzed.insert(rf.krate.clone());
-        let es = std::fs::read_to_string(&rf.path).ok().and_then(|t| report_entries(&t)).unwrap_or_default();
+        // Disclose a read/parse failure (mirroring load_entries) — a silent unwrap_or_default() turned a
+        // corrupt report into an empty entry list, so the "everything is pure" message below printed for a
+        // mid-write/corrupt report: the exact silent-pure misread candor's never-silently-pure rule forbids.
+        let es = match std::fs::read_to_string(&rf.path) {
+            Ok(t) => report_entries(&t).unwrap_or_else(|| {
+                eprintln!("candor: report {} failed to parse — its functions are OMITTED from this audit (corrupt or mid-write); re-run the scan", rf.path.display());
+                Vec::new()
+            }),
+            Err(_) => {
+                eprintln!("candor: report {} could not be read — its functions are OMITTED from this audit", rf.path.display());
+                Vec::new()
+            }
+        };
         percrate.push((label, es.len()));
         fns.extend(es);
     }
@@ -370,6 +382,12 @@ struct ShowJson {
 /// longer silently widens to substring cousins (found by the speed-eval red-team: `whatif
 /// Pricing::quote` seeded the blast radius from `quote_bulk` too).
 fn match_tier(name: &str, q: &str) -> u8 {
+    if q.is_empty() {
+        // An empty query matches NOTHING. Without this `name.contains("")` is true for every function,
+        // so an unset `$FN` (e.g. `whatif <prefix> "" Net`) selected the WHOLE graph and reported the
+        // entire codebase as the blast radius with exit 0 — a false-clean answer for an unspecified edit.
+        return 0;
+    }
     if name == q {
         3
     } else if name.ends_with(q)
