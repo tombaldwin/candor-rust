@@ -164,21 +164,34 @@ pub struct Report {
 /// the legacy v0.1 bare array `[...]` (the migration contract — candor-spec §2). An envelope is a
 /// JSON object, so a bare array fails that parse and falls through; the two forms are unambiguous.
 pub fn report_entries(text: &str) -> Option<Vec<ReportEntry>> {
-    // Accept the v0.2 envelope `{candor, functions:[...]}` or a legacy bare array. Deserialize each
-    // entry INDEPENDENTLY (via raw `Value`s), skipping any that fail — so one malformed entry (a
-    // partial write, a hand-edit, an entry missing `fn`) loses only ITSELF, not the whole crate's
-    // report. The old all-or-nothing `Vec<ReportEntry>` deser dropped every function in the file on a
-    // single bad entry — a silent under-report of the entire crate.
+    report_entries_counted(text).map(|(entries, _dropped)| entries)
+}
+
+/// Like [`report_entries`] but also returns how many entries FAILED to deserialize and were dropped.
+/// Each entry is deserialized INDEPENDENTLY (via raw `Value`s), skipping any that fail — so one
+/// malformed entry (a partial write, a hand-edit, an entry whose `inferred` is a string not an array)
+/// loses only ITSELF, not the whole crate's report. But a SILENT per-entry drop is the same kind of
+/// under-report a whole-file parse failure is — and the latter IS disclosed by callers. So this variant
+/// surfaces the drop count: a caller MUST disclose `dropped > 0` (a vanished function's effects read as
+/// pure otherwise — exactly the "never silently pure" failure the gate exists to prevent).
+pub fn report_entries_counted(text: &str) -> Option<(Vec<ReportEntry>, usize)> {
     let val: serde_json::Value = serde_json::from_str(text).ok()?;
     let arr = val
         .get("functions")
         .and_then(|f| f.as_array())
         .or_else(|| val.as_array())?;
-    Some(
-        arr.iter()
-            .filter_map(|e| serde_json::from_value::<ReportEntry>(e.clone()).ok())
-            .collect(),
-    )
+    let mut dropped = 0usize;
+    let entries = arr
+        .iter()
+        .filter_map(|e| match serde_json::from_value::<ReportEntry>(e.clone()) {
+            Ok(entry) => Some(entry),
+            Err(_) => {
+                dropped += 1;
+                None
+            }
+        })
+        .collect();
+    Some((entries, dropped))
 }
 
 /// Serialize a v0.2 report from a header + entries, borrowing both so the caller keeps ownership
@@ -262,6 +275,25 @@ mod tests {
 
         assert!(report_entries("not json").is_none());
         assert!(report_entries(r#"{"candor":{}}"#).is_none()); // object without `functions`
+    }
+
+    #[test]
+    fn counted_surfaces_dropped_entries_for_disclosure() {
+        // A mid-write / hand-edited entry whose `inferred` is a string not an array fails to deserialize.
+        // The good entries survive (per-entry independence), but the drop must be COUNTED so the caller
+        // can disclose it — a silently-vanished function reads as pure, the under-report the gate forbids.
+        let mixed = r#"{"candor":{"version":"v","toolchain":"t"},"functions":[
+            {"fn":"good","inferred":["Net"]},
+            {"fn":"corrupt","inferred":"Fs"},
+            {"fn":"alsogood","inferred":["Db"]}
+        ]}"#;
+        let (entries, dropped) = report_entries_counted(mixed).unwrap();
+        assert_eq!(dropped, 1, "the string-`inferred` entry must be counted as dropped");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(report_entries(mixed).unwrap().len(), 2); // back-compat: same surviving entries
+        // a clean report drops nothing
+        let clean = r#"[{"fn":"a","inferred":["Fs"],"hash":""}]"#;
+        assert_eq!(report_entries_counted(clean).unwrap().1, 0);
     }
 
     #[test]

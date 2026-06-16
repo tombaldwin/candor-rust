@@ -121,13 +121,24 @@ pub fn literal_allowed(effect: &str, reached: &str, allow: &BTreeSet<String>) ->
     }
 }
 
+/// Split a function name (or scope) into PATH SEGMENTS on either separator. Reports reach the Rust gate
+/// AND `candor-query` from BOTH the Rust engines (`::`-separated names) and the JVM/Swift/TS engines
+/// (`.`-separated names — `candor-query` is explicitly built to read them). Segmenting on `::` ALONE
+/// left a scoped `deny`/`pure` rule silently INERT on a dotted name: the scope matched nothing, so
+/// `whatif` returned a false green on the security boundary (gate-evasion). The JVM engine's own
+/// `scopeMatches` already splits on `.`; this aligns the Rust side. A `:`/`.` never appears WITHIN a
+/// real segment, so splitting on both never over-segments a Rust name (no spurious match).
+fn name_segments(s: &str) -> Vec<&str> {
+    s.split(|c| c == '.' || c == ':').filter(|p| !p.is_empty()).collect()
+}
+
 /// A policy scope matches a function name by **path segment** (SPEC §6.2), not substring: split both
-/// on `::`; the scope matches a contiguous run of name-segments where every segment except the last
-/// matches exactly and the last is a prefix. So `domain` matches `app::domain::h` and `domain_logic`
-/// but not `subdomain`. (Used directly by the Rust gate; the JVM engine mirrors it over `.`.)
+/// into segments (on `::` or `.`); the scope matches a contiguous run of name-segments where every
+/// segment except the last matches exactly and the last is a prefix. So `domain` matches
+/// `app::domain::h`, `com.acme.domain.h`, and `domain_logic` but not `subdomain`.
 pub fn scope_matches(name: &str, scope: &str) -> bool {
-    let segs: Vec<&str> = name.split("::").collect();
-    let parts: Vec<&str> = scope.split("::").collect();
+    let segs = name_segments(name);
+    let parts = name_segments(scope);
     if parts.is_empty() || parts.len() > segs.len() {
         return false;
     }
@@ -363,6 +374,15 @@ mod tests {
         assert!(!scope_matches("crate::network::client::send", "net::client"));
         assert!(!scope_matches("crate::net::x::client", "net::client"));
         assert!(!scope_matches("net", "net::client"));
+        // DOTTED names (JVM/Swift/TS reports `candor-query` consumes): a scope must match across `.` too,
+        // else a scoped deny/pure rule is silently inert → whatif false-green (gate-evasion). Both a
+        // `.`-written and a `::`-written scope must match a dotted name.
+        assert!(scope_matches("com.acme.domain.Pricing.quote", "domain"));
+        assert!(scope_matches("com.acme.domain.Pricing.quote", "acme.domain"));
+        assert!(scope_matches("com.acme.domain.Pricing.quote", "acme::domain"));
+        assert!(scope_matches("com.acme.infra.Net.fetch", "infra.Net"));
+        assert!(!scope_matches("com.acme.subdomain.h", "domain"));
+        assert!(!scope_matches("com.acme.domain.h", "infra"));
     }
 
     #[test]

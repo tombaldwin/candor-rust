@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use candor_report::{report_entries, report_files, ReportEntry, EFFECTS};
+use candor_report::{report_entries_counted, report_files, ReportEntry, EFFECTS};
 use regex::Regex;
 use serde::Serialize;
 
@@ -84,8 +84,20 @@ fn load_entries(prefix: &str) -> Vec<ReportEntry> {
             eprintln!("candor: report {} could not be read — its functions are OMITTED from this query", path.display());
             continue;
         };
-        match report_entries(&text) {
-            Some(es) => out.extend(es),
+        match report_entries_counted(&text) {
+            Some((es, dropped)) => {
+                if dropped > 0 {
+                    // A per-entry drop is the same under-report as a whole-file failure — disclose it,
+                    // never let a corrupt function silently vanish (and read as pure) from the query.
+                    eprintln!(
+                        "candor: report {} — {dropped} function entr{} could not be parsed and {} OMITTED from this query (corrupt or mid-write); re-run the scan",
+                        path.display(),
+                        if dropped == 1 { "y" } else { "ies" },
+                        if dropped == 1 { "is" } else { "are" },
+                    );
+                }
+                out.extend(es);
+            }
             None => eprintln!(
                 "candor: report {} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan",
                 path.display()
@@ -219,10 +231,21 @@ fn cmd_audit(args: &[String]) -> i32 {
         // corrupt report into an empty entry list, so the "everything is pure" message below printed for a
         // mid-write/corrupt report: the exact silent-pure misread candor's never-silently-pure rule forbids.
         let es = match std::fs::read_to_string(&rf.path) {
-            Ok(t) => report_entries(&t).unwrap_or_else(|| {
-                eprintln!("candor: report {} failed to parse — its functions are OMITTED from this audit (corrupt or mid-write); re-run the scan", rf.path.display());
-                Vec::new()
-            }),
+            Ok(t) => match report_entries_counted(&t) {
+                Some((es, dropped)) => {
+                    if dropped > 0 {
+                        eprintln!("candor: report {} — {dropped} function entr{} could not be parsed and {} OMITTED from this audit (corrupt or mid-write); re-run the scan",
+                            rf.path.display(),
+                            if dropped == 1 { "y" } else { "ies" },
+                            if dropped == 1 { "is" } else { "are" });
+                    }
+                    es
+                }
+                None => {
+                    eprintln!("candor: report {} failed to parse — its functions are OMITTED from this audit (corrupt or mid-write); re-run the scan", rf.path.display());
+                    Vec::new()
+                }
+            },
             Err(_) => {
                 eprintln!("candor: report {} could not be read — its functions are OMITTED from this audit", rf.path.display());
                 Vec::new()

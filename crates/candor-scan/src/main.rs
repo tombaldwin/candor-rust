@@ -3197,9 +3197,19 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             let aliased = tail2(&c.path)
                 .and_then(|t2| t2.split("::").next().map(str::to_string))
                 .is_some_and(|ty| merged.prim_aliases.contains(&ty));
+            // Did this call resolve to a LOCAL definition (free fn, method, or a unique trait-default)?
+            // If so the local def is AUTHORITATIVE and its effects flow through the `calls` edge — the
+            // crate/FFI classifier MUST NOT also fire, or a pure local fn whose NAME collides with an FFI
+            // tier (`sqlite3_step`/`git_clone`/`curl_*`/`SSL_*`) or a whole-crate rule (`getrandom`/
+            // `fastrand`) inherits that crate's effect: FABRICATION on a provably-pure path, transitively
+            // poisoning every caller (the cardinal sin the syntactic floor must never commit). The
+            // bare-leaf-METHOD suppression below was the special case of this; this covers the general
+            // case (free fns and qualified `Type::method` calls the bare-leaf guard missed).
+            let mut resolved_local = false;
             if resolvable && !aliased {
                 let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf);
                 if let Some(targets) = targets {
+                    resolved_local = true;
                     for t in targets {
                         if t != &f.qual {
                             calls.entry(f.qual.clone()).or_default().insert(t.clone());
@@ -3224,6 +3234,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                                 }
                             }
                             if hits.len() == 1 && hits[0] != &f.qual {
+                                resolved_local = true;
                                 calls.entry(f.qual.clone()).or_default().insert(hits[0].clone());
                             }
                         }
@@ -3241,7 +3252,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // (a genuine `fastrand::u32` dependency call). Qualified calls keep their type-precise rule.
             let suppress_bare_leaf =
                 c.method && !c.path.contains("::") && local_method_leaves.contains(&c.leaf);
-            if let Some(eff) = classified.filter(|_| !suppress_bare_leaf) {
+            if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
                 if let Some(s) = &c.str_arg {
                     match eff {
@@ -4551,6 +4562,66 @@ mod tests {
         // the genuine external `fastrand::u32` call — unresolved locally — STILL classifies Rand.
         assert!(effects_of("uses_external").contains(&"Rand".to_string()),
                 "a real external fastrand::u32 call must still report Rand:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn local_fn_or_method_named_like_an_ffi_tier_does_not_fabricate() {
+        // The leaf-PREFIX FFI tiers (`sqlite3_`/`git_`/`curl_`/`SSL_`) and whole-crate Rand
+        // (`getrandom`/`fastrand`) classify by leaf name independent of the binding crate. A PURE local
+        // FREE FN or qualified `Type::method` whose name collides was classified anyway — FABRICATION on a
+        // provably-pure path that transitively poisons every caller (the cardinal sin). The general
+        // local-resolution suppression must cover the free-fn and qualified-method cases the bare-leaf
+        // guard missed. A genuine FFI binding (an `extern "C"` decl, no Rust body) must STILL classify.
+        let d = std::env::temp_dir().join(format!("candor-scan-ffiname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"ffiname\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            // PURE local free fns named like FFI tiers / whole-crate rules
+            pub fn sqlite3_step() -> i32 { 0 }
+            pub fn git_clone() {}
+            pub fn getrandom() -> u32 { 4 }
+            pub fn uses_sqlite() -> i32 { sqlite3_step() }
+            pub fn uses_git() { git_clone() }
+            pub fn uses_rand() -> u32 { getrandom() }
+            // a PURE local qualified Type::method named like the git_ tier
+            pub struct Repo;
+            impl Repo { pub fn git_remote_fetch(&self) {} }
+            pub fn uses_method(r: &Repo) { r.git_remote_fetch() }
+            // a GENUINE FFI binding (extern decl, no Rust body) — must STILL classify Db
+            extern "C" { fn sqlite3_exec(p: *mut i8) -> i32; }
+            pub fn real_ffi() { unsafe { sqlite3_exec(std::ptr::null_mut()); } }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // every pure local fn/method (and its caller) carries NO fabricated FFI effect
+        for q in ["sqlite3_step", "git_clone", "getrandom", "uses_sqlite", "uses_git", "uses_rand",
+                  "git_remote_fetch", "uses_method"] {
+            assert!(effects_of(q).is_empty(),
+                    "local fn/method named like an FFI tier FABRICATED an effect on {q}: {:?}\n{body}",
+                    effects_of(q));
+        }
+        // the genuine extern-C FFI binding still classifies Db (no real effect dropped)
+        assert!(effects_of("real_ffi").contains(&"Db".to_string()),
+                "a real extern-C sqlite3_exec FFI call must still report Db:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
