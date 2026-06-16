@@ -3116,12 +3116,6 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // ambiguous leaf beats fabricating an effect candor never observed (the cardinal sin). (Real tokio
     // sweep: `RngSeedGenerator::next_seed` calls `rng.fastrand()` through a lock guard → bare leaf
     // `fastrand` → Rand, propagated to ~14 fns incl `Runtime::new`.)
-    let local_method_leaves: std::collections::HashSet<String> = fns.iter()
-        .filter_map(|f| tail2(&f.qual))
-        .filter(|t2| t2.split("::").next().is_some_and(|ty| ty.chars().next().is_some_and(char::is_uppercase)))
-        .filter_map(|t2| t2.rsplit("::").next().map(str::to_string))
-        .collect();
-
     let mut direct: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
     let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut cmds: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -3148,35 +3142,11 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     dep_classified.insert(cr.to_string());
                 }
             }
-            // Cross-crate chaining (spec §2): an UNCLASSIFIED qualified call into a crate a
-            // CANDOR_DEPS sibling report covers inherits that function's recorded effects and
-            // literal surfaces — joined unambiguous-tail2-first, then unambiguous leaf, like
-            // `resolve_target`. A chained dep is covered, not a κ blind spot.
-            // a renamed dependency: the call's crate root is the manifest KEY; reports/registry
-            // know the REAL package — join and cover under the real name
-            let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
-            if classified.is_none() && c.path.contains("::") && deps_idx.crates.contains(cr_real) {
-                // Join on the call path RELATIVE to the crate root: a multi-segment rel joins by
-                // its qualified tail ONLY (review: a bare-leaf fallback for qualified paths let a
-                // pure `MockDb::connect` inherit `Db::connect`'s effects — fabrication); a
-                // single-segment rel (a crate-root free fn) IS the dep's leaf key.
-                let rel = c.path.strip_prefix(&format!("{cr}::")).unwrap_or(&c.path);
-                let hit = if rel.contains("::") {
-                    tail2(rel).and_then(|t2| deps_idx.by_key.get(&format!("{cr_real}#{t2}")))
-                } else {
-                    deps_idx.by_key.get(&format!("{cr_real}#{rel}"))
-                };
-                if let Some(de) = hit {
-                    for e in &de.effects {
-                        direct.entry(f.qual.clone()).or_default().insert(e);
-                    }
-                    hosts.entry(f.qual.clone()).or_default().extend(de.hosts.iter().cloned());
-                    cmds.entry(f.qual.clone()).or_default().extend(de.cmds.iter().cloned());
-                    paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
-                    tables.entry(f.qual.clone()).or_default().extend(de.tables.iter().cloned());
-                    dep_classified.insert(cr.to_string());
-                }
-            }
+            // (The CANDOR_DEPS cross-crate JOIN moved BELOW — it must run AFTER `resolved_local`/
+            // `suppress_bare_leaf` are known and be gated on them, else a local fn/method/module named like
+            // a covered dep crate inherits that dep's effects onto a provably-pure LOCAL path — the same
+            // cardinal-sin fabrication the classifier's `resolved_local` guard prevents, which this join
+            // never had. Found by the cross-jar sweep.)
             // Resolve the call to a local definition via the precise, uniqueness-filtered `resolve_target`.
             // A receiver-typed `Type::method` call (`x.go()` inferred to `S::go`) resolves to the local
             // method ONLY when `Type` is locally defined — this recovers the common `x.method()` edge that
@@ -3250,8 +3220,42 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // classification; the effect (if any) flows from the resolved target through propagation. The
             // external-crate classification of a bare leaf still applies when NO local method shares the name
             // (a genuine `fastrand::u32` dependency call). Qualified calls keep their type-precise rule.
-            let suppress_bare_leaf =
-                c.method && !c.path.contains("::") && local_method_leaves.contains(&c.leaf);
+            // A BARE leaf (no `::`) naming ANY local definition (`by_leaf` keys every local fn/method by
+            // leaf) is the project's OWN — the local def is authoritative. Suppress the bare-leaf
+            // classifier (and the dep-join below). This covers the bare-leaf METHOD case AND the bare-leaf
+            // FREE-FN case the old `c.method && local_method_leaves` guard missed: a pure local free fn
+            // whose leaf is AMBIGUOUS (≥2 local defs, e.g. a free `git_clone` + a trait method `git_clone`)
+            // defeats `resolve_target`'s uniqueness filter (→ `resolved_local=false`), so the FFI/crate
+            // classifier fired unsuppressed and fabricated the effect (cardinal sin). A bare leaf with no
+            // local def (a genuine prelude/extern call) still classifies; a `use`-imported call is
+            // qualified (`::`) and keeps its type-precise rule.
+            let suppress_bare_leaf = !c.path.contains("::") && by_leaf.contains_key(&c.leaf);
+            // CANDOR_DEPS cross-crate JOIN (spec §2), GATED: an UNCLASSIFIED qualified call into a crate a
+            // sibling report covers inherits that fn's recorded effects + literal surfaces — UNLESS the call
+            // resolved to a local target or names a local bare leaf (then the local is authoritative; the
+            // join would fabricate). Joined unambiguous-tail2-first, then unambiguous leaf, like resolve_target.
+            // A renamed dep joins under its real package name.
+            let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
+            if classified.is_none() && !resolved_local && !suppress_bare_leaf
+                && c.path.contains("::") && deps_idx.crates.contains(cr_real)
+            {
+                let rel = c.path.strip_prefix(&format!("{cr}::")).unwrap_or(&c.path);
+                let hit = if rel.contains("::") {
+                    tail2(rel).and_then(|t2| deps_idx.by_key.get(&format!("{cr_real}#{t2}")))
+                } else {
+                    deps_idx.by_key.get(&format!("{cr_real}#{rel}"))
+                };
+                if let Some(de) = hit {
+                    for e in &de.effects {
+                        direct.entry(f.qual.clone()).or_default().insert(e);
+                    }
+                    hosts.entry(f.qual.clone()).or_default().extend(de.hosts.iter().cloned());
+                    cmds.entry(f.qual.clone()).or_default().extend(de.cmds.iter().cloned());
+                    paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
+                    tables.entry(f.qual.clone()).or_default().extend(de.tables.iter().cloned());
+                    dep_classified.insert(cr.to_string());
+                }
+            }
             if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
                 if let Some(s) = &c.str_arg {
@@ -4173,6 +4177,52 @@ mod tests {
     }
 
     #[test]
+    fn dep_join_does_not_fabricate_onto_a_local_shadow() {
+        // The CANDOR_DEPS cross-crate join must NOT override a LOCAL definition: a project module/fn named
+        // like a covered dep crate, resolving to the project's OWN pure code, must not inherit the dep
+        // report's effects (a cardinal-sin fabrication the join lacked the `resolved_local` guard for). A
+        // GENUINE external call into the covered crate must still inherit.
+        let dep = std::env::temp_dir().join(format!("candor-depjoin-rep-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dep.join("report.depb.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.5"}},
+            "functions": [{{"fn": "effectful_fn", "inferred": ["Net"], "hash": "depb#effectful_fn"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        assert!(idx.crates.contains("depb"));
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-depjoin-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        // LOCAL module named like the dep crate → its caller must stay PURE (no Net from the join)
+        let shadow = run("projsh", "mod depb { pub fn effectful_fn() -> i32 { 42 } }\npub fn uses_local() { let _ = depb::effectful_fn(); }");
+        assert!(eff(&shadow, "uses_local").is_empty(),
+                "dep-join FABRICATED the dep's effect onto a local shadow:\n{shadow}");
+        // GENUINE external call into the covered crate → must STILL inherit Net
+        let genuine = run("projgen", "pub fn calls_dep() { depb::effectful_fn(); }");
+        assert!(eff(&genuine, "calls_dep").contains(&"Net".to_string()),
+                "a genuine dep call must still inherit the dep report's Net:\n{genuine}");
+        let _ = std::fs::remove_dir_all(&dep);
+    }
+
+    #[test]
     fn dispatch_typed_receivers_resolve_via_local_impls_or_read_unknown() {
         // The trait-object hole, closed: `t.save()` on a `&dyn Store` either edges to the LOCAL
         // implementors (syntactic CHA, the JVM engine's bounded move) or reads honest Unknown —
@@ -4591,6 +4641,12 @@ mod tests {
             pub struct Repo;
             impl Repo { pub fn git_remote_fetch(&self) {} }
             pub fn uses_method(r: &Repo) { r.git_remote_fetch() }
+            // AMBIGUOUS bare leaf: a free fn AND a method share an FFI-named leaf, defeating
+            // resolve_target's uniqueness filter — the bare-leaf classifier must STILL be suppressed.
+            pub fn curl_easy_perform() {}
+            pub struct Conn;
+            impl Conn { pub fn curl_easy_perform(&self) {} }
+            pub fn uses_ambig() { curl_easy_perform() }
             // a GENUINE FFI binding (extern decl, no Rust body) — must STILL classify Db
             extern "C" { fn sqlite3_exec(p: *mut i8) -> i32; }
             pub fn real_ffi() { unsafe { sqlite3_exec(std::ptr::null_mut()); } }
@@ -4614,7 +4670,7 @@ mod tests {
         };
         // every pure local fn/method (and its caller) carries NO fabricated FFI effect
         for q in ["sqlite3_step", "git_clone", "getrandom", "uses_sqlite", "uses_git", "uses_rand",
-                  "git_remote_fetch", "uses_method"] {
+                  "git_remote_fetch", "uses_method", "curl_easy_perform", "uses_ambig"] {
             assert!(effects_of(q).is_empty(),
                     "local fn/method named like an FFI tier FABRICATED an effect on {q}: {:?}\n{body}",
                     effects_of(q));
