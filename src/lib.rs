@@ -987,6 +987,103 @@ fn from_residual_local_edge<'tcx>(
     did.is_local().then_some(did)
 }
 
+/// Instance-resolve a (generic) callee to its concrete impl method and keep it only if LOCAL.
+fn resolve_local_method<'tcx>(
+    cx: &LateContext<'tcx>,
+    fn_did: DefId,
+    gargs: rustc_middle::ty::GenericArgsRef<'tcx>,
+) -> Option<DefId> {
+    let inst = rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), fn_did, gargs)
+        .ok()
+        .flatten()?;
+    let did = inst.def_id();
+    did.is_local().then_some(did)
+}
+
+/// RETURN-TYPE-directed std driver edge (HOLE: `collect`/`into`/`parse`). A std method selects a LOCAL
+/// trait impl by the call's RESULT type, then runs it inside its non-local body — invisible through the
+/// std fn, so an effectful `FromIterator`/`From`/`FromStr` impl reached this way was silently pure (the
+/// receiver-directed iter-combinator bridge only peels the RECEIVER, never the return type). Recover the
+/// one edge to the local impl method (precise; a non-local/std target resolves to std and is dropped).
+fn return_type_driver_local_edge<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    callee_did: DefId,
+) -> Option<DefId> {
+    let typeck = cx.maybe_typeck_results()?;
+    let ExprKind::MethodCall(_, receiver, _, _) = expr.kind else { return None };
+    let method = cx.tcx.item_name(callee_did);
+    // Unwrap `Result<T, _>` to its Ok type (diagnostic-item gated so a user `Result` alias can't spoof).
+    let ok_of_result = |ty: rustc_middle::ty::Ty<'tcx>| -> Option<rustc_middle::ty::Ty<'tcx>> {
+        if let rustc_middle::ty::TyKind::Adt(def, substs) = ty.kind() {
+            if cx.tcx.is_diagnostic_item(rustc_span::sym::Result, def.did()) {
+                return Some(substs.type_at(0));
+            }
+        }
+        None
+    };
+    let assoc_fn = |trait_did: DefId| -> Option<DefId> {
+        cx.tcx
+            .associated_item_def_ids(trait_did)
+            .iter()
+            .copied()
+            .find(|d| matches!(cx.tcx.def_kind(*d), DefKind::AssocFn))
+    };
+
+    // `x.into()` → `<ResultTy as From<SrcTy>>::from` (the `T: Into<U>` blanket is `U: From<T>`).
+    if method.as_str() == "into" {
+        let trait_did = cx.tcx.trait_of_assoc(callee_did)?;
+        if cx.tcx.item_name(trait_did).as_str() != "Into" {
+            return None;
+        }
+        let result_ty = typeck.expr_ty(expr);
+        let src_ty = typeck.expr_ty_adjusted(receiver).peel_refs();
+        let from_trait = cx.tcx.get_diagnostic_item(rustc_span::sym::From)?;
+        let gargs = cx.tcx.mk_args(&[result_ty.into(), src_ty.into()]); // From's args [Self=Result, T=Src]
+        return resolve_local_method(cx, assoc_fn(from_trait)?, gargs);
+    }
+    // `s.parse::<T>()` → `<T as FromStr>::from_str` (T is the Ok type of the `Result<T, T::Err>` return).
+    // FromStr is not a diagnostic item; recover it from `parse`'s own `F: FromStr` bound.
+    if method.as_str() == "parse" {
+        let target = ok_of_result(typeck.expr_ty(expr))?;
+        let fromstr_trait = cx.tcx.predicates_of(callee_did).predicates.iter().find_map(|(p, _)| {
+            let tp = p.as_trait_clause()?;
+            let did = tp.def_id();
+            (cx.tcx.item_name(did).as_str() == "FromStr").then_some(did)
+        })?;
+        let gargs = cx.tcx.mk_args(&[target.into()]); // FromStr's only param is Self
+        return resolve_local_method(cx, assoc_fn(fromstr_trait)?, gargs);
+    }
+    // `it.collect::<T>()` → `<T as FromIterator<Item>>::from_iter`. from_iter needs [Self=T, A=Item,
+    // I=iterator]: pull the iterator type (the receiver) + its `Iterator::Item`, and the result type T.
+    if method.as_str() == "collect" {
+        let trait_did = cx.tcx.trait_of_assoc(callee_did)?;
+        if cx.tcx.item_name(trait_did).as_str() != "Iterator" {
+            return None;
+        }
+        let result_ty = typeck.expr_ty(expr);
+        let iter_ty = typeck.expr_ty_adjusted(receiver);
+        let iter_trait = cx.tcx.get_diagnostic_item(rustc_span::sym::Iterator)?;
+        let item_assoc = cx
+            .tcx
+            .associated_items(iter_trait)
+            .in_definition_order()
+            .find(|a| matches!(a.kind, rustc_middle::ty::AssocKind::Type { .. }))?
+            .def_id;
+        let item_ty = cx
+            .tcx
+            .try_normalize_erasing_regions(
+                cx.typing_env(),
+                rustc_middle::ty::Ty::new_projection(cx.tcx, item_assoc, [iter_ty]),
+            )
+            .ok()?;
+        let fromiter_trait = cx.tcx.get_diagnostic_item(rustc_span::sym::FromIterator)?;
+        let gargs = cx.tcx.mk_args(&[result_ty.into(), item_ty.into(), iter_ty.into()]);
+        return resolve_local_method(cx, assoc_fn(fromiter_trait)?, gargs);
+    }
+    None
+}
+
 /// Resolve a COMPARISON-operator call (`==`/`!=` -> PartialEq::eq, `<`/`<=`/`>`/`>=` -> PartialOrd::
 /// partial_cmp) to its concrete LOCAL impl method, pinned by the operand type. Comparison operators don't
 /// record a `type_dependent_def_id` even when overloaded, so resolve_callee can't see them via the normal
@@ -2135,6 +2232,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // that one edge from the call's types (see from_residual_local_edge). Adds soundness only.
         if let Some(from_did) = from_residual_local_edge(cx, expr, def_id) {
             add_edge(self, from_did);
+        }
+
+        // RETURN-TYPE-directed std drivers (`collect`/`into`/`parse`): a std method selects a LOCAL
+        // `FromIterator`/`From`/`FromStr` impl by the call's RESULT type and runs it through its non-local
+        // body — invisible like the `?`-From edge above. Recover that one local edge. Soundness only.
+        if let Some(driver_did) = return_type_driver_local_edge(cx, expr, def_id) {
+            add_edge(self, driver_did);
         }
 
         // HOLE 1 — std ITERATOR-COMBINATOR / consumer driving a LOCAL `Iterator::next` / `into_iter`.

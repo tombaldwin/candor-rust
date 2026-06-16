@@ -103,6 +103,16 @@ def edge_forms(callee, i=0):
         # must resolve `partial_cmp` directly. The `eq` impl here is pure, isolating the PartialOrd path.
         "cmp_op":     (f"{{ let _ = Cmp{i:02d}(0) < Cmp{i:02d}(0); }}", [], [], [
             f"struct Cmp{i:02d}(i32);\nimpl PartialEq for Cmp{i:02d} {{ fn eq(&self, _o: &Self) -> bool {{ true }} }}\nimpl PartialOrd for Cmp{i:02d} {{ fn partial_cmp(&self, _o: &Self) -> Option<std::cmp::Ordering> {{ {callee}(); Some(std::cmp::Ordering::Equal) }} }}"]),
+        # RETURN-TYPE-DIRECTED std drivers: a std method (`collect`/`into`/`parse`) selects a LOCAL trait
+        # impl by the call's RESULT type and runs it inside its non-local body — invisible like the `?`-From
+        # edge, so an effectful FromIterator/From/FromStr impl reached this way was silent-pure. The
+        # receiver-directed iter-combinator bridge only peels the RECEIVER, so it's blind to these.
+        "into_from":  (f"{{ let _: Wf{i:02d} = 5i32.into(); }}", [], [], [
+            f"struct Wf{i:02d}(i32);\nimpl From<i32> for Wf{i:02d} {{ fn from(_v: i32) -> Self {{ {callee}(); Wf{i:02d}(0) }} }}"]),
+        "collect_fromiter": (f"{{ let _: Cl{i:02d} = (0..2).collect(); }}", [], [], [
+            f"struct Cl{i:02d};\nimpl FromIterator<i32> for Cl{i:02d} {{ fn from_iter<I: IntoIterator<Item=i32>>(_i: I) -> Self {{ {callee}(); Cl{i:02d} }} }}"]),
+        "parse_fromstr": (f"{{ let _ = \"x\".parse::<Pf{i:02d}>(); }}", [], [], [
+            f"struct Pf{i:02d};\nimpl std::str::FromStr for Pf{i:02d} {{ type Err = (); fn from_str(_s: &str) -> Result<Self, ()> {{ {callee}(); Ok(Pf{i:02d}) }} }}"]),
         # OVERLOADED INDEX: `v[0]` is `ExprKind::Index` → `Index::index`; same root cause as op_add.
         "index":      (f"{{ let v = Ix{i:02d}(()); let _ = v[0]; }}", [], [], [
             f"struct Ix{i:02d}(());\nimpl std::ops::Index<usize> for Ix{i:02d} {{ type Output = (); fn index(&self, _: usize) -> &() {{ {callee}(); &self.0 }} }}"]),
