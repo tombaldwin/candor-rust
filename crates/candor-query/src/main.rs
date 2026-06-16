@@ -933,11 +933,23 @@ fn load_callgraph(prefix: &str) -> BTreeMap<String, Vec<String>> {
         if !name.starts_with(&pfx) || !name.ends_with(".callgraph.json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
-        if let Ok(map) = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&text) {
-            for (k, v) in map {
-                out.entry(k).or_default().extend(v);
+        // A corrupt/unreadable callgraph file silently shrinks the graph — so a blast-radius query
+        // (whatif/rewire/callers) UNDER-reports, and `whatif` can return a false GREEN on the security
+        // boundary (an in-scope caller whose edge lived in the dropped file vanishes). Sweep-2 fixed this
+        // asymmetry on the REPORT path (load_entries discloses) but not here. Disclose both failure arms,
+        // mirroring that fix — never silently drop graph edges a gate verdict depends on.
+        let path = ent.path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("candor: callgraph {} could not be read — its edges are OMITTED, so blast-radius queries (whatif/rewire/callers) UNDER-report", path.display());
+            continue;
+        };
+        match serde_json::from_str::<BTreeMap<String, Vec<String>>>(&text) {
+            Ok(map) => {
+                for (k, v) in map {
+                    out.entry(k).or_default().extend(v);
+                }
             }
+            Err(_) => eprintln!("candor: callgraph {} failed to parse — its edges are OMITTED, so blast-radius queries (whatif/rewire/callers) UNDER-report (corrupt or mid-write); re-run the scan", path.display()),
         }
     }
     out
