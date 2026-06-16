@@ -1,6 +1,6 @@
 [package]
 name = "candor"
-version = "0.5.4"
+version = "0.5.5"
 authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
 description = "A type-aware capability/effect checker for Rust, as a dylint lint."
 edition = "2024"
