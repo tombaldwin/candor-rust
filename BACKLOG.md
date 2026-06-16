@@ -547,3 +547,49 @@ fixpoint profiled on ripgrep (negligible).
   crate). Measured negligible: on ripgrep (52k lines) the largest crate (`rg`: 1179 fns / 3302 edges)
   fixpoints in 0.42 ms, ~0.7 ms total across the workspace — ~0.017% of the run. Per-crate cost is
   dominated by call resolution + rustc, not propagation, so a worklist rewrite isn't worth it.
+
+## Cross-component consistency (from the 2026-06-16 core-component sweep)
+
+These four are NOT simple bugs — they are cross-engine consistency / coverage efforts that need a
+deliberate design pass (some touch the spec + all 4 engines + conformance + releases). The clear bugs
+the same sweep found are already fixed (java serialization soundness 0.5.7; candor-query audit silent-pure
++ whatif empty-target; ci self-gate stale-binary; mcp arg-validation; candor-agents crash + strict gate).
+
+1. **Report ENVELOPE cross-engine field divergence.** A consumer written against one engine breaks on
+   another: (a) candor-scan (rust) never emits `declared`/`undeclared`/`overdeclared` (java/swift/ts always
+   do, as `[]`); (b) rust OMITS `direct` when a fn has no own-body effects (others emit `[]`), so a
+   consumer can't tell "no direct effect" from "untracked"; (c) rust emits exact-DUPLICATE entries
+   (tokio: 2 fns appear twice, identical hash/loc/inferred — cfg-gated re-emission; DEDUP-by-fn before
+   writing, others don't dup); (d) `unknownWhy` token vocabulary diverges 4 ways (java `dispatch-broad:`/
+   `dispatch-broad-ext:`, ts `call:`/`accessor:`, swift `contentsOf:`, rust `callback:` — spec defines
+   only reflect:/native:/dispatch:/callback:); (e) java envelope coverage field is `packages:[]` (array)
+   vs `package:""` (string) elsewhere; (f) `unresolved` is presence-only on rust/ts vs explicit bool on
+   java/swift. The dedup (c) is a clear small fix; the rest needs a SPEC decision (which envelope fields
+   are mandatory vs optional, and a single `unknownWhy` vocabulary) then per-engine alignment + a
+   conformance check on the envelope shape. candor's whole pitch is cross-language-consistent reports, so
+   this matters. NOTE: do NOT blindly add declared/undeclared to rust — confirm whether rust supports the
+   declaration-annotation feature at all first (it may be a genuine semantic gap, not a missing field).
+
+2. **candor-scan (syntactic, stable) silent-pure on macro-hidden effects.** A `libc::socket(...)` inside an
+   idiomatic `syscall!{...}` declarative-macro wrapper (socket2/mio) comes back PURE — the stable backend
+   doesn't expand local `macro_rules!`, so the libc callee is invisible (candor-classify WOULD map it to
+   Net). This is the documented SYNTACTIC-FLOOR limitation (absence≠pure; the nightly HIR engine, which
+   expands macros, is the sound gate). NOT a candor-scan bug to "fix" by guessing — but consider whether
+   candor-scan can raise Unknown when a function body contains an UNEXPANDABLE local-macro invocation it
+   can't see through (sound over-approximation), vs the current silent omission, and whether the κ ledger
+   discloses it. Verify the disclosure story; don't add noisy Unknown-on-every-macro.
+
+3. **Conformance coverage gaps.** The 4-way suite exercises only 6/10 effects (Fs/Net/Exec/Env/Clock);
+   Db/Rand/Log/Clipboard/Ipc have ZERO cross-engine coverage (deliberately scoped out in expected.json —
+   they need per-language deps / are structurally asymmetric, so each engine tests them in its own suite).
+   And the generative matrix has NO desugared-call forms (custom-iterator for-of, disposal, operators,
+   subscripts), so the ~14 implicit-call holes fixed 2026-06-15 are gated ONLY by per-engine fuzzers, not
+   conformance — a cross-engine regression of them wouldn't be caught. Worth: add desugared-call fixtures
+   to the generative differential, and at least Db/Log (the common ones) to the cross-engine set.
+
+4. **MCP tool-set divergence across engines.** ts exposes 8 tools (impact/where/reachable/path/callers/
+   show/map/whatif), rust 5 (effects/where/callers/whatif/diff), java 4 — and the arg key is `fn` (ts) vs
+   `function` (python). An agent/skill written against one engine's candor MCP breaks on another, defeating
+   the "same prompt everywhere" promise. Align: a canonical tool set + arg key across all three servers
+   (the python servers shell out to candor-query which already has impact/reachable/path/show/map, so it's
+   mostly wiring), update the schemas + mcp.json.example + READMEs.
