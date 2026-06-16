@@ -1084,6 +1084,32 @@ fn return_type_driver_local_edge<'tcx>(
     None
 }
 
+/// `core::mem::drop(x)` runs `x`'s destructor INSIDE mem::drop's non-local body — so an effectful local
+/// `Drop` impl reached via an explicit `drop(guard)` (early lock/file/connection release) was silent-pure
+/// (scope-end drop-glue IS modeled, but moving the value into `mem::drop` relocates the destructor to a
+/// std fn the engine doesn't walk). Resolve `<T as Drop>::drop` for the argument type and edge it if local.
+fn mem_drop_local_edge<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    callee_did: DefId,
+) -> Option<DefId> {
+    if !cx.tcx.is_diagnostic_item(rustc_span::sym::mem_drop, callee_did) {
+        return None;
+    }
+    let ExprKind::Call(_, args) = expr.kind else { return None };
+    let typeck = cx.maybe_typeck_results()?;
+    let arg_ty = typeck.expr_ty_adjusted(args.first()?);
+    let drop_trait = cx.tcx.lang_items().drop_trait()?;
+    let drop_fn = cx
+        .tcx
+        .associated_item_def_ids(drop_trait)
+        .iter()
+        .copied()
+        .find(|d| matches!(cx.tcx.def_kind(*d), DefKind::AssocFn))?;
+    let gargs = cx.tcx.mk_args(&[arg_ty.into()]); // Drop's only param is Self
+    resolve_local_method(cx, drop_fn, gargs)
+}
+
 /// Resolve a COMPARISON-operator call (`==`/`!=` -> PartialEq::eq, `<`/`<=`/`>`/`>=` -> PartialOrd::
 /// partial_cmp) to its concrete LOCAL impl method, pinned by the operand type. Comparison operators don't
 /// record a `type_dependent_def_id` even when overloaded, so resolve_callee can't see them via the normal
@@ -2239,6 +2265,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // body — invisible like the `?`-From edge above. Recover that one local edge. Soundness only.
         if let Some(driver_did) = return_type_driver_local_edge(cx, expr, def_id) {
             add_edge(self, driver_did);
+        }
+
+        // `mem::drop(x)` relocates `x`'s destructor into the non-local mem::drop body — recover the edge
+        // to the local `Drop::drop` (explicit early-release of an effectful guard, else silent-pure).
+        if let Some(drop_did) = mem_drop_local_edge(cx, expr, def_id) {
+            add_edge(self, drop_did);
         }
 
         // HOLE 1 — std ITERATOR-COMBINATOR / consumer driving a LOCAL `Iterator::next` / `into_iter`.

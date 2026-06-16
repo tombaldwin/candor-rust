@@ -113,6 +113,11 @@ def edge_forms(callee, i=0):
             f"struct Cl{i:02d};\nimpl FromIterator<i32> for Cl{i:02d} {{ fn from_iter<I: IntoIterator<Item=i32>>(_i: I) -> Self {{ {callee}(); Cl{i:02d} }} }}"]),
         "parse_fromstr": (f"{{ let _ = \"x\".parse::<Pf{i:02d}>(); }}", [], [], [
             f"struct Pf{i:02d};\nimpl std::str::FromStr for Pf{i:02d} {{ type Err = (); fn from_str(_s: &str) -> Result<Self, ()> {{ {callee}(); Ok(Pf{i:02d}) }} }}"]),
+        # EXPLICIT mem::drop: `drop(v)` relocates v's destructor into the non-local mem::drop body, so an
+        # effectful local Drop impl reached via explicit early-release was silent-pure (scope-end glue is
+        # modeled, but the move into mem::drop is not). candor must resolve <T as Drop>::drop for the arg.
+        "mem_drop": (f"{{ let v = Dp{i:02d}(()); drop(v); }}", [], [], [
+            f"struct Dp{i:02d}(());\nimpl Drop for Dp{i:02d} {{ fn drop(&mut self) {{ {callee}(); }} }}"]),
         # OVERLOADED INDEX: `v[0]` is `ExprKind::Index` → `Index::index`; same root cause as op_add.
         "index":      (f"{{ let v = Ix{i:02d}(()); let _ = v[0]; }}", [], [], [
             f"struct Ix{i:02d}(());\nimpl std::ops::Index<usize> for Ix{i:02d} {{ type Output = (); fn index(&self, _: usize) -> &() {{ {callee}(); &self.0 }} }}"]),
