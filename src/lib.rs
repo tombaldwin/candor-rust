@@ -712,8 +712,7 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
         // Without this, an effectful `impl Add`/`Index`/`Deref` reached through operator sugar was
         // invisible to the call graph — the caller looked pure though the impl performs I/O. A silent
         // under-report; teeth: soundness/gen.py `op_add`/`index`/`deref` forms.
-        ExprKind::Binary(..)
-        | ExprKind::Unary(..)
+        ExprKind::Unary(..)
         | ExprKind::Index(..)
         | ExprKind::AssignOp(..) => {
             let method_did = typeck.type_dependent_def_id(expr.hir_id)?;
@@ -724,6 +723,27 @@ fn resolve_callee<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Option<Cal
                 // or marks it `Unknown` rather than treating it as a pinned target.
                 Some(Devirt::StillVirtual) => Some(Callee::Def { did: method_did, dynamic: true }),
                 None => None,
+            }
+        }
+        ExprKind::Binary(op, lhs, _) => {
+            use rustc_hir::BinOpKind::*;
+            // COMPARISON operators need a dedicated path — the normal type_dependent_def_id route misses
+            // the operand's LOCAL impl two different ways: `==`/`!=` record NO type_dependent_def_id at
+            // all, and `<`/`<=`/`>`/`>=` record one pointing at the non-local DEFAULT PartialOrd method
+            // (lt/le/gt/ge) which forwards to — but HIDES — the local `partial_cmp`. Either way an
+            // effectful eq/partial_cmp reached via comparison sugar was silent-pure in the SOUND gate (its
+            // worst hole). Resolve the operand's eq/partial_cmp directly. Arithmetic/bitwise ops (and Index/
+            // Unary/AssignOp above) keep the type_dependent_def_id path.
+            if matches!(op.node, Eq | Ne | Lt | Le | Gt | Ge) {
+                resolve_cmp_op(cx, typeck, op.node, lhs)
+            } else {
+                typeck.type_dependent_def_id(expr.hir_id).and_then(|method_did| {
+                    match devirtualize(cx, expr, method_did) {
+                        Some(Devirt::Static(did)) => Some(Callee::Def { did, dynamic: false }),
+                        Some(Devirt::StillVirtual) => Some(Callee::Def { did: method_did, dynamic: true }),
+                        None => None,
+                    }
+                })
             }
         }
         _ => None,
@@ -965,6 +985,48 @@ fn from_residual_local_edge<'tcx>(
         .flatten()?;
     let did = inst.def_id();
     did.is_local().then_some(did)
+}
+
+/// Resolve a COMPARISON-operator call (`==`/`!=` -> PartialEq::eq, `<`/`<=`/`>`/`>=` -> PartialOrd::
+/// partial_cmp) to its concrete LOCAL impl method, pinned by the operand type. Comparison operators don't
+/// record a `type_dependent_def_id` even when overloaded, so resolve_callee can't see them via the normal
+/// operator path — without this an effectful PartialEq/PartialOrd impl reached through comparison sugar is
+/// invisible (a silent under-report in the sound gate). Mirrors the `From` resolver above (two type
+/// params). A non-local/std impl resolves to std (pure calibration); an unresolvable generic stays dynamic.
+fn resolve_cmp_op<'tcx>(
+    cx: &LateContext<'tcx>,
+    typeck: &rustc_middle::ty::TypeckResults<'tcx>,
+    op: rustc_hir::BinOpKind,
+    lhs: &Expr<'tcx>,
+) -> Option<Callee> {
+    use rustc_hir::BinOpKind::*;
+    // Lang items (guaranteed present) rather than diagnostic items — PartialOrd's diagnostic item isn't
+    // reliably set, which left `<`/`<=`/`>`/`>=` unresolved.
+    let (trait_did, method) = match op {
+        Eq | Ne => (cx.tcx.lang_items().eq_trait()?, "eq"),
+        Lt | Le | Gt | Ge => (cx.tcx.lang_items().partial_ord_trait()?, "partial_cmp"),
+        _ => return None,
+    };
+    let trait_fn = cx
+        .tcx
+        .associated_items(trait_did)
+        .in_definition_order()
+        .find(|a| a.is_fn() && a.name().as_str() == method)?
+        .def_id;
+    // PartialEq<Rhs = Self> / PartialOrd<Rhs = Self>: the impl is pinned by [Self = T, Rhs = T] where T is
+    // the operand type (peel the auto-ref the `&self`/`&Rhs` receiver adds).
+    let t = typeck.expr_ty_adjusted(lhs).peel_refs();
+    let gargs = cx.tcx.mk_args(&[t.into(), t.into()]);
+    let resolve = |env: rustc_middle::ty::TypingEnv<'tcx>| {
+        rustc_middle::ty::Instance::try_resolve(cx.tcx, env, trait_fn, gargs).ok().flatten()
+    };
+    let inst = resolve(cx.typing_env())
+        .or_else(|| resolve(cx.typing_env().with_post_analysis_normalized(cx.tcx)))?;
+    match inst.def {
+        // still vtable dispatch (vanishingly rare for operators) — honest dynamic, CHA'd or Unknown.
+        rustc_middle::ty::InstanceKind::Virtual(..) => Some(Callee::Def { did: trait_fn, dynamic: true }),
+        _ => Some(Callee::Def { did: inst.def_id(), dynamic: false }),
+    }
 }
 
 /// The outcome of resolving a std iterator-combinator (or `core::fmt`) call to the LOCAL trait impl(s)

@@ -90,6 +90,19 @@ def edge_forms(callee, i=0):
         # query type_dependent_def_id on the operator node or the edge is invisible (silent-pure hole).
         "op_add":     (f"{{ let _ = Op{i:02d} + Op{i:02d}; }}", [], [], [
             f"struct Op{i:02d};\nimpl std::ops::Add for Op{i:02d} {{ type Output = (); fn add(self, _: Self) {{ {callee}(); }} }}"]),
+        # COMPARISON `==`: `a == b` is `ExprKind::Binary(Eq)` but — unlike `+` — records NO
+        # type_dependent_def_id, so the normal operator path can't see the local `PartialEq::eq`. candor
+        # needs a dedicated comparison resolver (resolve_cmp_op) keyed on the operand type, or an effectful
+        # `eq` reached through `==` is silent-pure. By VALUE (`Eq(0) == Eq(0)`) so it can't fall through to
+        # the std blanket `&T: PartialEq` impl (which DOES carry a tddi → std-pure → fix never engages).
+        "eq_op":      (f"{{ let _ = Eq{i:02d}(0) == Eq{i:02d}(0); }}", [], [], [
+            f"struct Eq{i:02d}(i32);\nimpl PartialEq for Eq{i:02d} {{ fn eq(&self, _o: &Self) -> bool {{ {callee}(); true }} }}"]),
+        # COMPARISON `<`: `a < b` records a tddi — but it points at the non-local DEFAULT `PartialOrd::lt`,
+        # which HIDES the local `partial_cmp` the operator actually dispatches to. The normal path resolves
+        # the default (std, pure) and misses the effectful local `partial_cmp` → silent-pure. resolve_cmp_op
+        # must resolve `partial_cmp` directly. The `eq` impl here is pure, isolating the PartialOrd path.
+        "cmp_op":     (f"{{ let _ = Cmp{i:02d}(0) < Cmp{i:02d}(0); }}", [], [], [
+            f"struct Cmp{i:02d}(i32);\nimpl PartialEq for Cmp{i:02d} {{ fn eq(&self, _o: &Self) -> bool {{ true }} }}\nimpl PartialOrd for Cmp{i:02d} {{ fn partial_cmp(&self, _o: &Self) -> Option<std::cmp::Ordering> {{ {callee}(); Some(std::cmp::Ordering::Equal) }} }}"]),
         # OVERLOADED INDEX: `v[0]` is `ExprKind::Index` → `Index::index`; same root cause as op_add.
         "index":      (f"{{ let v = Ix{i:02d}(()); let _ = v[0]; }}", [], [], [
             f"struct Ix{i:02d}(());\nimpl std::ops::Index<usize> for Ix{i:02d} {{ type Output = (); fn index(&self, _: usize) -> &() {{ {callee}(); &self.0 }} }}"]),
