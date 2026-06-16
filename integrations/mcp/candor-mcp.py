@@ -141,6 +141,11 @@ def main():
             req = json.loads(line)
         except Exception:
             continue  # not parseable; nothing we can reply to without an id
+        # A frame that parses to a non-object (a JSON array — MCP permits batches — a number, a string)
+        # would crash on `.get` below, killing the whole stdio session (a one-frame DoS). The TS server
+        # already guards this; mirror it. We don't support batches, so a non-dict frame is ignored.
+        if not isinstance(req, dict):
+            continue
         mid = req.get("id")
         method = req.get("method")
         if mid is None:
