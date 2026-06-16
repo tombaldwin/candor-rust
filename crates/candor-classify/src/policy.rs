@@ -129,7 +129,7 @@ pub fn literal_allowed(effect: &str, reached: &str, allow: &BTreeSet<String>) ->
 /// `scopeMatches` already splits on `.`; this aligns the Rust side. A `:`/`.` never appears WITHIN a
 /// real segment, so splitting on both never over-segments a Rust name (no spurious match).
 fn name_segments(s: &str) -> Vec<&str> {
-    s.split(|c| c == '.' || c == ':').filter(|p| !p.is_empty()).collect()
+    s.split(['.', ':']).filter(|p| !p.is_empty()).collect()
 }
 
 /// A policy scope matches a function name by **path segment** (SPEC §6.2), not substring: split both
