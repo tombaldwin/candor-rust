@@ -5,8 +5,11 @@
 # `deny Net Db Exec Ipc` boundary in .candor/policy by asserting no analyzed function reaches those.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCAN="${CANDOR_SCAN_BIN:-$ROOT/target/release/candor-scan}"
-[ -x "$SCAN" ] || cargo build --release -p candor-scan --manifest-path "$ROOT/Cargo.toml" || exit 2
+# Always rebuild when using the default binary (cargo is incremental, so this is ~free when up to date).
+# `[ -x "$SCAN" ] ||` only rebuilt when the binary was MISSING — so a STALE target/release binary that
+# predates a gate fix (e.g. the §6.2 ASCII-whitespace split) was used as-is, silently gate-evadable. Only
+# trust a binary verbatim when explicitly provided via CANDOR_SCAN_BIN.
+[ -n "${CANDOR_SCAN_BIN:-}" ] || cargo build --release -p candor-scan --manifest-path "$ROOT/Cargo.toml" || exit 2
 SCAN="${CANDOR_SCAN_BIN:-$ROOT/target/release/candor-scan}"
 # The denied effects, read from .candor/policy's `deny` line (the file is the source of truth). POSIX
 # awk (not `\s` — BSD sed/grep don't support it): strip a trailing comment, drop the `deny` keyword.

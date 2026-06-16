@@ -93,17 +93,32 @@ def run_query(args):
         return f"candor: query failed ({e})"
 
 
+def arg(args, key):
+    """Required-arg getter. A missing/empty value is a clear error, not a silent whole-report query
+    (an unset `function` would otherwise run `show "" --json`). A leading-dash value is rejected — it
+    would be parsed as a FLAG by candor-query (argument injection from a tool argument)."""
+    v = args.get(key, "")
+    if not isinstance(v, str) or v == "":
+        raise ValueError(f"missing required argument: {key}")
+    if v.startswith("-"):
+        raise ValueError(f"argument {key!r} may not start with '-'")
+    return v
+
+
 def dispatch(name, args):
-    if name == "candor_effects":
-        return run_query(["show", args.get("function", ""), "--json"])
-    if name == "candor_where":
-        return run_query(["where", args.get("effect", ""), "--json"])
-    if name == "candor_callers":
-        return run_query(["callers", args.get("function", ""), "--json"])
-    if name == "candor_whatif":
-        return run_query(["whatif", args.get("function", ""), args.get("effect", ""), "--json"])
-    if name == "candor_diff":
-        return run_query(["diff", "--json"])
+    try:
+        if name == "candor_effects":
+            return run_query(["show", arg(args, "function"), "--json"])
+        if name == "candor_where":
+            return run_query(["where", arg(args, "effect"), "--json"])
+        if name == "candor_callers":
+            return run_query(["callers", arg(args, "function"), "--json"])
+        if name == "candor_whatif":
+            return run_query(["whatif", arg(args, "function"), arg(args, "effect"), "--json"])
+        if name == "candor_diff":
+            return run_query(["diff", "--json"])
+    except ValueError as e:
+        return f"candor: {e}"
     return None
 
 
