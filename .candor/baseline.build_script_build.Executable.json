@@ -1,8 +1,10 @@
 {
   "candor": {
-    "version": "47fdab6",
-    "toolchain": "nightly-2026-04-16"
+    "version": "399054b",
+    "toolchain": "nightly-2026-04-16",
+    "spec": "0.5"
   },
+  "package": "build_script_build",
   "functions": [
     {
       "fn": "main",
@@ -15,14 +17,12 @@
         "Exec",
         "Fs"
       ],
-      "declared": [],
       "undeclared": [
         "Exec",
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "a9ebd5d552a2cd75d6de1a93313d7c51",
+      "entryPoint": true,
+      "hash": "e0290fbf8a7549b741c3344de78ba11a",
       "fs": [
         "read"
       ],

@@ -1,8 +1,10 @@
 {
   "candor": {
-    "version": "47fdab6",
-    "toolchain": "nightly-2026-04-16"
+    "version": "399054b",
+    "toolchain": "nightly-2026-04-16",
+    "spec": "0.5"
   },
+  "package": "candor_report",
   "functions": [
     {
       "fn": "report_files",
@@ -13,15 +15,29 @@
       "direct": [
         "Fs"
       ],
-      "declared": [],
       "undeclared": [
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "37584c8c90dd0589f0b61f81320e88a2",
+      "hash": "5fb4a28d4e04a7cefc6a5a194661fed1",
       "fs": [
         "read"
+      ]
+    },
+    {
+      "fn": "write_atomic",
+      "loc": "crates/candor-report/src/lib.rs:227:1: 227:73",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "undeclared": [
+        "Fs"
+      ],
+      "hash": "5fb4a28d4e04a7ce0f8773ba1807e004",
+      "fs": [
+        "write"
       ]
     }
   ]

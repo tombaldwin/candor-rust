@@ -1,7 +1,9 @@
 {
   "candor": {
-    "version": "47fdab6",
-    "toolchain": "nightly-2026-04-16"
+    "version": "399054b",
+    "toolchain": "nightly-2026-04-16",
+    "spec": "0.5"
   },
+  "package": "candor_classify",
   "functions": []
 }

@@ -1,12 +1,14 @@
 {
   "candor": {
-    "version": "47fdab6",
-    "toolchain": "nightly-2026-04-16"
+    "version": "399054b",
+    "toolchain": "nightly-2026-04-16",
+    "spec": "0.5"
   },
+  "package": "candor",
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:1212:5: 1212:54",
+      "loc": "src/lib.rs:2126:5: 2126:54",
       "inferred": [
         "Env",
         "Fs"
@@ -14,22 +16,25 @@
       "direct": [
         "Env"
       ],
-      "declared": [],
       "undeclared": [
         "Env",
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a792135152eb4b9b8ab0",
+      "hash": "d4961ef38fb570b91cc6a76f2d2cfaf2",
       "calls": [
         "load_cross_reports",
         "load_layer_reach"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "rustc_middle",
+        "serde_json"
       ]
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:1520:5: 1520:59",
+      "loc": "src/lib.rs:2700:5: 2700:59",
       "inferred": [
         "Env",
         "Fs",
@@ -39,28 +44,82 @@
         "Env",
         "Fs"
       ],
-      "declared": [],
       "undeclared": [
         "Env",
         "Fs",
         "Log"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a7923adce60027f5808c",
-      "fs": [
-        "read",
-        "write"
-      ],
+      "hash": "d4961ef38fb570b938457d896addc5f6",
       "calls": [
         "load_baseline",
+        "mir_spike::drop_edges",
+        "propagate",
         "span_lint",
         "write_layer_reach"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "indexmap",
+        "rustc_hashes",
+        "rustc_hir",
+        "rustc_index",
+        "rustc_middle",
+        "rustc_session",
+        "rustc_span",
+        "rustc_type_ir",
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_expr",
+      "loc": "src/lib.rs:2171:5: 2171:77",
+      "inferred": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b929c97fe83d490bdc",
+      "calls": [
+        "generic_callee_local_edges",
+        "return_type_driver_local_edge",
+        "std_driver_local_edges"
+      ],
+      "invisible": [
+        "candor_classify",
+        "indexmap",
+        "rustc_data_structures",
+        "rustc_hashes",
+        "rustc_hir",
+        "rustc_hir_id",
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_session",
+        "rustc_span",
+        "rustc_type_ir"
+      ]
+    },
+    {
+      "fn": "<collect_generic_callee_edges::V<'a, 'tcx, FT, FF> as rustc_hir::intravisit::Visitor<'tcx>>::visit_expr",
+      "loc": "src/lib.rs:1707:13: 1707:58",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b90a08252d9c830ffe",
+      "unknownWhy": [
+        "callback:fn-pointer / closure"
+      ],
+      "invisible": [
+        "rustc_hir",
+        "rustc_middle"
       ]
     },
     {
       "fn": "Candor::new",
-      "loc": "src/lib.rs:277:5: 277:25",
+      "loc": "src/lib.rs:322:5: 322:25",
       "inferred": [
         "Env",
         "Fs"
@@ -69,133 +128,341 @@
         "Env",
         "Fs"
       ],
-      "declared": [],
       "undeclared": [
         "Env",
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a7921f91f700bbf0193b",
+      "hash": "d4961ef38fb570b9a8f10e7d94445ef4",
       "fs": [
         "read"
+      ],
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "collect_generic_callee_edges",
+      "loc": "src/lib.rs:1607:1: 1614:2",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b9c3934d251a17eb36",
+      "calls": [
+        "<collect_generic_callee_edges::V<'a, 'tcx, FT, FF> as rustc_hir::intravisit::Visitor<'tcx>>::visit_expr",
+        "collect_generic_callee_edges"
+      ],
+      "unknownWhy": [
+        "generic-iter:next"
+      ],
+      "invisible": [
+        "rustc_hir",
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_span",
+        "rustc_type_ir"
+      ]
+    },
+    {
+      "fn": "fmt_impl_for",
+      "loc": "src/lib.rs:1510:1: 1514:19",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b928cc817b14b0bd3c",
+      "unknownWhy": [
+        "generic-iter:find"
+      ],
+      "invisible": [
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_span"
+      ]
+    },
+    {
+      "fn": "generic_callee_local_edges",
+      "loc": "src/lib.rs:1561:1: 1565:16",
+      "inferred": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b976320d2c1e7ef8cc",
+      "calls": [
+        "collect_generic_callee_edges"
+      ],
+      "invisible": [
+        "rustc_hir",
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_span",
+        "rustc_type_ir"
+      ]
+    },
+    {
+      "fn": "is_dyn_receiver",
+      "loc": "src/lib.rs:656:1: 656:84",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b9b0a30d0ee18b549f",
+      "unknownWhy": [
+        "generic-iter:next"
+      ],
+      "invisible": [
+        "rustc_middle",
+        "rustc_span",
+        "rustc_type_ir"
       ]
     },
     {
       "fn": "load_baseline",
-      "loc": "src/lib.rs:691:1: 691:74",
+      "loc": "src/lib.rs:628:1: 628:74",
       "inferred": [
         "Fs"
       ],
       "direct": [
         "Fs"
       ],
-      "declared": [],
       "undeclared": [
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a792e6eca485279a0d14",
+      "hash": "d4961ef38fb570b912b4dc8327e1c753",
       "fs": [
         "read"
+      ],
+      "invisible": [
+        "candor_report"
       ]
     },
     {
       "fn": "load_cross_reports",
-      "loc": "src/lib.rs:591:1: 591:96",
+      "loc": "src/lib.rs:499:1: 499:96",
       "inferred": [
         "Fs"
       ],
       "direct": [
         "Fs"
       ],
-      "declared": [],
       "undeclared": [
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a7926d6d42c39ad66118"
+      "hash": "d4961ef38fb570b93130ac3ca36a7ef4",
+      "invisible": [
+        "candor_classify",
+        "candor_report"
+      ]
     },
     {
       "fn": "load_layer_reach",
-      "loc": "src/lib.rs:665:1: 665:75",
+      "loc": "src/lib.rs:599:1: 599:75",
       "inferred": [
         "Fs"
       ],
       "direct": [
         "Fs"
       ],
-      "declared": [],
       "undeclared": [
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a792eafa02919a60348a",
+      "hash": "d4961ef38fb570b9514eb25cac482d2c",
       "fs": [
         "read"
+      ],
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "local_trait_method_for_self",
+      "loc": "src/lib.rs:1336:1: 1341:19",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b9710ea7a777a232fd",
+      "unknownWhy": [
+        "generic-iter:find"
+      ],
+      "invisible": [
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_span"
+      ]
+    },
+    {
+      "fn": "mir_spike::drop_edges",
+      "loc": "src/mir_spike.rs:198:1: 198:75",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b91416e88516c4b7ed",
+      "unknownWhy": [
+        "generic-iter:next"
+      ],
+      "invisible": [
+        "indexmap",
+        "rustc_hir",
+        "rustc_index",
+        "rustc_middle",
+        "rustc_span",
+        "rustc_type_ir"
+      ]
+    },
+    {
+      "fn": "propagate",
+      "loc": "src/lib.rs:122:1: 125:38",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b9f5cac68718f73432",
+      "unknownWhy": [
+        "generic-iter:cloned"
       ]
     },
     {
       "fn": "register_lints",
-      "loc": "/Users/tom/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dylint_linting-6.0.1/src/lib.rs:285:13: 285:105",
+      "loc": "/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dylint_linting-6.0.1/src/lib.rs:285:13: 285:105",
       "inferred": [
         "Env",
         "Fs"
       ],
-      "direct": [],
-      "declared": [],
       "undeclared": [
         "Env",
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a7923cc2af58c06dbe9a",
+      "entryPoint": true,
+      "hash": "d4961ef38fb570b9ca1d780a67ca97f5",
       "fs": [
         "read"
       ],
       "calls": [
         "Candor::new"
+      ],
+      "invisible": [
+        "candor_classify",
+        "dylint_linting",
+        "rustc_lint"
+      ]
+    },
+    {
+      "fn": "resolve_cmp_op",
+      "loc": "src/lib.rs:1133:1: 1138:20",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b9b823e2689420de78",
+      "unknownWhy": [
+        "generic-iter:find"
+      ],
+      "invisible": [
+        "rustc_hir",
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_span"
+      ]
+    },
+    {
+      "fn": "return_type_driver_local_edge",
+      "loc": "src/lib.rs:1022:1: 1026:19",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b9a12b303e813f484c",
+      "unknownWhy": [
+        "generic-iter:find"
+      ],
+      "invisible": [
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_span",
+        "rustc_type_ir"
       ]
     },
     {
       "fn": "span_lint",
-      "loc": "src/lib.rs:74:1: 79:2",
+      "loc": "src/lib.rs:79:1: 84:2",
       "inferred": [
         "Log"
       ],
       "direct": [
         "Log"
       ],
-      "declared": [],
       "undeclared": [
         "Log"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a7922887275cb31f3e57"
+      "hash": "d4961ef38fb570b976ff64a44cc2f29a"
+    },
+    {
+      "fn": "std_driver_local_edges",
+      "loc": "src/lib.rs:1373:1: 1377:16",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "d4961ef38fb570b98c2b25a392c07b65",
+      "calls": [
+        "local_trait_method_for_self"
+      ],
+      "unknownWhy": [
+        "generic-iter:next"
+      ],
+      "invisible": [
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_span"
+      ]
     },
     {
       "fn": "write_layer_reach",
-      "loc": "src/lib.rs:657:1: 657:71",
+      "loc": "src/lib.rs:591:1: 591:71",
       "inferred": [
         "Fs"
       ],
       "direct": [
         "Fs"
       ],
-      "declared": [],
       "undeclared": [
         "Fs"
       ],
-      "overdeclared": [],
-      "unresolved": false,
-      "hash": "f3527b5bef15a7922fe589369494fee0",
+      "hash": "d4961ef38fb570b96f6b171ac0a0afe5",
       "fs": [
         "write"
+      ],
+      "invisible": [
+        "serde_json"
       ]
     }
   ]
