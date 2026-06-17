@@ -29,12 +29,10 @@ cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan || { ec
 SCAN="$ROOT/target/debug/candor-scan"
 
 # KNOWN, TRIAGED under-reports — tracked so the oracle is a clean gate (green on known gaps, red only on
-# NEW findings). Each needs a real fix; listed here with the root cause, not silently ignored.
-#   exec_duct — candor-SCAN reads `duct::cmd!(...).run()` pure: the cmd! MACRO result is untypeable by the
-#     syntactic scanner, so `.run()`'s Exec (a typed-receiver rule) is dropped. The DEEP engine catches it
-#     via the typed `.run()` (lib.rs:3675); fixing scan is a deliberate cross-engine call (over-approximate
-#     the shared classifier vs a syntactic-mode macro classifier). Same macro-blindness family as the log bug.
-KNOWN_UNDER=( "exec_duct" )
+# NEW findings). Each needs a real fix; listed here with the root cause, not silently ignored. Empty now:
+# the duct cmd!() macro-receiver under-report this oracle FOUND is FIXED (scan_builder_entry_effect in
+# candor-scan; the entry is over-approximated Exec for the syntactic engine, the deep engine stays precise).
+KNOWN_UNDER=()
 
 # member | effect ("" = pure control) | marker (must appear in the strace iff the effect ran)
 CASES=(

@@ -224,6 +224,23 @@ fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
 }
 
+/// candor-SCAN ONLY: builder-ENTRY points whose effect the typed classifier deliberately defers to a
+/// terminal VERB. `duct::cmd!(...).run()` is the canonical case — `cmd!`/`cmd` only BUILD an Expression;
+/// the spawn is at `.run()`/`.read()`/`.start()`. The DEEP engine types the receiver and catches the verb,
+/// so candor-classify keeps the entry pure for PRECISION (lib.rs duct rule + its `cmd → None` test). But
+/// the SYNTACTIC scanner can't type a builder chain — least of all through the `cmd!` MACRO whose result
+/// is opaque — so the verb's effect is dropped and the program reads silent-pure (a real under-report
+/// found by the real-world dynamic oracle; the same macro-blindness family as the log/tracing macros).
+/// Classify the ENTRY as the crate's whole effect: a safe OVER-approximation (candor's never-under-report
+/// bias), scoped to candor-scan so the deep engine stays precise. Both engines still agree on the
+/// function's effect when the builder is actually run (the overwhelmingly common case).
+fn scan_builder_entry_effect(cr: &str, path: &str) -> Option<&'static str> {
+    match cr {
+        "duct" if path == "duct::cmd" || path == "duct::sh" => Some("Exec"),
+        _ => None,
+    }
+}
+
 /// A loaded sibling-report function: the effects + literal surfaces a consumer's call inherits.
 #[derive(Clone, Default)]
 struct DepFn {
@@ -1454,7 +1471,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // effect, so inert macros (`println!`/`vec!`/`format!`/`matches!`) add no spurious call-graph edge.
         let mpath = expand(&path_to_string(&node.path), self.uses);
         let cr = mpath.split("::").next().unwrap_or(&mpath);
-        if candor_classify::classify(cr, &mpath).is_some() {
+        if candor_classify::classify(cr, &mpath).is_some() || scan_builder_entry_effect(cr, &mpath).is_some() {
             let leaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
             self.calls.push(Call { path: mpath, leaf, str_arg: None, typed: false, method: false });
         }
@@ -3236,7 +3253,8 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         }
         for c in &f.calls {
             let cr = c.path.split("::").next().unwrap_or("");
-            let classified = candor_classify::classify(cr, &c.path);
+            let classified = candor_classify::classify(cr, &c.path)
+                .or_else(|| scan_builder_entry_effect(cr, &c.path));
             // κ ledger: a qualified call into a declared dependency. (A bare leaf has no `::`, so it
             // can't name a crate; a local module sharing a dep's name is the rare accepted ambiguity.)
             if c.path.contains("::") && deps.contains(cr) {
@@ -5423,6 +5441,19 @@ trait G {
         // guards the shared-classifier contract the scanner relies on: an expanded std::fs path is Fs.
         assert_eq!(candor_classify::classify("std", "std::fs::read_to_string"), Some("Fs"));
         assert_eq!(candor_classify::classify("std", "std::process::Command::new"), Some("Exec"));
+    }
+
+    #[test]
+    fn duct_builder_entry_is_exec_for_the_syntactic_scanner() {
+        // The real-world oracle caught candor-scan silent-pure'ing `duct::cmd!(...).run()` (the cmd! macro
+        // result is untypeable, so .run()'s Exec was dropped). scan-only over-approx of the ENTRY fixes it;
+        // the shared classifier still keeps the entry pure (the deep engine catches the typed .run() verb).
+        assert_eq!(scan_builder_entry_effect("duct", "duct::cmd"), Some("Exec"));
+        assert_eq!(scan_builder_entry_effect("duct", "duct::sh"), Some("Exec"));
+        assert_eq!(scan_builder_entry_effect("duct", "duct::Expression::run"), None); // the verb is classify()'s job
+        assert_eq!(scan_builder_entry_effect("std", "std::process::Command::new"), None);
+        // invariant the deep engine relies on stays intact (entry pure in the SHARED classifier):
+        assert_eq!(candor_classify::classify("duct", "duct::cmd"), None);
     }
 
     #[test]
