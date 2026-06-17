@@ -10,7 +10,7 @@ import json, sys
 #     nor DISCLOSES it (visit_macro only records a macro it can classify, so an uncalibrated macro reach
 #     never reaches the κ-ledger) → silent-pure. Distinct from the builder-chain family: the fix is to
 #     DISCLOSE uncalibrated macro reaches to declared deps as blind (so it reads Unknown, honest). [P1]
-KNOWN_UNDER = {"log_slog"}
+KNOWN_UNDER = set()  # log_slog FIXED: visit_macro now discloses crate-qualified macro reaches
 
 def main(report, expected):
     rep = {f["fn"]: f for f in json.load(open(report)).get("functions", [])}

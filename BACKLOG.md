@@ -143,9 +143,12 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P1 — correctness (silent wrong answers are the worst failure)
 
-- [ ] **candor-scan silent-pures an UNCALIBRATED crate reached ONLY via a MACRO — no blind disclosure**
-      (found 2026-06-17 by the non-syscall recall corpus, `soundness/realworld/recall/`, case log_slog;
-      KNOWN_UNDER). `slog::info!(logger, "m")` reads pure: slog isn't calibrated, AND because the reach is a
+- [x] **candor-scan silent-pured an UNCALIBRATED crate reached ONLY via a MACRO — no blind disclosure**
+      (FOUND 2026-06-17 by the non-syscall recall corpus, case log_slog; FIXED same day — `visit_macro` now
+      records ANY crate-qualified macro path, so a macro reach into a declared-but-unmodeled dep is DISCLOSED
+      blind at attribution (slog::info! → invisible), the same honest Unknown a normal call gets. Verified
+      ZERO over-disclosure: candor-query invisible count identical before/after, 4-way conformance unchanged.
+      recall corpus now 14/14 honest, no tracked exceptions.) `slog::info!(logger, "m")` reads pure: slog isn't calibrated, AND because the reach is a
       MACRO, `visit_macro` never records it (it only records a macro it can classify), so it never reaches
       the κ-ledger / `invisible` disclosure either — whereas the SAME crate reached via a normal call WOULD
       be disclosed (cf. net_minreq → `invisible`). So it's silent, not honest-Unknown. DISTINCT from the

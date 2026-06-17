@@ -1487,13 +1487,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         syn::visit::visit_local(self, node);
     }
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        // The macro PATH itself can be an effect: the log/tracing EMIT macros (`log::info!`,
-        // `tracing::warn!`) expand to the logging dispatch, which a syntactic (pre-expansion) scan can't
-        // see — so classify the macro path directly. Record it as a call ONLY when it classifies to an
-        // effect, so inert macros (`println!`/`vec!`/`format!`/`matches!`) add no spurious call-graph edge.
+        // The macro PATH itself can carry/hide an effect that a syntactic (pre-expansion) scan can't see.
+        // Record a CRATE-QUALIFIED macro path (has `::`) so attribution handles it like any external call:
+        //   - classified → its effect (the log/tracing EMIT macros: `log::info!`, `tracing::warn!`),
+        //   - a builder ENTRY → its effect (`duct::cmd!`), or
+        //   - an unmodeled DECLARED dep → DISCLOSED blind (`slog::info!` → invisible, not silent-pure: the
+        //     macro-disclosure gap — a macro reach now gets the same honest Unknown a normal call does).
+        // BARE macros (`println!`/`vec!`/`format!`/`matches!`) have no `::` → skipped (no spurious edge); a
+        // crate-qualified path is an external call, so it never mints a phantom intra-crate edge either.
         let mpath = expand(&path_to_string(&node.path), self.uses);
-        let cr = mpath.split("::").next().unwrap_or(&mpath);
-        if candor_classify::classify(cr, &mpath).is_some() || scan_builder_entry_effect(cr, &mpath).is_some() {
+        if mpath.contains("::") {
             let leaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
             self.calls.push(Call { path: mpath, leaf, str_arg: None, typed: false, method: false });
         }
