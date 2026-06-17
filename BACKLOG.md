@@ -265,8 +265,15 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P2 — depth / precision
 
-- [ ] **Model the modern async-HTTP / TLS / QUIC stack as Net (+ a few more) — found by the independent-method
-      differential 2026-06-17** (`soundness/realworld/` method: scan a real corpus, read candor's κ-ledger
+- [~] **Model the modern async-HTTP / TLS / QUIC stack as Net (+ a few more) — MOSTLY DONE 2026-06-17**
+      (`4c6d66a` found it, calibrated same day: hyper/hickory_resolver/h3/quinn/tokio_rustls/native_tls→Net,
+      tokio_vsock→Ipc, rustls_native_certs→Fs, num_cpus/rlimit→Env — verb-keyed + crate-gated in classify;
+      on oha: Net 30→40 fns, disclosed deps 32→25, fabrication-probe clean. REMAINDER: hyper_util +
+      native_tls calls in oha stay disclosed because they're a bare `.request()`/`.connect()` on an UNTYPED
+      builder receiver — the syntactic scanner can't form `hyper_util::…::request`, and (unlike ureq::get) the
+      entry is a constructor-then-method, so neither the verb rule nor scan_builder_entry_effect catches it.
+      That's the candor-scan builder-chain-receiver-typing boundary; honest — disclosed, not silent. The deep
+      engine catches all of these via typed resolution.) Original finding: (`soundness/realworld/` method: scan a real corpus, read candor's κ-ledger
       DISCLOSED-dep list, have an independent classifier pin each to effect-or-pure). Run on `oha`: candor
       honestly DISCLOSES (invisible, NOT silent) but doesn't MODEL a stack that is candor's core value (Net):
       **hyper, hyper_util, hickory_resolver (DNS), h3, quinn, h3_quinn, tokio_rustls, native_tls** → Net

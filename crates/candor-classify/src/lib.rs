@@ -363,6 +363,43 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     {
         return Some("Net");
     }
+    // The modern async-HTTP / TLS / QUIC / DNS stack — the LAYER reqwest/ureq/isahc build on, and that
+    // crates use DIRECTLY. Found by the independent-method differential on `oha` (2026-06-17): candor
+    // honestly DISCLOSED these as blind but never CLASSIFIED them, leaving real Net reaches uncovered.
+    // Verb-keyed (the pure type/builder/codec surface stays None) and CRATE-GATED, so generic verbs
+    // (request/connect/get/read/write/accept) never fabricate across unrelated crates. Same precision
+    // discipline as the reqwest/curl rules above; complements the scan_builder_entry_effect entries.
+    match crate_name {
+        // hyper 1.x client connection I/O (the builder/Body/Request types stay pure).
+        "hyper" if path.ends_with("::send_request") || path.ends_with("::handshake") => return Some("Net"),
+        // hyper-util's pooled legacy Client + its TCP connectors.
+        "hyper_util" if path.ends_with("::request") || path.ends_with("::connect") => return Some("Net"),
+        // hickory (trust-dns) resolver — issues DNS queries over the network.
+        "hickory_resolver"
+            if path.ends_with("::lookup_ip") || path.ends_with("::lookup") || path.ends_with("_lookup")
+                || path.ends_with("::resolve") => return Some("Net"),
+        // HTTP/3 over QUIC.
+        "h3" if path.ends_with("::send_request") || path.ends_with("::recv_data")
+            || path.ends_with("::recv_response") || path.ends_with("::send_data") => return Some("Net"),
+        // QUIC transport (UDP socket send/recv).
+        "quinn" if path.ends_with("::connect") || path.ends_with("::accept") || path.ends_with("::open_bi")
+            || path.ends_with("::open_uni") || path.ends_with("::accept_bi") || path.ends_with("::accept_uni")
+            || path.ends_with("::send_datagram") || path.ends_with("::read_datagram") => return Some("Net"),
+        // TLS-over-TCP stream adapters — the actual socket handshake/I/O (the config/cert types stay pure).
+        "tokio_rustls" | "native_tls"
+            if path.ends_with("::connect") || path.ends_with("::accept") || path.ends_with("::handshake") =>
+            return Some("Net"),
+        // AF_VSOCK host<->guest sockets — inter-process / VM comms.
+        "tokio_vsock" if path.ends_with("::connect") || path.ends_with("::bind") || path.ends_with("::accept") =>
+            return Some("Ipc"),
+        // Loads the OS trust store from disk (cert files / keychain).
+        "rustls_native_certs" if path.ends_with("::load_native_certs") => return Some("Fs"),
+        // Reads host/process config from the OS (CPU count, cgroup quota; resource limits).
+        "num_cpus" if path.ends_with("::get") || path.ends_with("::get_physical") => return Some("Env"),
+        "rlimit" if path.ends_with("::getrlimit") || path.ends_with("::setrlimit")
+            || path.ends_with("::increase_nofile_limit") => return Some("Env"),
+        _ => {}
+    }
     // Message-queue clients fully encapsulate the socket (the underlying tokio::net lives
     // inside the crate, unseen), so a user's connect/publish/consume calls ARE the I/O
     // boundary — to a remote broker, hence Net. Match the broker round-trip verbs (snake_case
@@ -1324,6 +1361,28 @@ mod tests {
                 "calibrated crate `{c}` is matched by no path in classify() — dead list entry"
             );
         }
+    }
+
+    #[test]
+    fn async_http_stack_classifies() {
+        // The modern async-HTTP/TLS/QUIC/DNS stack (found by the independent-method differential on oha):
+        // verb-keyed Net/Ipc/Fs/Env, crate-gated so generic verbs never fabricate across crates.
+        assert_eq!(classify("hyper", "hyper::client::conn::http1::SendRequest::send_request"), Some("Net"));
+        assert_eq!(classify("hyper", "hyper::client::conn::http1::handshake"), Some("Net"));
+        assert_eq!(classify("hyper_util", "hyper_util::client::legacy::Client::request"), Some("Net"));
+        assert_eq!(classify("hickory_resolver", "hickory_resolver::Resolver::lookup_ip"), Some("Net"));
+        assert_eq!(classify("quinn", "quinn::Endpoint::connect"), Some("Net"));
+        assert_eq!(classify("tokio_rustls", "tokio_rustls::TlsConnector::connect"), Some("Net"));
+        assert_eq!(classify("native_tls", "native_tls::TlsConnector::connect"), Some("Net"));
+        assert_eq!(classify("tokio_vsock", "tokio_vsock::VsockStream::connect"), Some("Ipc"));
+        assert_eq!(classify("rustls_native_certs", "rustls_native_certs::load_native_certs"), Some("Fs"));
+        assert_eq!(classify("num_cpus", "num_cpus::get"), Some("Env"));
+        assert_eq!(classify("rlimit", "rlimit::setrlimit"), Some("Env"));
+        // pure surface stays None (no fabrication): builder/type/config paths, and other crates' generic verbs
+        assert_eq!(classify("hyper", "hyper::Request::builder"), None);
+        assert_eq!(classify("hyper", "hyper::body::Bytes::new"), None);
+        assert_eq!(classify("native_tls", "native_tls::TlsConnectorBuilder::min_protocol_version"), None);
+        assert_eq!(classify("serde", "serde::Deserialize::request"), None); // generic verb, wrong crate
     }
 
     #[test]
