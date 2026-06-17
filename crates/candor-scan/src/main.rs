@@ -232,6 +232,10 @@ struct DepFn {
     cmds: Vec<String>,
     paths: Vec<String>,
     tables: Vec<String>,
+    /// Blind crates the dep fn (transitively) reaches — its report's `invisible`. Carried across the join
+    /// so a consumer inherits the disclosure (sweep [8]): else a dep that floored an unmodeled crate read
+    /// as plain pure at the chain boundary, dropping the per-fn honesty caveat.
+    invisible: Vec<String>,
 }
 
 /// The CANDOR_DEPS index: `crate#tail2` and `crate#leaf` keys (UNAMBIGUOUS only — a key two dep
@@ -335,6 +339,7 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 de.cmds = strs("cmds");
                 de.paths = strs("paths");
                 de.tables = strs("tables");
+                de.invisible = strs("invisible"); // sweep [8]: carry the blind-crate disclosure across the join
             }
             let mut keys = vec![format!("{krate}#{}", qual.rsplit("::").next().unwrap_or(qual))];
             if let Some(t2) = tail2(qual) {
@@ -3093,6 +3098,10 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // the genuinely-blind crates (κ never classified them) + propagated transitively → the per-fn
     // `invisible` honesty disclosure (the κ ledger, but attributed per function).
     let mut blind_direct: HashMap<String, BTreeSet<String>> = HashMap::new();
+    // Blind crates inherited from a dep fn's `invisible` (sweep [8]): genuinely blind (the dep confirmed
+    // it), but a TRANSITIVE crate the consumer never saw directly, so it is absent from `dep_seen` and
+    // would be dropped by the `global_blind` filter. Collected here and unioned into global_blind below.
+    let mut dep_invisible: BTreeSet<String> = BTreeSet::new();
 
     // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
     // segment (`new`); `by_tail2` keys on the last TWO segments (`RequestBuilder::new`). The leaf index
@@ -3290,6 +3299,11 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     cmds.entry(f.qual.clone()).or_default().extend(de.cmds.iter().cloned());
                     paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
                     tables.entry(f.qual.clone()).or_default().extend(de.tables.iter().cloned());
+                    // sweep [8]: inherit the dep fn's blind-crate disclosure so a consumer's pure verdict
+                    // stays qualified across the chain boundary (else the dep's floored reach reads as plain
+                    // pure here). Propagated with the local blind spots below.
+                    blind_direct.entry(f.qual.clone()).or_default().extend(de.invisible.iter().cloned());
+                    dep_invisible.extend(de.invisible.iter().cloned());
                     dep_classified.insert(cr.to_string());
                 }
             }
@@ -3351,6 +3365,10 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         })
         .cloned()
         .collect();
+    // A dep-inherited invisible crate is genuinely blind (the dep's own scan confirmed it) but transitive,
+    // so it never appears in `dep_seen` — keep it so the consumer's `invisible` survives the filter ([8]).
+    let global_blind: std::collections::HashSet<String> =
+        global_blind.into_iter().chain(dep_invisible).collect();
 
     let mut entries: Vec<ReportEntry> = Vec::new();
     let mut cg: BTreeMap<String, Vec<String>> = BTreeMap::new();
