@@ -515,6 +515,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         if path == "ignore::WalkBuilder::build"
             || path == "ignore::WalkBuilder::build_parallel"
             || path.ends_with("::WalkParallel::run")
+            // `add_ignore(path)` LOOKS like a config setter but reads that ignore file from disk at call
+            // time (it returns the read error) — unlike the pure `add_custom_ignore_filename(name)` which
+            // only stores a filename string. The lone Fs-touching builder method in the otherwise-pure setter
+            // surface, so it was silently pure under the covered-crate floor.
+            || path == "ignore::WalkBuilder::add_ignore"
         {
             return Some("Fs");
         }
@@ -1349,6 +1354,7 @@ mod tests {
         assert_eq!(classify("ignore", "ignore::WalkBuilder::build_parallel"), Some("Fs"));
         assert_eq!(classify("ignore", "ignore::WalkBuilder::build"), Some("Fs"));
         assert_eq!(classify("ignore", "ignore::WalkParallel::run"), Some("Fs"));
+        assert_eq!(classify("ignore", "ignore::WalkBuilder::add_ignore"), Some("Fs")); // reads the ignore file
         assert_eq!(classify("ignore", "ignore::overrides::OverrideBuilder::build"), None); // pure config
         assert_eq!(classify("ignore", "ignore::gitignore::GitignoreBuilder::build"), None); // pure config
         assert_eq!(classify("ignore", "ignore::DirEntry::path"), None); // pure accessor
