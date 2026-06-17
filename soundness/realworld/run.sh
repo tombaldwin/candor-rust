@@ -33,15 +33,12 @@ retry cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan |
 SCAN="$ROOT/target/debug/candor-scan"
 
 # KNOWN, TRIAGED under-reports — tracked so the oracle is a clean gate (green on known gaps, red only on
-# NEW findings). Each needs a real fix; listed here with the root cause, not silently ignored.
-#   net_ureq — candor-scan reads `ureq::get(url).timeout().call()` pure. candor-classify puts ureq's Net on
-#     the `.call()` VERB (lib.rs:348), but the syntactic scanner can't type the builder chain from the
-#     `ureq::get()` entry, so .call() is missed — AND because ureq is CALIBRATED it isn't disclosed blind →
-#     silent-pure. SAME builder-chain family as the (fixed) duct case, but via a FUNCTION entry, not a macro:
-#     confirms the family generalizes; the real fix over-approximates builder-chain ENTRIES broadly. [P1]
-# (duct's cmd!() under-report — the first finding — is FIXED: scan_builder_entry_effect over-approximates the
-#  entry for the syntactic engine, deep engine stays precise.)
-KNOWN_UNDER=( "net_ureq" )
+# NEW findings). Each needs a real fix; listed here with the root cause, not silently ignored. Empty now:
+# both builder-chain under-reports this oracle found (duct cmd!()→run, ureq get()→call) are FIXED by the
+# GENERALIZED scan_builder_entry_effect table in candor-scan (over-approximate the entry for the syntactic
+# engine; the deep engine types the terminal verb and stays precise). New verb-keyed crates that under-report
+# get a table row + leave this empty.
+KNOWN_UNDER=()
 
 # member | effect ("" = pure control) | marker (must appear in the strace iff the effect ran)
 CASES=(

@@ -158,8 +158,11 @@ that's the narrow, modest-value axis. Diminishing returns.
       effect attribution runs through `classify()` at the call-join, so a scan-only path needs threading
       there too). Likely generalizes beyond duct (any builder-macro whose terminal verb carries the effect).
 
-- [ ] **candor-scan silent-pures BUILDER-CHAIN verbs whose entry it can't type — `ureq::get(url)…​.call()`**
-      (found by the real-world oracle's net_ureq driver 2026-06-17; KNOWN_UNDER). candor-classify puts
+- [x] **candor-scan silent-pured BUILDER-CHAIN verbs whose entry it can't type — `ureq::get(url)….call()`**
+      (FOUND by the real-world oracle 2026-06-17; FIXED same day by GENERALIZING `scan_builder_entry_effect`
+      into an entry→effect TABLE — duct `cmd`/`sh`→Exec + ureq `get`/`post`/…→Net; the oracle drives new
+      rows. Closed duct + ureq together; the table is the systematic "generalize" fix.) Original finding:
+      candor-classify puts
       ureq's Net on the `.call()` VERB (lib.rs:348); the syntactic scanner can't type the chain from the
       `ureq::get()` entry, so `.call()` is missed — and because ureq is CALIBRATED it isn't disclosed blind
       → silent-pure (worse than the uncalibrated case, which discloses). This is the SAME family as duct but

@@ -234,11 +234,25 @@ fn path_to_string(p: &syn::Path) -> String {
 /// Classify the ENTRY as the crate's whole effect: a safe OVER-approximation (candor's never-under-report
 /// bias), scoped to candor-scan so the deep engine stays precise. Both engines still agree on the
 /// function's effect when the builder is actually run (the overwhelmingly common case).
-fn scan_builder_entry_effect(cr: &str, path: &str) -> Option<&'static str> {
-    match cr {
-        "duct" if path == "duct::cmd" || path == "duct::sh" => Some("Exec"),
-        _ => None,
-    }
+fn scan_builder_entry_effect(_cr: &str, path: &str) -> Option<&'static str> {
+    // A DATA TABLE the real-world oracle DRIVES: builder-chain ENTRY paths whose effect candor-classify
+    // keys on a TERMINAL VERB the syntactic scanner can't reach (it can't type the chain). Add a row when
+    // the oracle proves a verb-keyed crate under-reports here. Entries are exact ENTRY paths — NOT the
+    // terminal verbs (those stay candor-classify's job for the typed deep engine, which stays precise).
+    const ENTRIES: &[(&str, &str)] = &[
+        // duct — `cmd!`/`sh!`/`cmd`/`sh` build; `.run()/.read()/.start()` execute (found 2026-06-17).
+        ("duct::cmd", "Exec"),
+        ("duct::sh", "Exec"),
+        // ureq — `get/post/...` build a Request; `.call()` performs the Net (found 2026-06-17, net_ureq).
+        ("ureq::get", "Net"),
+        ("ureq::post", "Net"),
+        ("ureq::put", "Net"),
+        ("ureq::delete", "Net"),
+        ("ureq::head", "Net"),
+        ("ureq::patch", "Net"),
+        ("ureq::request", "Net"),
+    ];
+    ENTRIES.iter().find(|(p, _)| *p == path).map(|(_, eff)| *eff)
 }
 
 /// A loaded sibling-report function: the effects + literal surfaces a consumer's call inherits.
@@ -5444,16 +5458,22 @@ trait G {
     }
 
     #[test]
-    fn duct_builder_entry_is_exec_for_the_syntactic_scanner() {
-        // The real-world oracle caught candor-scan silent-pure'ing `duct::cmd!(...).run()` (the cmd! macro
-        // result is untypeable, so .run()'s Exec was dropped). scan-only over-approx of the ENTRY fixes it;
-        // the shared classifier still keeps the entry pure (the deep engine catches the typed .run() verb).
+    fn builder_chain_entries_over_approximate_for_the_syntactic_scanner() {
+        // The real-world oracle caught candor-scan silent-pure'ing builder chains whose effect candor-
+        // classify keys on a terminal VERB it can't type-resolve: `duct::cmd!(...).run()` (macro entry) and
+        // `ureq::get(url)...call()` (fn entry). Over-approximate the ENTRY here (scan-only); the shared
+        // classifier keeps the entry pure so the DEEP engine (which types the verb) stays precise.
         assert_eq!(scan_builder_entry_effect("duct", "duct::cmd"), Some("Exec"));
         assert_eq!(scan_builder_entry_effect("duct", "duct::sh"), Some("Exec"));
-        assert_eq!(scan_builder_entry_effect("duct", "duct::Expression::run"), None); // the verb is classify()'s job
+        assert_eq!(scan_builder_entry_effect("ureq", "ureq::get"), Some("Net"));
+        assert_eq!(scan_builder_entry_effect("ureq", "ureq::post"), Some("Net"));
+        // terminal verbs stay classify()'s job; an unrelated path is None:
+        assert_eq!(scan_builder_entry_effect("duct", "duct::Expression::run"), None);
+        assert_eq!(scan_builder_entry_effect("ureq", "ureq::Request::call"), None);
         assert_eq!(scan_builder_entry_effect("std", "std::process::Command::new"), None);
-        // invariant the deep engine relies on stays intact (entry pure in the SHARED classifier):
+        // invariant the deep engine relies on stays intact (entries pure in the SHARED classifier):
         assert_eq!(candor_classify::classify("duct", "duct::cmd"), None);
+        assert_eq!(candor_classify::classify("ureq", "ureq::get"), None);
     }
 
     #[test]
