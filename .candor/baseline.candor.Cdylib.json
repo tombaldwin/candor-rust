@@ -1,6 +1,6 @@
 {
   "candor": {
-    "version": "399054b",
+    "version": "5dfe979",
     "toolchain": "nightly-2026-04-16",
     "spec": "0.5"
   },
@@ -8,7 +8,7 @@
   "functions": [
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate",
-      "loc": "src/lib.rs:2126:5: 2126:54",
+      "loc": "src/lib.rs:2139:5: 2139:54",
       "inferred": [
         "Env",
         "Fs"
@@ -20,7 +20,7 @@
         "Env",
         "Fs"
       ],
-      "hash": "d4961ef38fb570b91cc6a76f2d2cfaf2",
+      "hash": "f23f086acb011094ba35ecaf0791d77d",
       "calls": [
         "load_cross_reports",
         "load_layer_reach"
@@ -34,7 +34,7 @@
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_crate_post",
-      "loc": "src/lib.rs:2700:5: 2700:59",
+      "loc": "src/lib.rs:2713:5: 2713:59",
       "inferred": [
         "Env",
         "Fs",
@@ -49,7 +49,7 @@
         "Fs",
         "Log"
       ],
-      "hash": "d4961ef38fb570b938457d896addc5f6",
+      "hash": "f23f086acb011094aa3054927671149d",
       "calls": [
         "load_baseline",
         "mir_spike::drop_edges",
@@ -73,12 +73,12 @@
     },
     {
       "fn": "<Candor as rustc_lint::LateLintPass<'tcx>>::check_expr",
-      "loc": "src/lib.rs:2171:5: 2171:77",
+      "loc": "src/lib.rs:2184:5: 2184:77",
       "inferred": [
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b929c97fe83d490bdc",
+      "hash": "f23f086acb011094df08e7b7b20943db",
       "calls": [
         "generic_callee_local_edges",
         "return_type_driver_local_edge",
@@ -100,7 +100,7 @@
     },
     {
       "fn": "<collect_generic_callee_edges::V<'a, 'tcx, FT, FF> as rustc_hir::intravisit::Visitor<'tcx>>::visit_expr",
-      "loc": "src/lib.rs:1707:13: 1707:58",
+      "loc": "src/lib.rs:1720:13: 1720:58",
       "inferred": [
         "Unknown"
       ],
@@ -108,7 +108,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b90a08252d9c830ffe",
+      "hash": "f23f086acb011094c7d0b38060def5da",
       "unknownWhy": [
         "callback:fn-pointer / closure"
       ],
@@ -132,7 +132,7 @@
         "Env",
         "Fs"
       ],
-      "hash": "d4961ef38fb570b9a8f10e7d94445ef4",
+      "hash": "f23f086acb011094116b8874da463193",
       "fs": [
         "read"
       ],
@@ -142,7 +142,7 @@
     },
     {
       "fn": "collect_generic_callee_edges",
-      "loc": "src/lib.rs:1607:1: 1614:2",
+      "loc": "src/lib.rs:1620:1: 1627:2",
       "inferred": [
         "Unknown"
       ],
@@ -150,7 +150,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b9c3934d251a17eb36",
+      "hash": "f23f086acb011094db5a850660237f80",
       "calls": [
         "<collect_generic_callee_edges::V<'a, 'tcx, FT, FF> as rustc_hir::intravisit::Visitor<'tcx>>::visit_expr",
         "collect_generic_callee_edges"
@@ -168,7 +168,7 @@
     },
     {
       "fn": "fmt_impl_for",
-      "loc": "src/lib.rs:1510:1: 1514:19",
+      "loc": "src/lib.rs:1523:1: 1527:19",
       "inferred": [
         "Unknown"
       ],
@@ -176,7 +176,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b928cc817b14b0bd3c",
+      "hash": "f23f086acb011094396ac121f8f58ca1",
       "unknownWhy": [
         "generic-iter:find"
       ],
@@ -188,12 +188,12 @@
     },
     {
       "fn": "generic_callee_local_edges",
-      "loc": "src/lib.rs:1561:1: 1565:16",
+      "loc": "src/lib.rs:1574:1: 1578:16",
       "inferred": [
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b976320d2c1e7ef8cc",
+      "hash": "f23f086acb0110944ba28996cea3b137",
       "calls": [
         "collect_generic_callee_edges"
       ],
@@ -215,7 +215,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b9b0a30d0ee18b549f",
+      "hash": "f23f086acb01109415ba0d920836d5c2",
       "unknownWhy": [
         "generic-iter:next"
       ],
@@ -237,7 +237,7 @@
       "undeclared": [
         "Fs"
       ],
-      "hash": "d4961ef38fb570b912b4dc8327e1c753",
+      "hash": "f23f086acb0110945a94554541e8651b",
       "fs": [
         "read"
       ],
@@ -257,7 +257,7 @@
       "undeclared": [
         "Fs"
       ],
-      "hash": "d4961ef38fb570b93130ac3ca36a7ef4",
+      "hash": "f23f086acb011094b98d516639b9e69e",
       "invisible": [
         "candor_classify",
         "candor_report"
@@ -275,7 +275,7 @@
       "undeclared": [
         "Fs"
       ],
-      "hash": "d4961ef38fb570b9514eb25cac482d2c",
+      "hash": "f23f086acb011094917497f282087d99",
       "fs": [
         "read"
       ],
@@ -293,7 +293,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b9710ea7a777a232fd",
+      "hash": "f23f086acb01109404ae25d1becd531d",
       "unknownWhy": [
         "generic-iter:find"
       ],
@@ -313,7 +313,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b91416e88516c4b7ed",
+      "hash": "f23f086acb011094c5a54771f47f38e7",
       "unknownWhy": [
         "generic-iter:next"
       ],
@@ -336,14 +336,14 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b9f5cac68718f73432",
+      "hash": "f23f086acb011094e3cfbb170540b731",
       "unknownWhy": [
         "generic-iter:cloned"
       ]
     },
     {
       "fn": "register_lints",
-      "loc": "/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dylint_linting-6.0.1/src/lib.rs:285:13: 285:105",
+      "loc": "/Users/tom/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dylint_linting-6.0.1/src/lib.rs:285:13: 285:105",
       "inferred": [
         "Env",
         "Fs"
@@ -353,7 +353,7 @@
         "Fs"
       ],
       "entryPoint": true,
-      "hash": "d4961ef38fb570b9ca1d780a67ca97f5",
+      "hash": "f23f086acb011094edf9d4ce292b5219",
       "fs": [
         "read"
       ],
@@ -376,7 +376,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b9b823e2689420de78",
+      "hash": "f23f086acb01109499d4ee48e0ffee83",
       "unknownWhy": [
         "generic-iter:find"
       ],
@@ -397,7 +397,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b9a12b303e813f484c",
+      "hash": "f23f086acb0110942ef2aab6041f0eb7",
       "unknownWhy": [
         "generic-iter:find"
       ],
@@ -420,11 +420,11 @@
       "undeclared": [
         "Log"
       ],
-      "hash": "d4961ef38fb570b976ff64a44cc2f29a"
+      "hash": "f23f086acb011094bb3bd67d57888d4f"
     },
     {
       "fn": "std_driver_local_edges",
-      "loc": "src/lib.rs:1373:1: 1377:16",
+      "loc": "src/lib.rs:1386:1: 1390:16",
       "inferred": [
         "Unknown"
       ],
@@ -432,7 +432,7 @@
         "Unknown"
       ],
       "unresolved": true,
-      "hash": "d4961ef38fb570b98c2b25a392c07b65",
+      "hash": "f23f086acb011094cd6234c4f7e152ee",
       "calls": [
         "local_trait_method_for_self"
       ],
@@ -457,7 +457,7 @@
       "undeclared": [
         "Fs"
       ],
-      "hash": "d4961ef38fb570b96f6b171ac0a0afe5",
+      "hash": "f23f086acb011094659099e0b1211303",
       "fs": [
         "write"
       ],

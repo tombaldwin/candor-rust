@@ -1,6 +1,6 @@
 {
   "candor": {
-    "version": "399054b",
+    "version": "5dfe979",
     "toolchain": "nightly-2026-04-16",
     "spec": "0.5"
   },
@@ -18,7 +18,7 @@
       "undeclared": [
         "Fs"
       ],
-      "hash": "5fb4a28d4e04a7cefc6a5a194661fed1",
+      "hash": "7c9f03242dd88e9fb60e93dc814d496d",
       "fs": [
         "read"
       ]
@@ -35,7 +35,7 @@
       "undeclared": [
         "Fs"
       ],
-      "hash": "5fb4a28d4e04a7ce0f8773ba1807e004",
+      "hash": "7c9f03242dd88e9f9087ae83d4c00f30",
       "fs": [
         "write"
       ]

@@ -1339,6 +1339,19 @@ fn local_trait_method_for_self<'tcx>(
     method_sym: &str,
     trait_lang: rustc_span::Symbol,
 ) -> Option<DefId> {
+    // This only ever yields a LOCAL impl method; for a self type that mentions no local ADT (a tuple,
+    // a std collection, a bare ref) resolution can only land on a non-local impl → None. Skipping those
+    // is a precision no-op AND sidesteps a rustc ICE (nightly `Instance::try_resolve` delayed-bugs with
+    // "missing value for assoc item in impl" via core's `impl_hash_tuple` when resolution transitively
+    // touches a tuple's Hash impl — e.g. a HashMap's `(K, V)` Item self type). Gate on "mentions a local
+    // ADT" so we never feed those types to try_resolve. (Remove when the upstream ICE is fixed.)
+    if !self_ty
+        .walk()
+        .filter_map(|g| g.as_type())
+        .any(|t| matches!(t.kind(), rustc_middle::ty::TyKind::Adt(a, _) if a.did().is_local()))
+    {
+        return None;
+    }
     let trait_did = cx.tcx.get_diagnostic_item(trait_lang)?;
     // The trait's assoc fn of the wanted name (`Iterator::next`, `IntoIterator::into_iter`).
     let trait_fn = cx
