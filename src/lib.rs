@@ -165,6 +165,12 @@ pub struct Candor {
     /// *statically visible* (literal) subset; a runtime-computed address is simply absent (the host is
     /// undecidable in general, so this is honest best-effort, never a completeness claim).
     net_hosts_direct: HashMap<LocalDefId, BTreeSet<String>>,
+    /// External crates a function calls DIRECTLY that κ neither classifies nor resolves into (the floor:
+    /// a non-std external call whose `classify` returned None — candor cannot see through it). Propagated
+    /// like `net_hosts_direct`; surfaced as the report's `invisible` detail so `inferred: []` is never an
+    /// unqualified "pure" claim PER FUNCTION (the deep engine floors unmodeled crates like the syntactic
+    /// engines; this discloses it — the honesty contract, sweep [4]/[19]).
+    invisible_direct: HashMap<LocalDefId, BTreeSet<String>>,
     /// Literal subprocess commands a function runs directly (the program in `Command::new("git")`).
     /// Propagated like `net_hosts_direct`; surfaced as the report's optional `cmds` detail and enforced
     /// by `allow Exec …` (AS-EFF-008). Static-literal subset only — a runtime command is simply absent.
@@ -341,6 +347,7 @@ impl Candor {
             direct: HashMap::new(),
             fs_direct: HashMap::new(),
             net_hosts_direct: HashMap::new(),
+            invisible_direct: HashMap::new(),
             exec_cmds_direct: HashMap::new(),
             fs_paths_direct: HashMap::new(),
             db_tables_direct: HashMap::new(),
@@ -2472,6 +2479,16 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let path = cx.tcx.def_path_str(def_id);
         let builtin = classify(crate_name.as_str(), &path);
         let effect = builtin.or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
+        // FLOOR DISCLOSURE (sweep [4]/[19]): a DIRECT external call (not a trait dispatch — those CHA-resolve
+        // to local impls, or are disclosed as `Unknown` above) that κ does NOT classify is a reach candor
+        // cannot see through. The deep engine floors it to pure like the syntactic engines; record the crate
+        // so the fn's `invisible` qualifies its pure verdict (the honesty contract, propagated below). std-
+        // like crates are known-pure-frontier, excluded — matching the `encountered` coverage filter.
+        if effect.is_none() && trait_did.is_none() && !def_id.is_local()
+            && !matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
+        {
+            self.invisible_direct.entry(caller).or_default().insert(crate_name.to_string());
+        }
         if let Some(effect) = effect {
             self.direct.entry(caller).or_default().insert(effect);
             // Non-breaking Fs refinement: when the verb tells us read vs write, record it (propagated
@@ -2725,6 +2742,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // interpretation. So a fn with `Net` but empty `hosts` means "talks to the network, endpoint not
         // statically known", exactly right.
         let hostsacc = propagate(self.net_hosts_direct.clone(), &self.calls);
+        // invisible[f] = invisible_direct[f] ∪ ⋃ { invisible[g] : g ∈ calls[f] } — the blind crates a fn
+        // transitively reaches (the disclosed floor; sweep [4]/[19]). Same graph as hosts/effects.
+        let invisibleacc = propagate(self.invisible_direct.clone(), &self.calls);
         let cmdsacc = propagate(self.exec_cmds_direct.clone(), &self.calls);
         let pathsacc = propagate(self.fs_paths_direct.clone(), &self.calls);
         let tablesacc = propagate(self.db_tables_direct.clone(), &self.calls);
@@ -3002,6 +3022,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     } else {
                         Vec::new()
                     },
+                    // The blind external crates this fn transitively reaches (the disclosed floor): empty
+                    // unless it calls into an unmodeled, unwalkable crate — then `inferred` is a LOWER bound.
+                    invisible: invisibleacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
                 });
                 continue;
             }
