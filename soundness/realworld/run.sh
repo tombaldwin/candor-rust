@@ -19,6 +19,11 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 case "$(uname -s)" in Linux) : ;; *) echo "realworld oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
 command -v strace >/dev/null 2>&1 || { echo "realworld oracle: strace not installed — skipping."; exit 0; }
 
+# The repo's .cargo/config forces `-C linker=dylint-link` (for the nightly lint). This oracle uses only
+# candor-scan (stable, no dylint), so override RUSTFLAGS to the normal linker — avoids needing dylint-link
+# installed. (Setting RUSTFLAGS supersedes the config's rustflags entirely.)
+export RUSTFLAGS="-C linker=cc"
+
 echo "realworld oracle: building candor-scan (stable)…"
 cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan || { echo "FAIL: candor-scan build"; exit 1; }
 SCAN="$ROOT/target/debug/candor-scan"
