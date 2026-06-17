@@ -1,6 +1,6 @@
 [package]
 name = "candor-classify"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 description = "candor's curated effect classifier (crate+path -> effect) — pure, stable Rust."
 license = "MIT OR Apache-2.0"
