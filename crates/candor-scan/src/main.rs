@@ -1220,6 +1220,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         } else {
             None
         };
+        // A NAMED fn / method passed BY VALUE to an INVOKING adapter (`xs.iter().for_each(Conn::send)`,
+        // `opt.map(eff_fn)`) is invoked by the adapter, so its effect is reachable — edge to it (sweep [28];
+        // the Rust/TS engines' fn-as-value posture). Gated on `elem_adapter` (an invoking HOF) so a STORE
+        // sink never fabricates; a bare LOCAL (a value/closure, not a free-fn path) is skipped.
+        if elem_adapter {
+            for a in &node.args {
+                if let syn::Expr::Path(p) = a {
+                    let is_local = p.path.get_ident().is_some_and(|i| {
+                        let n = i.to_string();
+                        self.vars.contains_key(&n) || self.closure_vars.contains(&n) || self.fn_typed_vars.contains(&n)
+                    });
+                    if p.qself.is_none() && !is_local {
+                        let name = path_to_string(&p.path);
+                        let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, self.uses));
+                        let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
+                        self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false });
+                    }
+                }
+            }
+        }
         // Visit the receiver and args. The receiver and non-closure args carry no element binding; the
         // closure arg (if any) is visited under the scoped element binding so its body resolves `c`.
         self.visit_expr(&node.receiver);
@@ -1273,6 +1293,27 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             });
         } else {
             syn::visit::visit_arm(self, node);
+        }
+    }
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        // Type each ANNOTATED closure param (`|c: &Conn| c.send()`) into `vars` so the body's `c.method()`
+        // resolves — the annotation was discarded, so an effectful method on it read silent-pure (sweep
+        // [29]). Save+restore scopes the bindings to the closure body (closures are walked lexically here).
+        let mut saved: Vec<(String, Option<String>)> = Vec::new();
+        for input in &node.inputs {
+            if let syn::Pat::Type(pt) = input {
+                if let (Some(name), Some(ty)) = (single_pat_ident(&pt.pat), type_path(&pt.ty, self.uses)) {
+                    let prev = self.vars.insert(name.clone(), ty);
+                    saved.push((name, prev));
+                }
+            }
+        }
+        syn::visit::visit_expr_closure(self, node);
+        for (name, prev) in saved {
+            match prev {
+                Some(v) => { self.vars.insert(name, v); }
+                None => { self.vars.remove(&name); }
+            }
         }
     }
     fn visit_local(&mut self, node: &'ast syn::Local) {
