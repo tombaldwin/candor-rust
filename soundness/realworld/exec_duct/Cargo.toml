@@ -1,0 +1,10 @@
+[package]
+name = "exec_duct"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "exec_duct"
+path = "src/main.rs"
+[dependencies]
+duct = "0.13"

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Real-world DYNAMIC oracle (Bet 1, phase 3) — kernel ground truth on REAL-crate classification.
+#
+# For each driver crate (which exercises a REAL effectful crate with a distinctive marker): build it, RUN
+# it under strace, and confirm the effect actually executed (its marker appears in the trace). If it did,
+# assert candor-scan's STATIC prediction for the program contains that effect — OR discloses uncertainty
+# (Unknown / blind / invisible / unresolved), which is honest. An effect that demonstrably RAN but which
+# candor predicts NOWHERE and discloses NOWHERE (silent-pure) is a real under-report — the dangerous lie.
+#
+# Unlike the generated oracle (soundness/oracle.sh, std-only synthetic seeds) this tests candor's REAL
+# κ-table against the kernel, incl. an UNCALIBRATED crate (net_minreq) — the true honesty probe. Uses
+# candor-scan (stable, the deployed engine; no nightly). Linux + strace only.
+#
+#   bash soundness/realworld/run.sh
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+
+case "$(uname -s)" in Linux) : ;; *) echo "realworld oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
+command -v strace >/dev/null 2>&1 || { echo "realworld oracle: strace not installed — skipping."; exit 0; }
+
+echo "realworld oracle: building candor-scan (stable)…"
+cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan || { echo "FAIL: candor-scan build"; exit 1; }
+SCAN="$ROOT/target/debug/candor-scan"
+
+# member | effect ("" = pure control) | marker (must appear in the strace iff the effect ran)
+CASES=(
+  "net_std|Net|192.0.2.1"
+  "net_minreq|Net|192.0.2.2"
+  "exec_duct|Exec|candor-oracle-exec"
+  "fs_fserr|Fs|/tmp/candor-oracle-fs-marker"
+  "pure_ctrl||__no_marker__"
+)
+
+pass=0; under=0; skip=0; fab=0; failed=""
+for row in "${CASES[@]}"; do
+  IFS='|' read -r m eff marker <<<"$row"
+  d="$HERE/$m"
+  cargo +stable build -q --manifest-path "$HERE/Cargo.toml" -p "$m" 2>/dev/null \
+    || { echo "  $m: build failed — SKIP"; skip=$((skip+1)); continue; }
+  bin="$HERE/target/debug/$m"
+  [ -x "$bin" ] || { echo "  $m: no binary — SKIP"; skip=$((skip+1)); continue; }
+
+  strace -f -e trace=connect,socket,openat,open,execve -o "$d/trace.log" "$bin" >/dev/null 2>&1 || true
+  ran=0; grep -qF "$marker" "$d/trace.log" 2>/dev/null && ran=1
+
+  rm -rf "$d/.candor" 2>/dev/null
+  "$SCAN" "$d" >/dev/null 2>&1
+  rep=$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)
+  read -r pred uncertain <<<"$(python3 - "${rep:-/dev/null}" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    funcs = d.get("functions", [])
+except Exception:
+    funcs = []
+main = None; union = set(); unc = False
+for f in funcs:
+    s = set(f.get("inferred", [])); union |= s
+    if "Unknown" in s or f.get("unresolved") or f.get("invisible") or f.get("blind") or f.get("incomplete"):
+        unc = True
+    if f.get("fn", "").split("::")[-1] == "main":
+        main = s
+pred = main if main is not None else union
+print((",".join(sorted(pred)) or "-"), ("uncertain" if unc else "certain"))
+PY
+)"
+
+  echo "  $m: ran=$ran  effect=${eff:-none}  candor=[$pred] $uncertain"
+  if [ -z "$eff" ]; then  # pure control: nothing should run, nothing should be predicted
+    { [ "$ran" = "0" ] && [ "$pred" = "-" ]; } && pass=$((pass+1)) || { echo "    ⚠ control: ran=$ran pred=$pred (expected none/none)"; fab=$((fab+1)); }
+    continue
+  fi
+  if [ "$ran" = "0" ]; then echo "    SKIP ($eff did not execute under strace this run)"; skip=$((skip+1)); continue; fi
+  if echo ",$pred," | grep -q ",$eff," || echo ",$pred," | grep -q ",Unknown," || [ "$uncertain" = "uncertain" ]; then
+    pass=$((pass+1))
+  else
+    echo "    ✗ UNDER-REPORT: ran $eff (marker '$marker' in trace) but candor predicts [$pred] with no uncertainty"
+    under=$((under+1)); failed="$failed $m"
+  fi
+done
+
+echo
+echo "realworld oracle: $pass honest, $under UNDER-REPORT(S), $fab fabrication(s), $skip skipped"
+[ -n "$failed" ] && echo "realworld oracle: under-reporting drivers:$failed"
+{ [ "$under" -eq 0 ] && [ "$fab" -eq 0 ]; }

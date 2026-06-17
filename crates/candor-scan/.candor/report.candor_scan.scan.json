@@ -1,0 +1,628 @@
+{
+  "candor": {
+    "version": "scan-0.5.7",
+    "toolchain": "stable",
+    "spec": "0.5"
+  },
+  "package": "candor_scan",
+  "functions": [
+    {
+      "fn": "CallCollector::bind_tuple",
+      "loc": "src/main.rs:1058:5",
+      "inferred": [],
+      "hash": "candor_scan#CallCollector::bind_tuple",
+      "calls": [
+        "elem_type",
+        "single_pat_ident",
+        "type_path"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "CallCollector::expr_is_fn_typed",
+      "loc": "src/main.rs:1018:5",
+      "inferred": [],
+      "hash": "candor_scan#CallCollector::expr_is_fn_typed",
+      "calls": [
+        "block_tail_expr"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "CallCollector::scoped_var",
+      "loc": "src/main.rs:1034:5",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "candor_scan#CallCollector::scoped_var",
+      "unknownWhy": [
+        "callback:unresolved call"
+      ]
+    },
+    {
+      "fn": "CallCollector::visit_arm",
+      "loc": "src/main.rs:1289:5",
+      "inferred": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "candor_scan#CallCollector::visit_arm",
+      "calls": [
+        "CallCollector::scoped_var",
+        "arm_payload_binding"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "CallCollector::visit_expr_call",
+      "loc": "src/main.rs:1092:5",
+      "inferred": [],
+      "hash": "candor_scan#CallCollector::visit_expr_call",
+      "calls": [
+        "expand",
+        "first_str_lit",
+        "path_to_string"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "CallCollector::visit_expr_closure",
+      "loc": "src/main.rs:1307:5",
+      "inferred": [],
+      "hash": "candor_scan#CallCollector::visit_expr_closure",
+      "calls": [
+        "single_pat_ident",
+        "type_path"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "CallCollector::visit_expr_for_loop",
+      "loc": "src/main.rs:1271:5",
+      "inferred": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "candor_scan#CallCollector::visit_expr_for_loop",
+      "calls": [
+        "CallCollector::resolve_elem_type",
+        "CallCollector::scoped_var",
+        "single_pat_ident"
+      ]
+    },
+    {
+      "fn": "CallCollector::visit_expr_method_call",
+      "loc": "src/main.rs:1139:5",
+      "inferred": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "candor_scan#CallCollector::visit_expr_method_call",
+      "calls": [
+        "CallCollector::resolve_elem_type",
+        "CallCollector::resolve_recv_traits",
+        "CallCollector::resolve_recv_type",
+        "CallCollector::scoped_var",
+        "expand",
+        "first_str_lit",
+        "path_to_string",
+        "single_pat_ident"
+      ]
+    },
+    {
+      "fn": "CallCollector::visit_local",
+      "loc": "src/main.rs:1328:5",
+      "inferred": [],
+      "hash": "candor_scan#CallCollector::visit_local",
+      "calls": [
+        "CallCollector::bind_tuple",
+        "CallCollector::expr_is_fn_typed",
+        "CallCollector::resolve_elem_type",
+        "ctor_type",
+        "elem_type",
+        "expand",
+        "is_callable_type",
+        "path_to_string",
+        "single_pat_ident",
+        "trait_leaves",
+        "tuple_types",
+        "type_path"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "CallCollector::visit_macro",
+      "loc": "src/main.rs:1450:5",
+      "inferred": [],
+      "hash": "candor_scan#CallCollector::visit_macro",
+      "calls": [
+        "expand",
+        "path_to_string"
+      ],
+      "invisible": [
+        "candor_classify",
+        "syn"
+      ]
+    },
+    {
+      "fn": "CallCollector::visit_stmt",
+      "loc": "src/main.rs:1083:5",
+      "inferred": [],
+      "hash": "candor_scan#CallCollector::visit_stmt",
+      "calls": [
+        "stmt_cfg_inactive"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "bound_leaves",
+      "loc": "src/main.rs:529:1",
+      "inferred": [],
+      "hash": "candor_scan#bound_leaves",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "cargo_deps",
+      "loc": "src/main.rs:400:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#cargo_deps",
+      "calls": [
+        "cargo_toml_deps"
+      ],
+      "invisible": [
+        "walkdir"
+      ]
+    },
+    {
+      "fn": "cfg_eval",
+      "loc": "src/main.rs:1637:1",
+      "inferred": [],
+      "hash": "candor_scan#cfg_eval",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "cfg_meta_requires_test",
+      "loc": "src/main.rs:1495:1",
+      "inferred": [],
+      "hash": "candor_scan#cfg_meta_requires_test",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collect_decls",
+      "loc": "src/main.rs:2111:1",
+      "inferred": [],
+      "hash": "candor_scan#collect_decls",
+      "calls": [
+        "collect_use",
+        "elem_type",
+        "has_cfg",
+        "impl_type_name",
+        "is_cfg_test",
+        "is_non_nominal_type",
+        "record_return",
+        "trait_leaves",
+        "type_path"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "dirs_cargo_registry_src",
+      "loc": "src/main.rs:3751:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_scan#dirs_cargo_registry_src"
+    },
+    {
+      "fn": "file_decls",
+      "loc": "src/main.rs:2438:1",
+      "inferred": [],
+      "hash": "candor_scan#file_decls",
+      "calls": [
+        "collect_decls"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "fn_locs",
+      "loc": "src/main.rs:1841:1",
+      "inferred": [],
+      "hash": "candor_scan#fn_locs",
+      "calls": [
+        "is_cfg_test"
+      ],
+      "invisible": [
+        "proc_macro2",
+        "syn"
+      ]
+    },
+    {
+      "fn": "fninfo",
+      "loc": "src/main.rs:1993:1",
+      "inferred": [],
+      "hash": "candor_scan#fninfo",
+      "calls": [
+        "CallCollector::visit_stmt",
+        "collect_use",
+        "seed_elem_of",
+        "seed_fn_typed_vars",
+        "seed_trait_vars",
+        "seed_vars"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "generic_bounds_of",
+      "loc": "src/main.rs:617:1",
+      "inferred": [],
+      "hash": "candor_scan#generic_bounds_of",
+      "calls": [
+        "bound_leaves"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "has_cfg",
+      "loc": "src/main.rs:1476:1",
+      "inferred": [],
+      "hash": "candor_scan#has_cfg",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "has_workspace_table",
+      "loc": "src/main.rs:3971:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#has_workspace_table"
+    },
+    {
+      "fn": "is_callable_type",
+      "loc": "src/main.rs:575:1",
+      "inferred": [],
+      "hash": "candor_scan#is_callable_type",
+      "calls": [
+        "trait_leaves"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "is_cfg_inactive",
+      "loc": "src/main.rs:1682:1",
+      "inferred": [],
+      "hash": "candor_scan#is_cfg_inactive",
+      "calls": [
+        "cfg_cell",
+        "cfg_eval"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "is_cfg_test",
+      "loc": "src/main.rs:1517:1",
+      "inferred": [],
+      "hash": "candor_scan#is_cfg_test",
+      "calls": [
+        "cfg_meta_requires_test"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "load_dep_reports",
+      "loc": "src/main.rs:254:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#load_dep_reports",
+      "calls": [
+        "tail2"
+      ],
+      "invisible": [
+        "candor_classify",
+        "serde_json",
+        "walkdir"
+      ]
+    },
+    {
+      "fn": "main",
+      "loc": "src/main.rs:2684:1",
+      "inferred": [],
+      "entryPoint": true,
+      "hash": "candor_scan#main",
+      "invisible": [
+        "rayon"
+      ]
+    },
+    {
+      "fn": "parse_features",
+      "loc": "src/main.rs:1575:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#parse_features",
+      "calls": [
+        "push_quoted",
+        "toml_section"
+      ]
+    },
+    {
+      "fn": "policy_violations",
+      "loc": "src/main.rs:3766:1",
+      "inferred": [],
+      "hash": "candor_scan#policy_violations",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "read_crate_name",
+      "loc": "src/main.rs:3912:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#read_crate_name",
+      "calls": [
+        "toml_scalar",
+        "toml_section"
+      ]
+    },
+    {
+      "fn": "run_with_deps",
+      "loc": "src/main.rs:3649:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_scan#run_with_deps",
+      "calls": [
+        "dirs_cargo_registry_src",
+        "load_dep_reports",
+        "scan_one",
+        "scan_target"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "serde_json",
+        "syn",
+        "walkdir"
+      ]
+    },
+    {
+      "fn": "scan_items",
+      "loc": "src/main.rs:1734:1",
+      "inferred": [],
+      "hash": "candor_scan#scan_items",
+      "calls": [
+        "collect_use",
+        "fninfo",
+        "impl_type_name",
+        "is_cfg_test",
+        "next_loc"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "scan_main",
+      "loc": "src/main.rs:2702:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "hash": "candor_scan#scan_main",
+      "calls": [
+        "load_dep_reports",
+        "run_with_deps",
+        "scan_target"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "serde_json",
+        "syn",
+        "walkdir"
+      ]
+    },
+    {
+      "fn": "scan_one",
+      "loc": "src/main.rs:2820:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#scan_one",
+      "calls": [
+        "cache_schema",
+        "cargo_deps",
+        "decl_index_digest",
+        "file_decls",
+        "fn_locs",
+        "fnv1a",
+        "host_part",
+        "is_build_script",
+        "is_test_file_stem",
+        "merge_decls",
+        "module_path",
+        "parse_features",
+        "policy_violations",
+        "propagate",
+        "propagate_str",
+        "read_crate_name",
+        "resolve_target",
+        "scan_items",
+        "set_cfg_features",
+        "tail2"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "serde_json",
+        "syn",
+        "walkdir"
+      ]
+    },
+    {
+      "fn": "scan_target",
+      "loc": "src/main.rs:3593:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_scan#scan_target",
+      "calls": [
+        "has_workspace_table",
+        "read_crate_name",
+        "scan_one",
+        "workspace_members"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "serde_json",
+        "syn",
+        "walkdir"
+      ]
+    },
+    {
+      "fn": "seed_fn_typed_vars",
+      "loc": "src/main.rs:600:1",
+      "inferred": [],
+      "hash": "candor_scan#seed_fn_typed_vars",
+      "calls": [
+        "generic_bounds_of",
+        "is_callable_type"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "seed_trait_vars",
+      "loc": "src/main.rs:1975:1",
+      "inferred": [],
+      "hash": "candor_scan#seed_trait_vars",
+      "calls": [
+        "generic_bounds_of",
+        "trait_leaves"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "stmt_cfg_inactive",
+      "loc": "src/main.rs:1722:1",
+      "inferred": [],
+      "hash": "candor_scan#stmt_cfg_inactive",
+      "calls": [
+        "expr_attrs",
+        "is_cfg_inactive"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "trait_leaves",
+      "loc": "src/main.rs:542:1",
+      "inferred": [],
+      "hash": "candor_scan#trait_leaves",
+      "calls": [
+        "bound_leaves"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "workspace_members",
+      "loc": "src/main.rs:3980:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#workspace_members",
+      "calls": [
+        "toml_string_array"
+      ]
+    }
+  ]
+}

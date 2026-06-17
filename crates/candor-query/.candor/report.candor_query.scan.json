@@ -1,14 +1,27 @@
 {
   "candor": {
-    "version": "scan-0.5.1",
+    "version": "scan-0.5.7",
     "toolchain": "stable",
     "spec": "0.5"
   },
   "package": "candor_query",
   "functions": [
     {
+      "fn": "callers_via_callgraph",
+      "loc": "src/main.rs:603:1",
+      "inferred": [],
+      "hash": "candor_query#callers_via_callgraph",
+      "calls": [
+        "best_tier",
+        "q_match"
+      ],
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
       "fn": "clear_other_reports",
-      "loc": "src/main.rs:1881:1",
+      "loc": "src/main.rs:1934:1",
       "inferred": [
         "Fs"
       ],
@@ -22,7 +35,7 @@
     },
     {
       "fn": "cmd_audit",
-      "loc": "src/main.rs:183:1",
+      "loc": "src/main.rs:195:1",
       "inferred": [
         "Fs"
       ],
@@ -36,11 +49,16 @@
         "prefix_base",
         "sorted",
         "tally_effects"
+      ],
+      "invisible": [
+        "candor_report",
+        "regex",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_callers",
-      "loc": "src/main.rs:535:1",
+      "loc": "src/main.rs:576:1",
       "inferred": [
         "Fs"
       ],
@@ -50,11 +68,15 @@
         "load_callgraph",
         "load_entries_loud",
         "three"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_containment",
-      "loc": "src/main.rs:1572:1",
+      "loc": "src/main.rs:1625:1",
       "inferred": [
         "Fs"
       ],
@@ -64,11 +86,15 @@
         "glob_reports",
         "layer_of",
         "load_fninfo"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_diff",
-      "loc": "src/main.rs:1035:1",
+      "loc": "src/main.rs:1088:1",
       "inferred": [
         "Fs"
       ],
@@ -79,11 +105,15 @@
         "load_fninfo",
         "q_or",
         "rank"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_engine_version",
-      "loc": "src/main.rs:1985:1",
+      "loc": "src/main.rs:2038:1",
       "inferred": [
         "Fs"
       ],
@@ -94,7 +124,7 @@
     },
     {
       "fn": "cmd_gains",
-      "loc": "src/main.rs:1765:1",
+      "loc": "src/main.rs:1818:1",
       "inferred": [
         "Fs"
       ],
@@ -103,22 +133,30 @@
         "gained_effects",
         "glob_reports",
         "load_fninfo"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_impact",
-      "loc": "src/main.rs:1278:1",
+      "loc": "src/main.rs:1331:1",
       "inferred": [
         "Fs"
       ],
       "hash": "candor_query#cmd_impact",
       "calls": [
         "load_entries_loud"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_locate",
-      "loc": "src/main.rs:1971:1",
+      "loc": "src/main.rs:2024:1",
       "inferred": [
         "Fs"
       ],
@@ -129,7 +167,7 @@
     },
     {
       "fn": "cmd_map",
-      "loc": "src/main.rs:913:1",
+      "loc": "src/main.rs:966:1",
       "inferred": [
         "Fs"
       ],
@@ -137,44 +175,59 @@
       "calls": [
         "load_entries_loud",
         "two"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_merge_hook",
-      "loc": "src/main.rs:2009:1",
+      "loc": "src/main.rs:2062:1",
       "inferred": [
         "Fs"
       ],
       "direct": [
         "Fs"
       ],
-      "hash": "candor_query#cmd_merge_hook"
+      "hash": "candor_query#cmd_merge_hook",
+      "invisible": [
+        "serde_json"
+      ]
     },
     {
       "fn": "cmd_parsepolicy",
-      "loc": "src/main.rs:627:1",
+      "loc": "src/main.rs:668:1",
       "inferred": [
         "Fs"
       ],
       "direct": [
         "Fs"
       ],
-      "hash": "candor_query#cmd_parsepolicy"
+      "hash": "candor_query#cmd_parsepolicy",
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ]
     },
     {
       "fn": "cmd_path",
-      "loc": "src/main.rs:1384:1",
+      "loc": "src/main.rs:1437:1",
       "inferred": [
         "Fs"
       ],
       "hash": "candor_query#cmd_path",
       "calls": [
         "load_entries_loud"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_reachable",
-      "loc": "src/main.rs:1497:1",
+      "loc": "src/main.rs:1550:1",
       "inferred": [
         "Fs"
       ],
@@ -182,11 +235,15 @@
       "calls": [
         "load_entries_loud",
         "reachable_leaf"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_receipt",
-      "loc": "src/main.rs:1718:1",
+      "loc": "src/main.rs:1771:1",
       "inferred": [
         "Fs"
       ],
@@ -197,11 +254,15 @@
         "load_entries_loud",
         "prefix_base",
         "tally_effects"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_reports",
-      "loc": "src/main.rs:1911:1",
+      "loc": "src/main.rs:1964:1",
       "inferred": [
         "Fs"
       ],
@@ -209,11 +270,14 @@
       "calls": [
         "clear_other_reports",
         "report_backend"
+      ],
+      "invisible": [
+        "candor_report"
       ]
     },
     {
       "fn": "cmd_rewire",
-      "loc": "src/main.rs:827:1",
+      "loc": "src/main.rs:868:1",
       "inferred": [
         "Fs"
       ],
@@ -221,11 +285,14 @@
       "calls": [
         "dropped_edges",
         "load_callgraph"
+      ],
+      "invisible": [
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_show",
-      "loc": "src/main.rs:408:1",
+      "loc": "src/main.rs:449:1",
       "inferred": [
         "Fs"
       ],
@@ -236,11 +303,15 @@
         "q_match",
         "sorted",
         "three"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_state",
-      "loc": "src/main.rs:1819:1",
+      "loc": "src/main.rs:1872:1",
       "inferred": [
         "Fs"
       ],
@@ -254,7 +325,7 @@
     },
     {
       "fn": "cmd_whatif",
-      "loc": "src/main.rs:675:1",
+      "loc": "src/main.rs:716:1",
       "inferred": [
         "Env",
         "Fs"
@@ -268,11 +339,15 @@
         "best_tier",
         "load_callgraph",
         "q_match"
+      ],
+      "invisible": [
+        "candor_classify",
+        "serde_json"
       ]
     },
     {
       "fn": "cmd_where",
-      "loc": "src/main.rs:486:1",
+      "loc": "src/main.rs:527:1",
       "inferred": [
         "Fs"
       ],
@@ -280,11 +355,15 @@
       "calls": [
         "load_entries_loud",
         "three"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
       ]
     },
     {
       "fn": "collect_rs",
-      "loc": "src/main.rs:2075:1",
+      "loc": "src/main.rs:2128:1",
       "inferred": [
         "Fs"
       ],
@@ -295,7 +374,7 @@
     },
     {
       "fn": "encountered_set",
-      "loc": "src/main.rs:164:1",
+      "loc": "src/main.rs:176:1",
       "inferred": [
         "Fs"
       ],
@@ -305,11 +384,14 @@
       "hash": "candor_query#encountered_set",
       "calls": [
         "glob_encountered"
+      ],
+      "invisible": [
+        "serde_json"
       ]
     },
     {
       "fn": "glob_encountered",
-      "loc": "src/main.rs:119:1",
+      "loc": "src/main.rs:131:1",
       "inferred": [
         "Fs"
       ],
@@ -322,26 +404,41 @@
       ]
     },
     {
+      "fn": "glob_reports",
+      "loc": "src/main.rs:68:1",
+      "inferred": [],
+      "hash": "candor_query#glob_reports",
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
       "fn": "load_calibrated",
-      "loc": "src/main.rs:327:1",
+      "loc": "src/main.rs:362:1",
       "inferred": [
         "Fs"
       ],
       "direct": [
         "Fs"
       ],
-      "hash": "candor_query#load_calibrated"
+      "hash": "candor_query#load_calibrated",
+      "invisible": [
+        "serde_json"
+      ]
     },
     {
       "fn": "load_callgraph",
-      "loc": "src/main.rs:881:1",
+      "loc": "src/main.rs:922:1",
       "inferred": [
         "Fs"
       ],
       "direct": [
         "Fs"
       ],
-      "hash": "candor_query#load_callgraph"
+      "hash": "candor_query#load_callgraph",
+      "invisible": [
+        "serde_json"
+      ]
     },
     {
       "fn": "load_entries",
@@ -355,11 +452,14 @@
       "hash": "candor_query#load_entries",
       "calls": [
         "glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
       ]
     },
     {
       "fn": "load_entries_loud",
-      "loc": "src/main.rs:98:1",
+      "loc": "src/main.rs:110:1",
       "inferred": [
         "Fs"
       ],
@@ -367,22 +467,28 @@
       "calls": [
         "glob_reports",
         "load_entries"
+      ],
+      "invisible": [
+        "candor_report"
       ]
     },
     {
       "fn": "load_fninfo",
-      "loc": "src/main.rs:1001:1",
+      "loc": "src/main.rs:1054:1",
       "inferred": [
         "Fs"
       ],
       "hash": "candor_query#load_fninfo",
       "calls": [
         "load_entries"
+      ],
+      "invisible": [
+        "candor_report"
       ]
     },
     {
       "fn": "locate_newest",
-      "loc": "src/main.rs:1937:1",
+      "loc": "src/main.rs:1990:1",
       "inferred": [
         "Fs"
       ],
@@ -424,6 +530,21 @@
         "cmd_state",
         "cmd_whatif",
         "cmd_where"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "regex",
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "report_backend",
+      "loc": "src/main.rs:1906:1",
+      "inferred": [],
+      "hash": "candor_query#report_backend",
+      "invisible": [
+        "candor_report"
       ]
     }
   ]

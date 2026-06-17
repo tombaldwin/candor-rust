@@ -1,0 +1,8 @@
+# Real-world dynamic-oracle corpus (Bet 1, phase 3): tiny driver crates that exercise REAL effectful
+# crates with a distinctive MARKER, so the oracle can confirm (via strace) the effect actually ran and
+# then assert candor's static scan predicted it — kernel ground truth on real-crate classification, not
+# generated std code. Each driver is its own member so candor-scan attributes per-crate. A SEPARATE
+# workspace (not part of the candor build) — soundness/realworld/run.sh drives it on Linux.
+[workspace]
+resolver = "2"
+members = ["net_std", "net_minreq", "exec_duct", "fs_fserr", "pure_ctrl"]

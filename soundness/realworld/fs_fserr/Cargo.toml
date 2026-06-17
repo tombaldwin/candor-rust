@@ -1,0 +1,10 @@
+[package]
+name = "fs_fserr"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "fs_fserr"
+path = "src/main.rs"
+[dependencies]
+fs-err = "2"

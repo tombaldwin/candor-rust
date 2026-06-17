@@ -1,0 +1,13 @@
+[package]
+name = "net_minreq"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "net_minreq"
+path = "src/main.rs"
+[dependencies]
+# A small HTTP crate. The POINT of this driver is whether candor classifies (or honestly DISCLOSES) a
+# Net crate it may NOT have in its calibrated table: if candor reads silent-pure here, that's the
+# dangerous under-report; if it predicts Net OR Unknown/blind, it's honest.
+minreq = { version = "2", default-features = false }

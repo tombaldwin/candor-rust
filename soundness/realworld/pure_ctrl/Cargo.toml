@@ -1,0 +1,8 @@
+[package]
+name = "pure_ctrl"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "pure_ctrl"
+path = "src/main.rs"
