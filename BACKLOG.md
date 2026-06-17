@@ -143,6 +143,19 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P1 — correctness (silent wrong answers are the worst failure)
 
+- [ ] **candor-scan silent-pures `duct::cmd!(...).run()` — macro-result receiver typing hole** (found by
+      the real-world dynamic oracle, `soundness/realworld/`, 2026-06-17; tracked in KNOWN_UNDER). The
+      syntactic scanner can't type the result of the `cmd!` MACRO, so the chained `.run()` doesn't resolve
+      to `duct::Expression::run` and its Exec is dropped — the program spawns a process (kernel-confirmed
+      via strace) yet reads pure+certain. The deep engine catches it (typed `.run()`, lib.rs:3675), so this
+      is scan-only. SAME macro-blindness family as the log-macro bug. FIX is a deliberate cross-engine call:
+      (a) over-approximate the SHARED classifier — `duct::cmd`/`sh` entry → Exec (safe-direction, candor's
+      never-under-report bias; but degrades the deep engine's builder-discipline precision + breaks its
+      `duct::cmd → None` test), OR (b) a SYNTACTIC-MODE macro classifier candor-scan uses for entry macros
+      the typed classifier leaves to verbs (keeps the deep engine pristine; more infra — and note scan's
+      effect attribution runs through `classify()` at the call-join, so a scan-only path needs threading
+      there too). Likely generalizes beyond duct (any builder-macro whose terminal verb carries the effect).
+
 - [~] **Soundness fuzzer — "never silently under-reports" is now a CI gate, not a hope** (`soundness/`,
       **Bet 1 phase 1** of the improvement roadmap). A hand review found multiple trust-contract
       violations the unit/integration suite missed (`Box<dyn Fn>` callbacks, non-local callbacks,
