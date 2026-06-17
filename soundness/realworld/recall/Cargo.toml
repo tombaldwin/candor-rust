@@ -17,3 +17,8 @@ rusqlite = "0.31"
 sqlx = "0.7"
 diesel = "2"
 postgres = "0.19"
+rand = "0.8"
+getrandom = "0.2"
+uuid = { version = "1", features = ["v4"] }
+arboard = "3"
+interprocess = "2"

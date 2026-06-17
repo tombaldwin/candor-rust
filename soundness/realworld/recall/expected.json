@@ -6,5 +6,12 @@
   "db_rusqlite": "Db",
   "db_sqlx": "Db",
   "db_diesel": "Db",
-  "db_postgres": "Db"
+  "db_postgres": "Db",
+  "rand_random": "Rand",
+  "rand_thread_rng": "Rand",
+  "rand_getrandom": "Rand",
+  "rand_uuid": "Rand",
+  "clip_arboard": "Clipboard",
+  "ipc_unix": "Ipc",
+  "ipc_interprocess": "Ipc"
 }
