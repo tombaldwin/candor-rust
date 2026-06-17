@@ -3065,6 +3065,10 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let (deps, dep_renames) = cargo_deps(dir);
     let mut dep_seen: HashMap<String, usize> = HashMap::new(); // dep crate root -> call-site count
     let mut dep_classified: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // fn -> the dep crates it DIRECTLY calls into where the classifier floored the call. Post-filtered to
+    // the genuinely-blind crates (κ never classified them) + propagated transitively → the per-fn
+    // `invisible` honesty disclosure (the κ ledger, but attributed per function).
+    let mut blind_direct: HashMap<String, BTreeSet<String>> = HashMap::new();
 
     // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
     // segment (`new`); `by_tail2` keys on the last TWO segments (`RequestBuilder::new`). The leaf index
@@ -3146,6 +3150,9 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
                 if classified.is_some() {
                     dep_classified.insert(cr.to_string());
+                } else {
+                    // a FLOORED dep call: candidate per-fn blind spot (filtered to genuinely-blind below).
+                    blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
                 }
             }
             // (The CANDOR_DEPS cross-crate JOIN moved BELOW — it must run AFTER `resolved_local`/
@@ -3306,6 +3313,20 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let pathsacc = propagate_str(&paths, &calls, &all);
     let tablesacc = propagate_str(&tables, &calls, &all);
     let incompleteacc = propagate(&incomplete, &calls, &all); // transitive masking-incompleteness
+    let blind_acc = propagate_str(&blind_direct, &calls, &all); // transitive per-fn blind reach
+    // The genuinely-blind dep crates (the per-scan κ "unlisted" set): seen, never classified, not
+    // dep-report-covered, not calibrated. A fn's `invisible` = its transitive blind reach ∩ this set.
+    let global_blind: std::collections::HashSet<String> = dep_seen
+        .keys()
+        .filter(|cr| {
+            !dep_classified.contains(*cr)
+                && !deps_idx.crates.contains(dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str()))
+                && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
+                && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
+                && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
+        })
+        .cloned()
+        .collect();
 
     let mut entries: Vec<ReportEntry> = Vec::new();
     let mut cg: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -3316,7 +3337,10 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // an always-present key also lets a consumer distinguish "no callers" from "no such function".
         cg.insert(q.clone(), calls.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default());
         let inf = inferred.get(q).cloned().unwrap_or_default();
-        if inf.is_empty() {
+        // Keep a pure fn if it has a BLIND reach — so the honesty disclosure survives on exactly the
+        // `inferred: []` fns that need it (else `invisible` would be dropped with the pure entry).
+        let has_blind = blind_acc.get(q).is_some_and(|s| s.iter().any(|c| global_blind.contains(c)));
+        if inf.is_empty() && !has_blind {
             continue;
         }
         entries.push(ReportEntry {
@@ -3352,6 +3376,12 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // lint also flags `#[no_mangle]`; the scanner can't see attributes, so it under-marks — the
             // sound direction for an optional reachability hint.
             entry_point: q.rsplit("::").next() == Some("main"),
+            // Per-fn honesty: the genuinely-blind crates this fn transitively reaches. `inferred` is a
+            // LOWER BOUND when this is non-empty.
+            invisible: blind_acc
+                .get(q)
+                .map(|s| s.iter().filter(|c| global_blind.contains(*c)).cloned().collect())
+                .unwrap_or_default(),
         });
     }
     entries.sort_by(|a, b| a.func.cmp(&b.func));

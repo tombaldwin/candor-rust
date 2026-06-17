@@ -132,6 +132,13 @@ pub struct ReportEntry {
     /// when the function introduces no direct `Unknown`.
     #[serde(default, rename = "unknownWhy", skip_serializing_if = "Vec::is_empty")]
     pub unknown_why: Vec<String>,
+    /// The external crates/packages this function (transitively) reaches that the classifier could NOT see
+    /// through — κ floored them and never classified them anywhere. Effects through them are NOT in
+    /// `inferred`, so this is the per-fn HONESTY caveat: `inferred` is a LOWER BOUND when this is non-empty
+    /// (`inferred: []` with a non-empty `invisible` means "pure as far as candor could see, but it could
+    /// not see through these"). The per-scan κ line is the same disclosure aggregated. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invisible: Vec<String>,
 }
 
 /// The candor-spec contract version this build implements (the report SCHEMA + AS-EFF codes), distinct
