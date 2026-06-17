@@ -1364,6 +1364,74 @@ fn local_trait_method_for_self<'tcx>(
     did.is_local().then_some(did)
 }
 
+/// HOLE — a NON-LOCAL std DRIVER method whose body invokes a trait method on its RECEIVER or ELEMENT
+/// type that candor never sees: `x.to_string()` → `<X as Display>::fmt`; `v.contains(e)`/`v.clone()`/
+/// `s.to_vec()`/`v.sort()`/`set.insert(e)` → `<E as PartialEq/Clone/Ord/Hash>::method`. candor sees only
+/// the std method DefId, not the `<T as Trait>::m` dispatch over a LOCAL type — so a local EFFECTFUL impl
+/// is reached silently (sweep [25]/[26]). Recover the edge to the LOCAL impl method; a std element
+/// (`Vec<u32>`) or a pure derived impl resolves to a non-effectful target → no fabrication. Soundness only.
+fn std_driver_local_edges<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    callee_did: DefId,
+) -> Vec<DefId> {
+    use rustc_middle::ty::TyKind;
+    use rustc_span::sym;
+    if callee_did.is_local()
+        || !matches!(cx.tcx.crate_name(callee_did.krate).as_str(), "core" | "std" | "alloc")
+    {
+        return vec![];
+    }
+    let ExprKind::MethodCall(_, receiver, _, _) = expr.kind else { return vec![] };
+    let Some(typeck) = cx.maybe_typeck_results() else { return vec![] };
+    let recv_ty = typeck.expr_ty_adjusted(receiver).peel_refs();
+    let method = cx.tcx.item_name(callee_did);
+    let method = method.as_str();
+    let mut out = Vec::new();
+    let mut push = |cx: &LateContext<'tcx>, ty: rustc_middle::ty::Ty<'tcx>, m: &str, tr: rustc_span::Symbol| {
+        if let Some(did) = local_trait_method_for_self(cx, ty, m, tr) {
+            out.push(did);
+        }
+    };
+    // RECEIVER-typed driver: `x.to_string()` formats through `<X as Display>::fmt`.
+    if method == "to_string" {
+        push(cx, recv_ty, "fmt", sym::Display);
+        return out;
+    }
+    // ELEMENT-typed drivers over a sequence/set container — the element type and which trait the verb
+    // drives depend on the container KIND (a `Vec::insert` is positional and drives NOTHING — only a SET
+    // `insert` drives Hash/Ord; conflating them would fabricate).
+    let (elem, is_set, ordered) = match recv_ty.kind() {
+        TyKind::Slice(e) | TyKind::Array(e, _) => (Some(*e), false, false),
+        TyKind::Adt(adt, args) => match cx.tcx.item_name(adt.did()).as_str() {
+            "Vec" | "VecDeque" | "LinkedList" => (args.types().next(), false, false),
+            "HashSet" => (args.types().next(), true, false),
+            "BTreeSet" | "BinaryHeap" => (args.types().next(), true, true),
+            _ => (None, false, false),
+        },
+        _ => (None, false, false),
+    };
+    let Some(elem) = elem else { return out };
+    match method {
+        "clone" | "to_vec" => push(cx, elem, "clone", sym::Clone),
+        "contains" => {
+            if ordered {
+                push(cx, elem, "cmp", sym::Ord);
+            } else {
+                push(cx, elem, "eq", sym::PartialEq);
+            }
+        }
+        "sort" | "sort_unstable" | "sort_by" if !is_set => push(cx, elem, "cmp", sym::Ord),
+        "insert" if ordered => push(cx, elem, "cmp", sym::Ord),
+        "insert" if is_set => {
+            push(cx, elem, "hash", sym::Hash);
+            push(cx, elem, "eq", sym::PartialEq);
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Find the LOCAL `Display`/`Debug`/… `fmt` impls a `core::fmt` formatting call hides (HOLE 2). The
 /// `println!`/`format!`/`write!` macros lower each formatted value to a `core::fmt::rt::Argument::
 /// new_<kind>(&value)` constructor; the actual `<kind>::fmt(&value, f)` call happens INSIDE the std
@@ -2350,6 +2418,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         }
 
+        // HOLE 2b — a non-local std DRIVER method (`to_string`/`contains`/`clone`/`sort`/set-`insert`)
+        // running a LOCAL effectful `Display`/`PartialEq`/`Clone`/`Ord`/`Hash` impl over its receiver/
+        // element type (sweep [25]/[26]). Recover the local edge; pure/std targets resolve non-local.
+        for e in std_driver_local_edges(cx, expr, def_id) {
+            add_edge(self, e);
+        }
+
         // GENERIC-RECEIVER hole — a LOCAL generic callee whose body drives a trait method on one of its
         // OWN generic params (`run_generic::<I>(it){ it.for_each(..) }` → internally `<I as Iterator>::
         // next`). Inside the callee `I` is an unresolved `Param`, so candor reports it pure for itself and
@@ -3043,6 +3118,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     // The blind external crates this fn transitively reaches (the disclosed floor): empty
                     // unless it calls into an unmodeled, unwalkable crate — then `inferred` is a LOWER bound.
                     invisible: invisibleacc.get(&f).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+                    // Effects with a masking-incomplete surface — carried so a cross-crate consumer inherits
+                    // the incompleteness ([3]/[7]/[30]); the gate already fails closed locally on it.
+                    incomplete: incompleteacc.get(&f).map(|s| s.iter().map(|e| e.to_string()).collect()).unwrap_or_default(),
                 });
                 continue;
             }

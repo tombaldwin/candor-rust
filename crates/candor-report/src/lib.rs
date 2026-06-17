@@ -139,6 +139,14 @@ pub struct ReportEntry {
     /// not see through these"). The per-scan κ line is the same disclosure aggregated. Omitted when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invisible: Vec<String>,
+    /// Effects (Net/Exec/Fs/Db) whose literal SURFACE this function leaves INCOMPLETE — a host-/command-
+    /// establishing call performed with a runtime (non-literal) locator, so the endpoint is invisible to
+    /// the AS-EFF-008 allowlist. Carried in the report ONLY so a CANDOR_DEPS consumer inherits the
+    /// incompleteness across the crate boundary (else a benign literal in the consumer could mask the
+    /// dep's invisible forbidden endpoint — sweep [30]). Omitted when none; consumed by the gate, not a
+    /// primary surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incomplete: Vec<String>,
 }
 
 /// The candor-spec contract version this build implements (the report SCHEMA + AS-EFF codes), distinct

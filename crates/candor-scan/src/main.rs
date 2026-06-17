@@ -236,6 +236,9 @@ struct DepFn {
     /// so a consumer inherits the disclosure (sweep [8]): else a dep that floored an unmodeled crate read
     /// as plain pure at the chain boundary, dropping the per-fn honesty caveat.
     invisible: Vec<String>,
+    /// Effects whose surface the dep fn left masking-incomplete — carried so a benign literal in the
+    /// consumer can't mask the dep's invisible forbidden endpoint across the join (sweep [30]).
+    incomplete: Vec<&'static str>,
 }
 
 /// The CANDOR_DEPS index: `crate#tail2` and `crate#leaf` keys (UNAMBIGUOUS only — a key two dep
@@ -340,6 +343,12 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 de.paths = strs("paths");
                 de.tables = strs("tables");
                 de.invisible = strs("invisible"); // sweep [8]: carry the blind-crate disclosure across the join
+                // sweep [30]: carry masking-incompleteness (mapped to the static effect alphabet).
+                for s in e.get("incomplete").and_then(|x| x.as_array()).into_iter().flatten() {
+                    if let Some(eff) = s.as_str().and_then(candor_classify::cap_from_name) {
+                        de.incomplete.push(eff);
+                    }
+                }
             }
             let mut keys = vec![format!("{krate}#{}", qual.rsplit("::").next().unwrap_or(qual))];
             if let Some(t2) = tail2(qual) {
@@ -3345,6 +3354,11 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     // pure here). Propagated with the local blind spots below.
                     blind_direct.entry(f.qual.clone()).or_default().extend(de.invisible.iter().cloned());
                     dep_invisible.extend(de.invisible.iter().cloned());
+                    // sweep [30]: inherit the dep fn's masking-incompleteness so a benign literal here can't
+                    // certify the dep's invisible runtime endpoint (propagated with the local incomplete map).
+                    if !de.incomplete.is_empty() {
+                        incomplete.entry(f.qual.clone()).or_default().extend(de.incomplete.iter().copied());
+                    }
                     dep_classified.insert(cr.to_string());
                 }
             }
@@ -3469,6 +3483,9 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 .get(q)
                 .map(|s| s.iter().filter(|c| global_blind.contains(*c)).cloned().collect())
                 .unwrap_or_default(),
+            // Masking-incomplete effects — carried so a CANDOR_DEPS consumer inherits the incompleteness
+            // across the crate boundary (sweep [30]); the gate already fails closed locally on it.
+            incomplete: incompleteacc.get(q).map(|s| s.iter().map(|e| e.to_string()).collect()).unwrap_or_default(),
         });
     }
     entries.sort_by(|a, b| a.func.cmp(&b.func));

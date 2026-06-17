@@ -272,6 +272,36 @@ def edge_forms(callee, i=0):
                 f"fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {callee}(); write!(f, \"x\") }} }}"
             ],
         ),
+        # `x.to_string()` drives `<X as Display>::fmt` INSIDE the std blanket `ToString` impl — candor sees
+        # only the non-local `ToString::to_string`, never the local `fmt` (sweep [25]). The std blanket is
+        # in `is_pure_std_trait`, so without the driver recovery the caller looked silently pure.
+        "to_string_fmt": (
+            f'{{ let _ = Ts{i:02d}.to_string(); }}',
+            [], [],
+            [
+                f"struct Ts{i:02d};\nimpl std::fmt::Display for Ts{i:02d} {{ "
+                f"fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {callee}(); write!(f, \"x\") }} }}"
+            ],
+        ),
+        # `v.contains(x)` drives `<E as PartialEq>::eq` inside the std `<[E]>::contains` (a non-local generic
+        # driver bounded by `T: PartialEq`) — candor sees only `contains`, never the local `eq` (sweep [26]).
+        "vec_contains_eq": (
+            f'{{ let v = vec![Eq{i:02d}(0)]; let _ = v.contains(&Eq{i:02d}(1)); }}',
+            [], [],
+            [
+                f"struct Eq{i:02d}(u32);\nimpl PartialEq for Eq{i:02d} {{ "
+                f"fn eq(&self, o: &Self) -> bool {{ {callee}(); self.0 == o.0 }} }}"
+            ],
+        ),
+        # `v.clone()` drives `<E as Clone>::clone` element-wise inside the std `Vec::clone` (sweep [26]).
+        "vec_clone": (
+            f'{{ let v = vec![Cl{i:02d}(0)]; let _ = v.clone(); }}',
+            [], [],
+            [
+                f"struct Cl{i:02d}(u32);\nimpl Clone for Cl{i:02d} {{ "
+                f"fn clone(&self) -> Self {{ {callee}(); Cl{i:02d}(self.0) }} }}"
+            ],
+        ),
     }
 
 
