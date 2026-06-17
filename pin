@@ -1,0 +1,1 @@
+  static void exec() { Runnable r = new R0(); r.run(); } // monomorphic - to R0

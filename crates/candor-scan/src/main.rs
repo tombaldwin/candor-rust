@@ -3121,6 +3121,12 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let mut cmds: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut paths: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut tables: HashMap<String, BTreeSet<String>> = HashMap::new();
+    // Effects whose literal SURFACE is INCOMPLETE for a fn: it has a Net reach whose host is invisible to
+    // the gate (a Net call with no string-literal arg — a runtime host, or a builder terminal whose host was
+    // on a pure builder candor doesn't capture). The AS-EFF-008 gate treats an incomplete surface as
+    // uncertifiable EVEN with other visible hosts, so a benign literal can't MASK the invisible endpoint
+    // (the same gate evasion fixed in candor-java 0.5.29). Net-only, matching candor-java.
+    let mut incomplete: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
     let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut loc: HashMap<String, String> = HashMap::new();
     for f in &fns {
@@ -3258,6 +3264,14 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
+                // A Net call with NO string-literal host arg → the host is invisible to the gate (a runtime
+                // host, or a builder terminal whose host was on a pure builder). Mark the surface incomplete
+                // so a benign captured host can't certify it (the masking evasion). A Net call WITH a literal
+                // (the host-establishing convenience form / `TcpStream::connect("h")`) captures the host
+                // below and is NOT incomplete; untyped use-calls (`stream.write()`) aren't classified Net.
+                if eff == "Net" && c.str_arg.is_none() {
+                    incomplete.entry(f.qual.clone()).or_default().insert("Net");
+                }
                 if let Some(s) = &c.str_arg {
                     match eff {
                         "Net" => { hosts.entry(f.qual.clone()).or_default().insert(host_part(s)); }
@@ -3291,6 +3305,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let cmdsacc = propagate_str(&cmds, &calls, &all);
     let pathsacc = propagate_str(&paths, &calls, &all);
     let tablesacc = propagate_str(&tables, &calls, &all);
+    let incompleteacc = propagate(&incomplete, &calls, &all); // transitive masking-incompleteness
 
     let mut entries: Vec<ReportEntry> = Vec::new();
     let mut cg: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -3417,7 +3432,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
             return (2, json_body);
         };
-        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc);
+        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc);
         for line in &v {
             println!("{line}");
         }
@@ -3619,6 +3634,7 @@ fn policy_violations(
     cmdsacc: &HashMap<String, BTreeSet<String>>,
     pathsacc: &HashMap<String, BTreeSet<String>>,
     tablesacc: &HashMap<String, BTreeSet<String>>,
+    incompleteacc: &HashMap<String, BTreeSet<&'static str>>,
 ) -> Vec<String> {
     use candor_classify::policy::{literal_allowed, parse_policy, scope_matches};
     let p = parse_policy(policy_text);
@@ -3658,8 +3674,11 @@ fn policy_violations(
                 "Db" => tablesacc.get(q),
                 _ => pathsacc.get(q),
             };
+            // An INCOMPLETE surface (a structurally-invisible reach) can't be certified even with visible
+            // hosts — else a benign literal masks the invisible forbidden endpoint (the masking evasion).
+            let surface_incomplete = incompleteacc.get(q).is_some_and(|s| s.contains(r.effect));
             match lits {
-                Some(ls) if !ls.is_empty() => {
+                Some(ls) if !ls.is_empty() && !surface_incomplete => {
                     let bad: Vec<&str> =
                         ls.iter().filter(|l| !literal_allowed(r.effect, l, &r.literals)).map(String::as_str).collect();
                     if !bad.is_empty() {
@@ -4434,28 +4453,54 @@ mod tests {
         let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
         hosts.insert("api::handle".into(), ["evil.example.com".to_string()].into_iter().collect());
         let empty = HashMap::new();
+        let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
         // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
         let mut tables: HashMap<String, BTreeSet<String>> = HashMap::new();
         tables.insert("db::run".into(), ["audit.log".to_string()].into_iter().collect());
         // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
         let v = policy_violations(
             "deny Net api\nallow Net in api good.example.com\nforbid ui -> db\n",
-            &all, &inferred, &calls, &hosts, &empty, &empty, &tables,
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc,
         );
         assert_eq!(v.len(), 3, "{v:?}");
         assert!(v.iter().any(|l| l.contains("[AS-EFF-006]") && l.contains("api::handle")));
         assert!(v.iter().any(|l| l.contains("[AS-EFF-008]") && l.contains("evil.example.com")));
         assert!(v.iter().any(|l| l.contains("[AS-EFF-009]") && l.contains("ui::draw")));
         // clean policy -> no violations; `pure` flags ANY effect incl. the Db fn.
-        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables).is_empty());
-        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables).len(), 1);
+        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).is_empty());
+        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).len(), 1);
         // the Db table allowlist: db::run reaches audit.log — outside `ledger.*` -> violation;
         // covered by `audit.*` -> clean. ui::draw INHERITS Db but the literal propagation is the
         // caller's tablesacc, supplied here only for db::run, so only db::run flags.
-        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables);
+        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc);
         assert_eq!(bad.len(), 1, "{bad:?}");
         assert!(bad[0].contains("audit.log"));
-        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables).is_empty());
+        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).is_empty());
+    }
+
+    #[test]
+    fn masking_incomplete_net_surface_not_certified() {
+        // The masking evasion: a fn with a captured BENIGN host AND a structurally-INVISIBLE Net reach
+        // (an incomplete surface) must NOT be certified by the benign host. A clean fn (host captured,
+        // surface complete) certifies. Mirrors candor-java 0.5.29.
+        let all = vec!["a::mask".to_string(), "a::clean".to_string()];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inferred.insert("a::mask".into(), ["Net"].into_iter().collect());
+        inferred.insert("a::clean".into(), ["Net"].into_iter().collect());
+        let calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
+        hosts.insert("a::mask".into(), ["api.stripe.com".to_string()].into_iter().collect());
+        hosts.insert("a::clean".into(), ["api.stripe.com".to_string()].into_iter().collect());
+        let empty: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let tables: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inc.insert("a::mask".into(), ["Net"].into_iter().collect()); // mask also has an invisible reach
+        let v = policy_violations(
+            "allow Net api.stripe.com\n",
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &inc,
+        );
+        assert!(v.iter().any(|l| l.contains("a::mask") && l.contains("cannot be certified")), "{v:?}");
+        assert!(!v.iter().any(|l| l.contains("a::clean")), "clean must certify: {v:?}");
     }
 
     #[test]
