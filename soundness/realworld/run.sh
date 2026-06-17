@@ -24,8 +24,12 @@ command -v strace >/dev/null 2>&1 || { echo "realworld oracle: strace not instal
 # installed. (Setting RUSTFLAGS supersedes the config's rustflags entirely.)
 export RUSTFLAGS="-C linker=cc"
 
+# Retry a (cargo) command — crates.io fetches flake transiently in CI (SSL eof), which is NOT an oracle
+# finding; a retry keeps a network hiccup from masquerading as a failure.
+retry() { local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge 3 ] && return 1; echo "  (retry $n after transient failure: $*)"; sleep 5; done; }
+
 echo "realworld oracle: building candor-scan (stable)…"
-cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan || { echo "FAIL: candor-scan build"; exit 1; }
+retry cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan || { echo "FAIL: candor-scan build"; exit 1; }
 SCAN="$ROOT/target/debug/candor-scan"
 
 # KNOWN, TRIAGED under-reports — tracked so the oracle is a clean gate (green on known gaps, red only on
@@ -47,7 +51,7 @@ pass=0; under=0; known=0; skip=0; fab=0; failed=""
 for row in "${CASES[@]}"; do
   IFS='|' read -r m eff marker <<<"$row"
   d="$HERE/$m"
-  cargo +stable build -q --manifest-path "$HERE/Cargo.toml" -p "$m" 2>/dev/null \
+  retry cargo +stable build -q --manifest-path "$HERE/Cargo.toml" -p "$m" 2>/dev/null \
     || { echo "  $m: build failed — SKIP"; skip=$((skip+1)); continue; }
   bin="$HERE/target/debug/$m"
   [ -x "$bin" ] || { echo "  $m: no binary — SKIP"; skip=$((skip+1)); continue; }
