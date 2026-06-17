@@ -1002,7 +1002,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // fabricated Log on them. Match the emit verbs; everything else returns None.
     if crate_name == "tracing" {
         let m = path.rsplit("::").next().unwrap_or(path);
-        if m == "event"
+        // The user-facing emit MACROS (`tracing::info!`/`warn!`/…) — candor-scan is pre-expansion, so it
+        // sees the raw macro path `tracing::info`, not the expanded `__tracing`/`Subscriber::event` the
+        // deep (post-expansion) engine sees. Only the macro names; the pure DATA types (Level/Span/Event)
+        // have other tails and stay None.
+        if m == "trace" || m == "debug" || m == "info" || m == "warn" || m == "error"
+            || m == "trace_span" || m == "debug_span" || m == "info_span" || m == "warn_span"
+            || m == "error_span" || m == "span"
+            || m == "event"
             || m == "new_span"
             || m == "record"
             || m == "record_follows_from"
@@ -1023,8 +1030,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     }
     // The `log` facade: its macros route through `log::__private_api`; the crate's types
     // (`Level`, `LevelFilter`) are pure, so match the logging entry, not the whole crate.
-    if crate_name == "log" && path.contains("::__private_api") {
-        return Some("Log");
+    if crate_name == "log" {
+        // Expanded macro form (deep engine) OR the raw user-facing macro names (candor-scan, pre-expansion).
+        // `log::Level`/`LevelFilter`/`Record`/`Metadata` have other tails, so the type surface stays pure.
+        let m = path.rsplit("::").next().unwrap_or(path);
+        if path.contains("::__private_api")
+            || m == "error" || m == "warn" || m == "info" || m == "debug" || m == "trace" || m == "log"
+        {
+            return Some("Log");
+        }
     }
     // Compiler diagnostic emission — the ONE genuinely effectful operation in the otherwise-pure
     // rustc_* surface (a dylint lint's actual OUTPUT: it writes warnings/errors to the compiler's
@@ -1310,6 +1324,19 @@ mod tests {
                 "calibrated crate `{c}` is matched by no path in classify() — dead list entry"
             );
         }
+    }
+
+    #[test]
+    fn log_tracing_emit_macros_classify_pre_expansion() {
+        // candor-scan is pre-expansion: it sees the raw macro path (`log::info`, `tracing::warn`), not the
+        // expanded dispatch the deep engine sees. Both the user-facing macro names AND the type surface:
+        assert_eq!(classify("log", "log::info"), Some("Log"));
+        assert_eq!(classify("log", "log::error"), Some("Log"));
+        assert_eq!(classify("tracing", "tracing::warn"), Some("Log"));
+        assert_eq!(classify("tracing", "tracing::info_span"), Some("Log"));
+        // pure data-type surface stays None (no fabricated Log)
+        assert_eq!(classify("log", "log::Level::as_str"), None);
+        assert_eq!(classify("tracing", "tracing::Level::INFO"), None);
     }
 
     #[test]

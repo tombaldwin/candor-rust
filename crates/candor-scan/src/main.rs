@@ -1448,6 +1448,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         syn::visit::visit_local(self, node);
     }
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        // The macro PATH itself can be an effect: the log/tracing EMIT macros (`log::info!`,
+        // `tracing::warn!`) expand to the logging dispatch, which a syntactic (pre-expansion) scan can't
+        // see — so classify the macro path directly. Record it as a call ONLY when it classifies to an
+        // effect, so inert macros (`println!`/`vec!`/`format!`/`matches!`) add no spurious call-graph edge.
+        let mpath = expand(&path_to_string(&node.path), self.uses);
+        let cr = mpath.split("::").next().unwrap_or(&mpath);
+        if candor_classify::classify(cr, &mpath).is_some() {
+            let leaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
+            self.calls.push(Call { path: mpath, leaf, str_arg: None, typed: false, method: false });
+        }
         // syn does not parse a macro's body, so every call hidden inside one is invisible by default —
         // a real miss on crates that route effectful calls through a macro (git2 wraps EVERY libgit2 FFI
         // call in `try_call!(raw::git_...())`; `println!("{}", f())` hides `f`). Best-effort: parse the
