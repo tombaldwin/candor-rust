@@ -103,10 +103,19 @@ jobs:
       - name: Self-guard
         run: |
           LIB=$(ls "$PWD"/target/debug/libcandor@*.so)
-          out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1)
+          # Capture output AND exit code without letting `bash -e` abort on a non-zero dylint exit —
+          # otherwise the lint's actual output (incl. the AS-EFF-005 detail) is never printed and the
+          # step fails opaquely before the grep. Always echo the output + the exit code, THEN classify.
+          rc=0
+          out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1) || rc=$?
           echo "$out"
+          echo "── cargo dylint exit code: $rc ──"
           if echo "$out" | grep -q "AS-EFF-005"; then
             echo "::error::candor's effect surface grew vs .candor/baseline; refresh it if intended"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::cargo dylint exited $rc without emitting AS-EFF-005 — see output above (not a surface regression)"
             exit 1
           fi
 
