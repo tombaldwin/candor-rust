@@ -1125,6 +1125,32 @@ pub fn is_cmd_naming_method(method: &str) -> bool {
     matches!(method, "new" | "cmd")
 }
 
+/// The masking guard (AS-EFF-008): a Net call whose method takes the HOST/URL as an argument is
+/// "establishing" — a classified Net call here with no captured host literal leaves the endpoint
+/// structurally INVISIBLE (a runtime-built host), so the surface is incomplete and the gate must fail
+/// closed (else a benign sibling literal masks the runtime endpoint). An ALLOWLIST of connection-
+/// establishing verbs — the SAFE direction: a USE-verb on an already-connected socket
+/// (`stream.write`/`read`/`flush`, `socket.send`/`recv`) is NOT here, so a missing literal there (the
+/// host was fixed at `connect`) never false-positives. Under-catching an unusual establishing verb is a
+/// missed mask (sound-with-disclosure), never a broken gate. The arg is the method (path's last segment).
+pub fn is_net_establishing(method: &str) -> bool {
+    matches!(
+        method,
+        "connect"
+            | "connect_timeout"
+            | "get"
+            | "post"
+            | "put"
+            | "patch"
+            | "delete"
+            | "head"
+            | "request"
+            | "send_to"
+            | "lookup_host"
+            | "to_socket_addrs"
+    )
+}
+
 /// Map a cap-std capability *type* to the effect it authorises. Holding one of these
 /// (e.g. `&Dir`) is the real, unforgeable right to perform that effect — so candor
 /// treats it as a declared capability, exactly like its own `&Fs` token.
@@ -1544,5 +1570,17 @@ mod tests {
         assert!(is_cmd_naming_method("new") && is_cmd_naming_method("cmd"));
         assert!(!is_cmd_naming_method("get_env")); // a GETTER, not a namer — the leak this closes
         assert!(!is_cmd_naming_method("arg") && !is_cmd_naming_method("env") && !is_cmd_naming_method("current_dir"));
+    }
+
+    #[test]
+    fn net_establishing_allowlist() {
+        // sweep [3]/[7]: the masking guard's establishing-verb allowlist — host-bearing connect/request
+        // verbs establish (a runtime host there is invisible); USE-verbs on a connected socket do NOT.
+        assert!(is_net_establishing("connect") && is_net_establishing("connect_timeout"));
+        assert!(is_net_establishing("get") && is_net_establishing("post") && is_net_establishing("request"));
+        assert!(is_net_establishing("send_to") && is_net_establishing("to_socket_addrs"));
+        // use-verbs (host fixed at connect) must NOT be establishing — else `connect("h").write()` flags.
+        assert!(!is_net_establishing("write") && !is_net_establishing("read") && !is_net_establishing("send"));
+        assert!(!is_net_establishing("flush") && !is_net_establishing("recv") && !is_net_establishing("peek"));
     }
 }

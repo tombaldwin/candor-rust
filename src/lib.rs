@@ -171,6 +171,12 @@ pub struct Candor {
     /// unqualified "pure" claim PER FUNCTION (the deep engine floors unmodeled crates like the syntactic
     /// engines; this discloses it — the honesty contract, sweep [4]/[19]).
     invisible_direct: HashMap<LocalDefId, BTreeSet<String>>,
+    /// Effects whose literal SURFACE this fn leaves incomplete: a host-establishing Net call / a cmd-naming
+    /// Exec call performed with a RUNTIME (non-literal) locator, so the endpoint is structurally invisible
+    /// to the gate. Propagated like effects; the AS-EFF-008 allowlist fails CLOSED on an incomplete surface
+    /// even when benign literals are present (else the benign literal masks the runtime endpoint — sweep
+    /// [3]/[7]). Net + Exec only (Fs/Db establishing-vs-use is undecidable here; deferred).
+    incomplete_direct: HashMap<LocalDefId, BTreeSet<&'static str>>,
     /// Literal subprocess commands a function runs directly (the program in `Command::new("git")`).
     /// Propagated like `net_hosts_direct`; surfaced as the report's optional `cmds` detail and enforced
     /// by `allow Exec …` (AS-EFF-008). Static-literal subset only — a runtime command is simply absent.
@@ -348,6 +354,7 @@ impl Candor {
             fs_direct: HashMap::new(),
             net_hosts_direct: HashMap::new(),
             invisible_direct: HashMap::new(),
+            incomplete_direct: HashMap::new(),
             exec_cmds_direct: HashMap::new(),
             fs_paths_direct: HashMap::new(),
             db_tables_direct: HashMap::new(),
@@ -2504,6 +2511,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 let hosts = net_hosts_in_call(expr);
                 if !hosts.is_empty() {
                     self.net_hosts_direct.entry(caller).or_default().extend(hosts);
+                } else if candor_classify::is_net_establishing(path.rsplit("::").next().unwrap_or("")) {
+                    // a host-ESTABLISHING Net call with no captured host literal → runtime endpoint, invisible
+                    // to the gate (masking; sweep [3]/[7]). Use-verbs (write/read/send) are not establishing.
+                    self.incomplete_direct.entry(caller).or_default().insert("Net");
                 }
             }
             // Non-breaking Exec/Fs refinements: the literal command (`Command::new("git")`) / path
@@ -2523,6 +2534,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             .extend(classify_command_head(&cmd).iter().copied());
                         self.exec_cmds_direct.entry(caller).or_default().insert(cmd);
                     }
+                } else if is_cmd_naming_method(path.rsplit("::").next().unwrap_or("")) {
+                    // a program-NAMING Exec call (`Command::new(runtime_var)`) with no literal head → the
+                    // command is invisible to the gate (masking; sweep [3]/[7]).
+                    self.incomplete_direct.entry(caller).or_default().insert("Exec");
                 }
             }
             if builtin == Some("Fs") {
@@ -2745,6 +2760,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // invisible[f] = invisible_direct[f] ∪ ⋃ { invisible[g] : g ∈ calls[f] } — the blind crates a fn
         // transitively reaches (the disclosed floor; sweep [4]/[19]). Same graph as hosts/effects.
         let invisibleacc = propagate(self.invisible_direct.clone(), &self.calls);
+        // incomplete[f] = incomplete_direct[f] ∪ ⋃ { incomplete[g] : g ∈ calls[f] } — a caller transitively
+        // reaches a callee's invisible endpoint, so it inherits the surface-incompleteness (masking [3]/[7]).
+        let incompleteacc = propagate(self.incomplete_direct.clone(), &self.calls);
         let cmdsacc = propagate(self.exec_cmds_direct.clone(), &self.calls);
         let pathsacc = propagate(self.fs_paths_direct.clone(), &self.calls);
         let tablesacc = propagate(self.db_tables_direct.clone(), &self.calls);
@@ -3228,7 +3246,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 // exactly what AS-EFF-003/006 cover. Folding `Unknown` in here would fire on essentially
                 // every real effectful function, making the allowlist unusable.
                 let opaque = reached.map(|set| set.is_empty()).unwrap_or(true);
-                if !bad.is_empty() || opaque {
+                // The surface is INCOMPLETE for this effect (a host-establishing / cmd-naming call left the
+                // endpoint invisible): can't certify even with visible literals, else a benign literal masks
+                // the runtime endpoint (the masking evasion; sweep [3]/[7]). Matches candor-scan / the family.
+                let surface_incomplete = incompleteacc.get(&f).is_some_and(|s| s.contains(rule.effect));
+                if !bad.is_empty() || opaque || surface_incomplete {
                     let scope = rule.scope.as_deref().map(|s| format!(" (scope `{s}`)")).unwrap_or_default();
                     let noun = match rule.effect {
                         "Exec" => "a command",

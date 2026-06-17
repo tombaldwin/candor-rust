@@ -3309,13 +3309,17 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
-                // A Net call with NO string-literal host arg → the host is invisible to the gate (a runtime
-                // host, or a builder terminal whose host was on a pure builder). Mark the surface incomplete
-                // so a benign captured host can't certify it (the masking evasion). A Net call WITH a literal
-                // (the host-establishing convenience form / `TcpStream::connect("h")`) captures the host
-                // below and is NOT incomplete; untyped use-calls (`stream.write()`) aren't classified Net.
-                if eff == "Net" && c.str_arg.is_none() {
-                    incomplete.entry(f.qual.clone()).or_default().insert("Net");
+                // A host-ESTABLISHING Net / program-NAMING Exec call with NO captured literal → the endpoint
+                // is invisible to the gate (a runtime value). Mark the surface incomplete so a benign captured
+                // literal can't certify it (the masking evasion). Establishing-allowlist via the SHARED
+                // predicate (is_net_establishing / is_cmd_naming_method) — same as the deep engine — so a
+                // USE-verb (`stream.write()`) whose host was fixed at `connect` never false-positives.
+                if c.str_arg.is_none() {
+                    if eff == "Net" && candor_classify::is_net_establishing(&c.leaf) {
+                        incomplete.entry(f.qual.clone()).or_default().insert("Net");
+                    } else if eff == "Exec" && candor_classify::is_cmd_naming_method(&c.leaf) {
+                        incomplete.entry(f.qual.clone()).or_default().insert("Exec");
+                    }
                 }
                 if let Some(s) = &c.str_arg {
                     match eff {
