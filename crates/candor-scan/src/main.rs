@@ -187,6 +187,10 @@ struct CallCollector<'a> {
     /// params/locals of a fn-pointer / `impl`/`dyn Fn` / generic-`Fn`-bound type. Invoking one (`cb()`)
     /// calls an opaque body → honest `Unknown`, not a silently-dropped phantom call to a free fn `cb`.
     fn_typed_vars: std::collections::HashSet<String>,
+    /// locals aliased to a free-FUNCTION path (`let g = eff;` where `eff` is a visible fn): a later `g()`
+    /// resolves to the aliased path, so its effect (and whole transitive chain) is not silently dropped
+    /// (sweep [6]). Keyed by the local name → the expanded callee path.
+    fn_alias: std::collections::HashMap<String, String>,
     /// set once the body invokes a callable we can't resolve (see `FnInfo::unresolved`).
     unresolved: bool,
 }
@@ -1100,7 +1104,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     let is_closure_call = !self.closure_vars.is_empty()
                         && ident.as_ref().is_some_and(|n| self.closure_vars.contains(n));
                     if !is_closure_call {
-                        let path = expand(&path_to_string(&p.path), self.uses);
+                        // resolve a fn-alias local (`let g = eff; g()`) to its aliased path (sweep [6]);
+                        // otherwise the bare path as written.
+                        let path = ident
+                            .as_ref()
+                            .and_then(|n| self.fn_alias.get(n).cloned())
+                            .unwrap_or_else(|| expand(&path_to_string(&p.path), self.uses));
                         let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
                         self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method: false });
                     }
@@ -1347,6 +1356,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // `cb: fn()`/`impl Fn`): invoking `g()` is the same opaque-callback call as `cb()` →
                     // Unknown, not a phantom free-fn `g` (the max review found the param-only seeding
                     // missed this). A rebind to a non-fn clears the stale fn-typed marking.
+                    self.fn_alias.remove(&id.ident.to_string()); // drop any stale alias on rebind
                     if self.expr_is_fn_typed(&init.expr) {
                         self.fn_typed_vars.insert(id.ident.to_string());
                         self.vars.remove(&id.ident.to_string());
@@ -1354,6 +1364,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.fn_typed_vars.remove(&id.ident.to_string());
                         if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
                             self.vars.insert(id.ident.to_string(), ty);
+                        }
+                        // `let g = eff;` where the init is a bare PATH (not a call) — `g` aliases a free fn,
+                        // so a later `g()` resolves to it (sweep [6]). `g()` only compiles if the path is
+                        // callable, so aliasing any bare path is sound (an unused alias is never resolved).
+                        if let syn::Expr::Path(p) = &*init.expr {
+                            let single_local = p.path.get_ident().is_some_and(|i| {
+                                let n = i.to_string();
+                                self.vars.contains_key(&n) || self.closure_vars.contains(&n)
+                                    || self.fn_typed_vars.contains(&n)
+                            });
+                            if p.qself.is_none() && !single_local {
+                                self.fn_alias.insert(id.ident.to_string(), expand(&path_to_string(&p.path), self.uses));
+                            }
                         }
                     }
                     // Carry an element type through an element-preserving rebind (`let xs =
@@ -1970,6 +1993,7 @@ fn fninfo(
         calls: Vec::new(),
         closure_vars: std::collections::HashSet::new(),
         fn_typed_vars,
+        fn_alias: std::collections::HashMap::new(),
         unresolved: false,
     };
     for stmt in &block.stmts {
@@ -4097,6 +4121,7 @@ mod tests {
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -4138,6 +4163,7 @@ mod tests {
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -4312,6 +4338,7 @@ mod tests {
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
                 unresolved: false,
             };
             for stmt in &blk.stmts {
@@ -4351,7 +4378,7 @@ mod tests {
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), unresolved: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), unresolved: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -4374,7 +4401,7 @@ mod tests {
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), unresolved: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), unresolved: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -4412,6 +4439,7 @@ mod tests {
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -4440,6 +4468,7 @@ mod tests {
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
                 unresolved: false,
             };
             for stmt in &blk.stmts {

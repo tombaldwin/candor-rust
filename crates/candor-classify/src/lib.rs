@@ -536,6 +536,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // std DNS resolution — `("host", 80).to_socket_addrs()` / `std::net::lookup_host("host")` perform a
+    // real getaddrinfo query (Net), but the classify table covered only the socket I/O *types*, so they
+    // floored silently (sweep [37]; the syntactic engine modelled DNS only at the libc layer).
+    if path.ends_with("::to_socket_addrs")
+        || path == "std::net::lookup_host"
+        || path.ends_with("ToSocketAddrs::to_socket_addrs")
+    {
+        return Some("Net");
+    }
     // Raw sockets. Match the I/O *types* only — `std::net` also holds pure data types
     // (SocketAddr, IpAddr, …) whose construction must NOT be flagged.
     if path.starts_with("std::net::TcpStream")
@@ -543,6 +552,18 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         || path.starts_with("std::net::UdpSocket")
         || path.starts_with("tokio::net::")
     {
+        // …but the PURE accessors read back local/option state — no network I/O — so the whole-type Net
+        // rule fabricated Net on them (sweep [24], the cardinal sin; mirrors the arboard/memmap2 accessor
+        // carve-outs). local_addr/peer_addr return bound/connected addresses; nodelay/ttl/take_error read
+        // socket options/state. Every genuine verb (connect/read/write/send/recv/accept) stays Net.
+        if path.ends_with("::local_addr")
+            || path.ends_with("::peer_addr")
+            || path.ends_with("::nodelay")
+            || path.ends_with("::ttl")
+            || path.ends_with("::take_error")
+        {
+            return None;
+        }
         return Some("Net");
     }
     // Legacy tokio 0.1 socket crates — `tokio_tcp`/`tokio_udp` are *entirely* networking
@@ -612,7 +633,9 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 || path.contains("::get_multiplexed_async_connection")
                 // a live `ConnectionManager` round-trips (Db), but `ConnectionManagerConfig` is a pure
                 // in-memory builder (set_number_of_retries/set_max_delay) — exclude it (adversarial review).
-                || (path.contains("ConnectionManager") && !path.contains("ConnectionManagerConfig"))
+                // `ConnectionManager::clone` is an Arc refcount bump — no Db round-trip (sweep [27]).
+                || (path.contains("ConnectionManager") && !path.contains("ConnectionManagerConfig")
+                    && !path.ends_with("::clone"))
                 || path.ends_with("::query")
                 || path.ends_with("::query_async")
                 || path.ends_with("::req_command")
@@ -663,6 +686,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // builder by the trait in the path (`ActiveModelTrait::`). (Found hardening on a
         // sea_orm consumer app: `.all(db)` reads and `ActiveModel::insert` writes were pure.)
         if crate_name == "sea_orm" {
+            // sea_orm RE-EXPORTS sea_query (`sea_orm::sea_query::…`), whose builder algebra collides with
+            // the execution verbs: `Func::count(col)` builds a COUNT() expr, `Condition::all()` AND-groups
+            // filters, `Expr::count(…)` — all PURE, none touch a db. The `::all`/`::count`/`::one` execution
+            // rule fabricated Db on them (sweep [5]). sea_query is pure query construction end-to-end, so
+            // exclude the whole re-exported namespace first.
+            if path.contains("sea_query") {
+                return None;
+            }
             if path.ends_with("::all")
                 || path.ends_with("::one")
                 || path.ends_with("::count")
@@ -876,6 +907,18 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         || path.starts_with("async_std::process::Command")
         || path.starts_with("async_std::process::Child")
     {
+        // PURE read-backs of the builder's stored fields / the cached pid — no spawn, no syscall — so the
+        // whole-type Exec rule fabricated Exec on them (sweep [23]; mirrors the portable_pty getter carve-
+        // out just below). get_program/get_args/get_envs/get_current_dir read the Command; Child::id reads
+        // the cached pid. Every genuine verb (new/spawn/output/status/wait/kill) stays Exec.
+        if path.ends_with("::get_program")
+            || path.ends_with("::get_args")
+            || path.ends_with("::get_envs")
+            || path.ends_with("::get_current_dir")
+            || path.ends_with("Child::id")
+        {
+            return None;
+        }
         return Some("Exec");
     }
     // portable_pty / async_process are whole-crate Exec EXCEPT for the proven-pure surface they expose:
@@ -1392,6 +1435,29 @@ mod tests {
         // pure crates stay pure
         assert_eq!(classify("serde", "serde::Serialize::serialize"), None);
         assert_eq!(classify("std", "std::vec::Vec::push"), None);
+
+        // ── sweep 2026-06-17: fabrication carve-outs + DNS coverage (each fails pre-fix) ──
+        // [24] std::net socket accessors are pure; the I/O verbs stay Net.
+        assert_eq!(classify("std", "std::net::TcpStream::connect"), Some("Net"));
+        assert_eq!(classify("std", "std::net::TcpStream::local_addr"), None);
+        assert_eq!(classify("std", "std::net::TcpStream::nodelay"), None);
+        assert_eq!(classify("std", "std::net::TcpStream::ttl"), None);
+        assert_eq!(classify("std", "std::net::UdpSocket::peer_addr"), None);
+        // [37] std DNS resolution is Net (was floored).
+        assert_eq!(classify("std", "std::net::lookup_host"), Some("Net"));
+        assert_eq!(classify("std", "core::net::ToSocketAddrs::to_socket_addrs"), Some("Net"));
+        // [23] std::process getters are pure; spawn/new stay Exec.
+        assert_eq!(classify("std", "std::process::Command::get_program"), None);
+        assert_eq!(classify("std", "std::process::Command::get_args"), None);
+        assert_eq!(classify("std", "std::process::Child::id"), None);
+        assert_eq!(classify("std", "std::process::Command::spawn"), Some("Exec"));
+        // [27] redis ConnectionManager::clone is an Arc bump (pure); a query round-trips.
+        assert_eq!(classify("redis", "redis::aio::ConnectionManager::clone"), None);
+        assert_eq!(classify("redis", "redis::aio::ConnectionManager::send_packed_command"), Some("Db"));
+        // [5] sea_orm re-exported sea_query builder algebra is pure; execution verbs stay Db.
+        assert_eq!(classify("sea_orm", "sea_orm::sea_query::Func::count"), None);
+        assert_eq!(classify("sea_orm", "sea_orm::sea_query::Condition::all"), None);
+        assert_eq!(classify("sea_orm", "sea_orm::Select::all"), Some("Db"));
     }
 
     #[test]

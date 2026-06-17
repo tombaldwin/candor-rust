@@ -173,6 +173,18 @@ fn is_ascii_ws(c: char) -> bool {
 
 pub fn parse_policy(text: &str) -> ParsedPolicy {
     let mut out = ParsedPolicy::default();
+    // `str::lines()` splits on \n and \r\n but NOT bare \r — a classic-Mac file then collapses to ONE
+    // line, and since \r is also an in-line ASCII-ws token separator (is_ascii_ws), every rule after the
+    // first was glued into the first rule's tokens and dropped (sweep [16], a gateless-green divergence).
+    // Java's Files.readAllLines (the reference) breaks on bare \r too — normalize to match it. Allocation
+    // only when a bare \r is actually present (the overwhelmingly-common \n / \r\n files are untouched).
+    let normalized;
+    let text = if text.contains('\r') {
+        normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        normalized.as_str()
+    } else {
+        text
+    };
     for raw_line in text.lines() {
         let line = raw_line.split('#').next().unwrap_or("").trim_matches(is_ascii_ws);
         if line.is_empty() {
@@ -294,6 +306,12 @@ mod tests {
         assert_eq!(rules[0].scope.as_deref(), Some("domain"));
         assert!(rules[1].effects.contains("Exec") && rules[1].scope.is_none());
         assert!(rules[2].effects.is_empty() && rules[2].scope.as_deref() == Some("parse"));
+        // sweep [16]: a classic-Mac (bare \r) multi-rule policy must NOT collapse to the first rule.
+        let cr = parse_policy("deny Net a\rdeny Exec b\rdeny Db c\r");
+        assert_eq!(cr.rules.len(), 3, "bare-CR lines must each parse");
+        assert!(cr.rules.iter().any(|r| r.effects.contains("Exec") && r.scope.as_deref() == Some("b")));
+        // mixed \r\n and bare \r normalize identically.
+        assert_eq!(parse_policy("deny Net a\r\ndeny Exec b\r").rules.len(), 2);
         // `Unknown` is a denyable token; a bare `deny` with no effect is ignored.
         assert_eq!(parse_policy("deny Unknown core").rules[0].effects, ["Unknown"].into_iter().collect());
         assert!(parse_policy("deny\ndeny   \n").rules.is_empty());
