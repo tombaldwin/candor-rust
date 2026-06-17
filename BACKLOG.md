@@ -265,6 +265,19 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P2 — depth / precision
 
+- [ ] **Model the modern async-HTTP / TLS / QUIC stack as Net (+ a few more) — found by the independent-method
+      differential 2026-06-17** (`soundness/realworld/` method: scan a real corpus, read candor's κ-ledger
+      DISCLOSED-dep list, have an independent classifier pin each to effect-or-pure). Run on `oha`: candor
+      honestly DISCLOSES (invisible, NOT silent) but doesn't MODEL a stack that is candor's core value (Net):
+      **hyper, hyper_util, hickory_resolver (DNS), h3, quinn, h3_quinn, tokio_rustls, native_tls** → Net
+      (high-confidence; the lower layer reqwest/ureq build on — the hand-picked recall corpus missed it).
+      Also: **tokio_vsock** → Ipc; **rustls_native_certs** → Fs (loads OS trust store); **num_cpus / rlimit**
+      → Env. Low-confidence (verify the called API): humantime (Clock via now-formatter), clap (Env via args).
+      The classifier CORRECTLY left url/kanal/serde_json/bytes/ratatui/http/aws_sign_v4/rand_regex PURE
+      (disclosure right). These are honest-but-incomplete (P2 precision), not silent under-reports. Calibrate
+      verb-keyed (like reqwest) + add the builder ENTRIES to scan_builder_entry_effect so candor-scan catches
+      them too. NOTE: the DEEP engine has the same gap (shared classifier), so this helps both.
+
 ### The κ-treadmill endgame: dep-tree scanning (κ → builtins-only frontier)
 
 The curated classifier's structural weakness is that κ tries to know the PACKAGE ECOSYSTEM. The
