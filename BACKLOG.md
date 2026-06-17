@@ -143,8 +143,10 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P1 — correctness (silent wrong answers are the worst failure)
 
-- [ ] **candor-scan silent-pures `duct::cmd!(...).run()` — macro-result receiver typing hole** (found by
-      the real-world dynamic oracle, `soundness/realworld/`, 2026-06-17; tracked in KNOWN_UNDER). The
+- [x] **candor-scan silent-pured `duct::cmd!(...).run()` — macro-result receiver typing hole** (FOUND by
+      the real-world dynamic oracle 2026-06-17; FIXED same day, `scan_builder_entry_effect` in candor-scan —
+      over-approximate the duct entry `cmd`/`sh` → Exec for the syntactic engine; shared classifier + deep
+      engine unchanged. The generalization below stays open as a watch-item.) Original finding: the
       syntactic scanner can't type the result of the `cmd!` MACRO, so the chained `.run()` doesn't resolve
       to `duct::Expression::run` and its Exec is dropped — the program spawns a process (kernel-confirmed
       via strace) yet reads pure+certain. The deep engine catches it (typed `.run()`, lib.rs:3675), so this
