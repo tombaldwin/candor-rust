@@ -267,7 +267,9 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 - [~] **Model the modern async-HTTP / TLS / QUIC stack as Net (+ a few more) — MOSTLY DONE 2026-06-17**
       (`4c6d66a` found it, calibrated same day: hyper/hickory_resolver/h3/quinn/tokio_rustls/native_tls→Net,
-      tokio_vsock→Ipc, rustls_native_certs→Fs, num_cpus/rlimit→Env — verb-keyed + crate-gated in classify;
+      tokio_vsock→Ipc, rustls_native_certs→Fs, rlimit→Env — verb-keyed + crate-gated in classify (num_cpus
+      was initially modeled Env but REVERTED to pure: it's a near-pure CPU-topology query, std's equivalent
+      thread::available_parallelism is pure, and Env would spray over every thread-pool ctor);
       on oha: Net 30→40 fns, disclosed deps 32→25, fabrication-probe clean. REMAINDER: hyper_util +
       native_tls calls in oha stay disclosed because they're a bare `.request()`/`.connect()` on an UNTYPED
       builder receiver — the syntactic scanner can't form `hyper_util::…::request`, and (unlike ureq::get) the
@@ -278,8 +280,9 @@ that's the narrow, modest-value axis. Diminishing returns.
       honestly DISCLOSES (invisible, NOT silent) but doesn't MODEL a stack that is candor's core value (Net):
       **hyper, hyper_util, hickory_resolver (DNS), h3, quinn, h3_quinn, tokio_rustls, native_tls** → Net
       (high-confidence; the lower layer reqwest/ureq build on — the hand-picked recall corpus missed it).
-      Also: **tokio_vsock** → Ipc; **rustls_native_certs** → Fs (loads OS trust store); **num_cpus / rlimit**
-      → Env. Low-confidence (verify the called API): humantime (Clock via now-formatter), clap (Env via args).
+      Also: **tokio_vsock** → Ipc; **rustls_native_certs** → Fs (loads OS trust store); **rlimit** → Env
+      (num_cpus considered but left PURE — topology query, not Env). Low-confidence (verify the called API):
+      humantime (Clock via now-formatter), clap (Env via args).
       The classifier CORRECTLY left url/kanal/serde_json/bytes/ratatui/http/aws_sign_v4/rand_regex PURE
       (disclosure right). These are honest-but-incomplete (P2 precision), not silent under-reports. Calibrate
       verb-keyed (like reqwest) + add the builder ENTRIES to scan_builder_entry_effect so candor-scan catches

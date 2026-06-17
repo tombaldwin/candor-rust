@@ -1166,12 +1166,32 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if !is_closure_call {
                         // resolve a fn-alias local (`let g = eff; g()`) to its aliased path (sweep [6]);
                         // otherwise the bare path as written.
-                        let path = ident
+                        let mut path = ident
                             .as_ref()
                             .and_then(|n| self.fn_alias.get(n).cloned())
                             .unwrap_or_else(|| expand(&path_to_string(&p.path), self.uses));
+                        // A QSELF call (`<Type>::assoc()` / `<Type as Trait>::m()`) is an ASSOCIATED-fn call
+                        // on the qself receiver TYPE, not a free fn — but `path_to_string(&p.path)` DROPS the
+                        // qself type (`p.qself.ty`), so an INHERENT-form `<Vec<u8>>::new()` collapses to the
+                        // BARE leaf `new`, which `resolve_target`'s by_leaf route then mis-linked to ANY
+                        // unique local fn/method named `new`/`dump`/… — FABRICATING that def's effect onto a
+                        // provably-pure path (`<Vec<u8>>::new()` charged Exec via a sibling `Daemon::new`).
+                        // FIX: RESTORE the receiver type (`Vec::new`) so resolution stays PRECISE in BOTH
+                        // directions — `<Daemon>::new()` still resolves to a local effectful `Daemon::new`
+                        // (no under-report), while `<Vec<u8>>::new()` finds no local `Vec` (no fabrication).
+                        // The trait-qualified form `<T as Trait>::m` already keeps `Trait::m` (has `::`), so
+                        // only the bare-collapsed inherent form is touched. If the receiver isn't a nominal
+                        // path (tuple/slice/…) the type can't be recovered → suppress the bare-leaf route
+                        // (`method:true` → resolve_target None): an honest under-report, never a fabrication.
+                        let mut method = false;
+                        if p.qself.is_some() && !path.contains("::") {
+                            match p.qself.as_ref().and_then(|q| type_path(&q.ty, self.uses)) {
+                                Some(ty) => path = format!("{ty}::{path}"),
+                                None => method = true,
+                            }
+                        }
                         let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
-                        self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method: false, is_macro: false });
+                        self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method, is_macro: false });
                     }
                 }
             }
@@ -5548,6 +5568,59 @@ trait G {
         let ext = run("macedge3", "pub fn logs() { log::info!(\"hi\"); }");
         assert!(eff(&ext, "logs").contains(&"Log".to_string()),
                 "an external classified emit-macro must still attribute its effect:\n{ext}");
+    }
+
+    #[test]
+    fn qself_call_never_mints_a_bare_leaf_local_edge() {
+        // REGRESSION (qself hole): `path_to_string` drops the qself receiver type, so an inherent-form
+        // fully-qualified assoc call `<Vec<u8>>::new()` collapses to the BARE leaf `new`, which the by_leaf
+        // route mis-linked to a unique local `new`/`dump`, FABRICATING its effect onto a pure path. The fix
+        // RESTORES the receiver type (`Vec::new`), staying precise in BOTH directions: `<Vec<u8>>::new()`
+        // finds no local `Vec` (no fabrication) AND `<Daemon>::new()` still resolves to the local effectful
+        // `Daemon::new` (no under-report — the blunt `method:true` suppress would have lost this).
+        let idx = load_dep_reports(None);
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-qself-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        // A unique local `new` doing Exec; the pure builder uses idiomatic `<Vec<u8>>::new()`.
+        let bug = run("qselfnew",
+            "use std::process::Command;\npub struct Daemon;\nimpl Daemon { pub fn new() -> Self { Command::new(\"/bin/sh\").status().unwrap(); Daemon } }\npub fn pure_build() -> Vec<u8> { let mut v = <Vec<u8>>::new(); v.push(1); v }");
+        assert!(eff(&bug, "pure_build").is_empty(),
+                "a qself assoc call FABRICATED a same-named local fn's effect onto a pure caller:\n{bug}");
+        // Surgical: a genuine bare free-fn call STILL edges and inherits the effect.
+        let real = run("qselfreal",
+            "use std::fs;\npub fn dump() { fs::write(\"/x\", b\"d\").unwrap(); }\npub fn real_caller() { dump(); }");
+        assert!(eff(&real, "real_caller").contains(&"Fs".to_string()),
+                "the qself guard wrongly suppressed a genuine bare free-fn edge:\n{real}");
+        // A qualified-tail qself into a LOCAL trait default still links (the accepted trait-default band).
+        let band = run("qselfband",
+            "use std::fs;\npub trait Marker { fn go() { fs::write(\"/x\", b\"d\").unwrap(); } }\npub fn via_trait_ufcs() { <SomeType as Marker>::go(); }");
+        assert!(eff(&band, "via_trait_ufcs").contains(&"Fs".to_string()),
+                "a qualified-tail qself into a local trait default must still link:\n{band}");
+        // PRECISION (what the blunt method:true suppress would have lost): an INHERENT qself on a LOCAL type
+        // whose assoc fn is effectful must STILL propagate — the restored `Daemon::new` tail resolves it.
+        let local = run("qselflocal",
+            "use std::process::Command;\npub struct Daemon;\nimpl Daemon { pub fn new() -> Self { Command::new(\"/bin/sh\").status().unwrap(); Daemon } }\npub fn boot() { let _d = <Daemon>::new(); }");
+        assert!(eff(&local, "boot").contains(&"Exec".to_string()),
+                "an inherent qself on a LOCAL effectful assoc fn must NOT be under-reported:\n{local}");
     }
 
     #[test]
