@@ -1,0 +1,10 @@
+[package]
+name = "net_ureq"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "net_ureq"
+path = "src/main.rs"
+[dependencies]
+ureq = { version = "2", default-features = false }

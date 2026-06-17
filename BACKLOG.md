@@ -158,6 +158,18 @@ that's the narrow, modest-value axis. Diminishing returns.
       effect attribution runs through `classify()` at the call-join, so a scan-only path needs threading
       there too). Likely generalizes beyond duct (any builder-macro whose terminal verb carries the effect).
 
+- [ ] **candor-scan silent-pures BUILDER-CHAIN verbs whose entry it can't type — `ureq::get(url)…​.call()`**
+      (found by the real-world oracle's net_ureq driver 2026-06-17; KNOWN_UNDER). candor-classify puts
+      ureq's Net on the `.call()` VERB (lib.rs:348); the syntactic scanner can't type the chain from the
+      `ureq::get()` entry, so `.call()` is missed — and because ureq is CALIBRATED it isn't disclosed blind
+      → silent-pure (worse than the uncalibrated case, which discloses). This is the SAME family as duct but
+      via a FUNCTION entry, not a macro — so it CONFIRMS the family generalizes, and the real fix is broader
+      than the duct point-patch: over-approximate builder-chain ENTRIES generally for the syntactic engine
+      (extend `scan_builder_entry_effect` — e.g. `ureq::get`/`post`/`request` → Net — and ideally drive it
+      from a small data table of "entry → effect where the typed classifier defers to a terminal verb").
+      The deep engine catches all these via the typed verb, so it stays precise. The systematic version of
+      this is the "generalize the macro-blindness fix" backlog direction.
+
 - [~] **Soundness fuzzer — "never silently under-reports" is now a CI gate, not a hope** (`soundness/`,
       **Bet 1 phase 1** of the improvement roadmap). A hand review found multiple trust-contract
       violations the unit/integration suite missed (`Box<dyn Fn>` callbacks, non-local callbacks,
