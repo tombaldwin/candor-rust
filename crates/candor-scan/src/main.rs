@@ -251,6 +251,14 @@ fn scan_builder_entry_effect(_cr: &str, path: &str) -> Option<&'static str> {
         ("ureq::head", "Net"),
         ("ureq::patch", "Net"),
         ("ureq::request", "Net"),
+        // sqlx — `query*()` build; `.execute()/.fetch_*()` round-trip (found 2026-06-17, recall corpus).
+        ("sqlx::query", "Db"),
+        ("sqlx::query_as", "Db"),
+        ("sqlx::query_scalar", "Db"),
+        ("sqlx::query_with", "Db"),
+        ("sqlx::query_as_with", "Db"),
+        // diesel — `sql_query()` builds raw SQL; `.execute()/.load()` round-trips (found 2026-06-17).
+        ("diesel::sql_query", "Db"),
     ];
     ENTRIES.iter().find(|(p, _)| *p == path).map(|(_, eff)| *eff)
 }
@@ -5467,6 +5475,8 @@ trait G {
         assert_eq!(scan_builder_entry_effect("duct", "duct::sh"), Some("Exec"));
         assert_eq!(scan_builder_entry_effect("ureq", "ureq::get"), Some("Net"));
         assert_eq!(scan_builder_entry_effect("ureq", "ureq::post"), Some("Net"));
+        assert_eq!(scan_builder_entry_effect("sqlx", "sqlx::query"), Some("Db"));
+        assert_eq!(scan_builder_entry_effect("diesel", "diesel::sql_query"), Some("Db"));
         // terminal verbs stay classify()'s job; an unrelated path is None:
         assert_eq!(scan_builder_entry_effect("duct", "duct::Expression::run"), None);
         assert_eq!(scan_builder_entry_effect("ureq", "ureq::Request::call"), None);

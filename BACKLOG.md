@@ -143,6 +143,16 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P1 — correctness (silent wrong answers are the worst failure)
 
+- [ ] **candor-scan silent-pures an UNCALIBRATED crate reached ONLY via a MACRO — no blind disclosure**
+      (found 2026-06-17 by the non-syscall recall corpus, `soundness/realworld/recall/`, case log_slog;
+      KNOWN_UNDER). `slog::info!(logger, "m")` reads pure: slog isn't calibrated, AND because the reach is a
+      MACRO, `visit_macro` never records it (it only records a macro it can classify), so it never reaches
+      the κ-ledger / `invisible` disclosure either — whereas the SAME crate reached via a normal call WOULD
+      be disclosed (cf. net_minreq → `invisible`). So it's silent, not honest-Unknown. DISTINCT from the
+      builder-chain family (that's a recall miss on CALIBRATED crates; this is a DISCLOSURE miss on
+      UNCALIBRATED ones). FIX: `visit_macro` should record/disclose a macro call to a DECLARED-but-unmodeled
+      dep as a blind reach (Unknown/invisible), so an uncalibrated macro reads honest-uncertain not pure.
+
 - [x] **candor-scan silent-pured `duct::cmd!(...).run()` — macro-result receiver typing hole** (FOUND by
       the real-world dynamic oracle 2026-06-17; FIXED same day, `scan_builder_entry_effect` in candor-scan —
       over-approximate the duct entry `cmd`/`sh` → Exec for the syntactic engine; shared classifier + deep

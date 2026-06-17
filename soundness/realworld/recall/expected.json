@@ -1,0 +1,10 @@
+{
+  "_comment": "Non-syscall RECALL corpus: candor-scan must predict each fn's KNOWN effect (the crate's documented semantics) OR disclose uncertainty (Unknown/blind/invisible). A silent-pure is an under-report. strace can't distinguish these effects, so known semantics is the ground truth. Runs anywhere (candor-scan is syntactic).",
+  "log_tracing": "Log",
+  "log_log": "Log",
+  "log_slog": "Log",
+  "db_rusqlite": "Db",
+  "db_sqlx": "Db",
+  "db_diesel": "Db",
+  "db_postgres": "Db"
+}

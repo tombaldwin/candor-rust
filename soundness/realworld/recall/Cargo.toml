@@ -1,0 +1,19 @@
+# Non-syscall RECALL corpus — Db/Log/Rand/etc. effects that strace can't distinguish (a SQLite write looks
+# like Fs; Log like a write). Ground truth = the crate's KNOWN semantics. candor-scan is SYNTACTIC, so
+# these deps need NOT build/resolve — declared only so candor treats the paths as real dependencies (for
+# the disclosed-blind-vs-silent honesty distinction). Scanned by recall_check; runs anywhere (no strace).
+[package]
+name = "recall"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[lib]
+path = "src/lib.rs"
+[dependencies]
+tracing = "0.1"
+log = "0.4"
+slog = "2"
+rusqlite = "0.31"
+sqlx = "0.7"
+diesel = "2"
+postgres = "0.19"
