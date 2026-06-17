@@ -1,0 +1,52 @@
+# Manual re-baseline of the self-guard (AS-EFF-005) on the CURRENT pinned nightly.
+#
+# The self-guard compares candor's analysis of its OWN source against .candor/baseline.*. Deep-engine
+# changes (a richer/changed classifier or resolver) can reclassify candor's own effect surface, which
+# trips AS-EFF-005 until the baseline is refreshed deliberately. The nightly-bump workflow re-baselines
+# as a side effect of a toolchain bump; this job does ONLY the re-baseline (no rust-toolchain change),
+# for when the engine drifted on the same nightly. Runs on Ubuntu — the macOS dylint driver currently
+# ICEs (rustc_private "missing value for assoc item in impl"), so this is the supported path.
+name: re-baseline
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  re-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Stable drives the dylint runner; the pinned nightly (+rustc-dev) is fetched by rust-toolchain.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dylint
+        run: cargo +stable install cargo-dylint dylint-link
+      - name: Build (fetches the pinned nightly + rustc-dev)
+        run: cargo build --workspace
+
+      - name: Re-baseline + verify the guard is clean
+        run: |
+          LIB="$(ls "$PWD"/target/debug/libcandor@*.so | head -1)"
+          # Write the new baseline from the current engine's self-analysis…
+          CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
+          # …then assert the guard no longer trips against it.
+          CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1 | grep -q "AS-EFF-005" \
+            && { echo "::error::self-guard still trips after re-baseline — investigate"; exit 1; } || true
+
+      - name: Commit the refreshed baseline
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- .candor/; then
+            echo "baseline already current — nothing to commit."
+            exit 0
+          fi
+          git add .candor/
+          git commit -m "Re-baseline self-guard on the current pinned nightly
+
+          Refreshes .candor/baseline.* after deep-engine drift reclassified candor's own
+          effect surface (AS-EFF-005). No rust-toolchain change. Run via the re-baseline
+          workflow_dispatch (the macOS dylint driver ICEs locally; Ubuntu builds it cleanly)."
+          git push origin HEAD:main
