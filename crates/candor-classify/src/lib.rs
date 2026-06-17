@@ -381,10 +381,17 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // HTTP/3 over QUIC.
         "h3" if path.ends_with("::send_request") || path.ends_with("::recv_data")
             || path.ends_with("::recv_response") || path.ends_with("::send_data") => return Some("Net"),
-        // QUIC transport (UDP socket send/recv).
+        // QUIC transport (UDP socket send/recv): connection setup, datagrams, AND the stream byte I/O
+        // (`RecvStream::read*` / `SendStream::write*` / `finish`). Opening a stream is caught above, but a
+        // fn that only HOLDS a stream and reads/writes it would otherwise read silent-pure (review: a Net
+        // under-report). Crate-gated to quinn, where these verbs are unambiguously the socket I/O.
         "quinn" if path.ends_with("::connect") || path.ends_with("::accept") || path.ends_with("::open_bi")
             || path.ends_with("::open_uni") || path.ends_with("::accept_bi") || path.ends_with("::accept_uni")
-            || path.ends_with("::send_datagram") || path.ends_with("::read_datagram") => return Some("Net"),
+            || path.ends_with("::send_datagram") || path.ends_with("::read_datagram")
+            || path.ends_with("::read") || path.ends_with("::read_chunk") || path.ends_with("::read_chunks")
+            || path.ends_with("::read_to_end") || path.ends_with("::write") || path.ends_with("::write_all")
+            || path.ends_with("::write_chunk") || path.ends_with("::write_chunks")
+            || path.ends_with("::finish") => return Some("Net"),
         // TLS-over-TCP stream adapters — the actual socket handshake/I/O (the config/cert types stay pure).
         "tokio_rustls" | "native_tls"
             if path.ends_with("::connect") || path.ends_with("::accept") || path.ends_with("::handshake") =>
@@ -394,8 +401,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             return Some("Ipc"),
         // Loads the OS trust store from disk (cert files / keychain).
         "rustls_native_certs" if path.ends_with("::load_native_certs") => return Some("Fs"),
-        // Reads host/process config from the OS (CPU count, cgroup quota; resource limits).
-        "num_cpus" if path.ends_with("::get") || path.ends_with("::get_physical") => return Some("Env"),
+        // `rlimit` reads/mutates the process's kernel resource limits — the closest bucket is Env (host/
+        // process config); no dedicated process-state bucket exists, so getrlimit (read) and setrlimit
+        // (mutate) share it. NOTE: `num_cpus::get`/`get_physical` are deliberately NOT modeled — asking the
+        // OS for the CPU count is a near-pure topology query, and std's equivalent `thread::
+        // available_parallelism` classifies pure; modeling it as Env would spray Env over every thread-pool
+        // constructor (review: a high-noise over-report) for no capability a reviewer cares about.
         "rlimit" if path.ends_with("::getrlimit") || path.ends_with("::setrlimit")
             || path.ends_with("::increase_nofile_limit") => return Some("Env"),
         _ => {}
@@ -1372,12 +1383,16 @@ mod tests {
         assert_eq!(classify("hyper_util", "hyper_util::client::legacy::Client::request"), Some("Net"));
         assert_eq!(classify("hickory_resolver", "hickory_resolver::Resolver::lookup_ip"), Some("Net"));
         assert_eq!(classify("quinn", "quinn::Endpoint::connect"), Some("Net"));
+        assert_eq!(classify("quinn", "quinn::RecvStream::read_to_end"), Some("Net")); // stream byte I/O, not just open
+        assert_eq!(classify("quinn", "quinn::SendStream::write_all"), Some("Net"));
         assert_eq!(classify("tokio_rustls", "tokio_rustls::TlsConnector::connect"), Some("Net"));
         assert_eq!(classify("native_tls", "native_tls::TlsConnector::connect"), Some("Net"));
         assert_eq!(classify("tokio_vsock", "tokio_vsock::VsockStream::connect"), Some("Ipc"));
         assert_eq!(classify("rustls_native_certs", "rustls_native_certs::load_native_certs"), Some("Fs"));
-        assert_eq!(classify("num_cpus", "num_cpus::get"), Some("Env"));
         assert_eq!(classify("rlimit", "rlimit::setrlimit"), Some("Env"));
+        // num_cpus is deliberately PURE (consistency with std::thread::available_parallelism; avoids Env spray)
+        assert_eq!(classify("num_cpus", "num_cpus::get"), None);
+        assert_eq!(classify("num_cpus", "num_cpus::get_physical"), None);
         // pure surface stays None (no fabrication): builder/type/config paths, and other crates' generic verbs
         assert_eq!(classify("hyper", "hyper::Request::builder"), None);
         assert_eq!(classify("hyper", "hyper::body::Bytes::new"), None);

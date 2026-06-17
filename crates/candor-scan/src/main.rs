@@ -66,6 +66,13 @@ struct Call {
     /// form (the `typed` call) links a method edge. Found on nushell (Rand/Clipboard on the random cmds).
     #[serde(rename = "m", default, skip_serializing_if = "std::ops::Not::not")]
     method: bool,
+    /// A MACRO invocation (`log::info!`, `duct::cmd!`, `crate::helpers::trace!`). Recorded so its path can
+    /// be classified/builder-mapped/disclosed like an external call — but a macro is NEVER a call to a local
+    /// FUNCTION, so it must be EXCLUDED from local call-graph edge resolution: a crate-local macro path
+    /// (`crate::helpers::trace` after `expand`) keeps its `::` and would otherwise mis-link to a same-named
+    /// local fn, fabricating that fn's effect onto a pure caller (the same hazard the `typed` flag guards).
+    #[serde(rename = "mac", default, skip_serializing_if = "std::ops::Not::not")]
+    is_macro: bool,
 }
 
 /// One function the scan found: its module-qualified name, where, and the calls in its body.
@@ -1164,7 +1171,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             .and_then(|n| self.fn_alias.get(n).cloned())
                             .unwrap_or_else(|| expand(&path_to_string(&p.path), self.uses));
                         let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
-                        self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method: false });
+                        self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method: false, is_macro: false });
                     }
                 }
             }
@@ -1179,7 +1186,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let leaf = node.method.to_string();
         let str_arg = first_str_lit(&node.args);
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
-        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true });
+        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false });
         // Typed call: if the receiver's type resolves, form `Type::method` so the existing per-crate
         // method rules (reqwest/sqlx/redis/…) — unreachable from a bare method name — can fire. This is
         // the method-dispatch frontier: light, local type inference, no compiler.
@@ -1199,7 +1206,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let std_path_recv = ty == "std::path::Path" || ty == "std::path::PathBuf";
             if !matches!(cr, "std" | "core" | "alloc") || std_path_recv {
                 let path = format!("{ty}::{leaf}");
-                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true });
+                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true, is_macro: false });
             }
         } else {
             // DISPATCH-typed receiver (`&dyn T` / `impl T` / `X: T` / a `Box<dyn T>` field): no
@@ -1234,6 +1241,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 str_arg: str_arg.clone(),
                                 typed: true,
                                 method: true,
+                                is_macro: false,
                             });
                         }
                     }
@@ -1283,7 +1291,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let name = path_to_string(&p.path);
                         let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, self.uses));
                         let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
-                        self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false });
+                        self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false });
                     }
                 }
             }
@@ -1493,12 +1501,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         //   - a builder ENTRY → its effect (`duct::cmd!`), or
         //   - an unmodeled DECLARED dep → DISCLOSED blind (`slog::info!` → invisible, not silent-pure: the
         //     macro-disclosure gap — a macro reach now gets the same honest Unknown a normal call does).
-        // BARE macros (`println!`/`vec!`/`format!`/`matches!`) have no `::` → skipped (no spurious edge); a
-        // crate-qualified path is an external call, so it never mints a phantom intra-crate edge either.
+        // BARE macros (`println!`/`vec!`/`format!`/`matches!`) have no `::` → skipped (no spurious edge).
+        // CRUCIAL: a crate-LOCAL qualified macro (`crate::helpers::trace!` → `expand` → `helpers::trace`)
+        // keeps its `::`, so it is NOT necessarily external — flag it `is_macro` so local edge resolution
+        // SKIPS it (a macro is never a call to a local FUNCTION; without this it would mis-link to a
+        // same-named local fn and fabricate that fn's effect onto a pure caller). Classification, the
+        // builder table, and κ blind-disclosure still apply (they key on the path/crate, not the edge).
         let mpath = expand(&path_to_string(&node.path), self.uses);
         if mpath.contains("::") {
             let leaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
-            self.calls.push(Call { path: mpath, leaf, str_arg: None, typed: false, method: false });
+            self.calls.push(Call { path: mpath, leaf, str_arg: None, typed: false, method: false, is_macro: true });
         }
         // syn does not parse a macro's body, so every call hidden inside one is invisible by default —
         // a real miss on crates that route effectful calls through a macro (git2 wraps EVERY libgit2 FFI
@@ -3302,7 +3314,12 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // a bare leaf can't safely provide, while an external `reqwest::Client::send` is left to the
             // classifier (its type isn't local, so it can't mis-link to a same-named local `Client::send`).
             // A non-typed call uses the leaf/qualified-tail routes; std/core/alloc are the classifier's.
-            let resolvable = if c.typed {
+            let resolvable = if c.is_macro {
+                // A macro is never a call to a local FUNCTION. Its (possibly crate-local) qualified path
+                // must NOT resolve to a same-named local fn, or that fn's effect is fabricated onto the
+                // caller (the phantom-edge cardinal sin). Its effect still flows via `classified` / κ above.
+                false
+            } else if c.typed {
                 tail2(&c.path)
                     .and_then(|t2| t2.split("::").next().map(str::to_string))
                     .is_some_and(|ty| local_types.contains(&ty))
@@ -5487,6 +5504,50 @@ trait G {
         // invariant the deep engine relies on stays intact (entries pure in the SHARED classifier):
         assert_eq!(candor_classify::classify("duct", "duct::cmd"), None);
         assert_eq!(candor_classify::classify("ureq", "ureq::get"), None);
+    }
+
+    #[test]
+    fn macro_invocation_never_mints_a_local_edge() {
+        // REGRESSION (review F1): a crate-LOCAL qualified macro (`crate::helpers::trace!`) expands to
+        // `helpers::trace`, KEEPING its `::` — so before the `is_macro` guard it mis-linked to a same-named
+        // LOCAL fn and FABRICATED that fn's effect onto a pure caller (the phantom-edge cardinal sin). The
+        // guard must be SURGICAL: a genuine (non-macro) call to the same fn STILL inherits the effect, and
+        // a genuine external classified emit-macro (`log::info!`) STILL attributes its effect.
+        let idx = load_dep_reports(None);
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-macroedge-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let local = "mod helpers { pub fn trace() { let _ = std::fs::read(\"/x\"); } }\n";
+        // The bug: a pure fn whose ONLY body is the LOCAL macro must NOT inherit `helpers::trace`'s Fs.
+        let bug = run("macedge", &format!("{local}pub fn pure_caller() {{ crate::helpers::trace!(); }}"));
+        assert!(eff(&bug, "pure_caller").is_empty(),
+                "macro invocation FABRICATED a same-named local fn's effect onto a pure caller:\n{bug}");
+        // Surgical: a GENUINE (non-macro) call to the same local fn STILL edges and inherits Fs.
+        let real = run("macedge2", &format!("{local}pub fn real_caller() {{ crate::helpers::trace(); }}"));
+        assert!(eff(&real, "real_caller").contains(&"Fs".to_string()),
+                "the is_macro guard wrongly suppressed a genuine local fn edge:\n{real}");
+        // A genuine EXTERNAL classified emit-macro still attributes its effect (the intended new behavior).
+        let ext = run("macedge3", "pub fn logs() { log::info!(\"hi\"); }");
+        assert!(eff(&ext, "logs").contains(&"Log".to_string()),
+                "an external classified emit-macro must still attribute its effect:\n{ext}");
     }
 
     #[test]
