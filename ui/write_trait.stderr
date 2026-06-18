@@ -1,0 +1,34 @@
+warning: `<LoudFmt as std::fmt::Write>::write_str` effects: { Fs* }   (* = via callee)
+  --> $DIR/write_trait.rs:16:5
+   |
+LL |     fn write_str(&mut self, _s: &str) -> std::fmt::Result {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `<LoudIo as std::io::Write>::write` effects: { Fs* }   (* = via callee)
+  --> $DIR/write_trait.rs:28:5
+   |
+LL |     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `sink` effects: { Fs }   (* = via callee)
+  --> $DIR/write_trait.rs:9:1
+   |
+LL | fn sink() {
+   | ^^^^^^^^^
+
+warning: `via_write_fmt` effects: { Fs* }   (* = via callee)
+  --> $DIR/write_trait.rs:21:1
+   |
+LL | fn via_write_fmt(w: &mut LoudFmt) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_write_io` effects: { Fs*, Unknown }   (* = via callee)
+  --> $DIR/write_trait.rs:36:1
+   |
+LL | fn via_write_io(w: &mut LoudIo) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 5 warnings emitted
+

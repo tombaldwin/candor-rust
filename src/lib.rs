@@ -1355,15 +1355,33 @@ fn local_trait_method_for_self<'tcx>(
         return None;
     }
     let trait_did = cx.tcx.get_diagnostic_item(trait_lang)?;
-    // The trait's assoc fn of the wanted name (`Iterator::next`, `IntoIterator::into_iter`).
+    local_trait_method_by_did(cx, self_ty, method_sym, trait_did)
+}
+
+/// As `local_trait_method_for_self`, but the trait is given by DefId — for traits WITHOUT a diagnostic
+/// item (`fmt::Write`/`io::Write`, used by the `write!` writer-side edge). Resolves `<self_ty as
+/// Trait>::method_sym` to its concrete LOCAL impl method, or None (non-local / virtual / unresolvable).
+fn local_trait_method_by_did<'tcx>(
+    cx: &LateContext<'tcx>,
+    self_ty: rustc_middle::ty::Ty<'tcx>,
+    method_sym: &str,
+    trait_did: DefId,
+) -> Option<DefId> {
+    // Same local-ADT gate as the caller (a self type mentioning no local ADT resolves non-local → None,
+    // and also sidesteps the tuple-Hash `try_resolve` ICE — see `local_trait_method_for_self`).
+    if !self_ty
+        .walk()
+        .filter_map(|g| g.as_type())
+        .any(|t| matches!(t.kind(), rustc_middle::ty::TyKind::Adt(a, _) if a.did().is_local()))
+    {
+        return None;
+    }
     let trait_fn = cx
         .tcx
         .associated_items(trait_did)
         .in_definition_order()
         .find(|a| a.is_fn() && a.name().as_str() == method_sym)?
         .def_id;
-    // Resolve `<self_ty as Trait>::method` to its concrete impl. `IntoIterator`'s `into_iter` takes
-    // `self` by value, so the Self/receiver type is `self_ty` as-is.
     let gargs = cx.tcx.mk_args(&[self_ty.into()]);
     let inst = rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), trait_fn, gargs)
         .ok()
@@ -1377,6 +1395,34 @@ fn local_trait_method_for_self<'tcx>(
     }
     let did = inst.def_id();
     did.is_local().then_some(did)
+}
+
+/// WRITER-side fmt hole: `write!`/`writeln!` lower to `w.write_fmt(args)`, whose default `fmt::Write` /
+/// `io::Write` impl drives the writer's REQUIRED method (`write_str` / `write`). candor sees only the
+/// non-local default `write_fmt`, so a LOCAL effectful writer reached only via `write!` was silent-pure
+/// (the writer side, distinct from HOLE 2's ARGUMENT-side `Display`). Recover the edge to the receiver's
+/// local required method. A std writer (`String`/`Vec`/`Stdout`) resolves non-local → None (pure).
+fn fmt_write_local_edge<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    callee_did: DefId,
+) -> Option<DefId> {
+    if callee_did.is_local() || cx.tcx.item_name(callee_did).as_str() != "write_fmt" {
+        return None;
+    }
+    let trait_did = cx.tcx.trait_of_assoc(callee_did)?;
+    // The required method the default `write_fmt` drives, per which Write trait this is.
+    let driven = match cx.tcx.def_path_str(trait_did).as_str() {
+        "core::fmt::Write" | "std::fmt::Write" => "write_str",
+        "std::io::Write" => "write",
+        _ => return None,
+    };
+    let ExprKind::MethodCall(_, receiver, _, _) = expr.kind else {
+        return None;
+    };
+    let typeck = cx.maybe_typeck_results()?;
+    let recv_ty = typeck.expr_ty_adjusted(receiver).peel_refs();
+    local_trait_method_by_did(cx, recv_ty, driven, trait_did)
 }
 
 /// HOLE — a NON-LOCAL std DRIVER method whose body invokes a trait method on its RECEIVER or ELEMENT
@@ -2535,6 +2581,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // running a LOCAL effectful `Display`/`PartialEq`/`Clone`/`Ord`/`Hash` impl over its receiver/
         // element type (sweep [25]/[26]). Recover the local edge; pure/std targets resolve non-local.
         for e in std_driver_local_edges(cx, expr, def_id) {
+            add_edge(self, e);
+        }
+
+        // HOLE 2c — the WRITER side of `write!`/`writeln!`: `w.write_fmt(..)`'s default impl drives a
+        // LOCAL effectful `fmt::Write::write_str` / `io::Write::write` on the receiver. Recover that edge
+        // (the arg-Display side is HOLE 2 above). Teeth: ui/write_trait.rs.
+        if let Some(e) = fmt_write_local_edge(cx, expr, def_id) {
             add_edge(self, e);
         }
 
