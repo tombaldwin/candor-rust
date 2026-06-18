@@ -28,7 +28,7 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 59] = [
+pub const CALIBRATED_CRATES: [&str; 79] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer;
     // pnet is raw L2/L3 packet capture)
@@ -54,6 +54,16 @@ pub const CALIBRATED_CRATES: [&str; 59] = [
     // raw syscalls via FFI — the syscall-name table that lights up the FFI-thin tier (nix is routed
     // through the same table by leaf name, so a consumer of nix is covered without nix's own source)
     "libc", "nix", "rustix",
+    // coverage-differential additions (verb-keyed; see the per-crate rules near the end of classify):
+    // sync TLS core + native-tls variants (Net); env/dir resolution + argv + LS_COLORS (Env);
+    // sqlx-core execution terminals (Net/Db); directory walk + timestamp mutation + same-file (Fs);
+    // process-spawn helpers (Exec); signal handler + interactive-tty prompts (Ipc); env_logger (Log);
+    // jiff/backoff clock reads (Clock).
+    "rustls", "native_tls_crate", "tokio_native_tls",
+    "etcetera", "wild", "lscolors",
+    "sqlx_core", "walkdir", "filetime", "clircle",
+    "execute", "ctrlc", "clap", "jiff", "env_logger",
+    "dialoguer", "console", "terminal_colorsaurus", "backoff", "grep_cli",
 ];
 
 pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
@@ -79,6 +89,11 @@ pub const CALIBRATION_PROBE_TAILS: &[&str] = &[
     // verb-precise crates whose whole-crate rules were narrowed to the effectful surface (the pure
     // accessors/ctors/data-types now return None), so the liveness probe must name an EFFECTFUL path:
     "::Mmap::map", "::event", "::u32", "::Clipboard::get_text", "::spawn_command",
+    // coverage-differential crates (each needs ≥1 effectful tail; existing tails already cover
+    // native_tls_crate/tokio_native_tls/sqlx_core via ::X::connect, execute via ::X::execute, jiff via ::now):
+    "::read_tls", "::home_dir", "::args", "::from_env", "::IntoIter::next", "::set_file_mtime",
+    "::surely_conflicts_with", "::set_handler", "::get_matches", "::init", "::interact",
+    "::write_line", "::background_color", "::retry", "::build",
 ];
 
 /// Database client crates whose execution verbs are I/O (see the DB branch in `classify`).
@@ -409,6 +424,19 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // constructor (review: a high-noise over-report) for no capability a reviewer cares about.
         "rlimit" if path.ends_with("::getrlimit") || path.ends_with("::setrlimit")
             || path.ends_with("::increase_nofile_limit") => return Some("Env"),
+        // rustls — the SYNC TLS core (tokio_rustls/native_tls above are the async/system adapters). The
+        // record-layer I/O is `read_tls`/`write_tls` (pull/push raw bytes through a held `io::Read`/`Write`)
+        // and `complete_io` (loops them until the handshake/buffers drain). The config/cert/builder types
+        // (`ClientConfig`/`ServerConfig`/`ConfigBuilder`) are PURE. `process_new_packets` is deliberately
+        // EXCLUDED — it only decrypts ALREADY-buffered bytes (no socket touch; docs say call it AFTER
+        // read_tls), so flagging it would over-report Net on the pure decrypt step.
+        "rustls" if path.ends_with("::read_tls") || path.ends_with("::write_tls")
+            || path.ends_with("::complete_io") => return Some("Net"),
+        // native-tls under its alternate crate name + the tokio async wrapper (the `native_tls` arm above
+        // is the common name). The TLS handshake over a TcpStream is Net; the builder/cert types are pure.
+        "native_tls_crate" | "tokio_native_tls"
+            if path.ends_with("::connect") || path.ends_with("::accept")
+                || path.ends_with("::handshake") => return Some("Net"),
         _ => {}
     }
     // Message-queue clients fully encapsulate the socket (the underlying tokio::net lives
@@ -1133,6 +1161,213 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // ── Coverage-differential additions (calibrated against each crate's real API; see the per-crate
+    //    notes). All verb-keyed + crate-gated, with the pure builder/config/data surface returning None.
+
+    // `etcetera` — XDG/known-folder base+app directory resolution. Each dir ACCESSOR reads the
+    // environment at call time (`$HOME`/`$XDG_*` on Unix, `%APPDATA%`/`%LOCALAPPDATA%` on Windows), and
+    // the `choose_*`/`home_dir` entry points read `$HOME`. The `AppStrategyArgs` data struct and the
+    // strategy types themselves are PURE. (Found DISCLOSED-but-unmodeled in 3/4 differential projects.)
+    if crate_name == "etcetera" {
+        let m = path.rsplit("::").next().unwrap_or(path);
+        if m == "home_dir"
+            || m == "choose_base_strategy" || m == "choose_native_strategy" || m == "choose_app_strategy"
+            || m == "config_dir" || m == "data_dir" || m == "cache_dir"
+            || m == "state_dir" || m == "runtime_dir" || m == "data_local_dir"
+        {
+            return Some("Env");
+        }
+        return None;
+    }
+    // `sqlx-core` (crate `sqlx_core`) — the execution terminals under the sqlx core (the `sqlx` builder
+    // table maps `sqlx::query*`; here it's the core `Executor`/`Connection`/`Pool` round-trips). Opening
+    // the connection is the network boundary (Net); the query/transaction round-trips are Db. The
+    // `*Options`/query-builder/row data types are PURE. Crate-gated so the generic verbs never spread.
+    if crate_name == "sqlx_core" {
+        if path.ends_with("::connect") || path.ends_with("::connect_with") {
+            return Some("Net");
+        }
+        if path.ends_with("::fetch") || path.ends_with("::fetch_all") || path.ends_with("::fetch_one")
+            || path.ends_with("::fetch_optional") || path.ends_with("::fetch_many")
+            || path.ends_with("::execute") || path.ends_with("::execute_many")
+            || path.ends_with("::prepare") || path.ends_with("::prepare_with")
+            || path.ends_with("::acquire") || path.ends_with("::begin") || path.ends_with("::ping")
+        {
+            return Some("Db");
+        }
+        return None;
+    }
+    // `walkdir` — recursive directory traversal. The disk read (`read_dir` + `stat`) happens lazily in
+    // `IntoIter::next` (driving the iterator), and `DirEntry::metadata` issues a `stat`. The
+    // `WalkDir::new`/`max_depth`/`follow_links`/`sort_by` BUILDERS, `WalkDir::into_iter` (constructs the
+    // iterator, no I/O until pulled), and the cached `DirEntry::path`/`file_name`/`file_type`/`depth`
+    // accessors (`file_type` makes NO syscall) are PURE. (Companion to the already-modeled `ignore`.)
+    if crate_name == "walkdir" {
+        if path.ends_with("::IntoIter::next") || path.ends_with("::DirEntry::metadata") {
+            return Some("Fs");
+        }
+        return None;
+    }
+    // `filetime` — file-timestamp mutation. The `set_*` free fns issue utimes/utimensat/futimens (Fs).
+    // `FileTime::now` reads the system clock (Clock). The `FileTime::from_*`/`zero` value constructors
+    // (incl. `from_last_modification_time(&Metadata)` etc., which read an ALREADY-loaded `&Metadata`, not
+    // the disk) and the `seconds`/`nanoseconds` accessors are PURE.
+    if crate_name == "filetime" {
+        if path.ends_with("::set_file_mtime") || path.ends_with("::set_file_atime")
+            || path.ends_with("::set_file_times") || path.ends_with("::set_symlink_file_times")
+            || path.ends_with("::set_file_handle_times")
+        {
+            return Some("Fs");
+        }
+        if path.ends_with("::FileTime::now") {
+            return Some("Clock");
+        }
+        return None;
+    }
+    // `execute` — the `Execute` trait that extends `std::process::Command` with run helpers. The
+    // `execute*` verbs SPAWN a child process (Exec). The `execute::command`/`shell` free fns and the
+    // `command!`/`command_args!` macros only BUILD a Command (no spawn) and stay PURE.
+    if crate_name == "execute" {
+        if path.contains("::execute") {
+            return Some("Exec");
+        }
+        return None;
+    }
+    // `ctrlc` — installs an OS signal handler (Unix SIGINT/SIGTERM/SIGHUP, Windows CTRL_C_EVENT) and
+    // spawns its handler thread. Signals are an inter-process control channel, so the closest bucket is
+    // Ipc (candor has no dedicated Signal effect; same judgment as routing SysV/pipe IPC to Ipc).
+    if crate_name == "ctrlc" {
+        if path.ends_with("::set_handler") || path.ends_with("::try_set_handler") {
+            return Some("Ipc");
+        }
+        return None;
+    }
+    // `clap` — argument parsing. ONLY the terminals that read `std::env::args_os` at call time are an
+    // effect (Env): `get_matches`/`get_matches_mut`/`try_get_matches` and the derive `parse`/`try_parse`.
+    // clap is MOSTLY PURE: the ENTIRE builder surface (`Command::new`/`arg`/`about`/`Arg::new`) stays
+    // None, and crucially the `*_from`/`*_parse_from` variants take an EXPLICIT iterator (they do NOT
+    // read argv) so they stay pure too. (`Arg::env` reads an env var at builder time but bare `::env` is
+    // too generic to gate safely, so it's left unmodeled — under-report over fabrication.)
+    if crate_name == "clap" {
+        if path.ends_with("::get_matches") || path.ends_with("::get_matches_mut")
+            || path.ends_with("::try_get_matches")
+            || path.ends_with("::parse") || path.ends_with("::try_parse")
+        {
+            return Some("Env");
+        }
+        return None;
+    }
+    // `jiff` — date/time. `Timestamp::now`/`Zoned::now`/`Zoned::now_with` read the wall clock (Clock).
+    // `tz::TimeZone::system`/`get` and `tz::db().get` read the system tzdb files from disk
+    // (`/etc/localtime`, `/usr/share/zoneinfo`; `system` is also `$TZ`-overridable — Fs is the dominant
+    // op, modeled as Fs). The `Span`/`civil` date math and `Timestamp`/`Zoned` arithmetic are PURE.
+    if crate_name == "jiff" {
+        if path.ends_with("::now") || path.ends_with("::now_with") {
+            return Some("Clock");
+        }
+        if path.ends_with("::TimeZone::system") || path.ends_with("::TimeZone::get")
+            || path.ends_with("::TimeZoneDatabase::get")
+        {
+            return Some("Fs");
+        }
+        return None;
+    }
+    // `env_logger` — installs the global logger and emits to stderr; reads `RUST_LOG`/`RUST_LOG_STYLE`.
+    // The init terminals are the effect (Log — program output, same family as `log`/`tracing`). The
+    // `Builder::new`/`build` and the format/filter/target config setters are PURE.
+    if crate_name == "env_logger" {
+        if path.ends_with("::init") || path.ends_with("::try_init")
+            || path.ends_with("::init_from_env") || path.ends_with("::try_init_from_env")
+        {
+            return Some("Log");
+        }
+        return None;
+    }
+    // `dialoguer` — interactive terminal prompts. The `interact*` verbs read stdin + write the tty (a
+    // console dialogue with the user — Ipc, like the other local-channel effects). The
+    // `with_prompt`/`default`/`items`/`validate_with` BUILDERS are PURE.
+    if crate_name == "dialoguer" {
+        if path.ends_with("::interact") || path.ends_with("::interact_on")
+            || path.ends_with("::interact_text") || path.ends_with("::interact_text_on")
+            || path.ends_with("::interact_opt") || path.ends_with("::interact_on_opt")
+        {
+            return Some("Ipc");
+        }
+        return None;
+    }
+    // `console` — terminal handle + styling. The `Term` read/write verbs do tty I/O (Ipc, the user
+    // dialogue channel; note there is NO `write_str` — `Term` impls `io::Write`). The free-fn terminal
+    // detection (`colors_enabled`/`user_attended`) reads `CLICOLOR`/`CLICOLOR_FORCE` (Env). The `Style`
+    // color/format methods and the text utils (`strip_ansi_codes`/`pad_str`/`measure_text_width`) are PURE.
+    if crate_name == "console" {
+        if path.ends_with("::write_line") || path.ends_with("::read_line")
+            || path.ends_with("::read_line_initial_text") || path.ends_with("::read_char")
+            || path.ends_with("::read_key") || path.ends_with("::read_key_raw")
+            || path.ends_with("::read_secure_line")
+        {
+            return Some("Ipc");
+        }
+        if path.ends_with("::colors_enabled") || path.ends_with("::colors_enabled_stderr")
+            || path.ends_with("::user_attended") || path.ends_with("::user_attended_stderr")
+        {
+            return Some("Env");
+        }
+        return None;
+    }
+    // `terminal_colorsaurus` — queries the terminal's colours by writing OSC 10/11 escapes and reading the
+    // reply (bidirectional tty dialogue — Ipc, consistent with dialoguer/console). Nothing else is I/O.
+    if crate_name == "terminal_colorsaurus" {
+        if path.ends_with("::background_color") || path.ends_with("::foreground_color")
+            || path.ends_with("::color_palette") || path.ends_with("::theme_mode")
+        {
+            return Some("Ipc");
+        }
+        return None;
+    }
+    // `backoff` — retry-with-backoff. `retry`/`retry_notify` consult the clock and `thread::sleep`
+    // between attempts (Clock). The `ExponentialBackoff`/builder config is PURE. (The user closure's own
+    // effects are out of scope here — we model only backoff's own Clock effect.)
+    if crate_name == "backoff" {
+        if path.ends_with("::retry") || path.ends_with("::retry_notify") {
+            return Some("Clock");
+        }
+        return None;
+    }
+    // `lscolors` — LS_COLORS parsing. ONLY `from_env` reads the environment (Env). `from_string`/
+    // `style_for_path`/`style_for*` and the `Style` type take explicit input and are PURE.
+    if crate_name == "lscolors" {
+        if path.ends_with("::from_env") {
+            return Some("Env");
+        }
+        return None;
+    }
+    // `wild` — argv with glob expansion. `args`/`args_os` read `std::env::args(_os)` (Env). Nothing else.
+    if crate_name == "wild" {
+        if path.ends_with("::args") || path.ends_with("::args_os") {
+            return Some("Env");
+        }
+        return None;
+    }
+    // `grep_cli` — only the firm effect is modeled: `CommandReaderBuilder::build` spawns a child process
+    // (Exec). The `is_readable_stdin`/`is_tty_*` fd probes (isatty/fstat on the std descriptors) are
+    // deliberately NOT modeled — candor doesn't classify `IsTerminal`/isatty as an effect anywhere, and
+    // they read no data; flagging them would be an inconsistent over-report.
+    if crate_name == "grep_cli" {
+        if path.ends_with("::build") {
+            return Some("Exec");
+        }
+        return None;
+    }
+    // `clircle` — detects whether two handles are the same file (cycle protection). `Identifier::try_from`
+    // (File/Stdio) issues an `fstat`, and `surely_conflicts_with` does an `lseek` (`stream_position`) — both
+    // Fs. The `PartialEq`/`Hash` comparisons read stored dev/ino and are PURE. (The named methods
+    // `are_identical`/`same_file` do NOT exist in the crate — not modeled.)
+    if crate_name == "clircle" {
+        if path.ends_with("::try_from") || path.ends_with("::surely_conflicts_with") {
+            return Some("Fs");
+        }
+        return None;
+    }
     None
 }
 
@@ -1484,6 +1719,125 @@ mod tests {
         assert_eq!(classify("hyper", "hyper::body::Bytes::new"), None);
         assert_eq!(classify("native_tls", "native_tls::TlsConnectorBuilder::min_protocol_version"), None);
         assert_eq!(classify("serde", "serde::Deserialize::request"), None); // generic verb, wrong crate
+    }
+
+    #[test]
+    fn coverage_differential_crates_classify() {
+        // Crates the coverage differential found DISCLOSED-but-unmodeled. Each rule is verb-keyed +
+        // crate-gated; the EFFECT verbs map to the right bucket and the PURE surface stays None (a
+        // wrongly-flagged pure crate is a fabrication, so the negatives matter as much as the positives).
+
+        // rustls (sync TLS core) — record I/O is Net; config/cert + the buffered-decrypt step are pure.
+        assert_eq!(classify("rustls", "rustls::ClientConnection::read_tls"), Some("Net"));
+        assert_eq!(classify("rustls", "rustls::ConnectionCommon::write_tls"), Some("Net"));
+        assert_eq!(classify("rustls", "rustls::Connection::complete_io"), Some("Net"));
+        assert_eq!(classify("rustls", "rustls::ConnectionCommon::process_new_packets"), None); // buffered decrypt, no I/O
+        assert_eq!(classify("rustls", "rustls::ClientConfig::builder"), None); // pure config
+
+        // native-tls variants — handshake is Net; builder is pure.
+        assert_eq!(classify("native_tls_crate", "native_tls_crate::TlsConnector::connect"), Some("Net"));
+        assert_eq!(classify("tokio_native_tls", "tokio_native_tls::TlsAcceptor::accept"), Some("Net"));
+        assert_eq!(classify("native_tls_crate", "native_tls_crate::TlsConnectorBuilder::min_protocol_version"), None);
+
+        // etcetera — dir resolution reads env; the args data type is pure.
+        assert_eq!(classify("etcetera", "etcetera::home_dir"), Some("Env"));
+        assert_eq!(classify("etcetera", "etcetera::base_strategy::choose_base_strategy"), Some("Env"));
+        assert_eq!(classify("etcetera", "etcetera::base_strategy::Xdg::config_dir"), Some("Env"));
+        assert_eq!(classify("etcetera", "etcetera::app_strategy::AppStrategyArgs::new"), None); // pure data
+
+        // sqlx-core — connect is Net, execute/fetch round-trips are Db; options/builders pure.
+        assert_eq!(classify("sqlx_core", "sqlx_core::connection::Connection::connect"), Some("Net"));
+        assert_eq!(classify("sqlx_core", "sqlx_core::executor::Executor::fetch_one"), Some("Db"));
+        assert_eq!(classify("sqlx_core", "sqlx_core::executor::Executor::execute"), Some("Db"));
+        assert_eq!(classify("sqlx_core", "sqlx_core::pool::Pool::acquire"), Some("Db"));
+        assert_eq!(classify("sqlx_core", "sqlx_core::pool::PoolOptions::max_connections"), None); // pure builder
+
+        // walkdir — the lazy read happens in next()/metadata(); builders + cached accessors pure.
+        assert_eq!(classify("walkdir", "walkdir::IntoIter::next"), Some("Fs"));
+        assert_eq!(classify("walkdir", "walkdir::DirEntry::metadata"), Some("Fs"));
+        assert_eq!(classify("walkdir", "walkdir::WalkDir::new"), None); // builder
+        assert_eq!(classify("walkdir", "walkdir::WalkDir::into_iter"), None); // no I/O until pulled
+        assert_eq!(classify("walkdir", "walkdir::DirEntry::file_type"), None); // cached, no syscall
+
+        // filetime — set_* are utimes (Fs), now is Clock; from_* constructors pure.
+        assert_eq!(classify("filetime", "filetime::set_file_mtime"), Some("Fs"));
+        assert_eq!(classify("filetime", "filetime::set_file_handle_times"), Some("Fs"));
+        assert_eq!(classify("filetime", "filetime::FileTime::now"), Some("Clock"));
+        assert_eq!(classify("filetime", "filetime::FileTime::from_unix_time"), None);
+        assert_eq!(classify("filetime", "filetime::FileTime::from_last_modification_time"), None); // reads &Metadata, not disk
+
+        // execute — the execute* verbs spawn (Exec); command/shell builders pure.
+        assert_eq!(classify("execute", "execute::Execute::execute"), Some("Exec"));
+        assert_eq!(classify("execute", "execute::Execute::execute_output"), Some("Exec"));
+        assert_eq!(classify("execute", "execute::Execute::execute_multiple_output"), Some("Exec"));
+        assert_eq!(classify("execute", "execute::command"), None); // only builds a Command
+        assert_eq!(classify("execute", "execute::shell"), None);
+
+        // ctrlc — install signal handler (Ipc).
+        assert_eq!(classify("ctrlc", "ctrlc::set_handler"), Some("Ipc"));
+        assert_eq!(classify("ctrlc", "ctrlc::try_set_handler"), Some("Ipc"));
+
+        // clap — only the argv-reading terminals are Env; the whole builder + *_from variants pure.
+        assert_eq!(classify("clap", "clap::Command::get_matches"), Some("Env"));
+        assert_eq!(classify("clap", "clap::Command::try_get_matches"), Some("Env"));
+        assert_eq!(classify("clap", "clap::Parser::parse"), Some("Env"));
+        assert_eq!(classify("clap", "clap::Command::new"), None); // builder
+        assert_eq!(classify("clap", "clap::Arg::about"), None); // builder
+        assert_eq!(classify("clap", "clap::Command::get_matches_from"), None); // explicit args, no argv read
+
+        // jiff — now* is Clock; tz lookups read the tzdb (Fs); span/civil math pure.
+        assert_eq!(classify("jiff", "jiff::Timestamp::now"), Some("Clock"));
+        assert_eq!(classify("jiff", "jiff::Zoned::now_with"), Some("Clock"));
+        assert_eq!(classify("jiff", "jiff::tz::TimeZone::system"), Some("Fs"));
+        assert_eq!(classify("jiff", "jiff::tz::TimeZone::get"), Some("Fs"));
+        assert_eq!(classify("jiff", "jiff::Span::checked_add"), None); // pure arithmetic
+
+        // env_logger — init installs the logger + reads RUST_LOG (Log); config setters pure.
+        assert_eq!(classify("env_logger", "env_logger::init"), Some("Log"));
+        assert_eq!(classify("env_logger", "env_logger::try_init"), Some("Log"));
+        assert_eq!(classify("env_logger", "env_logger::Builder::init"), Some("Log"));
+        assert_eq!(classify("env_logger", "env_logger::Builder::format_timestamp"), None); // config
+        assert_eq!(classify("env_logger", "env_logger::Builder::build"), None); // pure build
+
+        // dialoguer — interact* is tty I/O (Ipc); builders pure.
+        assert_eq!(classify("dialoguer", "dialoguer::Input::interact_text"), Some("Ipc"));
+        assert_eq!(classify("dialoguer", "dialoguer::Confirm::interact"), Some("Ipc"));
+        assert_eq!(classify("dialoguer", "dialoguer::Select::interact_opt"), Some("Ipc"));
+        assert_eq!(classify("dialoguer", "dialoguer::Input::with_prompt"), None); // builder
+
+        // console — Term I/O is Ipc, detection is Env, Style is pure.
+        assert_eq!(classify("console", "console::Term::write_line"), Some("Ipc"));
+        assert_eq!(classify("console", "console::Term::read_key"), Some("Ipc"));
+        assert_eq!(classify("console", "console::colors_enabled"), Some("Env"));
+        assert_eq!(classify("console", "console::Style::cyan"), None); // pure styling
+        assert_eq!(classify("console", "console::strip_ansi_codes"), None); // pure text util
+
+        // terminal_colorsaurus — tty colour query (Ipc).
+        assert_eq!(classify("terminal_colorsaurus", "terminal_colorsaurus::background_color"), Some("Ipc"));
+        assert_eq!(classify("terminal_colorsaurus", "terminal_colorsaurus::color_palette"), Some("Ipc"));
+
+        // backoff — retry sleeps + reads the clock (Clock); config pure.
+        assert_eq!(classify("backoff", "backoff::retry"), Some("Clock"));
+        assert_eq!(classify("backoff", "backoff::retry_notify"), Some("Clock"));
+        assert_eq!(classify("backoff", "backoff::ExponentialBackoff::default"), None);
+
+        // lscolors — ONLY from_env reads the environment; from_string/style_for_path pure.
+        assert_eq!(classify("lscolors", "lscolors::LsColors::from_env"), Some("Env"));
+        assert_eq!(classify("lscolors", "lscolors::LsColors::from_string"), None);
+        assert_eq!(classify("lscolors", "lscolors::LsColors::style_for_path"), None);
+
+        // wild — argv readers (Env).
+        assert_eq!(classify("wild", "wild::args"), Some("Env"));
+        assert_eq!(classify("wild", "wild::args_os"), Some("Env"));
+
+        // grep_cli — only the firm Exec (CommandReader spawn); the isatty probes stay unmodeled.
+        assert_eq!(classify("grep_cli", "grep_cli::CommandReaderBuilder::build"), Some("Exec"));
+        assert_eq!(classify("grep_cli", "grep_cli::is_readable_stdin"), None); // isatty/fstat, not modeled
+        assert_eq!(classify("grep_cli", "grep_cli::is_tty_stdout"), None);
+
+        // clircle — same-file detection issues fstat/lseek (Fs); equality is pure.
+        assert_eq!(classify("clircle", "clircle::Identifier::try_from"), Some("Fs"));
+        assert_eq!(classify("clircle", "clircle::Clircle::surely_conflicts_with"), Some("Fs"));
     }
 
     #[test]
