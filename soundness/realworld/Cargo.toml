@@ -5,5 +5,5 @@
 # workspace (not part of the candor build) — soundness/realworld/run.sh drives it on Linux.
 [workspace]
 resolver = "2"
-members = ["net_std", "net_minreq", "net_ureq", "exec_duct", "exec_xshell", "exec_std",
-           "fs_fserr", "fs_std", "fs_walkdir", "fs_tempfile", "pure_ctrl"]
+members = ["net_std", "net_minreq", "net_ureq", "exec_duct", "exec_xshell", "exec_std", "exec_subprocess",
+           "fs_fserr", "fs_std", "fs_walkdir", "fs_tempfile", "fs_fsextra", "pure_ctrl"]

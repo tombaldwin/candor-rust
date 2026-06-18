@@ -1,0 +1,10 @@
+[package]
+name = "exec_subprocess"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "exec_subprocess"
+path = "src/main.rs"
+[dependencies]
+subprocess = "0.2"

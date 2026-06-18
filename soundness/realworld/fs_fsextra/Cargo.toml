@@ -1,0 +1,10 @@
+[package]
+name = "fs_fsextra"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "fs_fsextra"
+path = "src/main.rs"
+[dependencies]
+fs_extra = "1"

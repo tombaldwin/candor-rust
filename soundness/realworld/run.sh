@@ -48,10 +48,12 @@ CASES=(
   "exec_duct|Exec|candor-oracle-exec"
   "exec_xshell|Exec|candor-oracle-xshell"
   "exec_std|Exec|candor-oracle-exec-std"
+  "exec_subprocess|Exec|candor-oracle-subprocess"
   "fs_fserr|Fs|/tmp/candor-oracle-fs-marker"
   "fs_std|Fs|/tmp/candor-oracle-fs-std"
   "fs_walkdir|Fs|candor-oracle-walk"
   "fs_tempfile|Fs|candor-oracle-temp"
+  "fs_fsextra|Fs|/tmp/candor-oracle-fsextra"
   "pure_ctrl||__no_marker__"
 )
 
