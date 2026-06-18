@@ -1193,6 +1193,53 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// IMPLICIT ITERATOR FORCING. A `for x in <expr>` or a consuming combinator (`.collect()`,
+    /// `.count()`, `for_each`, …) on `<expr>` drives the iterator's `next()` to completion — so if
+    /// `<expr>`'s receiver is a CONCRETE LOCAL TYPE with a local `impl Iterator`, that type's
+    /// effectful `next` is reachable but NEVER written at the forcing site (only an explicit
+    /// `x.next()` / `while let Some(_) = x.next()` was caught). This emits a synthetic edge to
+    /// `Type::next` so the init's effect propagates to the forcing fn (a §4 under-report fix).
+    ///
+    /// SCOPING — the RowIter no-fabrication guard. We charge ONLY when `resolve_recv_type` yields a
+    /// CONCRETE local type (a `vars`/field/`ctor_type`-return binding) whose leaf locally
+    /// `impl Iterator`. A bare `impl Iterator` / generic `T: Iterator` / `&mut dyn Iterator` param
+    /// lands in `trait_vars` (removed from `vars` in `fninfo`), so `resolve_recv_type` returns None
+    /// → no charge: a generic iterator consumer stays Unknown/pure, never charged with some local
+    /// impl's effect (the review-killed `fn f(it: impl Iterator)` + `impl Iterator for RowIter`
+    /// fabrication). A `-> impl Iterator` opaque return isn't recorded as a concrete return type, so
+    /// `build().count()` over an opaque builder also yields None (acceptable miss, not a guess). The
+    /// edge resolves to the local `Type::next` def via `resolve_target`'s unambiguous-tail2 route.
+    fn iter_next_target(&self, expr: &syn::Expr) -> Option<String> {
+        let ty = self.resolve_recv_type(expr)?;
+        let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty);
+        // The receiver's concrete type must locally `impl Iterator`. `trait_impls` values are type
+        // LEAVES (see `impl_type_name`), and the receiver type may be module-qualified, so compare
+        // by leaf. (A non-local / external iterator type is absent from `trait_impls` → None.)
+        let impls = self.trait_impls.get("Iterator")?;
+        if impls.iter().any(|t| t == ty_leaf) {
+            Some(ty_leaf.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Push the synthetic `Type::next` forcing edge for an implicitly-forced concrete-local iterator
+    /// (see `iter_next_target`). De-dup is unnecessary: the call list tolerates duplicate edges
+    /// (they collapse to one resolved target), and forcing sites are not hot-looped like lazy reads.
+    fn charge_iter_next(&mut self, expr: &syn::Expr) {
+        if let Some(ty_leaf) = self.iter_next_target(expr) {
+            let path = format!("{ty_leaf}::next");
+            self.calls.push(Call {
+                path,
+                leaf: "next".to_string(),
+                str_arg: None,
+                typed: false,
+                method: false,
+                is_macro: false,
+            });
+        }
+    }
+
     /// The trait bounds of a DISPATCH-typed receiver — a `&dyn T`/`impl T`/generic param (via
     /// `trait_vars`) or a trait-typed field (`self.store` where `store: Box<dyn Store>`, via
     /// `trait_fields`). Empty when the receiver has a concrete type (`resolve_recv_type` owns it)
@@ -1373,6 +1420,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let leaf = node.method.to_string();
         let str_arg = first_str_lit(&node.args);
+        // IMPLICIT ITERATOR FORCING via a consuming combinator: `it.count()`, `it.collect()`,
+        // `it.for_each(..)`, `it.fold(..)`, … each drive `Iterator::next` to completion. When `it`
+        // is a CONCRETE LOCAL type with a local `impl Iterator` (incl. a builder `build().count()`
+        // whose receiver type is the recorded return type), charge its effectful `next` — else the
+        // forcing site reads silent-pure (only an explicit `.next()` was caught). A generic/opaque
+        // iterator receiver yields no concrete type (`iter_next_target` → None), so the RowIter
+        // fabrication stays closed. (`.next()` itself isn't here — it resolves directly as a method.)
+        if is_iter_consumer(&leaf) {
+            self.charge_iter_next(&node.receiver);
+        }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
         self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false });
         // Typed call: if the receiver's type resolves, form `Type::method` so the existing per-crate
@@ -1512,6 +1569,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // the element type is indeterminate, the binding is still cleared for the body, never leaked in.
         // The iterated expr is visited FIRST (outside the binding — it's evaluated before the body).
         self.visit_expr(&node.expr);
+        // A `for _ in <concrete-local-iter>` IMPLICITLY drives the iterator's `next()` to completion —
+        // charge the local `Type::next` so its effect isn't silently dropped (see `iter_next_target`).
+        self.charge_iter_next(&node.expr);
         if let Some(name) = single_pat_ident(&node.pat) {
             let elem = self.resolve_elem_type(&node.expr);
             self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
@@ -4352,6 +4412,46 @@ fn tail2(path: &str) -> Option<String> {
     Some(format!("{}::{}", segs[n - 2], segs[n - 1]))
 }
 
+/// A CONSUMING iterator combinator: one that drives `Iterator::next` to completion (or short-circuits
+/// after forcing some elements). Calling one on a custom-iterator value runs its `next` — so if the
+/// receiver is a concrete local `impl Iterator`, the consumer reaches that `next`'s effect (handled by
+/// `charge_iter_next`). This is the EAGER/forcing subset only: lazy ADAPTERS (`map`/`filter`/`take`/…)
+/// return a new lazy iterator and do NOT force, so they are deliberately ABSENT — charging them would
+/// over-approximate a never-driven chain. `collect` is included (it forces); a never-consumed `collect`
+/// result is vanishingly rare and forcing is the safe direction. `next`/`next_back` are also absent —
+/// an explicit `.next()` already resolves as an ordinary method call on the receiver type.
+fn is_iter_consumer(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        "collect"
+            | "count"
+            | "sum"
+            | "product"
+            | "for_each"
+            | "try_for_each"
+            | "last"
+            | "nth"
+            | "fold"
+            | "try_fold"
+            | "reduce"
+            | "min"
+            | "max"
+            | "min_by"
+            | "max_by"
+            | "min_by_key"
+            | "max_by_key"
+            | "all"
+            | "any"
+            | "find"
+            | "find_map"
+            | "position"
+            | "rposition"
+            | "partition"
+            | "unzip"
+            | "collect_into"
+    )
+}
+
 /// Resolve a call to the local definition(s) it links to in the intra-crate graph, or `None` to
 /// under-report. A QUALIFIED path (`a::Job::run`, `mod::helper`, or an associated-fn call `Type::new()`)
 /// matches on its precise 2-segment tail, but ONLY when that tail is UNAMBIGUOUS — two same-named types in
@@ -4871,6 +4971,106 @@ mod tests {
         assert!(eff(&genuine, "calls_dep").contains(&"Net".to_string()),
                 "a genuine dep call must still inherit the dep report's Net:\n{genuine}");
         let _ = std::fs::remove_dir_all(&dep);
+    }
+
+    #[test]
+    fn implicit_iterator_force_charges_local_iter_next_but_not_generic() {
+        // A custom `impl Iterator for LocalType` whose `next()` is effectful must charge EVERY
+        // implicit forcing site — a `for` loop and consuming combinators (`.collect()`/`.count()`/
+        // `.fold()`/…), not just an explicit `.next()`. Controls: a PURE custom iterator stays pure,
+        // and a GENERIC/opaque iterator param must NOT inherit any concrete impl's effect (the
+        // review-killed RowIter fabrication must stay closed).
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-iternext-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, name: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(name))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+            struct LogTail { n: usize }
+            impl Iterator for LogTail {
+                type Item = String;
+                fn next(&mut self) -> Option<String> {
+                    std::fs::write("/t", b"x").unwrap();
+                    if self.n == 0 { None } else { self.n -= 1; Some(String::new()) }
+                }
+            }
+            fn tail(_p: &str) -> LogTail { LogTail { n: 1 } }
+            pub fn count_lines(p: &str) -> usize { tail(p).count() }
+            pub fn all_lines(p: &str) -> Vec<String> { tail(p).collect() }
+            pub fn process(p: &str) { for _l in tail(p) {} }
+            pub fn folded(p: &str) -> usize { tail(p).fold(0, |a, _| a + 1) }
+            pub fn explicit(p: &str) { let mut t = tail(p); let _ = t.next(); }
+            fn build() -> LogTail { LogTail { n: 1 } }
+            pub fn built_consumer() -> usize { build().count() }
+
+            struct PureIter { n: usize }
+            impl Iterator for PureIter {
+                type Item = u8;
+                fn next(&mut self) -> Option<u8> { if self.n == 0 { None } else { self.n -= 1; Some(1) } }
+            }
+            fn pure_src() -> PureIter { PureIter { n: 1 } }
+            pub fn pure_collect() -> Vec<u8> { pure_src().collect() }
+            pub fn pure_for() { for _ in pure_src() {} }
+
+            struct RowIter { n: usize }
+            impl Iterator for RowIter {
+                type Item = u8;
+                fn next(&mut self) -> Option<u8> {
+                    std::fs::write("/db", b"q").unwrap();
+                    if self.n == 0 { None } else { self.n -= 1; Some(0) }
+                }
+            }
+            pub fn generic_param(it: impl Iterator<Item = u8>) { for _ in it {} }
+            pub fn generic_bound<I: Iterator>(it: I) { let _ = it.count(); }
+            pub fn dyn_param(it: &mut dyn Iterator<Item = u8>) { let _ = it.count(); }
+
+            fn opaque() -> impl Iterator<Item = u8> { OpaqueSrc { n: 1 } }
+            struct OpaqueSrc { n: usize }
+            impl Iterator for OpaqueSrc {
+                type Item = u8;
+                fn next(&mut self) -> Option<u8> {
+                    std::fs::write("/o", b"z").unwrap();
+                    if self.n == 0 { None } else { self.n -= 1; Some(0) }
+                }
+            }
+            pub fn opaque_consumer() -> usize { opaque().count() }
+        "#;
+        let v = run("iternext", src);
+        // Effectful custom iterator: implicit force at every consumer carries Fs.
+        for f in ["count_lines", "all_lines", "process", "folded", "explicit", "built_consumer"] {
+            assert!(eff(&v, f).contains(&"Fs".to_string()),
+                    "implicit iterator force under-reported: {f} should be Fs but is {:?}\n{v}", eff(&v, f));
+        }
+        // Control 1: a PURE custom iterator stays pure (no fabrication from forcing).
+        for f in ["pure_collect", "pure_for"] {
+            assert!(eff(&v, f).is_empty(), "pure custom iterator fabricated an effect at {f}: {:?}", eff(&v, f));
+        }
+        // Control 2 (RowIter guard): a generic/opaque iterator param must NOT inherit a concrete
+        // impl's effect, even though `impl Iterator for RowIter` does Fs.
+        for f in ["generic_param", "generic_bound", "dyn_param"] {
+            assert!(eff(&v, f).is_empty(),
+                    "RowIter guard breached: generic iterator consumer {f} was charged {:?}", eff(&v, f));
+        }
+        // `-> impl Iterator` opaque return: can't resolve the concrete type → acceptable miss (pure).
+        assert!(eff(&v, "opaque_consumer").is_empty(),
+                "opaque-return consumer should stay pure (no concrete type): {:?}", eff(&v, "opaque_consumer"));
     }
 
     #[test]
