@@ -301,6 +301,7 @@ fn closure_or_block_stmts(e: &syn::Expr) -> Option<Vec<syn::Stmt>> {
 ///     whose init expr is a lazy-container `new` call (handles the `?`-free common form);
 ///   - `lazy_static! { static ref X: T = effectful(); }` — an `Item::Macro` (`lazy_static`), body parsed;
 ///   - `thread_local! { static T: Ty = effectful(); }` — an `Item::Macro` (`thread_local`), body parsed.
+///
 /// A PURE init is still returned (its synthetic unit will simply carry no effect) — purity is decided by
 /// the classifier downstream, NOT here; returning it unconditionally is what keeps the keying per-static.
 fn lazy_static_unit(it: &syn::Item) -> Option<(String, Vec<syn::Stmt>)> {
