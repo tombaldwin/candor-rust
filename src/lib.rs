@@ -2230,6 +2230,28 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         }
 
+        // A reference to a local `static` FORCES its initializer. For a deferred-init wrapper
+        // (`LazyLock`/`LazyCell`/`OnceLock`/`once_cell::Lazy`/`lazy_static!`/`thread_local!`) the
+        // initializer closure runs at the first access SITE, not at the static's declaration — so an
+        // effectful initializer reached only by naming the static was charged to the static item but
+        // NEVER to the forcing function: a silent under-report (the lazy-init seam, see
+        // ui/deferred_effects.rs). Add an edge from the enclosing fn to the static, exactly as the scan
+        // engine edges a forcing body to the static's synthetic init unit. Sound and non-fabricating: a
+        // static is a reportable item with its own (already-propagated) effect set, so a PURE static
+        // contributes nothing; and in safe Rust a static's only route to a RUNTIME effect IS a deferred
+        // closure (a plain `static X = const_expr;` is const-evaluated and cannot perform I/O), so no
+        // edge to a pure static can ever fabricate. (Conservative on `&STATIC` without a deref — naming
+        // forces, matching the scan engine; over-approximation in the safe direction.)
+        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = expr.kind {
+            if let rustc_hir::def::Res::Def(DefKind::Static { .. }, did) = path.res {
+                if let (Some(static_local), Some(caller)) =
+                    (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
+                {
+                    self.calls.entry(caller).or_default().insert(static_local);
+                }
+            }
+        }
+
         // IMPLICIT overloaded `Deref`/`DerefMut` calls the compiler inserts as expression ADJUSTMENTS
         // (auto-deref during method resolution, field access through a smart pointer, deref-coercion at
         // a call/arg/return/assignment site). These are NOT `Call`/`MethodCall`/`Unary(Deref)` HIR nodes

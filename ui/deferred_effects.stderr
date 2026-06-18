@@ -1,0 +1,40 @@
+warning: `<EffIter as std::iter::Iterator>::next` effects: { Fs* }   (* = via callee)
+  --> $DIR/deferred_effects.rs:43:5
+   |
+LL |     fn next(&mut self) -> Option<()> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `LAZY_EFF` effects: { Fs* }   (* = via callee)
+  --> $DIR/deferred_effects.rs:27:1
+   |
+LL | static LAZY_EFF: LazyLock<u8> = LazyLock::new(|| {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `sink` effects: { Fs }   (* = via callee)
+  --> $DIR/deferred_effects.rs:10:1
+   |
+LL | fn sink() {
+   | ^^^^^^^^^
+
+warning: `via_consume` effects: { Fs* }   (* = via callee)
+  --> $DIR/deferred_effects.rs:52:1
+   |
+LL | fn via_consume() {
+   | ^^^^^^^^^^^^^^^^
+
+warning: `via_force` effects: { Fs* }   (* = via callee)
+  --> $DIR/deferred_effects.rs:31:1
+   |
+LL | fn via_force() {
+   | ^^^^^^^^^^^^^^
+
+warning: `via_spawn` effects: { Fs* }   (* = via callee)
+  --> $DIR/deferred_effects.rs:15:1
+   |
+LL | fn via_spawn() {
+   | ^^^^^^^^^^^^^^
+
+warning: 6 warnings emitted
+
