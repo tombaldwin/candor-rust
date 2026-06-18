@@ -1,0 +1,82 @@
+warning: `<E2 as std::convert::From<E1>>::from` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:35:5
+   |
+LL |     fn from(_e: E1) -> E2 {
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `<G as std::ops::Drop>::drop` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:82:5
+   |
+LL |     fn drop(&mut self) {
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: `<Loud as std::fmt::Display>::fmt` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:19:5
+   |
+LL |     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `<N as std::ops::Add>::add` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:70:5
+   |
+LL |     fn add(self, _rhs: N) -> N {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `<W as std::ops::Deref>::deref` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:57:5
+   |
+LL |     fn deref(&self) -> &str {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `sink` effects: { Fs }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:12:1
+   |
+LL | fn sink() {
+   | ^^^^^^^^^
+
+warning: `via_add` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:75:1
+   |
+LL | fn via_add(a: N, b: N) -> N {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_deref` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:62:1
+   |
+LL | fn via_deref(w: &W) -> usize {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_drop_binding` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:86:1
+   |
+LL | fn via_drop_binding() {
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_format` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:24:1
+   |
+LL | fn via_format(l: &Loud) -> String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_into` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:49:1
+   |
+LL | fn via_into(e: E1) -> E2 {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_question` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:43:1
+   |
+LL | fn via_question() -> Result<(), E2> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_to_string` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:27:1
+   |
+LL | fn via_to_string(l: &Loud) -> String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 13 warnings emitted
+
