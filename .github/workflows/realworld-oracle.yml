@@ -24,5 +24,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install strace
         run: sudo apt-get update && sudo apt-get install -y strace
-      - name: Real-world dynamic oracle
+      - name: Real-world dynamic oracle (syscall ground truth — Fs/Net/Exec)
         run: bash soundness/realworld/run.sh
+      - name: Non-syscall recall corpus (known-semantics ground truth — Db/Log/Rand/Env/Clock/Ipc/Clipboard)
+        # strace can't distinguish these 7 effects; ground truth = the crate's documented semantics.
+        # candor-scan is syntactic so this needs no strace/dep-builds. Together with the syscall oracle
+        # above, candor's effect classification is now under ground-truth coverage for ALL 10 effects.
+        run: bash soundness/realworld/recall/recall.sh

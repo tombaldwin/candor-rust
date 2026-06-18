@@ -22,3 +22,5 @@ getrandom = "0.2"
 uuid = { version = "1", features = ["v4"] }
 arboard = "3"
 interprocess = "2"
+etcetera = "0.8"
+jiff = "0.1"

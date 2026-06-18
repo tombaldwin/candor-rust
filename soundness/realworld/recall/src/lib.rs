@@ -24,3 +24,13 @@ pub fn clip_arboard() { if let Ok(mut c) = arboard::Clipboard::new() { let _ = c
 // --- Ipc: std unix sockets are Ipc; interprocess is uncalibrated → expect DISCLOSED ---
 pub fn ipc_unix() { let _ = std::os::unix::net::UnixStream::connect("/tmp/candor-ipc"); }
 pub fn ipc_interprocess() { let _ = interprocess::local_socket::LocalSocketStream::connect("/tmp/x"); }
+
+// --- Env: std::env reads the process environment; etcetera reads $HOME/$XDG (calibrated 2026-06-18) ---
+pub fn env_std() { let _ = std::env::var("PATH"); }
+pub fn env_vars() { for _ in std::env::vars() {} }
+pub fn env_etcetera() { let _ = etcetera::home_dir(); }
+
+// --- Clock: std SystemTime/Instant read the wall/monotonic clock; jiff::now (calibrated 2026-06-18) ---
+pub fn clock_std() { let _ = std::time::SystemTime::now(); }
+pub fn clock_instant() { let _ = std::time::Instant::now(); }
+pub fn clock_jiff() { let _ = jiff::Timestamp::now(); }

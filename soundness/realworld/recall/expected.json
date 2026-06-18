@@ -13,5 +13,11 @@
   "rand_uuid": "Rand",
   "clip_arboard": "Clipboard",
   "ipc_unix": "Ipc",
-  "ipc_interprocess": "Ipc"
+  "ipc_interprocess": "Ipc",
+  "env_std": "Env",
+  "env_vars": "Env",
+  "env_etcetera": "Env",
+  "clock_std": "Clock",
+  "clock_instant": "Clock",
+  "clock_jiff": "Clock"
 }
