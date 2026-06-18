@@ -1,0 +1,46 @@
+warning: `<Loud as std::clone::Clone>::clone` effects: { Fs* }   (* = via callee)
+  --> $DIR/derived_and_once.rs:16:5
+   |
+LL |     fn clone(&self) -> Loud {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `cell_init` effects: { Fs* }   (* = via callee)
+  --> $DIR/derived_and_once.rs:49:1
+   |
+LL | fn cell_init() -> u8 {
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: `once_init` effects: { Fs* }   (* = via callee)
+  --> $DIR/derived_and_once.rs:40:1
+   |
+LL | fn once_init() {
+   | ^^^^^^^^^^^^^^
+
+warning: `sink` effects: { Fs }   (* = via callee)
+  --> $DIR/derived_and_once.rs:9:1
+   |
+LL | fn sink() {
+   | ^^^^^^^^^
+
+warning: `via_call_once` effects: { Fs* }   (* = via callee)
+  --> $DIR/derived_and_once.rs:43:1
+   |
+LL | fn via_call_once() {
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: `via_derived_clone` effects: { Fs* }   (* = via callee)
+  --> $DIR/derived_and_once.rs:25:1
+   |
+LL | fn via_derived_clone(s: &HasLoud) -> HasLoud {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_get_or_init` effects: { Fs* }   (* = via callee)
+  --> $DIR/derived_and_once.rs:53:1
+   |
+LL | fn via_get_or_init() {
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: 7 warnings emitted
+
