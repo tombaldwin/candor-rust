@@ -2199,6 +2199,8 @@ fn collect_decls(
     local_traits: &mut HashMap<String, LocalTrait>,
     trait_fields: &mut TraitFieldIndex,
     prim_aliases: &mut std::collections::HashSet<String>,
+    extern_fns: &mut std::collections::HashSet<String>,
+    drop_types: &mut std::collections::HashSet<String>,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
@@ -2314,12 +2316,33 @@ fn collect_decls(
                     }
                 }
             }
+            // A foreign (`extern "C" { fn system(..); }`) function declaration: the body lives in
+            // another language and is the canonical unknowable boundary. Record every declared name so a
+            // safe-wrapper call to it (`unsafe { system(cmd) }`) DISCLOSES Unknown instead of reading
+            // silent-pure — a bare leaf with no local def and no classification would otherwise fall
+            // through to pure (the FFI safe-wrapper under-report). We can't know the effect (Fs vs Net vs
+            // Exec), so Unknown is the honest signal, exactly as for an unresolved callback.
+            syn::Item::ForeignMod(fm) => {
+                for fi in &fm.items {
+                    if let syn::ForeignItem::Fn(f) = fi {
+                        extern_fns.insert(f.sig.ident.to_string());
+                    }
+                }
+            }
             syn::Item::Impl(im) => {
                 let self_ty = impl_type_name(&im.self_ty);
                 // `impl Trait for Type` — a CHA edge from the trait leaf to the implementing type.
                 if let (Some((_, tr, _)), Some(ty)) = (&im.trait_, &self_ty) {
                     if let Some(leaf) = tr.segments.last() {
                         trait_impls.entry(leaf.ident.to_string()).or_default().push(ty.clone());
+                        // A LOCAL `impl Drop for Type` — its `drop` body runs at scope exit, an implicit
+                        // edge the syntactic call graph doesn't otherwise model. Record the type leaf so a
+                        // fn that BINDS a value of this type inherits the (already-scanned) `Type::drop`
+                        // body's effects (drop-glue under-report). LOCAL types only — never fabricate a drop
+                        // edge for an external type whose Drop we can't see.
+                        if leaf.ident == "Drop" {
+                            drop_types.insert(ty.clone());
+                        }
                     }
                 }
                 for ii in &im.items {
@@ -2338,7 +2361,7 @@ fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types);
                 }
             }
             _ => {}
@@ -2474,7 +2497,7 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 fn cache_schema(include_tests: bool) -> String {
-    format!("scan-{}/rev4/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev5/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -2507,6 +2530,10 @@ struct FileDecls {
     trait_fields: TraitFieldIndex,
     /// names aliased to a non-nominal type (`type Inner = [u8; N]`) — resolution skips local `Inner::assoc`.
     prim_aliases: Vec<String>,
+    /// fn names declared in an `extern` block — a call to one is an FFI boundary → DISCLOSE Unknown.
+    extern_fns: Vec<String>,
+    /// local type leaves with a local `impl Drop` — a fn binding such a value inherits the drop body.
+    drop_types: Vec<String>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`).
@@ -2520,8 +2547,11 @@ fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
     let mut trait_decls: HashMap<String, LocalTrait> = HashMap::new();
     let mut trait_fields = HashMap::new();
     let mut prim_aliases = std::collections::HashSet::new();
+    let mut extern_fns = std::collections::HashSet::new();
+    let mut drop_types = std::collections::HashSet::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                  &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases);
+                  &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
+                  &mut extern_fns, &mut drop_types);
     FileDecls {
         fields,
         field_elem,
@@ -2534,6 +2564,8 @@ fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
             .collect(),
         trait_fields,
         prim_aliases: prim_aliases.into_iter().collect(),
+        extern_fns: extern_fns.into_iter().collect(),
+        drop_types: drop_types.into_iter().collect(),
     }
 }
 
@@ -2550,6 +2582,8 @@ struct MergedDecls {
     trait_decls: HashMap<String, LocalTrait>,
     trait_fields: TraitFieldIndex,
     prim_aliases: std::collections::HashSet<String>,
+    extern_fns: std::collections::HashSet<String>,
+    drop_types: std::collections::HashSet<String>,
 }
 
 /// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics
@@ -2613,6 +2647,12 @@ fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for a in &fd.prim_aliases {
         acc.prim_aliases.insert(a.clone()); // set union — order-independent
+    }
+    for n in &fd.extern_fns {
+        acc.extern_fns.insert(n.clone()); // set union — order-independent
+    }
+    for n in &fd.drop_types {
+        acc.drop_types.insert(n.clone()); // set union — order-independent
     }
 }
 
@@ -2696,6 +2736,24 @@ fn decl_index_digest(m: &MergedDecls) -> String {
     let mut pak: Vec<&String> = m.prim_aliases.iter().collect();
     pak.sort();
     for a in pak {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
+    // extern_fns — sorted set of FFI-declared fn names (a call to one DISCLOSES Unknown).
+    s.push_str("extern_fns");
+    let mut efk: Vec<&String> = m.extern_fns.iter().collect();
+    efk.sort();
+    for a in efk {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
+    // drop_types — sorted set of local types with a local `impl Drop` (binding one adds the drop edge).
+    s.push_str("drop_types");
+    let mut dtk: Vec<&String> = m.drop_types.iter().collect();
+    dtk.sort();
+    for a in dtk {
         s.push('|');
         s.push_str(a);
     }
@@ -3300,6 +3358,10 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let mut incomplete: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
     let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut loc: HashMap<String, String> = HashMap::new();
+    // Per-fn DIRECT Unknown-origin reasons (the receipt's `unknownWhy`, spec §2). Coarse, like the lint's
+    // per-trait tag: a callback we can't see through, an FFI/extern boundary, or a genuinely-unresolvable
+    // bare call. Tracked so the disclosure names WHY, not just that an Unknown exists.
+    let mut unknown_why: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
@@ -3307,11 +3369,33 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // receipt's unresolved count) instead of silently certifying the function pure.
         if f.unresolved {
             direct.entry(f.qual.clone()).or_default().insert("Unknown");
+            unknown_why.entry(f.qual.clone()).or_default().insert("callback:unresolved call");
         }
+        // DROP-GLUE (#3): local types this fn CONSTRUCTS that have a local `impl Drop`. The `Drop::drop`
+        // body runs at scope exit — an implicit edge the call graph misses, so a guard that flushes/closes
+        // on drop read silent-pure. Collected per-call below (a `T::*` associated-fn call where `T` has a
+        // local Drop), then edged to `T::drop` after the call loop. Over-approximates toward the SOUND
+        // direction (a constructed value is assumed to drop in this scope); gated to LOCAL drop types only,
+        // so an external type's invisible Drop is never fabricated.
+        let mut drops_here: BTreeSet<String> = BTreeSet::new();
         for c in &f.calls {
             let cr = c.path.split("::").next().unwrap_or("");
             let classified = candor_classify::classify(cr, &c.path)
                 .or_else(|| scan_builder_entry_effect(cr, &c.path));
+            // DROP-GLUE detection: a `T::assoc()` ASSOCIATED-FN call (a CONSTRUCTOR like `Guard::new`)
+            // where `T` is a LOCAL drop type means a `T` value is CREATED in this scope and dropped at exit.
+            // Record `T` so we edge to `T::drop` after the loop. CRUCIALLY gated to `!c.method`: a METHOD
+            // call (`reg.poll()`, recorded typed as `Registration::poll`) operates on a BORROW and does NOT
+            // own/drop the value here — including those over-connected every borrow-site to the drop body
+            // (tokio: 170 fns). A constructor is `Type::fn(..)` syntax (an associated fn, `method=false`).
+            // Excludes `T::drop` itself.
+            if !merged.drop_types.is_empty() && !c.method && c.path.contains("::") && c.leaf != "drop" {
+                if let Some(ty) = tail2(&c.path).and_then(|t2| t2.split("::").next().map(str::to_string)) {
+                    if merged.drop_types.contains(&ty) {
+                        drops_here.insert(ty);
+                    }
+                }
+            }
             // κ ledger: a qualified call into a declared dependency. (A bare leaf has no `::`, so it
             // can't name a crate; a local module sharing a dep's name is the rare accepted ambiguity.)
             if c.path.contains("::") && deps.contains(cr) {
@@ -3422,6 +3506,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // join would fabricate). Joined unambiguous-tail2-first, then unambiguous leaf, like resolve_target.
             // A renamed dep joins under its real package name.
             let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
+            let mut dep_join_hit = false;
             if classified.is_none() && !resolved_local && !suppress_bare_leaf
                 && c.path.contains("::") && deps_idx.crates.contains(cr_real)
             {
@@ -3432,6 +3517,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     deps_idx.by_key.get(&format!("{cr_real}#{rel}"))
                 };
                 if let Some(de) = hit {
+                    dep_join_hit = true;
                     for e in &de.effects {
                         direct.entry(f.qual.clone()).or_default().insert(e);
                     }
@@ -3488,6 +3574,37 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                         "Db" => { tables.entry(f.qual.clone()).or_default().extend(candor_classify::tables_in_sql(s)); }
                         _ => {}
                     }
+                }
+            }
+            // §4 HONESTY — FFI BOUNDARY: a call that fell through EVERY resolution route above (not
+            // classified, not a local def, not a dep-report join) AND names a fn declared in an `extern`
+            // block is the canonical unknowable boundary — its body is in another language, so the effect
+            // (Fs/Net/Exec/…) is unknowable. DISCLOSE Unknown — the same honest signal an unresolved
+            // callback gets — instead of silent-pure. A safe wrapper `unsafe { system(cmd) }` otherwise
+            // read pure (the `extern` block was never collected, so the call was a bare leaf resolving to
+            // nothing → pure). NEVER fires when a LOCAL def of the same name exists (`suppress_bare_leaf`
+            // / `resolved_local` win — the local is authoritative, no fabrication).
+            //
+            // (The general "any unresolvable bare call → Unknown" disclosure was PROTOTYPED and REJECTED:
+            // it floods on a real corpus — closure-param invocations (`func(x)`), macro-DEFINED local
+            // helpers absent from `by_leaf`, and cfg-gated platform fns all read as bare-unresolved, so it
+            // charged ~80 pure tokio fns Unknown for ~0 genuine signal beyond this FFI case. See the task
+            // report's residual note. The extern case below is the precise, non-flooding subset.)
+            let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf || dep_join_hit;
+            if !c.is_macro && !already_handled && merged.extern_fns.contains(&c.leaf) {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert("ffi:extern fn");
+            }
+        }
+        // DROP-GLUE EDGE (#3): for each LOCAL drop type this fn constructed, add the implicit scope-exit
+        // edge to its `T::drop` body — but ONLY when that body is a UNIQUE local def (in `by_tail2` with
+        // exactly one target), the same uniqueness discipline `resolve_target` uses. The drop body's
+        // effects then propagate to `f` like any other callee (a flushing/closing guard stops reading
+        // silent-pure). Self-edges are skipped (a `Drop::drop` that constructs its own type).
+        for ty in &drops_here {
+            if let Some(targets) = by_tail2.get(&format!("{ty}::drop")) {
+                if targets.len() == 1 && targets[0] != f.qual {
+                    calls.entry(f.qual.clone()).or_default().insert(targets[0].clone());
                 }
             }
         }
@@ -3555,14 +3672,13 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             paths: pathsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             tables: tablesacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             calls: calls.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default(),
-            // The syntactic backend has ONE Unknown origin: a call it couldn't see through (a closure /
-            // fn-pointer value). Tag it directly-introduced Unknowns so the receipt matches the lint's
-            // `unknownWhy` (candor-spec §2). Coarser than the lint's per-trait tag — by design.
-            unknown_why: if direct.get(q).is_some_and(|d| d.contains("Unknown")) {
-                vec!["callback:unresolved call".to_string()]
-            } else {
-                Vec::new()
-            },
+            // DIRECTLY-introduced Unknown origins (candor-spec §2 `unknownWhy`): an unresolved callback /
+            // fn-pointer call, an FFI/extern boundary, or a genuinely-unresolvable bare call. Coarser than
+            // the lint's per-trait tag — by design — but now names WHICH boundary, not just "callback".
+            unknown_why: unknown_why
+                .get(q)
+                .map(|s| s.iter().map(|r| r.to_string()).collect())
+                .unwrap_or_default(),
             // candor-spec §2 `entryPoint`: syntactically we can only spot `main` (the program root). The
             // lint also flags `#[no_mangle]`; the scanner can't see attributes, so it under-marks — the
             // sound direction for an optional reachability hint.
@@ -4825,7 +4941,7 @@ mod tests {
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -4956,6 +5072,173 @@ mod tests {
     }
 
     #[test]
+    fn ffi_safe_wrapper_of_an_unclassified_extern_fn_discloses_unknown() {
+        // §4 honesty: a SAFE WRAPPER calling an `extern "C"` fn whose NAME the classifier doesn't know
+        // (`system`, `my_native_writer`) has an unknowable body — the effect could be anything — so it must
+        // DISCLOSE Unknown, never read silent-pure. Before this fix the `extern` block was never collected,
+        // so the call was a bare leaf resolving to nothing → pure (the cardinal sin). CONTROLS: (a) a fn
+        // with NO extern call stays pure (no fabrication); (b) a wrapper of a CLASSIFIED extern leaf
+        // (`sqlite3_exec` → Db) keeps the precise effect, NOT a coarse Unknown.
+        let d = std::env::temp_dir().join(format!("candor-scan-ffiwrap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"ffiwrap\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            extern "C" {
+                fn system(cmd: *const i8) -> i32;
+                fn my_native_writer(p: *const u8, n: usize) -> i32;
+                fn sqlite3_exec(p: *mut i8) -> i32;
+            }
+            // safe wrappers over UNCLASSIFIED extern fns → must DISCLOSE Unknown
+            pub fn run_shell(cmd: *const i8) -> i32 { unsafe { system(cmd) } }
+            pub fn native_write(p: *const u8, n: usize) -> i32 { unsafe { my_native_writer(p, n) } }
+            // a transitive caller inherits the Unknown
+            pub fn does_native_io() -> i32 { native_write(std::ptr::null(), 0) }
+            // CONTROL (a): a genuinely-pure fn with NO extern call stays pure
+            pub fn pure_math(a: i32, b: i32) -> i32 { a + b }
+            // CONTROL (b): a wrapper of a CLASSIFIED extern leaf keeps the PRECISE effect (Db), not Unknown
+            pub fn run_query() -> i32 { unsafe { sqlite3_exec(std::ptr::null_mut()) } }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q == needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // THE FIX: unclassified-extern wrappers disclose Unknown (not silent-pure)
+        assert!(effects_of("run_shell").contains(&"Unknown".to_string()),
+                "FFI wrapper of `system` must disclose Unknown:\n{body}");
+        assert!(effects_of("native_write").contains(&"Unknown".to_string()),
+                "FFI wrapper of `my_native_writer` must disclose Unknown:\n{body}");
+        // the unknown propagates transitively
+        assert!(effects_of("does_native_io").contains(&"Unknown".to_string()),
+                "a caller of an FFI wrapper must inherit Unknown:\n{body}");
+        // the disclosure names the FFI boundary
+        let why = v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some("run_shell"))
+            .and_then(|f| f.get("unknownWhy").or_else(|| f.get("unknown_why")))
+            .and_then(|w| w.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(why.iter().any(|r| r.contains("ffi")), "unknownWhy must name the FFI boundary: {why:?}\n{body}");
+        // CONTROL (a): pure_math has NO effect — never fabricated (it's absent from the effectful report)
+        assert!(effects_of("pure_math").is_empty(),
+                "a pure fn with no extern call must stay pure (no fabricated Unknown):\n{body}");
+        // CONTROL (b): a CLASSIFIED extern leaf keeps its precise Db, NOT a coarse Unknown
+        let rq = effects_of("run_query");
+        assert!(rq.contains(&"Db".to_string()), "classified extern (sqlite3_exec) must stay Db:\n{body}");
+        assert!(!rq.contains(&"Unknown".to_string()),
+                "a CLASSIFIED extern leaf must NOT be downgraded to Unknown:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn drop_glue_of_a_local_effectful_drop_propagates_to_the_binder() {
+        // §4 honesty (#3): a fn that constructs a value of a LOCAL type whose `impl Drop` does I/O must
+        // inherit that Drop body's effect — the scope-exit `drop` is an implicit edge the call graph misses,
+        // so a flushing/closing guard otherwise read silent-pure. CONTROLS: (a) a local type with a PURE
+        // Drop adds no effect; (b) an EXTERNAL type's invisible Drop is never fabricated (we only model
+        // LOCAL Drop impls).
+        let d = std::env::temp_dir().join(format!("candor-scan-dropglue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"dropglue\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            // a LOCAL type whose Drop writes a file (effectful scope-exit)
+            pub struct FlushGuard { path: String }
+            impl FlushGuard { pub fn new(p: &str) -> Self { FlushGuard { path: p.to_string() } } }
+            impl Drop for FlushGuard {
+                fn drop(&mut self) { std::fs::write(&self.path, b"flush").unwrap(); }
+            }
+            // binds a FlushGuard → the implicit drop edge must give this fn Fs
+            pub fn does_work_with_guard() {
+                let _g = FlushGuard::new("/tmp/x");
+                let _ = 1 + 1;
+            }
+            // CONTROL (a): a LOCAL type with a PURE Drop — binding it adds no effect
+            pub struct PureGuard;
+            impl PureGuard { pub fn new() -> Self { PureGuard } }
+            impl Drop for PureGuard { fn drop(&mut self) { /* nothing */ } }
+            pub fn does_work_pure_guard() { let _g = PureGuard::new(); }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q == needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // THE FIX: the binder inherits the effectful Drop's Fs via the implicit scope-exit edge
+        assert!(effects_of("does_work_with_guard").contains(&"Fs".to_string()),
+                "a fn binding a local guard with an effectful Drop must inherit Fs (drop glue):\n{body}");
+        // CONTROL (a): a local guard with a PURE Drop fabricates nothing
+        assert!(effects_of("does_work_pure_guard").is_empty(),
+                "a local guard with a PURE Drop must add no effect:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn drop_glue_never_fabricates_for_an_external_type() {
+        // CONTROL (b) for #3, isolated: a fn that binds an EXTERNAL type (whose Drop we cannot see) must
+        // NOT get a fabricated drop effect — we model ONLY local `impl Drop`. A `std::fs::File` is dropped
+        // at scope exit but its Drop (close) is invisible/benign; charging the binder an effect would be a
+        // fabrication. (The `std::fs::File::create` open itself is Fs via the classifier — that's correct —
+        // but a fn that merely RECEIVES a File by value and lets it drop must stay pure.)
+        let d = std::env::temp_dir().join(format!("candor-scan-dropext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"dropext\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            // receives an external File by value; it drops here, but its Drop is not a LOCAL impl → pure
+            pub fn consumes_a_file(f: std::fs::File) { let _f = f; }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs: Vec<String> = v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str() == Some("consumes_a_file"))
+            .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect();
+        assert!(effs.is_empty(),
+                "binding an EXTERNAL type must not fabricate a drop effect (only local Drop is modeled):\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn tuple_struct_fields_index_by_position() {
         // The other PROVE-IT miss: `self.0.0.run()` (ureq's ConfigBuilder newtype chain) — tuple
         // fields weren't in the FieldIndex, so the receiver never typed and the edge dropped.
@@ -4970,7 +5253,7 @@ mod tests {
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -4990,7 +5273,8 @@ mod tests {
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -5019,7 +5303,8 @@ mod tests {
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -5046,7 +5331,8 @@ mod tests {
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -5294,7 +5580,8 @@ trait G {
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new());
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
@@ -5670,6 +5957,8 @@ trait G {
             trait_decls: _,
             trait_fields: _,
             prim_aliases: _,
+            extern_fns: _,
+            drop_types: _,
         } = MergedDecls::default();
 
         let empty = decl_index_digest(&MergedDecls::default());
@@ -5685,6 +5974,8 @@ trait G {
             ("trait_decls", |m| { m.trait_decls.entry("Tr".into()).or_default().count += 1; }),
             ("trait_fields", |m| { m.trait_fields.entry("S".into()).or_default().insert("f".into(), vec!["b".into()]); }),
             ("prim_aliases", |m| { m.prim_aliases.insert("A".into()); }),
+            ("extern_fns", |m| { m.extern_fns.insert("system".into()); }),
+            ("drop_types", |m| { m.drop_types.insert("Guard".into()); }),
         ];
         for (name, mutate) in mutators {
             let mut m = MergedDecls::default();
