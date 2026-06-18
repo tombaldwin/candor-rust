@@ -35,6 +35,7 @@ fn main() {
         "reachable" => cmd_reachable(rest),
         "path" => cmd_path(rest),
         "impact" => cmd_impact(rest),
+        "blindspots" => cmd_blindspots(rest),
         "whatif" => cmd_whatif(rest),
         "rewire" => cmd_rewire(rest),
         "receipt" => cmd_receipt(rest),
@@ -1338,6 +1339,87 @@ fn layer_of(name: &str, prefix_len: usize) -> String {
 /// ENTRY POINTS are downstream ("if I change this, what surfaces at runtime?"). Backward dual of `path`;
 /// the transitive, entry-point-scoped `callers`. Reverses the effect-relevant `calls` graph. Read-only.
 /// Scoped to effectful targets (the report's `calls` records only effect-carrying edges — honest limit).
+/// `blindspots` (SPEC §3.1 ⟨0.6⟩) — the Unknown SOURCES: entries whose OWN body has an unresolvable call
+/// (so they carry `unknownWhy`), each ranked by its Unknown blast radius (the transitive callers that
+/// inherit `Unknown` through it). The actionable inverse of a widely-propagated `Unknown`: a report can
+/// read mostly-Unknown from a handful of root causes — this names them, ranked, to declare/resolve/accept.
+/// Reverse-BFS over the report's effect-relevant `calls` edges (the channel `Unknown` propagates along),
+/// the same graph `impact` uses.
+fn cmd_blindspots(args: &[String]) -> i32 {
+    let want_json = args.iter().any(|a| a == "--json");
+    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
+    let Some(pre) = pos.first() else {
+        eprintln!("usage: candor-query blindspots <prefix> [--json]");
+        return 2;
+    };
+    let entries = match load_entries_loud(pre) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let mut rev: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in &entries {
+        for c in &e.calls {
+            rev.entry(c.as_str()).or_default().push(e.func.as_str());
+        }
+    }
+    let total_unknown = entries.iter().filter(|e| e.inferred.iter().any(|x| x == "Unknown")).count();
+    #[derive(Serialize)]
+    struct Source {
+        #[serde(rename = "fn")]
+        func: String,
+        why: Vec<String>,
+        reaches: usize,
+        affected: Vec<String>,
+    }
+    let mut sources: Vec<Source> = Vec::new();
+    for e in &entries {
+        if e.unknown_why.is_empty() {
+            continue; // a SOURCE carries its own unknownWhy; a purely-transitive Unknown does not
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut q: VecDeque<&str> = VecDeque::new();
+        q.push_back(e.func.as_str());
+        seen.insert(e.func.as_str());
+        while let Some(cur) = q.pop_front() {
+            if let Some(callers) = rev.get(cur) {
+                for &caller in callers {
+                    if seen.insert(caller) {
+                        q.push_back(caller);
+                    }
+                }
+            }
+        }
+        let mut affected: Vec<String> =
+            seen.iter().copied().filter(|n| *n != e.func.as_str()).map(String::from).collect();
+        affected.sort_unstable();
+        sources.push(Source { func: e.func.clone(), why: e.unknown_why.clone(), reaches: affected.len(), affected });
+    }
+    // most-smearing sources first; tie-break by name for a stable cross-engine shape.
+    sources.sort_by(|a, b| b.reaches.cmp(&a.reaches).then_with(|| a.func.cmp(&b.func)));
+    if want_json {
+        #[derive(Serialize)]
+        struct Out {
+            sources: Vec<Source>,
+            #[serde(rename = "totalUnknown")]
+            total_unknown: usize,
+        }
+        println!("{}", serde_json::to_string(&Out { sources, total_unknown }).unwrap());
+        return 0;
+    }
+    if sources.is_empty() {
+        println!("  no Unknown sources — every call resolved (or no Unknown in this report).");
+        return 0;
+    }
+    println!(
+        "  {} Unknown source(s) explaining {} Unknown function(s) — the blind spots to declare, resolve, or accept:",
+        sources.len(), total_unknown
+    );
+    for s in &sources {
+        println!("  {:<52} reaches {:>4}  {:?}", s.func, s.reaches, s.why);
+    }
+    0
+}
+
 fn cmd_impact(args: &[String]) -> i32 {
     let want_json = args.iter().any(|a| a == "--json");
     let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
