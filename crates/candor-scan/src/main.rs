@@ -1339,7 +1339,11 @@ impl<'a> CallCollector<'a> {
     /// or inline-captured hole (`{x}`) and `write!`/`writeln!`'s leading writer arg are handled by the
     /// positional accounting below. For each value arg whose type is a concrete local impl of the
     /// requested formatter trait, edge to `Type::fmt` (resolve-or-skip — a std/external arg lights nothing).
-    fn charge_format_args(&mut self, exprs: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+    fn charge_format_args(
+        &mut self,
+        leaf: &str,
+        exprs: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+    ) {
         let exprs: Vec<&syn::Expr> = exprs.iter().collect();
         // Locate the format-string literal and the index where positional value args begin. `write!`/
         // `writeln!`/`fwrite` take a WRITER as the first arg, then the format string; `format!`/`print!`/
@@ -1379,6 +1383,19 @@ impl<'a> CallCollector<'a> {
             let Some(arg) = pos_args.get(idx) else { continue };
             let trait_method = if hole.debug { ("Debug", "fmt") } else { ("Display", "fmt") };
             self.charge_coercion(arg, trait_method.0, trait_method.1);
+        }
+        // WRITER side of `write!`/`writeln!`: the arg BEFORE the format string is the writer, whose
+        // effectful `fmt::Write::write_str` / `io::Write::write` (driven by the default `write_fmt`) was
+        // dropped — the writer side, distinct from the arg-`Display` side above (a cross-engine blind spot:
+        // the deep engine had it too, HOLE 2c). Charge it (resolve-or-skip — a std writer like `String`/
+        // `Vec`/`Stdout` resolves to no local impl → nothing). Gated to the write family so a leading
+        // `assert!`/`assert_eq!` operand is never mistaken for a writer. Both method names are tried because
+        // the `Write` trait leaf is shared by fmt (`write_str`) and io (`write`); only the one the local
+        // type actually defines resolves to a body, so a mismatch is a harmless no-op edge.
+        if matches!(leaf, "write" | "writeln") && fmt_pos >= 1 {
+            let writer = exprs[fmt_pos - 1];
+            self.charge_coercion(writer, "Write", "write_str");
+            self.charge_coercion(writer, "Write", "write");
         }
     }
 
@@ -1991,7 +2008,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // we can't map to a holder defaults to Display (the bare `{}` case). A std/external arg type
             // (`String`, `i32`) resolves to no local impl → no edge (no flood — the common case).
             if is_format_macro(&mleaf) {
-                self.charge_format_args(&exprs);
+                self.charge_format_args(&mleaf, &exprs);
             }
             for e in &exprs {
                 self.visit_expr(e);
@@ -7046,6 +7063,50 @@ trait G {
         let ext = run("macedge3", "pub fn logs() { log::info!(\"hi\"); }");
         assert!(eff(&ext, "logs").contains(&"Log".to_string()),
                 "an external classified emit-macro must still attribute its effect:\n{ext}");
+    }
+
+    #[test]
+    fn write_macro_charges_the_local_writer_side() {
+        // R14 cross-engine sweep (scan): `write!(w, ...)` to a custom `fmt::Write` writer dropped the
+        // writer's effectful `write_str` — silent-pure (the deep engine had this too, fixed as HOLE 2c).
+        // The writer is the arg BEFORE the format string; charge its `write_str`/`write`. A std writer
+        // (`String`) must light nothing (no fabrication), and a leading `assert_eq!` operand must never be
+        // mistaken for a writer (the charge is gated to the write/writeln family).
+        let idx = load_dep_reports(None);
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-wr-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let w = "use std::fmt::Write as _;\nstruct Loud;\nimpl std::fmt::Write for Loud { fn write_str(&mut self, _s: &str) -> std::fmt::Result { let _ = std::fs::read(\"/x\"); Ok(()) } }\n";
+        // effectful local fmt::Write writer -> Fs (the bug: this was silent-pure)
+        let hit = run("wrfmt", &format!("{w}pub fn via_write(w: &mut Loud) {{ let _ = write!(w, \"hi {{}}\", 1); }}"));
+        assert!(eff(&hit, "via_write").contains(&"Fs".to_string()),
+                "write! to a local effectful fmt::Write writer must charge the writer side:\n{hit}");
+        // std String writer -> pure (no fabrication)
+        let pure = run("wrstr", "use std::fmt::Write as _;\npub fn via_str(s: &mut String) { let _ = write!(s, \"hi {}\", 1); }");
+        assert!(eff(&pure, "via_str").is_empty(),
+                "write! to a std String writer must stay pure:\n{pure}");
+        // assert_eq! leads with operands, not a writer — must NOT be charged (gated to write/writeln)
+        let asrt = run("wrassert", &format!("{w}#[derive(Debug, PartialEq)]\nstruct Tag;\npub fn via_assert(a: Tag, b: Tag) {{ assert_eq!(a, b, \"ctx {{}}\", 1); }}"));
+        assert!(eff(&asrt, "via_assert").is_empty(),
+                "an assert_eq! operand was wrongly charged as a writer:\n{asrt}");
     }
 
     #[test]
