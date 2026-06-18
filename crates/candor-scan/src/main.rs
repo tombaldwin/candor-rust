@@ -210,6 +210,12 @@ struct CallCollector<'a> {
     forced_lazies: std::collections::HashSet<String>,
     /// set once the body invokes a callable we can't resolve (see `FnInfo::unresolved`).
     unresolved: bool,
+    /// The ERROR type leaf of the enclosing fn's `Result<_, E>` return, if any — the `?` operator's
+    /// `From::from` TARGET. A `may_fail()?` where `may_fail` returns `Result<_, E1>` and this fn returns
+    /// `Result<_, E2>` desugars to `E2::from(e1)` via a local `impl From<E1> for E2`; we edge to
+    /// `E2::from` when `E2` locally `impl From` (see `charge_from`). `None` for a non-fallible fn or an
+    /// unresolvable/`Box<dyn Error>`/external error type → no `?` edge (the no-flood default).
+    err_ret_leaf: Option<String>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely
@@ -1012,6 +1018,33 @@ fn unwrap_result_option(ty: &syn::Type) -> &syn::Type {
     ty
 }
 
+/// The ERROR type LEAF of a fn's `Result<T, E>` / `io::Result<T>` return — the `?` operator's
+/// `From::from` conversion TARGET. Returns the leaf of `E` when the output is a two-arg `Result<_, E>`
+/// whose `E` is a concrete nominal path (a local error enum/struct). `None` for: a non-`Result` output,
+/// a one-arg alias (`io::Result<T>`/`anyhow::Result<T>` carry no visible `E`), or a non-nominal/`Box<dyn
+/// Error>` error (no single local type to convert to) — each the no-flood default for `?` (the edge is
+/// only ever synthesized when `E` is also a LOCAL `impl From`, gated downstream in `charge_from`).
+fn result_err_leaf(output: &syn::ReturnType, uses: &HashMap<String, String>) -> Option<String> {
+    let syn::ReturnType::Type(_, ty) = output else { return None };
+    let syn::Type::Path(p) = &**ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "Result" {
+        return None; // only the std two-arg Result exposes the error type positionally
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+    // The error is the SECOND generic arg. A one-arg `Result<T>` (an aliased Result) has no `E` here.
+    let mut tys = args.args.iter().filter_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    });
+    let _ok = tys.next()?;
+    let err = tys.next()?;
+    // The error type leaf — only a concrete nominal path (a local error type). `expand` then strips
+    // module qualifiers; we keep just the leaf to match `trait_impls`/`by_tail2` keying.
+    let expanded = type_path(err, uses)?;
+    Some(expanded.rsplit("::").next().unwrap_or(&expanded).to_string())
+}
+
 /// Expand a call path against this file's `use` map: if the first segment is the last segment of some
 /// `use a::b::Name`, replace it with the full `a::b::Name`. Turns `fs::read` → `std::fs::read`,
 /// `Command::new` → `std::process::Command::new`. `crate`/`self`/`super` prefixes are stripped (local).
@@ -1241,6 +1274,114 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// Push a synthetic `Type::method` edge — the shared primitive for every implicit trait-method
+    /// coercion (`Display::fmt`, `From::from`, `Deref::deref`, the operator family). The path mirrors what
+    /// the impl-method walker records as a FnInfo qual (`impl Display for T { fn fmt }` → qual `T::fmt`,
+    /// via `impl_type_name`), so it resolves through `resolve_target`'s unambiguous-tail2 route to the
+    /// LOCAL impl body, carrying its (possibly effectful) effects to this fn. `method=false`/`typed=false`
+    /// like the iterator/lazy edges. The CALLER owns the resolve-or-skip gate (the type must be a concrete
+    /// local `impl <trait>`), so this never fabricates.
+    fn push_coercion_edge(&mut self, ty_leaf: &str, method: &str) {
+        self.calls.push(Call {
+            path: format!("{ty_leaf}::{method}"),
+            leaf: method.to_string(),
+            str_arg: None,
+            typed: false,
+            method: false,
+            is_macro: false,
+        });
+    }
+
+    /// IMPLICIT TRAIT-METHOD COERCION on an OPERAND. Synthesize an edge to `<Type>::<method>` ONLY when
+    /// `operand` resolves to a CONCRETE LOCAL type (via `resolve_recv_type`) that locally `impl <trait>`
+    /// (present in `trait_impls[trait_leaf]`, keyed by type leaf per `impl_type_name`). This covers the
+    /// constructs whose hidden call is dispatched on the operand's OWN type: `{}`/`{:?}` format args
+    /// (`Display::fmt`/`Debug::fmt`), `*w`/auto-deref (`Deref::deref`), and the operator overloads
+    /// (`a + b`→`Add::add`, `a == b`→`PartialEq::eq`, …). (`From::from`, dispatched on the TARGET type,
+    /// has its own `charge_from`.)
+    ///
+    /// GOVERNING DISCIPLINE (critical — these constructs are PERVASIVE): a PURE local impl contributes
+    /// nothing (its `Type::method` FnInfo carries no effect — the edge resolves to a pure body); an
+    /// UNRESOLVABLE operand (a std/external value like `String`/`i32`, a generic/`impl Trait` param in
+    /// `trait_vars`, an opaque return) yields None → NO edge, NOT a disclosed Unknown — a blanket Unknown
+    /// here would FLOOD every `format!`/`+`/`concat` in real code. We never fabricate; only a real LOCAL
+    /// effectful impl lights up. An impl whose method body isn't a UNIQUE local def is an honest miss
+    /// (`resolve_target`'s uniqueness filter), e.g. a type impl'ing both Display and Debug (two `T::fmt`).
+    fn charge_coercion(&mut self, operand: &syn::Expr, trait_leaf: &str, method: &str) {
+        let Some(ty) = self.resolve_recv_type(operand) else { return };
+        let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty);
+        if let Some(impls) = self.trait_impls.get(trait_leaf) {
+            if impls.iter().any(|t| t == ty_leaf) {
+                self.push_coercion_edge(ty_leaf, method);
+            }
+        }
+    }
+
+    /// IMPLICIT `From::from` (the `?` operator's error conversion and `.into()`), dispatched on the TARGET
+    /// type. `?` on `expr: Result<_, E1>` inside a fn returning `Result<_, E2>` desugars (when `E1 != E2`)
+    /// to `E2::from(e1)` via a local `impl From<E1> for E2`; `.into()` to `Target::from(src)`. The body
+    /// that may be effectful lives on the TARGET `E2`/`Target`, NOT the operand's source type — so we
+    /// resolve from the supplied `target_leaf` (the enclosing fn's error type for `?`; a context type for
+    /// `.into()`) and edge to `Target::from` ONLY when `Target` locally `impl From`. A None/unknown target
+    /// → NO edge (no flood — the overwhelming case is std `From` like `String: From<&str>`, never local).
+    fn charge_from(&mut self, target_leaf: &str) {
+        if let Some(impls) = self.trait_impls.get("From") {
+            if impls.iter().any(|t| t == target_leaf) {
+                self.push_coercion_edge(target_leaf, "from");
+            }
+        }
+    }
+
+    /// Charge `Display::fmt`/`Debug::fmt` coercion edges for a formatting macro's arguments (#2). `exprs`
+    /// is the macro's comma-separated token parse: a leading format-string LITERAL (when present) followed
+    /// by the value args. We parse the literal's `{…}` holes to learn which positional arg each uses and
+    /// whether it requests Debug (`{:?}`/`{:#?}`) or Display (everything else, incl. bare `{}`); a NAMED
+    /// or inline-captured hole (`{x}`) and `write!`/`writeln!`'s leading writer arg are handled by the
+    /// positional accounting below. For each value arg whose type is a concrete local impl of the
+    /// requested formatter trait, edge to `Type::fmt` (resolve-or-skip — a std/external arg lights nothing).
+    fn charge_format_args(&mut self, exprs: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        let exprs: Vec<&syn::Expr> = exprs.iter().collect();
+        // Locate the format-string literal and the index where positional value args begin. `write!`/
+        // `writeln!`/`fwrite` take a WRITER as the first arg, then the format string; `format!`/`print!`/
+        // … lead with the string. We find the first string-literal expr and treat everything AFTER it as
+        // the positional value args (named args `name = expr` are `Expr::Assign` — skipped as positional).
+        let Some(fmt_pos) = exprs.iter().position(|e| {
+            matches!(e, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. }))
+        }) else {
+            return; // no literal format string (a runtime `&str` fmt) — can't map holes, skip (no flood)
+        };
+        let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = exprs[fmt_pos] else {
+            return;
+        };
+        let fmt = s.value();
+        // The positional value args, in order (a `name = expr` named arg has no positional hole; skip it
+        // so positional indices stay aligned). These are the args AFTER the format string.
+        let pos_args: Vec<&syn::Expr> = exprs[fmt_pos + 1..]
+            .iter()
+            .copied()
+            .filter(|e| !matches!(e, syn::Expr::Assign(_)))
+            .collect();
+        // Each parsed hole → (positional index, wants_debug). A hole with an inline capture/name
+        // (`{x}`, `{x:?}`) is NOT positional — it captures a same-named binding, not a value arg, so it
+        // consumes no positional slot (we can't resolve the captured ident's type here → skip it).
+        let mut next_positional = 0usize;
+        for hole in parse_format_holes(&fmt) {
+            let idx = match hole.arg {
+                FmtArg::Implicit => {
+                    let i = next_positional;
+                    next_positional += 1;
+                    i
+                }
+                FmtArg::Index(i) => i,
+                // a named/inline-captured hole consumes no positional value arg
+                FmtArg::Named => continue,
+            };
+            let Some(arg) = pos_args.get(idx) else { continue };
+            let trait_method = if hole.debug { ("Debug", "fmt") } else { ("Display", "fmt") };
+            self.charge_coercion(arg, trait_method.0, trait_method.1);
+        }
+    }
+
     /// The trait bounds of a DISPATCH-typed receiver — a `&dyn T`/`impl T`/generic param (via
     /// `trait_vars`) or a trait-typed field (`self.store` where `store: Box<dyn Store>`, via
     /// `trait_fields`). Empty when the receiver has a concrete type (`resolve_recv_type` owns it)
@@ -1430,6 +1571,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // fabrication stays closed. (`.next()` itself isn't here — it resolves directly as a method.)
         if is_iter_consumer(&leaf) {
             self.charge_iter_next(&node.receiver);
+        }
+        // IMPLICIT `.to_string()` → `Display::fmt` (#2): `ToString` is blanket-impl'd for every `T: Display`
+        // by routing through `Display::fmt`, so `v.to_string()` on a concrete local `impl Display` reaches
+        // that (possibly effectful) formatter — silent-pure otherwise. Charge it like a `{}` format arg.
+        // (A type with its OWN inherent `to_string` is rare; the blanket impl is the universal case, and a
+        // local impl Display is the resolve-or-skip gate.) `format_args!`-family macros are handled in
+        // `visit_macro`.
+        if leaf == "to_string" && node.args.is_empty() {
+            self.charge_coercion(&node.receiver, "Display", "fmt");
         }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
         self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false });
@@ -1683,6 +1833,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if let Some(t) = tuple_types(&pt.ty, self.uses) {
                     self.tuple_of.insert(id.ident.to_string(), t);
                 }
+                // IMPLICIT `.into()` → `From::from` (#5), TARGET resolved from the annotation. `let d:
+                // Dst = src.into();` desugars to `Dst::from(src)` via a local `impl From<Src> for Dst`;
+                // the conversion body lives on `Dst` (the annotated type), so charge `Dst::from` when `Dst`
+                // is a LOCAL `impl From`. We only do this where the target is KNOWN (the annotation) — a
+                // bare `f(x.into())` arg whose target is inferred from the callee's param type can't be
+                // resolved syntactically → skipped (no flood; an `.into()` to a std type lights nothing).
+                if let Some(init) = &node.init {
+                    if expr_is_into_call(&init.expr) {
+                        if let Some(tgt) = type_path(&pt.ty, self.uses) {
+                            let tgt_leaf = tgt.rsplit("::").next().unwrap_or(&tgt).to_string();
+                            self.charge_from(&tgt_leaf);
+                        }
+                    }
+                }
             } else if let syn::Pat::Tuple(tup) = &*pt.pat {
                 // ANNOTATED TUPLE DESTRUCTURE: `let (s, _): (Sender, usize) = pair;` — bind each
                 // single-ident element to its annotated tuple element type so `s.send()` resolves.
@@ -1742,7 +1906,28 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     } else {
                         self.fn_typed_vars.remove(&id.ident.to_string());
                         if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
-                            self.vars.insert(id.ident.to_string(), ty);
+                            self.vars.insert(id.ident.to_string(), ty.clone());
+                            // DROP-GLUE via STRUCT-LITERAL / UNIT construction (#6). The existing drop-glue
+                            // catches only `let g = T::new()` constructor CALLS — a `let g = Guard { .. };`
+                            // or bare `let g = UnitGuard;` builds a `T` value just the same (its `impl Drop`
+                            // runs at scope exit) but emits NO call, so an effectful-Drop guard built this
+                            // way read silent-pure. Emit a synthetic CONSTRUCTION marker (`T::<construct>`,
+                            // method=false, an angle-bracket leaf that can't collide with a real fn or a
+                            // crate classifier) so the call-loop's drop detection — gated on `drop_types`
+                            // (LOCAL `impl Drop` only) — picks `T` up and edges to `T::drop`. A non-drop
+                            // type's marker is inert (filtered out there); a plain typed binding (a CALL
+                            // init, already handled) is excluded — only literal construction emits this.
+                            if matches!(&*init.expr, syn::Expr::Struct(_) | syn::Expr::Path(_)) {
+                                let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+                                self.calls.push(Call {
+                                    path: format!("{ty_leaf}::<construct>"),
+                                    leaf: "<construct>".to_string(),
+                                    str_arg: None,
+                                    typed: false,
+                                    method: false,
+                                    is_macro: false,
+                                });
+                            }
                         }
                         // `let g = eff;` where the init is a bare PATH (not a call) — `g` aliases a free fn,
                         // so a later `g()` resolves to it (sweep [6]). `g()` only compiles if the path is
@@ -1785,9 +1970,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // same-named local fn and fabricate that fn's effect onto a pure caller). Classification, the
         // builder table, and κ blind-disclosure still apply (they key on the path/crate, not the edge).
         let mpath = expand(&path_to_string(&node.path), self.uses);
+        let mleaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
         if mpath.contains("::") {
-            let leaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
-            self.calls.push(Call { path: mpath, leaf, str_arg: None, typed: false, method: false, is_macro: true });
+            self.calls.push(Call { path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true });
         }
         // syn does not parse a macro's body, so every call hidden inside one is invisible by default —
         // a real miss on crates that route effectful calls through a macro (git2 wraps EVERY libgit2 FFI
@@ -1797,10 +1982,62 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // — so this only ever ADDS visibility, never breaks. Owned exprs, so visit a local copy.
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
         if let Ok(exprs) = syn::parse::Parser::parse2(parser, node.tokens.clone()) {
+            // IMPLICIT FORMATTING (#2): a formatting macro (`format!`/`println!`/`write!`/…) runs each
+            // `{}`/`{:?}` argument through `Display::fmt`/`Debug::fmt`. A LOCAL type with an effectful
+            // `impl Display`/`impl Debug` (a custom formatter that touches the fs/net/etc.) is therefore
+            // reached at every format site but reads silent-pure. When this is such a macro, charge the
+            // coercion for each formatted argument whose type is a concrete local impl. The format STRING
+            // (the first literal) tells us which args are `{:?}` (Debug) vs `{}`/`{:…}` (Display); an arg
+            // we can't map to a holder defaults to Display (the bare `{}` case). A std/external arg type
+            // (`String`, `i32`) resolves to no local impl → no edge (no flood — the common case).
+            if is_format_macro(&mleaf) {
+                self.charge_format_args(&exprs);
+            }
             for e in &exprs {
                 self.visit_expr(e);
             }
         }
+    }
+    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+        // THE `?` OPERATOR (#1): `may_fail()?` in a fn returning `Result<_, E2>`, where the operand is
+        // `Result<_, E1>` with `E1 != E2`, desugars to `E2::from(e1)` via a local `impl From<E1> for E2`.
+        // The conversion body lives on the enclosing fn's ERROR type `E2` (`err_ret_leaf`); edge to
+        // `E2::from` when `E2` is a LOCAL `impl From`. A `?` whose enclosing error type is unknown /
+        // std / `Box<dyn Error>` (the overwhelming case) has no `err_ret_leaf` → no edge (no flood).
+        if let Some(err_leaf) = self.err_ret_leaf.clone() {
+            self.charge_from(&err_leaf);
+        }
+        syn::visit::visit_expr_try(self, node);
+    }
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        // OPERATOR OVERLOADS (#4): a binary operator on a value of a concrete LOCAL type with the matching
+        // `impl Add`/`Sub`/…/`PartialEq`/`PartialOrd` runs that impl's method (`a + b`→`Add::add`,
+        // `a == b`→`PartialEq::eq`, `a < b`→`PartialOrd::partial_cmp`). An effectful operator impl
+        // (rare, but a real reach) reads silent-pure otherwise. Charge on the LEFT operand's type (the
+        // dispatch receiver for `Add`/`PartialEq`/…). A std/primitive operand resolves to no local impl
+        // → no edge (no flood on arithmetic over `i32`/`usize`/etc.).
+        if let Some((tr, method)) = binop_trait(&node.op) {
+            self.charge_coercion(&node.left, tr, method);
+        }
+        syn::visit::visit_expr_binary(self, node);
+    }
+    fn visit_expr_unary(&mut self, node: &'ast syn::ExprUnary) {
+        // UNARY OPERATOR OVERLOADS (#4): `-a`→`Neg::neg`, `!a`→`Not::not`, and the DEREF coercion
+        // `*w`→`Deref::deref` (#3) on a concrete local impl. (`&a`/`Borrow` is not an operator overload.)
+        match &node.op {
+            syn::UnOp::Neg(_) => self.charge_coercion(&node.expr, "Neg", "neg"),
+            syn::UnOp::Not(_) => self.charge_coercion(&node.expr, "Not", "not"),
+            // `*w` on a local `impl Deref for W` runs `W::deref` (the explicit-deref case of #3).
+            syn::UnOp::Deref(_) => self.charge_coercion(&node.expr, "Deref", "deref"),
+            _ => {}
+        }
+        syn::visit::visit_expr_unary(self, node);
+    }
+    fn visit_expr_index(&mut self, node: &'ast syn::ExprIndex) {
+        // INDEX OVERLOAD (#4): `a[i]` on a concrete local `impl Index for A` runs `A::index`. (A std
+        // collection / slice / array operand resolves to no local impl → no edge.)
+        self.charge_coercion(&node.expr, "Index", "index");
+        syn::visit::visit_expr_index(self, node);
     }
 }
 
@@ -2434,6 +2671,7 @@ fn fninfo(
         lazy_statics,
         forced_lazies: std::collections::HashSet::new(),
         unresolved: false,
+        err_ret_leaf: result_err_leaf(&sig.output, uses),
     };
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
@@ -2808,7 +3046,7 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 fn cache_schema(include_tests: bool) -> String {
-    format!("scan-{}/rev5/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev6/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -4471,6 +4709,142 @@ fn is_iter_consumer(leaf: &str) -> bool {
     )
 }
 
+/// A FORMATTING macro: one whose `{}`/`{:?}` args are run through `Display::fmt`/`Debug::fmt` (#2). The
+/// std family `format!`/`format_args!`/`print!`/`println!`/`eprint!`/`eprintln!`/`write!`/`writeln!` plus
+/// the very common `panic!`/`assert!` family and `.to_string()` (handled at the method site, not here).
+/// Only these implicitly format — a non-format macro never reaches a `Display`/`Debug` impl this way.
+fn is_format_macro(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        "format"
+            | "format_args"
+            | "print"
+            | "println"
+            | "eprint"
+            | "eprintln"
+            | "write"
+            | "writeln"
+            | "panic"
+            | "unreachable"
+            | "todo"
+            | "unimplemented"
+            | "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "debug_assert_ne"
+    )
+}
+
+/// The (trait leaf, method) a binary operator overloads to, for the operator-overload coercion (#4). The
+/// dispatch receiver is the LEFT operand (Rust resolves `a OP b` as `<A>::method(a, b)`). Comparison ops
+/// route through `PartialOrd::partial_cmp`/`PartialEq::eq` (the impl method, not the per-op `lt`/`gt`
+/// which forward to it). Lazy boolean `&&`/`||`, assignment, and the compound-assign ops (`+=` is
+/// `AddAssign`, a distinct family left as an honest residual) return None — no overload edge.
+fn binop_trait(op: &syn::BinOp) -> Option<(&'static str, &'static str)> {
+    use syn::BinOp;
+    Some(match op {
+        BinOp::Add(_) => ("Add", "add"),
+        BinOp::Sub(_) => ("Sub", "sub"),
+        BinOp::Mul(_) => ("Mul", "mul"),
+        BinOp::Div(_) => ("Div", "div"),
+        BinOp::Rem(_) => ("Rem", "rem"),
+        BinOp::BitAnd(_) => ("BitAnd", "bitand"),
+        BinOp::BitOr(_) => ("BitOr", "bitor"),
+        BinOp::BitXor(_) => ("BitXor", "bitxor"),
+        BinOp::Shl(_) => ("Shl", "shl"),
+        BinOp::Shr(_) => ("Shr", "shr"),
+        BinOp::Eq(_) | BinOp::Ne(_) => ("PartialEq", "eq"),
+        BinOp::Lt(_) | BinOp::Le(_) | BinOp::Gt(_) | BinOp::Ge(_) => ("PartialOrd", "partial_cmp"),
+        _ => return None,
+    })
+}
+
+/// True if `expr` is a `<recv>.into()` method call (no args), peeling effect-transparent wrappers — the
+/// `.into()` coercion (#5) whose `From::from` target is the binding's annotated type.
+fn expr_is_into_call(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::MethodCall(m) => m.method == "into" && m.args.is_empty(),
+        syn::Expr::Reference(r) => expr_is_into_call(&r.expr),
+        syn::Expr::Paren(p) => expr_is_into_call(&p.expr),
+        syn::Expr::Group(g) => expr_is_into_call(&g.expr),
+        _ => false,
+    }
+}
+
+/// Which argument a format `{…}` hole references.
+enum FmtArg {
+    /// a bare `{}` / `{:?}` — the next positional value arg in order
+    Implicit,
+    /// an explicit positional index `{0}` / `{1:?}`
+    Index(usize),
+    /// a named or inline-captured hole (`{name}`, `{x:?}`) — references a binding, not a value arg
+    Named,
+}
+
+/// One parsed `{…}` hole of a format string: which arg it draws, and whether it requests `Debug` (`{:?}`/
+/// `{:#?}`) rather than `Display`.
+struct FmtHole {
+    arg: FmtArg,
+    debug: bool,
+}
+
+/// Parse the `{…}` holes of a format string (`std::fmt` mini-grammar, the subset that matters for picking
+/// the formatter trait). Handles `{{`/`}}` escapes, implicit (`{}`) vs indexed (`{0}`) vs named (`{x}`)
+/// argument refs, and detects `Debug` via a `?`/`#?` type in the format spec after `:`. We do NOT resolve
+/// width/precision `$`-args (a `{:.*}` / `{:1$}` extra positional) — at worst that misaligns one implicit
+/// index, a benign miss (an edge to the wrong-but-also-local arg, or none), never a fabrication on a
+/// non-local type. Best-effort and forgiving: a malformed hole is skipped.
+fn parse_format_holes(fmt: &str) -> Vec<FmtHole> {
+    let mut holes = Vec::new();
+    let bytes: Vec<char> = fmt.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            '{' => {
+                if bytes.get(i + 1) == Some(&'{') {
+                    i += 2; // escaped `{{`
+                    continue;
+                }
+                // Read until the matching `}`.
+                let start = i + 1;
+                let mut j = start;
+                while j < bytes.len() && bytes[j] != '}' {
+                    j += 1;
+                }
+                if j >= bytes.len() {
+                    break; // unterminated — malformed, stop
+                }
+                let inner: String = bytes[start..j].iter().collect();
+                // Split off the format SPEC after the first `:`.
+                let (name_part, spec) = match inner.split_once(':') {
+                    Some((n, s)) => (n.trim(), s),
+                    None => (inner.trim(), ""),
+                };
+                // Debug = the spec's type char is `?` (optionally after `#` for pretty `{:#?}`), i.e. the
+                // spec (after stripping fill/align/flags/width/precision) ENDS in `?`. A simple, robust
+                // test: the spec contains `?` as its trailing type.
+                let debug = spec.trim_end().ends_with('?');
+                let arg = if name_part.is_empty() {
+                    FmtArg::Implicit
+                } else if let Ok(idx) = name_part.parse::<usize>() {
+                    FmtArg::Index(idx)
+                } else {
+                    FmtArg::Named
+                };
+                holes.push(FmtHole { arg, debug });
+                i = j + 1;
+            }
+            '}' => {
+                i += if bytes.get(i + 1) == Some(&'}') { 2 } else { 1 }; // escaped `}}` or stray
+            }
+            _ => i += 1,
+        }
+    }
+    holes
+}
+
 /// Resolve a call to the local definition(s) it links to in the intra-crate graph, or `None` to
 /// under-report. A QUALIFIED path (`a::Job::run`, `mod::helper`, or an associated-fn call `Type::new()`)
 /// matches on its precise 2-segment tail, but ONLY when that tail is UNAMBIGUOUS — two same-named types in
@@ -4816,6 +5190,7 @@ mod tests {
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
+            err_ret_leaf: None,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -4860,6 +5235,7 @@ mod tests {
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
+            err_ret_leaf: None,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -5093,6 +5469,148 @@ mod tests {
     }
 
     #[test]
+    fn implicit_coercion_edges_charge_local_effectful_impls_but_never_std() {
+        // The implicit-conversion / coercion edges (cardinal sin = a fn read PURE when an effect is
+        // reachable through an IMPLICIT trait-method invocation): `format!`/`.to_string()`→Display::fmt,
+        // `{:?}`→Debug::fmt, `?`→From::from, operators→Add/PartialEq/Index/Neg, `*w`→Deref::deref,
+        // `.into()`→From::from, and struct-literal/unit Drop-glue. Each must light up the triggering fn
+        // when a LOCAL EFFECTFUL impl exists; controls (a PURE impl, a STD/primitive operand) stay pure.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-coerce-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, name: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(name))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+            use std::fmt;
+            // #2 effectful Display via format! / println! / to_string
+            struct EffDisp;
+            impl fmt::Display for EffDisp {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    std::fs::write("/t", b"x").unwrap(); write!(f, "e")
+                }
+            }
+            pub fn disp_format() -> String { let d = EffDisp; format!("{}", d) }
+            pub fn disp_println() { let d = EffDisp; println!("hi {}", d); }
+            pub fn disp_tostring() -> String { let d = EffDisp; d.to_string() }
+            // #2 effectful Debug via {:?}
+            struct EffDbg;
+            impl fmt::Debug for EffDbg {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    std::fs::write("/t", b"x").unwrap(); write!(f, "d")
+                }
+            }
+            pub fn dbg_format() -> String { let d = EffDbg; format!("{:?}", d) }
+            // control: PURE Display, and STD types (String/i32) → pure
+            struct PureDisp;
+            impl fmt::Display for PureDisp {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "p") }
+            }
+            pub fn disp_pure() -> String { let d = PureDisp; format!("{}", d) }
+            pub fn fmt_std() -> String { let s = String::new(); let n = 3i32; format!("{} {}", s, n) }
+
+            // #1 effectful From via ?
+            struct MyErr;
+            impl From<std::io::Error> for MyErr {
+                fn from(_e: std::io::Error) -> MyErr { std::fs::write("/t", b"x").unwrap(); MyErr }
+            }
+            fn may_fail() -> Result<(), std::io::Error> { Ok(()) }
+            pub fn q_eff() -> Result<(), MyErr> { may_fail()?; Ok(()) }
+            // control: PURE From via ?
+            struct PureErr;
+            impl From<std::io::Error> for PureErr { fn from(_e: std::io::Error) -> PureErr { PureErr } }
+            fn may_fail2() -> Result<(), std::io::Error> { Ok(()) }
+            pub fn q_pure() -> Result<(), PureErr> { may_fail2()?; Ok(()) }
+
+            // #4 effectful operators
+            struct Acc;
+            impl std::ops::Add for Acc {
+                type Output = Acc;
+                fn add(self, _o: Acc) -> Acc { std::fs::write("/t", b"x").unwrap(); Acc }
+            }
+            pub fn op_add() -> Acc { let a = Acc; let b = Acc; a + b }
+            struct Cmp;
+            impl PartialEq for Cmp {
+                fn eq(&self, _o: &Cmp) -> bool { std::fs::write("/t", b"x").unwrap(); true }
+            }
+            pub fn op_eq() -> bool { let a = Cmp; let b = Cmp; a == b }
+            struct Ix;
+            impl std::ops::Index<usize> for Ix {
+                type Output = u8;
+                fn index(&self, _i: usize) -> &u8 { std::fs::write("/t", b"x").unwrap(); &0 }
+            }
+            pub fn op_index() -> u8 { let a = Ix; a[0] }
+            struct Ng;
+            impl std::ops::Neg for Ng {
+                type Output = Ng;
+                fn neg(self) -> Ng { std::fs::write("/t", b"x").unwrap(); Ng }
+            }
+            pub fn op_neg() -> Ng { let a = Ng; -a }
+            // control: PURE operator, and STD arithmetic → pure
+            struct PureAdd;
+            impl std::ops::Add for PureAdd { type Output = PureAdd; fn add(self, _o: PureAdd) -> PureAdd { PureAdd } }
+            pub fn op_pure() -> PureAdd { let a = PureAdd; let b = PureAdd; a + b }
+            pub fn op_std() -> i32 { let a = 1i32; let b = 2i32; a + b }
+
+            // #3 effectful Deref via *w
+            struct Wrap;
+            impl std::ops::Deref for Wrap {
+                type Target = u8;
+                fn deref(&self) -> &u8 { std::fs::write("/t", b"x").unwrap(); &0 }
+            }
+            pub fn deref_eff() -> u8 { let w = Wrap; *w }
+
+            // #5 effectful From via .into()
+            struct Tgt;
+            impl From<u8> for Tgt { fn from(_v: u8) -> Tgt { std::fs::write("/t", b"x").unwrap(); Tgt } }
+            pub fn into_eff() { let x: Tgt = 5u8.into(); let _ = x; }
+
+            // #6 struct-literal & unit Drop-glue
+            struct Guard { n: u8 }
+            impl Drop for Guard { fn drop(&mut self) { std::fs::write("/t", b"x").unwrap(); } }
+            pub fn drop_struct() { let _g = Guard { n: 1 }; }
+            struct UnitGuard;
+            impl Drop for UnitGuard { fn drop(&mut self) { std::fs::write("/t", b"x").unwrap(); } }
+            pub fn drop_unit() { let _g = UnitGuard; }
+            // control: PURE-Drop struct literal → pure
+            struct PureGuard { n: u8 }
+            impl Drop for PureGuard { fn drop(&mut self) {} }
+            pub fn drop_pure() { let _g = PureGuard { n: 1 }; }
+        "#;
+        let v = run("coerce", src);
+        // Every effectful coercion must carry Fs at the triggering fn.
+        for f in [
+            "disp_format", "disp_println", "disp_tostring", "dbg_format", "q_eff",
+            "op_add", "op_eq", "op_index", "op_neg", "deref_eff", "into_eff",
+            "drop_struct", "drop_unit",
+        ] {
+            assert!(eff(&v, f).contains(&"Fs".to_string()),
+                    "coercion under-reported: {f} should be Fs but is {:?}", eff(&v, f));
+        }
+        // Controls: a PURE impl or a STD/primitive operand must stay pure — no fabrication, no flood.
+        for f in ["disp_pure", "fmt_std", "q_pure", "op_pure", "op_std", "drop_pure"] {
+            assert!(eff(&v, f).is_empty(),
+                    "coercion control fabricated an effect at {f}: {:?}", eff(&v, f));
+        }
+    }
+
+    #[test]
     fn dispatch_typed_receivers_resolve_via_local_impls_or_read_unknown() {
         // The trait-object hole, closed: `t.save()` on a `&dyn Store` either edges to the LOCAL
         // implementors (syntactic CHA, the JVM engine's bounded move) or reads honest Unknown —
@@ -5137,6 +5655,7 @@ mod tests {
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
+                err_ret_leaf: None,
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -5175,7 +5694,7 @@ mod tests {
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -5198,7 +5717,7 @@ mod tests {
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -5240,6 +5759,7 @@ mod tests {
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
+            err_ret_leaf: None,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -5271,6 +5791,7 @@ mod tests {
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
+                err_ret_leaf: None,
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
