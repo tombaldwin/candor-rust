@@ -1,0 +1,34 @@
+warning: `<N as std::ops::AddAssign>::add_assign` effects: { Fs* }   (* = via callee)
+  --> $DIR/compound_assign.rs:13:5
+   |
+LL |     fn add_assign(&mut self, _rhs: N) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `<N as std::ops::SubAssign>::sub_assign` effects: { Fs* }   (* = via callee)
+  --> $DIR/compound_assign.rs:18:5
+   |
+LL |     fn sub_assign(&mut self, _rhs: N) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `sink` effects: { Fs }   (* = via callee)
+  --> $DIR/compound_assign.rs:7:1
+   |
+LL | fn sink() {
+   | ^^^^^^^^^
+
+warning: `via_add_assign` effects: { Fs* }   (* = via callee)
+  --> $DIR/compound_assign.rs:23:1
+   |
+LL | fn via_add_assign(mut a: N, b: N) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_sub_assign` effects: { Fs* }   (* = via callee)
+  --> $DIR/compound_assign.rs:26:1
+   |
+LL | fn via_sub_assign(mut a: N, b: N) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 5 warnings emitted
+
