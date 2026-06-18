@@ -198,6 +198,16 @@ struct CallCollector<'a> {
     /// resolves to the aliased path, so its effect (and whole transitive chain) is not silently dropped
     /// (sweep [6]). Keyed by the local name → the expanded callee path.
     fn_alias: std::collections::HashMap<String, String>,
+    /// Crate-wide LAZY/deferred static names (`once_cell`/`std` `Lazy`/`LazyLock`/`LazyCell`,
+    /// `lazy_static!`, `thread_local!`). A body that NAMES one of these FORCES its deferred init on
+    /// first use — so naming the static edges to its synthetic init unit (`<lazy>::NAME`), carrying the
+    /// init's effect to this fn. Over-approximating "names ⇒ forces" is a SAFE over-approximation (the
+    /// init does run on first use), never a fabrication. Keyed per static NAME (not module-scoped), so a
+    /// pure-init lazy contributes nothing. Set once per forcing site (de-duped via `forced_lazies`).
+    lazy_statics: &'a std::collections::HashSet<String>,
+    /// Lazy statics already FORCED (edged) in this body — emit at most one forcing edge per static, so a
+    /// hot static read in a loop doesn't bloat the call list.
+    forced_lazies: std::collections::HashSet<String>,
     /// set once the body invokes a callable we can't resolve (see `FnInfo::unresolved`).
     unresolved: bool,
 }
@@ -229,6 +239,164 @@ type ParsedFile = (SendFile, Vec<String>);
 
 fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
+}
+
+/// The synthetic-unit qual PREFIX for a LAZY/deferred static's init body. A deferred static
+/// (`static X: Lazy<_> = Lazy::new(|| ..effect..)`, `thread_local!`, `lazy_static!`) attaches an init
+/// CLOSURE that runs at FIRST USE, not at definition — so the closure body is reachable from no fn yet
+/// performs the effect. We synthesize a unit per such static (`<lazy>::NAME`, the closure body walked
+/// as a normal FnInfo) so the existing classifier/propagation charge it, then edge every FORCING site
+/// (a fn that names the static) to it. A `<` in a path never collides with a real crate path (and a
+/// resolved-local edge suppresses the classifier anyway), so the unit is never mis-classified. The
+/// per-static keying is what prevents flooding: a PURE-init lazy's unit carries no effect, so its
+/// forcing sites stay pure — only a genuinely-effectful init lights its accessors up.
+const LAZY_UNIT_PREFIX: &str = "<lazy>";
+
+/// Recognize the LAZY/deferred CONTAINER constructors whose argument is an init thunk run on first use.
+/// A `Container::new(|| body)` defers the `body` to first use. Matched on the TYPE leaf of a `Type::new`
+/// associated call so a
+/// `use once_cell::sync::Lazy;` rename still hits. `OnceCell`/`OnceLock` are DELIBERATELY ABSENT: their
+/// `get_or_init(|| ..)` already passes the closure at a normal reachable CALL SITE (the forcing site IS
+/// the call), so the existing closure-arg walking already charges it — adding them would double-count.
+fn is_lazy_container_new(path: &str) -> bool {
+    // `Lazy::new`, `LazyLock::new`, `LazyCell::new` (once_cell sync/unsync + std). The penultimate
+    // segment is the container TYPE; the last must be `new`.
+    let Some(t2) = tail2(path) else { return false };
+    let mut it = t2.split("::");
+    let ty = it.next().unwrap_or("");
+    let m = it.next().unwrap_or("");
+    m == "new" && matches!(ty, "Lazy" | "LazyLock" | "LazyCell")
+}
+
+/// Extract the deferred INIT BODY (a block of statements) from a lazy-container `new` call's first
+/// argument — a closure (`Lazy::new(|| { .. })`, `Lazy::new(|| expr)`) or a bare block
+/// (`LazyLock::new(|| ..)` is the norm; a non-closure arg is not deferred). Returns the closure body as
+/// statements to walk. A non-closure first arg (a function path `Lazy::new(load)`) is NOT inlined here —
+/// it would be an ordinary reachable call if it appeared at a call site; the deferred-static seam is
+/// specifically the inline CLOSURE/BLOCK, which is reachable from nowhere.
+fn lazy_init_body(call: &syn::ExprCall) -> Option<Vec<syn::Stmt>> {
+    if !matches!(&*call.func, syn::Expr::Path(p) if is_lazy_container_new(&path_to_string(&p.path))) {
+        return None;
+    }
+    let first = call.args.first()?;
+    closure_or_block_stmts(first)
+}
+
+/// The statements of an init thunk expression: a closure's body (block or single expr), or a bare block.
+fn closure_or_block_stmts(e: &syn::Expr) -> Option<Vec<syn::Stmt>> {
+    match e {
+        syn::Expr::Closure(cl) => match &*cl.body {
+            syn::Expr::Block(b) => Some(b.block.stmts.clone()),
+            other => Some(vec![syn::Stmt::Expr(other.clone(), None)]),
+        },
+        syn::Expr::Block(b) => Some(b.block.stmts.clone()),
+        syn::Expr::Paren(p) => closure_or_block_stmts(&p.expr),
+        _ => None,
+    }
+}
+
+/// If `it` is a LAZY/deferred static whose init has a walkable thunk body, return `(static_name, body)`.
+/// Covers the four idioms:
+///   - `static X: Lazy<_> = Lazy::new(|| ..)` / `LazyLock` / `LazyCell` — an `Item::Static`/`Item::Const`
+///     whose init expr is a lazy-container `new` call (handles the `?`-free common form);
+///   - `lazy_static! { static ref X: T = effectful(); }` — an `Item::Macro` (`lazy_static`), body parsed;
+///   - `thread_local! { static T: Ty = effectful(); }` — an `Item::Macro` (`thread_local`), body parsed.
+/// A PURE init is still returned (its synthetic unit will simply carry no effect) — purity is decided by
+/// the classifier downstream, NOT here; returning it unconditionally is what keeps the keying per-static.
+fn lazy_static_unit(it: &syn::Item) -> Option<(String, Vec<syn::Stmt>)> {
+    match it {
+        syn::Item::Static(s) => {
+            let syn::Expr::Call(call) = &*s.expr else { return None };
+            let body = lazy_init_body(call)?;
+            Some((s.ident.to_string(), body))
+        }
+        // A `const X: Lazy<_> = Lazy::new(|| ..)` is unusual but legal and behaves identically.
+        syn::Item::Const(c) => {
+            let syn::Expr::Call(call) = &*c.expr else { return None };
+            let body = lazy_init_body(call)?;
+            Some((c.ident.to_string(), body))
+        }
+        syn::Item::Macro(m) => {
+            let mname = path_to_string(&m.mac.path);
+            let mname = mname.rsplit("::").next().unwrap_or(&mname);
+            match mname {
+                "lazy_static" => lazy_static_macro_body(&m.mac.tokens),
+                "thread_local" => thread_local_macro_body(&m.mac.tokens),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Parse a `lazy_static! { static ref NAME: T = EXPR; }` body: the init EXPR runs lazily on first deref,
+/// so its effects are deferred exactly like `Lazy::new`. Returns `(NAME, [EXPR;])`. Single-static bodies
+/// are the dominant form; a multi-static block parses the FIRST (a rare multi-static `lazy_static!` is
+/// under-approximated to its first entry — honest, never fabricated). Parsing failure → skip (only adds
+/// visibility, never breaks).
+fn lazy_static_macro_body(tokens: &proc_macro2::TokenStream) -> Option<(String, Vec<syn::Stmt>)> {
+    syn::parse2::<LazyStaticDecl>(tokens.clone())
+        .ok()
+        .map(|d| (d.name, vec![syn::Stmt::Expr(d.init, None)]))
+}
+
+/// Parse a `thread_local! { static NAME: Ty = EXPR; }` body the same way — the per-thread init EXPR runs
+/// on first `.with(..)`, a deferred thunk. Returns `(NAME, [EXPR;])`.
+fn thread_local_macro_body(tokens: &proc_macro2::TokenStream) -> Option<(String, Vec<syn::Stmt>)> {
+    syn::parse2::<ThreadLocalDecl>(tokens.clone())
+        .ok()
+        .map(|d| (d.name, vec![syn::Stmt::Expr(d.init, None)]))
+}
+
+/// `[pub] static [ref] NAME: T = INIT;` — the single-static shape inside `lazy_static!`. We tolerate a
+/// leading visibility and the `ref` keyword, take the NAME, skip the `: T`, and parse the `= INIT` expr.
+struct LazyStaticDecl {
+    name: String,
+    init: syn::Expr,
+}
+impl syn::parse::Parse for LazyStaticDecl {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let _attrs = input.call(syn::Attribute::parse_outer)?;
+        let _vis: syn::Visibility = input.parse()?;
+        let _static: syn::Token![static] = input.parse()?;
+        // `lazy_static!` requires `ref`; tolerate its absence so the parser is liberal.
+        if input.peek(syn::Token![ref]) {
+            let _ref: syn::Token![ref] = input.parse()?;
+        }
+        let name: syn::Ident = input.parse()?;
+        let _colon: syn::Token![:] = input.parse()?;
+        let _ty: syn::Type = input.parse()?;
+        let _eq: syn::Token![=] = input.parse()?;
+        let init: syn::Expr = input.parse()?;
+        // `syn::parse2` requires the WHOLE stream consumed — drain the trailing `;` and any further
+        // statics in a multi-static block. We keep only the FIRST static (the dominant single-static
+        // form); a rare multi-static `lazy_static!` under-approximates to its first entry (honest).
+        let _ = input.parse::<syn::Token![;]>();
+        input.parse::<proc_macro2::TokenStream>()?;
+        Ok(LazyStaticDecl { name: name.to_string(), init })
+    }
+}
+
+/// `[pub] static NAME: Ty = INIT;` — the single-static shape inside `thread_local!` (no `ref`).
+struct ThreadLocalDecl {
+    name: String,
+    init: syn::Expr,
+}
+impl syn::parse::Parse for ThreadLocalDecl {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let _attrs = input.call(syn::Attribute::parse_outer)?;
+        let _vis: syn::Visibility = input.parse()?;
+        let _static: syn::Token![static] = input.parse()?;
+        let name: syn::Ident = input.parse()?;
+        let _colon: syn::Token![:] = input.parse()?;
+        let _ty: syn::Type = input.parse()?;
+        let _eq: syn::Token![=] = input.parse()?;
+        let init: syn::Expr = input.parse()?;
+        // Drain the trailing `;` + any further per-thread statics (keep the first — honest under-approx).
+        let _ = input.parse::<syn::Token![;]>();
+        input.parse::<proc_macro2::TokenStream>()?;
+        Ok(ThreadLocalDecl { name: name.to_string(), init })
+    }
 }
 
 /// candor-SCAN ONLY: builder-ENTRY points whose effect the typed classifier deliberately defers to a
@@ -1371,6 +1539,34 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             syn::visit::visit_arm(self, node);
         }
     }
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        // FORCING a lazy/deferred static: any mention of the static's NAME (deref `*X`, `X.method()`,
+        // `Lazy::force(&X)`, `X.with(..)`, or a bare path `X`) runs its deferred init on first use. Edge
+        // to the static's synthetic init unit (`<lazy>::NAME`) so the init's effect propagates here. We
+        // key on the LAST path segment so a module-qualified mention (`config::CONFIG`) also forces, and
+        // skip a name shadowed by a LOCAL binding (a same-named param/let/closure is not the static).
+        if node.qself.is_none() {
+            if let Some(last) = node.path.segments.last() {
+                let name = last.ident.to_string();
+                let locally_bound = self.vars.contains_key(&name)
+                    || self.closure_vars.contains(&name)
+                    || self.fn_typed_vars.contains(&name)
+                    || self.fn_alias.contains_key(&name)
+                    || self.elem_of.contains_key(&name)
+                    || self.trait_vars.contains_key(&name);
+                if !locally_bound
+                    && self.lazy_statics.contains(&name)
+                    && self.forced_lazies.insert(name.clone())
+                {
+                    let qual = format!("{LAZY_UNIT_PREFIX}::{name}");
+                    // path has `::` (the `<lazy>::` prefix) so it resolves via the tail2 route in
+                    // `resolve_target`, edging to the unique synthetic unit. Not a macro/typed/method.
+                    self.calls.push(Call { path: qual, leaf: name, str_arg: None, typed: false, method: false, is_macro: false });
+                }
+            }
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
         // Type each ANNOTATED closure param (`|c: &Conn| c.send()`) into `vars` so the body's `c.method()`
         // resolves — the annotation was discarded, so an effectful method on it read silent-pure (sweep
@@ -1819,6 +2015,7 @@ fn scan_items(
     returns: &ReturnIndex,
     traits: TraitIndexes,
     elems: ElemIndexes,
+    lazy_statics: &std::collections::HashSet<String>,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -1839,7 +2036,7 @@ fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems));
+                out.push(fninfo(&n, &qual(&n), &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -1857,7 +2054,7 @@ fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems));
+                        out.push(fninfo(&n, &q, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics));
                     }
                 }
             }
@@ -1868,7 +2065,7 @@ fn scan_items(
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, &mut subuses, out);
+                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, &mut subuses, out);
                 }
             }
             // A trait's PROVIDED (default) methods have bodies that can perform effects directly
@@ -1892,13 +2089,47 @@ fn scan_items(
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), &loc, &m.sig, block,
-                            Some(&tname), uses, fields, returns, traits, elems));
+                            Some(&tname), uses, fields, returns, traits, elems, lazy_statics));
                     }
                 }
             }
             _ => {}
         }
+        // SYNTHETIC LAZY-INIT UNIT: a `static X: Lazy<_> = Lazy::new(|| ..)` (or LazyLock/LazyCell,
+        // `lazy_static!`, `thread_local!`) attaches a deferred init thunk reachable from NO fn — yet it
+        // runs on first use and may perform effects (the silent-under-report seam). Emit the thunk body
+        // as its own unit (`<lazy>::NAME`) so the classifier/propagation charge it; forcing sites
+        // (`visit_expr_path`) edge to it. Always emitted (even for a PURE init) — purity is decided
+        // downstream, keeping the keying per-static so a pure lazy floods nothing. Synthetic units are
+        // EXCLUDED from `by_leaf` later so they never pollute bare-leaf resolution. Mirrored in
+        // `fn_locs` (same walk position + same `#[cfg(test)]` skip via `lazy_unit_emitted`).
+        if lazy_unit_emitted(it, include_tests) {
+            if let Some((name, body)) = lazy_static_unit(it) {
+                let block = syn::Block { brace_token: Default::default(), stmts: body };
+                let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
+                let loc = next_loc(locs, loc_idx);
+                let q = format!("{LAZY_UNIT_PREFIX}::{name}");
+                out.push(fninfo(&name, &q, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics));
+            }
+        }
     }
+}
+
+/// Whether a lazy-static synthetic unit will be EMITTED for `it` — a `static`/`const`/macro lazy with a
+/// walkable thunk that is NOT `#[cfg(test)]`-gated (unless tests are included). The single source of
+/// truth shared by `scan_items` (emits the unit) and `fn_locs` (emits its loc), so the two walks stay in
+/// LOCKSTEP (the `debug_assert` count guard). Returns false for any non-lazy item.
+fn lazy_unit_emitted(it: &syn::Item, include_tests: bool) -> bool {
+    let attrs: &[syn::Attribute] = match it {
+        syn::Item::Static(s) => &s.attrs,
+        syn::Item::Const(c) => &c.attrs,
+        syn::Item::Macro(m) => &m.attrs,
+        _ => return false,
+    };
+    if !include_tests && is_cfg_test(attrs) {
+        return false;
+    }
+    lazy_static_unit(it).is_some()
 }
 
 /// Pop the next pre-resolved loc for an emitted fn, advancing the cursor. `locs` is produced by `fn_locs`
@@ -1976,6 +2207,11 @@ fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out: &mut Vec<S
                 }
             }
             _ => {}
+        }
+        // Mirror the synthetic LAZY-INIT UNIT loc in lockstep with `scan_items` (same `lazy_unit_emitted`
+        // predicate, same walk position). The unit's loc is the static item's own span.
+        if lazy_unit_emitted(it, include_tests) {
+            out.push(loc(it.span()));
         }
     }
 }
@@ -2077,6 +2313,7 @@ fn fninfo(
     returns: &ReturnIndex,
     traits: TraitIndexes,
     elems: ElemIndexes,
+    lazy_statics: &std::collections::HashSet<String>,
 ) -> FnInfo {
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
@@ -2133,6 +2370,8 @@ fn fninfo(
         closure_vars: std::collections::HashSet::new(),
         fn_typed_vars,
         fn_alias: std::collections::HashMap::new(),
+        lazy_statics,
+        forced_lazies: std::collections::HashSet::new(),
         unresolved: false,
     };
     for stmt in &block.stmts {
@@ -2201,6 +2440,7 @@ fn collect_decls(
     prim_aliases: &mut std::collections::HashSet<String>,
     extern_fns: &mut std::collections::HashSet<String>,
     drop_types: &mut std::collections::HashSet<String>,
+    lazy_statics: &mut std::collections::HashSet<String>,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
@@ -2209,6 +2449,16 @@ fn collect_decls(
     }
     let no_generics = HashMap::new();
     for it in items {
+        // LAZY/deferred static NAME collection (crate-wide) — a forcing site (any fn naming the static)
+        // edges to its synthetic init unit, and the forcing site lives anywhere, so the name set must be
+        // crate-wide (Pass A), exactly like the trait/return/extern indexes. The synthetic UNIT itself is
+        // emitted in `scan_items`; this only records WHICH names are lazy statics so `CallCollector` can
+        // recognise a force. `#[cfg(test)]`-gated statics are excluded unless tests are included.
+        if lazy_unit_emitted(it, include_tests) {
+            if let Some((name, _)) = lazy_static_unit(it) {
+                lazy_statics.insert(name);
+            }
+        }
         match it {
             syn::Item::Struct(s) => {
                 match &s.fields {
@@ -2361,7 +2611,7 @@ fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, lazy_statics);
                 }
             }
             _ => {}
@@ -2534,6 +2784,10 @@ struct FileDecls {
     extern_fns: Vec<String>,
     /// local type leaves with a local `impl Drop` — a fn binding such a value inherits the drop body.
     drop_types: Vec<String>,
+    /// LAZY/deferred static NAMES in this file (`Lazy`/`LazyLock`/`LazyCell`, `lazy_static!`,
+    /// `thread_local!`) — a fn naming one of these FORCES its deferred init unit (`<lazy>::NAME`).
+    #[serde(default)]
+    lazy_statics: Vec<String>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`).
@@ -2549,9 +2803,10 @@ fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
     let mut prim_aliases = std::collections::HashSet::new();
     let mut extern_fns = std::collections::HashSet::new();
     let mut drop_types = std::collections::HashSet::new();
+    let mut lazy_statics = std::collections::HashSet::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut rets,
                   &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types);
+                  &mut extern_fns, &mut drop_types, &mut lazy_statics);
     FileDecls {
         fields,
         field_elem,
@@ -2566,6 +2821,7 @@ fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
         prim_aliases: prim_aliases.into_iter().collect(),
         extern_fns: extern_fns.into_iter().collect(),
         drop_types: drop_types.into_iter().collect(),
+        lazy_statics: lazy_statics.into_iter().collect(),
     }
 }
 
@@ -2584,6 +2840,7 @@ struct MergedDecls {
     prim_aliases: std::collections::HashSet<String>,
     extern_fns: std::collections::HashSet<String>,
     drop_types: std::collections::HashSet<String>,
+    lazy_statics: std::collections::HashSet<String>,
 }
 
 /// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics
@@ -2653,6 +2910,9 @@ fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for n in &fd.drop_types {
         acc.drop_types.insert(n.clone()); // set union — order-independent
+    }
+    for n in &fd.lazy_statics {
+        acc.lazy_statics.insert(n.clone()); // set union — order-independent
     }
 }
 
@@ -2754,6 +3014,16 @@ fn decl_index_digest(m: &MergedDecls) -> String {
     let mut dtk: Vec<&String> = m.drop_types.iter().collect();
     dtk.sort();
     for a in dtk {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
+    // lazy_statics — sorted set of LAZY/deferred static names (naming one adds a forcing edge to its
+    // synthetic init unit). A change here re-resolves forcing sites, so it must invalidate cached FnInfos.
+    s.push_str("lazy_statics");
+    let mut lsk: Vec<&String> = m.lazy_statics.iter().collect();
+    lsk.sort();
+    for a in lsk {
         s.push('|');
         s.push_str(a);
     }
@@ -3179,6 +3449,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let trait_fields = &merged.trait_fields;
     let traits = TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields };
     let elems = ElemIndexes { field_elem, enum_variants: &enum_variants };
+    let lazy_statics = &merged.lazy_statics;
 
     // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
     // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
@@ -3237,7 +3508,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         let mut loc_idx = 0usize;
         let mut uses = HashMap::new();
         let mut file_fns: Vec<FnInfo> = Vec::new();
-        scan_items(&file.items, &modpath, locs, &mut loc_idx, include_tests, fields, &returns, traits, elems, &mut uses, &mut file_fns);
+        scan_items(&file.items, &modpath, locs, &mut loc_idx, include_tests, fields, &returns, traits, elems, lazy_statics, &mut uses, &mut file_fns);
         fns.extend(file_fns.iter().cloned());
         fresh_fninfos.insert(rel.clone(), file_fns);
     }
@@ -3309,7 +3580,15 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // `reqwest::Client::send` can't mis-link to a same-named local `Client::send` (an inverse fabrication).
     let mut local_types: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in &fns {
-        by_leaf.entry(f.leaf.clone()).or_default().push(f.qual.clone());
+        // SYNTHETIC lazy-init units (`<lazy>::NAME`) are resolved ONLY via the qualified `<lazy>::`
+        // tail2 route a forcing site emits — they must NOT enter `by_leaf`, or a bare call to a real fn
+        // sharing the static's NAME would see an ambiguous leaf and stop resolving (a spurious
+        // under-report on unrelated code). Their tail2 (`<lazy>::NAME`) is unique and the forcing edge
+        // always qualifies, so keeping them out of `by_leaf` loses nothing.
+        let is_lazy_unit = f.qual.starts_with(LAZY_UNIT_PREFIX);
+        if !is_lazy_unit {
+            by_leaf.entry(f.leaf.clone()).or_default().push(f.qual.clone());
+        }
         if let Some(t2) = tail2(&f.qual) {
             if let Some(ty) = t2.split("::").next() {
                 if ty.chars().next().is_some_and(|c| c.is_uppercase()) {
@@ -4284,6 +4563,13 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
+    /// A shared, empty lazy-static name set for direct `CallCollector` constructions in unit tests that
+    /// don't exercise the lazy-forcing path (the lazy-forcing tests use the full `scan_one`/`scan_src`).
+    fn empty_lazy() -> &'static std::collections::HashSet<String> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(std::collections::HashSet::new)
+    }
+
     #[test]
     fn expand_uses_the_use_map_and_strips_local_prefixes() {
         let u = uses(&[("fs", "std::fs"), ("Command", "std::process::Command")]);
@@ -4408,6 +4694,8 @@ mod tests {
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
             fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -4450,6 +4738,8 @@ mod tests {
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
             fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -4625,6 +4915,8 @@ mod tests {
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(),
             fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
             };
             for stmt in &blk.stmts {
@@ -4664,7 +4956,7 @@ mod tests {
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), unresolved: false,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -4687,7 +4979,7 @@ mod tests {
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), unresolved: false,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -4726,6 +5018,8 @@ mod tests {
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
             fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
         };
         for stmt in &block.stmts {
@@ -4755,6 +5049,8 @@ mod tests {
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(),
             fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
             };
             for stmt in &blk.stmts {
@@ -4941,7 +5237,7 @@ mod tests {
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -5239,6 +5535,91 @@ mod tests {
     }
 
     #[test]
+    fn lazy_static_deferred_init_is_charged_to_the_forcing_site() {
+        // THE UNDER-REPORT: a LAZY/deferred static whose init does I/O has its effect reachable from NO
+        // fn (the init thunk runs on first use). Before the fix the effect vanished and every forcing site
+        // read silent-pure. The fix synthesizes a `<lazy>::NAME` unit (the thunk body) and edges each
+        // forcing site to it. This test asserts all four idioms light up, a PURE init fabricates nothing,
+        // and the keying is per-STATIC (not module-scoped) so a pure lazy's accessor stays pure even when
+        // an effectful lazy sits in the same module.
+        let d = std::env::temp_dir().join(format!("candor-scan-lazystatic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        // `once_cell` / `lazy_static` are declared so the κ ledger treats them as known deps; the scan
+        // never builds them — the idiom is recognised syntactically.
+        std::fs::write(
+            d.join("Cargo.toml"),
+            "[package]\nname = \"lazystatic\"\n[dependencies]\nonce_cell = \"1\"\nlazy_static = \"1\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use once_cell::sync::Lazy;
+            use std::sync::LazyLock;
+            use std::fs;
+            use lazy_static::lazy_static;
+
+            // 1. once_cell Lazy, effectful init
+            pub static CFG: Lazy<String> = Lazy::new(|| fs::read_to_string("/etc/a").unwrap_or_default());
+            // 2. std LazyLock, effectful init
+            pub static CFG2: LazyLock<String> = LazyLock::new(|| fs::read_to_string("/etc/b").unwrap_or_default());
+            // 3. lazy_static!, effectful init
+            lazy_static! { pub static ref CFG3: String = fs::read_to_string("/etc/c").unwrap_or_default(); }
+            // 4. thread_local!, effectful init
+            thread_local! { pub static CFG4: String = fs::read_to_string("/etc/d").unwrap_or_default(); }
+
+            // NO-FABRICATION CONTROLS: pure inits contribute nothing
+            pub static PURE_NUM: Lazy<usize> = Lazy::new(|| 1 + 1);
+
+            // forcing sites — each names exactly ONE static
+            pub fn force1() -> bool { CFG.contains("x") }
+            pub fn force2() -> bool { CFG2.contains("x") }
+            pub fn force3() -> bool { CFG3.contains("x") }
+            pub fn force4() -> bool { CFG4.with(|c| c.contains("x")) }
+            // MULTI-STATIC SCOPING: this fn names only the PURE lazy — must stay pure even though
+            // effectful lazies live in the same module (static-scoped, not module-scoped).
+            pub fn force_pure() -> usize { *PURE_NUM + 5 }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // THE FIX: all four idioms' forcing sites carry Fs (the effect no longer vanishes).
+        for (f, idiom) in [("force1", "once_cell Lazy"), ("force2", "std LazyLock"),
+                           ("force3", "lazy_static!"), ("force4", "thread_local!")] {
+            assert!(effects_of(f).contains(&"Fs".to_string()),
+                    "{idiom}: forcing site `{f}` must carry Fs (deferred init under-report):\n{body}");
+        }
+        // NO-FABRICATION: a pure-init lazy's forcing site stays pure (absent from the effectful report).
+        // Also proves MULTI-STATIC scoping — `force_pure` names only PURE_NUM, so the sibling effectful
+        // lazies in the same module must NOT bleed into it.
+        assert!(effects_of("force_pure").is_empty(),
+                "a pure-init lazy's forcing site must stay pure (no fabrication / no module-bleed):\n{body}");
+        // The pure lazy's synthetic unit, if present at all, must carry no effect (it's dropped from the
+        // effectful report — assert it never appears WITH an effect).
+        let pure_unit_effectful = v["functions"].as_array().into_iter().flatten().any(|f| {
+            f["fn"].as_str() == Some("<lazy>::PURE_NUM")
+                && f["inferred"].as_array().is_some_and(|a| !a.is_empty())
+        });
+        assert!(!pure_unit_effectful, "the pure lazy's synthetic unit must carry no effect:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn tuple_struct_fields_index_by_position() {
         // The other PROVE-IT miss: `self.0.0.run()` (ureq's ConfigBuilder newtype chain) — tuple
         // fields weren't in the FieldIndex, so the receiver never typed and the edge dropped.
@@ -5253,7 +5634,7 @@ mod tests {
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -5274,7 +5655,7 @@ mod tests {
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -5285,7 +5666,7 @@ mod tests {
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
         fns.into_iter()
             .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
             .collect()
@@ -5304,7 +5685,7 @@ mod tests {
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -5315,7 +5696,7 @@ mod tests {
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.unresolved)).collect()
     }
 
@@ -5332,7 +5713,7 @@ mod tests {
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -5343,7 +5724,7 @@ mod tests {
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.loc)).collect()
     }
 
@@ -5581,7 +5962,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
@@ -5959,6 +6340,7 @@ trait G {
             prim_aliases: _,
             extern_fns: _,
             drop_types: _,
+            lazy_statics: _,
         } = MergedDecls::default();
 
         let empty = decl_index_digest(&MergedDecls::default());
@@ -5976,6 +6358,7 @@ trait G {
             ("prim_aliases", |m| { m.prim_aliases.insert("A".into()); }),
             ("extern_fns", |m| { m.extern_fns.insert("system".into()); }),
             ("drop_types", |m| { m.drop_types.insert("Guard".into()); }),
+            ("lazy_statics", |m| { m.lazy_statics.insert("CONFIG".into()); }),
         ];
         for (name, mutate) in mutators {
             let mut m = MergedDecls::default();
