@@ -5349,7 +5349,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dep);
         let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
         std::fs::write(dep.join("report.depb.scan.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.5"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.6"}},
             "functions": [{{"fn": "effectful_fn", "inferred": ["Net"], "hash": "depb#effectful_fn"}}]}}"#)).unwrap();
         let idx = load_dep_reports(Some(dep.to_str().unwrap()));
         assert!(idx.crates.contains("depb"));
