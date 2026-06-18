@@ -1,0 +1,16 @@
+warning: `sink` effects: { Fs }   (* = via callee)
+  --> $DIR/thread_local_effects.rs:8:1
+   |
+LL | fn sink() {
+   | ^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `via_thread_local` effects: { Fs* }   (* = via callee)
+  --> $DIR/thread_local_effects.rs:18:1
+   |
+LL | fn via_thread_local() {
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: 2 warnings emitted
+

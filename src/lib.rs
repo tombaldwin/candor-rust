@@ -2039,6 +2039,45 @@ fn enclosing_named_fn(tcx: TyCtxt<'_>, hir_id: HirId) -> Option<LocalDefId> {
     }
 }
 
+/// Collects every LOCAL fn referenced as a VALUE within a body (descending into nested bodies). Used to
+/// recover a `thread_local!`'s deferred init fn (`__rust_std_internal_init_fn`), which the macro places
+/// inside the `LocalKey::new(...)` construction in the static/const initializer — see `local_key_init_fns`.
+struct FnRefCollector<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    out: Vec<LocalDefId>,
+}
+
+impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for FnRefCollector<'tcx> {
+    type NestedFilter = rustc_middle::hir::nested_filter::All;
+    fn maybe_tcx(&mut self) -> TyCtxt<'tcx> {
+        self.tcx
+    }
+    fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
+        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) = e.kind {
+            if let rustc_hir::def::Res::Def(DefKind::Fn, did) = p.res {
+                if let Some(l) = did.as_local() {
+                    self.out.push(l);
+                }
+            }
+        }
+        rustc_hir::intravisit::walk_expr(self, e);
+    }
+}
+
+/// The LOCAL fns a `thread_local!` item's initializer references as a value — its deferred init
+/// (`__rust_std_internal_init_fn`), which the macro builds inside the `LocalKey::new(...)` construction.
+/// That body lives in an inline const, so `enclosing_named_fn` charges it to NO reportable item, and the
+/// accessor (`LocalKey::with`) is non-local std — leaving the init's effects orphaned from the call
+/// graph. Edging a forcing fn to these propagates them (the thread_local analog of the lazy-init edge).
+fn local_key_init_fns(tcx: TyCtxt<'_>, tl_did: LocalDefId) -> Vec<LocalDefId> {
+    let Some(body) = tcx.hir_maybe_body_owned_by(tl_did) else {
+        return vec![];
+    };
+    let mut c = FnRefCollector { tcx, out: vec![] };
+    rustc_hir::intravisit::Visitor::visit_body(&mut c, &body);
+    c.out
+}
+
 // --- Taint heuristic (CANDOR_TAINT): flag an effect whose argument derives from a function
 // parameter — e.g. `fs::read(format!("/var/cache/{key}"))` where `key` is a param. This is the
 // injection class (path traversal / command injection / SSRF). It is an INTRAPROCEDURAL, SYNTACTIC
@@ -2248,6 +2287,43 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
                 {
                     self.calls.entry(caller).or_default().insert(static_local);
+                }
+            }
+        }
+
+        // `thread_local!` FORCE: a method call on a `LocalKey` receiver (`KEY.with(…)`, `with_borrow`,
+        // `set`, …) runs the thread_local's DEFERRED initializer. The macro places that init in a local fn
+        // referenced inside `LocalKey::new(…)` in KEY's initializer — but that reference sits in an inline
+        // const (charged to NO reportable item by `enclosing_named_fn`) and the accessor is non-local std,
+        // so the init's effects were orphaned from the call graph: a `.with()`-forced effectful
+        // thread_local read silently pure. Edge the forcing fn to the init fn (the thread_local analog of
+        // the LazyLock static-ref edge above; here the effect is NOT in the item's own initializer but
+        // behind the accessor). Sound + non-fabricating: only edges to a LOCAL fn the item references, so a
+        // pure-init thread_local (or a std/external LocalKey) contributes nothing. Teeth: ui/thread_local_effects.rs.
+        if let ExprKind::MethodCall(_, receiver, _, _) = expr.kind {
+            if let Some(typeck) = cx.maybe_typeck_results() {
+                if let rustc_middle::ty::TyKind::Adt(adt, _) =
+                    typeck.expr_ty(receiver).peel_refs().kind()
+                {
+                    if cx.tcx.item_name(adt.did()).as_str() == "LocalKey"
+                        && cx.tcx.crate_name(adt.did().krate).as_str() == "std"
+                    {
+                        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) = receiver.kind {
+                            if let rustc_hir::def::Res::Def(
+                                DefKind::Const { .. } | DefKind::Static { .. },
+                                tl_did,
+                            ) = p.res
+                            {
+                                if let (Some(tl_local), Some(caller)) =
+                                    (tl_did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
+                                {
+                                    for init in local_key_init_fns(cx.tcx, tl_local) {
+                                        self.calls.entry(caller).or_default().insert(init);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
