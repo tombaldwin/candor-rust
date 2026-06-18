@@ -265,6 +265,15 @@ that's the narrow, modest-value axis. Diminishing returns.
 
 ## P2 — depth / precision
 
+- **Under-report seam residuals (deferred from the 2026-06-18 under-report round; candor-scan).** The round
+  FIXED the FFI-call→Unknown disclosure + Drop-glue edge (shipped 0.5.11). Deferred, honestly:
+  (1) the GENERAL "any unresolvable bare call → Unknown" — rejected for now because it FLOODS (measured 80
+  false-positive Unknowns on tokio: closure-param invokes, macro-defined locals, cfg-gated fns, re-exports);
+  needs a way to distinguish a genuinely-foreign bare call from a syntactically-unresolved-but-pure local one
+  (e.g. seed from extern/glob-import provenance) before widening disclosure. (2) bare local `macro_rules!`
+  body effects (the transcriber token-soup parse is fragile — risks fabrication). (3) Deref/Index/operator
+  implicit-coercion edges (no syntactic call node; needs type-directed coercion the syntactic backend lacks).
+
 - [~] **Model the modern async-HTTP / TLS / QUIC stack as Net (+ a few more) — MOSTLY DONE 2026-06-17**
       (`4c6d66a` found it, calibrated same day: hyper/hickory_resolver/h3/quinn/tokio_rustls/native_tls→Net,
       tokio_vsock→Ipc, rustls_native_certs→Fs, rlimit→Env — verb-keyed + crate-gated in classify (num_cpus
