@@ -105,13 +105,32 @@ fn pure_format_local(q: &Quiet) -> String {
     format!("{}", q) // pure
 }
 
-// std operator + std `?`/From — must not light up.
+// std operator — must not light up.
 fn pure_add(a: i32, b: i32) -> i32 {
     a + b // pure
 }
-fn pure_question(s: &str) -> Result<i32, std::num::ParseIntError> {
-    let n: i32 = s.parse()?; // std From, pure
+
+// std cross-type `From`/`.into()` (i32 -> i64) — a real conversion, but non-local, so pure.
+fn pure_into(n: i32) -> i64 {
+    n.into() // pure
+}
+
+// `?` with a genuine std error conversion (ParseIntError -> Box<dyn Error>) — non-local From, pure.
+fn pure_question(s: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let n: i32 = s.parse()?; // std From<ParseIntError> for Box<dyn Error>, pure
     Ok(n)
+}
+
+// a LOCAL but effect-free Deref impl — resolves locally through auto-deref, carries nothing.
+struct PureW;
+impl Deref for PureW {
+    type Target = str;
+    fn deref(&self) -> &str {
+        "pure"
+    }
+}
+fn pure_deref_local(w: &PureW) -> usize {
+    w.len() // pure (auto-deref through a pure PureW::deref)
 }
 
 fn main() {}
