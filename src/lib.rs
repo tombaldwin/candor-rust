@@ -172,10 +172,12 @@ pub struct Candor {
     /// engines; this discloses it — the honesty contract, sweep [4]/[19]).
     invisible_direct: HashMap<LocalDefId, BTreeSet<String>>,
     /// Effects whose literal SURFACE this fn leaves incomplete: a host-establishing Net call / a cmd-naming
-    /// Exec call performed with a RUNTIME (non-literal) locator, so the endpoint is structurally invisible
-    /// to the gate. Propagated like effects; the AS-EFF-008 allowlist fails CLOSED on an incomplete surface
-    /// even when benign literals are present (else the benign literal masks the runtime endpoint — sweep
-    /// [3]/[7]). Net + Exec only (Fs/Db establishing-vs-use is undecidable here; deferred).
+    /// Exec call / a path-naming Fs call / a query-bearing Db call performed with a RUNTIME (non-literal)
+    /// locator, so the endpoint is structurally invisible to the gate. Propagated like effects; the
+    /// AS-EFF-008 allowlist fails CLOSED on an incomplete surface even when benign literals are present
+    /// (else the benign literal masks the runtime endpoint — sweep [3]/[7]). All four locator-bearing
+    /// effects (Net/Exec/Fs/Db), each via its establishing-allowlist predicate (is_net_establishing /
+    /// is_cmd_naming_method / is_fs_path_arg / is_db_query_arg), matching candor-scan + candor-java.
     incomplete_direct: HashMap<LocalDefId, BTreeSet<&'static str>>,
     /// Literal subprocess commands a function runs directly (the program in `Command::new("git")`).
     /// Propagated like `net_hosts_direct`; surfaced as the report's optional `cmds` detail and enforced
@@ -2631,6 +2633,19 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             if builtin == Some("Fs") {
                 if let Some(p) = first_str_lit_arg(expr) {
                     self.fs_paths_direct.entry(caller).or_default().insert(p);
+                } else {
+                    // a path-NAMING Fs call (`fs::write(p,…)`/`File::open(p)`) with no literal path → the
+                    // path is a runtime value, invisible to the gate (masking; the AS-EFF-008 guard
+                    // generalized from Net/Exec to Fs). Use the SHARED establishing-allowlist predicate
+                    // (`is_fs_path_arg`), and EXCLUDE the path-stat METHODS whose path is the RECEIVER, not
+                    // an arg (`p.metadata()`/`p.exists()` resolve to `std::path::Path::*`/`PathBuf::*`) —
+                    // those carry no path arg, so a missing literal there must not false-positive.
+                    let leaf = path.rsplit("::").next().unwrap_or("");
+                    let stat_method = path.starts_with("std::path::Path::")
+                        || path.starts_with("std::path::PathBuf::");
+                    if !stat_method && candor_classify::is_fs_path_arg(leaf) {
+                        self.incomplete_direct.entry(caller).or_default().insert("Fs");
+                    }
                 }
             }
             // Non-breaking Db refinement: table-position identifiers in a SQL string literal are the
@@ -2643,6 +2658,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     if !ts.is_empty() {
                         self.db_tables_direct.entry(caller).or_default().extend(ts);
                     }
+                    // (a literal SQL with no table — `SELECT 1` — is visible-but-tableless, NOT incomplete.)
+                } else if candor_classify::is_db_query_arg(path.rsplit("::").next().unwrap_or("")) {
+                    // a SQL-QUERY-bearing Db call (`con.execute(sql,…)`/`query`/`prepare`) with no literal
+                    // query → the table is a runtime value, invisible to the gate (masking; the AS-EFF-008
+                    // guard generalized from Net/Exec to Db). The allowlist excludes build-then-execute
+                    // terminals (`fetch_all`/`load`/`all`) and lifecycle ops (`connect`/`open`/`begin`),
+                    // whose query is built structurally (no maskable string literal).
+                    self.incomplete_direct.entry(caller).or_default().insert("Db");
                 }
             }
             if self.explain.is_some() {

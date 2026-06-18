@@ -3694,7 +3694,10 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // the gate (a Net call with no string-literal arg — a runtime host, or a builder terminal whose host was
     // on a pure builder candor doesn't capture). The AS-EFF-008 gate treats an incomplete surface as
     // uncertifiable EVEN with other visible hosts, so a benign literal can't MASK the invisible endpoint
-    // (the same gate evasion fixed in candor-java 0.5.29). Net-only, matching candor-java.
+    // (the same gate evasion fixed in candor-java 0.5.29). Generalized from Net to Exec/Fs/Db (a masked
+    // path/table alongside a benign sibling literal defeated `opaque` and silently passed `allow Fs`/
+    // `allow Db`) — the establishing-allowlist predicate per effect (is_net_establishing /
+    // is_cmd_naming_method / is_fs_path_arg / is_db_query_arg), matching candor-java's surfaceIncomplete.
     let mut incomplete: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
     let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut loc: HashMap<String, String> = HashMap::new();
@@ -3890,6 +3893,21 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
                     } else if eff == "Exec" && candor_classify::is_cmd_naming_method(&c.leaf) {
                         incomplete.entry(f.qual.clone()).or_default().insert("Exec");
+                    } else if eff == "Fs" && !c.method && candor_classify::is_fs_path_arg(&c.leaf) {
+                        // A path-NAMING Fs call (`fs::write(p,…)`/`File::open(p)` — a free fn / constructor,
+                        // `method=false`) with NO captured path literal → the path is a runtime value,
+                        // invisible to the gate. Mark Fs incomplete so a benign sibling literal can't certify
+                        // the masked path (`allow Fs` fails closed). The `!c.method` gate excludes the
+                        // path-stat METHODS (`p.metadata()`/`p.exists()`) whose path is the RECEIVER, not an
+                        // arg — same establishing-allowlist discipline as Net/Exec (matches candor-java).
+                        incomplete.entry(f.qual.clone()).or_default().insert("Fs");
+                    } else if eff == "Db" && candor_classify::is_db_query_arg(&c.leaf) {
+                        // A SQL-QUERY-bearing Db call (`con.execute(sql,…)`/`query`/`prepare`) with NO captured
+                        // query literal → the table is a runtime value, invisible to the gate. Mark Db
+                        // incomplete so a benign sibling literal can't certify the masked table. The allowlist
+                        // excludes build-then-execute terminals (`fetch_all`/`load`/`all`) and lifecycle ops
+                        // (`connect`/`open`/`begin`) whose query is built structurally (no maskable string).
+                        incomplete.entry(f.qual.clone()).or_default().insert("Db");
                     }
                 }
                 if let Some(s) = &c.str_arg {
@@ -5343,6 +5361,76 @@ mod tests {
         );
         assert!(v.iter().any(|l| l.contains("a::mask") && l.contains("cannot be certified")), "{v:?}");
         assert!(!v.iter().any(|l| l.contains("a::clean")), "clean must certify: {v:?}");
+    }
+
+    #[test]
+    fn masking_fs_path_and_db_table_gate_fails_closed() {
+        // End-to-end (scan_one + a CANDOR_POLICY file): a MASKED Fs path / Db table reached ALONGSIDE a
+        // benign ALLOWED literal must FAIL the allowlist gate (exit 1) — the benign sibling must not mask
+        // the runtime-built endpoint. A single compliant literal still PASSES (no false positive). A
+        // fully-masked program (no benign sibling) still fails. The gate evasion this closes:
+        // `inferred=[Fs] paths=[/var/app/x]` with no `incomplete` certified `allow Fs /var/app` while a
+        // sibling `fs::write(format!("/etc/{}","passwd"), …)` hit /etc/passwd at runtime.
+        let run = |name: &str, src: &str, policy: &str| -> i32 {
+            let d = std::env::temp_dir().join(format!("candor-mask-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let pp = d.join("candor.policy");
+            std::fs::write(&pp, policy).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false,
+                policy: Some(pp.to_string_lossy().into_owned()), quiet: true, deps_idx: &idx,
+            });
+            let _ = std::fs::remove_dir_all(&d);
+            rc
+        };
+
+        // Fs: a benign allowed write + a MASKED (runtime-path) write → gate FAILS (Fs incomplete).
+        let fs_mix = r#"
+            use std::fs;
+            pub fn go() {
+                let _ = fs::write("/var/app/x", b"x");
+                let p = format!("/etc/{}", "passwd");
+                let _ = fs::write(p, b"x");
+            }
+        "#;
+        assert_eq!(run("fsmix", fs_mix, "allow Fs /var/app\n"), 1, "masked Fs path must fail the gate");
+
+        // Fs: a single compliant literal (no masking) → PASSES.
+        let fs_ok = r#"
+            use std::fs;
+            pub fn go() { let _ = fs::write("/var/app/x", b"x"); }
+        "#;
+        assert_eq!(run("fsok", fs_ok, "allow Fs /var/app\n"), 0, "compliant Fs path must pass (no false positive)");
+
+        // Fs: fully masked (no benign sibling) → still fails (unchanged behaviour).
+        let fs_masked = r#"
+            use std::fs;
+            pub fn go() { let p = format!("/etc/{}", "passwd"); let _ = fs::write(p, b"x"); }
+        "#;
+        assert_eq!(run("fsmask", fs_masked, "allow Fs /var/app\n"), 1, "fully-masked Fs path must fail");
+
+        // Db: a benign allowed query + a MASKED (runtime-query) execute → gate FAILS (Db incomplete).
+        let db_mix = r#"
+            pub fn go(con: &rusqlite::Connection) {
+                let _ = con.execute("SELECT id FROM customers", []);
+                let q = format!("DELETE FROM {}", "secrets");
+                let _ = con.execute(&q, []);
+            }
+        "#;
+        assert_eq!(run("dbmix", db_mix, "allow Db customers\n"), 1, "masked Db table must fail the gate");
+
+        // Db: a single compliant query (no masking) → PASSES.
+        let db_ok = r#"
+            pub fn go(con: &rusqlite::Connection) {
+                let _ = con.execute("SELECT id FROM customers", []);
+            }
+        "#;
+        assert_eq!(run("dbok", db_ok, "allow Db customers\n"), 0, "compliant Db table must pass (no false positive)");
     }
 
     #[test]

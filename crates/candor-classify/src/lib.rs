@@ -1218,6 +1218,92 @@ pub fn is_net_establishing(method: &str) -> bool {
     )
 }
 
+/// The masking guard (AS-EFF-008), the `Fs` analog of `is_net_establishing`: whether an `Fs`-classified
+/// call takes the filesystem PATH as a string argument (so a missing literal leaves the path
+/// structurally INVISIBLE — a runtime-built path — and the surface is incomplete, fail-closed). An
+/// ALLOWLIST of the path-NAMING free functions / constructors (`fs::write`/`read`/`File::open`/…), the
+/// SAFE direction: a path-stat METHOD whose path is the RECEIVER (`p.metadata()`, `p.exists()`) is
+/// invoked method-form and the caller gates on `!is_method`, so this never sees it; an op on an
+/// already-opened handle (`file.write_all`, `mmap.flush`, `tempfile()` — a random name, no path arg)
+/// is not here, so a missing literal there never false-positives. Under-catching an unusual
+/// path-naming fn is a missed mask (sound-with-disclosure), never a broken gate. The arg is the
+/// method/fn leaf (the path's last segment).
+pub fn is_fs_path_arg(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        // std::fs / tokio::fs / async_std::fs / fs_err free functions taking a path argument
+        "write"
+            | "read"
+            | "read_to_string"
+            | "read_dir"
+            | "read_link"
+            | "copy"
+            | "rename"
+            | "remove_file"
+            | "remove_dir"
+            | "remove_dir_all"
+            | "create_dir"
+            | "create_dir_all"
+            | "hard_link"
+            | "soft_link"
+            | "symlink"
+            | "symlink_file"
+            | "symlink_dir"
+            | "symlink_metadata"
+            | "canonicalize"
+            | "metadata"
+            | "set_permissions"
+            | "exists"
+            | "try_exists"
+            // File / OpenOptions constructors taking a path argument
+            | "open"
+            | "create"
+            | "create_new"
+    )
+}
+
+/// The masking guard (AS-EFF-008), the `Db` analog of `is_net_establishing`: whether a `Db`-classified
+/// call takes the raw SQL QUERY as a string argument (so a missing literal leaves the table
+/// structurally INVISIBLE — a runtime-built query — and the surface is incomplete, fail-closed). An
+/// ALLOWLIST of the SQL-string-bearing execution/prepare verbs, the SAFE direction: a
+/// build-then-execute terminal that takes NO SQL string (sqlx/diesel/sea_orm `fetch*`/`load*`/`first`/
+/// `all`/`one`/`stream`, the document-store `find*`/`insert*`/…), and a non-query op (`connect`/
+/// `open`/`acquire`/`begin`/`commit`/`ping`/`get_conn`), are NOT here — their query is built
+/// structurally (never a maskable string literal) so a missing literal must not false-positive.
+/// Under-catching an unusual query verb is a missed mask (sound-with-disclosure), never a broken gate.
+/// The arg is the method leaf (the path's last segment).
+pub fn is_db_query_arg(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        "execute"
+            | "execute_batch"
+            | "execute_unprepared"
+            | "batch_execute"
+            | "simple_query"
+            | "query"
+            | "query_one"
+            | "query_opt"
+            | "query_raw"
+            | "query_row"
+            | "query_map"
+            | "query_and_then"
+            | "query_typed"
+            | "query_all"
+            | "prepare"
+            | "prepare_typed"
+            | "prepare_cached"
+            | "exec"
+            | "exec_first"
+            | "exec_iter"
+            | "exec_map"
+            | "exec_fold"
+            | "exec_drop"
+            | "exec_batch"
+            | "prep"
+            | "run_command"
+    )
+}
+
 /// Map a cap-std capability *type* to the effect it authorises. Holding one of these
 /// (e.g. `&Dir`) is the real, unforgeable right to perform that effect — so candor
 /// treats it as a declared capability, exactly like its own `&Fs` token.
@@ -1689,5 +1775,36 @@ mod tests {
         // use-verbs (host fixed at connect) must NOT be establishing — else `connect("h").write()` flags.
         assert!(!is_net_establishing("write") && !is_net_establishing("read") && !is_net_establishing("send"));
         assert!(!is_net_establishing("flush") && !is_net_establishing("recv") && !is_net_establishing("peek"));
+    }
+
+    #[test]
+    fn fs_path_arg_allowlist() {
+        // The Fs masking guard's path-naming-fn allowlist — free fns / constructors take the path as a
+        // string arg (a runtime path there is invisible to the gate). Stat methods (path on the receiver)
+        // and handle ops carry no path arg and must NOT flag — but they're caught by the caller's
+        // `!is_method` gate; the allowlist itself just enumerates the path-NAMING leaves.
+        assert!(is_fs_path_arg("write") && is_fs_path_arg("read") && is_fs_path_arg("read_to_string"));
+        assert!(is_fs_path_arg("open") && is_fs_path_arg("create") && is_fs_path_arg("create_new"));
+        assert!(is_fs_path_arg("remove_file") && is_fs_path_arg("rename") && is_fs_path_arg("copy"));
+        assert!(is_fs_path_arg("create_dir_all") && is_fs_path_arg("canonicalize") && is_fs_path_arg("metadata"));
+        // handle ops / pure builders take NO path arg — never path-naming.
+        assert!(!is_fs_path_arg("write_all") && !is_fs_path_arg("flush") && !is_fs_path_arg("read_exact"));
+        assert!(!is_fs_path_arg("new") && !is_fs_path_arg("sync_all") && !is_fs_path_arg("set_len"));
+    }
+
+    #[test]
+    fn db_query_arg_allowlist() {
+        // The Db masking guard's query-bearing-verb allowlist — these take the raw SQL as a string arg
+        // (a runtime query there is invisible to the gate). Build-then-execute terminals and non-query
+        // ops carry no SQL string and must NOT flag.
+        assert!(is_db_query_arg("execute") && is_db_query_arg("query") && is_db_query_arg("query_one"));
+        assert!(is_db_query_arg("prepare") && is_db_query_arg("batch_execute") && is_db_query_arg("execute_batch"));
+        assert!(is_db_query_arg("query_row") && is_db_query_arg("query_map") && is_db_query_arg("exec"));
+        // build-then-execute terminals (query built structurally, no SQL string) must NOT flag.
+        assert!(!is_db_query_arg("fetch_all") && !is_db_query_arg("load") && !is_db_query_arg("first"));
+        assert!(!is_db_query_arg("all") && !is_db_query_arg("one") && !is_db_query_arg("stream"));
+        // connection / lifecycle ops take no SQL — must NOT flag.
+        assert!(!is_db_query_arg("connect") && !is_db_query_arg("open") && !is_db_query_arg("begin"));
+        assert!(!is_db_query_arg("commit") && !is_db_query_arg("ping") && !is_db_query_arg("get_conn"));
     }
 }

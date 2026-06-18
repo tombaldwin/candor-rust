@@ -224,6 +224,21 @@ want   "AS-EFF-008 flags the path outside the allowed prefix (config::leak → /
 absent "a path under the allowed prefix is NOT flagged (config::load → /etc/app/…)"       "$out" '[AS-EFF-008] `config::load`'
 rm -rf "$(dirname "$FA")"
 
+# ── 9a-mask. Masking fail-closed: a RUNTIME Fs path / Db table alongside a BENIGN allowed literal
+# must FAIL the allowlist (the surface is incomplete) — a benign sibling must not certify the masked
+# endpoint. This is the AS-EFF-008 masking guard generalized from Net/Exec to Fs/Db (gate-evasion fix).
+echo "== masking fail-closed / AS-EFF-008 (allow Fs/Db, runtime locator) =="
+MK=$(mktemp -d)/mk; mkdir -p "$MK/src"
+printf '[package]\nname="mk"\nversion="0.1.0"\nedition="2021"\n' > "$MK/Cargo.toml"
+# fs_mask: a benign /var/app write + a MASKED runtime-path write (format! → /etc/passwd).
+# fs_ok: a single allowed literal write (no masking) — must certify.
+printf 'pub fn fs_mask(){ let _=std::fs::write("/var/app/x", b"x"); let p=format!("/etc/{}","passwd"); let _=std::fs::write(p, b"x"); }\npub fn fs_ok(){ let _=std::fs::write("/var/app/x", b"x"); }\nfn main(){ fs_mask(); fs_ok(); }\n' > "$MK/src/main.rs"
+echo "allow Fs  /var/app" > "$MK/policy"
+out=$(dl "$MK" env CANDOR_POLICY="$MK/policy")
+want   "AS-EFF-008 fails closed on a MASKED Fs path despite a benign sibling (fs_mask)" "$out" '[AS-EFF-008] `fs_mask`'
+absent "a single allowed literal Fs path still certifies (fs_ok)"                       "$out" '[AS-EFF-008] `fs_ok`'
+rm -rf "$(dirname "$MK")"
+
 # ── 9b. Module layering: forbid a dependency direction (AS-EFF-009) ──
 echo "== module layering / AS-EFF-009 (CANDOR_POLICY forbid) =="
 LY=$(mktemp -d)/ly; mkdir -p "$LY/src"
