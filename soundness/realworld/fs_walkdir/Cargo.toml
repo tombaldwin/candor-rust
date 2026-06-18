@@ -1,0 +1,10 @@
+[package]
+name = "fs_walkdir"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "fs_walkdir"
+path = "src/main.rs"
+[dependencies]
+walkdir = "2"

@@ -1,0 +1,10 @@
+[package]
+name = "fs_tempfile"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "fs_tempfile"
+path = "src/main.rs"
+[dependencies]
+tempfile = "3"

@@ -47,7 +47,11 @@ CASES=(
   "net_ureq|Net|192.0.2.3"
   "exec_duct|Exec|candor-oracle-exec"
   "exec_xshell|Exec|candor-oracle-xshell"
+  "exec_std|Exec|candor-oracle-exec-std"
   "fs_fserr|Fs|/tmp/candor-oracle-fs-marker"
+  "fs_std|Fs|/tmp/candor-oracle-fs-std"
+  "fs_walkdir|Fs|candor-oracle-walk"
+  "fs_tempfile|Fs|candor-oracle-temp"
   "pure_ctrl||__no_marker__"
 )
 
