@@ -34,3 +34,21 @@ pub fn env_etcetera() { let _ = etcetera::home_dir(); }
 pub fn clock_std() { let _ = std::time::SystemTime::now(); }
 pub fn clock_instant() { let _ = std::time::Instant::now(); }
 pub fn clock_jiff() { let _ = jiff::Timestamp::now(); }
+
+// --- Seam propagation (the deferred/indirect classes found in the 2026-06-18 adversarial sweep). An
+// effect reached only THROUGH the seam must propagate to the forcing/writing fn — not stay on the seam's
+// own body. Routed through Clock (SystemTime::now) to keep this corpus non-syscall + runs-anywhere. These
+// gate the SCAN engine via known semantics, the ground-truth complement to the deep engine's ui/ fixtures
+// (lazy-init: candor-rust ui/deferred_effects.rs; thread_local: ui/thread_local_effects.rs; write-fmt
+// writer side: ui/write_trait.rs + scan 0.5.18). A silent-pure on any forcing fn is an under-report. ---
+static SEAM_LAZY: std::sync::LazyLock<u8> = std::sync::LazyLock::new(|| { let _ = std::time::SystemTime::now(); 0 });
+pub fn seam_lazy_force() { let _ = *SEAM_LAZY; }                                  // Clock (forces the lazy init)
+
+thread_local! { static SEAM_TL: u8 = { let _ = std::time::SystemTime::now(); 0 }; }
+pub fn seam_thread_local() { SEAM_TL.with(|v| { let _ = v; }); }                 // Clock (forces the thread_local init)
+
+struct ClockWriter;
+impl std::fmt::Write for ClockWriter {
+    fn write_str(&mut self, _s: &str) -> std::fmt::Result { let _ = std::time::SystemTime::now(); Ok(()) }
+}
+pub fn seam_write_fmt(w: &mut ClockWriter) { use std::fmt::Write as _; let _ = write!(w, "x"); } // Clock (write! drives the writer)

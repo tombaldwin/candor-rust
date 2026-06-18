@@ -19,5 +19,8 @@
   "env_etcetera": "Env",
   "clock_std": "Clock",
   "clock_instant": "Clock",
-  "clock_jiff": "Clock"
+  "clock_jiff": "Clock",
+  "seam_lazy_force": "Clock",
+  "seam_thread_local": "Clock",
+  "seam_write_fmt": "Clock"
 }
