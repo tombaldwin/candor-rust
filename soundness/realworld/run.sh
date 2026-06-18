@@ -51,6 +51,7 @@ CASES=(
   "exec_subprocess|Exec|candor-oracle-subprocess"
   "fs_fserr|Fs|/tmp/candor-oracle-fs-marker"
   "fs_std|Fs|/tmp/candor-oracle-fs-std"
+  "fs_writefmt|Fs|/tmp/candor-oracle-writefmt"
   "fs_walkdir|Fs|candor-oracle-walk"
   "fs_tempfile|Fs|candor-oracle-temp"
   "fs_fsextra|Fs|/tmp/candor-oracle-fsextra"

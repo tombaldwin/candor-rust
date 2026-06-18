@@ -1,0 +1,8 @@
+[package]
+name = "fs_writefmt"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "fs_writefmt"
+path = "src/main.rs"
