@@ -575,10 +575,16 @@ fn cmd_where(args: &[String]) -> i32 {
 // ── callers ─────────────────────────────────────────────────────────────────────────────────────
 
 fn cmd_callers(args: &[String]) -> i32 {
-    let (pre, q, want_json) = match three(args) {
+    // --include-unknown ⟨0.7⟩: also disclose the unresolved-dispatch frontier (possibleViaUnknownDispatch).
+    // candor-query is the query engine for candor-swift too (swift is analyze-only), so this serves swift
+    // reports (which emit `dispatch:owner.member` + a hierarchy sidecar) as well as rust reports (no
+    // `dispatch:` → empty frontier). Without the flag, the {of,direct,transitive} shape is unchanged.
+    let include_unknown = args.iter().any(|a| a == "--include-unknown");
+    let pos: Vec<String> = args.iter().filter(|a| *a != "--include-unknown").cloned().collect();
+    let (pre, q, want_json) = match three(&pos) {
         Some(t) => t,
         None => {
-            eprintln!("usage: candor-query callers <prefix> <query> <0|1>");
+            eprintln!("usage: candor-query callers <prefix> <query> <0|1> [--include-unknown]");
             return 2;
         }
     };
@@ -598,7 +604,189 @@ fn cmd_callers(args: &[String]) -> i32 {
             Err(c) => return c,
         };
     }
-    callers_via_callgraph(&cg, q, want_json)
+    if include_unknown {
+        let entries = match load_entries_loud(pre) {
+            Ok(v) => v,
+            Err(c) => return c,
+        };
+        callers_via_callgraph_frontier(&cg, &entries, &load_hierarchy(pre), q, want_json)
+    } else {
+        callers_via_callgraph(&cg, q, want_json)
+    }
+}
+
+/// The bare method name / declaring type of a `mod.Type.member` qual (split on the last `.`). Used by
+/// the dispatch-frontier to match a confirmed reacher against a `dispatch:OWNER.member` owner.
+fn simple_method(f: &str) -> &str {
+    f.rfind('.').map(|i| &f[i + 1..]).unwrap_or(f)
+}
+fn declaring_type(f: &str) -> &str {
+    f.rfind('.').map(|i| &f[..i]).unwrap_or(f)
+}
+/// Reflexive+transitive subtype test over the hierarchy sidecar.
+fn is_subtype_of(ty: &str, owner: &str, hier: &BTreeMap<String, Vec<String>>) -> bool {
+    if ty == owner {
+        return true;
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut stack: Vec<&str> = vec![ty];
+    while let Some(t) = stack.pop() {
+        if let Some(sups) = hier.get(t) {
+            for s in sups {
+                if s == owner {
+                    return true;
+                }
+                if seen.insert(s.as_str()) {
+                    stack.push(s.as_str());
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Load the type-hierarchy sidecar(s) (`<prefix>.*.hierarchy.json`, 0.7), or empty if absent (→ the
+/// frontier falls back to a simple-name match, which over-lists — the safe lower-bound direction).
+fn load_hierarchy(prefix: &str) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let p = Path::new(prefix);
+    let dir = p
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let Some(base) = p.file_name().and_then(|s| s.to_str()) else {
+        return out;
+    };
+    let pfx = format!("{base}.");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(&pfx) || !name.ends_with(".hierarchy.json") {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(ent.path()) {
+            if let Ok(map) = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&text) {
+                for (k, v) in map {
+                    out.entry(k).or_default().extend(v);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// callers + the unresolved-dispatch frontier (--include-unknown). The CONFIRMED reachers, plus the
+/// functions that reach `q` only through a `dispatch:OWNER.member` the engine declined to resolve —
+/// disclosed iff a confirmed reacher is an override of OWNER.member (same method AND a subtype of OWNER
+/// per the hierarchy; empty hierarchy → simple-name match, over-lists). Never asserted ("cannot confirm").
+fn callers_via_callgraph_frontier(
+    cg: &BTreeMap<String, Vec<String>>,
+    entries: &[ReportEntry],
+    hier: &BTreeMap<String, Vec<String>>,
+    q: &str,
+    want_json: bool,
+) -> i32 {
+    let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (caller, callees) in cg {
+        for c in callees {
+            rev.entry(c.as_str()).or_default().push(caller.as_str());
+        }
+    }
+    let names: BTreeSet<&str> =
+        cg.keys().map(|s| s.as_str()).chain(cg.values().flatten().map(|s| s.as_str())).collect();
+    let tier = best_tier(names.iter().copied(), q);
+    let targets: Vec<String> = names.iter().copied().filter(|n| q_match(n, q, tier)).map(String::from).collect();
+    if targets.is_empty() {
+        if want_json {
+            println!("{{}}");
+        } else {
+            println!("candor: no function matching `{q}` found in the call graph.");
+        }
+        return 0;
+    }
+    let direct: BTreeSet<String> =
+        targets.iter().flat_map(|t| rev.get(t.as_str()).into_iter().flatten().map(|s| s.to_string())).collect();
+    let mut all: BTreeSet<String> = BTreeSet::new();
+    let mut stack: Vec<String> = targets.clone();
+    while let Some(n) = stack.pop() {
+        if let Some(cs) = rev.get(n.as_str()) {
+            for &c in cs {
+                if all.insert(c.to_string()) {
+                    stack.push(c.to_string());
+                }
+            }
+        }
+    }
+    // Frontier: index confirmed reachers' declaring types by simple method name, then test each
+    // dispatch:OWNER.member source whose owner an override (a reacher) is a subtype of.
+    let mut confirmed: BTreeSet<&str> = BTreeSet::new();
+    for t in &targets {
+        confirmed.insert(t.as_str());
+    }
+    for a in &all {
+        confirmed.insert(a.as_str());
+    }
+    let mut by_method: HashMap<&str, Vec<&str>> = HashMap::new();
+    for r in &confirmed {
+        by_method.entry(simple_method(r)).or_default().push(declaring_type(r));
+    }
+    let has_hier = !hier.is_empty();
+    let mut possible: Vec<(String, String)> = Vec::new();
+    for e in entries {
+        if confirmed.contains(e.func.as_str()) {
+            continue;
+        }
+        let mut hits: BTreeSet<&str> = BTreeSet::new();
+        for w in &e.unknown_why {
+            if let Some(key) = w.strip_prefix("dispatch:") {
+                let m = simple_method(key);
+                let owner = declaring_type(key);
+                if let Some(types) = by_method.get(m) {
+                    if !has_hier || types.iter().any(|t| is_subtype_of(t, owner, hier)) {
+                        hits.insert(m);
+                    }
+                }
+            }
+        }
+        if !hits.is_empty() {
+            possible.push((e.func.clone(), hits.iter().copied().collect::<Vec<_>>().join(",")));
+        }
+    }
+    possible.sort();
+    if want_json {
+        let pv: Vec<_> =
+            possible.iter().map(|(f, v)| serde_json::json!({"fn": f, "viaDispatchOn": v})).collect();
+        let out = serde_json::json!({
+            "of": targets,
+            "direct": direct.iter().collect::<Vec<_>>(),
+            "transitive": all.iter().collect::<Vec<_>>(),
+            "possibleViaUnknownDispatch": pv,
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return 0;
+    }
+    let tgt = targets.join(", ");
+    if !all.is_empty() {
+        println!("  `{tgt}` is reached by {} function(s) (the blast radius if it gained an effect):", all.len());
+        for c in &all {
+            let mark = if direct.contains(c) { " (direct)" } else { "" };
+            println!("      {c}{mark}");
+        }
+    }
+    if !possible.is_empty() {
+        println!("  + {} function(s) MAY also reach `{tgt}` via an unresolved broad dispatch candor declined to resolve (cannot confirm):", possible.len());
+        for (f, v) in &possible {
+            println!("      {f}  (via dispatch on {v})");
+        }
+    }
+    if all.is_empty() && possible.is_empty() {
+        println!("  `{tgt}` has no callers (nothing in this crate calls it).");
+    }
+    0
 }
 
 /// "Who reaches `q`?" over the full call graph: the DIRECT callers and the full TRANSITIVE set (the
