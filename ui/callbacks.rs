@@ -8,6 +8,13 @@
 // callback, never unioned onto the HOF and leaked to EVERY caller. `handler_io` (passed an effectful
 // callback) is `Fs`; `domain_calc` (passed only a PURE callback) stays PURE; the HOF itself carries an
 // honest, NON-PROPAGATING `Unknown` (it invokes an opaque param) that does not re-pollute either.
+//
+// FINDING C — the union-fabrication guard under MULTI-SITE, MULTI-EFFECT pressure (stronger than B,
+// which has one effect + one effectful site). One HOF `apply` is passed callbacks with DISTINCT effects
+// from three sites: `site_fs` (Fs), `site_env` (Env), `site_pure` (pure). Each site must inherit ONLY
+// its own callback's effect — `site_fs` = { Fs }, `site_env` = { Env } (NOT { Fs, Env }), `site_pure` =
+// PURE. A regression that unions callback effects onto `apply` would leak { Fs, Env } to ALL three sites
+// (and `apply` itself); this fixture catches that cross-site contamination the single-effect B cannot.
 #![allow(unused)]
 
 fn fs_helper() {
@@ -41,6 +48,27 @@ fn handler_io() -> i32 {
 }
 fn domain_calc() -> i32 {
     with_retry(compute_local) // EXPECT PURE (must NOT inherit the sibling's Fs, nor the HOF's Unknown)
+}
+
+// --- Finding C — multi-site, multi-effect cross-contamination guard ---
+fn cb_fs() {
+    let _ = std::fs::read_to_string("/db"); // Fs
+}
+fn cb_env() {
+    let _ = std::env::var("PATH"); // Env
+}
+fn cb_pure() {} // PURE
+fn apply(g: fn()) {
+    g() // opaque param -> non-propagating Unknown on `apply`
+}
+fn site_fs() {
+    apply(cb_fs); // EXPECT { Fs } only
+}
+fn site_env() {
+    apply(cb_env); // EXPECT { Env } only (must NOT pick up Fs from the sibling site)
+}
+fn site_pure() {
+    apply(cb_pure); // EXPECT PURE (must NOT pick up Fs or Env)
 }
 
 fn main() {}
