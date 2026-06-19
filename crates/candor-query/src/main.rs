@@ -668,11 +668,11 @@ fn load_hierarchy(prefix: &str) -> BTreeMap<String, Vec<String>> {
         if !name.starts_with(&pfx) || !name.ends_with(".hierarchy.json") {
             continue;
         }
-        if let Ok(text) = std::fs::read_to_string(ent.path()) {
-            if let Ok(map) = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&text) {
-                for (k, v) in map {
-                    out.entry(k).or_default().extend(v);
-                }
+        if let Ok(text) = std::fs::read_to_string(ent.path())
+            && let Ok(map) = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&text)
+        {
+            for (k, v) in map {
+                out.entry(k).or_default().extend(v);
             }
         }
     }
@@ -745,10 +745,10 @@ fn callers_via_callgraph_frontier(
             if let Some(key) = w.strip_prefix("dispatch:") {
                 let m = simple_method(key);
                 let owner = declaring_type(key);
-                if let Some(types) = by_method.get(m) {
-                    if !has_hier || types.iter().any(|t| is_subtype_of(t, owner, hier)) {
-                        hits.insert(m);
-                    }
+                if let Some(types) = by_method.get(m)
+                    && (!has_hier || types.iter().any(|t| is_subtype_of(t, owner, hier)))
+                {
+                    hits.insert(m);
                 }
             }
         }
