@@ -4206,7 +4206,7 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf || dep_join_hit;
             if !c.is_macro && !already_handled && merged.extern_fns.contains(&c.leaf) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                unknown_why.entry(f.qual.clone()).or_default().insert("ffi:extern fn");
+                unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn"); // FFI is a native boundary — canonical `native:` (SPEC §4 ⟨0.7⟩)
             }
         }
         // DROP-GLUE EDGE (#3): for each LOCAL drop type this fn constructed, add the implicit scope-exit
@@ -6255,7 +6255,7 @@ mod tests {
             .and_then(|f| f.get("unknownWhy").or_else(|| f.get("unknown_why")))
             .and_then(|w| w.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
-        assert!(why.iter().any(|r| r.contains("ffi")), "unknownWhy must name the FFI boundary: {why:?}\n{body}");
+        assert!(why.iter().any(|r| r.starts_with("native:")), "unknownWhy must name the native/FFI boundary (canonical native:): {why:?}\n{body}");
         // CONTROL (a): pure_math has NO effect — never fabricated (it's absent from the effectful report)
         assert!(effects_of("pure_math").is_empty(),
                 "a pure fn with no extern call must stay pure (no fabricated Unknown):\n{body}");
