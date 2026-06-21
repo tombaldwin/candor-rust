@@ -1471,8 +1471,9 @@ fn rank(c: &Change, top_level: &BTreeSet<String>) -> u8 {
 
 /// BOUNDARY effects SHOULD live in a dedicated layer — their dispersion is the architecture signal (NOT
 /// raw counts, which are domain-dependent). AMBIENT effects are expected to be cross-cutting (logging /
-/// timestamps everywhere is fine), so they're reported but not scored. `Unknown` is excluded.
-const CONTAINED: &[&str] = &["Db", "Net", "Exec", "Fs", "Ipc"];
+/// timestamps everywhere is fine), so they're reported but not scored. `Unknown` is excluded. `Clipboard`
+/// is a §6.1 boundary effect (external-resource I/O), so it is contained/scored like the rest.
+const CONTAINED: &[&str] = &["Db", "Net", "Exec", "Fs", "Ipc", "Clipboard"];
 const AMBIENT: &[&str] = &["Log", "Clock", "Rand", "Env"];
 
 /// Normalize a function path for layer derivation: a UFCS trait-impl path `<Type as Trait>::method`
@@ -1517,7 +1518,7 @@ fn layer_of(name: &str, prefix_len: usize) -> String {
     }
 }
 
-/// `containment` — how well each BOUNDARY effect (Db/Net/Exec/Fs/Ipc) stays in one layer: the
+/// `containment` — how well each BOUNDARY effect (Db/Net/Exec/Fs/Ipc/Clipboard) stays in one layer: the
 /// domain-INDEPENDENT architecture signal behind the "leaky cross-cutting" intuition (a ratio /
 /// structure, not a count). With a baseline prefix it's a RATCHET — exit 1 if a boundary effect appears
 /// in a layer it wasn't in ("Db → actions"), and NOTE when one leaves a layer ("✓ Db ⊘ legacy").
@@ -1861,13 +1862,13 @@ fn cmd_reachable(args: &[String]) -> i32 {
         println!("  (no entry points in this report — nothing is marked runtime-invoked)");
         return 0;
     }
-    // Boundary effects first, then ambient, then Clipboard (a peripheral capability in neither set),
-    // then the Unknown caveat. Any other effect trails.
+    // Boundary effects first (Clipboard rides in CONTAINED now), then ambient, then the Unknown caveat.
+    // Any other effect trails.
     let order: Vec<&str> = CONTAINED
         .iter()
         .chain(AMBIENT.iter())
         .copied()
-        .chain(["Clipboard", "Unknown"])
+        .chain(["Unknown"])
         .collect();
     let mut seen: Vec<&String> = by_eff.keys().collect();
     seen.sort_by_key(|e| order.iter().position(|o| *o == e.as_str()).unwrap_or(order.len()));
