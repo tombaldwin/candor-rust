@@ -2,6 +2,17 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+> **Review note (2026-06-21).** Landed since this file was last swept (some entries below are now stale —
+> see annotations): the `unknownWhy` vocabulary harmonised to the canonical 4 kinds + a conformance check
+> (PART 10); the dispatch-frontier (`callers --include-unknown`, spec 0.7) across class/protocol engines
+> (PART 9); `containment` + the AS-EFF-010 ratchet added to the cross-engine conformance differential
+> (PART 11, Java vs candor-query) and to candor-ts; conformance effect coverage extended to 8 (added
+> Rand/Db/Log). The big cross-engine SOUNDNESS result of the period (candor-java only): the
+> inherited-into-project silent-pure vein class (active-record / repository / modeled-base-subclass) was
+> closed in candor-java and CONFIRMED not shared — candor-ts/scan disclose `Unknown` for the same shape
+> (their AST/syntactic models never resolve-to-nothing-then-pure). STILL OPEN here: the κ-treadmill
+> dep-tree scanning (P2), the CI self-guard nightly ICE (a rustc bug), and the MCP tool-set divergence (#4).
+
 ## Direction — where the value actually concentrates (a critical read)
 
 candor's measured, durable value is narrow and worth protecting from scope creep. Concentrate effort
@@ -624,6 +635,12 @@ fixpoint profiled on ripgrep (negligible).
   dominated by call resolution + rustc, not propagation, so a worklist rewrite isn't worth it.
 
 ## Cross-component consistency (from the 2026-06-16 core-component sweep)
+
+> **Status (2026-06-21):** item 1(d) `unknownWhy` vocabulary divergence is **DONE** (harmonised to the
+> canonical reflect/native/dispatch/callback + a conformance check, PART 10). Item 3 is **partly done**
+> (conformance now covers 8 effects + the dispatch frontier + `containment` PART 11; Clipboard/Ipc and the
+> desugared-call generative forms remain). Items 1(a/b/c/e/f) envelope-field divergence and 4 (MCP tool-set)
+> are still **open**.
 
 These four are NOT simple bugs — they are cross-engine consistency / coverage efforts that need a
 deliberate design pass (some touch the spec + all 4 engines + conformance + releases). The clear bugs
