@@ -2782,6 +2782,7 @@ fn collect_decls(
     prim_aliases: &mut std::collections::HashSet<String>,
     extern_fns: &mut std::collections::HashSet<String>,
     drop_types: &mut std::collections::HashSet<String>,
+    deref_target: &mut HashMap<String, String>,
     lazy_statics: &mut std::collections::HashSet<String>,
 ) {
     for it in items {
@@ -2935,6 +2936,24 @@ fn collect_decls(
                         if leaf.ident == "Drop" {
                             drop_types.insert(ty.clone());
                         }
+                        // A LOCAL `impl Deref for T { type Target = U }` — `t.method()` AUTO-DEREFS to U's
+                        // method (Rust auto-deref). Record T-leaf -> U-leaf so a method that resolves on no
+                        // `T::method` retries on `U::method` (the user-Deref analog of the Box/Arc/Rc peel; a
+                        // newtype `impl Deref` dropped `wrapper.method()` to silent-pure — corpus find).
+                        // `.clone()` stays guarded elsewhere, so the pointer-clone fabrication can't recur.
+                        if leaf.ident == "Deref" {
+                            for it in &im.items {
+                                if let syn::ImplItem::Type(at) = it {
+                                    if at.ident == "Target" {
+                                        if let Some(tp) = type_path(&at.ty, uses) {
+                                            let tl = tp.rsplit("::").next().unwrap_or(&tp).to_string();
+                                            let kl = ty.rsplit("::").next().unwrap_or(ty).to_string();
+                                            deref_target.insert(kl, tl);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 for ii in &im.items {
@@ -2953,7 +2972,7 @@ fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, lazy_statics);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics);
                 }
             }
             _ => {}
@@ -3126,6 +3145,10 @@ struct FileDecls {
     extern_fns: Vec<String>,
     /// local type leaves with a local `impl Drop` — a fn binding such a value inherits the drop body.
     drop_types: Vec<String>,
+    /// local type leaf -> Deref Target leaf (`impl Deref for T { type Target = U }`) — `t.method()`
+    /// auto-derefs to `U::method` when T declares no `method`.
+    #[serde(default)]
+    deref_target: HashMap<String, String>,
     /// LAZY/deferred static NAMES in this file (`Lazy`/`LazyLock`/`LazyCell`, `lazy_static!`,
     /// `thread_local!`) — a fn naming one of these FORCES its deferred init unit (`<lazy>::NAME`).
     #[serde(default)]
@@ -3145,10 +3168,11 @@ fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
     let mut prim_aliases = std::collections::HashSet::new();
     let mut extern_fns = std::collections::HashSet::new();
     let mut drop_types = std::collections::HashSet::new();
+    let mut deref_target = HashMap::new();
     let mut lazy_statics = std::collections::HashSet::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut rets,
                   &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types, &mut lazy_statics);
+                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics);
     FileDecls {
         fields,
         field_elem,
@@ -3163,6 +3187,7 @@ fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
         prim_aliases: prim_aliases.into_iter().collect(),
         extern_fns: extern_fns.into_iter().collect(),
         drop_types: drop_types.into_iter().collect(),
+        deref_target,
         lazy_statics: lazy_statics.into_iter().collect(),
     }
 }
@@ -3182,6 +3207,7 @@ struct MergedDecls {
     prim_aliases: std::collections::HashSet<String>,
     extern_fns: std::collections::HashSet<String>,
     drop_types: std::collections::HashSet<String>,
+    deref_target: HashMap<String, String>,
     lazy_statics: std::collections::HashSet<String>,
 }
 
@@ -3252,6 +3278,9 @@ fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for n in &fd.drop_types {
         acc.drop_types.insert(n.clone()); // set union — order-independent
+    }
+    for (k, v) in &fd.deref_target {
+        acc.deref_target.insert(k.clone(), v.clone()); // last-writer-wins (one Deref impl per type)
     }
     for n in &fd.lazy_statics {
         acc.lazy_statics.insert(n.clone()); // set union — order-independent
@@ -4100,6 +4129,30 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                             if hits.len() == 1 && hits[0] != &f.qual {
                                 resolved_local = true;
                                 calls.entry(f.qual.clone()).or_default().insert(hits[0].clone());
+                            }
+                        }
+                        // AUTO-DEREF fallback (last, after inherent + trait-default — Rust's resolution
+                        // order): a custom `impl Deref for t_type { type Target = U }` makes `recv.leaf()`
+                        // dispatch to `U::leaf`. Chase the Deref chain (bounded) and edge to the first
+                        // `U::leaf` that resolves — the user-Deref analog of the Box/Arc/Rc peel (a newtype
+                        // `impl Deref` dropped `wrapper.method()` to silent-pure — corpus find). `.clone()`
+                        // is guarded at the typed-call emit, so no pointee-clone fabrication recurs.
+                        if !resolved_local {
+                            let mut cur = t_type.clone();
+                            let mut hops = 0;
+                            while let Some(target) = merged.deref_target.get(&cur).cloned() {
+                                if hops >= 8 { break; }
+                                hops += 1;
+                                if let Some(ts) = resolve_target(&format!("{target}::{}", c.leaf), &c.leaf, false, &by_tail2, &by_leaf) {
+                                    resolved_local = true;
+                                    for t in ts {
+                                        if t != &f.qual {
+                                            calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                                        }
+                                    }
+                                    break;
+                                }
+                                cur = target;
                             }
                         }
                     }
@@ -5462,6 +5515,51 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
     }
 
     #[test]
+    fn custom_deref_resolves_pointee_method() {
+        // A custom `impl Deref for W { type Target = Inner }` makes `w.method()` auto-deref to Inner's
+        // method — it must reach the pointee's effect, not silently drop (the user-Deref analog of the
+        // Box/Arc/Rc peel; a newtype `impl Deref` dropped `wrapper.method()` to silent-pure — corpus find).
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-deref-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::ops::Deref;
+struct Inner;
+impl Inner {
+    fn doit(&self) { std::process::Command::new("ls").status().unwrap(); }
+    fn clone(&self) -> Inner { std::fs::read("/x").unwrap(); Inner }
+}
+struct W { inner: Inner }
+impl Deref for W { type Target = Inner; fn deref(&self) -> &Inner { &self.inner } }
+impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clone(); } }
+"#;
+        let v = run("deref", src);
+        // auto-deref through the custom Deref reaches the pointee's Exec (was silently pure)
+        assert!(eff(&v, "W::act").contains(&"Exec".to_string()), "custom Deref lost the pointee Exec:\n{v}");
+        // the global `.clone()` guard still holds — `w.clone()` is not attributed the pointee's effectful clone
+        assert!(eff(&v, "W::dup").is_empty(), "custom-Deref clone FABRICATED the pointee's clone effect:\n{v}");
+    }
+
+    #[test]
     fn implicit_iterator_force_charges_local_iter_next_but_not_generic() {
         // A custom `impl Iterator for LocalType` whose `next()` is effectful must charge EVERY
         // implicit forcing site — a `for` loop and consuming combinators (`.collect()`/`.count()`/
@@ -6140,7 +6238,7 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -6537,7 +6635,7 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -6558,7 +6656,7 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -6588,7 +6686,7 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -6616,7 +6714,7 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -6865,7 +6963,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
@@ -7287,6 +7385,7 @@ trait G {
             prim_aliases: _,
             extern_fns: _,
             drop_types: _,
+            deref_target: _,
             lazy_statics: _,
         } = MergedDecls::default();
 
