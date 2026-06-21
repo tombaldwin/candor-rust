@@ -872,7 +872,28 @@ fn type_path(ty: &syn::Type, uses: &HashMap<String, String>) -> Option<String> {
         syn::Type::Reference(r) => type_path(&r.elem, uses),
         syn::Type::Paren(p) => type_path(&p.elem, uses),
         syn::Type::Group(g) => type_path(&g.elem, uses),
-        syn::Type::Path(p) => Some(expand(&path_to_string(&p.path), uses)),
+        syn::Type::Path(p) => {
+            // A transparent OWNED smart-pointer wrapper (`Box<T>`/`Arc<T>`/`Rc<T>`) auto-derefs:
+            // `wrapper.method()` dispatches to `T`'s method. Peel to `T` so the method resolves against
+            // the POINTEE — without this, a `.method()` on an `Arc<Inner>` field/local/param resolved to
+            // "Arc" (no impl in crate) and the call was SILENTLY DROPPED, not even Unknown (a §4
+            // under-report). Arc/Rc/Box receivers are ubiquitous in real Rust (found by corpus-testing
+            // duct + crates: it dropped duct's whole public-API Exec). Mirrors elem_type's wrapper-peel.
+            // Only these three (owned, Deref-to-T); Mutex/RefCell need an explicit .lock()/.borrow().
+            if let Some(seg) = p.path.segments.last() {
+                if matches!(seg.ident.to_string().as_str(), "Box" | "Arc" | "Rc") {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(inner) = args.args.iter().find_map(|a| match a {
+                            syn::GenericArgument::Type(t) => Some(t),
+                            _ => None,
+                        }) {
+                            return type_path(inner, uses);
+                        }
+                    }
+                }
+            }
+            Some(expand(&path_to_string(&p.path), uses))
+        }
         _ => None,
     }
 }
@@ -1617,7 +1638,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // → Fs; the pure join/file_name surface returns None), so the coarse-prefix mis-fire risk
             // doesn't apply. Without this an entire directory walker reads as pure (gix-dir: zero Fs).
             let std_path_recv = ty == "std::path::Path" || ty == "std::path::PathBuf";
-            if !matches!(cr, "std" | "core" | "alloc") || std_path_recv {
+            // `.clone()` resolves to NO typed `Type::clone`: it is conventionally pure, and through the
+            // smart-pointer deref-peel (type_path) an `Arc<T>`/`Rc<T>` receiver types as `T`, so
+            // `arc.clone()` would form `T::clone` and FABRICATE — but `arc.clone()` calls the pointer's
+            // own `Arc::clone` (a pure refcount bump), NEVER `T::clone`. An effectful `T::clone` is a rare
+            // anti-pattern, so skipping the typed clone resolution is the safe choice (no fabrication).
+            if (!matches!(cr, "std" | "core" | "alloc") || std_path_recv) && leaf != "clone" {
                 let path = format!("{ty}::{leaf}");
                 self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true, is_macro: false });
             }
@@ -5383,6 +5409,56 @@ mod tests {
         assert!(eff(&genuine, "calls_dep").contains(&"Net".to_string()),
                 "a genuine dep call must still inherit the dep report's Net:\n{genuine}");
         let _ = std::fs::remove_dir_all(&dep);
+    }
+
+    #[test]
+    fn smart_pointer_receiver_resolves_pointee_method_but_not_clone() {
+        // A method call on an `Arc<T>`/`Rc<T>`/`Box<T>` receiver auto-derefs to T's method, so it must
+        // resolve the POINTEE's effect — not silently drop (the corpus-found §4 under-report: duct's
+        // whole public API read pure because `self.0: Arc<ExpressionInner>`). BUT `.clone()` must NOT
+        // resolve to `T::clone`: `arc.clone()` calls the pure `Arc::clone` (refcount), never the
+        // pointee's clone, so resolving it would FABRICATE an effectful in-crate clone.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-smartptr-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::sync::Arc; use std::rc::Rc;
+struct Inner;
+impl Inner {
+    fn doit(&self) { std::process::Command::new("ls").status().unwrap(); }
+    fn clone(&self) -> Inner { std::fs::read("/x").unwrap(); Inner }
+}
+struct A(Arc<Inner>);
+impl A { pub fn run(&self) { self.0.doit(); } pub fn dup(&self) -> Arc<Inner> { self.0.clone() } }
+struct B(Box<Inner>); impl B { pub fn run(&self) { self.0.doit(); } }
+struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
+"#;
+        let v = run("smartptr", src);
+        // auto-deref: the pointee's Exec is reached through Arc/Box/Rc receivers (was silently pure)
+        assert!(eff(&v, "A::run").contains(&"Exec".to_string()), "Arc deref lost Exec:\n{v}");
+        assert!(eff(&v, "B::run").contains(&"Exec".to_string()), "Box deref lost Exec:\n{v}");
+        assert!(eff(&v, "R::run").contains(&"Exec".to_string()), "Rc deref lost Exec:\n{v}");
+        // anti-fabrication: `arc.clone()` is the pure `Arc::clone`, never the effectful pointee clone
+        assert!(eff(&v, "A::dup").is_empty(), "arc.clone() FABRICATED the pointee's clone effect:\n{v}");
     }
 
     #[test]
