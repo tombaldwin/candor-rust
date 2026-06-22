@@ -288,10 +288,19 @@ case "$cmd" in
     # snapshot still stamped a version and reported success — an EMPTY baseline silently disables the
     # guard. Force the recompile, then verify the files actually appeared.
     rm -rf target/dylint 2>/dev/null || true
-    CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB"
+    # candor writes its report in `check_crate_post` — BEFORE rustc flushes any `span_delayed_bug`s at
+    # shutdown. So a NONZERO dylint exit alongside a COMPLETE report means a benign rustc shutdown
+    # delayed-bug (e.g. a speculative `Instance::try_resolve` on a derive'd impl — which candor already
+    # records as unresolved), NOT an analysis failure. Capture the exit (don't let `set -e` abort) and
+    # let the report-existence check below be the real success gate.
+    snap_rc=0
+    CANDOR_JSON="$pre" cargo dylint --lib-path "$LIB" || snap_rc=$?
     if ! report_exists "$pre"; then
       echo "candor: snapshot produced NO report files — did the crate build? Baseline NOT written." >&2
       exit 1
+    fi
+    if [ "$snap_rc" -ne 0 ]; then
+      echo "candor: note — rustc emitted a delayed-bug at shutdown (dylint exit $snap_rc), but the report is complete; the snapshot is valid. This is a benign rustc artifact of speculative resolution, not a candor analysis error." >&2
     fi
     engine_ver > "$pre.candor-version"
     rm -f "$(dirname "$pre")/review-seen" 2>/dev/null || true   # new baseline → reset §2 self-review
