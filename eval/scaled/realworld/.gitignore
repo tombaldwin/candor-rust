@@ -1,0 +1,6 @@
+# The target repo is checked out fresh per the manifest (commit-pinned); never vendored here.
+checkout/
+work/
+*.scan.json
+*.callgraph.json
+.candor/

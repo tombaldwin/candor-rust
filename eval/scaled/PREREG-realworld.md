@@ -1,7 +1,21 @@
 # Pre-registration: the blast-radius A/B on a REAL, large codebase (the un-leaky open cell)
 
 **To be committed before any trial agent runs**, and before the target repo/symbol/ground-truth are
-frozen (see "Freeze" below — that lands in its own pre-trial commit). Extends
+frozen (see "Freeze" below — that lands in its own pre-trial commit).
+
+> **Amendment (pre-freeze, before any trial): instrument = the deep engine, not candor-scan.**
+> The freeze step ran the *published syntactic backend* (`candor-scan`) on the candidate repo (ripgrep)
+> first and it failed selection rule 3: on real trait/closure/iterator-heavy Rust the syntactic call
+> graph is too sparse to carry a deep+wide+multi-file target (ripgrep `crates/core`: **292 edges over
+> 930 nodes**; the only wide caller-trees were flag accessors — file-concentrated, shallow, a
+> semantically weak place for an effect). Falling to fd/bat would hit the same wall — it's the
+> *instrument*, not the repo. So this batch runs on the **deep engine** (`cargo candor`, the nightly
+> rustc/MIR backend), which resolves dispatch and cross-crate edges (the same code: **4988 edges over
+> 2718 nodes**) and is the tool candor would actually recommend for a complete blast radius. This
+> trades the "published flagship" framing for a defensible real-world result; the syntactic backend's
+> real-graph sparsity is itself a known, separately-tracked limitation (EVAL.md library dogfood,
+> bounded-CHA), not what this batch is testing. The frozen target lives in
+> [realworld/MANIFEST.md](realworld/MANIFEST.md) + [realworld/GROUND_TRUTH.md](realworld/GROUND_TRUTH.md). Extends
 [PREREG-speed.md](PREREG-speed.md) and [PREREG-speed-models.md](PREREG-speed-models.md): those
 established, across Fable 5 / Opus / Sonnet (and Haiku in the agent-use track), that candor's answer is
 model-invariant while manual tracing degrades as the model cheapens. Every one of those batches carries
@@ -52,9 +66,11 @@ symbol is rejected and the next candidate is chosen by the rule below — record
    `ebman`, `mcfly`, and any crate added as a calibration dep — see EVAL.md). Confirmed un-seen.
 2. **Large enough that the graph exceeds comfortable context**: ≥ ~8k source lines and ≥ ~30 modules,
    so an agent cannot hold the whole call graph at once.
-3. **candor-scan analyzes it cleanly** — it produces a report with a *low* unresolved-source rate on
+3. **The engine analyzes it cleanly** — it produces a report with a *low* unresolved-source rate on
    the subtree of interest (a repo that is mostly `Unknown` would test the classifier, not the
-   blast-radius thesis; disqualify and fall through).
+   blast-radius thesis; disqualify and fall through). _Per the amendment above, candor-scan failed this
+   on ripgrep (sparse syntactic graph); the deep engine passed (2718 nodes / 4988 edges, no `Unknown`
+   on the symbol's caller tree)._
 4. Names are ordinary domain names, **not** authored to telegraph callers (the de-leak requirement that
    batch-2 added).
 
@@ -80,8 +96,8 @@ sidecar in `.candor/`.
 resolves recorded in RESULTS). This completes the 4×4 matrix the prior batches left at three.
 **N = 8 per arm per tier** (64 trials), batched 8-concurrent with arms balanced within each batch
 (4C + 4T, same tier), one shot per trial, single rerun only on a harness error (agent returns nothing),
-noted. Tooling under test: the **published `candor-scan`** (version recorded in RESULTS) + the repo
-`candor-query`.
+noted. Tooling under test: the **deep engine** (`cargo candor` snapshot, version recorded in RESULTS) +
+the repo `candor-query` (the `callers`/`whatif` queries over the deep report).
 
 **Identical prompt**, differing ONLY in the tool clause (verbatim shape from PREREG-speed.md):
 
