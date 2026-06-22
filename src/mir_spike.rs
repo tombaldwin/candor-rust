@@ -142,7 +142,7 @@ fn local_drop_impls<'tcx>(
                 }
             }
             for field in adt.all_fields() {
-                local_drop_impls(tcx, field.ty(tcx, args), out, seen);
+                local_drop_impls(tcx, field.ty(tcx, args).skip_normalization(), out, seen);
             }
             // A std OWNING container (Box/Vec/Rc/Arc/HashMap/…) holds its element behind a heap pointer,
             // so field-recursion stops at the raw pointer — yet dropping the container DOES drop the
@@ -181,7 +181,7 @@ fn local_drop_impls<'tcx>(
                     .chain(impls.blanket_impls())
                     .copied()
                 {
-                    let self_ty = tcx.type_of(impl_did).instantiate_identity();
+                    let self_ty = tcx.type_of(impl_did).instantiate_identity().skip_normalization();
                     local_drop_impls(tcx, self_ty, out, seen);
                 }
             }
@@ -215,7 +215,12 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
             let drop_ty = match &term.kind {
                 TerminatorKind::Drop { place, .. } => Some(place.ty(&body.local_decls, tcx).ty),
                 TerminatorKind::Call { func, .. } => match func.ty(&body.local_decls, tcx).kind() {
-                    TyKind::FnDef(d, args) if Some(*d) == tcx.lang_items().drop_in_place_fn() => {
+                    // The sync `drop_in_place` lang item was removed upstream (async-drop landed);
+                    // identify `core::ptr::drop_in_place` by name + defining crate instead.
+                    TyKind::FnDef(d, args)
+                        if tcx.item_name(*d).as_str() == "drop_in_place"
+                            && tcx.crate_name(d.krate).as_str() == "core" =>
+                    {
                         args.types().next()
                     }
                     _ => None,
