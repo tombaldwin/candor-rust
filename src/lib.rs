@@ -683,7 +683,7 @@ fn is_dyn_receiver<'tcx>(tcx: TyCtxt<'tcx>, ty: rustc_middle::ty::Ty<'tcx>) -> b
                 if def_id.as_local().is_none() {
                     return false;
                 }
-                ty = tcx.type_of(def_id).instantiate(tcx, alias.args).peel_refs();
+                ty = tcx.type_of(def_id).instantiate(tcx, alias.args).skip_normalization().peel_refs();
             }
             _ => return false,
         }
@@ -869,7 +869,7 @@ fn devirtualize<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, method_did: Def
     };
     let instance = resolve(cx.typing_env(), args).or_else(|| {
         let env = cx.typing_env().with_post_analysis_normalized(cx.tcx);
-        let args = cx.tcx.try_normalize_erasing_regions(env, args).unwrap_or(args);
+        let args = cx.tcx.try_normalize_erasing_regions(env, rustc_middle::ty::Unnormalized::new(args)).unwrap_or(args);
         resolve(env, args)
     })?;
     // A `Virtual` instance means resolution did NOT devirtualize — the call is still vtable dispatch
@@ -1090,7 +1090,9 @@ fn return_type_driver_local_edge<'tcx>(
             .tcx
             .try_normalize_erasing_regions(
                 cx.typing_env(),
-                rustc_middle::ty::Ty::new_projection(cx.tcx, item_assoc, [iter_ty]),
+                rustc_middle::ty::Unnormalized::new(rustc_middle::ty::Ty::new_projection(
+                    cx.tcx, item_assoc, [iter_ty],
+                )),
             )
             .ok()?;
         let fromiter_trait = cx.tcx.get_diagnostic_item(rustc_span::sym::FromIterator)?;
@@ -1520,7 +1522,7 @@ fn fmt_argument_local_edge<'tcx>(
     // the `Argument` ADT. (Reading `item_name` on the parent `impl` DefId would ICE — an impl block has
     // no name — so resolve the self type instead.)
     let impl_did = cx.tcx.impl_of_assoc(callee_did)?;
-    let self_ty = cx.tcx.type_of(impl_did).instantiate_identity();
+    let self_ty = cx.tcx.type_of(impl_did).instantiate_identity().skip_normalization();
     let rustc_middle::ty::TyKind::Adt(self_adt, _) = self_ty.kind() else { return None };
     if cx.tcx.item_name(self_adt.did()).as_str() != "Argument" {
         return None;
