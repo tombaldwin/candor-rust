@@ -46,12 +46,44 @@ precise.
 bites — sonnet control drops to 90.6% and is perfect only 1/8, and you cannot tell which ~10% is missing
 (or which entries are spurious) without the tool. candor returns the full, correct 61 in one query.
 
-## Cross-tier matrix — IN PROGRESS
+## Cross-tier matrix (complete — N=8/arm/tier, 64 trials)
 
-Sonnet done (above). opus / haiku / fable pending (N=8/arm each). Expectation (pre-registered hypothesis
-2): control completeness falls further at haiku, holds higher at opus/fable; treatment stays ~100% at
-every tier (the tool answer is model-invariant — it's one deterministic query). This section will be
-completed as the tiers land.
+| tier | control recall | control precision | control perfect | treatment recall | treatment perfect |
+|---|---:|---:|---:|---:|---:|
+| **haiku** 4.5 | 60.4% | 83.5% | 0 / 8 | **100%** | **8 / 8** |
+| **sonnet** 4.6 | 90.6% | 98.8% | 1 / 8 | **100%** | **8 / 8** |
+| **opus** 4.8 | 97.3% | 100.0% | 4 / 8 | **100%** | **8 / 8** |
+| **fable** 5 | 99.0% | 100.0% | 5 / 8 | **100%** | **8 / 8** |
+
+**The pre-registered gradient holds, cleanly and monotonically.** Control recall tracks model capability
+— 60% → 91% → 97% → 99% — and so does the perfect-answer rate (0 → 1 → 4 → 5 of 8). Treatment is **flat at
+100% recall, 100% precision, 8-of-8 perfect at every tier**: the tool's answer is model-invariant because
+it is one deterministic `candor-query callers` call that every model copied faithfully (haiku included).
+
+What this means for each end of the curve:
+- **Weak model (haiku):** without candor it is *both* badly incomplete (60% recall, 0/8 perfect) *and*
+  badly imprecise — one agent carpet-bombed **235 false positives** (precision 17.8%), i.e. listed most of
+  the crate. With candor it is perfect. Here candor substitutes for capability: it is the difference
+  between an unusable answer and an exact one.
+- **Frontier model (fable):** even at 99% recall it is perfect only 5/8 — it still drops the occasional
+  deep transitive edge (the lazy_static-cached emitters, a side-by-side painter) and you cannot tell which
+  trial is the incomplete one. candor closes that last gap deterministically.
+
+So candor adds value at **every** tier on a real 30k-LOC crate — most at the cheap end (where it rescues
+both completeness and precision), and still measurably at the frontier (the last few percent + guaranteed
+completeness). Treatment cost is ~constant (one query, ~24–28k tokens); control cost rises with capability
+as stronger models do more tracing work to approach — but never reach — the tool's answer.
+
+## Honest bounds
+
+One repo, one symbol, four tiers, N=8/arm. The graded GT is human-adjudicated reverse-reachability (two
+independent source-only tracers + source resolution of every disagreement; see GROUND_TRUTH). Grading is
+leaf-name match (pre-registered); the 8 lazy_static init pseudo-nodes candor surfaces are stripped before
+scoring (genuine path members below source granularity). The treatment arm was *told* to run
+`candor-query callers` — part of the lift is "we pointed it at the tool" — but the control arm had equal
+license to trace callers and, below the frontier, systematically didn't (or did so incompletely). A second
+repo/symbol would tighten the estimate; this is one strong real-world point, with the toy-fixture asterisk
+removed.
 
 ## Candor vs the adjudicated truth (recorded finding)
 
