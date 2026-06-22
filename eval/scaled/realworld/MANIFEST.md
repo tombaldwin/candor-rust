@@ -1,40 +1,37 @@
-# Frozen target — real-world blast-radius A/B
+# Frozen target — real-world blast-radius A/B (HARDENED)
 
-Committed before any trial agent runs (the pre-trial freeze required by
-[../PREREG-realworld.md](../PREREG-realworld.md)). Nothing here is retuned after trials begin.
+Committed before the trial matrix runs (the pre-trial freeze required by
+[../PREREG-realworld.md](../PREREG-realworld.md)). The first target (ripgrep `ignore`) proved the
+harness but was too easy — sonnet control reached 97.7% by reading the whole 6.7k-LOC crate (see
+[ignore-pilot/NOTE.md](ignore-pilot/NOTE.md)). This hardened target is a 30k-LOC crate whose call graph
+exceeds comfortable reading.
 
 | field | value |
 |---|---|
-| **repo** | `BurntSushi/ripgrep` (`https://github.com/BurntSushi/ripgrep`) |
-| **commit** | `dfe4a81d2591daca76d25ae4e052c34b26578155` |
-| **scope (crate)** | `crates/ignore` — the directory-walking + gitignore/override matching crate (~6.7k LOC) |
-| **symbol** | `pathutil::strip_prefix` (the `pub(crate) fn strip_prefix` in `crates/ignore/src/pathutil.rs`) |
-| **effect probed** | `Fs` — natural framing: *if `strip_prefix` canonicalized the path (resolving symlinks via the filesystem) before stripping, it would perform filesystem I/O* |
-| **instrument** | **deep engine** (`cargo candor`, the nightly rustc/MIR backend) — see the prereg amendment for why not candor-scan |
-| **ground truth** | the adjudicated 32-function propagation set in [GROUND_TRUTH.md](GROUND_TRUTH.md) |
+| **repo** | `dandavison/delta` (`https://github.com/dandavison/delta`) — `git-delta`, a git-diff syntax highlighter |
+| **commit** | `f85c46b` |
+| **scope** | the whole `delta` binary crate (~30k LOC, single crate, ~30 modules under `src/`) |
+| **symbol** | `utils::process::calling_process` (`pub fn calling_process()` in `src/utils/process.rs`) |
+| **effect probed** | `Exec` — natural framing: *delta inspects its parent process to adapt rendering; `calling_process` currently returns a **cached** value (the real `sysinfo` inspection runs once in a background thread). If it queried the OS for the parent process on each call, it would perform process-inspection I/O.* (Genuinely pure now — candor correctly reports it pure — so the "gains an effect" framing is clean.) |
+| **instrument** | deep engine (`cargo candor`, nightly rustc/MIR) — see the prereg amendment |
+| **ground truth** | the adjudicated **61-function** set in [GROUND_TRUTH.md](GROUND_TRUTH.md) / [delta-groundtruth.txt](delta-groundtruth.txt) |
 
-## Why this target (against the prereg's selection rules)
+## Why this target (against the selection rules)
 
-1. **Real, widely-used, un-seen.** ripgrep is not in candor's calibration corpus (that's `ebman`/`mcfly`
-   and their calibration deps). ✓
-2. **Graph exceeds comfortable context.** `crates/ignore` is ~6.7k LOC across 8 modules; the chosen
-   symbol's transitive caller tree is **32 functions across 4 files (walk/dir/gitignore/overrides) and
-   ~4 call-graph layers**, including trait-dispatch (`<Walk as Iterator>::next`), closures, and the
-   parallel-walk worker machinery — not enumerable completely by eye. ✓ (≥25 callers / ≥5 files is met
-   counting the two reachability spines + the iterator impl; layers ≥4.) ✓
-3. **The deep engine analyzes it cleanly.** Merged deep call graph: **2718 nodes / 4988 edges** (vs the
-   syntactic backend's 292 edges on the same code). The `callers` query resolves the symbol's tree with
-   no `Unknown` on the path of interest. ✓
-4. **Un-leaky names.** Ordinary domain names (`walk`, `dir`, `gitignore`, `strip_prefix`); the call
-   structure is not telegraphed by naming. ✓
+1. **Real, widely-used, un-seen** (not in candor's calibration corpus). ✓
+2. **Exceeds comfortable context.** 30k LOC / ~30 modules; the symbol's caller tree is **61 source
+   functions** spanning `handlers/*` (≈12 files), `paint`, `features/{line_numbers,side_by_side}`,
+   `subcommands/*`, `utils/path`, `config`, `delta`, `main` — through 4-6 call-graph layers (incl. the
+   `StateMachine` trait dispatch hub `delta::StateMachine::consume`). Not enumerable by eye; even a
+   strong unlimited-effort source tracer landed 58/61 with 3 false positives (see GROUND_TRUTH §log). ✓
+3. **Deep engine analyzes it cleanly** — 1030 nodes / 1311 edges; the symbol's tree resolves with the
+   only granularity caveat being the `lazy_static` init pseudo-nodes (noted in GROUND_TRUTH). ✓
+4. **Un-leaky names** — ordinary domain names; call structure not telegraphed. ✓
 
-## Reproduce the frozen setup
+## Reproduce
 
 ```sh
-git clone https://github.com/BurntSushi/ripgrep checkout
-git -C checkout checkout dfe4a81d2591daca76d25ae4e052c34b26578155
-# deep-engine report (treatment arm reads this; control reads only crates/ignore source):
-( cd checkout && cargo candor snapshot ../work/baseline )      # nightly dylint backend
-# the symbol's caller tree, as the treatment agent would query it:
-candor-query callers ../work/baseline pathutil::strip_prefix 1
+git clone https://github.com/dandavison/delta checkout && git -C checkout checkout f85c46b
+( cd checkout && cargo candor snapshot ../work/baseline )        # nightly deep engine
+candor-query callers ../work/baseline utils::process::calling_process 1
 ```

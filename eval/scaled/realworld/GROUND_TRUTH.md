@@ -1,95 +1,61 @@
-# Ground truth — ripgrep `ignore` crate, `pathutil::strip_prefix` (Fs)
+# Ground truth — `git-delta`, `utils::process::calling_process` (Exec)
 
-**Established INDEPENDENTLY of candor** and frozen before any trial agent runs. See
-[../PREREG-realworld.md](../PREREG-realworld.md) §"The ground-truth problem".
+**Established INDEPENDENTLY of candor** and frozen before the trial matrix. See
+[../PREREG-realworld.md](../PREREG-realworld.md) §"The ground-truth problem". The machine-readable list
+the harness grades against is [delta-groundtruth.txt](delta-groundtruth.txt) (61 functions).
 
-- **Effect gained:** `Fs`. **Edited (probed) function:** `pathutil::strip_prefix` (the `pub(crate)`
-  free function in `crates/ignore/src/pathutil.rs` — a byte-level path-prefix strip; the *natural* way
-  it would gain `Fs` is to `canonicalize` the path, resolving symlinks via the filesystem, before
-  stripping).
-- **Question under test:** if `pathutil::strip_prefix` performed `Fs`, which OTHER functions in the
-  crate would transitively perform `Fs` — i.e. the complete set of transitive callers.
+- **Effect gained:** `Exec`. **Probed function:** `utils::process::calling_process` — genuinely pure
+  today (it reads a cached `Lazy` static `CALLER`; the real `sysinfo` parent-process inspection runs
+  once in a background thread). Natural gain: querying the OS for the parent process on each call.
+- **Question:** if `calling_process` performed process-inspection I/O, which OTHER functions in the
+  crate would transitively perform it — i.e. the complete set of transitive callers.
 
 ## Method (anti-circularity)
 
-The graded set is **exhaustive reverse-reachability** of the symbol within `crates/ignore`, established
-by **two independent strong-model source-only tracers** (no candor, no call-graph tool — reading source
-only), cross-checked against a hand grep-recurse of the 6 free-function call sites, with every
-disagreement resolved against source. Candor's own `callers` output is recorded alongside as a *finding*
-— **it is not the answer key.**
+Two independent strong-model **source-only** tracers (no candor, no call-graph tool) each computed the
+reverse-reachability; their sets were diffed against each other **and** against candor's
+`callers` output, and **every** disagreement was resolved against source. The graded set is what the
+adjudication established — **independently** grounded: tracer **B** produced exactly this 61-set on its
+own, and tracer **A**'s 6 differences were all resolved at the source (below). candor's result is then
+reported as a *finding* against this set, not used to define it.
 
-- **Direct callers (4)** — the functions containing a call to the crate's free `strip_prefix` (NOT the
-  std `Path::strip_prefix` method, which was excluded throughout). Call sites: `gitignore.rs:283/295/298`
-  (in `Gitignore::strip`), `gitignore.rs:328` (in `GitignoreBuilder::new`), `dir.rs:409` (in
-  `Ignore::matched`), `dir.rs:993` (in `strip_if_is_prefix`).
+## The adjudicated set — 61 source functions
 
-## The adjudicated propagation set — 32 functions (the graded denominator)
+See [delta-groundtruth.txt](delta-groundtruth.txt). Spans (by file): `utils/path` (2), `handlers/grep`
+(8), `handlers/hunk` (5), `handlers/hunk_header` (4), `handlers/diff_header` (5), plus
+`diff_header_diff`/`diff_header_misc`/`diff_stat`/`commit_meta`/`submodule`/`blame`/`git_show_file`/
+`merge_conflict` handlers, `paint` (7), `features/line_numbers` (3), `features/side_by_side` (5),
+`config::from`, `delta::consume`+`delta::delta`, `subcommands/*` (4), `run_app`, `main`. Convergence hub:
+`delta::StateMachine::consume` (dispatches ~12 `handle_*` methods) → `delta::delta` → `run_app` → `main`.
 
-Excludes `pathutil::strip_prefix` itself, and all `#[cfg(test)]` functions (the eval scans the crate,
-not its test harness — matching the harness's default).
+## Adjudication log (the 6 disagreements + the granularity caveat)
 
-**gitignore.rs (6)**
-- `gitignore::Gitignore::strip`            *(direct)*
-- `gitignore::Gitignore::matched`
-- `gitignore::Gitignore::matched_path_or_any_parents`
-- `gitignore::Gitignore::new`
-- `gitignore::Gitignore::global`
-- `gitignore::GitignoreBuilder::new`       *(direct)*
+Resolved against source:
+- **`get_filename`** — `match &*process::calling_process()` → **direct caller, INCLUDE**. (Tracer A
+  missed it; candor + B had it.)
+- **`paint_left_panel_minus_line`, `paint_right_panel_plus_line`** — both call
+  `paint_minus_or_plus_panel_line`, which calls `Painter::paint_line` (a confirmed target-reacher) →
+  **INCLUDE** both. (Tracer A missed both; candor + B had them.)
+- **`handle_diff_header_file_operation_line`, `should_write_generic_diff_header_header_line`** — the
+  latter only calls `write_generic_diff_header_header_line`, which writes via `painter.writer` /
+  `draw_fn` and reaches **no** target-path function; the former's only candidate edge is that call →
+  **EXCLUDE** both. (Tracer A over-included; candor + B excluded.)
+- **`handle_hunk_header_line`** — parses the header and sets `self.state`; no target-reaching call →
+  **EXCLUDE**. (Tracer A over-included; candor + B excluded.)
 
-**overrides.rs (2)**
-- `overrides::Override::matched`
-- `overrides::OverrideBuilder::new`
-
-**dir.rs (10)**
-- `dir::Ignore::matched`                   *(direct)*
-- `dir::Ignore::matched_ignore`
-- `dir::Ignore::matched_dir_entry`
-- `dir::Ignore::add_child`
-- `dir::Ignore::add_child_path`
-- `dir::Ignore::add_parents`
-- `dir::strip_if_is_prefix`                *(direct)*
-- `dir::create_gitignore`
-- `dir::IgnoreBuilder::build`
-- `dir::IgnoreBuilder::build_with_cwd`
-
-**walk.rs (14)**
-- `walk::should_skip_entry`
-- `walk::Walk::skip_entry`
-- `walk::Walk::new`
-- `<walk::Walk as std::iter::Iterator>::next`
-- `walk::WalkBuilder::build`
-- `walk::WalkBuilder::build_parallel`
-- `walk::WalkBuilder::add_ignore`
-- `walk::WalkParallel::run`
-- `walk::WalkParallel::visit`
-- `walk::Worker::run`
-- `walk::Worker::run_one`
-- `walk::Worker::generate_work`
-- `walk::Work::add_parents`
-- `walk::Work::read_dir`
-
-The two reachability spines: (a) **matcher** — `strip`/`GitignoreBuilder::new` → `Override::matched`,
-`Ignore::matched_ignore` → `Ignore::matched`/`matched_dir_entry` → `should_skip_entry` → the `Walk`
-iterator + parallel worker; (b) **builder** — `GitignoreBuilder::new` → `create_gitignore` /
-`OverrideBuilder::new` / `Gitignore::new`/`global` / `IgnoreBuilder::build_with_cwd` →
-`Ignore::add_child_path` → `add_child`/`add_parents` → the walk machinery. Both converge on
-`WalkBuilder::build`/`build_parallel` and the `Walk`/`Worker` runtime.
-
-## Adjudication log
-
-- **Two independent tracers + candor converged on the same 32-function core.** One disagreement:
-  Tracer B additionally listed `overrides::OverrideBuilder::build`.
-- **Resolved against source — EXCLUDED.** `OverrideBuilder::build` calls only `GitignoreBuilder::build`
-  (`overrides.rs`), and `GitignoreBuilder::build` (`gitignore.rs`) constructs a `Gitignore` from
-  already-parsed globs — it calls neither `strip_prefix`, `strip`, nor `new` (the stripping happened
-  earlier, in `new`/`add`). So `OverrideBuilder::build` does **not** reach the symbol. Tracer B
-  over-included it; Tracer A and candor correctly excluded it.
+Net: tracer **B** = the 61-set exactly; tracer **A** = 58/61 (missed 3, over-included 3) — the
+completeness gap a strong, unbounded source tracer still shows on a 30k-LOC crate.
 
 ## Candor's result, recorded as a finding (NOT the key)
 
-The deep engine's `candor-query callers <report> pathutil::strip_prefix 1` returned **exactly these 32**
-— **recall 32/32 (100%), precision 32/32 (100%)** against the adjudicated truth, with the same 4 direct
-callers. On a real trait/closure/parallel-heavy crate, candor's deep-engine blast radius matched
-hand-adjudicated source analysis exactly; the only over-inclusion in the whole exercise came from an
-*independent human-equivalent* trace, not from candor. (This is the candor-vs-truth diff the prereg
-requires; it is **empty**. The diff is reported for transparency and does not feed the agents' grading.)
+`candor-query callers <deep-report> utils::process::calling_process 1` returned **all 61** source
+functions — **recall 61/61** against the adjudicated truth, matching tracer B exactly and catching the 3
+callers tracer A missed. candor additionally surfaces **8 `lazy_static` init pseudo-nodes**
+(`<OUTPUT_CONFIG as Deref>::deref::__static_ref_initialize`, the `CACHED_IS_WORD_DIFF` equivalents,
+etc.). These are **genuine** members of the call path — the lazy_static initialization really does call
+`make_output_config` / `compute_is_word_diff`, which reach the target — but they are macro-generated and
+below the source-function granularity a developer (or the agents) would list, so they are excluded from
+the graded set. They are a transparency/granularity detail, not a false positive: candor sees *more* of
+the real call graph than a hand trace, not less. So on both the easy (ignore, 32/32) and hard (delta,
+61/61) targets, candor's deep-engine blast radius equals the independently-adjudicated source truth; the
+treatment ceiling is established and the trials measure the control gap across model tiers.

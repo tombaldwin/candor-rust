@@ -15,7 +15,17 @@ frozen (see "Freeze" below — that lands in its own pre-trial commit).
 > trades the "published flagship" framing for a defensible real-world result; the syntactic backend's
 > real-graph sparsity is itself a known, separately-tracked limitation (EVAL.md library dogfood,
 > bounded-CHA), not what this batch is testing. The frozen target lives in
-> [realworld/MANIFEST.md](realworld/MANIFEST.md) + [realworld/GROUND_TRUTH.md](realworld/GROUND_TRUTH.md). Extends
+> [realworld/MANIFEST.md](realworld/MANIFEST.md) + [realworld/GROUND_TRUTH.md](realworld/GROUND_TRUTH.md).
+>
+> **Amendment 2 (pre-matrix): target hardened ripgrep `ignore` → `git-delta`.** The first freeze
+> (ripgrep `crates/ignore` / `strip_prefix` / 32-fn tree) ran an N=4/arm sonnet pilot that validated the
+> harness but showed the target was too easy: sonnet **control reached 97.7%** by reading the whole
+> 6.7k-LOC crate, so the *completeness* premise (hypothesis 1) didn't bite — the win was efficiency
+> (~31× faster, ~52× fewer tool calls) and reliability (4/4 vs 1/4 perfect). To make completeness bite,
+> the target was hardened to **`delta`** (30k-LOC single crate, `utils::process::calling_process` /
+> 61-fn tree spanning ~20 files and the `StateMachine` dispatch hub) — large enough that even a strong
+> *unbounded* source tracer landed 58/61 with 3 false positives. The ignore pilot is kept as
+> [realworld/ignore-pilot/](realworld/ignore-pilot/) (harness-validation record + the easy-end point). Extends
 [PREREG-speed.md](PREREG-speed.md) and [PREREG-speed-models.md](PREREG-speed-models.md): those
 established, across Fable 5 / Opus / Sonnet (and Haiku in the agent-use track), that candor's answer is
 model-invariant while manual tracing degrades as the model cheapens. Every one of those batches carries
