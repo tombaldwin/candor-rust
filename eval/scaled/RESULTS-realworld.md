@@ -74,9 +74,46 @@ both completeness and precision), and still measurably at the frontier (the last
 completeness). Treatment cost is ~constant (one query, ~24–28k tokens); control cost rises with capability
 as stronger models do more tracing work to approach — but never reach — the tool's answer.
 
+## Second target — bottom (Fs), the cross-target check
+
+A second real-world point to tighten the single-target estimate, varying repo + effect + architecture:
+`ClementTsang/bottom` @ `b3694fc` (a 37k-LOC TUI system monitor), symbol
+`app::data::store::DataStore::get_data` gaining `Fs` (natural framing: a cached store that could read
+live OS data), graded against an independently-adjudicated **26-function** tree (see
+[realworld/bottom/](realworld/bottom/)). Same 4-tier N=8 matrix.
+
+| tier | control recall | ctl precision | ctl perfect | treatment recall | tr perfect |
+|---|---:|---:|---:|---:|---:|
+| **haiku** | 81.7% | 97.3% | 2 / 8 | 99.0% | 6 / 8 |
+| **sonnet** | 99.5% | 100% | 7 / 8 | 100% | 8 / 8 |
+| **opus** | 99.5% | 100% | 7 / 8 | 100% | 8 / 8 |
+| **fable** | 100% | 100% | 8 / 8 | 100% | 8 / 8 |
+
+### What the two targets together show
+
+Both crates are large (delta 30k, bottom 37k), but the **shape of the blast radius differs**, and that —
+not crate size — is what governs the gap:
+
+- **delta / `calling_process`** — a **61-fn, ~6-layer** tree threaded through `StateMachine` dispatch and
+  a lazy_static cache; **not** greppable. Control falls at *every* tier: **60 / 91 / 97 / 99%**.
+- **bottom / `get_data`** — a **26-fn** tree with **16 direct callers** (every widget `draw_*` pulls the
+  store) — easy to grep and trace. Control is high except at the weak tier: **82 / 99.5 / 99.5 / 100%**.
+
+So candor's marginal value scales with **how hard the radius is to trace by hand** (depth × non-grep-
+ability), not raw LOC. On a deep tangled radius it bites at every tier; on a shallow greppable one it
+concentrates at the cheap models. **In both, treatment is ~model-invariant and ~complete** (100% at every
+tier except haiku-on-bottom 99%, where a couple of weak agents fumbled copying the query output) — one
+deterministic `candor-query` call. And in both, candor's own report equalled the independently-adjudicated
+truth (delta 61/61, bottom 26/26), confirming the treatment ceiling on two real codebases.
+
+**Engine note:** the bottom run used the deep engine on the `nightly-2026-06-14` port (branch); delta was
+re-verified byte-identical (61/61) on that engine. bottom's snapshot exits non-zero from a cosmetic rustc
+shutdown delayed-bug, but the report is written and complete (see realworld/bottom/MANIFEST.md) — a
+separate candor robustness item, not an analysis gap.
+
 ## Honest bounds
 
-One repo, one symbol, four tiers, N=8/arm. The graded GT is human-adjudicated reverse-reachability (two
+Two repos, two symbols, four tiers, N=8/arm. The graded GT is human-adjudicated reverse-reachability (two
 independent source-only tracers + source resolution of every disagreement; see GROUND_TRUTH). Grading is
 leaf-name match (pre-registered); the 8 lazy_static init pseudo-nodes candor surfaces are stripped before
 scoring (genuine path members below source granularity). The treatment arm was *told* to run

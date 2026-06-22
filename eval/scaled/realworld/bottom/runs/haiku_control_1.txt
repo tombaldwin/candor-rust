@@ -1,0 +1,9 @@
+app::App::handle_paste
+canvas::Painter::draw_cpu
+canvas::Painter::draw_data
+canvas::Painter::draw_network
+canvas::Painter::draw_widgets_with_constraints
+handle_key_event_or_break
+handle_mouse_event
+start_bottom
+try_drawing

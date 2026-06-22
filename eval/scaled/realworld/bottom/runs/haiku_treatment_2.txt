@@ -1,0 +1,25 @@
+app::App::handle_char
+app::App::on_char_key
+app::App::on_left_key
+app::App::on_left_mouse_up
+app::App::on_right_key
+app::App::on_space_key
+app::App::skip_to_last
+app::App::update_data
+canvas::Painter::draw_data
+canvas::Painter::draw_widgets_with_constraints
+canvas::widgets::battery_display::<impl canvas::Painter>::draw_battery
+canvas::widgets::cpu_basic::<impl canvas::Painter>::draw_basic_cpu
+canvas::widgets::cpu_graph::<impl canvas::Painter>::draw_cpu
+canvas::widgets::cpu_graph::<impl canvas::Painter>::draw_cpu_graph
+canvas::widgets::disk_io_graph::<impl canvas::Painter>::draw_disk_io_graph
+canvas::widgets::mem_basic::<impl canvas::Painter>::draw_basic_memory
+canvas::widgets::mem_graph::<impl canvas::Painter>::draw_memory_graph
+canvas::widgets::network_basic::<impl canvas::Painter>::draw_basic_network
+canvas::widgets::network_graph::<impl canvas::Painter>::draw_network
+canvas::widgets::network_graph::<impl canvas::Painter>::draw_network_graph
+canvas::widgets::network_graph::<impl canvas::Painter>::draw_old_network_labels
+canvas::widgets::temperature_graph::<impl canvas::Painter>::draw_temperature_graph
+event::handle_key_event_or_break
+event::handle_mouse_event
+try_drawing
