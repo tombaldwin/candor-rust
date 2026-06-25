@@ -4415,6 +4415,27 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 "candor-scan: wrote {} effectful functions to {file} (stable syntactic backend — see --help)",
                 entries.len()
             );
+            // Effect breakdown — make the result visible at a glance, not just a count + a file path.
+            let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for e in &entries {
+                for x in &e.inferred {
+                    *counts.entry(x.as_str()).or_insert(0) += 1;
+                }
+            }
+            let breakdown = ["Net", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
+                .iter()
+                .filter_map(|k| counts.get(k).map(|n| format!("{k} {n}")))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let unknown = counts.get("Unknown").copied().unwrap_or(0);
+            if !breakdown.is_empty() || unknown > 0 {
+                let u = if unknown > 0 {
+                    format!("{}Unknown {unknown} (disclosed)", if breakdown.is_empty() { "" } else { "   ·   " })
+                } else {
+                    String::new()
+                };
+                eprintln!("  {breakdown}{u}");
+            }
         }
         None
     };
