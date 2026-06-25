@@ -24,7 +24,7 @@ command -v cargo-candor && echo "cargo candor available"
 silently scan with it — surface it to the user first:
 
 1. Run `candor-scan --version` (offline) and **tell the user, plainly, which version this project is
-   on** — e.g. "This project is on candor-scan 0.5.1 (spec 0.5)." On a build too old for the two-line
+   on** — e.g. "This project is on candor-scan 0.7.1 (spec 0.7)." On a build too old for the two-line
    `--version`, read `candor.version` / `candor.spec` from an existing `.candor/report*.json` and
    report those instead.
 2. Then do the §1a currency check (candor can't phone home; *you* have network) and, if it's behind,
@@ -79,7 +79,7 @@ CANDOR_JSON=/tmp/candor-report cargo dylint --lib-path "$LIB"
 ```
 
 Either way you get one report file per crate: `<prefix>.<crate>.<type>.json`. Rust entries never
-carry `unitKind` (every Rust unit is an ordinary function — the spec-0.5-draft field's default);
+carry `unitKind` (every Rust unit is an ordinary function — the spec-0.7 field's default);
 sibling reports under a merged prefix may carry it (an accessor, a `<clinit>`, a fleet's agents) —
 it is informative only, read effects/edges identically.
 
@@ -97,8 +97,8 @@ curl -s -H 'User-Agent: candor-version-check' https://crates.io/api/v1/crates/ca
   | grep -o '"max_version":"[^"]*"'                                      # -> "max_version":"0.3.4"
 ```
 
-If they differ, **ask the user before upgrading** — e.g. "candor-scan 0.5.2 is available (you're on
-0.5.1) — upgrade before I scan?" — and only run the upgrade if they agree. Never upgrade silently:
+If they differ, **ask the user before upgrading** — e.g. "candor-scan 0.7.2 is available (you're on
+0.7.1) — upgrade before I scan?" — and only run the upgrade if they agree. Never upgrade silently:
 the engine version is part of the result's provenance (the report's `version` field), so a bump the
 user didn't sanction quietly changes what the scan means. Upgrade by the path you installed with:
 
