@@ -1,3 +1,4 @@
+<!-- MAINTAINERS: this is the canonical doc. After editing it, re-sync the embedded crate copies in the SAME commit or CI's drift gate (embedded_agents_contract_matches_the_repo_doc) fails: cp AGENTS.md crates/candor-scan/AGENTS.md && cp AGENTS.md crates/candor-query/AGENTS.md -->
 # Using candor (instructions for an AI coding agent)
 
 You are working in a Rust project. **candor** tells you, for every function, which side effects it
