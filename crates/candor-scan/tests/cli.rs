@@ -106,3 +106,198 @@ fn json_plus_policy_over_unparseable_source_exits_2() {
                 "any stdout under --json must remain valid JSON:\n{stdout}");
     }
 }
+
+// ── the bare-scan / --json baseline ───────────────────────────────────────────────────────────────
+
+#[test]
+fn bare_scan_writes_report_files_and_exits_0() {
+    // The default mode: no flags → write the report (+ callgraph sidecar) under <dir>/.candor/, exit 0.
+    let d = make_crate("bare", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0), "a clean bare scan must exit 0");
+    // Default prefix is <dir>/.candor/report → report.<crate>.scan.json + the callgraph sidecar.
+    assert!(d.join(".candor/report.bare.scan.json").is_file(), "bare scan must write the report file");
+    assert!(d.join(".candor/report.bare.scan.callgraph.json").is_file(), "bare scan must write the callgraph sidecar");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn json_prints_to_stdout_and_writes_no_files_exit_0() {
+    // `--json` prints ONE JSON document to stdout and writes NOTHING to disk (no .candor/ dir).
+    let d = make_crate("jsononly", "pub fn go() {}");
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0), "a clean --json scan must exit 0");
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    assert!(serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok(),
+            "--json stdout must parse as JSON, got:\n{stdout}");
+    assert!(!d.join(".candor").exists(), "--json must NOT write any report files to disk");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn json_plus_clean_policy_is_pure_json_exit_0() {
+    // `--json --policy <clean>`: stdout stays pure JSON, the gate's ✓ goes to stderr, exit 0.
+    let d = make_crate("jsonclean", "pub fn go() {}");
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Exec\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .arg("--policy")
+        .arg(pp.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(0), "a clean --json --policy run must exit 0");
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    assert!(serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok(),
+            "stdout under --json --policy (clean) must parse as JSON, got:\n{stdout}");
+    assert!(!stdout.contains('✓') && !stdout.contains("policy"),
+            "the gate's ✓ summary must be on stderr, not stdout:\n{stdout}");
+}
+
+// ── the policy gate exit-code contract (non-json) ─────────────────────────────────────────────────
+
+#[test]
+fn violating_policy_exits_1_clean_policy_exits_0() {
+    // A real violation → exit 1; the same scan against a non-overlapping deny → exit 0. The two halves
+    // share a crate body so the only variable is the policy (the gate's verdict, not the scan).
+    let d = make_crate("gate", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+
+    let violating = d.join("violating.policy");
+    std::fs::write(&violating, "deny Fs\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy")
+        .arg(violating.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(1), "deny Fs over an Fs effect must exit 1");
+
+    let clean = d.join("clean.policy");
+    std::fs::write(&clean, "deny Exec\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy")
+        .arg(clean.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0), "deny Exec over an Fs-only crate must exit 0");
+
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ── version / help ────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn version_prints_build_and_spec_exit_0() {
+    // `--version` and `-V` both print `candor-scan <ver> (spec <X>)` as the first line, exit 0.
+    for flag in ["--version", "-V"] {
+        let out = Command::new(bin()).arg(flag).output().expect("run candor-scan");
+        assert_eq!(out.status.code(), Some(0), "{flag} must exit 0");
+        let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+        let first = stdout.lines().next().unwrap_or("");
+        assert!(first.starts_with("candor-scan ") && first.contains("(spec "),
+                "{flag} first line must be `candor-scan <ver> (spec <X>)`, got: {first}");
+    }
+}
+
+#[test]
+fn help_prints_usage_exit_0() {
+    // `--help` and `-h` both print a USAGE banner, exit 0.
+    for flag in ["--help", "-h"] {
+        let out = Command::new(bin()).arg(flag).output().expect("run candor-scan");
+        assert_eq!(out.status.code(), Some(0), "{flag} must exit 0");
+        let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+        assert!(stdout.contains("USAGE"), "{flag} must print a USAGE line, got:\n{stdout}");
+    }
+}
+
+// ── unknown flags ─────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn unknown_flags_exit_2() {
+    // A dash-prefixed token that isn't a known flag must FAIL (exit 2), never be swallowed as a path.
+    // Covers a long `--bogus` and a single-dash `-x` (the typo'd-flag / newer-doc-old-binary failure).
+    for flag in ["--bogus", "-x"] {
+        let out = Command::new(bin()).arg(flag).output().expect("run candor-scan");
+        assert_eq!(out.status.code(), Some(2), "unknown flag {flag} must exit 2");
+        let stderr = String::from_utf8(out.stderr).expect("utf8 stderr");
+        assert!(stderr.contains("unknown flag"), "{flag} must report `unknown flag`, got:\n{stderr}");
+    }
+}
+
+// ── adversarial inputs: no panic, clean handling ──────────────────────────────────────────────────
+
+#[test]
+fn corrupt_random_bytes_source_does_not_panic() {
+    // A crate whose source is random bytes (not valid UTF-8/Rust): the scan must HANDLE it (no panic /
+    // SIGABRT — exit code is never 101), and a --json run still emits parseable JSON. With a gate it
+    // must exit 2 (parse failure → gate cannot be green), never 0.
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-randbytes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"randbytes\"\n").unwrap();
+    // Deterministic non-UTF8/garbage bytes — no RNG dependency.
+    let garbage: Vec<u8> = (0u16..2048).map(|i| (i.wrapping_mul(37) ^ 0xA5) as u8).collect();
+    std::fs::write(d.join("src/lib.rs"), &garbage).unwrap();
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    assert_ne!(out.status.code(), Some(101), "a random-bytes source must not panic the scanner");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !stdout.trim().is_empty() {
+        assert!(serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok(),
+                "--json over a garbage source must still emit valid JSON:\n{stdout}");
+    }
+
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Exec\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy")
+        .arg(pp.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(2), "a gate over an unparseable garbage source must exit 2, never green");
+}
+
+#[test]
+fn empty_dir_scan_is_clean_exit_0() {
+    // A directory with no Cargo.toml / no sources: no crash, exit 0, and --json emits valid JSON
+    // (an empty `functions` list). The package name falls back to "crate".
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-emptydir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(0), "an empty dir must scan cleanly (exit 0)");
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    assert!(serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok(),
+            "--json over an empty dir must emit valid JSON:\n{stdout}");
+}
+
+#[test]
+fn nonexistent_path_does_not_panic() {
+    // A path that does not exist must be handled, not panic (exit code never 101).
+    let missing = std::env::temp_dir().join(format!("candor-scan-cli-no-such-{}-xyz", std::process::id()));
+    let _ = std::fs::remove_dir_all(&missing);
+    let out = Command::new(bin())
+        .arg(missing.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    assert_ne!(out.status.code(), Some(101), "a nonexistent path must not panic the scanner");
+}

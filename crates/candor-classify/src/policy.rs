@@ -321,6 +321,18 @@ mod tests {
         let p2 = parse_policy("deny Net foo Db");
         assert_eq!(p2.rules[0].effects, ["Net"].into_iter().collect::<BTreeSet<_>>());
         assert_eq!(p2.rules[0].scope.as_deref(), Some("foo"));
+        // NBSP is NOT a token separator (only ASCII White_Space is) — pinned to MATCH Java, which
+        // drops it: a `deny\u{a0}Net` is one token `deny\u{a0}Net`, NOT `deny` + `Net`, so it names no
+        // known effect and is dropped. Splitting on Unicode whitespace here would let candor see a deny
+        // the JVM engine doesn't — a gateless-divergence between impls. (See is_ascii_ws.)
+        assert!(parse_policy("deny\u{a0}Net core").rules.is_empty(),
+                "an NBSP between deny and the effect must NOT split into separate tokens");
+        // The NBSP rides INTO the scope token rather than separating it: `deny Net\u{a0}domain` is
+        // `deny` + `Net` + `\u{a0}domain` — Net is the effect, the scope keeps the NBSP verbatim.
+        let nb = parse_policy("deny Net \u{a0}domain");
+        assert_eq!(nb.rules.len(), 1);
+        assert_eq!(nb.rules[0].effects, ["Net"].into_iter().collect::<BTreeSet<_>>());
+        assert_eq!(nb.rules[0].scope.as_deref(), Some("\u{a0}domain"));
     }
 
     #[test]
