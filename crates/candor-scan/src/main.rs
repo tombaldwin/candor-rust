@@ -124,6 +124,12 @@ type EnumVariantIndex = HashMap<String, String>;
 /// (no guess), like the unique-leaf call-graph rule.
 type ReturnIndex = HashMap<String, String>;
 
+/// Sentinel return-"type" for a fn whose return is a CALLABLE (`-> fn()`/`-> impl Fn`/`-> Box<dyn Fn>`).
+/// Stored in the return index under the fn's leaf; `expr_is_fn_typed` reads it so `let g = make_cb()`
+/// propagates fn-typed-ness, while `ctor_type` filters it out of var-typing (it's not a nominal type).
+/// The angle brackets cannot collide with a real Rust type path.
+const RET_FN_TYPED: &str = "<fn>";
+
 /// `trait leaf -> the local types that `impl Trait for Type` it` — the syntactic CHA universe for
 /// dispatch-typed receivers (the JVM engine's bounded-CHA move, done on syntax). Keyed by leaf like
 /// the other name indexes; includes impls of EXTERNAL traits for local types (the JVM resolves
@@ -986,8 +992,9 @@ fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, returns: &ReturnI
                     return Some(expand(ty, uses));
                 }
             }
-            // a local factory function call — its recorded (unambiguous) return type
-            returns.get(leaf).cloned()
+            // a local factory function call — its recorded (unambiguous) return type. The fn-typed
+            // sentinel is NOT a nominal type (it types no var / receiver) — `expr_is_fn_typed` owns it.
+            returns.get(leaf).filter(|t| *t != RET_FN_TYPED).cloned()
         }
         // `let s = S {..};` — a struct literal names its type directly.
         syn::Expr::Struct(s) => type_from_value_path(&path_to_string(&s.path), uses),
@@ -1467,7 +1474,21 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Paren(p) => self.expr_is_fn_typed(&p.expr),
             syn::Expr::Group(g) => self.expr_is_fn_typed(&g.expr),
             syn::Expr::Reference(r) => self.expr_is_fn_typed(&r.expr),
+            syn::Expr::Try(t) => self.expr_is_fn_typed(&t.expr),
+            syn::Expr::Await(a) => self.expr_is_fn_typed(&a.base),
             syn::Expr::If(e) => block_tail_expr(&e.then_branch).is_some_and(|t| self.expr_is_fn_typed(t)),
+            // `let g = make_callback();` — a call to a LOCAL factory the pre-pass recorded as returning a
+            // callable (the fn-typed sentinel). Without this, `g()` resolves as a phantom free-fn `g` and
+            // is silently dropped (or fabricates a same-named local fn). Over-approximating to fn-typed
+            // only marks `g()` Unknown — the safe direction for a missed-effect-is-a-hole tool.
+            syn::Expr::Call(c) => match &*c.func {
+                syn::Expr::Path(p) => p
+                    .path
+                    .get_ident()
+                    .and_then(|id| self.returns.get(&id.to_string()))
+                    .is_some_and(|t| t == RET_FN_TYPED),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -2738,6 +2759,22 @@ fn record_return(
     self_ty: Option<&str>,
 ) {
     let syn::ReturnType::Type(_, ty) = &sig.output else { return };
+    // A factory that returns a CALLABLE (`fn make_cb() -> Box<dyn Fn()>` / `-> fn()` / `-> impl Fn()`):
+    // record the FN-TYPED sentinel under its leaf so `let g = make_cb(); g()` reads the honest opaque
+    // call (Unknown), not a phantom free-fn `g`. A bare `fn()`/`impl Fn` has no path so `type_path` would
+    // drop it entirely (silent-pure); `Box<dyn Fn>` would record as "Box" and mis-resolve `g.method()`.
+    // The sentinel rides the SAME ambiguity rule as a type (a leaf seen callable AND non-callable, or two
+    // shapes, collapses to None → no claim) and is filtered out of var-typing in `ctor_type`. Over-
+    // approximating toward fn-typed only ever marks the binding Unknown — the safe direction.
+    if is_callable_type(unwrap_result_option(ty), &generic_bounds_of(sig)) {
+        let leaf = sig.ident.to_string();
+        match rets.get(&leaf) {
+            None => { rets.insert(leaf, Some(RET_FN_TYPED.to_string())); }
+            Some(Some(prev)) if prev != RET_FN_TYPED => { rets.insert(leaf, None); }
+            _ => {}
+        }
+        return;
+    }
     let Some(mut tp) = type_path(unwrap_result_option(ty), uses) else { return };
     // An impl method returning `Self` (`fn new_with_defaults() -> Self`) must index its IMPL type,
     // not the literal "Self": vars typed "Self" form `Self::method` calls that resolve to no local
@@ -3488,7 +3525,18 @@ fn scan_main() {
             "--json" => want_json = true,
             "--include-tests" => include_tests = true,
             "--incremental" => incremental = true,
-            "--policy" => policy_path = it.next().cloned(),
+            "--policy" => {
+                // A valueless trailing `--policy` (no path follows) must ERROR, not silently fall
+                // back to no-gate — matching the strict posture of a set-but-unreadable policy.
+                // Silently dropping the gate would let a violation ship under an intended-gated run.
+                match it.next().cloned() {
+                    Some(p) => policy_path = Some(p),
+                    None => {
+                        eprintln!("candor-scan: --policy requires a path argument");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--deps" => deps_mode = true,
             "-V" | "--version" => {
                 // Two lines, fully OFFLINE: the installed build + the spec contract it speaks, then
@@ -3770,6 +3818,10 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             unparsed.len()
         );
     }
+    // Remember whether ANY in-scope source failed to parse: the policy gate below must FAIL non-zero
+    // when a policy is configured AND analysis was incomplete — a gateless-green over unanalyzed code
+    // is a missed-effect = false-pure hole. (`unparsed` borrows `per_file`, consumed below; keep a flag.)
+    let had_parse_failure = !unparsed.is_empty();
 
     // Per-file Pass A decls (cache or fresh) + a place to hold a parsed file for Pass B. A file dropped
     // by a read/parse failure (no cache AND round-1 parse failed) is excluded entirely, preserving the
@@ -4287,6 +4339,22 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn"); // FFI is a native boundary — canonical `native:` (SPEC §4 ⟨0.7⟩)
             }
+            // §4 HONESTY — AMBIGUOUS LOCAL: a BARE leaf naming TWO-OR-MORE local defs (`tail2`/leaf
+            // collision: a free `tail2` + a `Type::tail2` method, or two `Type::method`s) defeats
+            // `resolve_target`'s uniqueness filter (resolved_local=false) AND is suppressed from the
+            // classifier/dep-join (`suppress_bare_leaf` — the local is authoritative). Today that leaves
+            // NO edge and NO disclosure: the callee's effects vanish (silent-pure over a real local call).
+            // DISCLOSE Unknown instead — we can't pick WHICH local def runs, so its effects are unknown,
+            // not absent. PRECISELY scoped (≥2 local defs of this bare leaf) so it can't flood like the
+            // rejected "any unresolvable bare call → Unknown": a closure-param call / macro-helper isn't in
+            // `by_leaf`, and a UNIQUE leaf resolves through `resolve_target` (never reaches here).
+            if !c.is_macro && classified.is_none() && !resolved_local && suppress_bare_leaf
+                && !c.path.contains("::")
+                && by_leaf.get(&c.leaf).is_some_and(|v| v.len() >= 2)
+            {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local defs");
+            }
         }
         // DROP-GLUE EDGE (#3): for each LOCAL drop type this fn constructed, add the implicit scope-exit
         // edge to its `T::drop` body — but ONLY when that body is a UNIQUE local def (in `by_tail2` with
@@ -4486,8 +4554,22 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             return (2, json_body);
         };
         let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc);
+        // Human gate output (the violation lines AND the ✓/count summary) goes to STDERR whenever
+        // `want_json`, so stdout stays a single pure JSON document (pipeable to `jq`). Without this,
+        // a gated `--json` run interleaves violation text into the JSON stream and corrupts it.
         for line in &v {
-            println!("{line}");
+            if want_json {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        }
+        // A configured gate over INCOMPLETE analysis (a source file failed to parse) must NOT report
+        // green: the unparsed file's effects are absent, so a `policy ✓` over it is a false-pure. Fail
+        // exit 2 (mirroring the unreadable-policy posture) — never exit 0/1 with a clean-looking ✓.
+        if had_parse_failure {
+            eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
+            return (2, json_body);
         }
         if v.is_empty() {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
@@ -6164,6 +6246,147 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             }
         "#;
         assert_eq!(run("dbok", db_ok, "allow Db customers\n"), 0, "compliant Db table must pass (no false positive)");
+    }
+
+    #[test]
+    fn gate_over_unparseable_source_fails_closed() {
+        // SOUNDNESS: a policy gate over a crate where a source file failed to PARSE must NOT report
+        // green — the unparsed file's effects are absent from the report, so a `policy ✓` over it is a
+        // false-pure. Exit 2 (mirroring the unreadable-policy posture), never 0. A clean-parsing crate
+        // under the same policy still passes 0 (the failure signal is specific, not a blanket fail).
+        let run = |name: &str, src: &str, with_policy: bool| -> i32 {
+            let d = std::env::temp_dir().join(format!("candor-parsefail-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let pp = d.join("candor.policy");
+            std::fs::write(&pp, "deny Exec\n").unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false,
+                policy: if with_policy { Some(pp.to_string_lossy().into_owned()) } else { None },
+                quiet: true, deps_idx: &idx,
+            });
+            let _ = std::fs::remove_dir_all(&d);
+            rc
+        };
+        // A file that does NOT parse (a stray token) under a configured gate → exit 2, never green.
+        let broken = "pub fn ok() {}\nthis is not valid rust @@@\n";
+        assert_eq!(run("broken", broken, true), 2,
+                   "a configured gate over an unparseable source file must FAIL exit 2, never green");
+        // No policy configured → no gate verdict to corrupt; the parse-failure is disclosed (stderr) only.
+        assert_eq!(run("brokennopol", broken, false), 0,
+                   "without a policy there is no gate; a parse failure is disclosed, not an exit code");
+        // A clean-parsing crate under the same gate still passes (the failure signal is specific).
+        assert_eq!(run("clean", "pub fn ok() {}\n", true), 0,
+                   "a clean-parsing crate must still pass the gate (no blanket fail)");
+    }
+
+    #[test]
+    fn call_returning_a_callable_in_an_unannotated_local_reads_unknown() {
+        // §4 HONESTY: `let g = make_cb(); g()` where `make_cb` returns a CALLABLE must read the opaque
+        // callback (Unknown), not silent-pure / a phantom free-fn `g`. Covers all three callable return
+        // shapes (`fn()`, `impl Fn`, `Box<dyn Fn>`). A NON-callable factory's binding stays pure.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-retcb-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        // `Box<dyn Fn>` return: the binding is fn-typed → `g()` is Unknown.
+        let boxed = r#"
+            pub fn make_cb() -> Box<dyn Fn()> { Box::new(|| {}) }
+            pub fn uses() { let g = make_cb(); g(); }
+        "#;
+        assert!(eff(&run("retbox", boxed), "uses").contains(&"Unknown".to_string()),
+                "a call returning Box<dyn Fn> bound to a local must read Unknown at the call site");
+        // bare `fn()` return.
+        let bare = r#"
+            fn h() {}
+            pub fn make_cb() -> fn() { h }
+            pub fn uses() { let g = make_cb(); g(); }
+        "#;
+        assert!(eff(&run("retbare", bare), "uses").contains(&"Unknown".to_string()),
+                "a call returning fn() bound to a local must read Unknown at the call site");
+        // `impl Fn` return.
+        let impl_fn = r#"
+            pub fn make_cb() -> impl Fn() { || {} }
+            pub fn uses() { let g = make_cb(); g(); }
+        "#;
+        assert!(eff(&run("retimpl", impl_fn), "uses").contains(&"Unknown".to_string()),
+                "a call returning impl Fn bound to a local must read Unknown at the call site");
+        // CONTROL: a non-callable factory's binding is NOT fn-typed → no fabricated Unknown.
+        let plain = r#"
+            pub fn make_v() -> i32 { 42 }
+            pub fn uses() { let v = make_v(); let _ = v; }
+        "#;
+        assert!(!eff(&run("retplain", plain), "uses").contains(&"Unknown".to_string()),
+                "a non-callable factory binding must stay pure (no fabricated Unknown)");
+    }
+
+    #[test]
+    fn ambiguous_same_name_local_bare_leaf_reads_unknown() {
+        // §4 HONESTY: a BARE leaf naming TWO-OR-MORE local defs (a free fn + a same-named method, here
+        // `process`) defeats `resolve_target`'s uniqueness filter AND is suppressed from the classifier —
+        // today its callee's effects vanish (silent-pure). Disclose Unknown instead. A UNIQUE same-name
+        // leaf must STILL resolve (no spurious Unknown) — the precise-scoping control.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-amb-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        // Two local defs of the leaf `process` (a free fn + a method); a bare `process()` call can't be
+        // disambiguated → Unknown, not silent-pure.
+        let ambiguous = r#"
+            pub fn process() {}
+            struct W;
+            impl W { fn process(&self) {} }
+            pub fn caller() { process(); }
+        "#;
+        assert!(eff(&run("ambig", ambiguous), "caller").contains(&"Unknown".to_string()),
+                "a bare leaf with two same-name local defs must read Unknown, not silent-pure");
+        // CONTROL: a UNIQUE local `solo` resolves cleanly — no spurious Unknown from this branch.
+        let unique = r#"
+            pub fn solo() {}
+            pub fn caller() { solo(); }
+        "#;
+        assert!(!eff(&run("uniq", unique), "caller").contains(&"Unknown".to_string()),
+                "a unique same-name leaf must resolve, never read a spurious Unknown");
     }
 
     #[test]
