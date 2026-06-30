@@ -4348,7 +4348,12 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // not absent. PRECISELY scoped (≥2 local defs of this bare leaf) so it can't flood like the
             // rejected "any unresolvable bare call → Unknown": a closure-param call / macro-helper isn't in
             // `by_leaf`, and a UNIQUE leaf resolves through `resolve_target` (never reaches here).
-            if !c.is_macro && classified.is_none() && !resolved_local && suppress_bare_leaf
+            // EXCLUDE method calls (`x.run()`): an unqualified method call already resolves to NOTHING by
+            // design (the `method` flag — linking it to a same-named def would guess/fabricate), and a
+            // same-named method is the COMMON case (`run`/`get`/`handle` across many types), so firing here
+            // floods every such call with Unknown. This disclosure is for genuinely-bare FREE calls (the M1
+            // case): `run()` with ≥2 free `run` defs, where the silent drop really is a lost local edge.
+            if !c.is_macro && !c.method && classified.is_none() && !resolved_local && suppress_bare_leaf
                 && !c.path.contains("::")
                 && by_leaf.get(&c.leaf).is_some_and(|v| v.len() >= 2)
             {
