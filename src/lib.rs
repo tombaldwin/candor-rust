@@ -292,6 +292,16 @@ pub struct Candor {
     /// which is explain-only) so the report's `unknownWhy` can tell the improvable opacity (a dispatch
     /// that would resolve with more inputs) from the irreducible — see candor-spec §2.
     unknown_why: HashMap<LocalDefId, BTreeSet<String>>,
+    /// CANDOR_VIOLATIONS: a sentinel file the engine APPENDS one line to per ENFORCEMENT violation
+    /// (the baseline gain AS-EFF-005 and the policy gates AS-EFF-006/008/009). This is the
+    /// MACHINE-READABLE verdict the `cargo-candor` wrapper consumes (file non-empty ⇒ exit 1),
+    /// instead of grepping the human diagnostic text for `AS-EFF-…` tokens — a reword or a dylint
+    /// output-stream change can drop the literal token and silently turn the gate green, but it
+    /// cannot stop the sentinel write. The text diagnostics are still emitted for humans. Opened in
+    /// append mode so every crate in a one-pass workspace `cargo dylint` accumulates into the one
+    /// file (the wrapper truncates/creates it fresh before the run). `None` ⇒ no sentinel (audit,
+    /// JSON, and any run where the wrapper didn't ask for one — a no-op, never a write).
+    violations_sink: Option<String>,
 }
 
 /// Where an effect enters a function's body — the callee that produced it and the source location.
@@ -385,6 +395,28 @@ impl Candor {
             taint: std::env::var("CANDOR_TAINT").is_ok(),
             tainted: HashMap::new(),
             unknown_why: HashMap::new(),
+            // The wrapper sets this to a fresh sentinel path before an enforcing run; absent/empty
+            // means "no machine signal requested" (audit, JSON, or a direct `cargo dylint` invocation).
+            violations_sink: std::env::var("CANDOR_VIOLATIONS").ok().filter(|s| !s.is_empty()),
+        }
+    }
+
+    /// Append one line — `<code> <function>` — to the `CANDOR_VIOLATIONS` sentinel for an ENFORCEMENT
+    /// violation, so the wrapper has a machine signal that doesn't depend on grepping the diagnostic
+    /// prose. Append (not truncate) so multiple crates in a single workspace `cargo dylint` pass all
+    /// land in the one file. A no-op when no sink is set. A write error is reported but non-fatal: the
+    /// human diagnostic still fired, and failing the compile here would be a worse failure mode than a
+    /// degraded signal (the wrapper additionally surfaces any AS-EFF text it sees).
+    fn record_violation(&self, code: &str, func: &str) {
+        let Some(path) = &self.violations_sink else { return };
+        use std::io::Write;
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(mut f) => {
+                if let Err(e) = writeln!(f, "{code} {func}") {
+                    eprintln!("candor: could not append to CANDOR_VIOLATIONS={path:?} ({e})");
+                }
+            }
+            Err(e) => eprintln!("candor: could not open CANDOR_VIOLATIONS={path:?} ({e})"),
         }
     }
 
@@ -3414,6 +3446,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 if let Some(prior) = base.get(&name) {
                     let gained = gained_effects(effs, prior);
                     if !gained.is_empty() {
+                        self.record_violation("AS-EFF-005", &name);
                         span_lint(
                             cx,
                             CANDOR,
@@ -3459,6 +3492,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     } else {
                         ""
                     };
+                    self.record_violation("AS-EFF-006", &name);
                     span_lint(
                         cx,
                         CANDOR,
@@ -3534,6 +3568,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             rule.effect
                         )
                     };
+                    self.record_violation("AS-EFF-008", &name);
                     span_lint(
                         cx,
                         CANDOR,
@@ -3548,6 +3583,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // reverse reachability over the call graph; emitted here where the function's span is known.
             if let Some(viols) = layer_viol.get(&f) {
                 for (raw, tgt) in viols {
+                    self.record_violation("AS-EFF-009", &name);
                     span_lint(
                         cx,
                         CANDOR,

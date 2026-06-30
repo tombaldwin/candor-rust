@@ -1,0 +1,33 @@
+# Real-world DYNAMIC oracle — the DEEP (nightly dylint) engine under kernel ground truth.
+# The SIBLING of realworld-oracle.yml: same driver crates, same strace ground truth, but it drives the
+# NIGHTLY dylib (src/lib.rs, the SOUND engine) via `cargo dylint`, not candor-scan. This closes the gap
+# where "the nightly engine is the sound gate / the oracle is continuous" was only ever verified for the
+# STABLE scanner — the deep engine's strace oracle (soundness/oracle.sh) ran only on the SYNTHETIC fuzzer.
+# CONTINUOUS GATE: a NEW silent under-report by the DEEP engine on a real crate now FAILS CI on every push
+# to main + every PR (run_deep.sh exits non-zero on a NEW finding). Linux + strace + the pinned nightly.
+name: realworld-oracle-deep
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: realworld-oracle-deep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle-deep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Stable toolchain to build/install the dylint runner + linker; the LINT itself builds with the
+      # nightly pinned in `rust-toolchain` (rustup fetches it + rustc-dev automatically when cargo runs
+      # in this repo). Mirrors ci.yml's setup so the deep engine builds the same way it does there.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dylint (runner + linker)
+        run: cargo +stable install cargo-dylint dylint-link
+      - name: Install strace
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - name: Real-world dynamic oracle — DEEP engine (syscall ground truth — Fs/Net/Exec)
+        run: bash soundness/realworld/run_deep.sh

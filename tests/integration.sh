@@ -13,7 +13,11 @@ echo "building candor lint + tooling…"
 # below exercise the CURRENT binary rather than a possibly-stale pre-built one.
 cargo build -q --workspace || { echo "FAIL: candor build"; exit 1; }
 # Absolute path — the scenarios `cd` into fixture dirs, so a relative lib path would break.
-LIB=$(ls "$ROOT"/target/debug/libcandor@*.dylib "$ROOT"/target/debug/libcandor@*.so 2>/dev/null | head -1)
+# NEWEST by mtime (`ls -t`), not the first glob match: the filename carries the toolchain
+# (`libcandor@nightly-2026-06-14-…`), so a stale build from an OLD pinned nightly would otherwise sort
+# ahead alphabetically and shadow the fresh `cargo build` — running the tests against the wrong engine
+# (this is exactly why `cargo-candor`'s own `newest_of` uses `ls -t`).
+LIB=$(ls -t "$ROOT"/target/debug/libcandor@*.dylib "$ROOT"/target/debug/libcandor@*.so 2>/dev/null | head -1)
 [ -n "$LIB" ] || { echo "FAIL: no dylib under target/debug"; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 required"; exit 1; }
 
@@ -182,9 +186,19 @@ printf '[package]\nname="pl"\nversion="0.1.0"\nedition="2021"\n' > "$PL/Cargo.to
 # domain_logic is pure-LOOKING but reaches the filesystem transitively via leaf(); domain_pure doesn't.
 printf 'fn leaf(){ let _=std::fs::read("/tmp/x"); }\nfn domain_logic(){ leaf(); }\nfn domain_pure(){ let _=1+1; }\nfn main(){ domain_logic(); domain_pure(); }\n' > "$PL/src/main.rs"
 echo "deny Fs Net  domain" > "$PL/policy"
-out=$(dl "$PL" env CANDOR_POLICY="$PL/policy")
+# MACHINE-SIGNAL verdict (CANDOR_VIOLATIONS): the wrapper's gate now rides on this sentinel, not on
+# grepping the diagnostic prose. A `deny` violation must (a) emit the human text AND (b) append a line
+# to the sentinel; a clean run must produce neither. Absolute path — `dl` runs `cd`'d into the fixture.
+VIO="$PL/violations"; : > "$VIO"
+out=$(dl "$PL" env CANDOR_POLICY="$PL/policy" CANDOR_VIOLATIONS="$VIO")
 want   "AS-EFF-006 flags the TRANSITIVE boundary violation (domain_logic reaches Fs via a helper)" "$out" '[AS-EFF-006] `domain_logic`'
 absent "the genuinely-pure domain fn is NOT flagged"                                               "$out" '[AS-EFF-006] `domain_pure`'
+# The sentinel is the signal the wrapper checks (`[ -s ]` → exit 1) — it must be non-empty and name the fn.
+want   "AS-EFF-006 violation writes the CANDOR_VIOLATIONS sentinel"                                "$(cat "$VIO")" 'AS-EFF-006 domain_logic'
+# A CLEAN run (a policy nothing violates) leaves the sentinel empty — the wrapper would exit 0.
+: > "$VIO"; echo "deny Net  domain" > "$PL/policy-clean"   # the crate has no Net, so nothing fires
+dl "$PL" env CANDOR_POLICY="$PL/policy-clean" CANDOR_VIOLATIONS="$VIO" >/dev/null
+if [ -s "$VIO" ]; then echo "  FAIL clean run must leave the sentinel empty — got: $(cat "$VIO")"; fail=$((fail+1)); else echo "  ok   clean run leaves the CANDOR_VIOLATIONS sentinel empty"; pass=$((pass+1)); fi
 rm -rf "$(dirname "$PL")"
 
 # ── 9a. Host allowlist: enforce per-scope Net endpoints (AS-EFF-008) ──

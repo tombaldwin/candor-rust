@@ -325,7 +325,11 @@ case "$cmd" in
     # audit/diff in the same job) would emit NOTHING and the guard would FAIL OPEN — passing a real
     # regression. Force the recompile so the lint actually runs over the code.
     rm -rf target/dylint 2>/dev/null || true
-    if out="$(CANDOR_BASELINE="$pre" cargo dylint --lib-path "$LIB" 2>&1)"; then
+    # Verdict via a MACHINE signal (CANDOR_VIOLATIONS), not by grepping the prose: the engine appends a
+    # line per AS-EFF-005 gain, so a reworded message or a changed output stream can't turn the guard
+    # green. Fresh file per run (the engine appends). The human diagnostics are still printed.
+    vio="$(mktemp)"; trap 'rm -f "$vio"' EXIT
+    if out="$(CANDOR_BASELINE="$pre" CANDOR_VIOLATIONS="$vio" cargo dylint --lib-path "$LIB" 2>&1)"; then
       printf '%s\n' "$out" >&2
     else
       # dylint itself failed (the crate didn't build) — the guard could NOT run, so do not pass silently.
@@ -333,7 +337,7 @@ case "$cmd" in
       echo "candor: guard could NOT run (the crate failed to build under dylint) — failing closed, not a pass." >&2
       exit 2
     fi
-    if printf '%s' "$out" | grep -q 'AS-EFF-005'; then
+    if [ -s "$vio" ]; then
       echo "candor: a function GAINED an effect vs the baseline (AS-EFF-005) — blocked. Bypass: git push --no-verify" >&2
       exit 1
     fi
@@ -568,9 +572,14 @@ case "$cmd" in
     # fingerprint, so a plain re-run would be a cache hit that never re-emits diagnostics. Clear
     # target/dylint so the enforce pass definitely re-runs the lint (with the siblings loaded).
     rm -rf target/dylint 2>/dev/null || true
-    out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" cargo dylint --lib-path "$LIB" 2>&1 || true)"
+    # The verdict rides on a MACHINE signal (CANDOR_VIOLATIONS), not on grepping the diagnostic prose:
+    # the engine appends one line per AS-EFF-006/008/009 violation to this file, so a message reword or
+    # a dylint output-stream change can't silently turn the gate green. We still print the human text.
+    # Fresh file per run (engine appends; a stale one would false-fail). `: >` truncates/creates.
+    vio="$tmp/violations"; : > "$vio"
+    out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" cargo dylint --lib-path "$LIB" 2>&1 || true)"
     printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]|\[AS-EFF-009\]' >&2 || true
-    if printf '%s' "$out" | grep -qE 'AS-EFF-006|AS-EFF-008|AS-EFF-009'; then
+    if [ -s "$vio" ]; then
       echo "candor: architecture-policy violation (AS-EFF-006/008/009) — blocked. Bypass: git push --no-verify" >&2
       exit 1
     fi
