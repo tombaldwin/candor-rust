@@ -301,3 +301,45 @@ fn nonexistent_path_does_not_panic() {
         .expect("run candor-scan");
     assert_ne!(out.status.code(), Some(101), "a nonexistent path must not panic the scanner");
 }
+
+#[test]
+fn gate_json_writes_the_structured_verdict_faithful_to_the_exit_code() {
+    // --gate-json (candor-spec §3.3 ⟨0.8⟩): the machine verdict { spec, ok, violations:[{rule,fn,effects,
+    // detail}] }, from the SAME gate that sets the exit code. Verified on a violating crate (exit 1).
+    let d = make_crate("gatejson", "pub fn go() { std::process::Command::new(\"sh\").status().unwrap(); }");
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Exec\n").unwrap();
+    let gp = d.join("gate.json");
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .arg("--gate-json").arg(gp.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(1), "a deny-Exec violation must exit 1");
+
+    let verdict: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&gp).expect("gate.json written")).expect("valid JSON");
+    let _ = std::fs::remove_dir_all(&d);
+
+    assert_eq!(verdict["spec"], "0.8", "verdict declares the spec version");
+    assert_eq!(verdict["ok"], false, "ok:false on a failing gate");
+    let viols = verdict["violations"].as_array().expect("violations array");
+    assert_eq!(viols.len(), 1, "one violation: {verdict}");
+    assert_eq!(viols[0]["rule"], "AS-EFF-006");
+    assert_eq!(viols[0]["fn"], "go");
+    assert_eq!(viols[0]["effects"], serde_json::json!(["Exec"]), "effects = the denied set");
+}
+
+#[test]
+fn gate_json_valueless_fails_closed() {
+    let d = make_crate("gatejsonnoval", "pub fn go() {}");
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--gate-json")
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(2), "a valueless --gate-json must fail (exit 2)");
+}

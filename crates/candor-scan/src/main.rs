@@ -3516,6 +3516,7 @@ fn scan_main() {
     let mut want_json = false;
     let mut include_tests = false;
     let mut policy_path: Option<String> = None;
+    let mut gate_json_path: Option<String> = None;
     let mut deps_mode = false;
     let mut incremental = false;
     let mut it = args.iter();
@@ -3533,6 +3534,17 @@ fn scan_main() {
                     Some(p) => policy_path = Some(p),
                     None => {
                         eprintln!("candor-scan: --policy requires a path argument");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--gate-json" => {
+                // The structured gate verdict target (candor-spec §3.3). Valueless fails closed, like
+                // --policy — a set-but-value-less gate flag must never silently drop its output.
+                match it.next().cloned() {
+                    Some(p) => gate_json_path = Some(p),
+                    None => {
+                        eprintln!("candor-scan: --gate-json requires a path argument");
                         std::process::exit(2);
                     }
                 }
@@ -3557,7 +3569,7 @@ fn scan_main() {
             "-h" | "--help" => {
                 println!("candor-scan {} — stable-Rust effect scanner (no nightly)", env!("CARGO_PKG_VERSION"));
                 println!();
-                println!("USAGE:  candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests] [--policy <file>]");
+                println!("USAGE:  candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests] [--policy <file>] [--gate-json <file>]");
                 println!();
                 println!("  <dir>             crate root to scan (default: .). A [workspace] root scans");
                 println!("                    every member: one report per member under the one prefix.");
@@ -3577,6 +3589,7 @@ fn scan_main() {
                 println!("                    CHAINED over those reports — effects cross every crate boundary");
                 println!("                    without κ needing to know the crates.");
                 println!("  --policy <file>   enforce a CANDOR_POLICY file (deny/pure/allow/forbid, spec §6.2)");
+                println!("  --gate-json <f>   write the structured gate verdict {{ spec, ok, violations }} as JSON (spec §3.3)");
                 println!("                    over this scan; exit 1 on violation. ADVISORY FLOOR: the syntactic");
                 println!("                    backend under-reports, so a miss can pass — the nightly engine is");
                 println!("                    the sound gate. (CANDOR_POLICY env is honoured when flag absent.)");
@@ -3619,6 +3632,9 @@ fn scan_main() {
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
     let deps_idx = load_dep_reports(std::env::var("CANDOR_DEPS").ok().as_deref());
+    // The --gate-json target rides a global (like INCREMENTAL above) so it threads no ScanOpts; set only
+    // on the main scan path (NOT --deps, which returned above) so a dependency scan never writes a verdict.
+    let _ = GATE_JSON_PATH.set(gate_json_path);
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
     std::process::exit(scan_target(&dir, prefix, want_json, include_tests, policy, &deps_idx));
@@ -4562,7 +4578,8 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // Human gate output (the violation lines AND the ✓/count summary) goes to STDERR whenever
         // `want_json`, so stdout stays a single pure JSON document (pipeable to `jq`). Without this,
         // a gated `--json` run interleaves violation text into the JSON stream and corrupts it.
-        for line in &v {
+        for gv in &v {
+            let line = format!("[{}] {}", gv.rule, gv.detail);
             if want_json {
                 eprintln!("{line}");
             } else {
@@ -4571,17 +4588,21 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         }
         // A configured gate over INCOMPLETE analysis (a source file failed to parse) must NOT report
         // green: the unparsed file's effects are absent, so a `policy ✓` over it is a false-pure. Fail
-        // exit 2 (mirroring the unreadable-policy posture) — never exit 0/1 with a clean-looking ✓.
+        // exit 2 (mirroring the unreadable-policy posture) — never exit 0/1 with a clean-looking ✓. No
+        // --gate-json verdict here: the analysis is incomplete, so there is no faithful verdict to emit.
         if had_parse_failure {
             eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
             return (2, json_body);
         }
+        write_gate_json(&v); // the machine verdict, from the SAME `v` that sets the exit code (before it)
         if v.is_empty() {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
         } else {
             eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
             return (1, json_body);
         }
+    } else {
+        write_gate_json(&[]); // --gate-json with no gate configured → the clean verdict { ok: true, [] }
     }
     (0, json_body)
 }
@@ -4765,6 +4786,19 @@ fn dirs_cargo_registry_src() -> Vec<std::path::PathBuf> {
 /// (AS-EFF-008) against the transitive hosts/cmds/paths/tables surfaces, layering `forbid A -> B`
 /// (AS-EFF-009) by reachability over the local call graph.
 #[allow(clippy::too_many_arguments)]
+/// One structured gate violation (candor-spec §3.3 ⟨0.8⟩): `effects` is the specific effect set the
+/// violation concerns — the denied set (006), the allowed effect (008), or [] (009 layer-flow, no single
+/// effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The
+/// console gate prints `[{rule}] {detail}`; --gate-json serializes these records verbatim.
+#[derive(serde::Serialize)]
+struct GateViolation {
+    rule: String,
+    #[serde(rename = "fn")]
+    func: String,
+    effects: Vec<String>,
+    detail: String,
+}
+
 fn policy_violations(
     policy_text: &str,
     all: &[String],
@@ -4775,7 +4809,7 @@ fn policy_violations(
     pathsacc: &HashMap<String, BTreeSet<String>>,
     tablesacc: &HashMap<String, BTreeSet<String>>,
     incompleteacc: &HashMap<String, BTreeSet<&'static str>>,
-) -> Vec<String> {
+) -> Vec<GateViolation> {
     use candor_classify::policy::{literal_allowed, parse_policy, scope_matches};
     let p = parse_policy(policy_text);
     let empty: BTreeSet<&'static str> = BTreeSet::new();
@@ -4795,7 +4829,12 @@ fn policy_violations(
                 inf.iter().copied().filter(|e| r.effects.contains(e)).collect()
             };
             if !hits.is_empty() {
-                out.push(format!("[AS-EFF-006] `{q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw));
+                out.push(GateViolation {
+                    rule: "AS-EFF-006".into(),
+                    func: q.clone(),
+                    effects: hits.iter().map(|s| s.to_string()).collect(),
+                    detail: format!("`{q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
+                });
             }
         }
         // AS-EFF-008 — literal allowlists over the transitive literal surfaces.
@@ -4822,13 +4861,20 @@ fn policy_violations(
                     let bad: Vec<&str> =
                         ls.iter().filter(|l| !literal_allowed(r.effect, l, &r.literals)).map(String::as_str).collect();
                     if !bad.is_empty() {
-                        out.push(format!("[AS-EFF-008] `{q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw));
+                        out.push(GateViolation {
+                            rule: "AS-EFF-008".into(),
+                            func: q.clone(),
+                            effects: vec![r.effect.to_string()],
+                            detail: format!("`{q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw),
+                        });
                     }
                 }
-                _ => out.push(format!(
-                    "[AS-EFF-008] `{q}` performs {} with no visible literal — the surface cannot be certified: `{}`",
-                    r.effect, r.raw
-                )),
+                _ => out.push(GateViolation {
+                    rule: "AS-EFF-008".into(),
+                    func: q.clone(),
+                    effects: vec![r.effect.to_string()],
+                    detail: format!("`{q}` performs {} with no visible literal — the surface cannot be certified: `{}`", r.effect, r.raw),
+                }),
             }
         }
         // AS-EFF-009 — layering: no fn in scope A may transitively reach scope B.
@@ -4852,12 +4898,45 @@ fn policy_violations(
                 }
             }
             if let Some(h) = hit {
-                out.push(format!("[AS-EFF-009] `{q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw));
+                out.push(GateViolation {
+                    rule: "AS-EFF-009".into(),
+                    func: q.clone(),
+                    effects: Vec::new(), // a layer-flow has no single effect
+                    detail: format!("`{q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw),
+                });
             }
         }
     }
-    out.sort();
+    // Sort by the rendered console line so ordering is identical to the old Vec<String> sort.
+    out.sort_by(|a, b| format!("[{}] {}", a.rule, a.detail).cmp(&format!("[{}] {}", b.rule, b.detail)));
     out
+}
+
+/// `--gate-json <file>` target, set once in `scan_main` (a no-op when unset — the direct-`scan_one` test
+/// paths never write). Mirrors the `CFG_FEATURES` OnceLock idiom; a plain path so it threads no ScanOpts.
+static GATE_JSON_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Write the structured gate verdict `{ spec, ok, violations }` (candor-spec §3.3 ⟨0.8⟩) — the machine
+/// analog of the AS-EFF console lines, from the SAME `policy_violations` that set the exit code, so it can
+/// never disagree with the gate. `-` streams to stdout. A no-op unless `--gate-json` was given.
+fn write_gate_json(violations: &[GateViolation]) {
+    let Some(Some(path)) = GATE_JSON_PATH.get() else { return };
+    #[derive(serde::Serialize)]
+    struct Verdict<'a> {
+        spec: &'static str,
+        ok: bool,
+        violations: &'a [GateViolation],
+    }
+    let verdict = Verdict { spec: candor_report::SPEC_VERSION, ok: violations.is_empty(), violations };
+    match serde_json::to_string_pretty(&verdict) {
+        Ok(json) if path == "-" => println!("{json}"),
+        Ok(json) => {
+            if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {
+                eprintln!("candor-scan: could not write --gate-json {path}: {e}");
+            }
+        }
+        Err(e) => eprintln!("candor-scan: could not serialize gate verdict: {e}"),
+    }
 }
 
 /// The last two `::`-segments of a path (`a::b::Type::new` → `Type::new`), the key used to resolve a
@@ -6142,10 +6221,12 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             "deny Net api\nallow Net in api good.example.com\nforbid ui -> db\n",
             &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc,
         );
-        assert_eq!(v.len(), 3, "{v:?}");
-        assert!(v.iter().any(|l| l.contains("[AS-EFF-006]") && l.contains("api::handle")));
-        assert!(v.iter().any(|l| l.contains("[AS-EFF-008]") && l.contains("evil.example.com")));
-        assert!(v.iter().any(|l| l.contains("[AS-EFF-009]") && l.contains("ui::draw")));
+        assert_eq!(v.len(), 3, "{}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
+        // 006 names the denied effect in `effects` (the denied SET, not just the message text).
+        assert!(v.iter().any(|g| g.rule == "AS-EFF-006" && g.func == "api::handle" && g.effects == ["Net"]));
+        assert!(v.iter().any(|g| g.rule == "AS-EFF-008" && g.detail.contains("evil.example.com") && g.effects == ["Net"]));
+        // 009 is a layer-flow — no single effect, so `effects` is empty.
+        assert!(v.iter().any(|g| g.rule == "AS-EFF-009" && g.func == "ui::draw" && g.effects.is_empty()));
         // clean policy -> no violations; `pure` flags ANY effect incl. the Db fn.
         assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).is_empty());
         assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).len(), 1);
@@ -6153,8 +6234,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // covered by `audit.*` -> clean. ui::draw INHERITS Db but the literal propagation is the
         // caller's tablesacc, supplied here only for db::run, so only db::run flags.
         let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc);
-        assert_eq!(bad.len(), 1, "{bad:?}");
-        assert!(bad[0].contains("audit.log"));
+        assert_eq!(bad.len(), 1, "{}", bad.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
+        assert!(bad[0].detail.contains("audit.log"));
         assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).is_empty());
     }
 
@@ -6179,8 +6260,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             "allow Net api.stripe.com\n",
             &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &inc,
         );
-        assert!(v.iter().any(|l| l.contains("a::mask") && l.contains("cannot be certified")), "{v:?}");
-        assert!(!v.iter().any(|l| l.contains("a::clean")), "clean must certify: {v:?}");
+        assert!(v.iter().any(|g| g.func == "a::mask" && g.detail.contains("cannot be certified")), "{:?}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
+        assert!(!v.iter().any(|g| g.func == "a::clean"), "clean must certify: {:?}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
     }
 
     #[test]
