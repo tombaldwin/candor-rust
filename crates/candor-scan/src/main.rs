@@ -4918,13 +4918,16 @@ fn policy_violations(
             }
         }
     }
-    // Sort by the rendered console line so ordering is identical to the old Vec<String> sort.
-    out.sort_by(|a, b| format!("[{}] {}", a.rule, a.detail).cmp(&format!("[{}] {}", b.rule, b.detail)));
+    // Sort by (rule, detail) — identical order to the old rendered-line sort (the "[rule] detail" render
+    // puts the constant '[' first and all AS-EFF codes are same-length), without allocating two Strings
+    // per comparison.
+    out.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     out
 }
 
 /// `--gate-json <file>` target, set once in `scan_main` (a no-op when unset — the direct-`scan_one` test
-/// paths never write). Mirrors the `CFG_FEATURES` OnceLock idiom; a plain path so it threads no ScanOpts.
+/// paths never RECORD). Mirrors the `CFG_FEATURES` OnceLock idiom; a plain path so it threads no ScanOpts.
+/// Members record via `record_gate_violations`; `scan_main` writes the single final verdict.
 static GATE_JSON_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 /// Violations ACCUMULATED across `scan_one` calls. A `[workspace]` root runs the gate once per member;
