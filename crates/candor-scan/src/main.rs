@@ -4780,12 +4780,6 @@ fn dirs_cargo_registry_src() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// Evaluate a CANDOR_POLICY (parsed by the SHARED §6.2 parser in candor-classify, so this gate can
-/// never disagree with the nightly/JVM gates on grammar) over a finished scan. Returns one line per
-/// violation: deny/pure (AS-EFF-006) against the transitive `inferred` sets, literal allowlists
-/// (AS-EFF-008) against the transitive hosts/cmds/paths/tables surfaces, layering `forbid A -> B`
-/// (AS-EFF-009) by reachability over the local call graph.
-#[allow(clippy::too_many_arguments)]
 /// One structured gate violation (candor-spec §3.3 ⟨0.8⟩): `effects` is the specific effect set the
 /// violation concerns — the denied set (006), the allowed effect (008), or [] (009 layer-flow, no single
 /// effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The
@@ -4799,6 +4793,12 @@ struct GateViolation {
     detail: String,
 }
 
+/// Evaluate a CANDOR_POLICY (parsed by the SHARED §6.2 parser in candor-classify, so this gate can
+/// never disagree with the nightly/JVM gates on grammar) over a finished scan. Returns one line per
+/// violation: deny/pure (AS-EFF-006) against the transitive `inferred` sets, literal allowlists
+/// (AS-EFF-008) against the transitive hosts/cmds/paths/tables surfaces, layering `forbid A -> B`
+/// (AS-EFF-009) by reachability over the local call graph.
+#[allow(clippy::too_many_arguments)]
 fn policy_violations(
     policy_text: &str,
     all: &[String],
