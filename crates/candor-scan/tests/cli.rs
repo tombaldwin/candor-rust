@@ -409,3 +409,35 @@ fn gate_json_rejects_a_flag_shaped_value_and_dash_stays_pure() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("AS-EFF-006"), "the human AS-EFF line goes to stderr: {stderr}");
 }
+
+#[test]
+fn candor_config_drives_the_gate_env_overrides_and_typo_fails_closed() {
+    // .candor/config (candor-spec §config): the checked-in floor under the env vars.
+    let d = make_crate("cfggate", "pub fn go() { std::process::Command::new(\"sh\").status().unwrap(); }");
+    std::fs::create_dir_all(d.join(".candor")).unwrap();
+    let deny_exec = d.join("deny-exec.policy");
+    std::fs::write(&deny_exec, "deny Exec\n").unwrap();
+    let deny_net = d.join("deny-net.policy");
+    std::fs::write(&deny_net, "deny Net\n").unwrap();
+    std::fs::write(d.join(".candor/config"),
+        format!("policy {}\npolcy typo\n", deny_exec.display())).unwrap();
+
+    // (a) the config drives the gate — no flag, no env — discovered via the target's ancestors.
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run");
+    assert_eq!(out.status.code(), Some(1), "the config-supplied deny-Exec gates the scan");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("unknown config key 'polcy'"), "typo protection warns: {stderr}");
+
+    // (b) the env overrides the config (a passing deny-Net wins over the config's deny-Exec).
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref())
+        .env("CANDOR_POLICY", deny_net.to_string_lossy().as_ref())
+        .output().expect("run");
+    assert_eq!(out.status.code(), Some(0), "CANDOR_POLICY env overrides the config");
+
+    // (c) a set-but-unusable CANDOR_CONFIG fails closed.
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref())
+        .env("CANDOR_CONFIG", d.join("no-such").to_string_lossy().as_ref())
+        .output().expect("run");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(2), "a typo'd CANDOR_CONFIG must fail closed");
+}

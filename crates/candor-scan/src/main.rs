@@ -3619,9 +3619,16 @@ fn scan_main() {
             }
         }
     }
-    // The policy source is resolved HERE, once (flag wins, CANDOR_POLICY env as fallback) — never
-    // inside scan_one, so --deps dependency scans can't inherit the root gate via the env.
-    let policy = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
+    // `.candor/config` (candor-spec §config): the checked-in floor under the env vars. Discovery is
+    // anchored to the SCAN TARGET (walk up from `dir` to the repo root's .candor/config), never the CWD;
+    // $CANDOR_CONFIG overrides discovery. FAIL-CLOSED when configured-but-unusable (exit 2 — the §6.2
+    // unreadable-policy posture); only genuine absence is empty.
+    let cfg = load_candor_config(&dir);
+    // The policy source is resolved HERE, once (flag wins, CANDOR_POLICY env next, the config file as the
+    // floor) — never inside scan_one, so --deps dependency scans can't inherit the root gate via the env.
+    let policy = policy_path
+        .or_else(|| std::env::var("CANDOR_POLICY").ok())
+        .or_else(|| cfg.get("policy").cloned());
     // The --gate-json target rides a global (like INCREMENTAL below) so it threads no ScanOpts. Members
     // RECORD violations (record_gate_violations); the verdict is written ONCE here after the whole scan —
     // per-member writes let a clean last member overwrite an earlier violator's verdict (ok:true vs exit 1).
@@ -3641,12 +3648,75 @@ fn scan_main() {
     // list of files and/or directories of *.json); an unclassified qualified call into a crate one
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
-    let deps_idx = load_dep_reports(std::env::var("CANDOR_DEPS").ok().as_deref());
+    let deps_spec = std::env::var("CANDOR_DEPS").ok().or_else(|| cfg.get("deps").cloned());
+    let deps_idx = load_dep_reports(deps_spec.as_deref());
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
     let code = scan_target(&dir, prefix, want_json, include_tests, policy, &deps_idx);
     write_gate_json(code);
     std::process::exit(code);
+}
+
+/// The shared §config key vocabulary; a key outside it WARNS (typo protection — a misspelt `policy`
+/// must not silently drop the gate), a known-but-unimplemented key (this engine reads `policy` + `deps`)
+/// is inert. Values: first token = key (ASCII-lowercased), rest of line = value; `#` comments; blanks.
+const CONFIG_KEYS: [&str; 7] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"];
+
+/// Locate + parse `.candor/config` for the scan of `dir` (candor-spec §config): $CANDOR_CONFIG if set
+/// (its path MUST be usable — exit 2 otherwise), else the nearest `.candor/config` walking UP from the
+/// target, else the CWD's, else empty. A discovered-but-unreadable file also exits 2 (fail-closed).
+fn load_candor_config(dir: &str) -> std::collections::HashMap<String, String> {
+    let file: Option<std::path::PathBuf> = match std::env::var("CANDOR_CONFIG") {
+        Ok(p) => {
+            let pb = std::path::PathBuf::from(&p);
+            if !pb.is_file() {
+                eprintln!("candor-scan: CANDOR_CONFIG set but {p} is not a readable file — failing (exit 2)");
+                std::process::exit(2);
+            }
+            Some(pb)
+        }
+        Err(_) => {
+            let start = std::fs::canonicalize(dir).unwrap_or_else(|_| std::path::PathBuf::from(dir));
+            let mut cur = if start.is_dir() { Some(start.as_path()) } else { start.parent() };
+            let mut found = None;
+            while let Some(d) = cur {
+                let cand = d.join(".candor/config");
+                if cand.exists() {
+                    found = Some(cand);
+                    break;
+                }
+                cur = d.parent();
+            }
+            found.or_else(|| {
+                let cwd = std::path::PathBuf::from(".candor/config");
+                if cwd.exists() { Some(cwd) } else { None }
+            })
+        }
+    };
+    let Some(file) = file else { return std::collections::HashMap::new() };
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("candor-scan: config {} exists but could not be read ({e}) — failing (exit 2)", file.display());
+            std::process::exit(2);
+        }
+    };
+    let mut cfg = std::collections::HashMap::new();
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.splitn(2, char::is_whitespace);
+        let key = it.next().unwrap_or("").to_ascii_lowercase();
+        let val = it.next().unwrap_or("").trim().to_string();
+        if !CONFIG_KEYS.contains(&key.as_str()) {
+            eprintln!("candor-scan: ignoring unknown config key '{key}' in {}", file.display());
+            continue;
+        }
+        cfg.insert(key, val);
+    }
+    cfg
 }
 
 /// Options for one crate scan. `policy` is RESOLVED by the caller (flag or CANDOR_POLICY env) —
