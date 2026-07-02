@@ -1,8 +1,8 @@
 {
   "candor": {
-    "version": "5dfe979",
-    "toolchain": "nightly-2026-04-16",
-    "spec": "0.5"
+    "version": "815ae01",
+    "toolchain": "nightly-2026-06-14",
+    "spec": "0.7"
   },
   "package": "build_script_build",
   "functions": [
@@ -22,7 +22,7 @@
         "Fs"
       ],
       "entryPoint": true,
-      "hash": "8a8f199e80173fd2f808b9a49edd33f2",
+      "hash": "ac1e6fb89b25bf200735cb3870e0a57c",
       "fs": [
         "read"
       ],
