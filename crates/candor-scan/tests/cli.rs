@@ -381,3 +381,31 @@ fn gate_json_workspace_accumulates_across_members() {
     assert_eq!(viols[0]["fn"], "fetch");
     assert_eq!(viols[0]["effects"], serde_json::json!(["Net"]));
 }
+
+#[test]
+fn gate_json_rejects_a_flag_shaped_value_and_dash_stays_pure() {
+    // `--gate-json --policy pol` must fail (exit 2) — it used to swallow `--policy` as the verdict path
+    // and let the displaced `pol` REPLACE the scan dir: gateless exit-0 over the wrong target.
+    let d = make_crate("gatejsondash", "pub fn go() { std::process::Command::new(\"sh\").status().unwrap(); }");
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Exec\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--gate-json").arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2), "a flag-shaped --gate-json value fails closed");
+
+    // `--gate-json -` streams the verdict to stdout, which must be PURE JSON (AS-EFF lines → stderr).
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .arg("--gate-json").arg("-")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout is pure verdict JSON");
+    assert_eq!(v["ok"], false);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("AS-EFF-006"), "the human AS-EFF line goes to stderr: {stderr}");
+}

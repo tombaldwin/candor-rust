@@ -3539,11 +3539,14 @@ fn scan_main() {
                 }
             }
             "--gate-json" => {
-                // The structured gate verdict target (candor-spec §3.3). Valueless fails closed, like
-                // --policy — a set-but-value-less gate flag must never silently drop its output.
+                // The structured gate verdict target (candor-spec §3.3). Valueless OR flag-shaped fails
+                // closed (exit 2): without the dash-check, `--gate-json --policy pol` swallowed `--policy`
+                // as the verdict path AND the displaced `pol` token replaced the scan dir (last-positional
+                // -wins) — a gateless exit-0 run over the wrong target (max-review find, shipped in 0.8.x).
+                // `-` (stream the verdict to stdout) stays valid.
                 match it.next().cloned() {
-                    Some(p) => gate_json_path = Some(p),
-                    None => {
+                    Some(p) if p == "-" || !p.starts_with('-') => gate_json_path = Some(p),
+                    _ => {
                         eprintln!("candor-scan: --gate-json requires a path argument");
                         std::process::exit(2);
                     }
@@ -4582,11 +4585,14 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         };
         let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc);
         // Human gate output (the violation lines AND the ✓/count summary) goes to STDERR whenever
-        // `want_json`, so stdout stays a single pure JSON document (pipeable to `jq`). Without this,
-        // a gated `--json` run interleaves violation text into the JSON stream and corrupts it.
+        // stdout carries a JSON document — the report (`--json`) or the streamed verdict
+        // (`--gate-json -`) — so stdout stays a single pure JSON document (pipeable to `jq` /
+        // candor-sarif). Without this, the AS-EFF lines interleave the stream and corrupt it.
+        let stdout_is_json = want_json
+            || matches!(GATE_JSON_PATH.get(), Some(Some(p)) if p == "-");
         for gv in &v {
             let line = format!("[{}] {}", gv.rule, gv.detail);
-            if want_json {
+            if stdout_is_json {
                 eprintln!("{line}");
             } else {
                 println!("{line}");
