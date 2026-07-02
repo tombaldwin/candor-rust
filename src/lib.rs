@@ -3288,7 +3288,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             let unused = overdeclared_effects(&declared, effs);
 
             if json_path.is_some() {
-                if effs.is_empty() && declared.is_empty() {
+                // Effect-free fns MAY be omitted (spec §2) — but NOT when the fn carries a disclosed
+                // floor (`invisible`): dropping it erases the disclosure, and its absent entry reads as
+                // an UNQUALIFIED pure claim — the exact silent under-report the field exists to prevent.
+                // (The syscall oracle caught this live: minreq/xshell/subprocess/fs_extra callers were
+                // floored to invisible at the call site, then omitted here — "certain pure" downstream.)
+                let invisible_only = invisibleacc.get(&f).is_some_and(|s| !s.is_empty());
+                if effs.is_empty() && declared.is_empty() && !invisible_only {
                     continue;
                 }
                 let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(span);
