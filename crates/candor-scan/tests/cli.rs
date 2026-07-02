@@ -343,3 +343,41 @@ fn gate_json_valueless_fails_closed() {
     let _ = std::fs::remove_dir_all(&d);
     assert_eq!(out.status.code(), Some(2), "a valueless --gate-json must fail (exit 2)");
 }
+
+#[test]
+fn gate_json_workspace_accumulates_across_members() {
+    // The workspace bug the spec review caught: the gate runs per member, and a per-member verdict write
+    // let a clean LAST member overwrite an earlier violator's — gate.json said ok:true while the process
+    // exited 1, violating §3.3's "the verdict MUST agree with the exit code". Members must ACCUMULATE.
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-gatews-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("a_viol/src")).unwrap();
+    std::fs::create_dir_all(d.join("z_clean/src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"a_viol\", \"z_clean\"]\n").unwrap();
+    std::fs::write(d.join("a_viol/Cargo.toml"), "[package]\nname = \"a_viol\"\n").unwrap();
+    std::fs::write(d.join("a_viol/src/lib.rs"), "pub fn fetch() { let _ = std::net::TcpStream::connect(\"x:80\"); }\n").unwrap();
+    std::fs::write(d.join("z_clean/Cargo.toml"), "[package]\nname = \"z_clean\"\n").unwrap();
+    std::fs::write(d.join("z_clean/src/lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Net\n").unwrap();
+    let gp = d.join("gate.json");
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .arg("--gate-json").arg(gp.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(1), "the violating member fails the workspace gate");
+
+    let verdict: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&gp).expect("gate.json written")).expect("valid JSON");
+    let _ = std::fs::remove_dir_all(&d);
+
+    assert_eq!(verdict["ok"], false,
+        "ok must agree with exit 1 — the clean last member must NOT overwrite the violator's verdict");
+    let viols = verdict["violations"].as_array().expect("violations array");
+    assert_eq!(viols.len(), 1, "the a_viol violation survives to the final verdict: {verdict}");
+    assert_eq!(viols[0]["fn"], "fetch");
+    assert_eq!(viols[0]["effects"], serde_json::json!(["Net"]));
+}

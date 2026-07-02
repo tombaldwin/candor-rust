@@ -3619,8 +3619,15 @@ fn scan_main() {
     // The policy source is resolved HERE, once (flag wins, CANDOR_POLICY env as fallback) — never
     // inside scan_one, so --deps dependency scans can't inherit the root gate via the env.
     let policy = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
+    // The --gate-json target rides a global (like INCREMENTAL below) so it threads no ScanOpts. Members
+    // RECORD violations (record_gate_violations); the verdict is written ONCE here after the whole scan —
+    // per-member writes let a clean last member overwrite an earlier violator's verdict (ok:true vs exit 1).
+    // Dependency scans under --deps run gate-free (policy=None in scan_one), so they record nothing.
+    let _ = GATE_JSON_PATH.set(gate_json_path);
     if deps_mode {
-        std::process::exit(run_with_deps(&dir, prefix, want_json, include_tests, policy));
+        let code = run_with_deps(&dir, prefix, want_json, include_tests, policy);
+        write_gate_json(code);
+        std::process::exit(code);
     }
     // Incremental is OPT-IN and SAFE: a full scan (no flag) never reads the cache, and `--incremental`
     // with no/invalid cache transparently does a full scan + populates it (the gates downgrade any
@@ -3632,12 +3639,11 @@ fn scan_main() {
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
     let deps_idx = load_dep_reports(std::env::var("CANDOR_DEPS").ok().as_deref());
-    // The --gate-json target rides a global (like INCREMENTAL above) so it threads no ScanOpts; set only
-    // on the main scan path (NOT --deps, which returned above) so a dependency scan never writes a verdict.
-    let _ = GATE_JSON_PATH.set(gate_json_path);
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
-    std::process::exit(scan_target(&dir, prefix, want_json, include_tests, policy, &deps_idx));
+    let code = scan_target(&dir, prefix, want_json, include_tests, policy, &deps_idx);
+    write_gate_json(code);
+    std::process::exit(code);
 }
 
 /// Options for one crate scan. `policy` is RESOLVED by the caller (flag or CANDOR_POLICY env) —
@@ -4594,16 +4600,15 @@ fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
             return (2, json_body);
         }
-        write_gate_json(&v); // the machine verdict, from the SAME `v` that sets the exit code (before it)
+        record_gate_violations(&v); // toward the final --gate-json verdict (written once, by scan_main)
         if v.is_empty() {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
         } else {
             eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
             return (1, json_body);
         }
-    } else {
-        write_gate_json(&[]); // --gate-json with no gate configured → the clean verdict { ok: true, [] }
     }
+    // No-gate runs record nothing; scan_main's final write_gate_json emits { ok: true, [] } for them.
     (0, json_body)
 }
 
@@ -4784,7 +4789,7 @@ fn dirs_cargo_registry_src() -> Vec<std::path::PathBuf> {
 /// violation concerns — the denied set (006), the allowed effect (008), or [] (009 layer-flow, no single
 /// effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The
 /// console gate prints `[{rule}] {detail}`; --gate-json serializes these records verbatim.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 struct GateViolation {
     rule: String,
     #[serde(rename = "fn")]
@@ -4916,18 +4921,43 @@ fn policy_violations(
 /// paths never write). Mirrors the `CFG_FEATURES` OnceLock idiom; a plain path so it threads no ScanOpts.
 static GATE_JSON_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
+/// Violations ACCUMULATED across `scan_one` calls. A `[workspace]` root runs the gate once per member;
+/// writing the verdict per member let the LAST member overwrite the first's violations — `gate.json` said
+/// `ok: true` while the process exited 1 (a clean final member masked an earlier violator), violating the
+/// §3.3 "verdict MUST agree with the exit code" rule. So members only RECORD here; `scan_main` writes ONCE.
+static GATE_VIOLATIONS: std::sync::OnceLock<std::sync::Mutex<Vec<GateViolation>>> = std::sync::OnceLock::new();
+
+/// Record one scan's gate violations toward the final `--gate-json` verdict. A no-op unless the flag was
+/// given (the direct-`scan_one` test/selftest paths never record).
+fn record_gate_violations(violations: &[GateViolation]) {
+    if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    acc.lock().unwrap().extend(violations.iter().cloned());
+}
+
 /// Write the structured gate verdict `{ spec, ok, violations }` (candor-spec §3.3 ⟨0.8⟩) — the machine
-/// analog of the AS-EFF console lines, from the SAME `policy_violations` that set the exit code, so it can
-/// never disagree with the gate. `-` streams to stdout. A no-op unless `--gate-json` was given.
-fn write_gate_json(violations: &[GateViolation]) {
+/// analog of the AS-EFF console lines, accumulated from the SAME `policy_violations` that set the exit
+/// code, so it can never disagree with the gate. Called ONCE, by `scan_main`, after the whole scan (every
+/// workspace member) completes. `-` streams to stdout. On exit 2 (an incomplete scan/gate — unreadable
+/// policy, a parse failure) NO verdict is written: there is no faithful verdict to emit. A no-op unless
+/// `--gate-json` was given.
+fn write_gate_json(exit_code: i32) {
     let Some(Some(path)) = GATE_JSON_PATH.get() else { return };
+    if exit_code == 2 {
+        eprintln!("candor-scan: --gate-json not written — the scan/gate did not complete (exit 2)");
+        return;
+    }
+    let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let violations = acc.lock().unwrap();
     #[derive(serde::Serialize)]
     struct Verdict<'a> {
         spec: &'static str,
         ok: bool,
         violations: &'a [GateViolation],
     }
-    let verdict = Verdict { spec: candor_report::SPEC_VERSION, ok: violations.is_empty(), violations };
+    let verdict = Verdict { spec: candor_report::SPEC_VERSION, ok: violations.is_empty(), violations: &violations };
     match serde_json::to_string_pretty(&verdict) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
