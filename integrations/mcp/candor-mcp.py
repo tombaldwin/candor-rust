@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# DEPRECATED (2026-07-02): superseded by the unified, engine-agnostic `candor-mcp` (ships in the
+# candor-ts npm package: `npx -y -p candor-ts candor-mcp`, or `candor-mcp` after `npm i -g candor-ts`).
+# It serves THIS engine's reports too (the spec envelope is the contract), with a richer tool set
+# (gate verdict, containment, blindspots, gains, diff) + MCP resources. This wrapper stays for one
+# release cycle; see candor/integrations/AGENT-SURFACE-DESIGN.md.
 # candor-mcp.py — a minimal MCP (Model Context Protocol) stdio server that exposes candor's INSTANT
 # read-only queries as native agent tools. No SDK: newline-delimited JSON-RPC 2.0 over stdio.
 #
