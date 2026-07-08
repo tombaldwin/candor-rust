@@ -317,6 +317,14 @@ case "$cmd" in
     pre="${1:-.candor/baseline}"
     ev="$(engine_ver)"; bv=""
     [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
+    # Absent provenance is as unverifiable as a mismatch (§2.1) — if a baseline EXISTS but carries no
+    # .candor-version sidecar, it predates stamping / was hand-made: fail closed too, not fail-open
+    # (review gap: the old `[ -n "$bv" ]` guard silently evaluated a sidecar-less baseline).
+    if [ -z "$bv" ] && ls "$pre".*.json >/dev/null 2>&1; then
+      echo "candor: the baseline $pre has no .candor-version provenance sidecar — unverifiable (§2.1)." >&2
+      echo "candor: Refresh with 'cargo candor snapshot $pre' (writes the sidecar), then commit both." >&2
+      exit 2
+    fi
     if [ -n "$bv" ] && [ "$bv" != "$ev" ]; then
       echo "candor: the baseline is @$bv but the engine is @$ev — an engine swap is" >&2
       echo "candor: baseline-invalidating, so the gate cannot evaluate (exit 2; never a silent skip," >&2
