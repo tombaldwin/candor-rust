@@ -308,18 +308,21 @@ case "$cmd" in
     exit 0 ;;
 
   guard)
-    # A baseline is only valid for the candor version that made it. If the engine has
-    # moved on, a richer classifier would report effects the old snapshot never saw —
-    # which is NOT a code regression. So on a version mismatch we SKIP enforcement (never
-    # false-fire) and tell the user how to refresh; `cargo candor update` does it for them.
+    # A baseline is only valid for the candor version that made it (spec §2.1): a stale baseline is
+    # INVALID GATE INPUT — the unreadable-policy class. Evaluating it would flood bogus AS-EFF-005s
+    # (a richer classifier reports effects the old snapshot never saw — unmasking, not regression) with
+    # any REAL regression hidden inside the wave; the old SKIP here was the other failure mode — an
+    # unbounded fail-open window (CI green with the gate silently off until someone remembered to
+    # refresh). The aligned family posture (candor-java matches): do NOT evaluate, say it once, exit 2.
     pre="${1:-.candor/baseline}"
     ev="$(engine_ver)"; bv=""
     [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
     if [ -n "$bv" ] && [ "$bv" != "$ev" ]; then
-      echo "candor: baseline is @$bv but the engine is @$ev — a tool upgrade is not a code" >&2
-      echo "candor: regression, so effect enforcement is SKIPPED this run. Refresh it with" >&2
-      echo "candor: 'cargo candor update' (or 'cargo candor snapshot $pre') here, then commit." >&2
-      exit 0
+      echo "candor: the baseline is @$bv but the engine is @$ev — an engine swap is" >&2
+      echo "candor: baseline-invalidating, so the gate cannot evaluate (exit 2; never a silent skip," >&2
+      echo "candor: never a bogus AS-EFF-005 wave). Refresh deliberately with 'cargo candor update'" >&2
+      echo "candor: (or 'cargo candor snapshot $pre'), review the effect delta, then commit both." >&2
+      exit 2
     fi
     # dylint emits AS-EFF-005 only when the crate recompiles, so a warm `target/dylint` (a prior
     # audit/diff in the same job) would emit NOTHING and the guard would FAIL OPEN — passing a real
