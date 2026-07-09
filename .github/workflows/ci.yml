@@ -244,4 +244,8 @@ jobs:
             target
           key: ${{ runner.os }}-candor-stable-v1-${{ hashFiles('Cargo.lock') }}
       - name: Test the stable crates (no nightly, no dylint)
-        run: cargo +stable test -p candor-report -p candor-classify -p candor-scan -p candor-query
+        # RUSTFLAGS= (set-but-empty) overrides the workspace .cargo/config.toml's
+        # `-C linker=dylint-link` rustflags — this lane deliberately has no dylint toolchain, and the
+        # stable crates need no special linker. (The ubuntu job installs dylint-link, so it is
+        # unaffected; conformance CI builds from OUTSIDE the repo dir, so the config never applied there.)
+        run: RUSTFLAGS= cargo +stable test -p candor-report -p candor-classify -p candor-scan -p candor-query
