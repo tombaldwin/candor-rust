@@ -1,9 +1,11 @@
 # Soundness fuzzer
 
-candor's one inviolable promise is the **trust contract**: it must never report a function as
-effect-free when it can't actually prove it — a call it can't resolve contributes `Unknown`, never a
-silent "pure". A silent under-report is the worst possible bug, because the whole point of the tool is
-that you can trust a clean result.
+candor's one inviolable promise is the **trust contract**
+([SPEC.md §4](https://github.com/tombaldwin/candor-spec/blob/main/SPEC.md#4-the-trust-contract--the-core-of-candor)):
+"**an implementation must never report a function as effect-free when it could not actually determine
+that.** A call it cannot resolve to a concrete target […] MUST contribute `Unknown` to that function's
+effect set […]. It must not be silently assumed pure." A silent under-report — candor's cardinal sin —
+is the worst possible bug, because the whole point of the tool is that you can trust a clean result.
 
 This harness makes that promise **testable and CI-enforced** instead of hoped-for. (It exists because a
 hand review found several violations — `Box<dyn Fn>` callbacks, non-local callbacks, `Arc<dyn>`
@@ -104,8 +106,9 @@ seed fail with `recv_boxed(pure/omitted)`.
 
 ## Fabrication probe (`fabrication_probe.py`) — the OTHER direction
 
-The fuzzer above guards **under-reporting** (a real effect reported pure). The fabrication probe guards
-the opposite, candor's CARDINAL SIN: **fabrication** — reporting a PURE function as effectful. The
+candor's cardinal sin is the SILENT UNDER-REPORT (what the fuzzer above guards). This probe guards the
+OPPOSITE direction: **FABRICATION** — a minted effect on a PURE function, the precision failure that
+poisons report trust (a spurious `deny` violation on innocent code). It is never *the* cardinal sin. The
 classifier's crate rules used to be whole-crate (one effect on EVERY path of an effect-bearing crate),
 which fabricated on those crates' pure accessors/builders/data-types (`Mmap::len`, `Level::as_str`,
 `Error::to_string`, `Rng::with_seed`, `CommandBuilder::get_cwd`, …). Those rules are now **verb-precise**;
@@ -150,9 +153,6 @@ top of its branch) makes the probe fail with 4 fabrications (`Mmap::len`/`is_emp
 `MmapOptions::new`) while the control still passes. The mirror probe for the JVM port lives at
 `candor-java/soundness/fabrication_probe.py`.
 
-## Next (not yet built)
-
-- **Per-function attribution in the oracle:** instrument each fn to emit a marker at runtime, interleave
-  with the syscall trace, so the oracle catches a *specific* function under-reporting (today it's a
-  whole-program check on `main`).
-- More forms: cross-crate boundaries, macro-generated bodies, trait objects with arbitrary self types.
+(The formerly-planned extensions are all built and documented above: per-function oracle attribution =
+`oracle_pf.sh`; cross-crate boundaries = `run_cross.sh`; macro-generated bodies = the `macro_call` form +
+the macro-defined `sink`; arbitrary self types = `arc_dyn`/`ufcs_dyn`.)

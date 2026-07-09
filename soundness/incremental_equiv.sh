@@ -9,7 +9,8 @@
 #     (a) an INCREMENTAL scan  (reusing the cache), and
 #     (b) a FULL scan-from-scratch  (a pristine copy of the same edited tree, no cache),
 # then asserts the two reports + call-graph sidecars are byte-identical. A SINGLE mismatch is a FAILURE:
-# the cache served a stale/wrong answer, the cardinal sin. Run it to a clean pass; keep it in the repo.
+# the cache served a stale/wrong answer (a stale "pure" is a silent under-report — the cardinal sin;
+# a stale effect is a fabrication). Run it to a clean pass; keep it in the repo.
 #
 #   bash soundness/incremental_equiv.sh [N_EDITS] [SEED]
 #     N_EDITS  number of random edits to apply (default 120)
