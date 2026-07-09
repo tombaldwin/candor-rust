@@ -322,7 +322,7 @@
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -362,7 +362,7 @@
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -410,7 +410,7 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -457,7 +457,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -557,7 +557,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -979,7 +979,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let idx = load_dep_reports(None);
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false,
-                policy: Some(pp.to_string_lossy().into_owned()), quiet: true, deps_idx: &idx,
+                policy: Some(pp.to_string_lossy().into_owned()), baseline: None, quiet: true, deps_idx: &idx,
             });
             let _ = std::fs::remove_dir_all(&d);
             rc
@@ -1048,7 +1048,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false,
                 policy: if with_policy { Some(pp.to_string_lossy().into_owned()) } else { None },
-                quiet: true, deps_idx: &idx,
+                baseline: None, quiet: true, deps_idx: &idx,
             });
             let _ = std::fs::remove_dir_all(&d);
             rc
@@ -1079,7 +1079,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -1138,7 +1138,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -1301,7 +1301,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -1368,7 +1368,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -1428,7 +1428,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -1502,7 +1502,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -1545,7 +1545,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -1612,7 +1612,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -2017,6 +2017,58 @@ trait G {
     }
 
     #[test]
+    fn baseline_guard_resolution_union_and_gain_logic() {
+        // The unit layer of check_baseline (the process layer lives in tests/cli.rs + integration.sh):
+        // prefix-vs-direct-file resolution, same-named-entry UNION, per-fn gain computation with the
+        // new-fn exemption, and the Invalid postures (empty value / no provenance / version mismatch).
+        let d = std::env::temp_dir().join(format!("candor-scan-blunit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let this_build = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let all: Vec<String> = vec!["a".into(), "b".into(), "newfn".into()];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inferred.insert("a".into(), ["Fs", "Exec"].into_iter().collect()); // gains Exec vs baseline
+        inferred.insert("b".into(), ["Net"].into_iter().collect()); // covered by the UNIONed duplicate
+        inferred.insert("newfn".into(), ["Db"].into_iter().collect()); // absent from baseline — exempt
+        let report = |ver: &str| format!(
+            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec":"0.8"}},
+                "functions":[{{"fn":"a","inferred":["Fs"]}},
+                             {{"fn":"b","inferred":[]}},
+                             {{"fn":"b","inferred":["Net"]}}]}}"#
+        );
+        // prefix form: `<value>.<crate>.scan.json`
+        std::fs::write(d.join("base.mycrate.scan.json"), report(&this_build)).unwrap();
+        let pre = d.join("base").to_string_lossy().into_owned();
+        match check_baseline(&pre, ".", "mycrate", &all, &inferred) {
+            BaselineOutcome::Checked(v) => {
+                assert_eq!(v.len(), 1, "only the real gain flags: {v:?}",
+                    v = v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
+                assert_eq!(v[0].rule, "AS-EFF-005");
+                assert_eq!(v[0].func, "a");
+                assert_eq!(v[0].effects, vec!["Exec".to_string()]);
+                assert!(v[0].detail.contains("`a` gained effect { Exec }"), "{}", v[0].detail);
+            }
+            _ => panic!("a valid same-build baseline must be evaluated"),
+        }
+        // direct-file form resolves the same way
+        let direct = d.join("base.mycrate.scan.json").to_string_lossy().into_owned();
+        assert!(matches!(check_baseline(&direct, ".", "mycrate", &all, &inferred),
+            BaselineOutcome::Checked(v) if v.len() == 1));
+        // version mismatch / missing provenance / empty value → Invalid (exit 2, never evaluated)
+        std::fs::write(d.join("stale.mycrate.scan.json"), report("scan-0.0.1")).unwrap();
+        let stale = d.join("stale").to_string_lossy().into_owned();
+        assert!(matches!(check_baseline(&stale, ".", "mycrate", &all, &inferred), BaselineOutcome::Invalid));
+        std::fs::write(d.join("bare.mycrate.scan.json"), r#"[{"fn":"a","inferred":["Fs"]}]"#).unwrap();
+        let bare = d.join("bare").to_string_lossy().into_owned();
+        assert!(matches!(check_baseline(&bare, ".", "mycrate", &all, &inferred), BaselineOutcome::Invalid));
+        assert!(matches!(check_baseline("", ".", "mycrate", &all, &inferred), BaselineOutcome::Invalid));
+        // absent file → Inactive (note; exit unchanged)
+        let absent = d.join("nosuch").to_string_lossy().into_owned();
+        assert!(matches!(check_baseline(&absent, ".", "mycrate", &all, &inferred), BaselineOutcome::Inactive));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn toml_primitives_tolerate_spacing_and_comments() {
         // The shared toml_section/toml_scalar fix a latent inconsistency: a `[ spaced ]` header and a
         // trailing `# comment` are now handled uniformly across all three manifest readers.
@@ -2121,7 +2173,7 @@ trait G {
         std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\n").unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
-        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, &idx);
+        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, None, &idx);
         assert_eq!(rc, 0);
         let ra = std::fs::read_to_string(format!("{prefix}.a.scan.json")).unwrap();
         let rb = std::fs::read_to_string(format!("{prefix}.b.scan.json")).unwrap();
@@ -2151,7 +2203,7 @@ trait G {
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: prefix.clone(), want_json: false, include_tests: false,
-            policy: None, quiet: true, deps_idx: &idx,
+            policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let rep = std::fs::read_to_string(format!("{prefix}.outer.scan.json")).unwrap();
@@ -2175,7 +2227,7 @@ trait G {
         let outdir = d.join("out");
         let prefix = outdir.join("r").to_string_lossy().into_owned();
         let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: false, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: false, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         // no temp turds: every output file ends in `.json`, never `.tmp.<pid>`.
@@ -2236,7 +2288,7 @@ trait G {
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2280,7 +2332,7 @@ trait G {
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2325,7 +2377,7 @@ trait G {
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2594,7 +2646,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2654,7 +2706,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"nl\"\n").unwrap();
         std::fs::write(d.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
-        let rc = run_with_deps(&d.to_string_lossy(), String::new(), true, false, None);
+        let rc = run_with_deps(&d.to_string_lossy(), String::new(), true, false, None, None);
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(rc, 2, "--deps without Cargo.lock must fail closed");
     }

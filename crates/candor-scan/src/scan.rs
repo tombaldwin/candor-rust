@@ -91,13 +91,19 @@ pub(crate) fn scan_main() {
                 println!("                    backend under-reports, so a miss can pass — the nightly engine is");
                 println!("                    the sound gate. (CANDOR_POLICY env is honoured when flag absent.)");
                 println!();
+                println!("  CANDOR_BASELINE=<p>  AS-EFF-005 regression guard: compare this scan against a saved");
+                println!("                    report (a path or --out prefix; also the `baseline` config key). A fn");
+                println!("                    GAINING an effect vs the baseline exits 1; absent baseline → note, guard");
+                println!("                    inactive; unparseable or produced by a DIFFERENT build → exit 2 (§2.1 —");
+                println!("                    never a stale compare). Record one: candor-scan <dir> --out <prefix>.");
                 println!("  CANDOR_DEPS=<p:…> chain sibling reports (files or directories of *.json): an");
                 println!("                    unclassified call into a crate a report covers inherits that");
                 println!("                    function's effects + literal surfaces (spec §2). Scan the dep");
                 println!("                    once, chain it everywhere; the κ ledger names what to scan next.");
                 println!("  -V, --version     print the installed build + spec contract (offline) and the upgrade line");
                 println!();
-                println!("Syntactic, so it under-reports vs the full candor nightly lint (no Unknown). It never");
+                println!("Syntactic, so it under-reports vs the full candor nightly lint (Unknown only for");
+                println!("callbacks/FFI/untrusted chained reports; other misses are silent). It never");
                 println!("fabricates an effect. See https://github.com/tombaldwin/candor");
                 return;
             }
@@ -123,13 +129,17 @@ pub(crate) fn scan_main() {
     let policy = policy_path
         .or_else(|| std::env::var("CANDOR_POLICY").ok())
         .or_else(|| cfg.get("policy").cloned());
+    // The AS-EFF-005 baseline (spec §7 item 5), resolved once like the policy: CANDOR_BASELINE env
+    // over the config `baseline` key (already home-anchored by load_candor_config). Dependency scans
+    // under --deps run guard-free — a dep's internals are not this repo's ratchet.
+    let baseline = std::env::var("CANDOR_BASELINE").ok().or_else(|| cfg.get("baseline").cloned());
     // The --gate-json target rides a global (like INCREMENTAL below) so it threads no ScanOpts. Members
     // RECORD violations (record_gate_violations); the verdict is written ONCE here after the whole scan —
     // per-member writes let a clean last member overwrite an earlier violator's verdict (ok:true vs exit 1).
     // Dependency scans under --deps run gate-free (policy=None in scan_one), so they record nothing.
     let _ = GATE_JSON_PATH.set(gate_json_path);
     if deps_mode {
-        let code = run_with_deps(&dir, prefix, want_json, include_tests, policy);
+        let code = run_with_deps(&dir, prefix, want_json, include_tests, policy, baseline);
         write_gate_json(code);
         std::process::exit(code);
     }
@@ -146,12 +156,12 @@ pub(crate) fn scan_main() {
     let deps_idx = load_dep_reports(deps_spec.as_deref());
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
-    let code = scan_target(&dir, prefix, want_json, include_tests, policy, &deps_idx);
+    let code = scan_target(&dir, prefix, want_json, include_tests, policy, baseline, &deps_idx);
     write_gate_json(code);
     std::process::exit(code);
 }
 
-/// Options for one crate scan. `policy` is RESOLVED by the caller (flag or CANDOR_POLICY env) —
+/// Options for one crate scan. `policy` and `baseline` are RESOLVED by the caller (flag/env/config) —
 /// scan_one itself never reads the env, so dependency scans under --deps can genuinely run
 /// gate-free (review: the env fallback inside scan_one ran the root policy 328 times against
 /// dependency internals). `quiet` suppresses the per-scan receipts (dep scans; the --deps summary
@@ -161,6 +171,9 @@ pub(crate) struct ScanOpts<'a> {
     pub(crate) want_json: bool,
     pub(crate) include_tests: bool,
     pub(crate) policy: Option<String>,
+    /// The AS-EFF-005 baseline value (`CANDOR_BASELINE` env / config `baseline` key): a saved report's
+    /// path or `--out` prefix. See `check_baseline` for the full guard contract.
+    pub(crate) baseline: Option<String>,
     pub(crate) quiet: bool,
     pub(crate) deps_idx: &'a DepIndex,
 }
@@ -169,7 +182,7 @@ pub(crate) struct ScanOpts<'a> {
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
 pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
-    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, quiet, deps_idx } = opts;
+    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, baseline: baseline_value, quiet, deps_idx } = opts;
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
     // Install this crate's cfg-feature picture (active = default closure, declared = all). A
@@ -1075,6 +1088,47 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         );
     }
 
+    // Human gate output (the violation lines AND the ✓/count summaries) goes to STDERR whenever
+    // stdout carries a JSON document — the report (`--json`) or the streamed verdict
+    // (`--gate-json -`) — so stdout stays a single pure JSON document (pipeable to `jq` /
+    // candor-sarif). Without this, the AS-EFF lines interleave the stream and corrupt it.
+    let stdout_is_json = want_json || matches!(GATE_JSON_PATH.get(), Some(Some(p)) if p == "-");
+
+    // The AS-EFF-005 baseline regression guard (spec §7 item 5) — candor-java's checkBaseline is the
+    // model; see check_baseline for the full contract. Runs BEFORE the policy gate so both record
+    // toward the one --gate-json verdict; the exit code is the max of the two (2 short-circuits).
+    let mut guard_code = 0;
+    if let Some(bv) = &baseline_value {
+        // A configured guard over INCOMPLETE analysis (a source file failed to parse) must not
+        // evaluate: the unparsed file's effects are absent, so a clean compare over it is a
+        // false-pure (the same posture as the policy gate below).
+        if had_parse_failure {
+            eprintln!("candor-scan: baseline guard NOT evaluated — source failed to parse (see above); the guard cannot compare unanalyzed code");
+            return (2, json_body);
+        }
+        match check_baseline(bv, dir, &crate_name, &all, &inferred) {
+            BaselineOutcome::Inactive => {} // absent file: noted, exit unchanged
+            BaselineOutcome::Invalid => return (2, json_body), // diagnostic already printed
+            BaselineOutcome::Checked(v) => {
+                for gv in &v {
+                    let line = format!("[{}] {}", gv.rule, gv.detail);
+                    if stdout_is_json {
+                        eprintln!("{line}");
+                    } else {
+                        println!("{line}");
+                    }
+                }
+                record_gate_violations(&v); // toward the final --gate-json verdict
+                if v.is_empty() {
+                    eprintln!("candor-scan: baseline guard ✓ — no function gained an effect (advisory floor: the syntactic backend under-reports)");
+                } else {
+                    eprintln!("candor-scan: {} baseline regression(s) — an existing function gained an effect (AS-EFF-005)", v.len());
+                    guard_code = 1;
+                }
+            }
+        }
+    }
+
     // The stable policy gate (spec §6.2 / AS-EFF-006/008/009) — the ADVISORY FLOOR. The syntactic
     // backend under-reports (a missed effect can pass), so this is a floor, never the sound gate
     // (that's the nightly engine / the JVM engine). It still catches every boundary crossing the
@@ -1086,12 +1140,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             return (2, json_body);
         };
         let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc);
-        // Human gate output (the violation lines AND the ✓/count summary) goes to STDERR whenever
-        // stdout carries a JSON document — the report (`--json`) or the streamed verdict
-        // (`--gate-json -`) — so stdout stays a single pure JSON document (pipeable to `jq` /
-        // candor-sarif). Without this, the AS-EFF lines interleave the stream and corrupt it.
-        let stdout_is_json = want_json
-            || matches!(GATE_JSON_PATH.get(), Some(Some(p)) if p == "-");
         for gv in &v {
             let line = format!("[{}] {}", gv.rule, gv.detail);
             if stdout_is_json {
@@ -1117,7 +1165,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         }
     }
     // No-gate runs record nothing; scan_main's final write_gate_json emits { ok: true, [] } for them.
-    (0, json_body)
+    // A clean policy still exits 1 when the baseline guard fired above (the codes join by max).
+    (guard_code, json_body)
 }
 
 /// Scan a TARGET — a single crate, or a `[workspace]` root fanned out into one report per member
@@ -1125,12 +1174,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
 /// workspace is never scanned as one merged package (colliding same-named fns) nor pruned to an
 /// empty report by the nested-package filter. With `want_json`, prints ONE JSON document for a
 /// single crate and a JSON ARRAY for a workspace — never concatenated documents. Returns the exit code.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn scan_target(
     dir: &str,
     prefix: String,
     want_json: bool,
     include_tests: bool,
     policy: Option<String>,
+    baseline: Option<String>,
     deps_idx: &DepIndex,
 ) -> i32 {
     let members = workspace_members(Path::new(dir));
@@ -1144,7 +1195,7 @@ pub(crate) fn scan_target(
                        check `members`/globs; scan member crates directly to gate them");
         }
         let (code, json) = scan_one(dir, ScanOpts {
-            prefix, want_json, include_tests, policy, quiet: false, deps_idx,
+            prefix, want_json, include_tests, policy, baseline, quiet: false, deps_idx,
         });
         if let Some(b) = json {
             println!("{b}");
@@ -1161,7 +1212,8 @@ pub(crate) fn scan_target(
     let mut bodies: Vec<String> = Vec::new();
     for d in &dirs {
         let (code, json) = scan_one(d, ScanOpts {
-            prefix: prefix.clone(), want_json, include_tests, policy: policy.clone(), quiet: false, deps_idx,
+            prefix: prefix.clone(), want_json, include_tests, policy: policy.clone(),
+            baseline: baseline.clone(), quiet: false, deps_idx,
         });
         rc = rc.max(code);
         if let Some(b) = json {
@@ -1180,7 +1232,7 @@ pub(crate) fn scan_target(
 /// `~/.cargo/registry/src/<index>/` into `<dir>/.candor/deps/`, then scan the root crate chained
 /// over those reports (plus anything CANDOR_DEPS already names). Path/git/workspace deps have no
 /// registry checkout and are skipped with a note — chain them by scanning them yourself.
-pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_tests: bool, policy: Option<String>) -> i32 {
+pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_tests: bool, policy: Option<String>, baseline: Option<String>) -> i32 {
     let lock = match std::fs::read_to_string(format!("{dir}/Cargo.lock")) {
         Ok(t) => t,
         Err(_) => {
@@ -1240,14 +1292,15 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
             continue;
         }
         let _ = std::fs::create_dir_all(&sub);
-        // Dep scans are quiet, unchained, report-only, and POLICY-FREE (the resolved root policy
-        // is deliberately not passed): their job is the report files. A registry dep is a single
-        // published package, so scan_one (not scan_target) is right; the json body is unused.
+        // Dep scans are quiet, unchained, report-only, and GATE-FREE (the resolved root policy and
+        // baseline are deliberately not passed): their job is the report files. A registry dep is a
+        // single published package, so scan_one (not scan_target) is right; the json body is unused.
         let _ = scan_one(&src.to_string_lossy(), ScanOpts {
             prefix: format!("{sub}/report"),
             want_json: false,
             include_tests: false,
             policy: None,
+            baseline: None,
             quiet: true,
             deps_idx: &no_deps,
         });
@@ -1275,5 +1328,5 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
     let idx = load_dep_reports(Some(&spec));
     // The final root scan goes through scan_target so `--deps <workspace>` fans out over members
     // too — the nested-package filter would otherwise prune them all into an empty, gate-passing report.
-    scan_target(dir, prefix, want_json, include_tests, policy, &idx)
+    scan_target(dir, prefix, want_json, include_tests, policy, baseline, &idx)
 }

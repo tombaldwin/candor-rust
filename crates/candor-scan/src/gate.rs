@@ -137,6 +137,138 @@ pub(crate) fn policy_violations(
     out
 }
 
+/// What the AS-EFF-005 baseline guard decided for one crate scan (see [`check_baseline`]).
+pub(crate) enum BaselineOutcome {
+    /// No baseline file exists — the ratchet is not adopted yet. A one-time stderr note was printed;
+    /// the exit code is unchanged (the guard is simply not active — candor-java's absent-file posture).
+    Inactive,
+    /// Invalid gate input (empty value, unreadable/unparseable file, missing or MISMATCHED producing
+    /// version) — the diagnostic was printed and the caller must exit 2 WITHOUT evaluating (the §2.1
+    /// stale-baseline posture: never a silent skip, never a stale compare).
+    Invalid,
+    /// The baseline was valid and same-build; here is every AS-EFF-005 violation (possibly none).
+    Checked(Vec<GateViolation>),
+}
+
+/// The absent-baseline notes already printed (one per resolved file, process-wide): a workspace whose
+/// members share one direct-path baseline value must not repeat the identical note per member.
+static NOTED_ABSENT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+
+/// The AS-EFF-005 baseline regression guard (candor-spec §7 item 5) — the stable scanner's arm of the
+/// family-wide MUST, with candor-java's `checkBaseline` as the exact model. `value` is the
+/// `CANDOR_BASELINE` env / config `baseline` value: a report PREFIX (the `--out` form —
+/// `<value>.<crate>.scan.json` per workspace member) or a direct report file path.
+///
+///   - EMPTY value                      → `Invalid` (exit 2): a configured-but-empty gate input is the
+///     §6.2 unreadable-policy class — never a silently skipped gate (matches the bare `policy` posture).
+///   - file ABSENT                      → `Inactive` + one stderr note ("guard not active; record one").
+///   - present but UNPARSEABLE, or with a MISSING/MISMATCHED producing version (the envelope
+///     `candor.version` vs this build) → `Invalid` (exit 2) WITHOUT evaluating: a baseline is comparable
+///     only to its OWN producing build (§2.1) — engine upgrades change reports, so evaluating produces a
+///     bogus AS-EFF-005 wave and skipping is an unbounded fail-open window.
+///   - valid + same build               → compare per-fn TRANSITIVE sets: any fn GAINING an effect vs its
+///     baseline set is one violation. A fn absent from the baseline is exempt — new code is reviewed as
+///     new code; the guard is for regressions in EXISTING functions (both reference engines omit pure
+///     fns from reports, so a formerly-pure fn reads as new — the shared family semantics).
+///
+/// Same-named baseline entries (rlib+bin `main`) are UNIONed, not last-write-wins — the baseline is the
+/// over-approximation of what a name was already permitted to reach (mirrors the deep engine).
+pub(crate) fn check_baseline(
+    value: &str,
+    dir: &str,
+    crate_name: &str,
+    all: &[String],
+    inferred: &HashMap<String, BTreeSet<&'static str>>,
+) -> BaselineOutcome {
+    if value.trim().is_empty() {
+        eprintln!(
+            "candor-scan: baseline is configured with an EMPTY value — failing (exit 2); the guard \
+             must not be silently skipped (set a report path/prefix, or remove the key)"
+        );
+        return BaselineOutcome::Invalid;
+    }
+    // A direct report file wins when it exists; otherwise the canonical `--out` prefix form.
+    let file = if Path::new(value).is_file() {
+        value.to_string()
+    } else {
+        format!("{value}.{crate_name}.scan.json")
+    };
+    if !Path::new(&file).is_file() {
+        let noted = NOTED_ABSENT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        if noted.lock().unwrap().insert(file.clone()) {
+            eprintln!(
+                "candor-scan: baseline {file} does not exist — the regression guard is not active \
+                 (record one: candor-scan {dir} --out {value})"
+            );
+        }
+        return BaselineOutcome::Inactive;
+    }
+    let regen = format!("regenerate it with this build: candor-scan {dir} --out {value}");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        eprintln!("candor-scan: baseline {file} exists but could not be read — failing (exit 2), guard NOT evaluated; {regen}");
+        return BaselineOutcome::Invalid;
+    };
+    // A partially-corrupt baseline (any entry dropped) is as invalid as a whole-file parse failure:
+    // a vanished entry's fn would read as new (exempt), silently narrowing the guard.
+    let entries = match candor_report::report_entries_counted(&text) {
+        Some((entries, 0)) => entries,
+        _ => {
+            eprintln!(
+                "candor-scan: baseline {file} exists but could not be parsed (corrupt/truncated?) — \
+                 failing (exit 2), guard NOT evaluated; the guard must not silently pass on an \
+                 unreadable baseline (the unreadable-policy class, §6.2); {regen}"
+            );
+            return BaselineOutcome::Invalid;
+        }
+    };
+    let this_build = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+    match candor_report::report_version(&text) {
+        None => {
+            eprintln!(
+                "candor-scan: baseline {file} has no provenance header (a legacy/bare-array report) — \
+                 a baseline is comparable only to its producing build (§2.1). Failing (exit 2); {regen}"
+            );
+            return BaselineOutcome::Invalid;
+        }
+        Some(v) if v != this_build => {
+            eprintln!(
+                "candor-scan: baseline {file} was produced by engine build {v} but this is build \
+                 {this_build} — coverage changes reports, so an engine swap is baseline-invalidating \
+                 and the gate cannot evaluate (exit 2, the unreadable-policy class; never a silent \
+                 skip, never a bogus AS-EFF-005 wave). Regenerate deliberately with this build: \
+                 candor-scan {dir} --out {value}"
+            );
+            return BaselineOutcome::Invalid;
+        }
+        Some(_) => {}
+    }
+    let mut base: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for e in entries {
+        base.entry(e.func).or_default().extend(e.inferred);
+    }
+    let empty: BTreeSet<&'static str> = BTreeSet::new();
+    let mut out = Vec::new();
+    for q in all {
+        let Some(prior) = base.get(q) else { continue }; // new function — not a regression
+        let gained: Vec<&str> =
+            inferred.get(q).unwrap_or(&empty).iter().copied().filter(|e| !prior.contains(*e)).collect();
+        if !gained.is_empty() {
+            out.push(GateViolation {
+                rule: "AS-EFF-005".into(),
+                func: q.clone(),
+                effects: gained.iter().map(|s| s.to_string()).collect(),
+                detail: format!(
+                    "`{q}` gained effect {{ {} }} not present in the baseline; an existing function \
+                     started performing a new effect",
+                    gained.join(", ")
+                ),
+            });
+        }
+    }
+    out.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
+    BaselineOutcome::Checked(out)
+}
+
 /// `--gate-json <file>` target, set once in `scan_main` (a no-op when unset — the direct-`scan_one` test
 /// paths never RECORD). Mirrors the `CFG_FEATURES` OnceLock idiom; a plain path so it threads no ScanOpts.
 /// Members record via `record_gate_violations`; `scan_main` writes the single final verdict.

@@ -4,6 +4,24 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [Unreleased]
+
+### ⚠ candor-scan: the `baseline` config key now ACTIVATES the AS-EFF-005 guard (spec §7 item 5)
+
+The stable scanner implements the family-MUST baseline regression guard, with candor-java's
+`checkBaseline` as the exact model: `CANDOR_BASELINE=<saved report path or --out prefix>` (or the
+`.candor/config` `baseline` key — **previously recognized-but-inert with a loud warning; a repo that
+already checked one in gets a LIVE ratchet on its next scan**). Semantics: an *existing* function
+that gained an effect vs its baseline transitive set → one `[AS-EFF-005]` violation per fn + exit 1,
+joined into the `--gate-json` verdict by the same accumulator as the policy gate; new fns exempt
+(regressions in existing code only); baseline file absent → one stderr note ("guard not active;
+record one: candor-scan <dir> --out <prefix>") + exit unchanged; baseline unparseable (incl. any
+dropped entry), missing its provenance header, or produced by a **different scanner build** (envelope
+`candor.version` vs this build) → exit 2 WITHOUT evaluating (the §2.1 stale-baseline posture — never
+a silent skip, never a stale compare); a configured-but-EMPTY value → exit 2 (the bare-`policy`
+posture); a guard over a crate with an unparseable source file → exit 2. Dependency scans under
+`--deps` stay guard-free. Same advisory-floor caveat as the scan policy gate.
+
 ## [candor-scan 0.8.5 · candor-query 0.8.1] — 2026-07-10
 
 ### ⚠ `pure` no longer counts `Unknown` as a violation (family ruling — verdict-affecting)

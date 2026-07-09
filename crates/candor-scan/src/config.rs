@@ -2,14 +2,15 @@
 
 
 /// The shared §config key vocabulary; a key outside it WARNS (typo protection — a misspelt `policy`
-/// must not silently drop the gate), a known-but-unimplemented key (this engine reads `policy` + `deps`)
-/// is inert. Values: first token = key (ASCII-lowercased), rest of line = value; `#` comments; blanks.
+/// must not silently drop the gate), a known-but-unimplemented key (this engine reads `policy` +
+/// `baseline` + `deps`) is inert. Values: first token = key (ASCII-lowercased), rest of line =
+/// value; `#` comments; blanks.
 pub(crate) const CONFIG_KEYS: [&str; 7] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"];
 
 /// The subset of [`CONFIG_KEYS`] this engine actually wires to a mode. The rest are spec-inert here —
-/// but a checked-in `baseline` key that silently does nothing is a DECLARED-GATE-SILENTLY-OFF (the
-/// reader believes the ratchet is on), so an inert recognized key warns loudly instead of staying mute.
-pub(crate) const CONFIG_KEYS_IMPLEMENTED: [&str; 2] = ["policy", "deps"];
+/// but a checked-in enforcement key that silently does nothing is a DECLARED-GATE-SILENTLY-OFF (the
+/// reader believes the gate is on), so an inert recognized key warns loudly instead of staying mute.
+pub(crate) const CONFIG_KEYS_IMPLEMENTED: [&str; 3] = ["policy", "baseline", "deps"];
 
 /// Locate + parse `.candor/config` for the scan of `dir` (candor-spec §config): $CANDOR_CONFIG if set
 /// (its path MUST be usable — exit 2 otherwise), else the nearest `.candor/config` walking UP from the
@@ -94,6 +95,11 @@ pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String,
     };
     if let Some(p) = cfg.get_mut("policy") {
         *p = resolve(p);
+    }
+    if let Some(b) = cfg.get_mut("baseline") {
+        // The AS-EFF-005 guard's report path/prefix — home-anchored like `policy`, so the checked-in
+        // `baseline .candor/baseline` means the same file no matter where the scan is run from.
+        *b = resolve(b);
     }
     if let Some(d) = cfg.get_mut("deps") {
         // CANDOR_DEPS is a `:`-separated list of files/directories; resolve each element.

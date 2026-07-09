@@ -242,6 +242,49 @@ if [ "$rc_su" = 1 ]; then echo "  ok   candor-scan: deny Unknown fires (exit 1)"
 rm -rf "$(dirname "$PSU")"
 rm -rf "$(dirname "$PU")"
 
+# ── 9-bl. candor-scan AS-EFF-005 baseline guard (spec §7 item 5; candor-java checkBaseline is the model) ──
+echo "== candor-scan baseline guard (CANDOR_BASELINE / config baseline key) =="
+SB=$(mktemp -d)/sb; mkdir -p "$SB/src"
+SCAN="$ROOT/target/debug/candor-scan"
+printf '[package]\nname="sb"\nversion="0.1.0"\nedition="2021"\n' > "$SB/Cargo.toml"
+printf 'pub fn go() { let _ = std::fs::read("/x"); }\n' > "$SB/src/lib.rs"
+env -u CANDOR_CONFIG -u CANDOR_BASELINE -u CANDOR_POLICY "$SCAN" "$SB" --out "$SB/base" >/dev/null 2>&1
+# clean compare (unchanged code) → exit 0 with the guard receipt
+rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/base" "$SCAN" "$SB" 2>&1) || rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   scan guard: clean compare exits 0"; pass=$((pass+1)); else echo "  FAIL scan guard: clean compare exited $rc (want 0)"; fail=$((fail+1)); fi
+want "scan guard: clean receipt printed" "$out" "baseline guard ✓"
+# the ratchet: go gains Exec (a new fn is also added and must be EXEMPT — only go flags)
+printf 'pub fn go() { let _ = std::fs::read("/x"); std::process::Command::new("sh").status().unwrap(); }\npub fn newbie() { let _ = std::net::TcpStream::connect("h:1"); }\n' > "$SB/src/lib.rs"
+rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/base" "$SCAN" "$SB" 2>&1) || rc=$?
+if [ "$rc" = 1 ]; then echo "  ok   scan guard: a gained effect exits 1"; pass=$((pass+1)); else echo "  FAIL scan guard: gain exited $rc (want 1)"; fail=$((fail+1)); fi
+want   "scan guard: AS-EFF-005 names the fn + gained effect" "$out" '[AS-EFF-005] `go` gained effect { Exec }'
+absent "scan guard: a NEW fn is exempt (reviewed as new code)" "$out" '[AS-EFF-005] `newbie`'
+# absent baseline → note + exit unchanged (guard inactive)
+rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/nosuch" "$SCAN" "$SB" 2>&1) || rc=$?
+if [ "$rc" = 0 ]; then echo "  ok   scan guard: absent baseline leaves exit 0"; pass=$((pass+1)); else echo "  FAIL scan guard: absent baseline exited $rc (want 0)"; fail=$((fail+1)); fi
+want "scan guard: absent baseline says how to record one" "$out" "regression guard is not active"
+# a doctored producing version → exit 2 WITHOUT evaluating (§2.1 — never a stale compare)
+python3 - "$SB/base.sb.scan.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["candor"]["version"] = "scan-0.0.0-doctored"
+json.dump(d, open(sys.argv[1], "w"))
+PY
+rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/base" "$SCAN" "$SB" 2>&1) || rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   scan guard: version-mismatched baseline exits 2 (fail closed)"; pass=$((pass+1)); else echo "  FAIL scan guard: stale baseline exited $rc (want 2)"; fail=$((fail+1)); fi
+absent "scan guard: NO AS-EFF-005 from a stale baseline" "$out" '[AS-EFF-005]'
+# unparseable baseline → exit 2
+printf '{ not json' > "$SB/base.sb.scan.json"
+rc=0; out=$(env -u CANDOR_CONFIG -u CANDOR_POLICY CANDOR_BASELINE="$SB/base" "$SCAN" "$SB" 2>&1) || rc=$?
+if [ "$rc" = 2 ]; then echo "  ok   scan guard: unparseable baseline exits 2"; pass=$((pass+1)); else echo "  FAIL scan guard: unparseable baseline exited $rc (want 2)"; fail=$((fail+1)); fi
+# the config `baseline` key drives the guard (home-relative value, run from an unrelated CWD)
+mkdir -p "$SB/.candor"; printf 'baseline .candor/cfgbase\n' > "$SB/.candor/config"
+env -u CANDOR_CONFIG -u CANDOR_BASELINE -u CANDOR_POLICY "$SCAN" "$SB" --out "$SB/.candor/cfgbase" >/dev/null 2>&1
+printf 'pub fn go() { let _ = std::fs::read("/x"); std::process::Command::new("sh").status().unwrap(); let _ = std::env::var("H"); }\npub fn newbie() { let _ = std::net::TcpStream::connect("h:1"); }\n' > "$SB/src/lib.rs"
+rc=0; out=$( cd /tmp; env -u CANDOR_CONFIG -u CANDOR_BASELINE -u CANDOR_POLICY "$SCAN" "$SB" 2>&1 ) || rc=$?
+if [ "$rc" = 1 ]; then echo "  ok   scan guard: config baseline key gates (home-anchored, exit 1)"; pass=$((pass+1)); else echo "  FAIL scan guard: config baseline key exited $rc (want 1)"; fail=$((fail+1)); fi
+want "scan guard: config-driven gain names the new effect" "$out" '[AS-EFF-005] `go` gained effect { Env }'
+rm -rf "$(dirname "$SB")"
+
 # ── 9-fc. Fail-closed wrapper gates: `policy` and `guard` must never pass when they could not run ──
 echo "== fail-closed gates (cargo candor policy / guard) =="
 FC=$(mktemp -d)/fc; mkdir -p "$FC/src"

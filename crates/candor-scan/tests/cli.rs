@@ -533,18 +533,178 @@ fn candor_config_bare_policy_key_fails_loud() {
 
 #[test]
 fn candor_config_recognized_but_unimplemented_key_warns_loudly() {
-    // A checked-in `baseline` (or strict/no-ambient/closed-world/taint) key is spec-recognized but not
-    // wired to any candor-scan mode — a DECLARED-GATE-SILENTLY-OFF unless disclosed. It must warn.
+    // A checked-in strict/no-ambient/closed-world/taint key is spec-recognized but not wired to any
+    // candor-scan mode — a DECLARED-GATE-SILENTLY-OFF unless disclosed. It must warn. (`baseline` used
+    // to be on this list; it is now IMPLEMENTED — the AS-EFF-005 guard — and must NOT warn as inert.)
     let d = make_crate("cfginert", "pub fn pure() -> u32 { 1 }");
     std::fs::create_dir_all(d.join(".candor")).unwrap();
-    std::fs::write(d.join(".candor/config"), "baseline .candor/baseline\ntaint true\n").unwrap();
+    std::fs::write(d.join(".candor/config"), "baseline .candor/baseline\ntaint true\nstrict 1\n").unwrap();
     let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run candor-scan");
     let _ = std::fs::remove_dir_all(&d);
-    assert_eq!(out.status.code(), Some(0), "inert keys don't fail the scan");
+    assert_eq!(out.status.code(), Some(0), "inert keys don't fail the scan (and an absent baseline is a note, not a failure)");
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("config key 'baseline' is recognized by the candor family but not implemented by candor-scan"),
-        "the inert `baseline` key must be disclosed loudly: {stderr}");
-    assert!(stderr.contains("config key 'taint'"), "every inert recognized key is disclosed: {stderr}");
+    assert!(stderr.contains("config key 'taint' is recognized by the candor family but not implemented by candor-scan"),
+        "the inert `taint` key must be disclosed loudly: {stderr}");
+    assert!(stderr.contains("config key 'strict'"), "every inert recognized key is disclosed: {stderr}");
+    assert!(!stderr.contains("config key 'baseline'"),
+        "`baseline` is implemented now — it must not be disclosed as inert: {stderr}");
+    assert!(stderr.contains("regression guard is not active"),
+        "an absent configured baseline gets the adopt note: {stderr}");
+}
+
+// ── the AS-EFF-005 baseline regression guard (spec §7 item 5; candor-java's checkBaseline is the model) ──
+
+/// Run `candor-scan <dir> [args…]` with `CANDOR_BASELINE=<baseline>` (when given) and return
+/// (exit code, stdout, stderr).
+fn scan_with_baseline(d: &std::path::Path, baseline: Option<&str>, args: &[&str]) -> (Option<i32>, String, String) {
+    let mut cmd = Command::new(bin());
+    cmd.arg(d.to_string_lossy().as_ref()).args(args);
+    // hermetic: the ambient environment must not smuggle in a gate/config of its own
+    cmd.env_remove("CANDOR_BASELINE").env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS");
+    if let Some(b) = baseline {
+        cmd.env("CANDOR_BASELINE", b);
+    }
+    let out = cmd.output().expect("run candor-scan");
+    (out.status.code(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+}
+
+#[test]
+fn baseline_guard_flags_a_gained_effect_exit_1_and_rides_the_gate_json() {
+    // The happy ratchet: snapshot a crate whose fn performs { Fs }, make the fn ALSO spawn a process,
+    // guard against the snapshot → one [AS-EFF-005] naming the gained Exec, exit 1 — and the violation
+    // joins the --gate-json verdict via the same accumulator as the policy gate.
+    let d = make_crate("blratchet", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "recording the baseline is a plain scan");
+    std::fs::write(d.join("src/lib.rs"),
+        "pub fn go() { let _ = std::fs::read(\"/x\"); std::process::Command::new(\"sh\").status().unwrap(); }").unwrap();
+    let verdict = d.join("verdict.json");
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()),
+        &["--gate-json", verdict.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(1), "a gained effect is a violation (exit 1): {stderr}");
+    let all = format!("{stdout}{stderr}");
+    assert!(all.contains("[AS-EFF-005] `go` gained effect { Exec }"),
+        "the violation line names the fn and the gained effect: {all}");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&verdict).unwrap()).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(v["ok"], serde_json::json!(false));
+    assert!(v["violations"].as_array().unwrap().iter().any(|gv|
+        gv["rule"] == "AS-EFF-005" && gv["fn"] == "go" && gv["effects"] == serde_json::json!(["Exec"])),
+        "AS-EFF-005 joins the structured verdict: {v}");
+}
+
+#[test]
+fn baseline_guard_clean_compare_exits_0_and_new_fns_are_exempt() {
+    // No gains → exit 0 with the guard-✓ receipt; and a NEW effectful fn (absent from the baseline)
+    // is exempt — the guard is for regressions in EXISTING functions, new code is reviewed as new code.
+    let d = make_crate("blclean", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    // (a) unchanged code: clean.
+    let (rc, _, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    assert_eq!(rc, Some(0), "an unchanged crate passes the ratchet: {stderr}");
+    assert!(stderr.contains("baseline guard ✓"), "the clean guard prints its receipt: {stderr}");
+    // (b) a brand-new effectful fn: exempt, still exit 0, no AS-EFF-005.
+    std::fs::write(d.join("src/lib.rs"),
+        "pub fn go() { let _ = std::fs::read(\"/x\"); }\npub fn newbie() { std::process::Command::new(\"sh\").status().unwrap(); }").unwrap();
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(0), "a new fn is not a regression: {stderr}");
+    assert!(!format!("{stdout}{stderr}").contains("AS-EFF-005"), "no violation for new code: {stdout}{stderr}");
+}
+
+#[test]
+fn baseline_guard_absent_file_notes_once_and_exit_unchanged() {
+    // CANDOR_BASELINE set but no such file: the ratchet is not adopted yet — a stderr note with the
+    // record incantation, exit unchanged (candor-java's absent-file posture; NOT a failure).
+    let d = make_crate("blabsent", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let (rc, _, stderr) = scan_with_baseline(&d, Some(d.join("nosuch").to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(0), "an absent baseline leaves the exit code unchanged: {stderr}");
+    assert!(stderr.contains("regression guard is not active") && stderr.contains("record one:"),
+        "the note says the guard is inactive and how to record a baseline: {stderr}");
+}
+
+#[test]
+fn baseline_guard_version_mismatch_fails_closed_without_evaluating() {
+    // §2.1: a baseline is comparable only to its OWN producing build. Doctor the envelope version on a
+    // baseline that WOULD flag a gain — the guard must exit 2 WITHOUT evaluating (no AS-EFF-005 wave,
+    // no silent skip). A MISSING version (legacy bare array) is the same class.
+    let d = make_crate("blver", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    // introduce a gain, then doctor the baseline's producing version
+    std::fs::write(d.join("src/lib.rs"),
+        "pub fn go() { let _ = std::fs::read(\"/x\"); std::process::Command::new(\"sh\").status().unwrap(); }").unwrap();
+    let file = d.join("base.blver.scan.json");
+    let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    v["candor"]["version"] = serde_json::json!("scan-0.0.0-doctored");
+    std::fs::write(&file, serde_json::to_string(&v).unwrap()).unwrap();
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    assert_eq!(rc, Some(2), "a producing-version mismatch is invalid gate input (exit 2): {stderr}");
+    assert!(stderr.contains("scan-0.0.0-doctored") && stderr.contains("cannot evaluate"),
+        "the diagnostic names both builds and refuses to evaluate: {stderr}");
+    assert!(!format!("{stdout}{stderr}").contains("[AS-EFF-005]"),
+        "no AS-EFF-005 violation may be emitted from a stale baseline: {stdout}{stderr}");
+    // MISSING version: a bare-array legacy report has no provenance — same exit 2, no evaluation.
+    std::fs::write(&file, "[{\"fn\":\"go\",\"inferred\":[]}]").unwrap();
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(2), "a provenance-less baseline cannot certify its build: {stderr}");
+    assert!(!format!("{stdout}{stderr}").contains("[AS-EFF-005]"), "never evaluated: {stdout}{stderr}");
+}
+
+#[test]
+fn baseline_guard_unparseable_or_empty_value_fails_closed() {
+    // An UNPARSEABLE baseline (corrupt/truncated) exits 2 — the unreadable-policy class (§6.2), never a
+    // silent pass. A configured-but-EMPTY value is the same class (matches the bare `policy` posture).
+    let d = make_crate("blcorrupt", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let garbage = d.join("base.blcorrupt.scan.json");
+    std::fs::write(&garbage, "{ this is not json").unwrap();
+    let (rc, _, stderr) = scan_with_baseline(&d, Some(d.join("base").to_string_lossy().as_ref()), &[]);
+    assert_eq!(rc, Some(2), "a corrupt baseline is invalid gate input: {stderr}");
+    assert!(stderr.contains("could not be parsed"), "the diagnostic says why: {stderr}");
+    // empty value (e.g. `CANDOR_BASELINE=` or a bare `baseline` config line) — fail closed, loud.
+    let (rc, _, stderr) = scan_with_baseline(&d, Some(""), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(2), "a configured-but-empty baseline must not silently skip the guard: {stderr}");
+    assert!(stderr.contains("EMPTY value"), "the diagnostic names the empty value: {stderr}");
+}
+
+#[test]
+fn baseline_guard_config_key_resolves_against_the_config_home_and_env_wins() {
+    // The `.candor/config` `baseline` key drives the guard with a RELATIVE value anchored to the
+    // config's HOME dir (spec §3.4) — never the process CWD — and the CANDOR_BASELINE env overrides it.
+    let d = make_crate("blcfg", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    std::fs::create_dir_all(d.join(".candor")).unwrap();
+    std::fs::write(d.join(".candor/config"), "baseline .candor/base\n").unwrap();
+    // record the baseline at the config's (home-anchored) prefix, then introduce a gain
+    let (rc, _, _) = scan_with_baseline(&d, None,
+        &["--out", d.join(".candor/base").to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    std::fs::write(d.join("src/lib.rs"),
+        "pub fn go() { let _ = std::fs::read(\"/x\"); std::process::Command::new(\"sh\").status().unwrap(); }").unwrap();
+    // run from an UNRELATED CWD with no env: only home-anchored resolution finds the baseline → exit 1
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref())
+        .current_dir(std::env::temp_dir()).output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(1),
+        "the config `baseline` key must activate the guard, home-anchored: {}",
+        String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("[AS-EFF-005]"),
+        "the gain is reported: {}", String::from_utf8_lossy(&out.stdout));
+    // env wins over config: record a FRESH snapshot of the current code (env pointed at an absent
+    // path so the config's stale baseline can't gate the recording run — exit 0 proves the override),
+    // then guard against it → exit 0 despite the config still naming the stale prefix.
+    let fresh = d.join("fresh");
+    let (rc, _, stderr) = scan_with_baseline(&d, Some(d.join("void").to_string_lossy().as_ref()),
+        &["--out", fresh.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "an absent env baseline overrides the config's firing one: {stderr}");
+    let (rc, _, stderr) = scan_with_baseline(&d, Some(fresh.to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(0), "CANDOR_BASELINE env overrides the config key: {stderr}");
 }
 
 #[test]

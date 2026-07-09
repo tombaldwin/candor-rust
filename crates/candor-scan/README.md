@@ -72,6 +72,15 @@ JVM gates) over the scan and exits 1 on violation. It is the **advisory floor**:
 under-reports, so a missed effect can pass — a clean run is necessary, never sufficient. It still
 catches every boundary crossing the scan *can* see, deterministically, with zero extra install.
 
+**The baseline guard floor (AS-EFF-005).** `CANDOR_BASELINE=<saved report path or --out prefix>` (or
+the `.candor/config` `baseline` key) turns the scan into a regression ratchet: any *existing* function
+that **gained** an effect vs the saved report is one `[AS-EFF-005]` violation → exit 1 (violations
+join the `--gate-json` verdict); new functions are exempt. No baseline file → a stderr note, guard
+inactive; a baseline that is unparseable or was produced by a **different scanner build** (the
+envelope `candor.version`) → exit 2 *without* evaluating — a stale baseline is invalid gate input
+(spec §2.1), never a silent skip, never a stale compare. Record one: `candor-scan <dir> --out
+.candor/baseline` and commit the files. Same advisory-floor caveat as the policy gate.
+
 For the soundness contract (`Unknown` over-approximation), conformance checking, and the **sound**
 policy/guard CI gates, use the full nightly [candor](https://github.com/tombaldwin/candor-rust) lint. The
 two share one classifier and one policy parser, so they never disagree on what counts as an effect or
@@ -80,7 +89,7 @@ what a rule means.
 ## Usage
 
 ```
-candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests]
+candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests] [--policy <file>] [--gate-json <f>]
 ```
 
 - `<dir>` — crate root to scan (default `.`).
@@ -89,6 +98,12 @@ candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests]
 - `--json` — print the report to stdout instead of writing files.
 - `--include-tests` — also scan `tests/`/`benches/`/`examples/` and `#[cfg(test)]` modules (off by
   default, so the report describes the crate, not its test harness).
+- `--policy <file>` / `--gate-json <file|->` — the policy gate + structured verdict (above).
+- `CANDOR_BASELINE=<path|prefix>` — the AS-EFF-005 regression guard (above).
+- `.candor/config` — the checked-in configuration (spec §3.4), discovered by walking up from the
+  scan target; this engine wires the `policy`, `baseline` and `deps` keys (relative values anchor to
+  the config's home directory), warns on unknown keys, and *discloses* recognized-but-unimplemented
+  keys (`strict`/`no-ambient`/`closed-world`/`taint`) rather than leaving a declared gate silently off.
 
 Requires a reasonably recent stable Rust (edition 2024 → Rust 1.85+).
 

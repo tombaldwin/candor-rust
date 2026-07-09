@@ -286,6 +286,28 @@ a stale or clean-looking lie.
 config). A `2` is fail-closed by design — the gate refuses to pass green when it could not actually
 check anything.
 
+### AS-EFF-005 on the stable scanner — the zero-install regression guard
+
+The deep engine's [regression guard](#ci-guardrail-lowest-friction-adoption) has a stable floor:
+`candor-scan` enforces the same AS-EFF-005 ratchet with no nightly. Record a baseline, commit it,
+and a PR that makes an *existing* function gain an effect fails:
+
+```sh
+candor-scan . --out .candor/baseline              # 1. record it (commit the .candor/baseline.* files)
+CANDOR_BASELINE=.candor/baseline candor-scan .    # 2. in CI: exit 1 if a function gained an effect
+```
+
+Or check it in once — the `.candor/config` `baseline` key (below) activates the guard on every scan.
+Semantics follow the reference engine (candor-java) exactly: a function that **gained** an effect vs
+its baseline set → one `[AS-EFF-005]` line per function + exit 1, and the violations join the
+`--gate-json` verdict; **new** functions are exempt (reviewed as new code — the guard is for
+regressions in existing functions); **no baseline file** → a stderr note, guard inactive, exit
+unchanged; a baseline that is **unparseable or produced by a different scanner build** (the envelope
+`candor.version`) → exit 2 *without evaluating* — a stale baseline is invalid gate input (spec §2.1):
+never a silent skip, never a stale compare. The same advisory-floor caveat as the scan policy gate
+applies: the syntactic backend under-reports, so a clean ratchet is necessary, never sufficient — the
+nightly guard is the sound one.
+
 ### `.candor/config` — check in the configuration
 
 One checked-in file replaces the `CANDOR_*` env wiring (candor-spec §3.4), so CI is "point at the
@@ -295,7 +317,7 @@ target** (`$CANDOR_CONFIG` overrides discovery; precedence: CLI arg → env var 
 ```text
 # .candor/config
 policy   .candor/policy      # the §6.2 policy file  (cargo candor policy / candor-scan --policy)
-baseline .candor/baseline    # the guard/diff/snapshot default prefix
+baseline .candor/baseline    # the AS-EFF-005 guard prefix (cargo candor guard/diff/snapshot AND candor-scan)
 deps     .candor/deps        # CANDOR_DEPS report chaining (candor-scan)
 ```
 
