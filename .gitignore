@@ -6,3 +6,4 @@ __pycache__/
 .candor/report.*
 .candor/*.scan.json
 .candor/*.callgraph.json
+.DS_Store

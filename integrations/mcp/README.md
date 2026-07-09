@@ -1,5 +1,10 @@
 # candor MCP server
 
+> **⚠ DEPRECATED (2026-07-02, `c2ba4e1`).** This per-engine Python server is superseded by the
+> **unified candor-mcp** shipped with candor-ts — one MCP server fronting every candor engine:
+> `npx candor-ts candor-mcp`. `candor-mcp.py` stays functional for existing configs but gets no new
+> tools; new setups should use the unified server.
+
 Exposes candor's **instant** read-only queries as native [MCP](https://modelcontextprotocol.io) tools,
 so an agent (Claude Code, …) reaches for them reflexively — in one cheap tool call — instead of
 grepping and reading source. The queries serve from candor's kept-fresh report, so they're fast;

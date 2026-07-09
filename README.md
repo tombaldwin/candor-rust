@@ -268,6 +268,42 @@ crate, then enforces with the siblings loaded, so an effect or endpoint that liv
 still gets caught at the boundary that forbids it. See [examples/candor-policy](examples/candor-policy)
 and [eval/bet3](eval/bet3/RESULTS.md).
 
+**Machine-readable verdict — `--gate-json` (both backends, candor-spec §3.3).** The gate's verdict as
+JSON, from the *same* check that sets the exit code, for CI annotations / the PR-native SARIF reporter:
+
+```sh
+cargo candor policy .candor/policy --gate-json verdict.json    # deep engine (also: guard --gate-json)
+candor-scan . --policy .candor/policy --gate-json verdict.json # stable scanner — identical shape
+# → { "spec": "0.8", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
+```
+
+`-` streams it to stdout. Exit semantics are pinned: violation → 1; a gate that could not run to
+completion (build failure, unreadable policy, unwritable verdict) → 2 with **no** verdict file — never
+a stale or clean-looking lie.
+
+**Exit codes, everywhere a gate runs:** `0` = evaluated, clean · `1` = evaluated, violations ·
+`2` = **not evaluated** (unreadable/empty policy, build failure, absent/stale baseline, unusable
+config). A `2` is fail-closed by design — the gate refuses to pass green when it could not actually
+check anything.
+
+### `.candor/config` — check in the configuration
+
+One checked-in file replaces the `CANDOR_*` env wiring (candor-spec §3.4), so CI is "point at the
+repo" and the configuration travels with the code. Both backends discover it by walking **up from the
+target** (`$CANDOR_CONFIG` overrides discovery; precedence: CLI arg → env var → config → default):
+
+```text
+# .candor/config
+policy   .candor/policy      # the §6.2 policy file  (cargo candor policy / candor-scan --policy)
+baseline .candor/baseline    # the guard/diff/snapshot default prefix
+deps     .candor/deps        # CANDOR_DEPS report chaining (candor-scan)
+```
+
+Relative paths resolve against the config's **home directory** — the one containing `.candor/` —
+never your shell's CWD. Fail-closed: an unusable config, or a bare `policy` line with no value, exits
+2 (a silently dropped config could be a silently dropped gate); unknown keys warn (typo protection);
+keys an engine recognizes but doesn't implement are disclosed, not silently inert.
+
 `cargo candor risk` is an **advisory, heuristic** nudge toward the injection class — an effect whose
 argument derives from a function parameter (`fs::read(format!("/var/cache/{key}"))`, `Command::new(name)`):
 
@@ -415,6 +451,13 @@ Now a PR that makes a parser suddenly open a socket, or a render function start 
 filesystem, fails review automatically — no tokens, no rewrite. Refresh the baseline deliberately
 (re-run the snapshot command) when a new effect is intended. This is equally useful to a human
 reviewer and to an AI agent reviewing a diff.
+
+**The guard fails closed (exit 2) on invalid gate input** — it never silently skips: a baseline made
+by a *different engine version* (stale after `git pull` — refresh with `cargo candor update`), a
+baseline with **no** `.candor-version` provenance sidecar, **no baseline at all** (never snapshotted /
+typo'd prefix), or a workspace member with no per-crate baseline file. Exit 2 means "the gate could
+not evaluate", distinct from exit 1 ("a function gained an effect"). Every case prints the exact
+refresh incantation.
 
 ## How well does it actually help an agent? (the honest version)
 
