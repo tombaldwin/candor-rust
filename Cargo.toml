@@ -1,6 +1,6 @@
 [package]
 name = "candor"
-version = "0.5.8"
+version = "0.5.9"
 authors = ["Tom Baldwin <tom@polymorphism.co.uk>"]
 description = "A type-aware capability/effect checker for Rust, as a dylint lint."
 edition = "2024"
@@ -25,7 +25,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `version` alongside `path`: cargo builds against the local path here, but a crates.io publish uses
 # the version (publish candor-report first). Carrying the version keeps candor publish-ready.
-candor-report = { path = "crates/candor-report", version = "0.5.1" }
+candor-report = { path = "crates/candor-report", version = "0.5.8" }
 candor-classify = { path = "crates/candor-classify", version = "0.5.1" }
 
 [dev-dependencies]
