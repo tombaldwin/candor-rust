@@ -22,6 +22,17 @@ a silent skip, never a stale compare); a configured-but-EMPTY value → exit 2 (
 posture); a guard over a crate with an unparseable source file → exit 2. Dependency scans under
 `--deps` stay guard-free. Same advisory-floor caveat as the scan policy gate.
 
+### Docs — reference-engine attribution, Path A `Unknown` claims, status refresh
+
+README/AGENTS corrections (with a new in-repo grep gate + a behavioral pin holding them): candor-java
+is the family's REFERENCE engine (this repo is the deep Rust engine — the README claimed "the
+reference implementation"); Path A/candor-scan does emit `Unknown` for invoked fn-values, FFI
+`extern` calls and untrusted chained reports (AGENTS.md and the scan docs claimed it "never emits
+`Unknown`" — other misses remain silent by design, now stated precisely); the status section now
+reflects the 35-crate calibration/fuzzer/oracle reality and spec 0.8 (it still said "Prototype,
+validated on ebman"); the conformance blurb counts four code engines + the agents domain engine;
+stale version examples became placeholders.
+
 ## [candor-scan 0.8.5 · candor-query 0.8.1] — 2026-07-10
 
 ### ⚠ `pure` no longer counts `Unknown` as a violation (family ruling — verdict-affecting)

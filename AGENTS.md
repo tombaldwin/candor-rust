@@ -39,9 +39,11 @@ path in §1 and install normally.
 Both write the same report files; everything below reads either. Choose:
 
 - **Path A (the floor)** — published scanner, stable Rust, one `cargo install`, seconds to run.
-  Syntactic: it **under-reports** relative to the deep engine (misses method-style effects, trait
-  dispatch, macros, cross-crate propagation, and emits no `Unknown`) — but it never fabricates an
-  effect. Right for a fast effect map, triage, and stable-only CI.
+  Syntactic: it **under-reports** relative to the deep engine (external-trait dispatch, uninferrable
+  receivers, desugared operators, cross-crate identity — those misses are *silent* by design). It
+  emits `Unknown` only where it can see the boundary: an invoked fn-value/callback, an FFI `extern`
+  call, an untrusted chained report. It never fabricates an effect. Right for a fast effect map,
+  triage, and stable-only CI.
 - **Path B (the certificate)** — the deep engine (a rustc-integrated lint on a pinned nightly,
   a few minutes to build once). Type-system-level resolution with the §4 trust contract: anything
   it can't resolve is marked `Unknown`, never silently pure. Right when you need to *rely* on
@@ -58,7 +60,11 @@ candor-scan . --out /tmp/candor-report     # writes /tmp/candor-report.<crate>.s
 
 It can also enforce a policy file as a gate: `candor-scan . --policy .candor/policy` (exit 1 on
 violation) — an **advisory floor**: a clean run is necessary, never sufficient; the deep engine is
-the sound gate.
+the sound gate. The same floor applies to the AS-EFF-005 regression guard: with
+`CANDOR_BASELINE=<saved report path or --out prefix>` (or the `.candor/config` `baseline` key) a
+function that *gained* an effect vs the saved report exits 1; no baseline file → a note, guard
+inactive; a baseline from a **different scanner build** (or unparseable) → exit 2 without
+evaluating — never a stale compare, never a silent skip.
 
 **Path B — clone + build the deep engine** (first build downloads a pinned nightly — expect a few
 minutes; it's not stuck):
@@ -95,7 +101,7 @@ candor-scan --version          # offline: "candor-scan <ver> (spec <SPEC>)" + th
 # Then YOU (you have network; candor doesn't) compare against crates.io.
 # crates.io REQUIRES a User-Agent header (it rejects requests without one):
 curl -s -H 'User-Agent: candor-version-check' https://crates.io/api/v1/crates/candor-scan \
-  | grep -o '"max_version":"[^"]*"'                                      # -> "max_version":"0.3.4"
+  | grep -o '"max_version":"[^"]*"'                                      # -> "max_version":"<version>"
 ```
 
 If they differ, **ask the user before upgrading** — e.g. "candor-scan 0.7.2 is available (you're on
@@ -195,9 +201,10 @@ two files.
 `inferred` is **authoritative for what candor resolved**. When `unresolved` is `true` (or `"Unknown"`
 appears in the set), the effect list **may be incomplete** — read the source for *that* function
 before relying on it. Never conclude a function is pure or effect-free if it is marked `unresolved`.
-candor is deliberately honest about what it cannot see; respect that boundary. (Path A never emits
-`Unknown` at all — that honesty marker is the deep engine's; treat every Path A absence as "not seen
-syntactically", not "proven absent".)
+candor deliberately discloses what it cannot see; respect that boundary. (Path A emits `Unknown`
+only for the boundaries it can see — an invoked fn-value/callback, an FFI `extern` call, an
+untrusted chained report; its **other** misses are silent by design, so treat every Path A absence
+as "not seen syntactically", never "proven absent".)
 
 ## 5. After you change code
 

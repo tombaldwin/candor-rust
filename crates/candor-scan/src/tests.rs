@@ -2017,6 +2017,65 @@ trait G {
     }
 
     #[test]
+    fn scan_emits_unknown_on_an_extern_call_as_the_agents_contract_states() {
+        // TESTING.md §9 (load-bearing doc claims get drift gates): AGENTS.md §1/§4 states Path A
+        // emits `Unknown` only where it can see the boundary — an invoked fn-value/callback, an FFI
+        // `extern` call, an untrusted chained report (it used to claim "never emits Unknown", which
+        // was false — scan.rs discloses all three). This behavioral pin sits NEXT to the embedded-doc
+        // drift gate above so the doc claim and the code are held together: an extern-call fixture
+        // MUST read Unknown with the canonical `native:` why-tag.
+        let d = std::env::temp_dir().join(format!("candor-scan-agentsunknown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"agentsunknown\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            "extern \"C\" { fn my_native_op(n: i32) -> i32; }\n\
+             pub fn wraps_ffi(n: i32) -> i32 { unsafe { my_native_op(n) } }\n",
+        )
+        .unwrap();
+        let idx = DepIndex::default();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, quiet: true, deps_idx: &idx,
+        });
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0);
+        let body = body.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let f = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "wraps_ffi")
+            .unwrap_or_else(|| panic!("wraps_ffi must be in the report (not silently pure):\n{body}"));
+        assert!(f["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"),
+            "an extern call is DISCLOSED as Unknown, exactly as AGENTS.md now claims:\n{body}");
+        assert!(f["unknownWhy"].as_array().unwrap().iter().any(|w| w.as_str().unwrap_or("").starts_with("native:")),
+            "the why-tag names the FFI boundary:\n{body}");
+    }
+
+    #[test]
+    fn repo_docs_carry_the_family_attribution_and_spec_floor() {
+        // TESTING.md §9 / the family ruling: candor-java is the REFERENCE engine; this repo is the
+        // family's deep Rust engine, spec floor 0.8. A cheap grep gate so a doc rewrite can't quietly
+        // reintroduce "the reference implementation" or drop the spec-0.8 floor string. Skips outside
+        // a workspace checkout (registry/vendor layout), like the drift gate above.
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let (Ok(readme), Ok(agents)) = (
+            std::fs::read_to_string(format!("{root}/README.md")),
+            std::fs::read_to_string(format!("{root}/AGENTS.md")),
+        ) else { return /* not a workspace checkout */ };
+        if !agents.contains("instructions for an AI coding agent") {
+            return; // an unrelated parent dir — not candor's repo root
+        }
+        assert!(readme.contains("reference engine is [candor-java]") || readme.contains("reference engine**; this"),
+            "README must attribute reference-engine status to candor-java");
+        assert!(!readme.to_lowercase().contains("the reference implementation of"),
+            "README must not claim reference-implementation status (family ruling: candor-java is the reference)");
+        assert!(!agents.to_lowercase().contains("the reference implementation of"),
+            "AGENTS must not claim reference-implementation status");
+        assert!(readme.contains("spec 0.8"), "README must state the spec 0.8 floor");
+        assert!(agents.contains("spec 0.8"), "AGENTS must state the spec 0.8 floor");
+    }
+
+    #[test]
     fn baseline_guard_resolution_union_and_gain_logic() {
         // The unit layer of check_baseline (the process layer lives in tests/cli.rs + integration.sh):
         // prefix-vs-direct-file resolution, same-named-entry UNION, per-fn gain computation with the

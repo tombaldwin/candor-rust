@@ -4,14 +4,17 @@
 //! `candor-classify`, and propagate transitively. No nightly, no `rustc-dev`, no dylint — `cargo install`
 //! and run anywhere.
 //!
-//! HONEST PRECISION TRADE vs the lint. This is syntactic, so it sees what's written, not what's
-//! resolved. It CATCHES: path-qualified effect calls (`std::fs::read`, `reqwest::Client::execute`,
-//! `Command::new`), including `use`-aliased prefixes; and intra-crate calls (matched by name) for
-//! transitive propagation. It MISSES (silently — it does NOT emit `Unknown`): effects reached only
-//! through a method call whose receiver type isn't path-qualified, trait-object dispatch, closures /
-//! fn-pointers, macros, and cross-crate propagation by stable identity. So on resolution-heavy code it
-//! under-reports relative to the lint. Use the lint when you need the soundness contract; use this when
-//! you need zero-friction, stable, installable triage. Shares the lint's classifier — one source of truth.
+//! THE PRECISION TRADE vs the lint, stated plainly. This is syntactic, so it sees what's written, not
+//! what's resolved. It CATCHES: path-qualified effect calls (`std::fs::read`, `reqwest::Client::execute`,
+//! `Command::new`), including `use`-aliased prefixes; intra-crate calls (matched by name) for transitive
+//! propagation; macro bodies; and local-type/local-trait method dispatch. It DISCLOSES `Unknown` where it
+//! can see the boundary it can't see through: an invoked fn-value/callback (scan.rs), an FFI `extern`
+//! call (scan.rs), an untrusted chained dep report (deps.rs). It MISSES (silently, by design — no
+//! `Unknown`): effects reached only through external-trait dispatch or an uninferrable receiver,
+//! desugared operators/`?`/`.await`/Drop-glue of external types, and cross-crate propagation by stable
+//! identity. So on resolution-heavy code it under-reports relative to the lint. Use the lint when you
+//! need the soundness contract; use this when you need zero-friction, stable, installable triage.
+//! Shares the lint's classifier — one source of truth.
 //!
 //! CALL RESOLUTION. The local call graph is name-resolved, not type-resolved. A qualified `Type::method`
 //! call (or an associated-fn call `RequestBuilder::new()`) is matched on its 2-segment tail, but ONLY when

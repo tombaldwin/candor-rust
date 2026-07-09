@@ -4,8 +4,10 @@
 
 **Enforce the capability and architectural boundaries that AI-generated code silently crosses — as a
 CI gate you can trust.** candor is a Rust capability/effect checker built as a
-[dylint](https://github.com/trailofbits/dylint) lint (the reference implementation of
-[candor-spec](https://github.com/tombaldwin/candor-spec)). It knows which functions reach the network,
+[dylint](https://github.com/trailofbits/dylint) lint implementing
+[candor-spec](https://github.com/tombaldwin/candor-spec) (the family's deep Rust engine; the
+reference engine is [candor-java](https://github.com/tombaldwin/candor-java)). It knows which
+functions reach the network,
 filesystem, a database, a subprocess, the clock, or the environment — *transitively, across crates* —
 and turns invariants like *"this layer stays pure," "this service may only talk to Stripe," "the
 domain layer must not depend on infra"* into rules that **fail the PR** when an edit breaks them.
@@ -65,7 +67,7 @@ A `Stop` hook auto-refreshes it on every turn that touches Rust (silent otherwis
 it on demand. Install: `integrations/claude-code/install.sh` from your project — it installs thin
 stubs that delegate to this clone, so `cargo candor update` refreshes the engine, the scripts, and
 `AGENTS.md` together (every receipt is stamped with the engine commit, so they can't silently
-desync). See its [README](integrations/claude-code/README.md) for the trust model and honest limits.
+desync). See its [README](integrations/claude-code/README.md) for the trust model and stated limits.
 
 **Opt-in edit-time self-review.** Set `CANDOR_REVIEW=1` (in `.candor/config`) and the Stop hook does
 more than inform the human: when the agent's edits give a function a *new* effect vs your committed
@@ -83,7 +85,7 @@ with `cargo candor watch` so every call serves from a fresh report.
 capability and architectural boundaries transitively — fail the PR that makes a parser open a socket,
 or routes the domain layer into infra ([CI guardrail](#ci-guardrail-lowest-friction-adoption)), no
 token-threading or rewrite required — and as the *non-local* delta handed to an editing agent (above).
-Its value is **conditional**, stated honestly: it shows up when a codebase *has* boundaries worth
+Its value is **conditional**, and stated plainly: it shows up when a codebase *has* boundaries worth
 defending and an edit *would* cross one. If the code already affords a clean seam, a strong model
 routes around the problem and candor is redundant — the same eval showed exactly that. It is
 deliberately *not* a few things: not a security boundary ([SECURITY.md](SECURITY.md)); not a
@@ -156,24 +158,26 @@ box). Within a full candor install it's also `cargo candor scan`.
 `audit`) and the [Claude Code receipt](integrations/claude-code/) prefer the nightly lint when it's
 installed (for the soundness contract) and **automatically fall back to the stable scanner when it
 isn't** — so candor works with zero install on any machine, and the receipt says `· stable backend` when
-it's using the syntactic path. Enforcement (`guard`/`policy`/`snapshot`/`diff`) still requires the lint:
-blocking a PR needs the soundness guarantee.
+it's using the syntactic path. The wrapper's enforcement commands (`guard`/`policy`/`snapshot`/`diff`)
+still require the lint — blocking a PR needs the soundness guarantee — while the scanner offers its own
+**advisory floor** for both gates (`--policy`, and the AS-EFF-005 baseline guard below).
 
-The trade is **precision, stated honestly**. The scanner is syntactic, so it sees what's *written*, not
+The trade is **precision, disclosed**. The scanner is syntactic, so it sees what's *written*, not
 what the compiler *resolves*. It catches path-qualified effect calls (`std::fs::read`, `Command::new`,
-`reqwest::Client::execute`), `use`-aliases, intra-crate transitive propagation, and **local-trait
-dispatch** (a `&dyn Store`/`impl Store`/`S: Store` receiver resolves to the trait's local implementors —
-syntactic CHA, bounded like the JVM engine's — or reads honest `Unknown` when the trait has no visible
-impl or too many). For dependencies, the receipt **names what the classifier can't see** (the
-κ-coverage ledger: `κ doesn't know N dependencies this code calls into…`) and `--deps` **closes it**:
+`reqwest::Client::execute`), `use`-aliases, intra-crate transitive propagation, macro bodies, and
+**local-trait dispatch** (a `&dyn Store`/`impl Store`/`S: Store` receiver resolves to the trait's local
+implementors — syntactic CHA, bounded like the JVM engine's — or reads `Unknown` when the trait has no
+visible impl or too many). It **discloses `Unknown`** where it can see the boundary it can't see
+through: an invoked fn-value/callback, an FFI `extern` call, an untrusted chained report. For
+dependencies, the receipt **names what the classifier can't see** (the κ-coverage ledger:
+`κ doesn't know N dependencies this code calls into…`) and `--deps` **closes it**:
 scan the whole `Cargo.lock` tree once (unbuilt registry sources, ~0.23s/dep measured) and the root
 scan chains over the reports — effects cross every crate boundary without the classifier knowing the
-crates (spec §2 report chaining). It **misses** —
-*silently*, without emitting `Unknown` — effects reached only through a method call on a non-path-qualified
-receiver, dispatch through an EXTERNAL trait, closures/fn-pointers, macros, and cross-crate propagation by
-stable identity. So on resolution-heavy code it **under-reports** relative to the lint. Use `scan` for
-zero-friction triage and CI on stable; use the nightly lint when you need the soundness contract
-(`Unknown` over-approximation, conformance, the policy/guard gates).
+crates (spec §2 report chaining). It **misses** — *silently*, by design — effects reached only through
+external-trait dispatch or an uninferrable receiver, desugared operators/`?`/`.await`, and cross-crate
+propagation by stable identity (unless chained). So on resolution-heavy code it **under-reports**
+relative to the lint. Use `scan` for zero-friction triage and CI on stable; use the nightly lint when
+you need the soundness contract (`Unknown` over-approximation, conformance, the sound policy/guard gates).
 
 By default `scan` reports only the crate's **library/binary** source — it skips `tests/`, `benches/`,
 `examples/`, `build.rs`, and `#[cfg(test)]` modules, so the report is what the *crate* does, not what its
@@ -181,7 +185,7 @@ harness does (`--include-tests` keeps them). A [calibration on 35 real crates](e
 found that with this in place the scanner has **no false positives in library code** — every effect it
 reports is real; its only errors are under-reports through FFI, method dispatch, and macros (the lint's
 job). E.g. it correctly catches chrono reading `/etc/localtime`+`$TZ` and `which` resolving `$PATH`,
-and honestly shows `Net: 0` on reqwest (whose socket I/O hides behind hyper's resolved method calls).
+and correctly shows `Net: 0` on reqwest (whose socket I/O hides behind hyper's resolved method calls).
 
 ## Quick start (humans)
 
@@ -400,8 +404,8 @@ toolchain). This is dylint's equivalent of a dependency; dylint loads libraries 
 
 ```toml
 [workspace.metadata.dylint]
-# clone-free — pin a tag/rev for reproducibility:
-libraries = [{ git = "https://github.com/tombaldwin/candor-rust", tag = "v0.3.0" }]
+# clone-free — pin the CURRENT release tag (see this repo's Releases page) for reproducibility:
+libraries = [{ git = "https://github.com/tombaldwin/candor-rust", tag = "v<version>" }]
 # …or a local checkout:
 libraries = [{ path = "/abs/path/to/candor" }]
 ```
@@ -481,7 +485,7 @@ typo'd prefix), or a workspace member with no per-crate baseline file. Exit 2 me
 not evaluate", distinct from exit 1 ("a function gained an effect"). Every case prints the exact
 refresh incantation.
 
-## How well does it actually help an agent? (the honest version)
+## How well does it actually help an agent? (the measured version)
 
 A controlled pilot ([EVAL.md](EVAL.md)) pitted a JSON-only agent against a source-only one on the
 same scoping task. The JSON was ~3× cheaper and ~6.5× faster — *and* it surfaced a real lesson: the
@@ -490,7 +494,7 @@ source-only agent was more **accurate** in one spot, because candor had silently
 but **only as correct as its classifier** — which is exactly why `Unknown`/`unresolved` exists, and
 why an agent should treat flagged-uncertain functions as "go read the source," not "trust me."
 
-## Unresolved calls (honest soundness)
+## Unresolved calls (soundness by disclosure)
 
 A call candor cannot trace to a concrete callee — `dyn Trait` dispatch, a function pointer, a
 closure reached through a generic `impl Fn` parameter — could perform *any* effect. candor records
@@ -521,7 +525,7 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 ## Known limitations
 
 - **Dynamic dispatch / fn-pointers / callbacks** can't be resolved to a concrete callee. These are
-  surfaced honestly as `Unknown` (→ AS-EFF-003) rather than silently dropped, but candor still can't
+  surfaced as `Unknown` (→ AS-EFF-003) rather than silently dropped, but candor still can't
   tell you *which* effects hide behind them. Exception: `dyn` over conventionally-pure std traits
   (`Display`, `Debug`, `Error`, `ToString`, `Clone`, …) is treated as pure, not `Unknown` —
   otherwise ubiquitous patterns like `dyn Error` formatting would flood reports with false positives.
@@ -544,13 +548,15 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 ## Documentation
 
 - **[candor-spec](https://github.com/tombaldwin/candor-spec)** — the language-agnostic spec candor
-  implements (effect vocabulary, report schema, trust contract). Shared by the
-  [JVM engine](https://github.com/tombaldwin/candor-java) and the from-spec-alone
-  [TS engine](https://github.com/tombaldwin/candor-ts); a CI conformance suite holds all three to the
-  same answers.
+  implements (effect vocabulary, report schema, trust contract). The
+  [JVM engine](https://github.com/tombaldwin/candor-java) is the family's **reference engine**; this
+  repo, the from-spec-alone [TS engine](https://github.com/tombaldwin/candor-ts) and the
+  [Swift engine](https://github.com/tombaldwin/candor-swift) complete the four code engines, joined
+  by the [candor-agents](https://github.com/tombaldwin/candor-agents) domain engine for agent
+  fleets; a CI conformance suite holds all of them to the same answers.
 - **[AGENTS.md](AGENTS.md)** — self-contained instructions for an AI agent (install → run → read).
 - **[PRINCIPLES.md](PRINCIPLES.md)** — the ideas candor (and its development) are built on.
-- **[CRITIQUE.md](CRITIQUE.md)** — an honest, critical self-assessment + comparison to prior art
+- **[CRITIQUE.md](CRITIQUE.md)** — a critical self-assessment + comparison to prior art
   (Cackle, cap-std, the Rust effects initiative).
 - **[EVAL.md](EVAL.md)** — a controlled pilot of whether the report actually helps an AI agent.
 - **[BACKLOG.md](BACKLOG.md)** — what's done, what's deferred, and the concrete reason for each.
@@ -581,14 +587,19 @@ effects the kernel actually observed — ground truth that trusts nothing about 
 
 ## Status
 
-Prototype. Validated on a real ~8k-line codebase (the `ebman` AWS Elastic Beanstalk TUI):
-audit tagged ~445 functions; a leaf module was converted to the capability discipline and brought to
-zero conformance violations while still building on stable.
+Beta — the candor family's **deep Rust engine**, declaring **spec 0.8** (the same contract the
+reference engine, [candor-java](https://github.com/tombaldwin/candor-java), declares; the
+cross-engine conformance suite pins the agreement). The stable scanner is
+[calibrated on 35 real crates](eval/calibration/CALIBRATION.md) (no false positives in library
+code); the deep engine's "never silently pure" contract is held in CI by the adversarial
+[soundness fuzzer](soundness/) plus `strace`/runtime oracles, and both gate surfaces carry pinned
+exit-code contracts (0/1/2) with fail-closed negatives. Pre-1.0: minor versions may change behavior,
+always in the soundness-increasing direction (see [CHANGELOG.md](CHANGELOG.md)).
 
 candor also **guards itself**: CI runs candor over candor against `.candor/baseline`. Its effectful
 surface — five functions in the lint (config / baseline / cross-report reads + the report write, all
 `Env`/`Fs`), plus `candor-report`'s `report_files` (`Fs`) and the build script (`Exec`/`Fs`) — can't
-gain a *new* effect unnoticed. Note the guard's scope, honestly: per AS-EFF-005's design it flags
+gain a *new* effect unnoticed. Note the guard's stated scope: per AS-EFF-005's design it flags
 *regressions in existing functions*, not brand-new functions (those are reviewed as new code), so a
 newly-added effectful function wouldn't trip it. Refresh with `cargo candor snapshot .candor/baseline`
 when a new effect is intended.
