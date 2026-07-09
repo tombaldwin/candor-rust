@@ -4,26 +4,17 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## [Unreleased] — candor-scan 0.8.4 · candor-query 0.8.0 · candor-report 0.5.8 (in tree, not yet on crates.io)
+## [candor-scan 0.8.5 · candor-query 0.8.1] — 2026-07-10
 
-### ⚠ Fail-open paths that used to pass GREEN now exit 2 — intentional bug-fix semantics
+### ⚠ `pure` no longer counts `Unknown` as a violation (family ruling — verdict-affecting)
 
-If your CI went red on one of these after updating the clone, the gate was previously **not
-running** and telling you it passed. Exit 2 always means "the gate could NOT evaluate", never a
-violation (that's exit 1):
-
-- **`cargo candor policy` on a run that couldn't complete.** A crate that failed to build under
-  dylint (or the engine's own §6.2 unreadable-policy exit) was swallowed by `|| true` and printed
-  "policy OK" with exit 0. Now: no report snapshot → exit 2 before enforcing (a snapshot-less
-  enforce also silently dropped cross-crate `allow` resolution); a nonzero dylint exit → exit 2
-  ("policy NOT evaluated").
-- **`cargo candor guard` with no baseline at all** (never snapshotted / typo'd prefix) exits 2 with
-  the snapshot incantation — the engine used to warn "guard NOT active" and exit 0. A **per-crate
-  baseline gap** (a new workspace member) is disclosed by the engine as a `GUARD-UNAVAILABLE`
-  sentinel and also exits 2. (Completes the fail-closed arc started by the stale-baseline and
-  absent-provenance-sidecar fixes of 2026-07-08.)
-- **A configured-but-EMPTY `policy`** (a bare `policy` line in `.candor/config`) exits 2 — never a
-  silently skipped gate.
+An Unknown-only function no longer trips a `pure` rule in candor-scan: `Unknown` is the §4 trust
+marker, not an effect — §6.2's `pure` forbids every EFFECT, AS-EFF-003 owns the uncertainty
+residual, and **`deny Unknown <scope>`** is the explicit knob (it keeps firing, effects
+`["Unknown"]`). The reference engine (candor-java) and the rust deep engine already read the
+predicate this way; candor-scan (with candor-ts and candor-swift, fixed in their repos) was
+counting the marker — a cross-engine verdict split on the same policy file. Pinned four-way by
+conformance PART 16.
 
 ### ⚠ Deep-engine `deny <Effect>` no longer fires on `Unknown` (SEMANTICS §6 alignment, family ruling)
 
@@ -38,12 +29,6 @@ denyable token — it keeps firing, with effects `["Unknown"]`). A `pure` rule l
 *real* effect but not the `Unknown` visibility marker (AS-EFF-003's concern), matching the reference
 engine. `candor-query whatif` mirrors the same projection, so the pre-edit verdict cannot diverge
 from the gate.
-
-### Changed — `CANDOR_CONFIG` → `CANDOR_RULES` (deep engine, clean rename, NO fallback)
-
-The lint's classifier-extension rules file is now pointed at by **`CANDOR_RULES`**. `CANDOR_CONFIG`
-now means one thing family-wide: the spec-§3.4 config-file override path (which candor-scan already
-implemented). One variable meaning two incompatible things was worse than a break.
 
 ### Internal — candor-query main.rs split into per-command-family modules (byte-identity gated)
 
@@ -70,6 +55,44 @@ no call site changed. Gated by a byte-identity battery (conformance fixtures inc
 runs, sample crates, a workspace root, minreq/fs_extra/xshell from crates.io — reports, sidecars,
 gate verdicts, stdout/stderr and exit codes all identical) plus the 120-edit incremental-cache
 equivalence run on tokio.
+
+### Added — the coverage wave's pins (tests only, no behavior change)
+
+- candor-scan: the `--deps` registry-tree mode is covered end-to-end for the first time (hermetic
+  fake registry — discovery, the documented `.candor/deps/<name>@<version>/` layout, effect + literal
+  surface crossing the chain, policy-free dep scans, lockless exit 2, cache reuse); the nested
+  `cfg(all/any/not)` evaluator, `push_quoted`, `is_non_nominal_type` and tuple-destructured binding
+  are unit-pinned (with an anti-fabrication rebind twin).
+- candor-query: in-repo pins for the previously conformance-only arms — `callers --include-unknown`
+  (hierarchy-gated frontier), `blindspots` (ranking + blast radius), `rewire` (exit contract),
+  `locate` — so an engine-local regression fails this repo's own CI, not just the spec repo's.
+
+## [candor-scan 0.8.4 · candor-query 0.8.0 · candor-report 0.5.8] — 2026-07-09
+
+### ⚠ Fail-open paths that used to pass GREEN now exit 2 — intentional bug-fix semantics
+
+If your CI went red on one of these after updating the clone, the gate was previously **not
+running** and telling you it passed. Exit 2 always means "the gate could NOT evaluate", never a
+violation (that's exit 1):
+
+- **`cargo candor policy` on a run that couldn't complete.** A crate that failed to build under
+  dylint (or the engine's own §6.2 unreadable-policy exit) was swallowed by `|| true` and printed
+  "policy OK" with exit 0. Now: no report snapshot → exit 2 before enforcing (a snapshot-less
+  enforce also silently dropped cross-crate `allow` resolution); a nonzero dylint exit → exit 2
+  ("policy NOT evaluated").
+- **`cargo candor guard` with no baseline at all** (never snapshotted / typo'd prefix) exits 2 with
+  the snapshot incantation — the engine used to warn "guard NOT active" and exit 0. A **per-crate
+  baseline gap** (a new workspace member) is disclosed by the engine as a `GUARD-UNAVAILABLE`
+  sentinel and also exits 2. (Completes the fail-closed arc started by the stale-baseline and
+  absent-provenance-sidecar fixes of 2026-07-08.)
+- **A configured-but-EMPTY `policy`** (a bare `policy` line in `.candor/config`) exits 2 — never a
+  silently skipped gate.
+
+### Changed — `CANDOR_CONFIG` → `CANDOR_RULES` (deep engine, clean rename, NO fallback)
+
+The lint's classifier-extension rules file is now pointed at by **`CANDOR_RULES`**. `CANDOR_CONFIG`
+now means one thing family-wide: the spec-§3.4 config-file override path (which candor-scan already
+implemented). One variable meaning two incompatible things was worse than a break.
 
 ### Added
 
