@@ -370,3 +370,223 @@ fn whatif_unknown_effect_exits_2() {
     let stderr = String::from_utf8(out.stderr).expect("utf8 stderr");
     assert!(stderr.contains("unknown effect"), "must report `unknown effect`, got:\n{stderr}");
 }
+
+// ── callers --include-unknown: the unresolved-dispatch frontier (⟨0.7⟩ — was conformance-only) ─────
+// TESTING.md §3: engine-local behavior needs in-repo coverage; this arm previously lived only in the
+// candor-spec conformance suite. Names are dot-separated (the swift/JVM report shape this arm serves).
+
+/// Write a report + callgraph (+ optionally a hierarchy sidecar) for the frontier scenario:
+/// confirmed chain `mod.Sub.handle → mod.Target.work`, plus three Unknown-dispatch carriers whose
+/// disclosure depends on the hierarchy gate.
+fn write_frontier_fixture(f: &Fixture, with_hierarchy: bool) {
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "app",
+  "functions": [
+    { "fn": "mod.Target.work", "inferred": ["Fs"], "direct": ["Fs"] },
+    { "fn": "mod.Sub.handle", "inferred": ["Fs"], "calls": ["mod.Target.work"] },
+    { "fn": "mod.Caller.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:mod.Base.handle"] },
+    { "fn": "mod.Other.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:mod.Unrelated.frob"] },
+    { "fn": "mod.NotSub.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:mod.Elsewhere.handle"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.app.scan.json", f.prefix), report).unwrap();
+    std::fs::write(
+        format!("{}.app.scan.callgraph.json", f.prefix),
+        r#"{"mod.Sub.handle":["mod.Target.work"],"mod.Target.work":[]}"#,
+    )
+    .unwrap();
+    if with_hierarchy {
+        // type → its supertypes: Sub is (only) a subtype of Base.
+        std::fs::write(
+            format!("{}.app.hierarchy.json", f.prefix),
+            r#"{"mod.Sub":["mod.Base"]}"#,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn callers_include_unknown_discloses_the_dispatch_frontier_via_the_hierarchy() {
+    // With the hierarchy sidecar: a `dispatch:OWNER.member` source is disclosed iff a CONFIRMED
+    // reacher overrides OWNER.member — same simple method AND a subtype of OWNER. `mod.Caller.run`
+    // (dispatch on Base.handle; Sub <: Base reaches the target) is IN; a same-named method on an
+    // unrelated owner (`mod.NotSub.run` → Elsewhere.handle) and a different method (`mod.Other.run`
+    // → Unrelated.frob) are OUT. Disclosed as possible — never asserted into `transitive`.
+    let f = Fixture::new("frontier-hier");
+    write_frontier_fixture(&f, true);
+    let out = Command::new(bin())
+        .arg("callers").arg(&f.prefix).arg("work").arg("1").arg("--include-unknown")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    assert_eq!(v["of"], serde_json::json!(["mod.Target.work"]));
+    assert_eq!(v["direct"], serde_json::json!(["mod.Sub.handle"]));
+    assert_eq!(v["transitive"], serde_json::json!(["mod.Sub.handle"]),
+               "frontier candidates must NOT be asserted into the confirmed set: {v}");
+    let poss = v["possibleViaUnknownDispatch"].as_array().expect("frontier array");
+    assert_eq!(poss.len(), 1, "exactly the hierarchy-confirmed overrider's dispatch: {v}");
+    assert_eq!(poss[0]["fn"], "mod.Caller.run");
+    assert_eq!(poss[0]["viaDispatchOn"], "handle");
+}
+
+#[test]
+fn callers_include_unknown_without_hierarchy_over_lists_by_simple_name() {
+    // No hierarchy sidecar → the documented fallback: a simple-METHOD-name match, which over-lists
+    // (the safe direction — a possible reacher is disclosed, never silently dropped). Both `handle`
+    // dispatchers now appear; the different-method one still doesn't.
+    let f = Fixture::new("frontier-flat");
+    write_frontier_fixture(&f, false);
+    let out = Command::new(bin())
+        .arg("callers").arg(&f.prefix).arg("work").arg("1").arg("--include-unknown")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    let fns: Vec<&str> = v["possibleViaUnknownDispatch"].as_array().unwrap()
+        .iter().filter_map(|p| p["fn"].as_str()).collect();
+    assert_eq!(fns, vec!["mod.Caller.run", "mod.NotSub.run"],
+               "empty hierarchy must fall back to simple-name over-listing: {v}");
+}
+
+#[test]
+fn callers_without_the_flag_omits_the_frontier_key() {
+    // The ⟨0.7⟩ flag is additive: without it the {of,direct,transitive} shape is unchanged — a
+    // pre-0.7 consumer never sees the new key.
+    let f = Fixture::new("frontier-off");
+    write_frontier_fixture(&f, true);
+    let out = Command::new(bin())
+        .arg("callers").arg(&f.prefix).arg("work").arg("1")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    assert!(v.get("possibleViaUnknownDispatch").is_none(),
+            "no --include-unknown → no frontier key: {v}");
+    assert_eq!(v["direct"], serde_json::json!(["mod.Sub.handle"]));
+}
+
+// ── blindspots: the Unknown sources ranked by blast radius (SPEC §3.1 ⟨0.6⟩ — was conformance-only) ─
+
+#[test]
+fn blindspots_ranks_sources_by_unknown_blast_radius() {
+    // Two SOURCES (entries carrying their own unknownWhy): src_a smears Unknown up a two-hop caller
+    // chain (reaches 2), src_b reaches nobody. Ranked most-smearing first; `affected` is the sorted
+    // transitive caller set; totalUnknown counts every Unknown-carrying fn (sources + inheritors).
+    let f = Fixture::new("blindspots");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "bs",
+  "functions": [
+    { "fn": "src_a", "inferred": ["Unknown"], "unknownWhy": ["callback:unresolved call"] },
+    { "fn": "mid", "inferred": ["Unknown"], "calls": ["src_a"] },
+    { "fn": "top", "inferred": ["Unknown"], "calls": ["mid"] },
+    { "fn": "src_b", "inferred": ["Unknown"], "unknownWhy": ["native:extern fn"] }
+  ]
+}"#;
+    std::fs::write(f.report_path().replace(".rpt.", ".bs."), report).unwrap();
+    let out = Command::new(bin())
+        .arg("blindspots").arg(&f.prefix).arg("--json")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    assert_eq!(v["totalUnknown"], 4, "every Unknown-carrying fn counts: {v}");
+    let sources = v["sources"].as_array().expect("sources");
+    assert_eq!(sources.len(), 2, "only unknownWhy CARRIERS are sources (mid/top are not): {v}");
+    assert_eq!(sources[0]["fn"], "src_a", "most-smearing source ranks first: {v}");
+    assert_eq!(sources[0]["reaches"], 2);
+    assert_eq!(sources[0]["affected"], serde_json::json!(["mid", "top"]));
+    assert_eq!(sources[0]["why"], serde_json::json!(["callback:unresolved call"]));
+    assert_eq!(sources[1]["fn"], "src_b");
+    assert_eq!(sources[1]["reaches"], 0);
+
+    // human mode agrees on the headline numbers
+    let out = Command::new(bin())
+        .arg("blindspots").arg(&f.prefix)
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("2 Unknown source(s) explaining 4 Unknown function(s)"),
+            "headline must count sources + explained fns, got:\n{text}");
+}
+
+#[test]
+fn blindspots_clean_report_says_so_exit_0() {
+    // A report with no unknownWhy sources is the honest all-resolved answer, not an error.
+    let f = Fixture::new("blindspots-clean");
+    f.write_report(); // outer→inner, Fs only, no Unknown
+    let out = Command::new(bin())
+        .arg("blindspots").arg(&f.prefix)
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8(out.stdout).unwrap().contains("no Unknown sources"));
+}
+
+// ── rewire: the de-wiring detector (was conformance-only) ──────────────────────────────────────────
+
+#[test]
+fn rewire_reports_a_dropped_edge_exit_1_and_clean_exit_0() {
+    // An agent can satisfy an effect gate by DISCONNECTING functionality — invisible to the effect
+    // diff, visible in the call graph. A baseline edge the current graph no longer has → exit 1 with
+    // {caller, no_longer_calls}; an unchanged graph → exit 0.
+    let f = Fixture::new("rewire");
+    let base = f.dir.join("base").to_string_lossy().into_owned();
+    let cur = f.dir.join("cur").to_string_lossy().into_owned();
+    std::fs::write(format!("{base}.app.scan.callgraph.json"),
+        r#"{"api.handle":["pricing.quote","util.log"],"pricing.quote":[]}"#).unwrap();
+    std::fs::write(format!("{cur}.app.scan.callgraph.json"),
+        r#"{"api.handle":["util.log"],"pricing.quote":[]}"#).unwrap();
+    let out = Command::new(bin())
+        .arg("rewire").arg(&cur).arg(&base).arg("1")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(1), "a dropped edge must exit 1 (verify the fix didn't gut the feature)");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["dropped"], serde_json::json!([
+        {"caller": "api.handle", "no_longer_calls": ["pricing.quote"]}
+    ]), "exactly the dropped edge, not the kept one: {v}");
+    // unchanged graph → clean exit 0
+    let out = Command::new(bin())
+        .arg("rewire").arg(&base).arg(&base).arg("0")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8(out.stdout).unwrap().contains("nothing de-wired"));
+}
+
+#[test]
+fn rewire_missing_either_side_fails_loud_exit_2() {
+    // A typo'd CURRENT prefix once read as "every baseline edge dropped" (a wall of false de-wiring);
+    // a missing BASELINE can't be compared at all. Both fail loud, never a fabricated verdict.
+    let f = Fixture::new("rewire-miss");
+    let real = f.dir.join("real").to_string_lossy().into_owned();
+    std::fs::write(format!("{real}.app.scan.callgraph.json"), r#"{"a":["b"]}"#).unwrap();
+    let missing = f.dir.join("nosuch").to_string_lossy().into_owned();
+    for (cur, base) in [(&missing, &real), (&real, &missing)] {
+        let out = Command::new(bin())
+            .arg("rewire").arg(cur).arg(base).arg("0")
+            .output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(2), "a missing side must exit 2, not a false verdict");
+    }
+}
+
+// ── locate: the newest-by-mtime artifact locator (smoke) ────────────────────────────────────────────
+
+#[test]
+fn locate_finds_the_scan_binary_and_misses_cleanly() {
+    let f = Fixture::new("locate");
+    std::fs::write(f.dir.join("candor-scan"), b"#!fake").unwrap();
+    let out = Command::new(bin())
+        .arg("locate").arg("scan").arg(f.dir.to_string_lossy().as_ref())
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8(out.stdout).unwrap().trim().ends_with("candor-scan"));
+    // no matching artifact → exit 1, empty stdout (the wrapper's fall-through signal)
+    let out = Command::new(bin())
+        .arg("locate").arg("lib").arg(f.dir.to_string_lossy().as_ref())
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+}
