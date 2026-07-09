@@ -7,3 +7,4 @@ __pycache__/
 .candor/*.scan.json
 .candor/*.callgraph.json
 .DS_Store
+soundness/realworld/**/r.*.json
