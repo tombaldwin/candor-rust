@@ -443,6 +443,50 @@ fn candor_config_drives_the_gate_env_overrides_and_typo_fails_closed() {
 }
 
 #[test]
+fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
+    // SPEC §2 chaining rule 3 / §7.14: a dependency covered by a CHAINED report is exempt from the
+    // κ ledger — INCLUDING an EMPTY report ({functions: []}, package field intact), which is that
+    // crate's all-pure purity CLAIM, not a blind spot. Found live: the exemption was keyed on the
+    // filename shape + entry hashes, so an empty report still drew "κ doesn't know 1 dependency…"
+    // (candor-java/candor-ts stay correctly quiet on the same shape).
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-kappaempty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"),
+        "[package]\nname = \"kappaledger\"\n\n[dependencies]\ndepc = \"1\"\n").unwrap();
+    std::fs::write(d.join("src/lib.rs"), "pub fn use_dep() { depc::hit(); }\n").unwrap();
+    // The empty depc report, named OUTSIDE the `….<crate>.scan.json` shape — the envelope's
+    // `package` field alone must carry the coverage claim.
+    let rep = d.join("depc-purity.json");
+    std::fs::write(&rep, format!(r#"{{
+        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.8"}},
+        "package": "depc",
+        "functions": []}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
+
+    // CONTROL (no chaining): the ledger fires — depc is a genuine blind spot.
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
+        .output().expect("run candor-scan");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("κ doesn't know") && stderr.contains("depc"),
+        "without chaining, the called-but-unknown dep must be disclosed: {stderr}");
+
+    // CHAINED empty report: NO ledger line, and the join-less call reads pure (the claim honored).
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env("CANDOR_DEPS", rep.to_string_lossy().as_ref())
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains("κ doesn't know"),
+        "an empty chained report is coverage — the ledger must stay quiet: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim())
+        .expect("pure JSON report");
+    assert!(v["functions"].as_array().unwrap().iter()
+            .all(|f| f["fn"].as_str() != Some("use_dep")),
+        "the call into the all-pure dep reads pure (omitted from the report): {v}");
+}
+
+#[test]
 fn candor_config_relative_path_resolves_against_the_config_dir_not_the_cwd() {
     // Family decision: a RELATIVE path value in .candor/config anchors to the CONFIG FILE'S directory
     // (the config is checked in and travels with the code), never the process CWD. Run the scan from

@@ -524,15 +524,32 @@ fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         let version = v.pointer("/candor/version").and_then(|x| x.as_str()).unwrap_or("");
         let stale = version != my_version;
         let Some(fns) = v.get("functions").and_then(|x| x.as_array()).or_else(|| v.as_array()) else { continue };
-        // The crate a report covers: the entries' `hash` prefix (`crate#qual`), else the filename
-        // (`report.<crate>.scan.json`).
+        // The crate(s) a report COVERS, for the §7.14 ledger exemption (§2 chaining rule 3): the
+        // AUTHORITATIVE claim is the envelope's `package` (or the JVM-shape `packages`) field — an
+        // EMPTY report ({functions: []}) is an all-pure purity claim for that package, covered and
+        // never a κ blind spot. Keyed on the envelope so the exemption doesn't depend on the file
+        // NAME or on any join firing (found live: an empty chained report named outside the
+        // `….<crate>.scan.json` shape still drew a "κ doesn't know" line here while candor-java and
+        // candor-ts correctly stayed quiet). A hyphenated package name also registers in Rust ident
+        // form (`dep-c` → `dep_c`), the form call paths carry.
+        for pkg in v
+            .get("package")
+            .and_then(|x| x.as_str())
+            .into_iter()
+            .chain(v.get("packages").and_then(|x| x.as_array()).into_iter().flatten().filter_map(|x| x.as_str()))
+        {
+            idx.crates.insert(pkg.to_string());
+            idx.crates.insert(pkg.replace('-', "_"));
+        }
+        // Filename fallback (`report.<crate>.scan.json`) for pre-`package` reports, and the default
+        // crate attribution for entries carrying no `hash` prefix.
         let file_crate = f
             .file_name()
             .and_then(|n| n.to_str())
             .and_then(|n| n.strip_suffix(".scan.json"))
             .and_then(|n| n.rsplit('.').next())
             .map(str::to_string);
-        // Register the crate at FILE level: an all-pure crate's report has zero entries, and that
+        // Register the crate at FILE level too: an all-pure crate's report has zero entries, and that
         // emptiness is its honest claim — the crate is covered, not invisible.
         if let Some(c) = &file_crate {
             idx.crates.insert(c.clone());
@@ -5742,6 +5759,32 @@ mod tests {
         assert!(idx.by_key.contains_key("billing#a::dup"), "tail2 still disambiguates the dups");
         let old = idx.by_key.get("old_dep#go").expect("stale entry present");
         assert_eq!(old.effects, vec!["Unknown"], "stale version must downgrade to Unknown");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dep_report_package_field_registers_coverage_for_the_ledger_exemption() {
+        // SPEC §2 chaining rule 3: the crates a loaded report COVERS come from its envelope
+        // `package`/`packages` field — independent of the file's NAME and of any join firing. An
+        // EMPTY report ({functions: []}) is an all-pure purity claim: covered, never a κ blind spot.
+        let d = std::env::temp_dir().join(format!("candor-deppkg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::create_dir_all(&d);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // deliberately NOT the `….<crate>.scan.json` filename shape — only the envelope names it.
+        std::fs::write(d.join("purity-claim.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.8"}},
+            "package": "dep-c",
+            "functions": []}}"#)).unwrap();
+        std::fs::write(d.join("multi.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.8"}},
+            "packages": ["alpha", "beta"],
+            "functions": []}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        assert!(idx.crates.contains("dep-c"), "the envelope `package` field registers coverage");
+        assert!(idx.crates.contains("dep_c"), "a hyphenated package also registers in Rust ident form");
+        assert!(idx.crates.contains("alpha") && idx.crates.contains("beta"),
+                "the JVM-shape `packages` array registers every covered package");
         let _ = std::fs::remove_dir_all(&d);
     }
 
