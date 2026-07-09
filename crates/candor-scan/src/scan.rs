@@ -584,7 +584,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // the scanner can't infer (`Mutex::lock()`'s guard, `self.state.lock()` → `MutexGuard<FastRand>`),
     // where no typed `FastRand::fastrand` sibling forms yet the leaf still names a local method. Suppress
     // on PRESENCE of a same-named local method, not on a recorded edge — under-reporting on the rare
-    // ambiguous leaf beats fabricating an effect candor never observed (the cardinal sin). (Real tokio
+    // ambiguous leaf beats fabricating an effect candor never observed (the precision failure). (Real tokio
     // sweep: `RngSeedGenerator::next_seed` calls `rng.fastrand()` through a lock guard → bare leaf
     // `fastrand` → Rand, propagated to ~14 fns incl `Runtime::new`.)
     let mut direct: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
@@ -655,7 +655,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // (The CANDOR_DEPS cross-crate JOIN moved BELOW — it must run AFTER `resolved_local`/
             // `suppress_bare_leaf` are known and be gated on them, else a local fn/method/module named like
             // a covered dep crate inherits that dep's effects onto a provably-pure LOCAL path — the same
-            // cardinal-sin fabrication the classifier's `resolved_local` guard prevents, which this join
+            // fabrication the classifier's `resolved_local` guard prevents, which this join
             // never had. Found by the cross-jar sweep.)
             // Resolve the call to a local definition via the precise, uniqueness-filtered `resolve_target`.
             // A receiver-typed `Type::method` call (`x.go()` inferred to `S::go`) resolves to the local
@@ -666,7 +666,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             let resolvable = if c.is_macro {
                 // A macro is never a call to a local FUNCTION. Its (possibly crate-local) qualified path
                 // must NOT resolve to a same-named local fn, or that fn's effect is fabricated onto the
-                // caller (the phantom-edge cardinal sin). Its effect still flows via `classified` / κ above.
+                // caller (a phantom-edge fabrication — the precision failure). Its effect still flows via `classified` / κ above.
                 false
             } else if c.typed {
                 tail2(&c.path)
@@ -687,7 +687,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // crate/FFI classifier MUST NOT also fire, or a pure local fn whose NAME collides with an FFI
             // tier (`sqlite3_step`/`git_clone`/`curl_*`/`SSL_*`) or a whole-crate rule (`getrandom`/
             // `fastrand`) inherits that crate's effect: FABRICATION on a provably-pure path, transitively
-            // poisoning every caller (the cardinal sin the syntactic floor must never commit). The
+            // poisoning every caller (a fabrication — the precision failure the syntactic floor must never commit). The
             // bare-leaf-METHOD suppression below was the special case of this; this covers the general
             // case (free fns and qualified `Type::method` calls the bare-leaf guard missed).
             let mut resolved_local = false;
@@ -765,7 +765,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // FREE-FN case the old `c.method && local_method_leaves` guard missed: a pure local free fn
             // whose leaf is AMBIGUOUS (≥2 local defs, e.g. a free `git_clone` + a trait method `git_clone`)
             // defeats `resolve_target`'s uniqueness filter (→ `resolved_local=false`), so the FFI/crate
-            // classifier fired unsuppressed and fabricated the effect (cardinal sin). A bare leaf with no
+            // classifier fired unsuppressed and fabricated the effect (the precision failure). A bare leaf with no
             // local def (a genuine prelude/extern call) still classifies; a `use`-imported call is
             // qualified (`::`) and keeps its type-precise rule.
             let suppress_bare_leaf = !c.path.contains("::") && by_leaf.contains_key(&c.leaf);

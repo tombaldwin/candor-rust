@@ -304,7 +304,7 @@
     fn dep_join_does_not_fabricate_onto_a_local_shadow() {
         // The CANDOR_DEPS cross-crate join must NOT override a LOCAL definition: a project module/fn named
         // like a covered dep crate, resolving to the project's OWN pure code, must not inherit the dep
-        // report's effects (a cardinal-sin fabrication the join lacked the `resolved_local` guard for). A
+        // report's effects (a fabrication the join lacked the `resolved_local` guard for). A
         // GENUINE external call into the covered crate must still inherit.
         let dep = std::env::temp_dir().join(format!("candor-depjoin-rep-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dep);
@@ -1332,7 +1332,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // The leaf-PREFIX FFI tiers (`sqlite3_`/`git_`/`curl_`/`SSL_`) and whole-crate Rand
         // (`getrandom`/`fastrand`) classify by leaf name independent of the binding crate. A PURE local
         // FREE FN or qualified `Type::method` whose name collides was classified anyway — FABRICATION on a
-        // provably-pure path that transitively poisons every caller (the cardinal sin). The general
+        // provably-pure path that transitively poisons every caller (a fabrication). The general
         // local-resolution suppression must cover the free-fn and qualified-method cases the bare-leaf
         // guard missed. A genuine FFI binding (an `extern "C"` decl, no Rust body) must STILL classify.
         let d = std::env::temp_dir().join(format!("candor-scan-ffiname-{}", std::process::id()));
@@ -1887,7 +1887,7 @@ trait G {
         assert!(m["g"].iter().any(|c| c == "Sender::send"), "enum-payload match binding dropped: {:?}", m["g"]);
     }
 
-    /// NO FABRICATION (the cardinal sin): the same six idioms over a PURE element type, or over an
+    /// NO FABRICATION (the precision failure): the same six idioms over a PURE element type, or over an
     /// effect-irrelevant element, must NOT type a `Type::send` edge to anything effectful — the element
     /// is pure, so the receiver typing must stay honest. We assert the effectful `Sender::send` never
     /// appears; a pure `Pure::send` edge is fine (it classifies to nothing).
@@ -2335,7 +2335,7 @@ trait G {
     fn macro_invocation_never_mints_a_local_edge() {
         // REGRESSION (review F1): a crate-LOCAL qualified macro (`crate::helpers::trace!`) expands to
         // `helpers::trace`, KEEPING its `::` — so before the `is_macro` guard it mis-linked to a same-named
-        // LOCAL fn and FABRICATED that fn's effect onto a pure caller (the phantom-edge cardinal sin). The
+        // LOCAL fn and FABRICATED that fn's effect onto a pure caller (the phantom-edge precision failure). The
         // guard must be SURGICAL: a genuine (non-macro) call to the same fn STILL inherits the effect, and
         // a genuine external classified emit-macro (`log::info!`) STILL attributes its effect.
         let idx = load_dep_reports(None);

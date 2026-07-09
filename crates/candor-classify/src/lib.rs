@@ -107,7 +107,7 @@ pub const DB_CRATES: [&str; 11] = [
 /// (`from_raw_fd`/`from_raw_socket`/`from_raw_handle`), EXTRACT/BORROW one
 /// (`into_raw_fd`/`into_raw_socket`/`into_raw_handle`, `as_raw_fd`/`as_raw_socket`/`as_raw_handle`),
 /// or UNWRAP an async wrapper back to its std type (`into_std`) — none of them issue a syscall or
-/// perform I/O. candor's cardinal sin is calling a PURE function effectful, and these collide with the
+/// perform I/O. calling a PURE function effectful is a FABRICATION — the precision failure (candor's cardinal sin is the opposite direction, the silent under-report) — and these collide with the
 /// coarse std-type PREFIX rules (`std::net::TcpStream`/`std::fs::File`/`std::os::unix::net` → Net/Fs/Ipc)
 /// even though the descriptor was opened ELSEWHERE. The portable_pty/async_process Exec rule already
 /// exempts `from_raw_fd`; this generalises the same carve-out across the net/fs/ipc prefix rules.
@@ -634,7 +634,7 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         || path.starts_with("tokio::net::")
     {
         // …but the PURE accessors read back local/option state — no network I/O — so the whole-type Net
-        // rule fabricated Net on them (sweep [24], the cardinal sin; mirrors the arboard/memmap2 accessor
+        // rule fabricated Net on them (sweep [24], the precision failure; mirrors the arboard/memmap2 accessor
         // carve-outs). local_addr/peer_addr return bound/connected addresses; nodelay/ttl/take_error read
         // socket options/state. Every genuine verb (connect/read/write/send/recv/accept) stays Net.
         if path.ends_with("::local_addr")
