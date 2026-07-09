@@ -3517,19 +3517,21 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                         continue;
                     }
                 }
-                // A `deny`d effect that's actually present is a definite violation; `Unknown` is an
-                // UNPROVABLE case — the function makes an unresolvable call that COULD perform the
-                // forbidden effect, so the boundary can't be certified. Both must flag (silently
-                // passing an unprovable boundary is the §4 trust contract's forbidden direction; under
-                // a policy-only run there's no AS-EFF-003 backstop). A `pure` rule already treats any
-                // effect — including `Unknown` — as a violation.
+                // SEMANTICS §6: AS-EFF-006 fires iff I(f) ∩ Forbidden(r) ≠ ∅ — a `deny <Effect>`
+                // flags only an effect PROVABLY in the transitive set. `Unknown` is NOT folded in:
+                // an Unknown-only fn does not trip `deny Net` (family ruling 2026-07; the reference
+                // engine, candor-scan and candor-ts all read the predicate this way — this engine
+                // used to fold `Unknown` into every deny projection, a false-positive divergence).
+                // The strictness knob is explicit: `deny Unknown <scope>` names the unprovable case
+                // and keeps firing (grammar §6.2 — `Unknown` is a denyable token for exactly this).
+                // A `pure` rule forbids every effect of the §1 vocabulary; `Unknown` is not an
+                // effect but the §4 visibility marker — AS-EFF-003's concern, matching the
+                // reference engine. Where the residual must also be excluded, pair with
+                // `deny Unknown` (SEMANTICS §6's documented pattern).
                 let bad: Vec<&str> = if rule.effects.is_empty() {
-                    effs.iter().copied().collect() // `pure` rule: any effect is a violation
+                    effs.iter().copied().filter(|e| *e != UNKNOWN).collect() // `pure`: any real effect
                 } else {
-                    effs.iter()
-                        .copied()
-                        .filter(|e| *e == UNKNOWN || rule.effects.contains(e))
-                        .collect()
+                    effs.iter().copied().filter(|e| rule.effects.contains(e)).collect()
                 };
                 if !bad.is_empty() {
                     let scope = rule.scope.as_deref().map(|s| format!(" (scope `{s}`)")).unwrap_or_default();

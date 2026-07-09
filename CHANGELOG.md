@@ -25,6 +25,20 @@ violation (that's exit 1):
 - **A configured-but-EMPTY `policy`** (a bare `policy` line in `.candor/config`) exits 2 — never a
   silently skipped gate.
 
+### ⚠ Deep-engine `deny <Effect>` no longer fires on `Unknown` (SEMANTICS §6 alignment, family ruling)
+
+The nightly gate folded `Unknown` into EVERY `deny` projection: a function whose only marker was
+`Unknown` (an unresolvable call) tripped `deny Net` — a **false-positive divergence** from the
+family. The reference engine (candor-java), candor-scan and candor-ts all implement the SEMANTICS §6
+predicate exactly: AS-EFF-006 fires iff `I(f) ∩ Forbidden(r) ≠ ∅` — an effect PROVABLY in the
+transitive set. The deep engine now agrees: `deny X` fires only when `X` is provably in `I(f)`, and
+`Unknown` never appears in a deny-X verdict's effects. **The strictness knob is explicit**: where a
+boundary must also exclude uncertainty, pair it with **`deny Unknown <scope>`** (the §6.2 grammar's
+denyable token — it keeps firing, with effects `["Unknown"]`). A `pure` rule likewise forbids every
+*real* effect but not the `Unknown` visibility marker (AS-EFF-003's concern), matching the reference
+engine. `candor-query whatif` mirrors the same projection, so the pre-edit verdict cannot diverge
+from the gate.
+
 ### Changed — `CANDOR_CONFIG` → `CANDOR_RULES` (deep engine, clean rename, NO fallback)
 
 The lint's classifier-extension rules file is now pointed at by **`CANDOR_RULES`**. `CANDOR_CONFIG`

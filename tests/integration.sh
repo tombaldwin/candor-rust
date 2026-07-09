@@ -201,6 +201,33 @@ dl "$PL" env CANDOR_POLICY="$PL/policy-clean" CANDOR_VIOLATIONS="$VIO" >/dev/nul
 if [ -s "$VIO" ]; then echo "  FAIL clean run must leave the sentinel empty — got: $(cat "$VIO")"; fail=$((fail+1)); else echo "  ok   clean run leaves the CANDOR_VIOLATIONS sentinel empty"; pass=$((pass+1)); fi
 rm -rf "$(dirname "$PL")"
 
+# ── 9-u. `deny <Effect>` vs `Unknown` (SEMANTICS §6, family ruling): AS-EFF-006 fires iff the rule
+# NAMES an effect provably in I(f). An Unknown-only fn does NOT trip `deny Net` (the reference engine,
+# candor-scan and candor-ts all read the predicate this way); the strictness knob is the explicit
+# `deny Unknown <scope>`, which keeps firing with effects = [Unknown].
+echo "== deny-vs-Unknown semantics (AS-EFF-006, SEMANTICS §6) =="
+PU=$(mktemp -d)/pu; mkdir -p "$PU/src"
+printf '[package]\nname="pu"\nversion="0.1.0"\nedition="2021"\n' > "$PU/Cargo.toml"
+# domain_unknown invokes an opaque boxed callback → honest `Unknown`, and provably NO Net.
+printf 'fn domain_unknown(f: Box<dyn Fn()>) { f(); }\nfn main() { domain_unknown(Box::new(|| ())); }\n' > "$PU/src/main.rs"
+echo "deny Net  domain" > "$PU/policy"
+UVIO="$PU/violations"; : > "$UVIO"
+out=$(dl "$PU" env CANDOR_POLICY="$PU/policy" CANDOR_VIOLATIONS="$UVIO")
+absent "deny Net does NOT fire on an Unknown-only fn (no false positive)" "$out" '[AS-EFF-006]'
+if [ -s "$UVIO" ]; then echo "  FAIL Unknown-only fn under deny Net must leave the sentinel empty — got: $(cat "$UVIO")"; fail=$((fail+1)); else echo "  ok   Unknown-only fn under deny Net leaves the sentinel empty"; pass=$((pass+1)); fi
+# The knob: `deny Unknown` names the unprovable case and fires.
+: > "$UVIO"; echo "deny Unknown  domain" > "$PU/policy-unknown"
+out=$(dl "$PU" env CANDOR_POLICY="$PU/policy-unknown" CANDOR_VIOLATIONS="$UVIO")
+want "deny Unknown fires on the Unknown-carrying fn"       "$out" '[AS-EFF-006] `domain_unknown`'
+want "deny Unknown verdict carries Unknown as the effect"  "$out" 'performs { Unknown }'
+want "deny Unknown violation writes the sentinel"          "$(cat "$UVIO")" 'AS-EFF-006 domain_unknown'
+# `pure` forbids every REAL effect; `Unknown` is the §4 visibility marker (AS-EFF-003's concern) —
+# matching the reference engine, a pure rule alone does not fire on an Unknown-only fn.
+: > "$UVIO"; echo "pure  domain" > "$PU/policy-pure"
+out=$(dl "$PU" env CANDOR_POLICY="$PU/policy-pure" CANDOR_VIOLATIONS="$UVIO")
+absent "pure does NOT fire on an Unknown-only fn (AS-EFF-003 owns that)" "$out" '[AS-EFF-006]'
+rm -rf "$(dirname "$PU")"
+
 # ── 9-fc. Fail-closed wrapper gates: `policy` and `guard` must never pass when they could not run ──
 echo "== fail-closed gates (cargo candor policy / guard) =="
 FC=$(mktemp -d)/fc; mkdir -p "$FC/src"

@@ -1058,7 +1058,16 @@ fn cmd_whatif(args: &[String]) -> i32 {
     if let Some(rules) = &rules {
         for fname in &affected {
             for rule in rules {
-                let denies = rule.effects.is_empty() || rule.effects.contains(effect.as_str());
+                // Mirrors the gate's SEMANTICS §6 projection: `deny` fires only when the rule NAMES
+                // the effect; `pure` forbids every real effect but not `Unknown` (the §4 visibility
+                // marker — AS-EFF-003's concern; `deny Unknown` is the explicit strictness knob).
+                // Kept in lockstep with the nightly gate (src/lib.rs) so the pre-edit verdict can
+                // never diverge from the real gate's.
+                let denies = if rule.effects.is_empty() {
+                    effect != candor_classify::policy::UNKNOWN
+                } else {
+                    rule.effects.contains(effect.as_str())
+                };
                 let in_scope =
                     rule.scope.as_deref().is_none_or(|s| candor_classify::policy::scope_matches(fname, s));
                 if denies && in_scope {
