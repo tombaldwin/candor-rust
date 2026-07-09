@@ -53,6 +53,7 @@ fn main() {
         "state" => cmd_state(rest),
         "reports" => cmd_reports(rest),
         "locate" => cmd_locate(rest),
+        "gate-verdict" => cmd_gate_verdict(rest),
         "engine-version" => cmd_engine_version(rest),
         "merge-hook" => cmd_merge_hook(rest),
         "parsepolicy" => cmd_parsepolicy(rest),
@@ -66,7 +67,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|whatif|rewire|parsepolicy|receipt|gains|state|reports|locate|engine-version|merge-hook|--agents)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|whatif|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|merge-hook|--agents)"
             );
             2
         }
@@ -119,6 +120,7 @@ fn print_help() {
         ("state    [<root>]", "a stable content hash of the .rs tree (source-freshness key)"),
         ("reports  <prefix> [--exists|--backend|--clear-other <scan|lint>]", "list/probe/clean the report artifacts for a prefix"),
         ("locate   <lib|scan> <dir>…", "print the newest matching report file under the dirs"),
+        ("gate-verdict <parts-file> <out|->", "assemble the §3.3 gate verdict from NDJSON violation records"),
         ("engine-version <lib-path>", "print the candor-build-version tag embedded in a binary"),
         ("merge-hook <settings.json> <hook-command>", "idempotently merge candor's Stop hook into a settings file"),
         ("--agents", "print the agent contract embedded in this installed build"),
@@ -2397,6 +2399,56 @@ fn cmd_engine_version(args: &[String]) -> i32 {
         return 1;
     }
     println!("{}", String::from_utf8_lossy(&v));
+    0
+}
+
+/// `gate-verdict <parts-file> <out|->` — assemble the candor-spec §3.3 gate verdict
+/// `{ spec, ok, violations }` from a file of NDJSON `GateViolation` records (one JSON object per
+/// line — what the deep engine appends to `<CANDOR_GATE_JSON>.parts` per enforcement violation).
+/// The wrapper runs this ONCE after the whole `cargo dylint` pass, so the final verdict covers every
+/// workspace crate regardless of per-crate write ordering. An ABSENT parts file is the clean run —
+/// the spec's `{ ok: true, violations: [] }`. A corrupt record fails (exit 2): a dropped violation
+/// would make the verdict under-report vs the gate's exit code, the §3.3 forbidden disagreement. An
+/// unwritable output also exits 2 (never silent).
+fn cmd_gate_verdict(args: &[String]) -> i32 {
+    let (Some(parts), Some(out)) = (args.first(), args.get(1)) else {
+        eprintln!("usage: candor-query gate-verdict <parts-file> <out-file|->");
+        return 2;
+    };
+    let mut violations: Vec<candor_report::GateViolation> = Vec::new();
+    match std::fs::read_to_string(parts) {
+        Ok(text) => {
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                match serde_json::from_str(line) {
+                    Ok(v) => violations.push(v),
+                    Err(e) => {
+                        eprintln!("candor-query: corrupt gate record in {parts} ({e}) — no faithful verdict exists");
+                        return 2;
+                    }
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // clean run: no violations recorded
+        Err(e) => {
+            eprintln!("candor-query: cannot read {parts} ({e})");
+            return 2;
+        }
+    }
+    let json = match candor_report::gate_verdict_json(&mut violations) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("candor-query: could not serialize the gate verdict ({e})");
+            return 2;
+        }
+    };
+    if out == "-" {
+        println!("{json}");
+        return 0;
+    }
+    if let Err(e) = candor_report::write_atomic(Path::new(out), format!("{json}\n").as_bytes()) {
+        eprintln!("candor-query: could not write the gate verdict to {out} ({e})");
+        return 2;
+    }
     0
 }
 

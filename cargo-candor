@@ -385,7 +385,33 @@ case "$cmd" in
     # any REAL regression hidden inside the wave; the old SKIP here was the other failure mode — an
     # unbounded fail-open window (CI green with the gate silently off until someone remembered to
     # refresh). The aligned family posture (candor-java matches): do NOT evaluate, say it once, exit 2.
-    pre="${1:-${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}}"
+    # Args: an optional baseline prefix + `--gate-json <path|->` (the §3.3 structured verdict, spec
+    # ⟨0.8⟩ — same shape as candor-scan's flag; `-` streams it to stdout).
+    pre=""; gjson=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --gate-json)
+          shift
+          { [ "$#" -gt 0 ] && { [ "$1" = "-" ] || [ "${1#-}" = "$1" ]; }; } \
+            || { echo "candor: --gate-json requires a path argument" >&2; exit 2; }
+          gjson="$1" ;;
+        -*) echo "candor: unknown flag '$1' for guard" >&2; exit 2 ;;
+        *)  pre="$1" ;;
+      esac
+      shift
+    done
+    [ -n "$pre" ] || pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
+    # The verdict target the ENGINE writes to (CANDOR_GATE_JSON; empty = not requested — the engine
+    # ignores an empty var). `-` streams: the engine writes a temp file, the final assembly prints it.
+    # Cleared UP FRONT so any exit-2 path below can never leave a STALE verdict from a previous run
+    # lying around looking current (the §3.3 verdict/exit-code agreement).
+    gate_target=""; gtmp=""
+    if [ -n "$gjson" ]; then
+      case "$gjson" in -|/*) ;; *) gjson="$PWD/$gjson" ;; esac
+      gtmp="$(mktemp -d)"
+      if [ "$gjson" = "-" ]; then gate_target="$gtmp/gate.json"; else gate_target="$gjson"; fi
+      rm -f "$gate_target" "$gate_target.parts"
+    fi
     # No baseline AT ALL (never snapshotted, a typo'd prefix) is the same invalid-gate-input class as a
     # stale one: the engine would warn "guard NOT active" and exit 0 — an unbounded fail-open window.
     # Fail closed with the incantation instead (review §2 gap).
@@ -418,12 +444,13 @@ case "$cmd" in
     # Verdict via a MACHINE signal (CANDOR_VIOLATIONS), not by grepping the prose: the engine appends a
     # line per AS-EFF-005 gain, so a reworded message or a changed output stream can't turn the guard
     # green. Fresh file per run (the engine appends). The human diagnostics are still printed.
-    vio="$(mktemp)"; trap 'rm -f "$vio"' EXIT
-    if out="$(CANDOR_BASELINE="$pre" CANDOR_VIOLATIONS="$vio" cargo dylint --lib-path "$LIB" 2>&1)"; then
+    vio="$(mktemp)"; trap 'rm -rf "$vio" ${gtmp:+"$gtmp"}' EXIT
+    if out="$(CANDOR_BASELINE="$pre" CANDOR_VIOLATIONS="$vio" CANDOR_GATE_JSON="$gate_target" cargo dylint --lib-path "$LIB" 2>&1)"; then
       printf '%s\n' "$out" >&2
     else
       # dylint itself failed (the crate didn't build) — the guard could NOT run, so do not pass silently.
       printf '%s\n' "$out" >&2
+      [ -n "$gate_target" ] && { rm -f "$gate_target" "$gate_target.parts"; echo "candor: --gate-json not written — the gate did not complete (exit 2)." >&2; }
       echo "candor: guard could NOT run (the crate failed to build under dylint) — failing closed, not a pass." >&2
       exit 2
     fi
@@ -432,10 +459,22 @@ case "$cmd" in
     # not evaluate that crate, so it must NOT pass silently — exit 2 (not-evaluated), not 0 and not a
     # bogus AS-EFF-005.
     if grep -q '^GUARD-UNAVAILABLE ' "$vio" 2>/dev/null; then
+      [ -n "$gate_target" ] && { rm -f "$gate_target" "$gate_target.parts"; echo "candor: --gate-json not written — the gate did not complete (exit 2)." >&2; }
       echo "candor: a crate's baseline files could not be loaded (see above) — the guard could NOT" >&2
       echo "candor: evaluate that crate; failing closed. Refresh with 'cargo candor snapshot $pre'" >&2
       echo "candor: and commit the baseline.* files." >&2
       exit 2
+    fi
+    # Final §3.3 verdict assembly, ONCE, over every crate's records — the engine's per-crate assembly
+    # can race in a parallel workspace build; this one can't. Unwritable target ⇒ exit 2, never silent.
+    if [ -n "$gate_target" ]; then
+      if [ "$gjson" = "-" ]; then
+        query gate-verdict "$gate_target.parts" - || { echo "candor: --gate-json verdict could not be assembled — failing closed." >&2; exit 2; }
+        rm -rf "$gtmp"
+      else
+        query gate-verdict "$gate_target.parts" "$gate_target" || { echo "candor: --gate-json verdict could not be written to $gate_target — failing closed." >&2; exit 2; }
+        rm -f "$gate_target.parts"
+      fi
     fi
     if [ -s "$vio" ]; then
       echo "candor: a function GAINED an effect vs the baseline (AS-EFF-005) — blocked. Bypass: git push --no-verify" >&2
@@ -660,9 +699,23 @@ case "$cmd" in
     # declared allowlist, or an endpoint candor can't pin down). Rules: `deny <Effects...> [scope]`,
     # `pure [scope]`, `allow Net [in <scope>] <host>...`; scope = a path substring. This is the
     # architectural-invariant gate an agent can't self-check.
+    # Args: an optional policy file + `--gate-json <path|->` (the §3.3 structured verdict, spec ⟨0.8⟩ —
+    # same shape as candor-scan's flag; `-` streams it to stdout).
+    pol=""; gjson=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --gate-json)
+          shift
+          { [ "$#" -gt 0 ] && { [ "$1" = "-" ] || [ "${1#-}" = "$1" ]; }; } \
+            || { echo "candor: --gate-json requires a path argument" >&2; exit 2; }
+          gjson="$1" ;;
+        -*) echo "candor: unknown flag '$1' for policy" >&2; exit 2 ;;
+        *)  pol="$1" ;;
+      esac
+      shift
+    done
     # Precedence (spec §3.4): the positional arg → $CANDOR_POLICY → .candor/config's `policy` key →
     # the conventional .candor/policy.
-    pol="${1:-}"
     [ -n "$pol" ] || pol="${CANDOR_POLICY:-}"
     [ -n "$pol" ] || pol="${CFG_POLICY:-}"
     [ -n "$pol" ] || pol=".candor/policy"
@@ -692,8 +745,16 @@ case "$cmd" in
     # a dylint output-stream change can't silently turn the gate green. We still print the human text.
     # Fresh file per run (engine appends; a stale one would false-fail). `: >` truncates/creates.
     vio="$tmp/violations"; : > "$vio"
+    # The §3.3 verdict target (empty = not requested; the engine ignores an empty CANDOR_GATE_JSON).
+    # Cleared up front so an exit-2 path can never leave a STALE verdict from a previous run.
+    gate_target=""
+    if [ -n "$gjson" ]; then
+      case "$gjson" in -|/*) ;; *) gjson="$PWD/$gjson" ;; esac
+      if [ "$gjson" = "-" ]; then gate_target="$tmp/gate.json"; else gate_target="$gjson"; fi
+      rm -f "$gate_target" "$gate_target.parts"
+    fi
     rc=0
-    out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" cargo dylint --lib-path "$LIB" 2>&1)" || rc=$?
+    out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" CANDOR_GATE_JSON="$gate_target" cargo dylint --lib-path "$LIB" 2>&1)" || rc=$?
     printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]|\[AS-EFF-009\]' >&2 || true
     # A nonzero dylint exit is NEVER a violation verdict (the engine reports violations via the sentinel
     # and diagnostics, not the exit code): it means the enforce pass could not run to completion — a
@@ -702,9 +763,20 @@ case "$cmd" in
     # `guard`: fail closed.
     if [ "$rc" -ne 0 ]; then
       printf '%s\n' "$out" >&2
+      [ -n "$gate_target" ] && { rm -f "$gate_target" "$gate_target.parts"; echo "candor: --gate-json not written — the gate did not complete (exit 2)." >&2; }
       echo "candor: policy NOT evaluated (cargo dylint exited $rc — a build failure, or the engine's" >&2
       echo "candor: unreadable-policy fail-closed exit) — failing closed (exit 2), not a pass." >&2
       exit 2
+    fi
+    # Final §3.3 verdict assembly, ONCE, over every crate's records — the engine's per-crate assembly
+    # can race in a parallel workspace build; this one can't. Unwritable target ⇒ exit 2, never silent.
+    if [ -n "$gate_target" ]; then
+      if [ "$gjson" = "-" ]; then
+        query gate-verdict "$gate_target.parts" - || { echo "candor: --gate-json verdict could not be assembled — failing closed." >&2; exit 2; }
+      else
+        query gate-verdict "$gate_target.parts" "$gate_target" || { echo "candor: --gate-json verdict could not be written to $gate_target — failing closed." >&2; exit 2; }
+        rm -f "$gate_target.parts"
+      fi
     fi
     if [ -s "$vio" ]; then
       echo "candor: architecture-policy violation (AS-EFF-006/008/009) — blocked. Bypass: git push --no-verify" >&2

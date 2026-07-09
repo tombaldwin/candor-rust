@@ -4909,18 +4909,13 @@ fn dirs_cargo_registry_src() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// One structured gate violation (candor-spec §3.3 ⟨0.8⟩): `effects` is the specific effect set the
-/// violation concerns — the denied set (006), the allowed effect (008), or [] (009 layer-flow, no single
-/// effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The
-/// console gate prints `[{rule}] {detail}`; --gate-json serializes these records verbatim.
-#[derive(serde::Serialize, Clone)]
-struct GateViolation {
-    rule: String,
-    #[serde(rename = "fn")]
-    func: String,
-    effects: Vec<String>,
-    detail: String,
-}
+/// One structured gate violation (candor-spec §3.3 ⟨0.8⟩) — the SHARED `candor_report::GateViolation`
+/// (one definition across the stable scanner, the deep engine, and `candor-query gate-verdict`, so the
+/// verdict shape can never drift): `effects` is the specific effect set the violation concerns — the
+/// denied set (006), the allowed effect (008), or [] (009 layer-flow, no single effect); `detail` is
+/// the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The console gate prints
+/// `[{rule}] {detail}`; --gate-json serializes these records verbatim.
+use candor_report::GateViolation;
 
 /// Evaluate a CANDOR_POLICY (parsed by the SHARED §6.2 parser in candor-classify, so this gate can
 /// never disagree with the nightly/JVM gates on grammar) over a finished scan. Returns one line per
@@ -5077,15 +5072,11 @@ fn write_gate_json(exit_code: i32) {
         return;
     }
     let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
-    let violations = acc.lock().unwrap();
-    #[derive(serde::Serialize)]
-    struct Verdict<'a> {
-        spec: &'static str,
-        ok: bool,
-        violations: &'a [GateViolation],
-    }
-    let verdict = Verdict { spec: candor_report::SPEC_VERSION, ok: violations.is_empty(), violations: &violations };
-    match serde_json::to_string_pretty(&verdict) {
+    // The shared serializer (candor_report::gate_verdict_json) also fixes the violation ORDER —
+    // (rule, detail), the same order the console prints — so the verdict is deterministic and
+    // byte-comparable across backends. Members already record in that order per crate.
+    let mut violations = acc.lock().unwrap().clone();
+    match candor_report::gate_verdict_json(&mut violations) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
             if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {

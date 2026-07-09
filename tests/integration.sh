@@ -255,6 +255,44 @@ want "a set-but-unusable CANDOR_CONFIG is loud" "$cfgu" "not a readable file"
 if [ "$cfgu_rc" -eq 2 ]; then echo "  ok   unusable CANDOR_CONFIG exits 2 (fail closed)"; pass=$((pass+1)); else echo "  FAIL unusable CANDOR_CONFIG exited $cfgu_rc (want 2)"; fail=$((fail+1)); fi
 rm -rf "$(dirname "$CG")"
 
+# ── 9-gj. --gate-json (spec §3.3): the deep path emits the SAME structured verdict as candor-scan ──
+echo "== --gate-json structured verdict (cargo candor policy/guard vs candor-scan) =="
+GJ=$(mktemp -d)/gj; mkdir -p "$GJ/src"
+printf '[package]\nname="gj"\nversion="0.1.0"\nedition="2021"\n' > "$GJ/Cargo.toml"
+printf 'fn leaf(){ let _=std::fs::read("/tmp/x"); }\nfn domain_logic(){ leaf(); }\nfn main(){ domain_logic(); }\n' > "$GJ/src/main.rs"
+echo "deny Fs  domain" > "$GJ/policy"
+gjp_rc=0; ( cd "$GJ"; "$ROOT/cargo-candor" policy policy --gate-json verdict.json >/dev/null 2>&1 ) || gjp_rc=$?
+if [ "$gjp_rc" -eq 1 ]; then echo "  ok   policy --gate-json still exits 1 on a violation"; pass=$((pass+1)); else echo "  FAIL policy --gate-json exited $gjp_rc (want 1)"; fail=$((fail+1)); fi
+# The same fixture through the STABLE scanner's --gate-json — the verdicts must agree on the pinned
+# projection (spec §3.3: ok + {rule, fn, effects}; `detail` is engine-natural prose, not pinned).
+"$ROOT/target/debug/candor-scan" "$GJ" --policy "$GJ/policy" --gate-json "$GJ/scan-verdict.json" >/dev/null 2>&1 || true
+gjcmp=$(python3 - "$GJ/verdict.json" "$GJ/scan-verdict.json" <<'PY'
+import json, sys
+deep, scan = (json.load(open(p)) for p in sys.argv[1:3])
+proj = lambda d: (d["spec"], d["ok"], [(v["rule"], v["fn"], v["effects"]) for v in d["violations"]])
+print("spec:", deep["spec"], "ok:", deep["ok"])
+for v in deep["violations"]: print("viol:", v["rule"], v["fn"], ",".join(v["effects"]), "detail" if v.get("detail") else "")
+print("PARITY" if proj(deep) == proj(scan) else f"MISMATCH {proj(deep)} vs {proj(scan)}")
+PY
+)
+want "deep verdict declares spec 0.8 and fails"          "$gjcmp" "spec: 0.8 ok: False"
+want "deep verdict pins the violation (rule/fn/effects)" "$gjcmp" "viol: AS-EFF-006 domain_logic Fs detail"
+want "deep and scan verdicts agree on the §3.3 projection" "$gjcmp" "PARITY"
+# A CLEAN gate writes the clean verdict { ok: true, violations: [] } and exits 0.
+echo "deny Net  domain" > "$GJ/policy-clean"
+gjc_rc=0; ( cd "$GJ"; "$ROOT/cargo-candor" policy policy-clean --gate-json verdict-clean.json >/dev/null 2>&1 ) || gjc_rc=$?
+gjclean=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["ok"], len(d["violations"]))' "$GJ/verdict-clean.json" 2>/dev/null)
+want "a clean policy --gate-json writes { ok: true, [] }" "$gjclean" "True 0"
+if [ "$gjc_rc" -eq 0 ]; then echo "  ok   clean policy --gate-json exits 0"; pass=$((pass+1)); else echo "  FAIL clean policy --gate-json exited $gjc_rc (want 0)"; fail=$((fail+1)); fi
+# guard --gate-json: a gained effect (AS-EFF-005 — the deep-only rule) rides the same verdict shape.
+( cd "$GJ"; "$ROOT/cargo-candor" snapshot .candor/base >/dev/null 2>&1 )
+printf 'fn leaf(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn domain_logic(){ leaf(); }\nfn main(){ domain_logic(); }\n' > "$GJ/src/main.rs"
+gjg_rc=0; ( cd "$GJ"; "$ROOT/cargo-candor" guard .candor/base --gate-json guard-verdict.json >/dev/null 2>&1 ) || gjg_rc=$?
+gjguard=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d["violations"]; print(d["ok"], v[0]["rule"] if v else "-", "Net" in (v[0]["effects"] if v else []))' "$GJ/guard-verdict.json" 2>/dev/null)
+want "guard --gate-json pins the AS-EFF-005 gain (Net)" "$gjguard" "False AS-EFF-005 True"
+if [ "$gjg_rc" -eq 1 ]; then echo "  ok   guard --gate-json still exits 1 on a gain"; pass=$((pass+1)); else echo "  FAIL guard --gate-json exited $gjg_rc (want 1)"; fail=$((fail+1)); fi
+rm -rf "$(dirname "$GJ")"
+
 # ── 9a. Host allowlist: enforce per-scope Net endpoints (AS-EFF-008) ──
 echo "== host allowlist / AS-EFF-008 (CANDOR_POLICY allow Net) =="
 HA=$(mktemp -d)/ha; mkdir -p "$HA/src"

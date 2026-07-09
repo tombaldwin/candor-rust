@@ -248,6 +248,43 @@ pub fn to_packaged_report_json(
     serde_json::to_string_pretty(&Out { candor, package, functions })
 }
 
+/// One structured gate violation (candor-spec §3.3 ⟨0.8⟩), shared by every backend so the verdict
+/// shape is defined ONCE: `effects` is the specific effect set the violation concerns — the denied
+/// set (006), the allow rule's effect (008), the gained set (005), or `[]` (009 layer-flow, no single
+/// effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The
+/// console gates print `[{rule}] {detail}`; `--gate-json` serializes these records verbatim.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GateViolation {
+    pub rule: String,
+    #[serde(rename = "fn")]
+    pub func: String,
+    #[serde(default)]
+    pub effects: Vec<String>,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// Serialize the §3.3 gate verdict `{ spec, ok, violations }` — the machine analog of the `AS-EFF`
+/// console lines. Defined here (with [`GateViolation`]) so the stable scanner, the deep engine, and
+/// `candor-query gate-verdict` can never drift on field names or shape. Violations are sorted by
+/// `(rule, detail)` — the same order the console gates print — so the verdict is deterministic
+/// regardless of which crate/member recorded first. Pretty-printed; callers append the trailing
+/// newline when writing to a file.
+pub fn gate_verdict_json(violations: &mut [GateViolation]) -> serde_json::Result<String> {
+    violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
+    #[derive(Serialize)]
+    struct Verdict<'a> {
+        spec: &'static str,
+        ok: bool,
+        violations: &'a [GateViolation],
+    }
+    serde_json::to_string_pretty(&Verdict {
+        spec: SPEC_VERSION,
+        ok: violations.is_empty(),
+        violations,
+    })
+}
+
 /// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy
 /// v0.1 bare array (no header).
 /// Does the report carry a v0.2 `{ candor: {...}, functions }` ENVELOPE (vs a legacy v0.1 bare array)?
@@ -355,6 +392,33 @@ mod tests {
         assert_eq!(report_entries(env).unwrap().len(), 1);
         // genuinely-broken JSON still yields None (not a panic).
         assert!(report_entries("{not json").is_none());
+    }
+
+    #[test]
+    fn gate_verdict_shape_ok_flag_and_sort() {
+        // Empty → the clean verdict (spec §3.3: "with no gate configured it writes { ok: true, [] }").
+        let clean = gate_verdict_json(&mut []).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&clean).unwrap();
+        assert_eq!(v["spec"], SPEC_VERSION);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["violations"], serde_json::json!([]));
+        // Violations sort by (rule, detail) and serialize under the pinned field names (`fn`, not func).
+        let mut vs = vec![
+            GateViolation { rule: "AS-EFF-009".into(), func: "b".into(), effects: vec![], detail: "z".into() },
+            GateViolation { rule: "AS-EFF-006".into(), func: "a".into(), effects: vec!["Net".into()], detail: "y".into() },
+            GateViolation { rule: "AS-EFF-006".into(), func: "c".into(), effects: vec!["Db".into()], detail: "x".into() },
+        ];
+        let s = gate_verdict_json(&mut vs).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["ok"], false);
+        let arr = v["violations"].as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["fn"], "c", "sorted by (rule, detail): x before y");
+        assert_eq!(arr[0]["effects"], serde_json::json!(["Db"]));
+        assert_eq!(arr[2]["rule"], "AS-EFF-009");
+        // round-trips (candor-query gate-verdict re-parses NDJSON records of this shape).
+        let back: GateViolation = serde_json::from_str(&serde_json::to_string(&arr[0]).unwrap()).unwrap();
+        assert_eq!(back.func, "c");
     }
 
     /// The ONE discrimination rule shared by the lint's cross-crate loader and the CLI: a report is

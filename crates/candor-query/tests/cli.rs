@@ -198,6 +198,160 @@ fn whatif_nonexistent_policy_exits_2() {
     assert!(stderr.contains("could not be read"), "must report the policy read failure, got:\n{stderr}");
 }
 
+// ── containment: the AS-EFF-010 ratchet exit contract (violation → 1, clean → 0) ──────────────────
+
+/// Write a `<prefix>.<crate>.scan.json` report whose `web` layer does (or doesn't) perform Db
+/// directly — the containment ratchet's leak shape. Layers derive from the module segment after the
+/// common `app::` root.
+fn write_containment_report(dir: &std::path::Path, name: &str, web_has_db: bool) -> String {
+    let prefix = dir.join(name).to_string_lossy().into_owned();
+    let web_direct = if web_has_db { r#","direct":["Db"]"# } else { "" };
+    let report = format!(
+        r#"{{"candor":{{"version":"scan-test","toolchain":"stable","spec":"0.8"}},"package":"cnt","functions":[
+            {{"fn":"app::data::save","inferred":["Db"],"direct":["Db"]}},
+            {{"fn":"app::web::page","inferred":["Db"]{web_direct}}}
+        ]}}"#
+    );
+    std::fs::write(format!("{prefix}.cnt.scan.json"), report).unwrap();
+    prefix
+}
+
+#[test]
+fn containment_ratchet_violation_exits_1_and_names_the_leak() {
+    // AS-EFF-010: a boundary effect (Db) performed DIRECTLY in a layer (`web`) it didn't occupy in
+    // the baseline is a leak — exit 1, with the `[AS-EFF-010]` line naming `Db → web`.
+    let f = Fixture::new("cnt-leak");
+    let base = write_containment_report(&f.dir, "base", false);
+    let cur = write_containment_report(&f.dir, "cur", true);
+    let out = Command::new(bin()).arg("containment").arg(&cur).arg(&base).output().expect("run");
+    assert_eq!(out.status.code(), Some(1), "a containment leak must exit 1 (the ratchet bites)");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("[AS-EFF-010]"), "the ratchet line carries its AS-EFF code: {stdout}");
+    assert!(stdout.contains("Db → web"), "the leak names effect and layer: {stdout}");
+}
+
+#[test]
+fn containment_ratchet_clean_exits_0() {
+    let f = Fixture::new("cnt-clean");
+    let base = write_containment_report(&f.dir, "base", true);
+    let cur = write_containment_report(&f.dir, "cur", true);
+    let out = Command::new(bin()).arg("containment").arg(&cur).arg(&base).output().expect("run");
+    assert_eq!(out.status.code(), Some(0), "an unchanged containment picture must exit 0");
+    // …and cleaning a layer UP is exit 0 too (informational, never a failure).
+    let cur2 = write_containment_report(&f.dir, "cur2", false);
+    let out = Command::new(bin()).arg("containment").arg(&cur2).arg(&base).output().expect("run");
+    assert_eq!(out.status.code(), Some(0), "a cleanup (layer left) must exit 0");
+    assert!(String::from_utf8(out.stdout).unwrap().contains("improved"),
+            "the cleanup is noted informationally");
+}
+
+// ── gate-verdict: assemble the §3.3 verdict from NDJSON records ────────────────────────────────────
+
+#[test]
+fn gate_verdict_absent_parts_is_the_clean_verdict() {
+    // No parts file = no violations recorded = the spec's clean verdict { ok: true, [] } (exit 0).
+    let f = Fixture::new("gv-clean");
+    let out = Command::new(bin())
+        .arg("gate-verdict").arg(f.dir.join("nosuch.parts").to_string_lossy().as_ref()).arg("-")
+        .output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["spec"], "0.8");
+    assert_eq!(v["violations"], serde_json::json!([]));
+}
+
+#[test]
+fn gate_verdict_assembles_and_sorts_records_into_a_failing_verdict() {
+    let f = Fixture::new("gv-viol");
+    let parts = f.dir.join("gate.json.parts");
+    std::fs::write(&parts, concat!(
+        r#"{"rule":"AS-EFF-009","fn":"b","effects":[],"detail":"z"}"#, "\n",
+        r#"{"rule":"AS-EFF-006","fn":"a","effects":["Net"],"detail":"y"}"#, "\n",
+    )).unwrap();
+    let outfile = f.dir.join("gate.json");
+    let out = Command::new(bin())
+        .arg("gate-verdict").arg(parts.to_string_lossy().as_ref()).arg(outfile.to_string_lossy().as_ref())
+        .output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&outfile).unwrap()).unwrap();
+    assert_eq!(v["ok"], false);
+    let arr = v["violations"].as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["rule"], "AS-EFF-006", "records sort by (rule, detail)");
+    assert_eq!(arr[0]["fn"], "a");
+    assert_eq!(arr[0]["effects"], serde_json::json!(["Net"]));
+}
+
+#[test]
+fn gate_verdict_corrupt_record_fails_closed() {
+    // A dropped record would make the verdict under-report vs the gate's exit code — the §3.3
+    // forbidden disagreement. Exit 2, never a partial verdict.
+    let f = Fixture::new("gv-corrupt");
+    let parts = f.dir.join("gate.json.parts");
+    std::fs::write(&parts, "{not json@@\n").unwrap();
+    let outfile = f.dir.join("gate.json");
+    let out = Command::new(bin())
+        .arg("gate-verdict").arg(parts.to_string_lossy().as_ref()).arg(outfile.to_string_lossy().as_ref())
+        .output().expect("run");
+    assert_eq!(out.status.code(), Some(2), "a corrupt record must fail closed");
+    assert!(!outfile.exists(), "no partial verdict may be written");
+}
+
+// ── reports --exists/--backend, engine-version, diff ──────────────────────────────────────────────
+
+#[test]
+fn reports_exists_and_backend_probe() {
+    let f = Fixture::new("rp-probe");
+    // absent → --exists is falsy (nonzero exit)
+    let out = Command::new(bin()).arg("reports").arg(&f.prefix).arg("--exists").output().expect("run");
+    assert_ne!(out.status.code(), Some(0), "no reports → --exists must be falsy");
+    f.write_report();
+    let out = Command::new(bin()).arg("reports").arg(&f.prefix).arg("--exists").output().expect("run");
+    assert_eq!(out.status.code(), Some(0), "a present report → --exists exit 0");
+    let out = Command::new(bin()).arg("reports").arg(&f.prefix).arg("--backend").output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "scan",
+               "a `.scan.json` report probes as the scan backend");
+}
+
+#[test]
+fn engine_version_reads_the_embedded_tag() {
+    let f = Fixture::new("ev-tag");
+    let lib = f.dir.join("libfake.so");
+    std::fs::write(&lib, b"\x7fELFjunk candor-build-version=abc1234 morejunk").unwrap();
+    let out = Command::new(bin()).arg("engine-version").arg(lib.to_string_lossy().as_ref()).output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "abc1234");
+    // a binary with NO tag → nonzero (the wrapper then falls back to git HEAD)
+    let bare = f.dir.join("bare.so");
+    std::fs::write(&bare, b"nothing here").unwrap();
+    let out = Command::new(bin()).arg("engine-version").arg(bare.to_string_lossy().as_ref()).output().expect("run");
+    assert_ne!(out.status.code(), Some(0), "no embedded tag → non-zero");
+}
+
+#[test]
+fn diff_reports_a_gained_effect() {
+    let f = Fixture::new("df-gain");
+    let base = f.dir.join("b").to_string_lossy().into_owned();
+    let cur = f.dir.join("c").to_string_lossy().into_owned();
+    let mk = |prefix: &str, effs: &str| {
+        std::fs::write(format!("{prefix}.d.scan.json"), format!(
+            r#"{{"candor":{{"version":"scan-test","toolchain":"stable","spec":"0.8"}},"functions":[
+                {{"fn":"worker","inferred":[{effs}],"direct":[{effs}]}}]}}"#)).unwrap();
+    };
+    mk(&base, r#""Fs""#);
+    mk(&cur, r#""Fs","Net""#);
+    let out = Command::new(bin())
+        .arg("diff").arg(&cur).arg(&base).arg("1").arg("v1").arg("v1")
+        .output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    let gained = v.pointer("/changed/0/gained").or_else(|| v.pointer("/gained"));
+    assert!(serde_json::to_string(&v).unwrap().contains("Net"),
+            "the +Net gain must appear in the diff JSON: {v} (gained={gained:?})");
+}
+
 #[test]
 fn whatif_unknown_effect_exits_2() {
     // A typo'd/lowercase effect (`net`) matches no deny rule and would print a false-green verdict —

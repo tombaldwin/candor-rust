@@ -302,6 +302,13 @@ pub struct Candor {
     /// file (the wrapper truncates/creates it fresh before the run). `None` ⇒ no sentinel (audit,
     /// JSON, and any run where the wrapper didn't ask for one — a no-op, never a write).
     violations_sink: Option<String>,
+    /// CANDOR_GATE_JSON: the §3.3 structured-verdict target. Enforcement violations are ALSO appended
+    /// as NDJSON `GateViolation` records to `<path>.parts` (O_APPEND — atomic per line, so parallel
+    /// workspace crates can't corrupt each other's records); `check_crate_post` then assembles the
+    /// final verdict `{ spec, ok, violations }` at `<path>` from ALL parts recorded so far. The
+    /// wrapper re-assembles once more after the whole run (`candor-query gate-verdict`) so the final
+    /// verdict always covers every crate. `None` ⇒ no verdict requested.
+    gate_sink: Option<String>,
 }
 
 /// Where an effect enters a function's body — the callee that produced it and the source location.
@@ -401,6 +408,7 @@ impl Candor {
             // The wrapper sets this to a fresh sentinel path before an enforcing run; absent/empty
             // means "no machine signal requested" (audit, JSON, or a direct `cargo dylint` invocation).
             violations_sink: std::env::var("CANDOR_VIOLATIONS").ok().filter(|s| !s.is_empty()),
+            gate_sink: std::env::var("CANDOR_GATE_JSON").ok().filter(|s| !s.is_empty()),
         }
     }
 
@@ -410,16 +418,43 @@ impl Candor {
     /// land in the one file. A no-op when no sink is set. A write error is reported but non-fatal: the
     /// human diagnostic still fired, and failing the compile here would be a worse failure mode than a
     /// degraded signal (the wrapper additionally surfaces any AS-EFF text it sees).
-    fn record_violation(&self, code: &str, func: &str) {
-        let Some(path) = &self.violations_sink else { return };
+    ///
+    /// `effects` + `detail` additionally feed the §3.3 gate verdict (CANDOR_GATE_JSON): every real
+    /// AS-EFF violation is appended as one NDJSON `GateViolation` record to `<gate_sink>.parts` — the
+    /// SAME data that feeds the sentinel, so the verdict can never disagree with the gate. The
+    /// GUARD-UNAVAILABLE sentinel is a NOT-EVALUATED signal, not a violation, so it never becomes a
+    /// verdict record (the verdict itself is withheld in that case — see `check_crate_post`).
+    fn record_violation(&self, code: &str, func: &str, effects: &[&str], detail: &str) {
         use std::io::Write;
-        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Some(path) = &self.violations_sink {
+            match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                Ok(mut f) => {
+                    if let Err(e) = writeln!(f, "{code} {func}") {
+                        eprintln!("candor: could not append to CANDOR_VIOLATIONS={path:?} ({e})");
+                    }
+                }
+                Err(e) => eprintln!("candor: could not open CANDOR_VIOLATIONS={path:?} ({e})"),
+            }
+        }
+        if !code.starts_with("AS-EFF") {
+            return;
+        }
+        let Some(gate) = &self.gate_sink else { return };
+        let rec = candor_report::GateViolation {
+            rule: code.to_string(),
+            func: func.to_string(),
+            effects: effects.iter().map(|s| s.to_string()).collect(),
+            detail: detail.to_string(),
+        };
+        let Ok(line) = serde_json::to_string(&rec) else { return };
+        let parts = format!("{gate}.parts");
+        match std::fs::OpenOptions::new().create(true).append(true).open(&parts) {
             Ok(mut f) => {
-                if let Err(e) = writeln!(f, "{code} {func}") {
-                    eprintln!("candor: could not append to CANDOR_VIOLATIONS={path:?} ({e})");
+                if let Err(e) = writeln!(f, "{line}") {
+                    eprintln!("candor: could not append to {parts:?} ({e})");
                 }
             }
-            Err(e) => eprintln!("candor: could not open CANDOR_VIOLATIONS={path:?} ({e})"),
+            Err(e) => eprintln!("candor: could not open {parts:?} ({e})"),
         }
     }
 
@@ -3144,7 +3179,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     // this sentinel to exit 2 ("guard not evaluated"), distinct from a real AS-EFF-005
                     // (exit 1). A no-op when no CANDOR_VIOLATIONS sink is set (direct `cargo dylint`
                     // runs still get the loud stderr above).
-                    self.record_violation("GUARD-UNAVAILABLE", &file);
+                    self.record_violation("GUARD-UNAVAILABLE", &file, &[], "");
                 }
                 loaded
             }
@@ -3462,17 +3497,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 if let Some(prior) = base.get(&name) {
                     let gained = gained_effects(effs, prior);
                     if !gained.is_empty() {
-                        self.record_violation("AS-EFF-005", &name);
-                        span_lint(
-                            cx,
-                            CANDOR,
-                            span,
-                            format!(
-                                "[AS-EFF-005] `{name}` gained effect {{ {} }} not present in the \
-                                 baseline; an existing function started performing a new effect",
-                                gained.join(", ")
-                            ),
+                        let detail = format!(
+                            "`{name}` gained effect {{ {} }} not present in the baseline; \
+                             an existing function started performing a new effect",
+                            gained.join(", ")
                         );
+                        self.record_violation("AS-EFF-005", &name, &gained, &detail);
+                        span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
                     }
                 }
             }
@@ -3508,17 +3539,13 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     } else {
                         ""
                     };
-                    self.record_violation("AS-EFF-006", &name);
-                    span_lint(
-                        cx,
-                        CANDOR,
-                        span,
-                        format!(
-                            "[AS-EFF-006] `{name}` performs {{ {} }}, forbidden by policy{scope}: `{}`{caveat}",
-                            bad.join(", "),
-                            rule.raw
-                        ),
+                    let detail = format!(
+                        "`{name}` performs {{ {} }}, forbidden by policy{scope}: `{}`{caveat}",
+                        bad.join(", "),
+                        rule.raw
                     );
+                    self.record_violation("AS-EFF-006", &name, &bad, &detail);
+                    span_lint(cx, CANDOR, span, format!("[AS-EFF-006] {detail}"));
                 }
             }
 
@@ -3584,13 +3611,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                             rule.effect
                         )
                     };
-                    self.record_violation("AS-EFF-008", &name);
-                    span_lint(
-                        cx,
-                        CANDOR,
-                        span,
-                        format!("[AS-EFF-008] `{name}` {detail}, forbidden by policy{scope}: `{}`", rule.raw),
-                    );
+                    let detail = format!("`{name}` {detail}, forbidden by policy{scope}: `{}`", rule.raw);
+                    self.record_violation("AS-EFF-008", &name, &[rule.effect], &detail);
+                    span_lint(cx, CANDOR, span, format!("[AS-EFF-008] {detail}"));
                 }
             }
 
@@ -3599,16 +3622,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // reverse reachability over the call graph; emitted here where the function's span is known.
             if let Some(viols) = layer_viol.get(&f) {
                 for (raw, tgt) in viols {
-                    self.record_violation("AS-EFF-009", &name);
-                    span_lint(
-                        cx,
-                        CANDOR,
-                        span,
-                        format!(
-                            "[AS-EFF-009] `{name}` reaches into a forbidden layer (via `{tgt}`), \
-                             violating policy: `{raw}`"
-                        ),
+                    let detail = format!(
+                        "`{name}` reaches into a forbidden layer (via `{tgt}`), violating policy: `{raw}`"
                     );
+                    // A layer-flow concerns no single effect — `effects` is [] (spec §3.3).
+                    self.record_violation("AS-EFF-009", &name, &[], &detail);
+                    span_lint(cx, CANDOR, span, format!("[AS-EFF-009] {detail}"));
                 }
             }
 
@@ -3700,6 +3719,58 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             let seen: Vec<&str> = self.encountered.iter().map(|s| s.as_str()).collect();
             if let Err(e) = std::fs::write(&efile, serde_json::to_string(&seen).unwrap_or_default()) {
                 eprintln!("candor: failed to write {efile:?} ({e})");
+            }
+        }
+
+        // ── the §3.3 gate verdict (CANDOR_GATE_JSON) ─────────────────────────────────────────────
+        // Assemble `{ spec, ok, violations }` at the target path from EVERY NDJSON record appended to
+        // `<path>.parts` so far (this crate's `record_violation`s + earlier workspace crates'), via
+        // the SHARED candor_report serializer — the same shape candor-scan's --gate-json emits, from
+        // the same data that feeds CANDOR_VIOLATIONS, so the verdict can never disagree with the gate.
+        // No parts file ⇒ the clean verdict { ok: true, violations: [] } (spec: written whenever the
+        // flag/env is given). WITHHELD when the guard could not evaluate this crate (an unloadable
+        // baseline): the gate did not complete, so there is no faithful verdict to emit — writing
+        // ok:true there would be the fail-open the wrapper's exit 2 exists to prevent.
+        if let Some(gate) = &self.gate_sink {
+            let guard_unavailable =
+                baseline.is_none() && std::env::var("CANDOR_BASELINE").is_ok();
+            if guard_unavailable {
+                eprintln!(
+                    "candor: CANDOR_GATE_JSON verdict NOT written — the regression guard could not \
+                     evaluate this crate, so no faithful verdict exists"
+                );
+            } else {
+                let parts = format!("{gate}.parts");
+                let mut violations: Vec<candor_report::GateViolation> = Vec::new();
+                let mut corrupt = false;
+                if let Ok(text) = std::fs::read_to_string(&parts) {
+                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                        match serde_json::from_str(line) {
+                            Ok(v) => violations.push(v),
+                            Err(e) => {
+                                eprintln!("candor: corrupt gate record in {parts:?} ({e})");
+                                corrupt = true;
+                            }
+                        }
+                    }
+                }
+                if corrupt {
+                    // A dropped record would make the verdict UNDER-report vs the exit code — withhold
+                    // it (the wrapper then fails closed on the missing file) rather than write a lie.
+                    eprintln!("candor: CANDOR_GATE_JSON verdict NOT written — corrupt violation records");
+                } else {
+                    match candor_report::gate_verdict_json(&mut violations) {
+                        Ok(json) => {
+                            if let Err(e) = candor_report::write_atomic(
+                                std::path::Path::new(gate),
+                                format!("{json}\n").as_bytes(),
+                            ) {
+                                eprintln!("candor: could not write CANDOR_GATE_JSON {gate}: {e}");
+                            }
+                        }
+                        Err(e) => eprintln!("candor: could not serialize the gate verdict ({e})"),
+                    }
+                }
             }
         }
     }
