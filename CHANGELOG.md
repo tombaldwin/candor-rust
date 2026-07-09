@@ -45,6 +45,16 @@ The lint's classifier-extension rules file is now pointed at by **`CANDOR_RULES`
 now means one thing family-wide: the spec-§3.4 config-file override path (which candor-scan already
 implemented). One variable meaning two incompatible things was worse than a break.
 
+### Internal — candor-scan main.rs split into modules (no behavior change, byte-identity gated)
+
+The 7.9k-line `crates/candor-scan/src/main.rs` is now 12 modules along its natural seams
+(model / lang / lazy / deps / collector / decls / cache / config / gate / propagate / scan + a
+`tests.rs` file module). One flat crate namespace is preserved via `pub(crate) use` re-exports, so
+no call site changed. Gated by a byte-identity battery (conformance fixtures incl. the gate/policy
+runs, sample crates, a workspace root, minreq/fs_extra/xshell from crates.io — reports, sidecars,
+gate verdicts, stdout/stderr and exit codes all identical) plus the 120-edit incremental-cache
+equivalence run on tokio.
+
 ### Added
 
 - **`.candor/config` on the deep path** (spec §3.4): the wrapper discovers the checked-in config

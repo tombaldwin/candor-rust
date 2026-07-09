@@ -1,0 +1,2443 @@
+//! The scanner's unit tests — the former in-file `#[cfg(test)] mod tests` of main.rs,
+//! now a file module (`super::*` still resolves to the crate root). Original indentation
+//! kept verbatim: several tests embed column-sensitive source strings.
+
+    use super::*;
+
+    fn uses(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// A shared, empty lazy-static name set for direct `CallCollector` constructions in unit tests that
+    /// don't exercise the lazy-forcing path (the lazy-forcing tests use the full `scan_one`/`scan_src`).
+    fn empty_lazy() -> &'static std::collections::HashSet<String> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(std::collections::HashSet::new)
+    }
+
+    #[test]
+    fn expand_uses_the_use_map_and_strips_local_prefixes() {
+        let u = uses(&[("fs", "std::fs"), ("Command", "std::process::Command")]);
+        assert_eq!(expand("fs::read_to_string", &u), "std::fs::read_to_string");
+        assert_eq!(expand("Command::new", &u), "std::process::Command::new");
+        // crate/self/super are local and stripped, leaving the rest unresolved (matched by leaf later)
+        assert_eq!(expand("crate::pricing::priced", &u), "pricing::priced");
+        assert_eq!(expand("self::helper", &u), "helper");
+        // an unknown first segment passes through unchanged
+        assert_eq!(expand("foo::bar", &u), "foo::bar");
+    }
+
+    #[test]
+    fn collect_use_expands_groups_and_renames() {
+        let mut out = HashMap::new();
+        // `use std::process::{Command, Stdio as Pipe};`
+        let tree: syn::UseTree = syn::parse_str("std::process::{Command, Stdio as Pipe}").unwrap();
+        collect_use(&tree, String::new(), &mut out);
+        assert_eq!(out.get("Command").map(String::as_str), Some("std::process::Command"));
+        assert_eq!(out.get("Pipe").map(String::as_str), Some("std::process::Stdio"));
+        // `use std::fs::{self, Metadata}` imports the MODULE `fs` itself → map `fs -> std::fs`.
+        let mut o2 = HashMap::new();
+        collect_use(&syn::parse_str("std::fs::{self, Metadata}").unwrap(), String::new(), &mut o2);
+        assert_eq!(o2.get("fs").map(String::as_str), Some("std::fs"));
+        assert_eq!(o2.get("Metadata").map(String::as_str), Some("std::fs::Metadata"));
+        assert_eq!(o2.get("self"), None); // not the useless `fs::self`
+    }
+
+    #[test]
+    fn module_path_mirrors_file_based_resolution() {
+        assert_eq!(module_path(Path::new("src/lib.rs")), "");
+        assert_eq!(module_path(Path::new("src/main.rs")), "");
+        assert_eq!(module_path(Path::new("src/pricing.rs")), "pricing");
+        assert_eq!(module_path(Path::new("src/billing/mod.rs")), "billing");
+        assert_eq!(module_path(Path::new("src/billing/tax.rs")), "billing::tax");
+        // a dotted file stem (tonic/prost gRPC codegen) is a nested module path, not one segment.
+        assert_eq!(
+            module_path(Path::new("src/generated/envoy.service.auth.v3.rs")),
+            "generated::envoy::service::auth::v3"
+        );
+        // a WORKSPACE member's path anchors at its OWN `src/`, not the scan root — otherwise the dir
+        // path (`crates/cli/src/decompress.rs`) mangles into `crates::cli::src::decompress`.
+        assert_eq!(module_path(Path::new("crates/cli/src/decompress.rs")), "decompress");
+        assert_eq!(module_path(Path::new("crates/ignore/src/walk.rs")), "walk");
+        assert_eq!(module_path(Path::new("crates/core/src/main.rs")), "");
+    }
+
+    #[test]
+    fn host_part_strips_scheme_path_and_userinfo() {
+        assert_eq!(host_part("https://api.stripe.com/v1/charges"), "api.stripe.com");
+        assert_eq!(host_part("user:pass@db.internal:5432"), "db.internal:5432");
+        assert_eq!(host_part("example.com"), "example.com");
+    }
+
+    #[test]
+    fn propagate_is_transitive_across_the_call_graph() {
+        // leaf has Fs directly; mid calls leaf; top calls mid — both must inherit Fs.
+        let mut direct: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        direct.insert("leaf".into(), ["Fs"].into_iter().collect());
+        let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+        calls.insert("mid".into(), ["leaf".to_string()].into_iter().collect());
+        calls.insert("top".into(), ["mid".to_string()].into_iter().collect());
+        let all = vec!["leaf".to_string(), "mid".to_string(), "top".to_string(), "pure".to_string()];
+        let acc = propagate(&direct, &calls, &all);
+        assert!(acc["leaf"].contains("Fs"));
+        assert!(acc["mid"].contains("Fs"));
+        assert!(acc["top"].contains("Fs"));
+        assert!(acc["pure"].is_empty());
+    }
+
+    #[test]
+    fn tail2_keys_on_the_qualified_method() {
+        assert_eq!(tail2("a::b::RequestBuilder::new").as_deref(), Some("RequestBuilder::new"));
+        assert_eq!(tail2("pricing::compute_price").as_deref(), Some("pricing::compute_price"));
+        assert_eq!(tail2("send"), None); // a bare method leaf — no type qualifier to disambiguate
+    }
+
+    #[test]
+    fn qualified_tail_disambiguates_same_named_methods() {
+        // Two distinct `new`s; a `RequestBuilder::new` call must resolve to ONLY the RequestBuilder one,
+        // never to every `*::new` (the leaf-collision over-connection that smeared one effect crate-wide).
+        let fns = ["http::RequestBuilder::new", "body::Body::new"];
+        let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
+        let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+        for q in fns {
+            by_leaf.entry("new".into()).or_default().push(q.into());
+            by_tail2.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        // a `RequestBuilder::new(...)` call — routed through PRODUCTION `resolve_target` (qualified tail).
+        assert_eq!(resolve_target("api::RequestBuilder::new", "new", false, &by_tail2, &by_leaf),
+                   Some(&vec!["http::RequestBuilder::new".to_string()]));
+        // a bare `.new()`-by-leaf with two candidates resolves to NEITHER (ambiguous → under-report)
+        assert_eq!(resolve_target("new", "new", true, &by_tail2, &by_leaf), None);
+    }
+
+    #[test]
+    fn macro_bodies_are_walked_for_hidden_calls() {
+        // git2 hides every libgit2 FFI call in `try_call!(...)`; format macros hide call args. Both
+        // must be collected, while a non-expression macro body (matches!) is skipped without panicking.
+        let uses = HashMap::new();
+        let fields = FieldIndex::new();
+        let block: syn::Block = syn::parse_str(
+            "{ try_call!(raw::git_remote_fetch(x)); println!(\"{}\", helper()); let _ = matches!(y, Some(_)); }",
+        )
+        .unwrap();
+        let returns = ReturnIndex::new();
+        let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let mut c = CallCollector {
+            uses: &uses,
+            vars: HashMap::new(),
+            trait_vars: HashMap::new(),
+            fields: &fields,
+            trait_fields: &tf,
+            trait_impls: &ti,
+            local_traits: &td,
+            returns: &returns,
+            field_elem: &fe,
+            enum_variants: &ev,
+            elem_of: HashMap::new(), tuple_of: HashMap::new(),
+            calls: Vec::new(),
+            closure_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
+            unresolved: false,
+            err_ret_leaf: None,
+        };
+        for stmt in &block.stmts {
+            c.visit_stmt(stmt);
+        }
+        let leaves: Vec<&str> = c.calls.iter().map(|c| c.leaf.as_str()).collect();
+        assert!(leaves.contains(&"git_remote_fetch"), "call inside try_call! macro was missed: {leaves:?}");
+        assert!(leaves.contains(&"helper"), "call inside println! macro was missed: {leaves:?}");
+    }
+
+    #[test]
+    fn receiver_type_inference_resolves_method_dispatch() {
+        // A method call on a param/field/typed-let of a known type resolves to `Type::method`, so the
+        // existing per-crate rules fire. Build a collector with `client: reqwest::Client` in scope.
+        let uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        // struct App { http: reqwest::Client }
+        fields.entry("App".into()).or_default().insert("http".into(), "reqwest::Client".into());
+        let mut vars = HashMap::new();
+        vars.insert("client".to_string(), "reqwest::Client".to_string());
+        vars.insert("self".to_string(), "App".to_string());
+        let returns = ReturnIndex::new();
+        let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let block: syn::Block =
+            syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
+        let mut c = CallCollector {
+            uses: &uses,
+            vars,
+            trait_vars: HashMap::new(),
+            fields: &fields,
+            trait_fields: &tf,
+            trait_impls: &ti,
+            local_traits: &td,
+            returns: &returns,
+            field_elem: &fe,
+            enum_variants: &ev,
+            elem_of: HashMap::new(), tuple_of: HashMap::new(),
+            calls: Vec::new(),
+            closure_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
+            unresolved: false,
+            err_ret_leaf: None,
+        };
+        for stmt in &block.stmts {
+            c.visit_stmt(stmt);
+        }
+        let typed: Vec<&str> = c.calls.iter().map(|c| c.path.as_str()).collect();
+        // chain `client.get(url).send()` → base type reqwest::Client, terminal verb send
+        assert!(typed.contains(&"reqwest::Client::send"), "chain not typed to base: {typed:?}");
+        // field access `self.http.execute(req)` resolves via the struct field index
+        assert!(typed.contains(&"reqwest::Client::execute"), "field recv not typed: {typed:?}");
+        // and both classify as Net through the shared classifier
+        assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::send"), Some("Net"));
+        assert_eq!(candor_classify::classify("reqwest", "reqwest::Client::execute"), Some("Net"));
+    }
+
+    #[test]
+    fn cargo_toml_deps_handles_all_header_forms() {
+        let mut out = std::collections::HashSet::new();
+        let mut renames = HashMap::new();
+        cargo_toml_deps(
+            "[package]\nname = \"x\"\n\n[dependencies]\nserde_json = \"1\"\nleft-pad = \"1\"\n\n[dependencies.table-header]\nversion = \"1\"\n\n[target.'cfg(unix)'.dependencies.nix]\nversion = \"0.29\"\n\n[target.'cfg(windows)'.dependencies]\nwinapi = \"0.3\"\n\n[workspace.dependencies]\nshared-dep = \"2\"\n\n[dev-dependencies]\ncriterion = \"0.5\"\n\n[build-dependencies]\ncc = \"1\"\n\n[dev-dependencies.proptest]\nversion = \"1\"\n",
+            &mut out,
+            &mut renames,
+        );
+        for d in ["serde_json", "left_pad", "table_header", "nix", "winapi", "shared_dep"] {
+            assert!(out.contains(d), "missing {d}: {out:?}");
+        }
+        for d in ["criterion", "cc", "proptest", "x"] {
+            assert!(!out.contains(d), "harness/package dep leaked: {d}");
+        }
+        // dependency RENAMES, both forms (found live: ebman's `tui-common = { package = "tb-tui-common" }`)
+        let mut out2 = std::collections::HashSet::new();
+        let mut ren2 = HashMap::new();
+        cargo_toml_deps(
+            "[dependencies]\ntui-common = { version = \"0.1\", package = \"tb-tui-common\" }\n\n[dependencies.short-name]\nversion = \"1\"\npackage = \"the-real-crate\"\n",
+            &mut out2,
+            &mut ren2,
+        );
+        assert!(out2.contains("tui_common") && out2.contains("short_name"), "{out2:?}");
+        assert_eq!(ren2.get("tui_common").map(String::as_str), Some("tb_tui_common"));
+        assert_eq!(ren2.get("short_name").map(String::as_str), Some("the_real_crate"));
+        // A dep whose KEY contains "package" must NOT parse its own version as a rename, and a dep
+        // literally NAMED `package` is a dependency, not a rename (the substring-match regression).
+        let mut out3 = std::collections::HashSet::new();
+        let mut ren3 = HashMap::new();
+        cargo_toml_deps(
+            "[dependencies]\nmy-package = \"1.2\"\nfoo-package = { version = \"2\" }\npackage = \"0.1\"\nreal = { version = \"1\", package = \"renamed-crate\" }\n",
+            &mut out3,
+            &mut ren3,
+        );
+        assert!(out3.contains("my_package") && out3.contains("foo_package") && out3.contains("package"));
+        assert!(!ren3.contains_key("my_package"), "key-substring 'package' fabricated a rename: {ren3:?}");
+        assert!(!ren3.contains_key("foo_package"), "{ren3:?}");
+        assert!(!ren3.contains_key("package"), "a dep named `package` is not a rename: {ren3:?}");
+        assert_eq!(ren3.get("real").map(String::as_str), Some("renamed_crate"), "real rename lost: {ren3:?}");
+    }
+
+    #[test]
+    fn dep_report_chaining_joins_unambiguously_and_distrusts_stale_versions() {
+        let d = std::env::temp_dir().join(format!("candor-deps-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // same-version report: effects + surfaces join; two fns sharing a leaf drop that key
+        std::fs::write(d.join("report.billing.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.3"}},
+            "functions": [
+              {{"fn": "ledger::Ledger::post", "inferred": ["Db"], "tables": ["ledger.entries"], "hash": "billing#ledger::Ledger::post"}},
+              {{"fn": "a::dup", "inferred": ["Net"], "hash": "billing#a::dup"}},
+              {{"fn": "b::dup", "inferred": ["Fs"], "hash": "billing#b::dup"}}
+            ]}}"#)).unwrap();
+        // a STALE producer version: §2.1 — downgraded to Unknown, never silently trusted
+        std::fs::write(d.join("report.old_dep.scan.json"), r#"{
+            "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
+            "functions": [{"fn": "io::go", "inferred": ["Exec"], "hash": "old_dep#io::go"}]}"#).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        assert!(idx.crates.contains("billing") && idx.crates.contains("old_dep"));
+        let post = idx.by_key.get("billing#Ledger::post").expect("tail2 key");
+        assert_eq!(post.effects, vec!["Db"]);
+        assert_eq!(post.tables, vec!["ledger.entries"]);
+        assert!(idx.by_key.contains_key("billing#post"), "unambiguous leaf key");
+        assert!(!idx.by_key.contains_key("billing#dup"), "shared leaf must be dropped, never guessed");
+        assert!(idx.by_key.contains_key("billing#a::dup"), "tail2 still disambiguates the dups");
+        let old = idx.by_key.get("old_dep#go").expect("stale entry present");
+        assert_eq!(old.effects, vec!["Unknown"], "stale version must downgrade to Unknown");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dep_report_package_field_registers_coverage_for_the_ledger_exemption() {
+        // SPEC §2 chaining rule 3: the crates a loaded report COVERS come from its envelope
+        // `package`/`packages` field — independent of the file's NAME and of any join firing. An
+        // EMPTY report ({functions: []}) is an all-pure purity claim: covered, never a κ blind spot.
+        let d = std::env::temp_dir().join(format!("candor-deppkg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::create_dir_all(&d);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // deliberately NOT the `….<crate>.scan.json` filename shape — only the envelope names it.
+        std::fs::write(d.join("purity-claim.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.8"}},
+            "package": "dep-c",
+            "functions": []}}"#)).unwrap();
+        std::fs::write(d.join("multi.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.8"}},
+            "packages": ["alpha", "beta"],
+            "functions": []}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        assert!(idx.crates.contains("dep-c"), "the envelope `package` field registers coverage");
+        assert!(idx.crates.contains("dep_c"), "a hyphenated package also registers in Rust ident form");
+        assert!(idx.crates.contains("alpha") && idx.crates.contains("beta"),
+                "the JVM-shape `packages` array registers every covered package");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dep_join_does_not_fabricate_onto_a_local_shadow() {
+        // The CANDOR_DEPS cross-crate join must NOT override a LOCAL definition: a project module/fn named
+        // like a covered dep crate, resolving to the project's OWN pure code, must not inherit the dep
+        // report's effects (a cardinal-sin fabrication the join lacked the `resolved_local` guard for). A
+        // GENUINE external call into the covered crate must still inherit.
+        let dep = std::env::temp_dir().join(format!("candor-depjoin-rep-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dep.join("report.depb.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.7"}},
+            "functions": [{{"fn": "effectful_fn", "inferred": ["Net"], "hash": "depb#effectful_fn"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        assert!(idx.crates.contains("depb"));
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-depjoin-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        // LOCAL module named like the dep crate → its caller must stay PURE (no Net from the join)
+        let shadow = run("projsh", "mod depb { pub fn effectful_fn() -> i32 { 42 } }\npub fn uses_local() { let _ = depb::effectful_fn(); }");
+        assert!(eff(&shadow, "uses_local").is_empty(),
+                "dep-join FABRICATED the dep's effect onto a local shadow:\n{shadow}");
+        // GENUINE external call into the covered crate → must STILL inherit Net
+        let genuine = run("projgen", "pub fn calls_dep() { depb::effectful_fn(); }");
+        assert!(eff(&genuine, "calls_dep").contains(&"Net".to_string()),
+                "a genuine dep call must still inherit the dep report's Net:\n{genuine}");
+        let _ = std::fs::remove_dir_all(&dep);
+    }
+
+    #[test]
+    fn smart_pointer_receiver_resolves_pointee_method_but_not_clone() {
+        // A method call on an `Arc<T>`/`Rc<T>`/`Box<T>` receiver auto-derefs to T's method, so it must
+        // resolve the POINTEE's effect — not silently drop (the corpus-found §4 under-report: duct's
+        // whole public API read pure because `self.0: Arc<ExpressionInner>`). BUT `.clone()` must NOT
+        // resolve to `T::clone`: `arc.clone()` calls the pure `Arc::clone` (refcount), never the
+        // pointee's clone, so resolving it would FABRICATE an effectful in-crate clone.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-smartptr-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::sync::Arc; use std::rc::Rc;
+struct Inner;
+impl Inner {
+    fn doit(&self) { std::process::Command::new("ls").status().unwrap(); }
+    fn clone(&self) -> Inner { std::fs::read("/x").unwrap(); Inner }
+}
+struct A(Arc<Inner>);
+impl A { pub fn run(&self) { self.0.doit(); } pub fn dup(&self) -> Arc<Inner> { self.0.clone() } }
+struct B(Box<Inner>); impl B { pub fn run(&self) { self.0.doit(); } }
+struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
+"#;
+        let v = run("smartptr", src);
+        // auto-deref: the pointee's Exec is reached through Arc/Box/Rc receivers (was silently pure)
+        assert!(eff(&v, "A::run").contains(&"Exec".to_string()), "Arc deref lost Exec:\n{v}");
+        assert!(eff(&v, "B::run").contains(&"Exec".to_string()), "Box deref lost Exec:\n{v}");
+        assert!(eff(&v, "R::run").contains(&"Exec".to_string()), "Rc deref lost Exec:\n{v}");
+        // anti-fabrication: `arc.clone()` is the pure `Arc::clone`, never the effectful pointee clone
+        assert!(eff(&v, "A::dup").is_empty(), "arc.clone() FABRICATED the pointee's clone effect:\n{v}");
+    }
+
+    #[test]
+    fn custom_deref_resolves_pointee_method() {
+        // A custom `impl Deref for W { type Target = Inner }` makes `w.method()` auto-deref to Inner's
+        // method — it must reach the pointee's effect, not silently drop (the user-Deref analog of the
+        // Box/Arc/Rc peel; a newtype `impl Deref` dropped `wrapper.method()` to silent-pure — corpus find).
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-deref-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::ops::Deref;
+struct Inner;
+impl Inner {
+    fn doit(&self) { std::process::Command::new("ls").status().unwrap(); }
+    fn clone(&self) -> Inner { std::fs::read("/x").unwrap(); Inner }
+}
+struct W { inner: Inner }
+impl Deref for W { type Target = Inner; fn deref(&self) -> &Inner { &self.inner } }
+impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clone(); } }
+"#;
+        let v = run("deref", src);
+        // auto-deref through the custom Deref reaches the pointee's Exec (was silently pure)
+        assert!(eff(&v, "W::act").contains(&"Exec".to_string()), "custom Deref lost the pointee Exec:\n{v}");
+        // the global `.clone()` guard still holds — `w.clone()` is not attributed the pointee's effectful clone
+        assert!(eff(&v, "W::dup").is_empty(), "custom-Deref clone FABRICATED the pointee's clone effect:\n{v}");
+    }
+
+    #[test]
+    fn implicit_iterator_force_charges_local_iter_next_but_not_generic() {
+        // A custom `impl Iterator for LocalType` whose `next()` is effectful must charge EVERY
+        // implicit forcing site — a `for` loop and consuming combinators (`.collect()`/`.count()`/
+        // `.fold()`/…), not just an explicit `.next()`. Controls: a PURE custom iterator stays pure,
+        // and a GENERIC/opaque iterator param must NOT inherit any concrete impl's effect (the
+        // review-killed RowIter fabrication must stay closed).
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-iternext-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, name: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(name))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+            struct LogTail { n: usize }
+            impl Iterator for LogTail {
+                type Item = String;
+                fn next(&mut self) -> Option<String> {
+                    std::fs::write("/t", b"x").unwrap();
+                    if self.n == 0 { None } else { self.n -= 1; Some(String::new()) }
+                }
+            }
+            fn tail(_p: &str) -> LogTail { LogTail { n: 1 } }
+            pub fn count_lines(p: &str) -> usize { tail(p).count() }
+            pub fn all_lines(p: &str) -> Vec<String> { tail(p).collect() }
+            pub fn process(p: &str) { for _l in tail(p) {} }
+            pub fn folded(p: &str) -> usize { tail(p).fold(0, |a, _| a + 1) }
+            pub fn explicit(p: &str) { let mut t = tail(p); let _ = t.next(); }
+            fn build() -> LogTail { LogTail { n: 1 } }
+            pub fn built_consumer() -> usize { build().count() }
+
+            struct PureIter { n: usize }
+            impl Iterator for PureIter {
+                type Item = u8;
+                fn next(&mut self) -> Option<u8> { if self.n == 0 { None } else { self.n -= 1; Some(1) } }
+            }
+            fn pure_src() -> PureIter { PureIter { n: 1 } }
+            pub fn pure_collect() -> Vec<u8> { pure_src().collect() }
+            pub fn pure_for() { for _ in pure_src() {} }
+
+            struct RowIter { n: usize }
+            impl Iterator for RowIter {
+                type Item = u8;
+                fn next(&mut self) -> Option<u8> {
+                    std::fs::write("/db", b"q").unwrap();
+                    if self.n == 0 { None } else { self.n -= 1; Some(0) }
+                }
+            }
+            pub fn generic_param(it: impl Iterator<Item = u8>) { for _ in it {} }
+            pub fn generic_bound<I: Iterator>(it: I) { let _ = it.count(); }
+            pub fn dyn_param(it: &mut dyn Iterator<Item = u8>) { let _ = it.count(); }
+
+            fn opaque() -> impl Iterator<Item = u8> { OpaqueSrc { n: 1 } }
+            struct OpaqueSrc { n: usize }
+            impl Iterator for OpaqueSrc {
+                type Item = u8;
+                fn next(&mut self) -> Option<u8> {
+                    std::fs::write("/o", b"z").unwrap();
+                    if self.n == 0 { None } else { self.n -= 1; Some(0) }
+                }
+            }
+            pub fn opaque_consumer() -> usize { opaque().count() }
+        "#;
+        let v = run("iternext", src);
+        // Effectful custom iterator: implicit force at every consumer carries Fs.
+        for f in ["count_lines", "all_lines", "process", "folded", "explicit", "built_consumer"] {
+            assert!(eff(&v, f).contains(&"Fs".to_string()),
+                    "implicit iterator force under-reported: {f} should be Fs but is {:?}\n{v}", eff(&v, f));
+        }
+        // Control 1: a PURE custom iterator stays pure (no fabrication from forcing).
+        for f in ["pure_collect", "pure_for"] {
+            assert!(eff(&v, f).is_empty(), "pure custom iterator fabricated an effect at {f}: {:?}", eff(&v, f));
+        }
+        // Control 2 (RowIter guard): a generic/opaque iterator param must NOT inherit a concrete
+        // impl's effect, even though `impl Iterator for RowIter` does Fs.
+        for f in ["generic_param", "generic_bound", "dyn_param"] {
+            assert!(eff(&v, f).is_empty(),
+                    "RowIter guard breached: generic iterator consumer {f} was charged {:?}", eff(&v, f));
+        }
+        // `-> impl Iterator` opaque return: can't resolve the concrete type → acceptable miss (pure).
+        assert!(eff(&v, "opaque_consumer").is_empty(),
+                "opaque-return consumer should stay pure (no concrete type): {:?}", eff(&v, "opaque_consumer"));
+    }
+
+    #[test]
+    fn implicit_coercion_edges_charge_local_effectful_impls_but_never_std() {
+        // The implicit-conversion / coercion edges (cardinal sin = a fn read PURE when an effect is
+        // reachable through an IMPLICIT trait-method invocation): `format!`/`.to_string()`→Display::fmt,
+        // `{:?}`→Debug::fmt, `?`→From::from, operators→Add/PartialEq/Index/Neg, `*w`→Deref::deref,
+        // `.into()`→From::from, and struct-literal/unit Drop-glue. Each must light up the triggering fn
+        // when a LOCAL EFFECTFUL impl exists; controls (a PURE impl, a STD/primitive operand) stay pure.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-coerce-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, name: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(name))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+            use std::fmt;
+            // #2 effectful Display via format! / println! / to_string
+            struct EffDisp;
+            impl fmt::Display for EffDisp {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    std::fs::write("/t", b"x").unwrap(); write!(f, "e")
+                }
+            }
+            pub fn disp_format() -> String { let d = EffDisp; format!("{}", d) }
+            pub fn disp_println() { let d = EffDisp; println!("hi {}", d); }
+            pub fn disp_tostring() -> String { let d = EffDisp; d.to_string() }
+            // #2 effectful Debug via {:?}
+            struct EffDbg;
+            impl fmt::Debug for EffDbg {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    std::fs::write("/t", b"x").unwrap(); write!(f, "d")
+                }
+            }
+            pub fn dbg_format() -> String { let d = EffDbg; format!("{:?}", d) }
+            // control: PURE Display, and STD types (String/i32) → pure
+            struct PureDisp;
+            impl fmt::Display for PureDisp {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "p") }
+            }
+            pub fn disp_pure() -> String { let d = PureDisp; format!("{}", d) }
+            pub fn fmt_std() -> String { let s = String::new(); let n = 3i32; format!("{} {}", s, n) }
+
+            // #1 effectful From via ?
+            struct MyErr;
+            impl From<std::io::Error> for MyErr {
+                fn from(_e: std::io::Error) -> MyErr { std::fs::write("/t", b"x").unwrap(); MyErr }
+            }
+            fn may_fail() -> Result<(), std::io::Error> { Ok(()) }
+            pub fn q_eff() -> Result<(), MyErr> { may_fail()?; Ok(()) }
+            // control: PURE From via ?
+            struct PureErr;
+            impl From<std::io::Error> for PureErr { fn from(_e: std::io::Error) -> PureErr { PureErr } }
+            fn may_fail2() -> Result<(), std::io::Error> { Ok(()) }
+            pub fn q_pure() -> Result<(), PureErr> { may_fail2()?; Ok(()) }
+
+            // #4 effectful operators
+            struct Acc;
+            impl std::ops::Add for Acc {
+                type Output = Acc;
+                fn add(self, _o: Acc) -> Acc { std::fs::write("/t", b"x").unwrap(); Acc }
+            }
+            pub fn op_add() -> Acc { let a = Acc; let b = Acc; a + b }
+            struct Cmp;
+            impl PartialEq for Cmp {
+                fn eq(&self, _o: &Cmp) -> bool { std::fs::write("/t", b"x").unwrap(); true }
+            }
+            pub fn op_eq() -> bool { let a = Cmp; let b = Cmp; a == b }
+            struct Ix;
+            impl std::ops::Index<usize> for Ix {
+                type Output = u8;
+                fn index(&self, _i: usize) -> &u8 { std::fs::write("/t", b"x").unwrap(); &0 }
+            }
+            pub fn op_index() -> u8 { let a = Ix; a[0] }
+            struct Ng;
+            impl std::ops::Neg for Ng {
+                type Output = Ng;
+                fn neg(self) -> Ng { std::fs::write("/t", b"x").unwrap(); Ng }
+            }
+            pub fn op_neg() -> Ng { let a = Ng; -a }
+            // control: PURE operator, and STD arithmetic → pure
+            struct PureAdd;
+            impl std::ops::Add for PureAdd { type Output = PureAdd; fn add(self, _o: PureAdd) -> PureAdd { PureAdd } }
+            pub fn op_pure() -> PureAdd { let a = PureAdd; let b = PureAdd; a + b }
+            pub fn op_std() -> i32 { let a = 1i32; let b = 2i32; a + b }
+
+            // #3 effectful Deref via *w
+            struct Wrap;
+            impl std::ops::Deref for Wrap {
+                type Target = u8;
+                fn deref(&self) -> &u8 { std::fs::write("/t", b"x").unwrap(); &0 }
+            }
+            pub fn deref_eff() -> u8 { let w = Wrap; *w }
+
+            // #5 effectful From via .into()
+            struct Tgt;
+            impl From<u8> for Tgt { fn from(_v: u8) -> Tgt { std::fs::write("/t", b"x").unwrap(); Tgt } }
+            pub fn into_eff() { let x: Tgt = 5u8.into(); let _ = x; }
+
+            // #6 struct-literal & unit Drop-glue
+            struct Guard { n: u8 }
+            impl Drop for Guard { fn drop(&mut self) { std::fs::write("/t", b"x").unwrap(); } }
+            pub fn drop_struct() { let _g = Guard { n: 1 }; }
+            struct UnitGuard;
+            impl Drop for UnitGuard { fn drop(&mut self) { std::fs::write("/t", b"x").unwrap(); } }
+            pub fn drop_unit() { let _g = UnitGuard; }
+            // control: PURE-Drop struct literal → pure
+            struct PureGuard { n: u8 }
+            impl Drop for PureGuard { fn drop(&mut self) {} }
+            pub fn drop_pure() { let _g = PureGuard { n: 1 }; }
+        "#;
+        let v = run("coerce", src);
+        // Every effectful coercion must carry Fs at the triggering fn.
+        for f in [
+            "disp_format", "disp_println", "disp_tostring", "dbg_format", "q_eff",
+            "op_add", "op_eq", "op_index", "op_neg", "deref_eff", "into_eff",
+            "drop_struct", "drop_unit",
+        ] {
+            assert!(eff(&v, f).contains(&"Fs".to_string()),
+                    "coercion under-reported: {f} should be Fs but is {:?}", eff(&v, f));
+        }
+        // Controls: a PURE impl or a STD/primitive operand must stay pure — no fabrication, no flood.
+        for f in ["disp_pure", "fmt_std", "q_pure", "op_pure", "op_std", "drop_pure"] {
+            assert!(eff(&v, f).is_empty(),
+                    "coercion control fabricated an effect at {f}: {:?}", eff(&v, f));
+        }
+    }
+
+    #[test]
+    fn dispatch_typed_receivers_resolve_via_local_impls_or_read_unknown() {
+        // The trait-object hole, closed: `t.save()` on a `&dyn Store` either edges to the LOCAL
+        // implementors (syntactic CHA, the JVM engine's bounded move) or reads honest Unknown —
+        // never silent-pure. External traits stay out (no Unknown flood on `impl Iterator`).
+        let uses = HashMap::new();
+        let fields = FieldIndex::new();
+        let returns = ReturnIndex::new();
+        let mut ti = TraitImplIndex::new();
+        ti.insert("Store".into(), vec!["PgStore".into(), "MemStore".into()]);
+        let mut td: HashMap<String, LocalTrait> = HashMap::new();
+        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect() });
+        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect() }); // no impl in sight
+        let mut tf = TraitFieldIndex::new();
+        // struct App { store: Box<dyn Store> }
+        tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
+        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let run = |src: &str, sig: &str| {
+            let sig: syn::Signature = syn::parse_str(sig).unwrap();
+            let blk: syn::Block = syn::parse_str(src).unwrap();
+            let trait_vars = seed_trait_vars(&sig);
+            let mut vars = seed_vars(&sig, Some("App"), &uses);
+            for k in trait_vars.keys() {
+                vars.remove(k); // same precedence as fninfo: dispatch-typing wins
+            }
+            vars.insert("self".to_string(), "App".to_string());
+            let mut c = CallCollector {
+                uses: &uses,
+                vars,
+                trait_vars,
+                fields: &fields,
+                trait_fields: &tf,
+                trait_impls: &ti,
+                local_traits: &td,
+                returns: &returns,
+                field_elem: &fe,
+                enum_variants: &ev,
+                elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                calls: Vec::new(),
+                closure_vars: std::collections::HashSet::new(),
+                fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
+                unresolved: false,
+                err_ret_leaf: None,
+            };
+            for stmt in &blk.stmts {
+                c.visit_stmt(stmt);
+            }
+            (c.calls.iter().map(|c| c.path.clone()).collect::<Vec<_>>(), c.unresolved)
+        };
+        // &dyn param → typed edges to BOTH local impls, not unresolved
+        let (paths, unres) = run("{ t.save(x); }", "fn f(t: &dyn Store)");
+        assert!(paths.contains(&"PgStore::save".to_string()), "dyn param not CHA-resolved: {paths:?}");
+        assert!(paths.contains(&"MemStore::save".to_string()), "dyn param missed an impl: {paths:?}");
+        assert!(!unres, "narrow local dispatch must not read Unknown");
+        // impl-Trait param and generic bound take the same route
+        let (paths, _) = run("{ s.save(x); }", "fn f(s: impl Store)");
+        assert!(paths.contains(&"PgStore::save".to_string()), "impl-Trait param not resolved: {paths:?}");
+        let (paths, _) = run("{ x.save(y); }", "fn f<X: Store>(x: X)");
+        assert!(paths.contains(&"PgStore::save".to_string()), "generic bound not resolved: {paths:?}");
+        // the DI field: self.store is Box<dyn Store> via the trait-field index
+        let (paths, _) = run("{ self.store.save(x); }", "fn f(&self)");
+        assert!(paths.contains(&"PgStore::save".to_string()), "trait-typed field not resolved: {paths:?}");
+        // a LOCAL trait with no visible impl: something implements it somewhere — honest Unknown
+        let (_, unres) = run("{ k.flush(); }", "fn f(k: &dyn Sink)");
+        assert!(unres, "local trait without impls must read Unknown, not silent-pure");
+        // an EXTERNAL trait (not locally declared, no local impls): documented miss, NO flood
+        let (paths, unres) = run("{ it.next(); }", "fn f(it: impl Iterator)");
+        assert!(!unres && !paths.iter().any(|p| p.contains("::next")), "external trait must stay out: {paths:?}");
+        // FABRICATION GUARD (review, execution-verified): an EXTERNAL trait with a LOCAL impl
+        // must STILL stay out — `impl Iterator for RowIter` + `f(it: impl Iterator)` must not
+        // charge f with RowIter's effects.
+        {
+            let mut ti2 = TraitImplIndex::new();
+            ti2.insert("Iterator".into(), vec!["RowIter".into()]);
+            let sig: syn::Signature = syn::parse_str("fn f(it: impl Iterator)").unwrap();
+            let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
+            let mut c = CallCollector {
+                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
+                fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
+                returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                calls: Vec::new(),
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None,
+            };
+            for stmt in &blk.stmts { c.visit_stmt(stmt); }
+            assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
+                    "external-trait local impl must not resolve (fabrication)");
+            assert!(!c.unresolved, "external trait must not flood Unknown either");
+        }
+        // a method the LOCAL trait does NOT declare (supertrait/blanket call) — out, no flood
+        let (paths, unres) = run("{ t.clone(); }", "fn f(t: &dyn Store)");
+        assert!(!unres && !paths.iter().any(|p| p.ends_with("::clone")),
+                "undeclared method must neither edge nor flood: {paths:?}");
+        // the cross-engine CHA bound: 12 impls resolve, 13 read honest Unknown
+        {
+            let wide = |n: usize, src: &str, sig: &str| {
+                let mut ti2 = TraitImplIndex::new();
+                ti2.insert("Store".into(), (0..n).map(|i| format!("S{i}")).collect());
+                let sig: syn::Signature = syn::parse_str(sig).unwrap();
+                let blk: syn::Block = syn::parse_str(src).unwrap();
+                let mut c = CallCollector {
+                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
+                    fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
+                    returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                    calls: Vec::new(),
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None,
+                };
+                for stmt in &blk.stmts { c.visit_stmt(stmt); }
+                (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
+            };
+            let (edges, unres) = wide(12, "{ t.save(x); }", "fn f(t: &dyn Store)");
+            assert!(edges == 12 && !unres, "12 impls must resolve (the shared bound)");
+            let (edges, unres) = wide(13, "{ t.save(x); }", "fn f(t: &dyn Store)");
+            assert!(edges == 0 && unres, "13 impls must read Unknown, not resolve");
+        }
+    }
+
+    #[test]
+    fn return_type_inference_flows_through_local_factories() {
+        // `let p = create_pool()?; p.fetch_one(q)` — create_pool's recorded return type lets p resolve.
+        let uses = HashMap::new();
+        let fields = FieldIndex::new();
+        let mut returns = ReturnIndex::new();
+        returns.insert("create_pool".to_string(), "sqlx::PgPool".to_string());
+        let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let block: syn::Block =
+            syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
+        let mut c = CallCollector {
+            uses: &uses,
+            vars: HashMap::new(),
+            trait_vars: HashMap::new(),
+            fields: &fields,
+            trait_fields: &tf,
+            trait_impls: &ti,
+            local_traits: &td,
+            returns: &returns,
+            field_elem: &fe,
+            enum_variants: &ev,
+            elem_of: HashMap::new(), tuple_of: HashMap::new(),
+            calls: Vec::new(),
+            closure_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
+            unresolved: false,
+            err_ret_leaf: None,
+        };
+        for stmt in &block.stmts {
+            c.visit_stmt(stmt);
+        }
+        let typed: Vec<&str> = c.calls.iter().map(|c| c.path.as_str()).collect();
+        assert!(typed.contains(&"sqlx::PgPool::fetch_one"), "return-typed recv not resolved: {typed:?}");
+
+        // A computed-callable invocation (a closure / fn-pointer the scan can't see through) marks the
+        // function `unresolved` (→ honest `Unknown`), while a LOCAL closure whose body IS visible does
+        // not — its effects were already walked lexically.
+        let mk = |src: &str| {
+            let blk: syn::Block = syn::parse_str(src).unwrap();
+            let mut cc = CallCollector {
+                uses: &uses,
+                vars: HashMap::new(),
+                trait_vars: HashMap::new(),
+                fields: &fields,
+                trait_fields: &tf,
+                trait_impls: &ti,
+                local_traits: &td,
+                returns: &returns,
+                field_elem: &fe,
+                enum_variants: &ev,
+                elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                calls: Vec::new(),
+                closure_vars: std::collections::HashSet::new(),
+                fn_typed_vars: std::collections::HashSet::new(),
+            fn_alias: std::collections::HashMap::new(),
+            lazy_statics: empty_lazy(),
+            forced_lazies: std::collections::HashSet::new(),
+                unresolved: false,
+                err_ret_leaf: None,
+            };
+            for stmt in &blk.stmts {
+                cc.visit_stmt(stmt);
+            }
+            cc.unresolved
+        };
+        assert!(mk("{ (handlers[k])(); }"), "indexed callable must be unresolved");
+        assert!(mk("{ (self.cb)(); }"), "fn-pointer field call must be unresolved");
+        assert!(!mk("{ let g = |x: i32| x + 1; let _ = g(3); }"), "local closure body is visible — not unresolved");
+        assert!(!mk("{ helper(); other::thing(); }"), "ordinary path calls are not unresolved");
+
+        // unwrap_result_option peels Result/Option to the success type
+        let r: syn::Type = syn::parse_str("std::io::Result<reqwest::Client>").unwrap();
+        assert_eq!(type_path(unwrap_result_option(&r), &uses).as_deref(), Some("reqwest::Client"));
+        let o: syn::Type = syn::parse_str("Option<PgPool>").unwrap();
+        assert_eq!(type_path(unwrap_result_option(&o), &uses).as_deref(), Some("PgPool"));
+    }
+
+    #[test]
+    fn test_file_stems_are_recognised() {
+        assert!(is_test_file_stem("tests")); // src/foo/tests.rs
+        assert!(is_test_file_stem("test"));
+        assert!(is_test_file_stem("decoder_tests")); // base64's read/decoder_tests.rs
+        assert!(is_test_file_stem("engine_test"));
+        // legitimate non-test modules must NOT be excluded
+        assert!(!is_test_file_stem("latest")); // not `_test`-suffixed (no underscore boundary)
+        assert!(!is_test_file_stem("request"));
+        assert!(!is_test_file_stem("contest"));
+        assert!(!is_test_file_stem("lib"));
+    }
+
+    #[test]
+    fn stable_policy_gate_evaluates_all_three_rule_kinds() {
+        let all = vec!["api::handle".to_string(), "db::run".to_string(), "ui::draw".to_string()];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inferred.insert("api::handle".into(), ["Net"].into_iter().collect());
+        inferred.insert("db::run".into(), ["Db"].into_iter().collect());
+        let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+        calls.insert("ui::draw".into(), ["db::run".to_string()].into_iter().collect());
+        let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
+        hosts.insert("api::handle".into(), ["evil.example.com".to_string()].into_iter().collect());
+        let empty = HashMap::new();
+        let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
+        let mut tables: HashMap<String, BTreeSet<String>> = HashMap::new();
+        tables.insert("db::run".into(), ["audit.log".to_string()].into_iter().collect());
+        // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
+        let v = policy_violations(
+            "deny Net api\nallow Net in api good.example.com\nforbid ui -> db\n",
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc,
+        );
+        assert_eq!(v.len(), 3, "{}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
+        // 006 names the denied effect in `effects` (the denied SET, not just the message text).
+        assert!(v.iter().any(|g| g.rule == "AS-EFF-006" && g.func == "api::handle" && g.effects == ["Net"]));
+        assert!(v.iter().any(|g| g.rule == "AS-EFF-008" && g.detail.contains("evil.example.com") && g.effects == ["Net"]));
+        // 009 is a layer-flow — no single effect, so `effects` is empty.
+        assert!(v.iter().any(|g| g.rule == "AS-EFF-009" && g.func == "ui::draw" && g.effects.is_empty()));
+        // clean policy -> no violations; `pure` flags ANY effect incl. the Db fn.
+        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).is_empty());
+        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).len(), 1);
+        // the Db table allowlist: db::run reaches audit.log — outside `ledger.*` -> violation;
+        // covered by `audit.*` -> clean. ui::draw INHERITS Db but the literal propagation is the
+        // caller's tablesacc, supplied here only for db::run, so only db::run flags.
+        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc);
+        assert_eq!(bad.len(), 1, "{}", bad.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
+        assert!(bad[0].detail.contains("audit.log"));
+        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).is_empty());
+    }
+
+    #[test]
+    fn masking_incomplete_net_surface_not_certified() {
+        // The masking evasion: a fn with a captured BENIGN host AND a structurally-INVISIBLE Net reach
+        // (an incomplete surface) must NOT be certified by the benign host. A clean fn (host captured,
+        // surface complete) certifies. Mirrors candor-java 0.5.29.
+        let all = vec!["a::mask".to_string(), "a::clean".to_string()];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inferred.insert("a::mask".into(), ["Net"].into_iter().collect());
+        inferred.insert("a::clean".into(), ["Net"].into_iter().collect());
+        let calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
+        hosts.insert("a::mask".into(), ["api.stripe.com".to_string()].into_iter().collect());
+        hosts.insert("a::clean".into(), ["api.stripe.com".to_string()].into_iter().collect());
+        let empty: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let tables: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inc.insert("a::mask".into(), ["Net"].into_iter().collect()); // mask also has an invisible reach
+        let v = policy_violations(
+            "allow Net api.stripe.com\n",
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &inc,
+        );
+        assert!(v.iter().any(|g| g.func == "a::mask" && g.detail.contains("cannot be certified")), "{:?}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
+        assert!(!v.iter().any(|g| g.func == "a::clean"), "clean must certify: {:?}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn masking_fs_path_and_db_table_gate_fails_closed() {
+        // End-to-end (scan_one + a CANDOR_POLICY file): a MASKED Fs path / Db table reached ALONGSIDE a
+        // benign ALLOWED literal must FAIL the allowlist gate (exit 1) — the benign sibling must not mask
+        // the runtime-built endpoint. A single compliant literal still PASSES (no false positive). A
+        // fully-masked program (no benign sibling) still fails. The gate evasion this closes:
+        // `inferred=[Fs] paths=[/var/app/x]` with no `incomplete` certified `allow Fs /var/app` while a
+        // sibling `fs::write(format!("/etc/{}","passwd"), …)` hit /etc/passwd at runtime.
+        let run = |name: &str, src: &str, policy: &str| -> i32 {
+            let d = std::env::temp_dir().join(format!("candor-mask-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let pp = d.join("candor.policy");
+            std::fs::write(&pp, policy).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false,
+                policy: Some(pp.to_string_lossy().into_owned()), quiet: true, deps_idx: &idx,
+            });
+            let _ = std::fs::remove_dir_all(&d);
+            rc
+        };
+
+        // Fs: a benign allowed write + a MASKED (runtime-path) write → gate FAILS (Fs incomplete).
+        let fs_mix = r#"
+            use std::fs;
+            pub fn go() {
+                let _ = fs::write("/var/app/x", b"x");
+                let p = format!("/etc/{}", "passwd");
+                let _ = fs::write(p, b"x");
+            }
+        "#;
+        assert_eq!(run("fsmix", fs_mix, "allow Fs /var/app\n"), 1, "masked Fs path must fail the gate");
+
+        // Fs: a single compliant literal (no masking) → PASSES.
+        let fs_ok = r#"
+            use std::fs;
+            pub fn go() { let _ = fs::write("/var/app/x", b"x"); }
+        "#;
+        assert_eq!(run("fsok", fs_ok, "allow Fs /var/app\n"), 0, "compliant Fs path must pass (no false positive)");
+
+        // Fs: fully masked (no benign sibling) → still fails (unchanged behaviour).
+        let fs_masked = r#"
+            use std::fs;
+            pub fn go() { let p = format!("/etc/{}", "passwd"); let _ = fs::write(p, b"x"); }
+        "#;
+        assert_eq!(run("fsmask", fs_masked, "allow Fs /var/app\n"), 1, "fully-masked Fs path must fail");
+
+        // Db: a benign allowed query + a MASKED (runtime-query) execute → gate FAILS (Db incomplete).
+        let db_mix = r#"
+            pub fn go(con: &rusqlite::Connection) {
+                let _ = con.execute("SELECT id FROM customers", []);
+                let q = format!("DELETE FROM {}", "secrets");
+                let _ = con.execute(&q, []);
+            }
+        "#;
+        assert_eq!(run("dbmix", db_mix, "allow Db customers\n"), 1, "masked Db table must fail the gate");
+
+        // Db: a single compliant query (no masking) → PASSES.
+        let db_ok = r#"
+            pub fn go(con: &rusqlite::Connection) {
+                let _ = con.execute("SELECT id FROM customers", []);
+            }
+        "#;
+        assert_eq!(run("dbok", db_ok, "allow Db customers\n"), 0, "compliant Db table must pass (no false positive)");
+    }
+
+    #[test]
+    fn gate_over_unparseable_source_fails_closed() {
+        // SOUNDNESS: a policy gate over a crate where a source file failed to PARSE must NOT report
+        // green — the unparsed file's effects are absent from the report, so a `policy ✓` over it is a
+        // false-pure. Exit 2 (mirroring the unreadable-policy posture), never 0. A clean-parsing crate
+        // under the same policy still passes 0 (the failure signal is specific, not a blanket fail).
+        let run = |name: &str, src: &str, with_policy: bool| -> i32 {
+            let d = std::env::temp_dir().join(format!("candor-parsefail-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let pp = d.join("candor.policy");
+            std::fs::write(&pp, "deny Exec\n").unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false,
+                policy: if with_policy { Some(pp.to_string_lossy().into_owned()) } else { None },
+                quiet: true, deps_idx: &idx,
+            });
+            let _ = std::fs::remove_dir_all(&d);
+            rc
+        };
+        // A file that does NOT parse (a stray token) under a configured gate → exit 2, never green.
+        let broken = "pub fn ok() {}\nthis is not valid rust @@@\n";
+        assert_eq!(run("broken", broken, true), 2,
+                   "a configured gate over an unparseable source file must FAIL exit 2, never green");
+        // No policy configured → no gate verdict to corrupt; the parse-failure is disclosed (stderr) only.
+        assert_eq!(run("brokennopol", broken, false), 0,
+                   "without a policy there is no gate; a parse failure is disclosed, not an exit code");
+        // A clean-parsing crate under the same gate still passes (the failure signal is specific).
+        assert_eq!(run("clean", "pub fn ok() {}\n", true), 0,
+                   "a clean-parsing crate must still pass the gate (no blanket fail)");
+    }
+
+    #[test]
+    fn call_returning_a_callable_in_an_unannotated_local_reads_unknown() {
+        // §4 HONESTY: `let g = make_cb(); g()` where `make_cb` returns a CALLABLE must read the opaque
+        // callback (Unknown), not silent-pure / a phantom free-fn `g`. Covers all three callable return
+        // shapes (`fn()`, `impl Fn`, `Box<dyn Fn>`). A NON-callable factory's binding stays pure.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-retcb-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        // `Box<dyn Fn>` return: the binding is fn-typed → `g()` is Unknown.
+        let boxed = r#"
+            pub fn make_cb() -> Box<dyn Fn()> { Box::new(|| {}) }
+            pub fn uses() { let g = make_cb(); g(); }
+        "#;
+        assert!(eff(&run("retbox", boxed), "uses").contains(&"Unknown".to_string()),
+                "a call returning Box<dyn Fn> bound to a local must read Unknown at the call site");
+        // bare `fn()` return.
+        let bare = r#"
+            fn h() {}
+            pub fn make_cb() -> fn() { h }
+            pub fn uses() { let g = make_cb(); g(); }
+        "#;
+        assert!(eff(&run("retbare", bare), "uses").contains(&"Unknown".to_string()),
+                "a call returning fn() bound to a local must read Unknown at the call site");
+        // `impl Fn` return.
+        let impl_fn = r#"
+            pub fn make_cb() -> impl Fn() { || {} }
+            pub fn uses() { let g = make_cb(); g(); }
+        "#;
+        assert!(eff(&run("retimpl", impl_fn), "uses").contains(&"Unknown".to_string()),
+                "a call returning impl Fn bound to a local must read Unknown at the call site");
+        // CONTROL: a non-callable factory's binding is NOT fn-typed → no fabricated Unknown.
+        let plain = r#"
+            pub fn make_v() -> i32 { 42 }
+            pub fn uses() { let v = make_v(); let _ = v; }
+        "#;
+        assert!(!eff(&run("retplain", plain), "uses").contains(&"Unknown".to_string()),
+                "a non-callable factory binding must stay pure (no fabricated Unknown)");
+    }
+
+    #[test]
+    fn ambiguous_same_name_local_bare_leaf_reads_unknown() {
+        // §4 HONESTY: a BARE leaf naming TWO-OR-MORE local defs (a free fn + a same-named method, here
+        // `process`) defeats `resolve_target`'s uniqueness filter AND is suppressed from the classifier —
+        // today its callee's effects vanish (silent-pure). Disclose Unknown instead. A UNIQUE same-name
+        // leaf must STILL resolve (no spurious Unknown) — the precise-scoping control.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-amb-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        // Two local defs of the leaf `process` (a free fn + a method); a bare `process()` call can't be
+        // disambiguated → Unknown, not silent-pure.
+        let ambiguous = r#"
+            pub fn process() {}
+            struct W;
+            impl W { fn process(&self) {} }
+            pub fn caller() { process(); }
+        "#;
+        assert!(eff(&run("ambig", ambiguous), "caller").contains(&"Unknown".to_string()),
+                "a bare leaf with two same-name local defs must read Unknown, not silent-pure");
+        // CONTROL: a UNIQUE local `solo` resolves cleanly — no spurious Unknown from this branch.
+        let unique = r#"
+            pub fn solo() {}
+            pub fn caller() { solo(); }
+        "#;
+        assert!(!eff(&run("uniq", unique), "caller").contains(&"Unknown".to_string()),
+                "a unique same-name leaf must resolve, never read a spurious Unknown");
+    }
+
+    #[test]
+    fn only_root_build_rs_is_the_build_script() {
+        use std::path::Path;
+        // the Cargo build script — crate-root `build.rs` — IS skipped
+        assert!(is_build_script(Path::new("build.rs")));
+        // a nested `build.rs` is an ordinary source module and must NOT be skipped (the regression:
+        // git2's `src/build.rs` is `RepoBuilder`, the whole clone/fetch network surface)
+        assert!(!is_build_script(Path::new("src/build.rs")));
+        assert!(!is_build_script(Path::new("src/foo/build.rs")));
+        assert!(!is_build_script(Path::new("build/mod.rs"))); // a `build` module dir, not the script
+    }
+
+    #[test]
+    fn cfg_test_modules_are_recognised() {
+        let yes1: syn::ItemMod = syn::parse_str("#[cfg(test)] mod tests {}").unwrap();
+        let yes2: syn::ItemMod =
+            syn::parse_str("#[cfg(any(test, feature = \"x\"))] mod tests {}").unwrap();
+        let no1: syn::ItemMod = syn::parse_str("#[cfg(feature = \"std\")] mod imp {}").unwrap();
+        let no2: syn::ItemMod = syn::parse_str("mod real {}").unwrap();
+        // deeper nesting positively requiring test → still skipped
+        let yes3: syn::ItemMod =
+            syn::parse_str("#[cfg(any(all(test, unix), windows))] mod t {}").unwrap();
+        // `not(test)` is PRODUCTION code — must NOT be treated as a test module (the regression fix)
+        let prod1: syn::ItemMod = syn::parse_str("#[cfg(not(test))] mod prod {}").unwrap();
+        let prod2: syn::ItemMod = syn::parse_str("#[cfg(all(unix, not(test)))] mod prod {}").unwrap();
+        assert!(is_cfg_test(&yes1.attrs));
+        assert!(is_cfg_test(&yes2.attrs));
+        assert!(is_cfg_test(&yes3.attrs));
+        assert!(!is_cfg_test(&no1.attrs));
+        assert!(!is_cfg_test(&no2.attrs));
+        assert!(!is_cfg_test(&prod1.attrs), "cfg(not(test)) is production, not a test module");
+        assert!(!is_cfg_test(&prod2.attrs), "cfg(all(unix, not(test))) is production");
+    }
+
+    #[test]
+    fn expand_does_not_alias_a_crate_rooted_path() {
+        // `crate::config::load` is explicitly crate-local; a `use other::config;` import must NOT hijack it.
+        let u = uses(&[("config", "other::config")]);
+        assert_eq!(expand("crate::config::load", &u), "config::load");
+        assert_eq!(expand("self::config::load", &u), "config::load");
+        // a NON-rooted bare `config::load` still expands via the use alias
+        assert_eq!(expand("config::load", &u), "other::config::load");
+    }
+
+    #[test]
+    fn ctor_type_rejects_a_module_path_receiver() {
+        // `serde_json::from_str(s)` must NOT infer the MODULE `serde_json` as a type (lower-case receiver);
+        // `reqwest::Client::new()` must still infer `reqwest::Client` (UpperCamel type receiver).
+        let u = HashMap::new();
+        let r = ReturnIndex::new();
+        let modcall: syn::Expr = syn::parse_str("serde_json::from_str(s)").unwrap();
+        assert_eq!(ctor_type(&modcall, &u, &r), None);
+        let typecall: syn::Expr = syn::parse_str("reqwest::Client::new()").unwrap();
+        assert_eq!(ctor_type(&typecall, &u, &r).as_deref(), Some("reqwest::Client"));
+    }
+
+    #[test]
+    fn struct_literal_bindings_infer_their_type() {
+        // `let s = S;` / `let s = S{..};` must type `s` so `s.go()` resolves (was the last named
+        // receiver-inference gap: both read pure while `let s: S = S;` worked).
+        let u = HashMap::new();
+        let r = ReturnIndex::new();
+        let t = |src: &str| ctor_type(&syn::parse_str::<syn::Expr>(src).unwrap(), &u, &r);
+        assert_eq!(t("S").as_deref(), Some("S")); // unit-struct literal
+        assert_eq!(t("S { a: 1 }").as_deref(), Some("S")); // struct literal
+        assert_eq!(t("m::S { a: 1 }").as_deref(), Some("m::S")); // module-qualified
+        assert_eq!(t("Color::Red").as_deref(), Some("Color")); // unit ENUM variant → the enum
+        assert_eq!(t("Color::Red { x: 1 }").as_deref(), Some("Color")); // struct enum variant → the enum
+        // negative gates: a variable copy and a SCREAMING_SNAKE const must NOT infer a type.
+        assert_eq!(t("other_var"), None);
+        assert_eq!(t("MAX_SIZE"), None);
+        assert_eq!(t("config::MAX_SIZE"), None);
+    }
+
+    #[test]
+    fn self_returning_ctor_types_the_local_and_the_edge_survives() {
+        // The PROVE-IT-on-ureq miss: `fn new_with_defaults() -> Self` indexed the literal "Self", so
+        // `let agent = Agent::new_with_defaults(); agent.run(..)` formed `Self::run` — no local def,
+        // edge silently dropped, and the caller read pure though run() does I/O.
+        let src = r#"
+            pub struct Agent;
+            impl Agent {
+                pub fn new_with_defaults() -> Self { Agent }
+                pub fn run(&self) { let _ = std::fs::read("/tmp/x"); }
+            }
+            pub fn top() { let agent = Agent::new_with_defaults(); agent.run() }
+        "#;
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields: FieldIndex = HashMap::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
+                   "Self must resolve to the impl type, not the literal");
+    }
+
+    #[test]
+    fn local_method_named_like_a_crate_does_not_inherit_the_crate_effect() {
+        // A bare-leaf method call (`self.fastrand()`) is recorded path==leaf with no crate qualifier, so
+        // the classifier would consult the LEAF against the calibrated crate rules (`fastrand` → Rand,
+        // `time` → Clock). When that call RESOLVES TO A LOCAL DEFINITION, the local resolution is
+        // authoritative and the external bare-leaf classification must be SUPPRESSED — tokio's pure
+        // `FastRand::fastrand` xorshift must not fabricate Rand (it propagated to ~14 fns incl
+        // `Runtime::new` in a real sweep). A genuine external `fastrand::u32()` call — qualified, NOT
+        // local — must STILL classify Rand (no real effect dropped).
+        let d = std::env::temp_dir().join(format!("candor-scan-localcrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"localcrate\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            pub struct FastRand { one: u32 }
+            impl FastRand {
+                // a PURE local method merely NAMED like the `fastrand` crate (tokio's xorshift)
+                pub fn fastrand(&mut self) -> u32 { self.one ^= self.one << 1; self.one }
+                pub fn fastrand_n(&mut self, n: u32) -> u32 { self.fastrand() % n }
+                // a local method named like the `time`/`now` clock verb — also pure
+                pub fn time(&self) -> u32 { self.one }
+            }
+            pub fn uses_local(r: &mut FastRand) { let _ = r.fastrand_n(5); let _ = r.time(); }
+            // a REAL external dependency call — qualified, does NOT resolve locally → STILL Rand
+            pub fn uses_external() { let _ = fastrand::u32(0..10); }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // The report only emits EFFECTFUL functions (pure ones are omitted), so the effect key is
+        // `inferred`; a function ABSENT from the report carries no effect (the desired outcome here).
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // local `FastRand::fastrand`/`fastrand_n`/`time` and their callers carry NO crate effect.
+        for q in ["FastRand::fastrand", "FastRand::fastrand_n", "FastRand::time", "uses_local"] {
+            let eff = effects_of(q);
+            assert!(!eff.contains(&"Rand".to_string()) && !eff.contains(&"Clock".to_string()),
+                    "local method named like a crate fabricated an effect on {q}: {eff:?}\n{body}");
+        }
+        // the genuine external `fastrand::u32` call — unresolved locally — STILL classifies Rand.
+        assert!(effects_of("uses_external").contains(&"Rand".to_string()),
+                "a real external fastrand::u32 call must still report Rand:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn local_fn_or_method_named_like_an_ffi_tier_does_not_fabricate() {
+        // The leaf-PREFIX FFI tiers (`sqlite3_`/`git_`/`curl_`/`SSL_`) and whole-crate Rand
+        // (`getrandom`/`fastrand`) classify by leaf name independent of the binding crate. A PURE local
+        // FREE FN or qualified `Type::method` whose name collides was classified anyway — FABRICATION on a
+        // provably-pure path that transitively poisons every caller (the cardinal sin). The general
+        // local-resolution suppression must cover the free-fn and qualified-method cases the bare-leaf
+        // guard missed. A genuine FFI binding (an `extern "C"` decl, no Rust body) must STILL classify.
+        let d = std::env::temp_dir().join(format!("candor-scan-ffiname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"ffiname\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            // PURE local free fns named like FFI tiers / whole-crate rules
+            pub fn sqlite3_step() -> i32 { 0 }
+            pub fn git_clone() {}
+            pub fn getrandom() -> u32 { 4 }
+            pub fn uses_sqlite() -> i32 { sqlite3_step() }
+            pub fn uses_git() { git_clone() }
+            pub fn uses_rand() -> u32 { getrandom() }
+            // a PURE local qualified Type::method named like the git_ tier
+            pub struct Repo;
+            impl Repo { pub fn git_remote_fetch(&self) {} }
+            pub fn uses_method(r: &Repo) { r.git_remote_fetch() }
+            // AMBIGUOUS bare leaf: a free fn AND a method share an FFI-named leaf, defeating
+            // resolve_target's uniqueness filter — the bare-leaf classifier must STILL be suppressed.
+            pub fn curl_easy_perform() {}
+            pub struct Conn;
+            impl Conn { pub fn curl_easy_perform(&self) {} }
+            pub fn uses_ambig() { curl_easy_perform() }
+            // a GENUINE FFI binding (extern decl, no Rust body) — must STILL classify Db
+            extern "C" { fn sqlite3_exec(p: *mut i8) -> i32; }
+            pub fn real_ffi() { unsafe { sqlite3_exec(std::ptr::null_mut()); } }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // every pure local fn/method (and its caller) carries NO fabricated FFI effect
+        for q in ["sqlite3_step", "git_clone", "getrandom", "uses_sqlite", "uses_git", "uses_rand",
+                  "git_remote_fetch", "uses_method", "curl_easy_perform", "uses_ambig"] {
+            assert!(effects_of(q).is_empty(),
+                    "local fn/method named like an FFI tier FABRICATED an effect on {q}: {:?}\n{body}",
+                    effects_of(q));
+        }
+        // the genuine extern-C FFI binding still classifies Db (no real effect dropped)
+        assert!(effects_of("real_ffi").contains(&"Db".to_string()),
+                "a real extern-C sqlite3_exec FFI call must still report Db:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn ffi_safe_wrapper_of_an_unclassified_extern_fn_discloses_unknown() {
+        // §4 honesty: a SAFE WRAPPER calling an `extern "C"` fn whose NAME the classifier doesn't know
+        // (`system`, `my_native_writer`) has an unknowable body — the effect could be anything — so it must
+        // DISCLOSE Unknown, never read silent-pure. Before this fix the `extern` block was never collected,
+        // so the call was a bare leaf resolving to nothing → pure (the cardinal sin). CONTROLS: (a) a fn
+        // with NO extern call stays pure (no fabrication); (b) a wrapper of a CLASSIFIED extern leaf
+        // (`sqlite3_exec` → Db) keeps the precise effect, NOT a coarse Unknown.
+        let d = std::env::temp_dir().join(format!("candor-scan-ffiwrap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"ffiwrap\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            extern "C" {
+                fn system(cmd: *const i8) -> i32;
+                fn my_native_writer(p: *const u8, n: usize) -> i32;
+                fn sqlite3_exec(p: *mut i8) -> i32;
+            }
+            // safe wrappers over UNCLASSIFIED extern fns → must DISCLOSE Unknown
+            pub fn run_shell(cmd: *const i8) -> i32 { unsafe { system(cmd) } }
+            pub fn native_write(p: *const u8, n: usize) -> i32 { unsafe { my_native_writer(p, n) } }
+            // a transitive caller inherits the Unknown
+            pub fn does_native_io() -> i32 { native_write(std::ptr::null(), 0) }
+            // CONTROL (a): a genuinely-pure fn with NO extern call stays pure
+            pub fn pure_math(a: i32, b: i32) -> i32 { a + b }
+            // CONTROL (b): a wrapper of a CLASSIFIED extern leaf keeps the PRECISE effect (Db), not Unknown
+            pub fn run_query() -> i32 { unsafe { sqlite3_exec(std::ptr::null_mut()) } }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q == needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // THE FIX: unclassified-extern wrappers disclose Unknown (not silent-pure)
+        assert!(effects_of("run_shell").contains(&"Unknown".to_string()),
+                "FFI wrapper of `system` must disclose Unknown:\n{body}");
+        assert!(effects_of("native_write").contains(&"Unknown".to_string()),
+                "FFI wrapper of `my_native_writer` must disclose Unknown:\n{body}");
+        // the unknown propagates transitively
+        assert!(effects_of("does_native_io").contains(&"Unknown".to_string()),
+                "a caller of an FFI wrapper must inherit Unknown:\n{body}");
+        // the disclosure names the FFI boundary
+        let why = v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some("run_shell"))
+            .and_then(|f| f.get("unknownWhy").or_else(|| f.get("unknown_why")))
+            .and_then(|w| w.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(why.iter().any(|r| r.starts_with("native:")), "unknownWhy must name the native/FFI boundary (canonical native:): {why:?}\n{body}");
+        // CONTROL (a): pure_math has NO effect — never fabricated (it's absent from the effectful report)
+        assert!(effects_of("pure_math").is_empty(),
+                "a pure fn with no extern call must stay pure (no fabricated Unknown):\n{body}");
+        // CONTROL (b): a CLASSIFIED extern leaf keeps its precise Db, NOT a coarse Unknown
+        let rq = effects_of("run_query");
+        assert!(rq.contains(&"Db".to_string()), "classified extern (sqlite3_exec) must stay Db:\n{body}");
+        assert!(!rq.contains(&"Unknown".to_string()),
+                "a CLASSIFIED extern leaf must NOT be downgraded to Unknown:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn drop_glue_of_a_local_effectful_drop_propagates_to_the_binder() {
+        // §4 honesty (#3): a fn that constructs a value of a LOCAL type whose `impl Drop` does I/O must
+        // inherit that Drop body's effect — the scope-exit `drop` is an implicit edge the call graph misses,
+        // so a flushing/closing guard otherwise read silent-pure. CONTROLS: (a) a local type with a PURE
+        // Drop adds no effect; (b) an EXTERNAL type's invisible Drop is never fabricated (we only model
+        // LOCAL Drop impls).
+        let d = std::env::temp_dir().join(format!("candor-scan-dropglue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"dropglue\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            // a LOCAL type whose Drop writes a file (effectful scope-exit)
+            pub struct FlushGuard { path: String }
+            impl FlushGuard { pub fn new(p: &str) -> Self { FlushGuard { path: p.to_string() } } }
+            impl Drop for FlushGuard {
+                fn drop(&mut self) { std::fs::write(&self.path, b"flush").unwrap(); }
+            }
+            // binds a FlushGuard → the implicit drop edge must give this fn Fs
+            pub fn does_work_with_guard() {
+                let _g = FlushGuard::new("/tmp/x");
+                let _ = 1 + 1;
+            }
+            // CONTROL (a): a LOCAL type with a PURE Drop — binding it adds no effect
+            pub struct PureGuard;
+            impl PureGuard { pub fn new() -> Self { PureGuard } }
+            impl Drop for PureGuard { fn drop(&mut self) { /* nothing */ } }
+            pub fn does_work_pure_guard() { let _g = PureGuard::new(); }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q == needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // THE FIX: the binder inherits the effectful Drop's Fs via the implicit scope-exit edge
+        assert!(effects_of("does_work_with_guard").contains(&"Fs".to_string()),
+                "a fn binding a local guard with an effectful Drop must inherit Fs (drop glue):\n{body}");
+        // CONTROL (a): a local guard with a PURE Drop fabricates nothing
+        assert!(effects_of("does_work_pure_guard").is_empty(),
+                "a local guard with a PURE Drop must add no effect:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn drop_glue_never_fabricates_for_an_external_type() {
+        // CONTROL (b) for #3, isolated: a fn that binds an EXTERNAL type (whose Drop we cannot see) must
+        // NOT get a fabricated drop effect — we model ONLY local `impl Drop`. A `std::fs::File` is dropped
+        // at scope exit but its Drop (close) is invisible/benign; charging the binder an effect would be a
+        // fabrication. (The `std::fs::File::create` open itself is Fs via the classifier — that's correct —
+        // but a fn that merely RECEIVES a File by value and lets it drop must stay pure.)
+        let d = std::env::temp_dir().join(format!("candor-scan-dropext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"dropext\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            // receives an external File by value; it drops here, but its Drop is not a LOCAL impl → pure
+            pub fn consumes_a_file(f: std::fs::File) { let _f = f; }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs: Vec<String> = v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str() == Some("consumes_a_file"))
+            .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect();
+        assert!(effs.is_empty(),
+                "binding an EXTERNAL type must not fabricate a drop effect (only local Drop is modeled):\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn lazy_static_deferred_init_is_charged_to_the_forcing_site() {
+        // THE UNDER-REPORT: a LAZY/deferred static whose init does I/O has its effect reachable from NO
+        // fn (the init thunk runs on first use). Before the fix the effect vanished and every forcing site
+        // read silent-pure. The fix synthesizes a `<lazy>::NAME` unit (the thunk body) and edges each
+        // forcing site to it. This test asserts all four idioms light up, a PURE init fabricates nothing,
+        // and the keying is per-STATIC (not module-scoped) so a pure lazy's accessor stays pure even when
+        // an effectful lazy sits in the same module.
+        let d = std::env::temp_dir().join(format!("candor-scan-lazystatic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        // `once_cell` / `lazy_static` are declared so the κ ledger treats them as known deps; the scan
+        // never builds them — the idiom is recognised syntactically.
+        std::fs::write(
+            d.join("Cargo.toml"),
+            "[package]\nname = \"lazystatic\"\n[dependencies]\nonce_cell = \"1\"\nlazy_static = \"1\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use once_cell::sync::Lazy;
+            use std::sync::LazyLock;
+            use std::fs;
+            use lazy_static::lazy_static;
+
+            // 1. once_cell Lazy, effectful init
+            pub static CFG: Lazy<String> = Lazy::new(|| fs::read_to_string("/etc/a").unwrap_or_default());
+            // 2. std LazyLock, effectful init
+            pub static CFG2: LazyLock<String> = LazyLock::new(|| fs::read_to_string("/etc/b").unwrap_or_default());
+            // 3. lazy_static!, effectful init
+            lazy_static! { pub static ref CFG3: String = fs::read_to_string("/etc/c").unwrap_or_default(); }
+            // 4. thread_local!, effectful init
+            thread_local! { pub static CFG4: String = fs::read_to_string("/etc/d").unwrap_or_default(); }
+
+            // NO-FABRICATION CONTROLS: pure inits contribute nothing
+            pub static PURE_NUM: Lazy<usize> = Lazy::new(|| 1 + 1);
+
+            // forcing sites — each names exactly ONE static
+            pub fn force1() -> bool { CFG.contains("x") }
+            pub fn force2() -> bool { CFG2.contains("x") }
+            pub fn force3() -> bool { CFG3.contains("x") }
+            pub fn force4() -> bool { CFG4.with(|c| c.contains("x")) }
+            // MULTI-STATIC SCOPING: this fn names only the PURE lazy — must stay pure even though
+            // effectful lazies live in the same module (static-scoped, not module-scoped).
+            pub fn force_pure() -> usize { *PURE_NUM + 5 }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effects_of = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // THE FIX: all four idioms' forcing sites carry Fs (the effect no longer vanishes).
+        for (f, idiom) in [("force1", "once_cell Lazy"), ("force2", "std LazyLock"),
+                           ("force3", "lazy_static!"), ("force4", "thread_local!")] {
+            assert!(effects_of(f).contains(&"Fs".to_string()),
+                    "{idiom}: forcing site `{f}` must carry Fs (deferred init under-report):\n{body}");
+        }
+        // NO-FABRICATION: a pure-init lazy's forcing site stays pure (absent from the effectful report).
+        // Also proves MULTI-STATIC scoping — `force_pure` names only PURE_NUM, so the sibling effectful
+        // lazies in the same module must NOT bleed into it.
+        assert!(effects_of("force_pure").is_empty(),
+                "a pure-init lazy's forcing site must stay pure (no fabrication / no module-bleed):\n{body}");
+        // The pure lazy's synthetic unit, if present at all, must carry no effect (it's dropped from the
+        // effectful report — assert it never appears WITH an effect).
+        let pure_unit_effectful = v["functions"].as_array().into_iter().flatten().any(|f| {
+            f["fn"].as_str() == Some("<lazy>::PURE_NUM")
+                && f["inferred"].as_array().is_some_and(|a| !a.is_empty())
+        });
+        assert!(!pure_unit_effectful, "the pure lazy's synthetic unit must carry no effect:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tuple_struct_fields_index_by_position() {
+        // The other PROVE-IT miss: `self.0.0.run()` (ureq's ConfigBuilder newtype chain) — tuple
+        // fields weren't in the FieldIndex, so the receiver never typed and the edge dropped.
+        let src = r#"
+            pub struct Inner;
+            pub struct Outer(Inner);
+            pub struct Stack(Outer);
+        "#;
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields: FieldIndex = HashMap::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        assert_eq!(fields["Outer"]["0"], "Inner");
+        assert_eq!(fields["Stack"]["0"], "Outer");
+    }
+
+    /// Run the FULL pipeline (Pass A indexes + Pass B collection, with the same wiring as `scan_one`)
+    /// over a source string and return `fn-qual -> the typed `Type::method` call paths it produced`.
+    /// A receiver typed by one of the new idioms shows up as `Sender::send` here; a dropped receiver
+    /// would leave only the bare leaf `send` (no `Type::` qualifier) — the silent-under-report shape.
+    fn typed_calls_of(src: &str) -> HashMap<String, Vec<String>> {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut ti = TraitImplIndex::new();
+        let mut td: HashMap<String, LocalTrait> = HashMap::new();
+        let mut tf = TraitFieldIndex::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let enum_variants: EnumVariantIndex =
+            enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
+        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let mut fns: Vec<FnInfo> = Vec::new();
+        let mut us2 = HashMap::new();
+        let mut locs = Vec::new();
+        fn_locs(&file.items, "lib.rs", false, &mut locs);
+        let mut loc_idx = 0usize;
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
+        fns.into_iter()
+            .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
+            .collect()
+    }
+
+    /// fn-name -> `unresolved` flag, through the same full pipeline — for the opacity/callback tests.
+    fn unresolved_of(src: &str) -> HashMap<String, bool> {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut ti = TraitImplIndex::new();
+        let mut td: HashMap<String, LocalTrait> = HashMap::new();
+        let mut tf = TraitFieldIndex::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let enum_variants: EnumVariantIndex =
+            enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
+        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let mut fns: Vec<FnInfo> = Vec::new();
+        let mut us2 = HashMap::new();
+        let mut locs = Vec::new();
+        fn_locs(&file.items, "lib.rs", false, &mut locs);
+        let mut loc_idx = 0usize;
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
+        fns.into_iter().map(|f| (f.qual, f.unresolved)).collect()
+    }
+
+    /// fn-qual -> its `loc` (`file:line:col`), through the same full pipeline — for the loc-fidelity test.
+    fn locs_of(src: &str) -> HashMap<String, String> {
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut ti = TraitImplIndex::new();
+        let mut td: HashMap<String, LocalTrait> = HashMap::new();
+        let mut tf = TraitFieldIndex::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let enum_variants: EnumVariantIndex =
+            enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
+        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let mut fns: Vec<FnInfo> = Vec::new();
+        let mut us2 = HashMap::new();
+        let mut locs = Vec::new();
+        fn_locs(&file.items, "lib.rs", false, &mut locs);
+        let mut loc_idx = 0usize;
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
+        fns.into_iter().map(|f| (f.qual, f.loc)).collect()
+    }
+
+    /// The `loc` field MUST be `file:line:col` (spec report schema), with the line being the fn's ACTUAL
+    /// source line — not the file-only `src/lib.rs` an adversarial cross-engine fidelity review found.
+    /// Line is 1-based; column is 1-based (proc-macro2's 0-based column + 1), pointing at the item's first
+    /// token, so a top-level `fn` at column 0 reads col 1 (matching the deep engine's `build.rs:10:1`). The
+    /// walk covers free fns, impl methods, nested-module fns, and trait default methods — the same set
+    /// `scan_items` emits — so every loc lines up with its FnInfo.
+    #[test]
+    fn loc_carries_actual_line_and_col() {
+        // Lines (1-based): blank=1, alpha=2, beta=4(`pub` indented?), … keep it explicit below.
+        let src = "\
+fn alpha() {}
+    fn beta() {}
+struct T;
+impl T {
+    fn gamma(&self) {}
+}
+mod inner {
+    fn delta() {}
+}
+trait G {
+    fn hello(&self) {}
+}
+";
+        let m = locs_of(src);
+        // alpha: line 1, first token `fn` at column 0 -> 1-based col 1.
+        assert_eq!(m["alpha"], "lib.rs:1:1");
+        // beta: line 2, indented 4 -> col 5 (1-based).
+        assert_eq!(m["beta"], "lib.rs:2:5");
+        // gamma: line 5 (inside impl), indented 4 -> col 5.
+        assert_eq!(m["T::gamma"], "lib.rs:5:5");
+        // delta: line 8 (inside `mod inner`), indented 4 -> col 5; qualified by the module path.
+        assert_eq!(m["inner::delta"], "lib.rs:8:5");
+        // hello: a trait DEFAULT method, line 11, indented 4 -> col 5.
+        assert_eq!(m["G::hello"], "lib.rs:11:5");
+    }
+
+    /// Invoking a fn-typed binding (`cb: fn()`/`impl Fn`/`dyn Fn`/generic `F: Fn`/`Box<dyn Fn>`) calls a
+    /// body the syntactic scan can't see, so the fn is `unresolved` (honest Unknown) — NOT silently pure.
+    /// Found by the cross-engine generative differential: candor-scan dropped these while java/ts/swift
+    /// propagated/Unknowned them. A normal free-fn call must NOT be flagged unresolved (no over-report).
+    #[test]
+    fn fn_typed_callback_invocation_is_unresolved() {
+        for hof in [
+            "fn h(cb: fn()) { cb(); }",
+            "fn h(cb: impl Fn()) { cb(); }",
+            "fn h<F: Fn()>(cb: F) { cb(); }",
+            "fn h(cb: &dyn Fn()) { cb(); }",
+            "fn h(cb: Box<dyn Fn()>) { cb(); }",
+        ] {
+            let m = unresolved_of(hof);
+            assert!(m["h"], "fn-typed callback invocation silently dropped (not unresolved): {hof}");
+        }
+        // A fn-typed binding REBOUND to a local must still be Unknown when invoked (the max review
+        // found the param-only seeding missed `let g = cb; g()`). Covers a plain rebind, an `if`-yield,
+        // and an annotated `let g: fn()`.
+        for hof in [
+            "fn h(cb: impl Fn()) { let g = cb; g(); }",
+            "fn h(cb: fn()) { let g = if true { cb } else { return }; g(); }",
+            "fn s() {} fn h() { let g: fn() = s; g(); }",
+        ] {
+            let m = unresolved_of(hof);
+            assert!(m["h"], "fn-typed callback rebound to a local silently dropped: {hof}");
+        }
+        // NO over-report: a normal free-fn call, AND a normal value rebind, stay resolved.
+        let m = unresolved_of("fn helper() {} fn caller() { helper(); }");
+        assert!(!m["caller"], "a normal free-fn call must not be flagged unresolved");
+        let m = unresolved_of("struct T; impl T { fn m(&self) {} } fn f() { let x = T; let y = x; y.m(); }");
+        assert!(!m["f"], "a normal value rebind must not be flagged unresolved");
+    }
+
+    /// A `#[cfg(test)]` free fn / impl block / impl method at module scope is test-only and must NOT
+    /// appear in the default (non-`--include-tests`) report — the guard was on `mod` only.
+    #[test]
+    fn cfg_test_items_excluded_from_default_report() {
+        let m = typed_calls_of(
+            "pub fn prod() {}\n\
+             #[cfg(test)] fn freefn() {}\n\
+             struct S;\n\
+             #[cfg(test)] impl S { fn blk(&self) {} }\n\
+             struct P; impl P { #[cfg(test)] fn meth(&self) {} fn keep(&self) {} }",
+        );
+        assert!(m.contains_key("prod"), "a production fn must be in the report");
+        assert!(m.keys().any(|k| k.ends_with("P::keep")), "a production method must be in the report");
+        for leaked in ["freefn", "S::blk", "P::meth"] {
+            assert!(!m.keys().any(|k| k.ends_with(leaked)), "a #[cfg(test)] item leaked: {leaked}");
+        }
+    }
+
+    /// Each of the six PROVEN-dropped idioms (the silent-under-report bug): a method call whose
+    /// receiver is reached via for-loop / iterator-adapter closure / subscript / nested field+subscript
+    /// / enum-payload match / tuple destructure. The effectful `Sender::send` must be TYPED (so it
+    /// classifies Net), mirroring the candor-swift sweep that fixed the same six.
+    #[test]
+    fn dropped_receiver_idioms_now_resolve() {
+        let prelude = "struct Sender; impl Sender { fn send(&self) {} }\n\
+                       struct Pool { senders: Vec<Sender> }\n\
+                       enum Conn { Active(Sender), Idle }\n";
+        let cases: &[(&str, &str)] = &[
+            // 1. for-loop over a Vec<Sender> param
+            ("fn f(xs: Vec<Sender>) { for c in xs { c.send(); } }", "f"),
+            // 1b. for-loop over a &[Sender] param
+            ("fn f(xs: &[Sender]) { for c in xs { c.send(); } }", "f"),
+            // 2. iterator-adapter closure (for_each / map)
+            ("fn f(xs: Vec<Sender>) { xs.iter().for_each(|c| c.send()); }", "f"),
+            ("fn f(xs: Vec<Sender>) { let _ = xs.iter().map(|c| c.send()).count(); }", "f"),
+            // 3. subscript
+            ("fn f(xs: Vec<Sender>) { xs[0].send(); }", "f"),
+            // 6. tuple destructure from a tuple-typed param
+            ("fn f(p: (Sender, usize)) { let (s, _) = p; s.send(); }", "f"),
+        ];
+        for (body, fnname) in cases {
+            let src = format!("{prelude}{body}");
+            let m = typed_calls_of(&src);
+            let calls = m.get(*fnname).cloned().unwrap_or_default();
+            assert!(
+                calls.iter().any(|c| c == "Sender::send"),
+                "idiom dropped the effectful receiver (silent under-report): {body}\n  typed calls: {calls:?}"
+            );
+        }
+        // nested field + subscript (`self.senders[0].send()`) and for-loop over a collection FIELD.
+        let m = typed_calls_of(&format!(
+            "{prelude}impl Pool {{ fn first(&self) {{ self.senders[0].send(); }} \
+             fn each(&self) {{ for c in &self.senders {{ c.send(); }} }} }}"
+        ));
+        assert!(m["Pool::first"].iter().any(|c| c == "Sender::send"), "nested field+subscript dropped: {:?}", m["Pool::first"]);
+        assert!(m["Pool::each"].iter().any(|c| c == "Sender::send"), "for-loop over field dropped: {:?}", m["Pool::each"]);
+        // 5. enum-payload match binding (`Conn::Active(s) => s.send()`).
+        let m = typed_calls_of(&format!(
+            "{prelude}fn g(c: Conn) {{ match c {{ Conn::Active(s) => s.send(), Conn::Idle => {{}} }} }}"
+        ));
+        assert!(m["g"].iter().any(|c| c == "Sender::send"), "enum-payload match binding dropped: {:?}", m["g"]);
+    }
+
+    /// NO FABRICATION (the cardinal sin): the same six idioms over a PURE element type, or over an
+    /// effect-irrelevant element, must NOT type a `Type::send` edge to anything effectful — the element
+    /// is pure, so the receiver typing must stay honest. We assert the effectful `Sender::send` never
+    /// appears; a pure `Pure::send` edge is fine (it classifies to nothing).
+    #[test]
+    fn idioms_never_fabricate_on_pure_elements() {
+        let prelude = "struct Pure; impl Pure { fn send(&self) {} }\n\
+                       struct Bag { items: Vec<Pure> }\n";
+        let bodies: &[&str] = &[
+            "fn f(xs: Vec<Pure>) { for c in xs { c.send(); } }",
+            "fn f(xs: Vec<Pure>) { xs.iter().for_each(|c| c.send()); }",
+            "fn f(xs: Vec<Pure>) { xs[0].send(); }",
+            "fn f(xs: Vec<i32>) { for c in xs { let _ = c + 1; } }",
+            "fn f(p: (Pure, usize)) { let (s, _) = p; s.send(); }",
+        ];
+        for body in bodies {
+            let m = typed_calls_of(&format!("{prelude}{body}"));
+            let calls = m.get("f").cloned().unwrap_or_default();
+            // the ONLY typed edge a pure element may form is `Pure::send` — never an effectful type's.
+            assert!(
+                calls.iter().all(|c| c != "Sender::send" && !c.contains("TcpStream")),
+                "fabricated an effectful edge on a pure element: {body}\n  typed: {calls:?}"
+            );
+        }
+    }
+
+    /// The candor-swift `vars`-leak lesson: a scoped binding (loop var, closure param, match payload)
+    /// must NOT leak past its block into a later same-named, uninferable var. Here the first loop binds
+    /// `c: Sender`; the second loop's `c` (a Pure) and a trailing free `c.send()` on an indeterminate
+    /// `c` must NOT inherit `Sender` and fabricate its edge.
+    #[test]
+    fn scoped_bindings_do_not_leak() {
+        let prelude = "struct Sender; impl Sender { fn send(&self) {} }\n\
+                       struct Pure; impl Pure { fn send(&self) {} }\n\
+                       fn mk() -> Pure { Pure }\n";
+        // second loop over Pure: `c` must be re-typed Pure, not the prior Sender.
+        let m = typed_calls_of(&format!(
+            "{prelude}fn f(xs: Vec<Sender>, ys: Vec<Pure>) {{ for c in xs {{ c.send(); }} for c in ys {{ c.send(); }} }}"
+        ));
+        let calls = &m["f"];
+        // exactly ONE Sender::send (the genuine first loop); the second loop's `c.send()` is Pure::send.
+        assert_eq!(
+            calls.iter().filter(|c| *c == "Sender::send").count(),
+            1,
+            "loop binding leaked into the next same-named loop (fabrication): {calls:?}"
+        );
+        // a closure param binding must not leak to a later free var of the same name.
+        let m = typed_calls_of(&format!(
+            "{prelude}fn f(xs: Vec<Sender>) {{ xs.iter().for_each(|c| c.send()); let c = mk(); c.send(); }}"
+        ));
+        let calls = &m["f"];
+        assert!(
+            !calls.iter().any(|c| *c == "Sender::send" && calls.iter().filter(|x| *x == "Sender::send").count() > 1),
+            "closure param leaked"
+        );
+        // the trailing `let c = mk(); c.send()` must be Pure::send, never Sender::send.
+        assert_eq!(calls.iter().filter(|c| *c == "Sender::send").count(), 1,
+                   "closure param binding leaked into a later same-named var: {calls:?}");
+        assert!(calls.iter().any(|c| c == "Pure::send"), "later c should type Pure::send: {calls:?}");
+    }
+
+    /// `elem_type` extracts T from every supported collection shape and resolves it through `uses`;
+    /// returns None for non-collections (so a non-collection receiver is never mis-typed as an element).
+    #[test]
+    fn elem_type_covers_the_collection_shapes() {
+        let u = uses(&[("Sender", "net::Sender")]);
+        let p = |s: &str| -> Option<String> {
+            let t: syn::Type = syn::parse_str(s).unwrap();
+            elem_type(&t, &u)
+        };
+        assert_eq!(p("Vec<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("&[Sender]").as_deref(), Some("net::Sender"));
+        assert_eq!(p("[Sender; 4]").as_deref(), Some("net::Sender"));
+        assert_eq!(p("HashSet<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("BTreeSet<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("VecDeque<Sender>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("Box<[Sender]>").as_deref(), Some("net::Sender"));
+        assert_eq!(p("Arc<Vec<Sender>>").as_deref(), Some("net::Sender"));
+        // a non-collection is NOT an element source
+        assert_eq!(p("Sender"), None);
+        assert_eq!(p("Option<Sender>"), None);
+        // a map's value carries the element only via `.values()` (not the bare type here)
+        assert_eq!(p("HashMap<String, Sender>"), None);
+    }
+
+    /// The Pass-A enum-variant index keeps only UNAMBIGUOUS single-payload variant leaves; a leaf two
+    /// enums share with different payloads is dropped (never guess), like the return-index rule.
+    #[test]
+    fn enum_variant_index_drops_ambiguous_leaves() {
+        let src = "enum A { One(i32), Pair(i32, i32), Unit }\n\
+                   enum B { Two(String) }\n\
+                   enum C { Two(Vec<u8>) }\n"; // `Two` conflicts across B and C → ambiguous, dropped
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
+        assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
+        assert_eq!(ev.get("Unit"), None);                           // unit variant: not indexed
+        assert_eq!(ev.get("Two"), None);                            // conflicting payloads: dropped
+    }
+
+    #[test]
+    fn embedded_agents_contract_matches_the_repo_doc() {
+        // --agents prints the contract EMBEDDED at build time; this gate keeps the packaged copy
+        // (crates/candor-scan/AGENTS.md, the only file a crates.io tarball can carry) in lockstep
+        // with the repo-root AGENTS.md. If this fails: cp AGENTS.md crates/candor-scan/AGENTS.md
+        let embedded = include_str!("../AGENTS.md");
+        assert!(embedded.contains("candor-scan"), "the contract must describe this tool");
+        // The repo-root doc exists ONLY in a workspace checkout. In a published-crate / `cargo
+        // vendor` layout `../../AGENTS.md` is absent (panic) or an UNRELATED file (false diff), so
+        // `cargo test` on the shipped crate would fail spuriously. Only assert the drift gate when
+        // the root doc is actually present AND is candor's own (contains the marker) — otherwise
+        // skip: the include_str above already proves the packaged copy compiles in.
+        match std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../AGENTS.md")) {
+            Ok(root) if root.contains("instructions for an AI coding agent") => {
+                assert_eq!(embedded, root, "crate AGENTS.md drifted from the repo root — re-copy it");
+            }
+            _ => { /* not a workspace checkout (registry/vendor layout) — drift gate N/A */ }
+        }
+    }
+
+    #[test]
+    fn toml_primitives_tolerate_spacing_and_comments() {
+        // The shared toml_section/toml_scalar fix a latent inconsistency: a `[ spaced ]` header and a
+        // trailing `# comment` are now handled uniformly across all three manifest readers.
+        assert_eq!(toml_section("[ workspace ]"), Some("workspace"));
+        assert_eq!(toml_section("[package]"), Some("package"));
+        assert_eq!(toml_section("name = \"x\""), None);
+        assert_eq!(toml_scalar("name = \"my-crate\"  # the name", "name"), Some("my-crate"));
+        assert_eq!(toml_scalar("name=bare # c", "name"), Some("bare"));
+        assert_eq!(toml_scalar("namespace = \"x\"", "name"), None); // key is whole, not a prefix
+        // read_crate_name through a spaced header + comment.
+        let d = std::env::temp_dir().join(format!("candor-scan-tomlhdr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[ package ]\nname = \"spaced-crate\"  # trailing\n").unwrap();
+        assert_eq!(read_crate_name(&d).as_deref(), Some("spaced_crate"));
+        // toml_string_array through a spaced [ workspace ] header.
+        assert_eq!(
+            toml_string_array("[ workspace ]\nmembers = [\"a\", \"b\"]\n", "workspace", "members"),
+            vec!["a", "b"]
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cargo_deps_excludes_nested_package_manifests() {
+        // The κ dep universe is the crate's OWN deps — a nested package (fixture, path-dep) is scanned
+        // separately, so its deps must not pollute the parent's ledger (matching the source walk).
+        let d = std::env::temp_dir().join(format!("candor-scan-nesteddeps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("fixture")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"outer\"\n[dependencies]\nserde = \"1\"\n").unwrap();
+        std::fs::write(d.join("fixture/Cargo.toml"), "[package]\nname = \"inner\"\n[dependencies]\nreqwest = \"0.12\"\n").unwrap();
+        let (deps, _) = cargo_deps(&d.to_string_lossy());
+        assert!(deps.contains("serde"), "the crate's own dep is present: {deps:?}");
+        assert!(!deps.contains("reqwest"), "a nested package's dep leaked into the parent: {deps:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn toml_string_array_reads_inline_and_multiline_members() {
+        let txt = "[package]\nname = \"x\"\n\n[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nexclude = [\n  \"eval\",\n  \"sample\",\n]\n";
+        assert_eq!(toml_string_array(txt, "workspace", "members"), vec!["crates/a", "crates/b"]);
+        assert_eq!(toml_string_array(txt, "workspace", "exclude"), vec!["eval", "sample"]);
+        assert!(toml_string_array(txt, "workspace", "default-members").is_empty());
+        assert!(toml_string_array("[dependencies]\nserde = \"1\"\n", "workspace", "members").is_empty());
+    }
+
+    #[test]
+    fn workspace_members_expand_globs_and_honour_exclude() {
+        let d = std::env::temp_dir().join(format!("candor-scan-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for m in ["crates/a", "crates/skipme", "tools/one", "crates/no-manifest"] {
+            std::fs::create_dir_all(d.join(m)).unwrap();
+            if m != "crates/no-manifest" {
+                std::fs::write(d.join(m).join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+            }
+        }
+        std::fs::write(
+            d.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\", \"tools/one\", \"gone/away\"]\nexclude = [\"crates/skipme\"]\n",
+        )
+        .unwrap();
+        let got: Vec<String> = workspace_members(&d)
+            .into_iter()
+            .map(|p| p.strip_prefix(&format!("{}/", d.to_string_lossy())).unwrap().to_string())
+            .collect();
+        assert_eq!(got, vec!["crates/a", "tools/one"], "glob expands, exclude + missing-manifest drop");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn workspace_members_bare_star_and_dedup() {
+        let d = std::env::temp_dir().join(format!("candor-scan-ws2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for m in ["a", "b"] {
+            std::fs::create_dir_all(d.join(m)).unwrap();
+            std::fs::write(d.join(m).join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+        }
+        // bare `*` = immediate children; AND `a` listed explicitly too — must dedup, not double-scan.
+        std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"*\", \"a\"]\n").unwrap();
+        let got: Vec<String> = workspace_members(&d)
+            .into_iter()
+            .map(|p| p.strip_prefix(&format!("{}/", d.to_string_lossy())).unwrap().to_string())
+            .collect();
+        assert_eq!(got, vec!["a", "b"], "bare * expands to children, deduped against the explicit `a`");
+        assert!(has_workspace_table(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn workspace_root_scans_members_even_under_deps_filter() {
+        // The --deps × workspace regression: the nested-package filter prunes member dirs, so a
+        // workspace root scanned as one crate yields an empty report. scan_target must fan out.
+        let d = std::env::temp_dir().join(format!("candor-scan-wsfan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for (m, body) in [("a", "pub fn ea() { let _ = std::fs::read(\"/x\"); }"),
+                          ("b", "pub fn eb() { let _ = std::process::Command::new(\"x\"); }")] {
+            std::fs::create_dir_all(d.join(m).join("src")).unwrap();
+            std::fs::write(d.join(m).join("Cargo.toml"), format!("[package]\nname = \"{m}\"\n")).unwrap();
+            std::fs::write(d.join(m).join("src/lib.rs"), body).unwrap();
+        }
+        std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\n").unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, &idx);
+        assert_eq!(rc, 0);
+        let ra = std::fs::read_to_string(format!("{prefix}.a.scan.json")).unwrap();
+        let rb = std::fs::read_to_string(format!("{prefix}.b.scan.json")).unwrap();
+        assert!(ra.contains("ea") && ra.contains("Fs"), "member a not scanned: {ra}");
+        assert!(rb.contains("eb") && rb.contains("Exec"), "member b not scanned: {rb}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn nested_packages_are_not_modules_of_the_parent() {
+        // The repo-root self-scan merged 194 eval-fixture `main`s into ONE unit (un-namespaced
+        // collision -> cross-wired inheritance). A subtree with its own Cargo.toml is a different
+        // package: the parent's walk must not descend into it.
+        let d = std::env::temp_dir().join(format!("candor-scan-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("fixture/src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"outer\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub fn outer_eff() { let _ = std::fs::read(\"/x\"); }\n").unwrap();
+        std::fs::write(d.join("fixture/Cargo.toml"), "[package]\nname = \"inner\"\n").unwrap();
+        std::fs::write(
+            d.join("fixture/src/lib.rs"),
+            "pub fn inner_eff() { let _ = std::process::Command::new(\"x\"); }\n",
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: prefix.clone(), want_json: false, include_tests: false,
+            policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let rep = std::fs::read_to_string(format!("{prefix}.outer.scan.json")).unwrap();
+        assert!(rep.contains("outer_eff"), "the parent's own fn must report: {rep}");
+        assert!(!rep.contains("inner_eff") && !rep.contains("Exec"),
+                "nested package's fn leaked into the parent report: {rep}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn report_is_written_atomically_no_tmp_leftovers() {
+        // A concurrent `candor-query` / `cargo candor watch` reader must never observe a half-written
+        // report (write_atomic: temp + rename). We assert the rename discipline by its observable
+        // effect: the scan leaves NO `.tmp.*` file behind, and both written files are WHOLE valid JSON.
+        let d = std::env::temp_dir().join(format!("candor-scan-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"atomiccrate\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub fn eff() { let _ = std::fs::read(\"/x\"); }\n").unwrap();
+        let idx = load_dep_reports(None);
+        let outdir = d.join("out");
+        let prefix = outdir.join("r").to_string_lossy().into_owned();
+        let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: false, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        // no temp turds: every output file ends in `.json`, never `.tmp.<pid>`.
+        let leftovers: Vec<String> = std::fs::read_dir(&outdir).unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.contains(".tmp")).collect();
+        assert!(leftovers.is_empty(), "atomic write left temp files behind: {leftovers:?}");
+        // both files parse as a whole — the post-rename invariant a concurrent reader relies on.
+        for name in ["r.atomiccrate.scan.json", "r.atomiccrate.scan.callgraph.json"] {
+            let body = std::fs::read_to_string(outdir.join(name)).unwrap();
+            serde_json::from_str::<serde_json::Value>(&body)
+                .unwrap_or_else(|e| panic!("{name} is not whole JSON ({e}): {body}"));
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn classifier_resolves_a_std_fs_call() {
+        // guards the shared-classifier contract the scanner relies on: an expanded std::fs path is Fs.
+        assert_eq!(candor_classify::classify("std", "std::fs::read_to_string"), Some("Fs"));
+        assert_eq!(candor_classify::classify("std", "std::process::Command::new"), Some("Exec"));
+    }
+
+    #[test]
+    fn builder_chain_entries_over_approximate_for_the_syntactic_scanner() {
+        // The real-world oracle caught candor-scan silent-pure'ing builder chains whose effect candor-
+        // classify keys on a terminal VERB it can't type-resolve: `duct::cmd!(...).run()` (macro entry) and
+        // `ureq::get(url)...call()` (fn entry). Over-approximate the ENTRY here (scan-only); the shared
+        // classifier keeps the entry pure so the DEEP engine (which types the verb) stays precise.
+        assert_eq!(scan_builder_entry_effect("duct", "duct::cmd"), Some("Exec"));
+        assert_eq!(scan_builder_entry_effect("duct", "duct::sh"), Some("Exec"));
+        assert_eq!(scan_builder_entry_effect("ureq", "ureq::get"), Some("Net"));
+        assert_eq!(scan_builder_entry_effect("ureq", "ureq::post"), Some("Net"));
+        assert_eq!(scan_builder_entry_effect("sqlx", "sqlx::query"), Some("Db"));
+        assert_eq!(scan_builder_entry_effect("diesel", "diesel::sql_query"), Some("Db"));
+        // terminal verbs stay classify()'s job; an unrelated path is None:
+        assert_eq!(scan_builder_entry_effect("duct", "duct::Expression::run"), None);
+        assert_eq!(scan_builder_entry_effect("ureq", "ureq::Request::call"), None);
+        assert_eq!(scan_builder_entry_effect("std", "std::process::Command::new"), None);
+        // invariant the deep engine relies on stays intact (entries pure in the SHARED classifier):
+        assert_eq!(candor_classify::classify("duct", "duct::cmd"), None);
+        assert_eq!(candor_classify::classify("ureq", "ureq::get"), None);
+    }
+
+    #[test]
+    fn macro_invocation_never_mints_a_local_edge() {
+        // REGRESSION (review F1): a crate-LOCAL qualified macro (`crate::helpers::trace!`) expands to
+        // `helpers::trace`, KEEPING its `::` — so before the `is_macro` guard it mis-linked to a same-named
+        // LOCAL fn and FABRICATED that fn's effect onto a pure caller (the phantom-edge cardinal sin). The
+        // guard must be SURGICAL: a genuine (non-macro) call to the same fn STILL inherits the effect, and
+        // a genuine external classified emit-macro (`log::info!`) STILL attributes its effect.
+        let idx = load_dep_reports(None);
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-macroedge-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let local = "mod helpers { pub fn trace() { let _ = std::fs::read(\"/x\"); } }\n";
+        // The bug: a pure fn whose ONLY body is the LOCAL macro must NOT inherit `helpers::trace`'s Fs.
+        let bug = run("macedge", &format!("{local}pub fn pure_caller() {{ crate::helpers::trace!(); }}"));
+        assert!(eff(&bug, "pure_caller").is_empty(),
+                "macro invocation FABRICATED a same-named local fn's effect onto a pure caller:\n{bug}");
+        // Surgical: a GENUINE (non-macro) call to the same local fn STILL edges and inherits Fs.
+        let real = run("macedge2", &format!("{local}pub fn real_caller() {{ crate::helpers::trace(); }}"));
+        assert!(eff(&real, "real_caller").contains(&"Fs".to_string()),
+                "the is_macro guard wrongly suppressed a genuine local fn edge:\n{real}");
+        // A genuine EXTERNAL classified emit-macro still attributes its effect (the intended new behavior).
+        let ext = run("macedge3", "pub fn logs() { log::info!(\"hi\"); }");
+        assert!(eff(&ext, "logs").contains(&"Log".to_string()),
+                "an external classified emit-macro must still attribute its effect:\n{ext}");
+    }
+
+    #[test]
+    fn write_macro_charges_the_local_writer_side() {
+        // R14 cross-engine sweep (scan): `write!(w, ...)` to a custom `fmt::Write` writer dropped the
+        // writer's effectful `write_str` — silent-pure (the deep engine had this too, fixed as HOLE 2c).
+        // The writer is the arg BEFORE the format string; charge its `write_str`/`write`. A std writer
+        // (`String`) must light nothing (no fabrication), and a leading `assert_eq!` operand must never be
+        // mistaken for a writer (the charge is gated to the write/writeln family).
+        let idx = load_dep_reports(None);
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-wr-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let w = "use std::fmt::Write as _;\nstruct Loud;\nimpl std::fmt::Write for Loud { fn write_str(&mut self, _s: &str) -> std::fmt::Result { let _ = std::fs::read(\"/x\"); Ok(()) } }\n";
+        // effectful local fmt::Write writer -> Fs (the bug: this was silent-pure)
+        let hit = run("wrfmt", &format!("{w}pub fn via_write(w: &mut Loud) {{ let _ = write!(w, \"hi {{}}\", 1); }}"));
+        assert!(eff(&hit, "via_write").contains(&"Fs".to_string()),
+                "write! to a local effectful fmt::Write writer must charge the writer side:\n{hit}");
+        // std String writer -> pure (no fabrication)
+        let pure = run("wrstr", "use std::fmt::Write as _;\npub fn via_str(s: &mut String) { let _ = write!(s, \"hi {}\", 1); }");
+        assert!(eff(&pure, "via_str").is_empty(),
+                "write! to a std String writer must stay pure:\n{pure}");
+        // assert_eq! leads with operands, not a writer — must NOT be charged (gated to write/writeln)
+        let asrt = run("wrassert", &format!("{w}#[derive(Debug, PartialEq)]\nstruct Tag;\npub fn via_assert(a: Tag, b: Tag) {{ assert_eq!(a, b, \"ctx {{}}\", 1); }}"));
+        assert!(eff(&asrt, "via_assert").is_empty(),
+                "an assert_eq! operand was wrongly charged as a writer:\n{asrt}");
+    }
+
+    #[test]
+    fn qself_call_never_mints_a_bare_leaf_local_edge() {
+        // REGRESSION (qself hole): `path_to_string` drops the qself receiver type, so an inherent-form
+        // fully-qualified assoc call `<Vec<u8>>::new()` collapses to the BARE leaf `new`, which the by_leaf
+        // route mis-linked to a unique local `new`/`dump`, FABRICATING its effect onto a pure path. The fix
+        // RESTORES the receiver type (`Vec::new`), staying precise in BOTH directions: `<Vec<u8>>::new()`
+        // finds no local `Vec` (no fabrication) AND `<Daemon>::new()` still resolves to the local effectful
+        // `Daemon::new` (no under-report — the blunt `method:true` suppress would have lost this).
+        let idx = load_dep_reports(None);
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-qself-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        // A unique local `new` doing Exec; the pure builder uses idiomatic `<Vec<u8>>::new()`.
+        let bug = run("qselfnew",
+            "use std::process::Command;\npub struct Daemon;\nimpl Daemon { pub fn new() -> Self { Command::new(\"/bin/sh\").status().unwrap(); Daemon } }\npub fn pure_build() -> Vec<u8> { let mut v = <Vec<u8>>::new(); v.push(1); v }");
+        assert!(eff(&bug, "pure_build").is_empty(),
+                "a qself assoc call FABRICATED a same-named local fn's effect onto a pure caller:\n{bug}");
+        // Surgical: a genuine bare free-fn call STILL edges and inherits the effect.
+        let real = run("qselfreal",
+            "use std::fs;\npub fn dump() { fs::write(\"/x\", b\"d\").unwrap(); }\npub fn real_caller() { dump(); }");
+        assert!(eff(&real, "real_caller").contains(&"Fs".to_string()),
+                "the qself guard wrongly suppressed a genuine bare free-fn edge:\n{real}");
+        // A qualified-tail qself into a LOCAL trait default still links (the accepted trait-default band).
+        let band = run("qselfband",
+            "use std::fs;\npub trait Marker { fn go() { fs::write(\"/x\", b\"d\").unwrap(); } }\npub fn via_trait_ufcs() { <SomeType as Marker>::go(); }");
+        assert!(eff(&band, "via_trait_ufcs").contains(&"Fs".to_string()),
+                "a qualified-tail qself into a local trait default must still link:\n{band}");
+        // PRECISION (what the blunt method:true suppress would have lost): an INHERENT qself on a LOCAL type
+        // whose assoc fn is effectful must STILL propagate — the restored `Daemon::new` tail resolves it.
+        let local = run("qselflocal",
+            "use std::process::Command;\npub struct Daemon;\nimpl Daemon { pub fn new() -> Self { Command::new(\"/bin/sh\").status().unwrap(); Daemon } }\npub fn boot() { let _d = <Daemon>::new(); }");
+        assert!(eff(&local, "boot").contains(&"Exec".to_string()),
+                "an inherent qself on a LOCAL effectful assoc fn must NOT be under-reported:\n{local}");
+    }
+
+    #[test]
+    fn resolve_target_is_precise_and_never_fabricates() {
+        // Exercises the PRODUCTION `resolve_target` (not a copy) so a regression in `run`'s resolution is
+        // caught here. Defs: a unique `bool` free fn, a unique `start` method, a unique `Worker::run`
+        // method, and TWO same-named `Job::run` methods in different modules (an ambiguous 2-segment tail).
+        let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
+        let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
+        for q in ["random::bool::bool", "clip::ClipboardThread::start", "util::helper",
+                  "app::Worker::run", "a::Job::run", "b::Job::run"] {
+            by_leaf.entry(q.rsplit("::").next().unwrap().into()).or_default().push(q.into());
+            by_tail2.entry(tail2(q).unwrap()).or_default().push(q.into());
+        }
+        // (a) qualified `Value::bool(..)` — external `Value`, tail absent locally → NONE (never the
+        // unique-leaf `random::bool::bool`; the original nushell Rand-on-146-fns fabrication).
+        assert_eq!(resolve_target("Value::bool", "bool", false, &by_tail2, &by_leaf), None);
+        // (b) unresolved-receiver method `range.start()` → NONE (never the unique `ClipboardThread::start`).
+        assert_eq!(resolve_target("start", "start", true, &by_tail2, &by_leaf), None);
+        // (c) unqualified free call `helper()` with a unique def → resolves.
+        assert_eq!(resolve_target("helper", "helper", false, &by_tail2, &by_leaf),
+                   Some(&vec!["util::helper".to_string()]));
+        // (d) associated-fn call `Worker::run()` (qualified, unique tail) → resolves to the one local def.
+        assert_eq!(resolve_target("Worker::run", "run", false, &by_tail2, &by_leaf),
+                   Some(&vec!["app::Worker::run".to_string()]));
+        // (e) AMBIGUOUS tail `Job::run` (two types, two modules) → NONE: linking both would fabricate one
+        // type's effect onto the other's caller (the bug the `len()==1` filter on the tail2 branch fixes).
+        assert_eq!(resolve_target("Job::run", "run", false, &by_tail2, &by_leaf), None);
+    }
+
+    // A REFLECTIVE guard on the `--incremental` cache key. `decl_index_digest` decides whether a cached
+    // file's Pass-B FnInfos may be reused; a `MergedDecls` field that steers resolution but is MISSING
+    // from the digest = a stale cache silently returning unsound effect sets. Rust has no runtime field
+    // reflection, so this stands in for it two ways: (1) the exhaustive destructure below stops COMPILING
+    // the moment a field is added to `MergedDecls` until you bind it here — forcing the question "is it in
+    // the digest?"; (2) every field is then mutated in isolation and the digest MUST move, proving each is
+    // actually folded in. Add a field → add its `_` binding AND a mutator case, or the build/test fails.
+    #[test]
+    fn every_merged_decls_field_is_folded_into_the_digest() {
+        // (1) Compile-time exhaustiveness: no `..`, so a new field breaks this line until it's listed.
+        let MergedDecls {
+            fields: _,
+            field_elem: _,
+            rets: _,
+            enum_tmp: _,
+            trait_impls: _,
+            trait_decls: _,
+            trait_fields: _,
+            prim_aliases: _,
+            extern_fns: _,
+            drop_types: _,
+            deref_target: _,
+            lazy_statics: _,
+        } = MergedDecls::default();
+
+        let empty = decl_index_digest(&MergedDecls::default());
+
+        // (2) One mutator per field — each touches exactly that field and nothing else.
+        type Mutator = fn(&mut MergedDecls);
+        let mutators: Vec<(&str, Mutator)> = vec![
+            ("fields", |m| { m.fields.entry("S".into()).or_default().insert("f".into(), "T".into()); }),
+            ("field_elem", |m| { m.field_elem.entry("S".into()).or_default().insert("f".into(), "E".into()); }),
+            ("rets", |m| { m.rets.insert("f".into(), Some("T".into())); }),
+            ("enum_tmp", |m| { m.enum_tmp.insert("v".into(), Some("E".into())); }),
+            ("trait_impls", |m| { m.trait_impls.entry("Tr".into()).or_default().push("Ty".into()); }),
+            ("trait_decls", |m| { m.trait_decls.entry("Tr".into()).or_default().count += 1; }),
+            ("trait_fields", |m| { m.trait_fields.entry("S".into()).or_default().insert("f".into(), vec!["b".into()]); }),
+            ("prim_aliases", |m| { m.prim_aliases.insert("A".into()); }),
+            ("extern_fns", |m| { m.extern_fns.insert("system".into()); }),
+            ("drop_types", |m| { m.drop_types.insert("Guard".into()); }),
+            ("lazy_statics", |m| { m.lazy_statics.insert("CONFIG".into()); }),
+        ];
+        for (name, mutate) in mutators {
+            let mut m = MergedDecls::default();
+            mutate(&mut m);
+            assert_ne!(
+                decl_index_digest(&m), empty,
+                "MergedDecls.{name} changes the index but NOT the digest — the --incremental cache would \
+                 reuse stale FnInfos. Fold `{name}` into decl_index_digest().",
+            );
+        }
+    }
