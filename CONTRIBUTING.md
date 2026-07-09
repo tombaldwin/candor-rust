@@ -36,8 +36,8 @@ Two rules, both load-bearing:
    `std::net::TcpStream` is `Net` but `std::net::SocketAddr` is not). The `tests` module is full of
    these; copy the pattern.
 
-For a crate specific to *your* project, you usually don't need code at all — use a `CANDOR_CONFIG`
-rules file (see the README).
+For a crate specific to *your* project, you usually don't need code at all — use a `CANDOR_RULES`
+rules file (see the README). (`CANDOR_CONFIG` now names the spec-§3.4 `.candor/config` override path.)
 
 ## If you can't make it sound, make it honest
 

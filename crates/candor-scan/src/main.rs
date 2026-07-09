@@ -3662,6 +3662,11 @@ fn scan_main() {
 /// is inert. Values: first token = key (ASCII-lowercased), rest of line = value; `#` comments; blanks.
 const CONFIG_KEYS: [&str; 7] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"];
 
+/// The subset of [`CONFIG_KEYS`] this engine actually wires to a mode. The rest are spec-inert here —
+/// but a checked-in `baseline` key that silently does nothing is a DECLARED-GATE-SILENTLY-OFF (the
+/// reader believes the ratchet is on), so an inert recognized key warns loudly instead of staying mute.
+const CONFIG_KEYS_IMPLEMENTED: [&str; 2] = ["policy", "deps"];
+
 /// Locate + parse `.candor/config` for the scan of `dir` (candor-spec §config): $CANDOR_CONFIG if set
 /// (its path MUST be usable — exit 2 otherwise), else the nearest `.candor/config` walking UP from the
 /// target, else the CWD's, else empty. A discovered-but-unreadable file also exits 2 (fail-closed).
@@ -3714,7 +3719,33 @@ fn load_candor_config(dir: &str) -> std::collections::HashMap<String, String> {
             eprintln!("candor-scan: ignoring unknown config key '{key}' in {}", file.display());
             continue;
         }
+        if !CONFIG_KEYS_IMPLEMENTED.contains(&key.as_str()) {
+            eprintln!(
+                "candor-scan: config key '{key}' is recognized by the candor family but not \
+                 implemented by candor-scan — that gate/mode is NOT active on this scan \
+                 (the nightly lint / another engine enforces it)"
+            );
+            continue;
+        }
         cfg.insert(key, val);
+    }
+    // Family decision: a RELATIVE path value in `.candor/config` resolves against the CONFIG FILE'S
+    // directory, never the process CWD — the config is checked in and travels with the code, so its
+    // paths must mean the same thing wherever the scan is launched from.
+    let base = file.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+    let resolve = |v: &str| -> String {
+        if v.is_empty() || std::path::Path::new(v).is_absolute() {
+            v.to_string()
+        } else {
+            base.join(v).to_string_lossy().into_owned()
+        }
+    };
+    if let Some(p) = cfg.get_mut("policy") {
+        *p = resolve(p);
+    }
+    if let Some(d) = cfg.get_mut("deps") {
+        // CANDOR_DEPS is a `:`-separated list of files/directories; resolve each element.
+        *d = d.split(':').map(&resolve).collect::<Vec<_>>().join(":");
     }
     cfg
 }

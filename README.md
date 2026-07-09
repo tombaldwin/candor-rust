@@ -331,7 +331,7 @@ CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LINT"      # 1. snapshot 
 CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LINT"  # 2. in CI: AS-EFF-005 on regressions
 
 # Flags that combine with any mode:
-CANDOR_CONFIG=candor.rules cargo dylint --lib-path "$LINT"   # extra classifier rules
+CANDOR_RULES=candor.rules  cargo dylint --lib-path "$LINT"   # extra classifier rules
 CANDOR_PARANOID=1          cargo dylint --lib-path "$LINT"   # treat generic trait dispatch as Unknown
 ```
 
@@ -440,8 +440,9 @@ assumed to honour their bound rather than marked `Unknown` — otherwise every `
 ## Extending the classifier
 
 `classify()` in `src/lib.rs` is a curated table mapping crates/paths to effects. To recognise your
-own effectful crates without rebuilding, point `CANDOR_CONFIG` at a rules file — one rule per line,
-`<Effect> <crate|path> <prefix>`:
+own effectful crates without rebuilding, point `CANDOR_RULES` at a rules file — one rule per line,
+`<Effect> <crate|path> <prefix>` (previously named `CANDOR_CONFIG` — that variable now means the
+[`.candor/config`](#candorconfig--check-in-the-configuration) override path, per candor-spec §3.4):
 
 ```
 # project effect rules

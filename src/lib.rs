@@ -18,7 +18,7 @@
 // their bound (a documented residual gap), to keep the audit from drowning in Unknown.
 //
 // The built-in classifier (`classify`) knows a fixed set of crates; a project can add
-// its own crate/path → effect rules via a CANDOR_CONFIG file (see `parse_config`).
+// its own crate/path → effect rules via a CANDOR_RULES file (see `parse_rules`).
 
 extern crate rustc_ast;
 extern crate rustc_errors;
@@ -332,13 +332,16 @@ static CANDOR_BUILD_TAG: &str = concat!("candor-build-version=", env!("CANDOR_VE
 
 impl Candor {
     pub fn new() -> Self {
-        // A *set-but-unreadable* CANDOR_CONFIG must be loud: silently ignoring it would
+        // A *set-but-unreadable* CANDOR_RULES must be loud: silently ignoring it would
         // make the user believe their crates are covered when they aren't.
-        let extra = match std::env::var("CANDOR_CONFIG") {
+        // (Renamed from CANDOR_CONFIG — no fallback: that name now means the spec-§3.4
+        // `.candor/config` override path family-wide, and one variable meaning two
+        // incompatible things is worse than a clean break.)
+        let extra = match std::env::var("CANDOR_RULES") {
             Ok(p) => match std::fs::read_to_string(&p) {
-                Ok(s) => parse_config(&s),
+                Ok(s) => parse_rules(&s),
                 Err(e) => {
-                    eprintln!("candor: CANDOR_CONFIG={p:?} could not be read ({e}); ignoring it");
+                    eprintln!("candor: CANDOR_RULES={p:?} could not be read ({e}); ignoring it");
                     Vec::new()
                 }
             },
@@ -452,13 +455,14 @@ impl Candor {
     }
 }
 
-/// Parse a CANDOR_CONFIG file: one rule per line, `<Effect> <crate|path> <prefix>`,
-/// blank lines and `#` comments ignored. The effect must be one of the known names.
+/// Parse a CANDOR_RULES file (classifier extensions): one rule per line,
+/// `<Effect> <crate|path> <prefix>`, blank lines and `#` comments ignored. The effect must be one
+/// of the known names.
 ///
 ///     # extend the classifier with this project's own effectful crates
 ///     Net   crate  reqwest
 ///     Fs    path   mycrate::storage::
-fn parse_config(text: &str) -> Vec<(&'static str, bool, String)> {
+fn parse_rules(text: &str) -> Vec<(&'static str, bool, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -4168,8 +4172,8 @@ mod tests {
     }
 
     #[test]
-    fn config_parsing_and_extra_rules() {
-        let rules = parse_config(
+    fn rules_parsing_and_extra_rules() {
+        let rules = parse_rules(
             "# a comment\n\nNet  crate  reqwest\nFs   path   mycrate::io::\nBogus crate x\n",
         );
         assert_eq!(rules.len(), 2); // the unknown-effect line is dropped

@@ -228,6 +228,33 @@ want "guard discloses the unloadable per-crate baseline" "$gap" "could not be lo
 if [ "$gap_rc" -eq 2 ]; then echo "  ok   guard with a per-crate baseline gap exits 2 (fail closed)"; pass=$((pass+1)); else echo "  FAIL guard with a per-crate baseline gap exited $gap_rc (want 2)"; fail=$((fail+1)); fi
 rm -rf "$(dirname "$FC")"
 
+# ── 9-cfg. `.candor/config` (spec §3.4) drives the wrapper: policy/baseline keys, fail-closed, warnings ──
+echo "== .candor/config discovery (cargo candor) =="
+CG=$(mktemp -d)/cg; mkdir -p "$CG/src" "$CG/.candor"
+printf '[package]\nname="cg"\nversion="0.1.0"\nedition="2021"\n' > "$CG/Cargo.toml"
+printf 'fn leaf(){ let _=std::fs::read("/tmp/x"); }\nfn domain_logic(){ leaf(); }\nfn main(){ domain_logic(); }\n' > "$CG/src/main.rs"
+echo "deny Fs  domain" > "$CG/.candor/deny-fs.policy"
+# RELATIVE values (resolve against the CONFIG's dir, .candor/) + a recognized-unwired key + a typo.
+printf 'policy deny-fs.policy\nbaseline cfgbase   # inline comment\nstrict 1\npolcy typo\n' > "$CG/.candor/config"
+cfgp_rc=0; cfgp=$( cd "$CG"; "$ROOT/cargo-candor" policy 2>&1 ) || cfgp_rc=$?
+want "config 'policy' key (relative to .candor/) drives the gate"  "$cfgp" '[AS-EFF-006] `domain_logic`'
+if [ "$cfgp_rc" -eq 1 ]; then echo "  ok   config-supplied policy violation exits 1"; pass=$((pass+1)); else echo "  FAIL config-supplied policy exited $cfgp_rc (want 1)"; fail=$((fail+1)); fi
+want "a recognized-but-unwired config key is disclosed"            "$cfgp" "NOT active"
+want "an unknown config key warns (typo protection)"               "$cfgp" "unknown config key 'polcy'"
+# config `baseline` key = the guard's default prefix: snapshot there, then a bare `guard` finds it.
+( cd "$CG"; "$ROOT/cargo-candor" snapshot >/dev/null 2>&1 )
+cfgg_rc=0; ( cd "$CG"; "$ROOT/cargo-candor" guard >/dev/null 2>&1 ) || cfgg_rc=$?
+if [ -e "$CG/.candor/cfgbase.candor-version" ] && [ "$cfgg_rc" -eq 0 ]; then
+  echo "  ok   config 'baseline' key anchors snapshot+guard (bare guard passes)"; pass=$((pass+1))
+else
+  echo "  FAIL config baseline key: sidecar-exists=$([ -e "$CG/.candor/cfgbase.candor-version" ] && echo yes || echo no) guard_rc=$cfgg_rc (want 0)"; fail=$((fail+1))
+fi
+# a set-but-unusable CANDOR_CONFIG fails closed (exit 2), never a silent no-config run.
+cfgu_rc=0; cfgu=$( cd "$CG"; CANDOR_CONFIG=/no/such/config "$ROOT/cargo-candor" guard 2>&1 ) || cfgu_rc=$?
+want "a set-but-unusable CANDOR_CONFIG is loud" "$cfgu" "not a readable file"
+if [ "$cfgu_rc" -eq 2 ]; then echo "  ok   unusable CANDOR_CONFIG exits 2 (fail closed)"; pass=$((pass+1)); else echo "  FAIL unusable CANDOR_CONFIG exited $cfgu_rc (want 2)"; fail=$((fail+1)); fi
+rm -rf "$(dirname "$CG")"
+
 # ── 9a. Host allowlist: enforce per-scope Net endpoints (AS-EFF-008) ──
 echo "== host allowlist / AS-EFF-008 (CANDOR_POLICY allow Net) =="
 HA=$(mktemp -d)/ha; mkdir -p "$HA/src"

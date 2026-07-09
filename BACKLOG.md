@@ -600,7 +600,7 @@ sound over-approximation (`Unknown`), which candor already does.
 
 ## Done (recent, for context)
 
-Unknown/AS-EFF-003 · CANDOR_CONFIG · CANDOR_NO_AMBIENT/AS-EFF-004 · CANDOR_PARANOID ·
+Unknown/AS-EFF-003 · CANDOR_RULES (né CANDOR_CONFIG) · CANDOR_NO_AMBIENT/AS-EFF-004 · CANDOR_PARANOID ·
 CANDOR_BASELINE/AS-EFF-005 · ICE hardening · raw-socket + HTTP + Rand + **Db + Ipc** classification ·
 **const/static initializers (macro-filtered)** · **main entry-point exemption** · unit tests ·
 `cargo-candor` wrapper · CI + downstream guard workflow · self-guard ·

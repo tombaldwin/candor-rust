@@ -144,9 +144,80 @@ is_scan_report() { [ "$(cq reports "$1" --backend 2>/dev/null)" = scan ]; }
 # keeps the lint's files (incl. its last-good report on a build failure) and drops only the scan ones.
 clear_scan_reports() { cq reports "$1" --clear-other lint >/dev/null 2>&1 || true; }
 
+# ── .candor/config (candor-spec §3.4): the checked-in floor under the CANDOR_* env wiring ──────────
+# Discovery is anchored to the project being analyzed: walk UP from $PWD to the nearest
+# `.candor/config`; a set $CANDOR_CONFIG overrides discovery entirely. Grammar matches candor-scan's
+# exactly (`#` begins a comment, inline too; first token = key, ASCII-lowercased; rest of line =
+# value). The wrapper wires the keys its commands consume — `policy` (the `policy` command's default
+# file), `baseline` (the guard/diff/snapshot default prefix), `deps` (exported as CANDOR_DEPS when the
+# env doesn't already set it) — and DISCLOSES the recognized keys it does not wire (a checked-in
+# `strict` that silently does nothing here would be a declared-gate-silently-off). Precedence, highest
+# first: CLI arg → the matching CANDOR_* env var → this file → the built-in default.
+# FAIL-CLOSED: a configured-but-unusable config exits 2 (it may carry the policy, so silently dropping
+# it is silently dropping a gate); unknown keys warn. A RELATIVE path value resolves against the
+# CONFIG FILE'S directory (the family decision — the config is checked in and travels with the code),
+# never the process CWD.
+CFG_POLICY=""; CFG_BASELINE=""
+load_config() {
+  local f="" d text line key val cfgdir
+  if [ -n "${CANDOR_CONFIG:-}" ]; then
+    f="$CANDOR_CONFIG"
+    if [ ! -f "$f" ] || [ ! -r "$f" ]; then
+      echo "candor: CANDOR_CONFIG=$f is not a readable file — failing closed (exit 2)." >&2
+      exit 2
+    fi
+  else
+    d="$PWD"
+    while :; do
+      [ -e "$d/.candor/config" ] && { f="$d/.candor/config"; break; }
+      [ "$d" = "/" ] && break
+      d="$(dirname "$d")"
+    done
+  fi
+  [ -n "$f" ] || return 0
+  if ! text="$(cat "$f" 2>/dev/null)"; then
+    echo "candor: config $f exists but could not be read — failing closed (exit 2)." >&2
+    exit 2
+  fi
+  cfgdir="$(cd "$(dirname "$f")" && pwd)"
+  rel() { case "$1" in ""|/*) printf '%s' "$1" ;; *) printf '%s/%s' "$cfgdir" "$1" ;; esac; }
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"   # trim
+    [ -n "$line" ] || continue
+    key="${line%%[[:space:]]*}"
+    val="${line#"$key"}"; val="${val#"${val%%[![:space:]]*}"}"
+    key="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
+    case "$key" in
+      policy)   CFG_POLICY="$(rel "$val")" ;;
+      baseline) CFG_BASELINE="$(rel "$val")" ;;
+      deps)
+        if [ -z "${CANDOR_DEPS:-}" ] && [ -n "$val" ]; then
+          local parts=() p out=""
+          IFS=':' read -ra parts <<< "$val"
+          for p in "${parts[@]}"; do out="$out:$(rel "$p")"; done
+          export CANDOR_DEPS="${out#:}"
+        fi ;;
+      strict|no-ambient|closed-world|taint)
+        echo "candor: config key '$key' is recognized by the candor family but not wired by" >&2
+        echo "candor: cargo-candor — that mode is NOT active on this run (invoke its command" >&2
+        echo "candor: explicitly, e.g. 'cargo candor strict/no-ambient/risk')." >&2 ;;
+      *)
+        echo "candor: ignoring unknown config key '$key' in $f" >&2 ;;
+    esac
+  done <<< "$text"
+}
+
 # Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
 [ "${1:-}" = "candor" ] && shift
 cmd="${1:-audit}"; shift || true
+
+# `scan` delegates to candor-scan, which does its own §3.4 discovery (don't double-warn); setup/help
+# must never fail on a broken config before they can help fix it.
+case "$cmd" in
+  setup|install|-h|--help|help|scan) : ;;
+  *) load_config ;;
+esac
 
 # Resolve (building on first use) the lint dylib — UNLESS the command doesn't need it. `setup` is the
 # recovery path (it builds cleanly via install.sh), and help is free; neither should fail on a missing
@@ -281,7 +352,7 @@ case "$cmd" in
   snapshot)
     # Write the baseline AND stamp the engine version beside it, so the guard later
     # knows which candor produced it.
-    pre="${1:-.candor/baseline}"
+    pre="${1:-${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}}"
     mkdir -p "$(dirname "$pre")"
     # dylint emits the report ONLY when the crate recompiles. A warm `target/dylint` (e.g. a prior
     # `cargo candor audit` in the same session) would otherwise produce ZERO baseline files while
@@ -314,7 +385,7 @@ case "$cmd" in
     # any REAL regression hidden inside the wave; the old SKIP here was the other failure mode — an
     # unbounded fail-open window (CI green with the gate silently off until someone remembered to
     # refresh). The aligned family posture (candor-java matches): do NOT evaluate, say it once, exit 2.
-    pre="${1:-.candor/baseline}"
+    pre="${1:-${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}}"
     # No baseline AT ALL (never snapshotted, a typo'd prefix) is the same invalid-gate-input class as a
     # stale one: the engine would warn "guard NOT active" and exit 0 — an unbounded fail-open window.
     # Fail closed with the incantation instead (review §2 gap).
@@ -376,7 +447,7 @@ case "$cmd" in
     # The agent-facing sibling of `guard`: instead of pass/fail, DESCRIBE the per-function effect
     # delta vs the baseline — what each function gained or lost. This is the signal an agent can't
     # cheaply self-compute (transitive effects across the call graph). `--json` for machine reading.
-    json=0; pre=".candor/baseline"
+    json=0; pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
     for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) pre="$a" ;; esac; done
     if ! report_exists "$pre"; then
       echo "candor: no baseline at '$pre.*' — create one with 'cargo candor snapshot $pre'." >&2
@@ -589,7 +660,12 @@ case "$cmd" in
     # declared allowlist, or an endpoint candor can't pin down). Rules: `deny <Effects...> [scope]`,
     # `pure [scope]`, `allow Net [in <scope>] <host>...`; scope = a path substring. This is the
     # architectural-invariant gate an agent can't self-check.
-    pol="${1:-.candor/policy}"
+    # Precedence (spec §3.4): the positional arg → $CANDOR_POLICY → .candor/config's `policy` key →
+    # the conventional .candor/policy.
+    pol="${1:-}"
+    [ -n "$pol" ] || pol="${CANDOR_POLICY:-}"
+    [ -n "$pol" ] || pol="${CFG_POLICY:-}"
+    [ -n "$pol" ] || pol=".candor/policy"
     [ -f "$pol" ] || { echo "candor: no policy at '$pol'. Rules: 'deny Net Db domain', 'pure parse', 'allow Net in billing api.stripe.com', 'forbid domain -> infra'." >&2; exit 2; }
     # Workspace-scale, one command. First SNAPSHOT every crate's report (dylint lints all workspace
     # members in one pass), so a boundary can see effects/hosts that physically live in a SIBLING crate.

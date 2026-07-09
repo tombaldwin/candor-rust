@@ -441,3 +441,41 @@ fn candor_config_drives_the_gate_env_overrides_and_typo_fails_closed() {
     let _ = std::fs::remove_dir_all(&d);
     assert_eq!(out.status.code(), Some(2), "a typo'd CANDOR_CONFIG must fail closed");
 }
+
+#[test]
+fn candor_config_relative_path_resolves_against_the_config_dir_not_the_cwd() {
+    // Family decision: a RELATIVE path value in .candor/config anchors to the CONFIG FILE'S directory
+    // (the config is checked in and travels with the code), never the process CWD. Run the scan from
+    // an unrelated CWD: if resolution were CWD-based the policy would be unreadable (exit 2 /
+    // gate-off); anchored correctly, the deny-Exec gate FIRES (exit 1).
+    let d = make_crate("cfgrel", "pub fn go() { std::process::Command::new(\"sh\").status().unwrap(); }");
+    std::fs::create_dir_all(d.join(".candor")).unwrap();
+    std::fs::write(d.join(".candor/deny-exec.policy"), "deny Exec\n").unwrap();
+    std::fs::write(d.join(".candor/config"), "policy deny-exec.policy\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .current_dir(std::env::temp_dir())
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(1),
+        "a config-relative policy path must resolve against the config's own directory (gate fires)");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("AS-EFF-006") || String::from_utf8_lossy(&out.stdout).contains("AS-EFF-006"),
+        "the deny-Exec violation must be reported: {stderr}");
+}
+
+#[test]
+fn candor_config_recognized_but_unimplemented_key_warns_loudly() {
+    // A checked-in `baseline` (or strict/no-ambient/closed-world/taint) key is spec-recognized but not
+    // wired to any candor-scan mode — a DECLARED-GATE-SILENTLY-OFF unless disclosed. It must warn.
+    let d = make_crate("cfginert", "pub fn pure() -> u32 { 1 }");
+    std::fs::create_dir_all(d.join(".candor")).unwrap();
+    std::fs::write(d.join(".candor/config"), "baseline .candor/baseline\ntaint true\n").unwrap();
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(0), "inert keys don't fail the scan");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("config key 'baseline' is recognized by the candor family but not implemented by candor-scan"),
+        "the inert `baseline` key must be disclosed loudly: {stderr}");
+    assert!(stderr.contains("config key 'taint'"), "every inert recognized key is disclosed: {stderr}");
+}
