@@ -226,6 +226,20 @@ want "deny Unknown violation writes the sentinel"          "$(cat "$UVIO")" 'AS-
 : > "$UVIO"; echo "pure  domain" > "$PU/policy-pure"
 out=$(dl "$PU" env CANDOR_POLICY="$PU/policy-pure" CANDOR_VIOLATIONS="$UVIO")
 absent "pure does NOT fire on an Unknown-only fn (AS-EFF-003 owns that)" "$out" '[AS-EFF-006]'
+# candor-scan shares the ruling — the syntactic gate wrongly counted Unknown under `pure` until
+# 2026-07-09 (a cross-engine verdict split on the same policy file). fn-typed-param callback →
+# scan's own Unknown; an unscoped `pure` must pass it, `deny Unknown` must fire.
+PSU=$(mktemp -d)/psu; mkdir -p "$PSU/src"
+printf '[package]\nname="psu"\nversion="0.1.0"\nedition="2021"\n' > "$PSU/Cargo.toml"
+printf 'pub fn entry(f: fn()) { f(); }\n' > "$PSU/src/lib.rs"
+printf 'pure\n' > "$PSU/policy-pure"; printf 'deny Unknown\n' > "$PSU/policy-unknown"
+env -u CANDOR_CONFIG CANDOR_POLICY="$PSU/policy-pure" "$ROOT/target/debug/candor-scan" "$PSU" >/dev/null 2>&1
+rc_sp=$?
+env -u CANDOR_CONFIG CANDOR_POLICY="$PSU/policy-unknown" "$ROOT/target/debug/candor-scan" "$PSU" >/dev/null 2>&1
+rc_su=$?
+if [ "$rc_sp" = 0 ]; then echo "  ok   candor-scan: pure passes an Unknown-only fn (exit 0)"; pass=$((pass+1)); else echo "  FAIL candor-scan: pure fired on an Unknown-only fn (exit $rc_sp)"; fail=$((fail+1)); fi
+if [ "$rc_su" = 1 ]; then echo "  ok   candor-scan: deny Unknown fires (exit 1)"; pass=$((pass+1)); else echo "  FAIL candor-scan: deny Unknown expected exit 1, got $rc_su"; fail=$((fail+1)); fi
+rm -rf "$(dirname "$PSU")"
 rm -rf "$(dirname "$PU")"
 
 # ── 9-fc. Fail-closed wrapper gates: `policy` and `guard` must never pass when they could not run ──

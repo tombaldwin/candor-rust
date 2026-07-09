@@ -42,7 +42,12 @@ pub(crate) fn policy_violations(
                 }
             }
             let hits: Vec<&str> = if r.effects.is_empty() {
-                inf.iter().copied().collect() // `pure` — ANY effect (Unknown included: not certifiably pure)
+                // `pure` — every EFFECT, but NOT `Unknown`: the §4 trust marker is not an effect
+                // (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). The reference
+                // engine and the deep backend exclude it identically — this engine wrongly counted an
+                // Unknown-only fn as a `pure` violation until 2026-07-09 (a cross-engine verdict split
+                // on the same policy file).
+                inf.iter().copied().filter(|e| *e != "Unknown").collect()
             } else {
                 inf.iter().copied().filter(|e| r.effects.contains(e)).collect()
             };

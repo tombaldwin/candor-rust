@@ -1,0 +1,29 @@
+{
+  "candor": {
+    "version": "66f31a9",
+    "toolchain": "nightly-2026-06-14",
+    "spec": "0.8"
+  },
+  "package": "net_minreq",
+  "functions": [
+    {
+      "fn": "fetch",
+      "loc": "net_minreq/src/main.rs:4:1: 4:11",
+      "inferred": [],
+      "hash": "d5c4839543d45e5c212d965d725a92a6",
+      "invisible": [
+        "minreq"
+      ]
+    },
+    {
+      "fn": "main",
+      "loc": "net_minreq/src/main.rs:9:1: 9:10",
+      "inferred": [],
+      "entryPoint": true,
+      "hash": "d5c4839543d45e5c8a223ca7498cdd42",
+      "invisible": [
+        "minreq"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "candor": {
+    "version": "66f31a9",
+    "toolchain": "nightly-2026-06-14",
+    "spec": "0.8"
+  },
+  "package": "pure_ctrl",
+  "functions": []
+}
