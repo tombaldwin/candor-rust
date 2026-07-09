@@ -155,8 +155,8 @@ clear_scan_reports() { cq reports "$1" --clear-other lint >/dev/null 2>&1 || tru
 # first: CLI arg → the matching CANDOR_* env var → this file → the built-in default.
 # FAIL-CLOSED: a configured-but-unusable config exits 2 (it may carry the policy, so silently dropping
 # it is silently dropping a gate); unknown keys warn. A RELATIVE path value resolves against the
-# CONFIG FILE'S directory (the family decision — the config is checked in and travels with the code),
-# never the process CWD.
+# config's HOME directory — the directory CONTAINING `.candor/`, i.e. the repo root the config travels
+# with (SPEC §3.4) — never the process CWD.
 CFG_POLICY=""; CFG_BASELINE=""
 load_config() {
   local f="" d text line key val cfgdir
@@ -179,8 +179,13 @@ load_config() {
     echo "candor: config $f exists but could not be read — failing closed (exit 2)." >&2
     exit 2
   fi
+  # The anchor for RELATIVE path values (SPEC §3.4): the config's HOME directory — the directory
+  # CONTAINING `.candor/` (the repo root the config travels with), so `policy .candor/gate.pol` and a
+  # root-relative `policy arch.policy` both mean what the author wrote. An out-of-tree $CANDOR_CONFIG
+  # override anchors to the file's own directory.
   cfgdir="$(cd "$(dirname "$f")" && pwd)"
-  rel() { case "$1" in ""|/*) printf '%s' "$1" ;; *) printf '%s/%s' "$cfgdir" "$1" ;; esac; }
+  case "$cfgdir" in */.candor) cfghome="${cfgdir%/.candor}" ;; *) cfghome="$cfgdir" ;; esac
+  rel() { case "$1" in ""|/*) printf '%s' "$1" ;; *) printf '%s/%s' "$cfghome" "$1" ;; esac; }
   while IFS= read -r line; do
     line="${line%%#*}"
     line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"   # trim
@@ -189,7 +194,15 @@ load_config() {
     val="${line#"$key"}"; val="${val#"${val%%[![:space:]]*}"}"
     key="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
     case "$key" in
-      policy)   CFG_POLICY="$(rel "$val")" ;;
+      policy)
+        # A configured-but-EMPTY policy (a bare `policy` line) means "enabled with the empty value" —
+        # fail loud (exit 2, the §6.2 unreadable-policy posture), never silently skip the gate as
+        # falsy (candor-scan and the family fail the same way).
+        if [ -z "$val" ]; then
+          echo "candor: $f names 'policy' with an EMPTY value — the gate cannot be evaluated; failing closed (exit 2)." >&2
+          exit 2
+        fi
+        CFG_POLICY="$(rel "$val")" ;;
       baseline) CFG_BASELINE="$(rel "$val")" ;;
       deps)
         if [ -z "${CANDOR_DEPS:-}" ] && [ -n "$val" ]; then

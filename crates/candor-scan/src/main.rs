@@ -3746,10 +3746,18 @@ fn load_candor_config(dir: &str) -> std::collections::HashMap<String, String> {
         }
         cfg.insert(key, val);
     }
-    // Family decision: a RELATIVE path value in `.candor/config` resolves against the CONFIG FILE'S
-    // directory, never the process CWD — the config is checked in and travels with the code, so its
-    // paths must mean the same thing wherever the scan is launched from.
-    let base = file.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+    // SPEC §3.4: a RELATIVE path value resolves against the config's HOME directory — the directory
+    // CONTAINING the `.candor/` dir (the repo root the config travels with) — never the process CWD.
+    // So `policy .candor/gate.pol` and a root-relative `policy arch.policy` both mean what the author
+    // wrote. An out-of-tree $CANDOR_CONFIG override anchors to the file's own directory.
+    let base = {
+        let parent = file.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+        if parent.file_name().and_then(|n| n.to_str()) == Some(".candor") {
+            parent.parent().map(std::path::Path::to_path_buf).unwrap_or(parent)
+        } else {
+            parent
+        }
+    };
     let resolve = |v: &str| -> String {
         if v.is_empty() || std::path::Path::new(v).is_absolute() {
             v.to_string()

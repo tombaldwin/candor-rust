@@ -487,25 +487,48 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
 }
 
 #[test]
-fn candor_config_relative_path_resolves_against_the_config_dir_not_the_cwd() {
-    // Family decision: a RELATIVE path value in .candor/config anchors to the CONFIG FILE'S directory
-    // (the config is checked in and travels with the code), never the process CWD. Run the scan from
-    // an unrelated CWD: if resolution were CWD-based the policy would be unreadable (exit 2 /
-    // gate-off); anchored correctly, the deny-Exec gate FIRES (exit 1).
+fn candor_config_relative_path_resolves_against_the_config_home_not_the_cwd() {
+    // SPEC §3.4: a RELATIVE path value anchors to the config's HOME directory — the directory
+    // CONTAINING `.candor/` (the repo root the config travels with) — never the process CWD (and not
+    // the literal dirname of the config, which would break `policy .candor/gate.pol`). Run the scan
+    // from an unrelated CWD: if resolution were CWD-based the policy would be unreadable (exit 2);
+    // anchored correctly, the deny-Exec gate FIRES (exit 1).
     let d = make_crate("cfgrel", "pub fn go() { std::process::Command::new(\"sh\").status().unwrap(); }");
     std::fs::create_dir_all(d.join(".candor")).unwrap();
-    std::fs::write(d.join(".candor/deny-exec.policy"), "deny Exec\n").unwrap();
-    std::fs::write(d.join(".candor/config"), "policy deny-exec.policy\n").unwrap();
+    std::fs::write(d.join(".candor/gate.pol"), "deny Exec\n").unwrap();
+    std::fs::write(d.join(".candor/config"), "policy .candor/gate.pol\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .current_dir(std::env::temp_dir())
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(1),
+        "a home-relative `.candor/gate.pol` policy value must resolve and fire the gate");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("AS-EFF-006") || String::from_utf8_lossy(&out.stdout).contains("AS-EFF-006"),
+        "the deny-Exec violation must be reported: {stderr}");
+    // …and a root-relative value (candor-init's scaffolded `policy arch.policy`) anchors there too.
+    std::fs::write(d.join("arch.policy"), "deny Exec\n").unwrap();
+    std::fs::write(d.join(".candor/config"), "policy arch.policy\n").unwrap();
     let out = Command::new(bin())
         .arg(d.to_string_lossy().as_ref())
         .current_dir(std::env::temp_dir())
         .output().expect("run candor-scan");
     let _ = std::fs::remove_dir_all(&d);
     assert_eq!(out.status.code(), Some(1),
-        "a config-relative policy path must resolve against the config's own directory (gate fires)");
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("AS-EFF-006") || String::from_utf8_lossy(&out.stdout).contains("AS-EFF-006"),
-        "the deny-Exec violation must be reported: {stderr}");
+        "a root-relative `arch.policy` value must resolve against the config home (gate fires)");
+}
+
+#[test]
+fn candor_config_bare_policy_key_fails_loud() {
+    // A configured-but-EMPTY policy (a bare `policy` line) means "enabled with the empty value" —
+    // it must FAIL (exit 2, the unreadable-policy posture), never be silently skipped as falsy
+    // (the declared-gate-silently-off class).
+    let d = make_crate("cfgbarepol", "pub fn go() { std::process::Command::new(\"sh\").status().unwrap(); }");
+    std::fs::create_dir_all(d.join(".candor")).unwrap();
+    std::fs::write(d.join(".candor/config"), "policy\n").unwrap();
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(2), "a bare `policy` config key must fail loud, never skip the gate");
 }
 
 #[test]
