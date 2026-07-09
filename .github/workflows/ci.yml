@@ -30,7 +30,12 @@ jobs:
 
       - name: Install dylint
         # +stable: build the runner with stable, not the nightly pinned for the lint.
-        run: cargo +stable install cargo-dylint dylint-link
+        # PINNED to the exact versions matching Cargo.toml's dylint_linting (6.0.1): an unpinned
+        # install lets a runner major bump land mid-arc and change behavior under CI's feet —
+        # bump deliberately, together with the dylint_linting dependency.
+        run: |
+          cargo +stable install cargo-dylint --version 6.0.1
+          cargo +stable install dylint-link --version 6.0.1
 
       # --workspace so the no-rustc_private crates build too: candor-query is a member but NOT a
       # dependency of the lint, so a bare `cargo build` would never compile it.
@@ -76,6 +81,13 @@ jobs:
       # diagnostics (env-driven) and cross-crate propagation across a real lib+bin build.
       - name: Integration tests (AS-EFF modes + cross-crate)
         run: bash tests/integration.sh
+
+      # The wrapper is plain bash with no unit tests and has shipped real fail-open bugs. This lane
+      # drives EVERY cargo-candor subcommand on a tiny fixture and pins the exit-code contract — the
+      # fail-closed negatives especially (policy on a build-broken crate → 2; guard with no baseline
+      # → 2; bare/unusable .candor/config → 2; --gate-json verdict emission on policy AND guard).
+      - name: Wrapper smoke (every subcommand + fail-closed negatives)
+        run: bash ci/wrapper-smoke.sh
 
       # Workspace-scale enforcement: AS-EFF-008 host allowlist catching a forbidden endpoint that
       # lives in a SIBLING crate (the cross-crate host-propagation + CANDOR_REPORTS path). Teeth:
@@ -214,3 +226,22 @@ jobs:
       # effect-or-Unknown — attributing a runtime-proven effect to the exact function, not just `main`.
       - name: Soundness per-function oracle
         run: bash soundness/oracle_pf.sh 40
+
+  # The stable crates on macOS — cheap cross-OS coverage for the surface adopters `cargo install`
+  # (scan/query/report/classify only; the dylint lint + soundness lanes stay Linux-only — the pinned
+  # nightly build is expensive and OS-independent in what it checks).
+  stable-crates-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-candor-stable-v1-${{ hashFiles('Cargo.lock') }}
+      - name: Test the stable crates (no nightly, no dylint)
+        run: cargo +stable test -p candor-report -p candor-classify -p candor-scan -p candor-query
