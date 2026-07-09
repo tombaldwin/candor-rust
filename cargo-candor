@@ -315,6 +315,14 @@ case "$cmd" in
     # unbounded fail-open window (CI green with the gate silently off until someone remembered to
     # refresh). The aligned family posture (candor-java matches): do NOT evaluate, say it once, exit 2.
     pre="${1:-.candor/baseline}"
+    # No baseline AT ALL (never snapshotted, a typo'd prefix) is the same invalid-gate-input class as a
+    # stale one: the engine would warn "guard NOT active" and exit 0 — an unbounded fail-open window.
+    # Fail closed with the incantation instead (review §2 gap).
+    if ! report_exists "$pre"; then
+      echo "candor: no baseline found at '$pre.*' — the guard cannot evaluate (never a silent pass)." >&2
+      echo "candor: create one with 'cargo candor snapshot $pre', commit the baseline.* files, re-run." >&2
+      exit 2
+    fi
     ev="$(engine_ver)"; bv=""
     [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
     # Absent provenance is as unverifiable as a mismatch (§2.1) — if a baseline EXISTS but carries no
@@ -346,6 +354,16 @@ case "$cmd" in
       # dylint itself failed (the crate didn't build) — the guard could NOT run, so do not pass silently.
       printf '%s\n' "$out" >&2
       echo "candor: guard could NOT run (the crate failed to build under dylint) — failing closed, not a pass." >&2
+      exit 2
+    fi
+    # A per-crate baseline gap (a NEW workspace member, a renamed crate — the prefix has files, but not
+    # for this crate) is disclosed by the engine as a GUARD-UNAVAILABLE sentinel line: the guard could
+    # not evaluate that crate, so it must NOT pass silently — exit 2 (not-evaluated), not 0 and not a
+    # bogus AS-EFF-005.
+    if grep -q '^GUARD-UNAVAILABLE ' "$vio" 2>/dev/null; then
+      echo "candor: a crate's baseline files could not be loaded (see above) — the guard could NOT" >&2
+      echo "candor: evaluate that crate; failing closed. Refresh with 'cargo candor snapshot $pre'" >&2
+      echo "candor: and commit the baseline.* files." >&2
       exit 2
     fi
     if [ -s "$vio" ]; then
@@ -488,8 +506,10 @@ case "$cmd" in
     cargs=(.candor/report)
     for a in "$@"; do case "$a" in --json) cargs+=("--json") ;; -*) ;; *) cargs+=("$a") ;; esac; done
     ensure_report || exit 1
-    query containment "${cargs[@]}"
-    exit 0 ;;
+    # Explicit exit-code propagation (a ratchet violation is candor-query's exit 1): don't lean on
+    # `set -e` aborting mid-function to carry the status out — make the gate's verdict deliberate.
+    rc=0; query containment "${cargs[@]}" || rc=$?
+    exit "$rc" ;;
 
   reachable)
     # What the program PERFORMS at runtime: the union of effects over the entry points (main /
@@ -579,6 +599,14 @@ case "$cmd" in
     snap() { CANDOR_JSON="$tmp/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
     snap
     report_exists "$tmp/r" || { rm -rf target/dylint 2>/dev/null || true; snap; }
+    # No snapshot ⇒ the crate didn't build (or the engine broke): enforcing anyway would run with NO
+    # sibling reports loaded, so a cross-crate `allow` host / boundary silently goes unenforced — and a
+    # total build failure would fall through to "policy OK". Fail closed (exit 2, policy NOT evaluated).
+    if ! report_exists "$tmp/r"; then
+      echo "candor: policy NOT evaluated — the report snapshot produced no reports (did the crate" >&2
+      echo "candor: build?). Failing closed (exit 2); run 'cargo candor audit --all' to see errors." >&2
+      exit 2
+    fi
     # The snapshot warmed cargo's check cache; the CANDOR_* env vars aren't part of cargo's build
     # fingerprint, so a plain re-run would be a cache hit that never re-emits diagnostics. Clear
     # target/dylint so the enforce pass definitely re-runs the lint (with the siblings loaded).
@@ -588,8 +616,20 @@ case "$cmd" in
     # a dylint output-stream change can't silently turn the gate green. We still print the human text.
     # Fresh file per run (engine appends; a stale one would false-fail). `: >` truncates/creates.
     vio="$tmp/violations"; : > "$vio"
-    out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" cargo dylint --lib-path "$LIB" 2>&1 || true)"
+    rc=0
+    out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" cargo dylint --lib-path "$LIB" 2>&1)" || rc=$?
     printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]|\[AS-EFF-009\]' >&2 || true
+    # A nonzero dylint exit is NEVER a violation verdict (the engine reports violations via the sentinel
+    # and diagnostics, not the exit code): it means the enforce pass could not run to completion — a
+    # build failure mid-workspace, or the engine's own §6.2 fail-closed exit 2 (an unreadable policy).
+    # The old `|| true` swallowed it and printed "policy OK" (fail-open, the cardinal class). Mirror
+    # `guard`: fail closed.
+    if [ "$rc" -ne 0 ]; then
+      printf '%s\n' "$out" >&2
+      echo "candor: policy NOT evaluated (cargo dylint exited $rc — a build failure, or the engine's" >&2
+      echo "candor: unreadable-policy fail-closed exit) — failing closed (exit 2), not a pass." >&2
+      exit 2
+    fi
     if [ -s "$vio" ]; then
       echo "candor: architecture-policy violation (AS-EFF-006/008/009) — blocked. Bypass: git push --no-verify" >&2
       exit 1

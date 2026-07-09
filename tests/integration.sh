@@ -201,6 +201,33 @@ dl "$PL" env CANDOR_POLICY="$PL/policy-clean" CANDOR_VIOLATIONS="$VIO" >/dev/nul
 if [ -s "$VIO" ]; then echo "  FAIL clean run must leave the sentinel empty — got: $(cat "$VIO")"; fail=$((fail+1)); else echo "  ok   clean run leaves the CANDOR_VIOLATIONS sentinel empty"; pass=$((pass+1)); fi
 rm -rf "$(dirname "$PL")"
 
+# ── 9-fc. Fail-closed wrapper gates: `policy` and `guard` must never pass when they could not run ──
+echo "== fail-closed gates (cargo candor policy / guard) =="
+FC=$(mktemp -d)/fc; mkdir -p "$FC/src"
+printf '[package]\nname="fc"\nversion="0.1.0"\nedition="2021"\n' > "$FC/Cargo.toml"
+# (a) `policy` on a crate that DOESN'T BUILD: the gate cannot evaluate → exit 2, never "policy OK".
+printf 'fn main() { this does not compile\n' > "$FC/src/main.rs"
+echo "deny Net" > "$FC/policy"
+pfc_rc=0; pfc=$( cd "$FC"; "$ROOT/cargo-candor" policy policy 2>&1 ) || pfc_rc=$?
+want "policy on a build-broken crate says NOT evaluated"  "$pfc" "policy NOT evaluated"
+absent "policy on a build-broken crate never says OK"     "$pfc" "policy OK"
+if [ "$pfc_rc" -eq 2 ]; then echo "  ok   policy on a build-broken crate exits 2"; pass=$((pass+1)); else echo "  FAIL policy on a build-broken crate exited $pfc_rc (want 2)"; fail=$((fail+1)); fi
+# (b) `guard` with NO baseline at all (never snapshotted / typo'd prefix): exit 2 + the incantation.
+printf 'fn main() {}\n' > "$FC/src/main.rs"
+gfc_rc=0; gfc=$( cd "$FC"; "$ROOT/cargo-candor" guard .candor/nosuch 2>&1 ) || gfc_rc=$?
+want "guard with no baseline names the snapshot incantation" "$gfc" "cargo candor snapshot"
+if [ "$gfc_rc" -eq 2 ]; then echo "  ok   guard with no baseline exits 2"; pass=$((pass+1)); else echo "  FAIL guard with no baseline exited $gfc_rc (want 2)"; fail=$((fail+1)); fi
+# (c) `guard` with a PER-CRATE baseline gap (the prefix has files, but not for THIS crate — a new
+# workspace member / renamed crate): the engine's GUARD-UNAVAILABLE sentinel → exit 2, not 0, not 1.
+( cd "$FC"; "$ROOT/cargo-candor" snapshot .candor/base >/dev/null 2>&1 )
+for f in "$FC"/.candor/base.fc.*.json; do
+  [ -e "$f" ] && mv "$f" "$(printf '%s' "$f" | sed 's/base\.fc\./base.othercrate./')"
+done
+gap_rc=0; gap=$( cd "$FC"; "$ROOT/cargo-candor" guard .candor/base 2>&1 ) || gap_rc=$?
+want "guard discloses the unloadable per-crate baseline" "$gap" "could not be loaded"
+if [ "$gap_rc" -eq 2 ]; then echo "  ok   guard with a per-crate baseline gap exits 2 (fail closed)"; pass=$((pass+1)); else echo "  FAIL guard with a per-crate baseline gap exited $gap_rc (want 2)"; fail=$((fail+1)); fi
+rm -rf "$(dirname "$FC")"
+
 # ── 9a. Host allowlist: enforce per-scope Net endpoints (AS-EFF-008) ──
 echo "== host allowlist / AS-EFF-008 (CANDOR_POLICY allow Net) =="
 HA=$(mktemp -d)/ha; mkdir -p "$HA/src"

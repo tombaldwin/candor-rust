@@ -3133,8 +3133,14 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 if loaded.is_none() {
                     eprintln!(
                         "candor: CANDOR_BASELINE set but {file:?} could not be loaded — \
-                         the regression guard is NOT active"
+                         the regression guard CANNOT evaluate this crate (fail closed)"
                     );
+                    // Fail-closed machine signal: a per-crate baseline gap (a NEW workspace member, a
+                    // renamed crate, a typo'd prefix) must not read as a silent pass — the wrapper maps
+                    // this sentinel to exit 2 ("guard not evaluated"), distinct from a real AS-EFF-005
+                    // (exit 1). A no-op when no CANDOR_VIOLATIONS sink is set (direct `cargo dylint`
+                    // runs still get the loud stderr above).
+                    self.record_violation("GUARD-UNAVAILABLE", &file);
                 }
                 loaded
             }
