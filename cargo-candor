@@ -18,12 +18,17 @@
 #   cargo candor containment [baseline]       # effect-leakage diagnostic; with a baseline, a CI ratchet
 #   cargo candor reachable                    # what the program does at runtime (union over entry points)
 #   cargo candor path     my_function Net     # the call chain by which a fn comes to perform an effect, INSTANT
+#   cargo candor impact   my_function         # blast radius: transitive callers + downstream entry points, INSTANT
 #   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
-#   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure rules)
+#   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure/allow/forbid rules)
 #   cargo candor risk                         # heuristic: effects on caller-derived input (advisory)
-#   cargo candor update
-#   cargo candor strict   my_module
-#   cargo candor no-ambient my_module
+#   cargo candor update                       # pull + rebuild the engine, refresh this project's baseline
+#   cargo candor strict   my_module           # conformance: inferred ⊆ declared (AS-EFF-001/002/003)
+#   cargo candor no-ambient my_module         # flag direct ambient-authority use (AS-EFF-004)
+#   cargo candor setup                        # (re)build + install — same as ./install.sh
+#
+# `policy` and `guard` also take `--gate-json <path|->` — the candor-spec §3.3 structured verdict.
+# A `.candor/config` (spec §3.4) supplies the policy/baseline/deps defaults; see the README.
 #
 # It locates (building on first use) the toolchain-suffixed candor dylib and invokes
 # `cargo dylint --lib-path <dylib>` with the right environment for the chosen command.
@@ -220,6 +225,11 @@ load_config() {
     esac
   done <<< "$text"
 }
+
+# The ONE command list, shared by `help` and the unknown-command usage (they had drifted apart,
+# each silently missing different commands). Keep in lockstep with the `case "$cmd"` dispatch below
+# and the header comment above.
+CMDS="setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|whatif|rewire|map|containment|reachable|path|impact|explain|policy|risk|strict|no-ambient|update|help"
 
 # Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
 [ "${1:-}" = "candor" ] && shift
@@ -842,8 +852,9 @@ case "$cmd" in
           echo "candor: review 'git diff .candor/' and commit it (this is the upgrade's doing, not a code change)." >&2
         fi
       else
-        echo "candor: this project didn't compile — baseline NOT refreshed; the guard stays fail-open" >&2
-        echo "candor: (and says so at push) until it builds and you re-run this." >&2
+        echo "candor: this project didn't compile — baseline NOT refreshed under the new engine, so" >&2
+        echo "candor: 'cargo candor guard' will FAIL CLOSED (exit 2, stale-baseline) until the crate" >&2
+        echo "candor: builds and you re-run this (or 'cargo candor snapshot')." >&2
       fi
     else
       echo "candor: (no guard baseline in $PWD — run from a project dir to refresh that project's baseline)" >&2
@@ -856,9 +867,13 @@ case "$cmd" in
     exec "$CANDOR_DIR/install.sh" "$@" ;;
 
   -h|--help|help)
-    sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'
+    # Print the WHOLE leading header comment (from line 2 to the first non-comment line) — a fixed
+    # line range drifted every time a command was added, silently dropping commands from the help.
+    awk 'NR>=2 { if ($0 ~ /^#/) { sub(/^# ?/, ""); print } else exit }' "$SELF"
+    echo
+    echo "commands: $CMDS"
     exit 0 ;;
   *)
-    echo "candor: unknown command '$cmd' (setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|whatif|rewire|map|explain|policy|risk|strict|no-ambient|update)" >&2
+    echo "candor: unknown command '$cmd' — commands: $CMDS (see 'cargo candor help')" >&2
     exit 2 ;;
 esac
