@@ -4,6 +4,91 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [Unreleased] — candor-scan 0.8.4 · candor-query 0.8.0 · candor-report 0.5.8 (in tree, not yet on crates.io)
+
+### ⚠ Fail-open paths that used to pass GREEN now exit 2 — intentional bug-fix semantics
+
+If your CI went red on one of these after updating the clone, the gate was previously **not
+running** and telling you it passed. Exit 2 always means "the gate could NOT evaluate", never a
+violation (that's exit 1):
+
+- **`cargo candor policy` on a run that couldn't complete.** A crate that failed to build under
+  dylint (or the engine's own §6.2 unreadable-policy exit) was swallowed by `|| true` and printed
+  "policy OK" with exit 0. Now: no report snapshot → exit 2 before enforcing (a snapshot-less
+  enforce also silently dropped cross-crate `allow` resolution); a nonzero dylint exit → exit 2
+  ("policy NOT evaluated").
+- **`cargo candor guard` with no baseline at all** (never snapshotted / typo'd prefix) exits 2 with
+  the snapshot incantation — the engine used to warn "guard NOT active" and exit 0. A **per-crate
+  baseline gap** (a new workspace member) is disclosed by the engine as a `GUARD-UNAVAILABLE`
+  sentinel and also exits 2. (Completes the fail-closed arc started by the stale-baseline and
+  absent-provenance-sidecar fixes of 2026-07-08.)
+- **A configured-but-EMPTY `policy`** (a bare `policy` line in `.candor/config`) exits 2 — never a
+  silently skipped gate.
+
+### Changed — `CANDOR_CONFIG` → `CANDOR_RULES` (deep engine, clean rename, NO fallback)
+
+The lint's classifier-extension rules file is now pointed at by **`CANDOR_RULES`**. `CANDOR_CONFIG`
+now means one thing family-wide: the spec-§3.4 config-file override path (which candor-scan already
+implemented). One variable meaning two incompatible things was worse than a break.
+
+### Added
+
+- **`.candor/config` on the deep path** (spec §3.4): the wrapper discovers the checked-in config
+  (walk up from the project; `$CANDOR_CONFIG` overrides), wires `policy`/`baseline`/`deps`, warns on
+  unknown keys, exits 2 on a configured-but-unusable file, and DISCLOSES recognized-but-unwired keys.
+  Relative path values anchor to the config's HOME directory (the one containing `.candor/`) in both
+  the wrapper and candor-scan — never the process CWD.
+- **`--gate-json` on the deep path** (spec §3.3): `cargo candor policy|guard --gate-json <path|->`
+  emit the structured verdict `{ spec, ok, violations }` — same shape, field names and byte layout as
+  candor-scan's (one shared `candor_report::GateViolation` + serializer, candor-report **0.5.8**),
+  assembled from the engine's `CANDOR_GATE_JSON` NDJSON records by the new
+  `candor-query gate-verdict`. Violation → exit 1; incomplete/unwritable verdict → exit 2, file
+  removed, never a stale or silent verdict.
+- **candor-scan 0.8.4**: the κ ledger honors the §2 rule-3 coverage exemption for CHAINED reports,
+  keyed on the envelope `package`/`packages` field — an EMPTY chained report is a purity claim, not
+  a "κ doesn't know" line; config keys the engine recognizes but does not implement
+  (baseline/strict/no-ambient/closed-world/taint) warn loudly instead of reading as an active gate.
+- **candor-query 0.8.0**: joins the spec-tracks-version convention; full crates.io metadata + a crate
+  README; candor-report floor 0.5.8 (resolution can never produce a pre-0.8 spec declaration).
+
+## [candor-scan 0.8.3] — 2026-07-02
+
+- **`.candor/config`** (spec §3.4): the checked-in configuration file — target-anchored discovery
+  (walk up from the scan target), `policy`/`deps` wired, unknown keys warn, configured-but-unusable
+  exits 2. CI becomes "point at the repo".
+- Allocation-free violation sort (identical order).
+
+## [candor-scan 0.8.2] — 2026-07-02
+
+- `--gate-json` takes a real path only (a flag-shaped/valueless value exits 2 — it used to swallow
+  `--policy` and scan the wrong target, gateless); `--gate-json -` streams the verdict to stdout,
+  which stays pure JSON (AS-EFF lines → stderr).
+
+## [candor-scan 0.8.1] — 2026-07-02
+
+- Workspace `--gate-json` accumulates across members (spec §3.3 MUST: the verdict agrees with the
+  exit code — a clean last member no longer overwrites an earlier violator's verdict).
+
+## [candor-scan 0.8.0 + candor-report 0.5.7] — 2026-07-01/02 — spec 0.8
+
+- **`--gate-json <file>`** (spec §3.3 ⟨0.8⟩): the structured gate verdict
+  `{ spec, ok, violations: [{rule, fn, effects, detail}] }`, written from the SAME check that sets
+  the exit code — the machine analog of the AS-EFF console lines (feeds the PR-native SARIF
+  reporter). candor-report 0.5.7 declares `SPEC_VERSION = "0.8"`; candor-scan 0.8.0 pins it as a
+  floor so dependency resolution can't produce a pre-0.8 declaration.
+- In the same window (in-tree, not a crates.io release): the nightly lint gained the
+  CANDOR_VIOLATIONS machine-readable violation sentinel + a deep-engine dynamic-oracle lane;
+  `cargo candor guard` turned fail-closed on a stale baseline and an absent provenance sidecar.
+
+### (bridge) 0.4 → 0.7, briefly
+
+The arc between this entry and 0.3.7 below: spec 0.5, **spec 0.6** (2026-06-19: the `blindspots`
+query + `unknownWhy` required on direct Unknown sources — candor-report 0.5.5, candor-scan 0.5.19),
+a long candor-scan 0.5.x soundness run (FFI/drop-glue seams, lazy-static deferred init,
+iterator-forcing, masked-literal fail-closed, implicit conversion, 20-crate coverage calibration),
+then **spec 0.7** (2026-06-19: engine versions aligned to the spec — candor-scan/candor-query
+0.7.0, candor-report 0.5.6) and the 0.7.x review fixes. Detail: `git log` around those dates.
+
 ## [0.3.7] — 2026-06-12 (crates: candor-report / candor-classify / candor-scan, lockstep)
 
 ### Changed — spec 0.4 (conformance-breaking upgrade, wire-compatible)
