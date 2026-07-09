@@ -593,6 +593,30 @@ want   "map: module/effects overview rendered"        "$mapout" "candor map"
 want   "map: surfaces the Net effect"                 "$mapout" "Net"
 rm -rf "$(dirname "$Q")"
 
+# ── 13b. candor-scan --deps: registry-tree scan + chain (hermetic fake CARGO_HOME, no network) ──
+echo "== candor-scan --deps (registry scan + cross-crate chain) =="
+SCANBIN="$ROOT/target/debug/candor-scan"
+DP=$(mktemp -d)
+CHOME="$DP/cargo-home"; RIDX="$CHOME/registry/src/index.crates.io-0000000000000000"
+mkdir -p "$RIDX/depi-0.3.0/src" "$DP/app/src"
+printf '[package]\nname="depi"\n' > "$RIDX/depi-0.3.0/Cargo.toml"
+printf 'pub fn eff() { let _ = std::fs::read("/etc/depi.conf"); }\n' > "$RIDX/depi-0.3.0/src/lib.rs"
+printf '[package]\nname="app"\n\n[dependencies]\ndepi = "0.3.0"\n' > "$DP/app/Cargo.toml"
+printf 'pub fn uses() { depi::eff(); }\n' > "$DP/app/src/lib.rs"
+printf 'version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\n\n[[package]]\nname = "depi"\nversion = "0.3.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n' > "$DP/app/Cargo.lock"
+dj=$(cd "$DP/app"; env -u CANDOR_DEPS -u CANDOR_POLICY -u CANDOR_CONFIG CARGO_HOME="$CHOME" "$SCANBIN" . --deps --json 2>"$DP/deps.err"); dj_rc=$?
+want "deps: dep report written under .candor/deps/<name>@<version>/" "$(ls "$DP/app/.candor/deps/depi@0.3.0/" 2>/dev/null)" 'report.depi.scan.json'
+want "deps: summary line counts the registry scan"                    "$(cat "$DP/deps.err")" 'scanned 1 of 1 registry dependencies'
+want "deps: the dep effect crosses the crate boundary (uses gains Fs)" "$dj" '"Fs"'
+want "deps: the dep literal surface rides the join"                    "$dj" '/etc/depi.conf'
+if [ "$dj_rc" -eq 0 ]; then echo "  ok   deps: clean chained run exits 0"; pass=$((pass+1)); else echo "  FAIL deps: chained run exited $dj_rc (want 0)"; fail=$((fail+1)); fi
+# missing lockfile → fail closed (exit 2), naming the incantation
+rm "$DP/app/Cargo.lock"
+nl_out=$(cd "$DP/app"; env -u CANDOR_DEPS -u CANDOR_POLICY -u CANDOR_CONFIG CARGO_HOME="$CHOME" "$SCANBIN" . --deps 2>&1); nl_rc=$?
+want "deps: missing Cargo.lock names the fix"                          "$nl_out" 'generate-lockfile'
+if [ "$nl_rc" -eq 2 ]; then echo "  ok   deps: missing Cargo.lock exits 2 (fail closed)"; pass=$((pass+1)); else echo "  FAIL deps: missing Cargo.lock exited $nl_rc (want 2)"; fail=$((fail+1)); fi
+rm -rf "$DP"
+
 # ── 14. MCP server: candor's queries as native agent tools (P0′ §10) ──
 echo "== MCP server (candor-mcp.py) =="
 MCP="$ROOT/integrations/mcp/candor-mcp.py"

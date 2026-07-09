@@ -617,3 +617,217 @@ pub fn nested_in() {
     assert!(eff("nested_in").contains(&"Env".to_string()),
             "all(deep-active, not(off)) is definite-true — Env lost (default closure broken?):\n{v}");
 }
+
+// ── --deps: the registry-tree scan mode (run_with_deps — was 0-covered everywhere) ─────────────────
+//
+// Hermetic: a FAKE cargo registry checkout tree under a per-test CARGO_HOME
+// (`<CARGO_HOME>/registry/src/<index-hash>/<name>-<version>/` — the shape dirs_cargo_registry_src
+// discovers), no network, no real ~/.cargo. Every test scrubs the CANDOR_* env so the runner's own
+// config can't leak into the child.
+
+/// Build `<tag>`'s fake CARGO_HOME carrying one registry-src index with the given package checkouts.
+fn make_registry(tag: &str, pkgs: &[(&str, &str, &str)]) -> PathBuf {
+    let ch = std::env::temp_dir().join(format!("candor-scan-cli-ch-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ch);
+    let idx = ch.join("registry/src/index.crates.io-0000000000000000");
+    std::fs::create_dir_all(&idx).unwrap();
+    for (n, v, src) in pkgs {
+        let d = idx.join(format!("{n}-{v}"));
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{n}\"\n")).unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+    }
+    ch
+}
+
+/// Write `root/Cargo.lock` naming the packages; `registry: true` marks a crates.io source line
+/// (the root package itself carries no `source =` — exactly what cargo writes).
+fn write_lockfile(root: &std::path::Path, pkgs: &[(&str, &str, bool)]) {
+    let mut s = String::from("version = 3\n");
+    for (n, v, reg) in pkgs {
+        s.push_str(&format!("\n[[package]]\nname = \"{n}\"\nversion = \"{v}\"\n"));
+        if *reg {
+            s.push_str("source = \"registry+https://github.com/rust-lang/crates.io-index\"\n");
+        }
+    }
+    std::fs::write(root.join("Cargo.lock"), s).unwrap();
+}
+
+/// Spawn the binary in --deps mode against `dir` with the fake CARGO_HOME, extra args appended.
+fn run_deps(dir: &std::path::Path, cargo_home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    let mut c = Command::new(bin());
+    c.arg(dir.to_string_lossy().as_ref()).arg("--deps");
+    for a in args {
+        c.arg(a);
+    }
+    c.env("CARGO_HOME", cargo_home)
+        .env_remove("CANDOR_DEPS")
+        .env_remove("CANDOR_POLICY")
+        .env_remove("CANDOR_CONFIG");
+    c.output().expect("run candor-scan --deps")
+}
+
+#[test]
+fn deps_without_cargo_lock_fails_closed_exit_2() {
+    // The documented precondition: --deps reads Cargo.lock. Missing lockfile → clean one-line error
+    // naming the fix (`cargo generate-lockfile`), exit 2 — never a silent lockless "success".
+    let d = make_crate("depsnolock", "pub fn go() {}");
+    let ch = make_registry("nolock", &[]);
+    let out = run_deps(&d, &ch, &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&ch);
+    assert_eq!(out.status.code(), Some(2), "--deps without a lockfile must exit 2");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Cargo.lock") && stderr.contains("generate-lockfile"),
+            "the error must name the missing lockfile + the incantation, got:\n{stderr}");
+}
+
+#[test]
+fn deps_scans_registry_tree_chains_effects_and_caches() {
+    // The happy path, end to end: the locked registry dep is discovered in the fake CARGO_HOME,
+    // scanned into <dir>/.candor/deps/<name>@<version>/ (the documented location), and the root scan
+    // is CHAINED over the fresh report — the dep's effect + literal surface cross the crate boundary.
+    // A dep in the lockfile with NO local checkout is disclosed in the summary, not fatal.
+    let ch = make_registry("happy", &[(
+        "depx", "0.1.0",
+        r#"pub fn eff() { let _ = std::fs::read("/etc/depx.conf"); }"#,
+    )]);
+    let d = make_crate("depsroot", "pub fn uses() { depx::eff(); }");
+    std::fs::write(d.join("Cargo.toml"),
+        "[package]\nname = \"depsroot\"\n\n[dependencies]\ndepx = \"0.1.0\"\nghost = \"0.9.9\"\n").unwrap();
+    write_lockfile(&d, &[("depsroot", "0.1.0", false), ("depx", "0.1.0", true), ("ghost", "0.9.9", true)]);
+
+    let out = run_deps(&d, &ch, &["--json"]);
+    assert_eq!(out.status.code(), Some(0), "a clean --deps run must exit 0: {}",
+               String::from_utf8_lossy(&out.stderr));
+    // dep report lands where documented: <dir>/.candor/deps/<name>@<version>/report.<crate>.scan.json
+    assert!(d.join(".candor/deps/depx@0.1.0/report.depx.scan.json").is_file(),
+            "the dep report must be written under .candor/deps/<name>@<version>/");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("scanned 1 of 2 registry dependencies"),
+            "the summary counts scanned/locked (root pkg is not a registry dep), got:\n{stderr}");
+    assert!(stderr.contains("without a local checkout") && stderr.contains("ghost-0.9.9"),
+            "a lockfile dep with no checkout is DISCLOSED, not fatal, got:\n{stderr}");
+    // the chained join: the root fn inherits the dep's Fs AND its literal path surface
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json report");
+    let uses = v["functions"].as_array().into_iter().flatten()
+        .find(|f| f["fn"].as_str() == Some("uses"))
+        .unwrap_or_else(|| panic!("`uses` missing from the chained report:\n{v}"));
+    assert!(uses["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Fs")),
+            "the dep's Fs must cross the crate boundary via the chain:\n{v}");
+    assert!(uses["paths"].as_array().is_some_and(|a| a.iter().any(|p| p == "/etc/depx.conf")),
+            "the dep's literal path surface must ride the join:\n{v}");
+
+    // SECOND run: registry checkouts are immutable per name@version — the report is reused, not rescanned.
+    let out2 = run_deps(&d, &ch, &["--json"]);
+    assert_eq!(out2.status.code(), Some(0));
+    let stderr2 = String::from_utf8(out2.stderr).unwrap();
+    assert!(stderr2.contains("scanned 0 of 2") && stderr2.contains("1 already scanned — cached"),
+            "the second run must reuse the cached dep report, got:\n{stderr2}");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&ch);
+}
+
+#[test]
+fn deps_dependency_scans_run_gate_free_but_root_gate_sees_the_chain() {
+    // Two sides of one contract (scan_one's `policy: None` for dep scans): the ROOT policy must not
+    // run against dependency internals (328 spurious gate runs, per the review), yet an effect the
+    // root INHERITS through the chain is fully gate-visible.
+    let ch = make_registry("gate", &[(
+        "depg", "0.2.0",
+        r#"pub fn spawn() { let _ = std::process::Command::new("sh").status(); }"#,
+    )]);
+    // (a) root does NOT call the dep → `deny Exec` is clean for the root → exit 0. If dep scans were
+    // gated, the dep's own `spawn` would fail the build here.
+    let d = make_crate("gatefree", "pub fn quiet() {}");
+    std::fs::write(d.join("Cargo.toml"),
+        "[package]\nname = \"gatefree\"\n\n[dependencies]\ndepg = \"0.2.0\"\n").unwrap();
+    write_lockfile(&d, &[("gatefree", "0.1.0", false), ("depg", "0.2.0", true)]);
+    let pol = d.join("candor.policy");
+    std::fs::write(&pol, "deny Exec\n").unwrap();
+    let out = run_deps(&d, &ch, &["--policy", pol.to_string_lossy().as_ref()]);
+    assert_eq!(out.status.code(), Some(0),
+               "dep scans must run GATE-FREE — the root policy fired on dependency internals:\n{}",
+               String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&d);
+
+    // (b) root DOES call the dep → it inherits Exec through the chain → the same policy exits 1.
+    let d2 = make_crate("gatechain", "pub fn uses() { depg::spawn(); }");
+    std::fs::write(d2.join("Cargo.toml"),
+        "[package]\nname = \"gatechain\"\n\n[dependencies]\ndepg = \"0.2.0\"\n").unwrap();
+    write_lockfile(&d2, &[("gatechain", "0.1.0", false), ("depg", "0.2.0", true)]);
+    let pol2 = d2.join("candor.policy");
+    std::fs::write(&pol2, "deny Exec\n").unwrap();
+    let out2 = run_deps(&d2, &ch, &["--policy", pol2.to_string_lossy().as_ref()]);
+    assert_eq!(out2.status.code(), Some(1),
+               "a chained-in Exec must fail the root gate (exit 1):\n{}",
+               String::from_utf8_lossy(&out2.stderr));
+    // (non-json runs print the violation lines on stdout; the summary count goes to stderr)
+    let stdout2 = String::from_utf8(out2.stdout).unwrap();
+    assert!(stdout2.contains("uses"), "the violation names the ROOT fn, got:\n{stdout2}");
+    let _ = std::fs::remove_dir_all(&d2);
+    let _ = std::fs::remove_dir_all(&ch);
+}
+
+#[test]
+fn deps_workspace_root_fans_out_over_members() {
+    // `--deps <workspace>`: the final root scan funnels through scan_target, so members are scanned
+    // individually — the nested-package filter must NOT prune them into an empty, gate-passing report.
+    let ch = make_registry("wsfan", &[(
+        "depw", "1.0.0",
+        r#"pub fn tick() { let _ = std::env::var("TZ"); }"#,
+    )]);
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-depsws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("m1/src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"m1\"]\n").unwrap();
+    std::fs::write(d.join("m1/Cargo.toml"),
+        "[package]\nname = \"m1\"\n\n[dependencies]\ndepw = \"1.0.0\"\n").unwrap();
+    std::fs::write(d.join("m1/src/lib.rs"), "pub fn go() { depw::tick(); }\n").unwrap();
+    write_lockfile(&d, &[("m1", "0.1.0", false), ("depw", "1.0.0", true)]);
+    let out = run_deps(&d, &ch, &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    // the member report exists under the workspace's default prefix and carries the chained Env
+    let rep = std::fs::read_to_string(d.join(".candor/report.m1.scan.json"))
+        .expect("member report must be written (the fan-out, not the pruned-empty root scan)");
+    assert!(rep.contains("\"go\"") && rep.contains("Env"),
+            "the member's chained dep effect is missing: {rep}");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&ch);
+}
+
+#[test]
+fn deps_appends_candor_deps_env_reports_to_the_chain() {
+    // CANDOR_DEPS is honoured IN ADDITION to the fresh .candor/deps tree (run_with_deps concatenates
+    // the spec) — a sibling report for a crate outside the registry still joins.
+    let ch = make_registry("extra", &[]); // no registry checkouts at all
+    let extra = std::env::temp_dir().join(format!("candor-scan-cli-extradep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&extra);
+    std::fs::create_dir_all(&extra).unwrap();
+    let me = env!("CARGO_PKG_VERSION");
+    std::fs::write(extra.join("report.extdep.scan.json"), format!(r#"{{
+        "candor": {{"version": "scan-{me}", "toolchain": "stable", "spec": "0.8"}},
+        "package": "extdep",
+        "functions": [{{"fn": "ping", "inferred": ["Net"], "hash": "extdep#ping"}}]}}"#)).unwrap();
+    let d = make_crate("extroot", "pub fn calls() { extdep::ping(); }");
+    write_lockfile(&d, &[("extroot", "0.1.0", false)]);
+    let mut c = Command::new(bin());
+    c.arg(d.to_string_lossy().as_ref()).arg("--deps").arg("--json")
+        .env("CARGO_HOME", &ch)
+        .env("CANDOR_DEPS", extra.to_string_lossy().as_ref())
+        .env_remove("CANDOR_POLICY")
+        .env_remove("CANDOR_CONFIG");
+    let out = c.output().expect("run candor-scan --deps");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&extra);
+    let _ = std::fs::remove_dir_all(&ch);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json report");
+    let calls = v["functions"].as_array().into_iter().flatten()
+        .find(|f| f["fn"].as_str() == Some("calls"))
+        .unwrap_or_else(|| panic!("`calls` missing:\n{v}"));
+    assert!(calls["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Net")),
+            "a CANDOR_DEPS sibling report must still chain under --deps:\n{v}");
+}

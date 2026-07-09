@@ -2610,3 +2610,51 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         assert!(!eff("rebound").contains(&"Exec".to_string()),
                 "a tuple REBIND must clear the stale Runner binding — Exec here is fabricated:\n{v}");
     }
+
+    #[test]
+    fn dirs_cargo_registry_src_honours_cargo_home() {
+        // The --deps registry locator (was 0-covered): CARGO_HOME wins over ~/.cargo; the result is the
+        // set of `registry/src/<index-hash>/` DIRECTORIES (a stray file is not an index); a CARGO_HOME
+        // with no registry at all yields empty — the "every dep missing a checkout" disclosure path.
+        // (No other test reads CARGO_HOME, so the temporary set_var cannot race a parallel test.)
+        let ch = std::env::temp_dir().join(format!("candor-regsrc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ch);
+        let src = ch.join("registry").join("src");
+        std::fs::create_dir_all(src.join("index.crates.io-aaaa")).unwrap();
+        std::fs::create_dir_all(src.join("index.mirror-bbbb")).unwrap();
+        std::fs::write(src.join("not-an-index.txt"), "x").unwrap();
+        let prior = std::env::var("CARGO_HOME").ok();
+        std::env::set_var("CARGO_HOME", &ch);
+        let mut roots = dirs_cargo_registry_src();
+        roots.sort();
+        let empty_home = std::env::temp_dir().join(format!("candor-regsrc-empty-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&empty_home);
+        std::env::set_var("CARGO_HOME", &empty_home);
+        let none = dirs_cargo_registry_src();
+        match prior {
+            Some(v) => std::env::set_var("CARGO_HOME", v),
+            None => std::env::remove_var("CARGO_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&ch);
+        let _ = std::fs::remove_dir_all(&empty_home);
+        assert_eq!(
+            roots,
+            vec![src.join("index.crates.io-aaaa"), src.join("index.mirror-bbbb")],
+            "exactly the index DIRECTORIES under <CARGO_HOME>/registry/src, files excluded"
+        );
+        assert!(none.is_empty(), "no registry under CARGO_HOME → empty, not an error");
+    }
+
+    #[test]
+    fn run_with_deps_without_lockfile_returns_2() {
+        // The in-process half of the fail-closed pin (the CLI test asserts the process exit + message):
+        // a scan dir with no Cargo.lock returns 2 before touching any registry.
+        let d = std::env::temp_dir().join(format!("candor-depsnolock-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"nl\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        let rc = run_with_deps(&d.to_string_lossy(), String::new(), true, false, None);
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 2, "--deps without Cargo.lock must fail closed");
+    }
