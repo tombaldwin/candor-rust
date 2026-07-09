@@ -2295,6 +2295,739 @@ fn effect_arg_from_param(tcx: TyCtxt<'_>, call: &Expr<'_>, caller: LocalDefId) -
     operands.iter().any(|a| expr_uses_local(a, &params))
 }
 
+
+/// The per-concern helpers extracted from the two former mega-fns (`check_expr`
+/// ~615 lines, `check_crate_post` ~795): each block below is one concern, moved
+/// verbatim — the byte-identity battery gated the move.
+impl Candor {
+    /// check_expr concern: a named fn referenced as a VALUE (callback/combinator/struct field)
+    /// gets a call edge from its passer, so its effects propagate to whoever can invoke it.
+    fn edge_fn_value_reference<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        // A named function referenced as a VALUE — passed as a callback, stored in a struct, handed
+        // to a higher-order combinator (`iter().map(parse)`, `thread::spawn(work)`, `register(cb)`)
+        // — isn't *called* here, but its effects are reachable through whoever invokes it. Add a call
+        // edge so they propagate, exactly as an inline closure's body is charged to its enclosing fn.
+        // Without it, an effectful fn passed as a callback looked pure to its passer — a silent
+        // under-report. (This is the statically-resolvable half of the closure problem: the callee
+        // identity is a known `FnDef`. The still-deferred residue is the *receiving* side — an
+        // `impl Fn` parameter whose concrete target needs interprocedural flow, kept honest `Unknown`.
+        // The callee position of a normal call is also a `FnDef` path; re-adding that edge is a
+        // harmless no-op on the `calls` set.)
+        if let ExprKind::Path(..) = expr.kind {
+            if let Some(typeck) = cx.maybe_typeck_results() {
+                if let rustc_middle::ty::TyKind::FnDef(did, _) = typeck.expr_ty(expr).kind() {
+                    if let (Some(local), Some(caller)) =
+                        (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
+                    {
+                        // A `FnDef` path being CAST AWAY from callability (`fs_helper as usize`,
+                        // `f as *const ()`) is never invoked through that cast value — a `usize` /
+                        // raw-data-pointer can't be called — so propagating the callback's effects to
+                        // the casting fn is a fabrication. Suppress the edge ONLY when the parent is a
+                        // cast whose TARGET type is non-callable; a `fn`-pointer cast (`f as fn()`) stays
+                        // callable, so KEEP the edge there, exactly as for `vec![f]` / `map(f)` / a struct
+                        // field. (Soundness: this only ever DROPS an edge for a provably-uncallable cast
+                        // target — it can never hide a real call, which goes through `resolve_callee`
+                        // below, not this value-reference edge.)
+                        let cast_away = match cx.tcx.parent_hir_node(expr.hir_id) {
+                            rustc_hir::Node::Expr(p) => match p.kind {
+                                ExprKind::Cast(inner, _) if inner.hir_id == expr.hir_id => !matches!(
+                                    typeck.expr_ty(p).kind(),
+                                    rustc_middle::ty::TyKind::FnPtr(..)
+                                        | rustc_middle::ty::TyKind::FnDef(..)
+                                        | rustc_middle::ty::TyKind::Closure(..)
+                                ),
+                                _ => false,
+                            },
+                            _ => false,
+                        };
+                        if !cast_away && matches!(cx.tcx.def_kind(*did), DefKind::Fn | DefKind::AssocFn)
+                        {
+                            self.calls.entry(caller).or_default().insert(local);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// check_expr concern: naming a local `static` FORCES a deferred initializer — edge the
+    /// forcing fn to the static (the lazy-init seam, ui/deferred_effects.rs).
+    fn edge_static_force<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        // A reference to a local `static` FORCES its initializer. For a deferred-init wrapper
+        // (`LazyLock`/`LazyCell`/`OnceLock`/`once_cell::Lazy`/`lazy_static!`/`thread_local!`) the
+        // initializer closure runs at the first access SITE, not at the static's declaration — so an
+        // effectful initializer reached only by naming the static was charged to the static item but
+        // NEVER to the forcing function: a silent under-report (the lazy-init seam, see
+        // ui/deferred_effects.rs). Add an edge from the enclosing fn to the static, exactly as the scan
+        // engine edges a forcing body to the static's synthetic init unit. Sound and non-fabricating: a
+        // static is a reportable item with its own (already-propagated) effect set, so a PURE static
+        // contributes nothing; and in safe Rust a static's only route to a RUNTIME effect IS a deferred
+        // closure (a plain `static X = const_expr;` is const-evaluated and cannot perform I/O), so no
+        // edge to a pure static can ever fabricate. (Conservative on `&STATIC` without a deref — naming
+        // forces, matching the scan engine; over-approximation in the safe direction.)
+        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = expr.kind {
+            if let rustc_hir::def::Res::Def(DefKind::Static { .. }, did) = path.res {
+                if let (Some(static_local), Some(caller)) =
+                    (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
+                {
+                    self.calls.entry(caller).or_default().insert(static_local);
+                }
+            }
+        }
+    }
+
+    /// check_expr concern: a `LocalKey` accessor (`KEY.with(…)`) forces the `thread_local!`
+    /// initializer — edge the forcing fn to the local init fn (ui/thread_local_effects.rs).
+    fn edge_thread_local_force<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        // `thread_local!` FORCE: a method call on a `LocalKey` receiver (`KEY.with(…)`, `with_borrow`,
+        // `set`, …) runs the thread_local's DEFERRED initializer. The macro places that init in a local fn
+        // referenced inside `LocalKey::new(…)` in KEY's initializer — but that reference sits in an inline
+        // const (charged to NO reportable item by `enclosing_named_fn`) and the accessor is non-local std,
+        // so the init's effects were orphaned from the call graph: a `.with()`-forced effectful
+        // thread_local read silently pure. Edge the forcing fn to the init fn (the thread_local analog of
+        // the LazyLock static-ref edge above; here the effect is NOT in the item's own initializer but
+        // behind the accessor). Sound + non-fabricating: only edges to a LOCAL fn the item references, so a
+        // pure-init thread_local (or a std/external LocalKey) contributes nothing. Teeth: ui/thread_local_effects.rs.
+        if let ExprKind::MethodCall(_, receiver, _, _) = expr.kind {
+            if let Some(typeck) = cx.maybe_typeck_results() {
+                if let rustc_middle::ty::TyKind::Adt(adt, _) =
+                    typeck.expr_ty(receiver).peel_refs().kind()
+                {
+                    if cx.tcx.item_name(adt.did()).as_str() == "LocalKey"
+                        && cx.tcx.crate_name(adt.did().krate).as_str() == "std"
+                    {
+                        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) = receiver.kind {
+                            if let rustc_hir::def::Res::Def(
+                                DefKind::Const { .. } | DefKind::Static { .. },
+                                tl_did,
+                            ) = p.res
+                            {
+                                if let (Some(tl_local), Some(caller)) =
+                                    (tl_did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
+                                {
+                                    for init in local_key_init_fns(cx.tcx, tl_local) {
+                                        self.calls.entry(caller).or_default().insert(init);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// check_expr concern: IMPLICIT overloaded `Deref`/`DerefMut` adjustment steps — edge each
+    /// local impl (or honest `Unknown` for an unresolvable one); the smart-pointer hole.
+    fn edge_overloaded_derefs<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        // IMPLICIT overloaded `Deref`/`DerefMut` calls the compiler inserts as expression ADJUSTMENTS
+        // (auto-deref during method resolution, field access through a smart pointer, deref-coercion at
+        // a call/arg/return/assignment site). These are NOT `Call`/`MethodCall`/`Unary(Deref)` HIR nodes
+        // — they live in `typeck.expr_adjustments(expr)` — so `resolve_callee` never sees them, and a
+        // LOCAL effectful `Deref` impl reached only this way was reported neither with its effect nor
+        // `Unknown`: silently pure (the smart-pointer hole). Add a call edge per overloaded-deref step
+        // EXACTLY as the explicit `Unary(Deref)` arm does. This runs for EVERY expr (a field access /
+        // coercion site is not a call, so the `resolve_callee` early-return below would skip it).
+        let deref_steps = overloaded_deref_steps(cx, expr);
+        if !deref_steps.is_empty() {
+            if let Some(caller) = enclosing_named_fn(cx.tcx, expr.hir_id) {
+                for step in deref_steps {
+                    match step {
+                        // Local impl → real edge (its body's effects propagate). Non-local std deref
+                        // (`Box`/`Rc`/`Arc`/`Pin`) → drop it: matches the std-trait pure calibration, no
+                        // fabrication.
+                        DerefStep::Static(did) => {
+                            if let Some(local) = did.as_local() {
+                                if matches!(cx.tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn) {
+                                    self.calls.entry(caller).or_default().insert(local);
+                                }
+                            }
+                        }
+                        // An unresolvable/generic overloaded deref: honest `Unknown`, never silent-pure.
+                        DerefStep::Unresolved => {
+                            self.direct.entry(caller).or_default().insert(UNKNOWN);
+                            self.unknown_why
+                                .entry(caller)
+                                .or_default()
+                                .insert("deref:unresolvable overloaded auto-deref".to_string());
+                            if self.explain.is_some() {
+                                let loc =
+                                    cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                                self.sites.entry(caller).or_default().push(EffectSite {
+                                    eff: UNKNOWN,
+                                    via: "unresolvable overloaded auto-deref".to_string(),
+                                    loc,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// check_expr concern: closure-flow bookkeeping (the SENDING side) — record what each arg
+    /// position of a free-fn call was passed, keyed by caller, for per-site callback resolution.
+    fn record_callback_flow<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>,
+                                  caller: LocalDefId, def_id: DefId) {
+        // Closure-flow bookkeeping: record what's passed at each arg position of a FREE fn call, so a
+        // callback parameter that fn invokes can later be resolved to these concrete targets. A named
+        // fn (`FnDef`) is a resolvable target; a closure / fn-pointer / generic value is unresolvable
+        // (forces that position back to `Unknown`). Free fns only → arg index == param index.
+        if let ExprKind::Call(_, args) = expr.kind {
+            if matches!(cx.tcx.def_kind(def_id), DefKind::Fn) {
+                if let Some(typeck) = cx.maybe_typeck_results() {
+                    for (i, arg) in args.iter().enumerate() {
+                        // ONLY a LOCAL named fn is a resolvable callback target (we can edge to its
+                        // body). A non-local fn-item, a closure, a fn-pointer, or any opaque/`dyn`
+                        // callable (`impl Fn` return, `&dyn Fn`, `Box<dyn Fn>`) we can't enumerate —
+                        // record it as a PER-SITE unresolvable so this caller's deferred `Unknown`
+                        // STANDS instead of being silently dropped. (A non-callable value at a
+                        // non-callback position also lands here; harmless — that key is consulted only
+                        // for an invoked param, where the arg is necessarily a callable.) SOUNDNESS:
+                        // routing a *non-local* fn into the resolvable set would let the resolver see a
+                        // non-empty target set, filter it to an empty `locals`, and add neither an edge
+                        // nor the `Unknown` → a false `pure`; routing it to the unresolvable set is the
+                        // honest fallback. The flow is keyed by the CALLER (per call site) so a
+                        // callback's effects reach the specific fn that passed it, never every caller of
+                        // the HOF (the union fabrication — see `callback_sites`).
+                        match typeck.expr_ty(arg).kind() {
+                            rustc_middle::ty::TyKind::FnDef(t, _)
+                                if t.as_local().is_some()
+                                    && matches!(cx.tcx.def_kind(*t), DefKind::Fn | DefKind::AssocFn) =>
+                            {
+                                self.callback_sites
+                                    .entry((caller, def_id, i))
+                                    .or_default()
+                                    .insert(*t);
+                            }
+                            _ => {
+                                self.callback_site_unknown.insert((caller, def_id, i));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// check_expr concern: the honest-`Unknown` disclosure for genuinely-unresolvable trait
+    /// dispatch (dyn over a non-local trait / CHA-unpinned), minus the pure-std-trait calibration.
+    fn note_unresolved_dispatch<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>,
+                                      caller: LocalDefId, trait_did: Option<DefId>, dynamic: bool,
+                                      cha_resolved: bool) {
+        // Honest `Unknown` only when dispatch is genuinely unresolvable here:
+        //  - a `dyn` call over a NON-local trait (we can't see its impl bodies), or
+        //  - (paranoid) any trait dispatch CHA couldn't pin to local impls.
+        // ...but NOT for conventionally-pure std traits (Display/Error/…), where the
+        // overwhelmingly-pure dispatch would otherwise flood reports with false Unknowns.
+        if let Some(td) = trait_did {
+            let tk = cx.tcx.crate_name(td.krate);
+            let tk = tk.as_str();
+            let ti = cx.tcx.item_name(td);
+            let ti = ti.as_str();
+            // `core::fmt::Write` is pure formatting — never `Unknown`, even via `&mut dyn fmt::Write`.
+            let pure = is_pure_std_trait(tk, ti) || is_pure_fmt_write(tk, ti);
+            // Generic (non-`dyn`) dispatch is assumed pure by default (marking it all Unknown floods —
+            // that's `CANDOR_PARANOID`). EXCEPT over a known-effectful std trait (`io::Read`/`Write`/…),
+            // where "assumed pure" is a real under-report: the reader/writer behind the generic could be
+            // a file or socket. So those are Unknown by default too — bounded, doesn't flood.
+            let effectful_dispatch = is_effectful_std_trait(tk, ti);
+            if !cha_resolved && !pure && (dynamic || self.paranoid || effectful_dispatch) {
+                self.direct.entry(caller).or_default().insert(UNKNOWN);
+                self.unknown_why
+                    .entry(caller)
+                    .or_default()
+                    .insert(format!("dispatch:{}", cx.tcx.def_path_str(td)));
+                if self.explain.is_some() {
+                    let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                    let via = format!("unresolvable dispatch over `{}`", cx.tcx.def_path_str(td));
+                    self.sites.entry(caller).or_default().push(EffectSite { eff: UNKNOWN, via, loc });
+                }
+            }
+        }
+    }
+
+    /// check_expr concern: record the RESOLVED call — classify a direct effect (+ fs/host/cmd/
+    /// path/table literal detail and the κ floor disclosure), or inherit a cross-crate callee's
+    /// effects + literals. The tail of check_expr, so its early `return` is behavior-identical.
+    fn record_resolved_call<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>,
+                                  caller: LocalDefId, def_id: DefId, trait_did: Option<DefId>) {
+        // Record a directly-performed effect (built-in classifier, then project rules).
+        let crate_name = cx.tcx.crate_name(def_id.krate);
+        // Note every EXTERNAL crate we actually saw a resolved call into — ground truth for
+        // the coverage blind-spot check (catches deps declared in workspace members, which a
+        // root-manifest scan misses). std/local are excluded; the consumer filters the rest.
+        if !def_id.is_local()
+            && !matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
+        {
+            self.encountered.insert(crate_name.to_string());
+        }
+        let path = cx.tcx.def_path_str(def_id);
+        let builtin = classify(crate_name.as_str(), &path);
+        let effect = builtin.or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
+        // FLOOR DISCLOSURE (sweep [4]/[19]): a DIRECT external call (not a trait dispatch — those CHA-resolve
+        // to local impls, or are disclosed as `Unknown` above) that κ does NOT classify is a reach candor
+        // cannot see through. The deep engine floors it to pure like the syntactic engines; record the crate
+        // so the fn's `invisible` qualifies its pure verdict (the honesty contract, propagated below). std-
+        // like crates are known-pure-frontier, excluded — matching the `encountered` coverage filter.
+        if effect.is_none() && trait_did.is_none() && !def_id.is_local()
+            && !matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
+        {
+            self.invisible_direct.entry(caller).or_default().insert(crate_name.to_string());
+        }
+        if let Some(effect) = effect {
+            self.direct.entry(caller).or_default().insert(effect);
+            // Non-breaking Fs refinement: when the verb tells us read vs write, record it (propagated
+            // like effects below, surfaced as the report's `fs` detail). The `Fs` effect is unchanged.
+            // Gated to built-in Fs classification — see `fs_detail_for`.
+            let kinds = fs_detail_for(builtin, &path);
+            if !kinds.is_empty() {
+                self.fs_direct.entry(caller).or_default().extend(kinds.iter().copied());
+            }
+            // Non-breaking Net refinement: a literal address/URL argument tells us the endpoint.
+            // Gated to built-in Net classification (a user `extra` rule's arg shape is unknown).
+            if builtin == Some("Net") {
+                let hosts = net_hosts_in_call(expr);
+                if !hosts.is_empty() {
+                    self.net_hosts_direct.entry(caller).or_default().extend(hosts);
+                } else if candor_classify::is_net_establishing(path.rsplit("::").next().unwrap_or("")) {
+                    // a host-ESTABLISHING Net call with no captured host literal → runtime endpoint, invisible
+                    // to the gate (masking; sweep [3]/[7]). Use-verbs (write/read/send) are not establishing.
+                    self.incomplete_direct.entry(caller).or_default().insert("Net");
+                }
+            }
+            // Non-breaking Exec/Fs refinements: the literal command (`Command::new("git")`) / path
+            // (`fs::read("/etc/x")`) is the first string-literal argument. Gated to the built-in
+            // classifier (a user `extra` rule's arg shape is unknown). Feeds the `allow Exec/Fs …`
+            // allowlists, exactly as host literals feed `allow Net …`.
+            if builtin == Some("Exec") {
+                if let Some(cmd) = first_str_lit_arg(expr) {
+                    // Capture the program head + refine the cliff (spec §4 ⟨0.5⟩) ONLY at a program-
+                    // NAMING call (`new`/`cmd`), an ALLOWLIST — not "any method except a known modifier".
+                    // A whole-crate-Exec crate classifies EVERY method as Exec, so a denylist leaked a
+                    // getter (`get_env("psql")` reads a KEY) → fabricated Db + polluted `cmds` (review find).
+                    if is_cmd_naming_method(path.rsplit("::").next().unwrap_or("")) {
+                        self.direct
+                            .entry(caller)
+                            .or_default()
+                            .extend(classify_command_head(&cmd).iter().copied());
+                        self.exec_cmds_direct.entry(caller).or_default().insert(cmd);
+                    }
+                } else if is_cmd_naming_method(path.rsplit("::").next().unwrap_or("")) {
+                    // a program-NAMING Exec call (`Command::new(runtime_var)`) with no literal head → the
+                    // command is invisible to the gate (masking; sweep [3]/[7]).
+                    self.incomplete_direct.entry(caller).or_default().insert("Exec");
+                }
+            }
+            if builtin == Some("Fs") {
+                if let Some(p) = first_str_lit_arg(expr) {
+                    self.fs_paths_direct.entry(caller).or_default().insert(p);
+                } else {
+                    // a path-NAMING Fs call (`fs::write(p,…)`/`File::open(p)`) with no literal path → the
+                    // path is a runtime value, invisible to the gate (masking; the AS-EFF-008 guard
+                    // generalized from Net/Exec to Fs). Use the SHARED establishing-allowlist predicate
+                    // (`is_fs_path_arg`), and EXCLUDE the path-stat METHODS whose path is the RECEIVER, not
+                    // an arg (`p.metadata()`/`p.exists()` resolve to `std::path::Path::*`/`PathBuf::*`) —
+                    // those carry no path arg, so a missing literal there must not false-positive.
+                    let leaf = path.rsplit("::").next().unwrap_or("");
+                    let stat_method = path.starts_with("std::path::Path::")
+                        || path.starts_with("std::path::PathBuf::");
+                    if !stat_method && candor_classify::is_fs_path_arg(leaf) {
+                        self.incomplete_direct.entry(caller).or_default().insert("Fs");
+                    }
+                }
+            }
+            // Non-breaking Db refinement: table-position identifiers in a SQL string literal are the
+            // tables this call statically reaches. Same posture as hosts/cmds/paths: the decidable
+            // subset only — `tables_in_sql` yields nothing for a dynamically-built query (the gate's
+            // opaque case), never a guess. Feeds `allow Db in <scope> <table>…` (AS-EFF-008).
+            if builtin == Some("Db") {
+                if let Some(sql) = first_str_lit_arg(expr) {
+                    let ts = candor_classify::tables_in_sql(&sql);
+                    if !ts.is_empty() {
+                        self.db_tables_direct.entry(caller).or_default().extend(ts);
+                    }
+                    // (a literal SQL with no table — `SELECT 1` — is visible-but-tableless, NOT incomplete.)
+                } else if candor_classify::is_db_query_arg(path.rsplit("::").next().unwrap_or("")) {
+                    // a SQL-QUERY-bearing Db call (`con.execute(sql,…)`/`query`/`prepare`) with no literal
+                    // query → the table is a runtime value, invisible to the gate (masking; the AS-EFF-008
+                    // guard generalized from Net/Exec to Db). The allowlist excludes build-then-execute
+                    // terminals (`fetch_all`/`load`/`all`) and lifecycle ops (`connect`/`open`/`begin`),
+                    // whose query is built structurally (no maskable string literal).
+                    self.incomplete_direct.entry(caller).or_default().insert("Db");
+                }
+            }
+            if self.explain.is_some() {
+                let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                self.sites.entry(caller).or_default().push(EffectSite { eff: effect, via: path.clone(), loc });
+            }
+            // Taint heuristic: an injection-class effect on a parameter-derived argument.
+            if self.taint
+                && matches!(effect, "Fs" | "Exec" | "Db" | "Net" | "Env" | "Ipc")
+                && effect_arg_from_param(cx.tcx, expr, caller)
+            {
+                self.tainted.entry(caller).or_default().insert(effect);
+            }
+        } else if !def_id.is_local() {
+            // Cross-crate: a call into one of THIS project's other crates (its lib, a sibling
+            // workspace member). For a TRAIT-method call the callee `def_id` is the trait method, but
+            // the dependency keyed its report by the concrete IMPL method — so devirtualize to that
+            // impl first (when the receiver is concrete), else the lookup would always miss.
+            let key_did = match devirtualize(cx, expr, def_id) {
+                Some(Devirt::Static(did)) => did,
+                _ => def_id, // still-virtual / unresolvable → the trait method is the key fallback
+            };
+            // Layering across crates (AS-EFF-009): record this cross-crate callee (its DefPathHash +
+            // path) so check_crate_post can compute reachability — a direct dependency (callee path
+            // matches a `forbid -> B` scope) or one laundered through that crate (its `layerreach`
+            // summary, keyed by the hash). Recorded from the callee identity alone, so it works even
+            // with no sibling report loaded.
+            if !self.layer_rules.is_empty() {
+                let callee_path = cx.tcx.def_path_str(key_did);
+                self.cross_callees.entry(caller).or_default().push((dph(cx.tcx, key_did), callee_path));
+            }
+            if self.cross.is_empty() {
+                return;
+            }
+            // Inherit the callee's already-transitive effects, looked up by its stable DefPathHash
+            // (matches whether the dependency emitted it locally or we see it externally), plus its
+            // literal detail (hosts / commands / paths) into the caller's direct sets, so within-crate
+            // propagation carries them up to every transitive caller — the allowlists then see a value
+            // that physically lives in another crate.
+            let cross_key = dph(cx.tcx, key_did);
+            if let Some(hs) = self.cross_hosts.get(&cross_key) {
+                self.net_hosts_direct.entry(caller).or_default().extend(hs.iter().cloned());
+            }
+            if let Some(cs) = self.cross_cmds.get(&cross_key) {
+                self.exec_cmds_direct.entry(caller).or_default().extend(cs.iter().cloned());
+            }
+            if let Some(ps) = self.cross_paths.get(&cross_key) {
+                self.fs_paths_direct.entry(caller).or_default().extend(ps.iter().cloned());
+            }
+            if let Some(ts) = self.cross_tables.get(&cross_key) {
+                self.db_tables_direct.entry(caller).or_default().extend(ts.iter().cloned());
+            }
+            if let Some(effs) = self.cross.get(&cross_key).cloned() {
+                for e in &effs {
+                    self.via_cross.entry(caller).or_default().insert(*e);
+                }
+                if self.explain.is_some() {
+                    let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                    let via = format!("cross-crate call to `{}`", cx.tcx.def_path_str(key_did));
+                    for e in &effs {
+                        self.sites.entry(caller).or_default().push(EffectSite { eff: e, via: via.clone(), loc: loc.clone() });
+                    }
+                }
+            }
+        }
+    }
+
+    /// check_crate_post concern: closure-flow resolution (the RECEIVING side), per call site —
+    /// edge each local caller to the callback it passed; returns the HOFs that must carry the
+    /// non-propagating report-only `Unknown` for an invoked param.
+    fn resolve_callback_sites(&mut self, cx: &LateContext<'_>) -> HashSet<LocalDefId> {
+        // Closure-flow resolution (receiving side), PER CALL SITE. A HOF `H` that invokes a callback
+        // parameter doesn't perform the callback's effects ITSELF — the *caller* that passed the
+        // callback does. So instead of unioning every callback ever passed to `H` and edging `H` to all
+        // of them (which then leaked to EVERY caller of `H` — a pure caller passing a pure callback
+        // inheriting a sibling caller's effectful one, the fabrication this fixes), attribute each
+        // callback to the SPECIFIC caller that passed it: edge `caller -> callback_target`.
+        //
+        // The HOF stays HONEST in its OWN report (SPEC §4 trust contract: an unresolvable invocation is
+        // never silently pure). From `H`'s own standalone standpoint it invokes an opaque callable, so
+        // it ALWAYS carries `Unknown` for the invoked param — but a NON-PROPAGATING one (injected into
+        // the report AFTER the fixpoint, see `hof_param_unknown` below), so it never flows back down the
+        // normal `caller -> H` edge to re-pollute the precise local callers we just fixed. This is the
+        // crux of the per-site model: the HOF is honestly indeterminate standalone, while each caller
+        // gets the EXACT effect of the callback IT passed.
+        //
+        // No under-report: every concrete invocation of `H`'s param is attributed to SOME function that
+        // can't drop it — a local caller (edge to the resolvable target, or its own `Unknown` for an
+        // unresolvable callback, recorded in `callback_site_unknown`), AND `H` itself keeps the honest
+        // `Unknown` for any caller we can't see (an external crate, an entry point, or simply a HOF that
+        // is never called at all but still reported on its own).
+        let param_calls = std::mem::take(&mut self.param_calls);
+        let callback_sites = std::mem::take(&mut self.callback_sites);
+        let callback_site_unknown = std::mem::take(&mut self.callback_site_unknown);
+        // HOFs that must carry the non-propagating, report-only `Unknown` for an invoked param.
+        let mut hof_param_unknown: HashSet<LocalDefId> = HashSet::new();
+        for (hof, indices) in &param_calls {
+            for &i in indices {
+                // PER-SITE: edge each LOCAL caller to the resolvable named callback it passed HERE.
+                for ((caller, h, pi), targets) in &callback_sites {
+                    if *h == hof.to_def_id() && *pi == i {
+                        let locals: Vec<LocalDefId> = targets
+                            .iter()
+                            .filter(|t| matches!(cx.tcx.def_kind(**t), DefKind::Fn | DefKind::AssocFn))
+                            .filter_map(|t| t.as_local())
+                            .collect();
+                        if !locals.is_empty() {
+                            self.calls.entry(*caller).or_default().extend(locals);
+                        }
+                    }
+                }
+                // PER-SITE: a caller that passed an UNRESOLVABLE callback (closure / fn-ptr / non-local
+                // fn / generic value) carries the honest `Unknown` ITSELF — it genuinely can't see what
+                // it handed over. (This DOES propagate to that caller's callers, correctly: they reach
+                // an indeterminate effect through it.)
+                for (caller, h, pi) in &callback_site_unknown {
+                    if *h == hof.to_def_id() && *pi == i {
+                        self.direct.entry(*caller).or_default().insert(UNKNOWN);
+                        self.unknown_why
+                            .entry(*caller)
+                            .or_default()
+                            .insert("callback:unresolvable callback passed".to_string());
+                    }
+                }
+                // The HOF itself: ALWAYS honest `Unknown` for the invocation (it invokes an opaque
+                // param). Report-only (non-propagating) so it never leaks to the precise local callers.
+                hof_param_unknown.insert(*hof);
+                self.unknown_why
+                    .entry(*hof)
+                    .or_default()
+                    .insert("callback:invoked param (opaque from the HOF's own standpoint)".to_string());
+            }
+        }
+        hof_param_unknown
+    }
+
+    /// check_crate_post concern: CANDOR_EXPLAIN — trace each matching fn's effects to their
+    /// origin (leaf call + location) on stderr. A dedicated query mode.
+    fn run_explain(&self, cx: &LateContext<'_>, eff: &HashMap<LocalDefId, BTreeSet<&'static str>>,
+                   query: &str) {
+        let mut targets: Vec<LocalDefId> = eff
+            .iter()
+            .filter(|(_, e)| !e.is_empty())
+            .map(|(f, _)| *f)
+            .filter(|f| cx.tcx.def_path_str(f.to_def_id()).contains(&query))
+            .collect();
+        targets.sort_by_cached_key(|f| cx.tcx.def_path_str(f.to_def_id()));
+        if targets.is_empty() {
+            eprintln!("candor explain: no effectful function matching `{query}`.");
+        }
+        for f in &targets {
+            eprintln!("\ncandor explain — {}", cx.tcx.def_path_str(f.to_def_id()));
+            for &e in eff[f].iter() {
+                match self.find_source(*f, e) {
+                    Some(path) => {
+                        let leaf = *path.last().unwrap();
+                        let chain = path
+                            .iter()
+                            .map(|d| cx.tcx.def_path_str(d.to_def_id()))
+                            .collect::<Vec<_>>()
+                            .join(" → ");
+                        eprintln!("  {e:<9} {chain}");
+                        if let Some(s) = self.sites.get(&leaf).and_then(|v| v.iter().find(|s| s.eff == e)) {
+                            eprintln!("            └ {} via {} at {}", cx.tcx.def_path_str(leaf.to_def_id()), s.via, s.loc);
+                        }
+                    }
+                    None => eprintln!("  {e:<9} (origin not localizable — inherited or via an unresolved path)"),
+                }
+            }
+        }
+    }
+
+    /// check_crate_post concern: AS-EFF-009 layering — propagate the `forbid`-target scopes each
+    /// fn reaches (local + cross-crate + laundered), write this crate's `layerreach` sidecar, and
+    /// return the violations (fn -> [(rule, example-path)]).
+    fn compute_layer_violations(&self, cx: &LateContext<'_>, krate: &str, kinds: &str)
+                                -> HashMap<LocalDefId, Vec<(String, String)>> {
+        let mut layer_viol: HashMap<LocalDefId, Vec<(String, String)>> = HashMap::new();
+        if !self.layer_rules.is_empty() {
+            // Scope-match against the CRATE-PREFIXED path (`<crate>::<path>`), because a crate's own
+            // functions' `def_path_str` omits the crate name — so a `from`/`to` scope spelled as the
+            // crate name would otherwise match nothing (a silent no-op). Module/type-name scopes still
+            // match (the segment is present either way). Cross-crate callee paths already carry the
+            // crate, so those (in `cross_callees`) are matched as-is, not through `name_of`.
+            let name_of = |g: LocalDefId| format!("{krate}::{}", cx.tcx.def_path_str(g.to_def_id()));
+            let tos: BTreeSet<&str> = self.layer_rules.iter().map(|r| r.to.as_str()).collect();
+            // Seed: scopes each function reaches via a DIRECT callee (local path match, cross path match,
+            // or cross callee's sidecar reach). Track an example path per (fn, scope) for the message.
+            let mut seed: HashMap<LocalDefId, BTreeSet<String>> = HashMap::new();
+            let mut example: HashMap<(LocalDefId, String), String> = HashMap::new();
+            let note = |seed: &mut HashMap<LocalDefId, BTreeSet<String>>,
+                            example: &mut HashMap<(LocalDefId, String), String>,
+                            f: LocalDefId,
+                            scope: &str,
+                            via: &str| {
+                seed.entry(f).or_default().insert(scope.to_string());
+                example.entry((f, scope.to_string())).or_insert_with(|| via.to_string());
+            };
+            for (&f, callees) in &self.calls {
+                for &c in callees {
+                    let cpath = name_of(c);
+                    for to in &tos {
+                        if scope_matches(&cpath, to) {
+                            note(&mut seed, &mut example, f, to, &cpath);
+                        }
+                    }
+                }
+            }
+            for (&f, ccs) in &self.cross_callees {
+                for (hash, cpath) in ccs {
+                    for to in &tos {
+                        if scope_matches(cpath, to) {
+                            note(&mut seed, &mut example, f, to, cpath);
+                        }
+                    }
+                    if let Some(reached) = self.cross_layer_reach.get(hash) {
+                        for s in reached {
+                            note(&mut seed, &mut example, f, s, cpath);
+                        }
+                    }
+                }
+            }
+            let reach = propagate(seed, &self.calls);
+
+            // Write this crate's sidecar (hex DefPathHash -> reached scopes) for dependent crates.
+            if let Some(prefix) = &self.reports_prefix {
+                let mut sidecar: HashMap<String, Vec<String>> = HashMap::new();
+                for (f, scopes) in &reach {
+                    if !scopes.is_empty() {
+                        sidecar.insert(dph_hex(cx.tcx, f.to_def_id()), scopes.iter().cloned().collect());
+                    }
+                }
+                write_layer_reach(&layer_reach_path(prefix, &krate.to_string(), &kinds), &sidecar);
+            }
+
+            // Flag: a function in scope `from` that reaches its rule's `to` scope.
+            for (&f, scopes) in &reach {
+                let fname = name_of(f);
+                for rule in &self.layer_rules {
+                    if scopes.contains(&rule.to) && scope_matches(&fname, &rule.from) {
+                        let via = example.get(&(f, rule.to.clone())).cloned().unwrap_or_else(|| rule.to.clone());
+                        layer_viol.entry(f).or_default().push((rule.raw.clone(), via));
+                    }
+                }
+            }
+        }
+        layer_viol
+    }
+
+    /// check_crate_post concern: CANDOR_JSON report emission — the packaged report, the full
+    /// callgraph sidecar (SPEC §2.2), the calibrated-crates stamp and the encountered-crates file.
+    fn write_report_files(&self, cx: &LateContext<'_>, prefix: &str, krate: &str, kinds: &str,
+                          json_entries: &[ReportEntry],
+                          eff: &HashMap<LocalDefId, BTreeSet<&'static str>>) {
+        let file = format!("{prefix}.{krate}.{kinds}.json");
+        // v0.2: a self-describing envelope { candor: {version, toolchain}, functions: [...] }.
+        let meta = ReportMeta {
+            version: CANDOR_VERSION.into(),
+            toolchain: CANDOR_TOOLCHAIN.into(),
+            spec: candor_report::SPEC_VERSION.into(),
+        };
+        match candor_report::to_packaged_report_json(&meta, krate, json_entries) {
+            Ok(body) => match candor_report::write_atomic(std::path::Path::new(&file), body.as_bytes()) {
+                Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
+                Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),
+            },
+            Err(e) => eprintln!("candor: failed to serialize report ({e})"),
+        }
+        // Full local call graph sidecar (every function's direct callees by path, INCLUDING pure
+        // ones the report omits). `cargo candor callers <fn>` reads it to answer "who (transitively)
+        // calls X" for ANY function — the pre-edit blast-radius question an agent asks before adding
+        // an effect ("I'm about to touch X; who depends on it?"). The main report only records
+        // effect-relevant edges, so it can't answer that for a pure X. 3-segment name ⇒ report_files
+        // ignores it. (Surfaced by the agent-use eval, eval/agentuse.)
+        // SPEC §2.2: EVERY analyzed function is a key — a LEAF with no local callees gets an empty
+        // list (iterating `eff`, which is seeded with every reportable item, not just `self.calls`,
+        // which only holds fns that make a call). Omitting leaves made an uncalled leaf invisible
+        // to `whatif`/`callers`, and an always-present key distinguishes "no callers" from "no such
+        // function".
+        let mut cg: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for f in eff.keys() {
+            let cs: Vec<String> = self
+                .calls
+                .get(f)
+                .map(|callees| {
+                    let mut v: Vec<String> =
+                        callees.iter().map(|c| cx.tcx.def_path_str(c.to_def_id())).collect();
+                    v.sort();
+                    v
+                })
+                .unwrap_or_default();
+            cg.insert(cx.tcx.def_path_str(f.to_def_id()), cs);
+        }
+        let cgfile = format!("{prefix}.{krate}.{kinds}.callgraph.json");
+        if let Ok(body) = serde_json::to_string(&cg) {
+            let _ = candor_report::write_atomic(std::path::Path::new(&cgfile), body.as_bytes());
+        }
+        // Emit candor's calibrated crate set alongside the report, so downstream
+        // coverage checks read it from the engine rather than a duplicated copy. Also stamp
+        // the engine's build identity here so the report is self-describing (a consumer in any
+        // language, or the guard, can tell which candor produced it — and a newer engine can
+        // refuse to silently trust a sibling crate's report from a different version).
+        let calib = serde_json::json!({
+            "candor_version": CANDOR_VERSION,
+            "toolchain": CANDOR_TOOLCHAIN,
+            // `.as_slice()`: serde only derives Serialize for arrays up to length 32.
+            "crates": CALIBRATED_CRATES.as_slice(),
+            "prefixes": CALIBRATED_PREFIXES.as_slice(),
+            "path_crates": PATH_CALIBRATED_CRATES.as_slice(),
+        });
+        let cfile = format!("{prefix}.calibrated.json");
+        if let Err(e) = std::fs::write(&cfile, calib.to_string()) {
+            eprintln!("candor: failed to write {cfile:?} ({e})");
+        }
+        // Emit the external crates we actually saw called, one file per crate+kind (a
+        // package emits the same crate name as both rlib and bin — they must NOT share a
+        // file or the sparser one overwrites the other). Named `encountered-<krate>-<kind>`
+        // (a single middle segment) so it does NOT match the `.*.*.json` report glob.
+        let efile = format!("{prefix}.encountered-{krate}-{kinds}.json");
+        let seen: Vec<&str> = self.encountered.iter().map(|s| s.as_str()).collect();
+        if let Err(e) = std::fs::write(&efile, serde_json::to_string(&seen).unwrap_or_default()) {
+            eprintln!("candor: failed to write {efile:?} ({e})");
+        }
+    }
+
+    /// check_crate_post concern: assemble the §3.3 CANDOR_GATE_JSON verdict from the NDJSON
+    /// `.parts` records — or withhold it (never a fail-open ok:true) when the guard could not
+    /// evaluate (`guard_unavailable`) or a record is corrupt.
+    fn write_gate_verdict(&self, guard_unavailable: bool) {
+        if let Some(gate) = &self.gate_sink {
+            if guard_unavailable {
+                eprintln!(
+                    "candor: CANDOR_GATE_JSON verdict NOT written — the regression guard could not \
+                     evaluate this crate, so no faithful verdict exists"
+                );
+            } else {
+                let parts = format!("{gate}.parts");
+                let mut violations: Vec<candor_report::GateViolation> = Vec::new();
+                let mut corrupt = false;
+                if let Ok(text) = std::fs::read_to_string(&parts) {
+                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                        match serde_json::from_str(line) {
+                            Ok(v) => violations.push(v),
+                            Err(e) => {
+                                eprintln!("candor: corrupt gate record in {parts:?} ({e})");
+                                corrupt = true;
+                            }
+                        }
+                    }
+                }
+                if corrupt {
+                    // A dropped record would make the verdict UNDER-report vs the exit code — withhold
+                    // it (the wrapper then fails closed on the missing file) rather than write a lie.
+                    eprintln!("candor: CANDOR_GATE_JSON verdict NOT written — corrupt violation records");
+                } else {
+                    match candor_report::gate_verdict_json(&mut violations) {
+                        Ok(json) => {
+                            if let Err(e) = candor_report::write_atomic(
+                                std::path::Path::new(gate),
+                                format!("{json}\n").as_bytes(),
+                            ) {
+                                eprintln!("candor: could not write CANDOR_GATE_JSON {gate}: {e}");
+                            }
+                        }
+                        Err(e) => eprintln!("candor: could not serialize the gate verdict ({e})"),
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl<'tcx> LateLintPass<'tcx> for Candor {
     fn check_crate(&mut self, cx: &LateContext<'tcx>) {
         // Cross-crate resolution: load THIS project's other crates' reports so calls into them
@@ -2342,155 +3075,17 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        // A named function referenced as a VALUE — passed as a callback, stored in a struct, handed
-        // to a higher-order combinator (`iter().map(parse)`, `thread::spawn(work)`, `register(cb)`)
-        // — isn't *called* here, but its effects are reachable through whoever invokes it. Add a call
-        // edge so they propagate, exactly as an inline closure's body is charged to its enclosing fn.
-        // Without it, an effectful fn passed as a callback looked pure to its passer — a silent
-        // under-report. (This is the statically-resolvable half of the closure problem: the callee
-        // identity is a known `FnDef`. The still-deferred residue is the *receiving* side — an
-        // `impl Fn` parameter whose concrete target needs interprocedural flow, kept honest `Unknown`.
-        // The callee position of a normal call is also a `FnDef` path; re-adding that edge is a
-        // harmless no-op on the `calls` set.)
-        if let ExprKind::Path(..) = expr.kind {
-            if let Some(typeck) = cx.maybe_typeck_results() {
-                if let rustc_middle::ty::TyKind::FnDef(did, _) = typeck.expr_ty(expr).kind() {
-                    if let (Some(local), Some(caller)) =
-                        (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
-                    {
-                        // A `FnDef` path being CAST AWAY from callability (`fs_helper as usize`,
-                        // `f as *const ()`) is never invoked through that cast value — a `usize` /
-                        // raw-data-pointer can't be called — so propagating the callback's effects to
-                        // the casting fn is a fabrication. Suppress the edge ONLY when the parent is a
-                        // cast whose TARGET type is non-callable; a `fn`-pointer cast (`f as fn()`) stays
-                        // callable, so KEEP the edge there, exactly as for `vec![f]` / `map(f)` / a struct
-                        // field. (Soundness: this only ever DROPS an edge for a provably-uncallable cast
-                        // target — it can never hide a real call, which goes through `resolve_callee`
-                        // below, not this value-reference edge.)
-                        let cast_away = match cx.tcx.parent_hir_node(expr.hir_id) {
-                            rustc_hir::Node::Expr(p) => match p.kind {
-                                ExprKind::Cast(inner, _) if inner.hir_id == expr.hir_id => !matches!(
-                                    typeck.expr_ty(p).kind(),
-                                    rustc_middle::ty::TyKind::FnPtr(..)
-                                        | rustc_middle::ty::TyKind::FnDef(..)
-                                        | rustc_middle::ty::TyKind::Closure(..)
-                                ),
-                                _ => false,
-                            },
-                            _ => false,
-                        };
-                        if !cast_away && matches!(cx.tcx.def_kind(*did), DefKind::Fn | DefKind::AssocFn)
-                        {
-                            self.calls.entry(caller).or_default().insert(local);
-                        }
-                    }
-                }
-            }
-        }
+        // Named-fn-as-value call edge — see edge_fn_value_reference.
+        self.edge_fn_value_reference(cx, expr);
 
-        // A reference to a local `static` FORCES its initializer. For a deferred-init wrapper
-        // (`LazyLock`/`LazyCell`/`OnceLock`/`once_cell::Lazy`/`lazy_static!`/`thread_local!`) the
-        // initializer closure runs at the first access SITE, not at the static's declaration — so an
-        // effectful initializer reached only by naming the static was charged to the static item but
-        // NEVER to the forcing function: a silent under-report (the lazy-init seam, see
-        // ui/deferred_effects.rs). Add an edge from the enclosing fn to the static, exactly as the scan
-        // engine edges a forcing body to the static's synthetic init unit. Sound and non-fabricating: a
-        // static is a reportable item with its own (already-propagated) effect set, so a PURE static
-        // contributes nothing; and in safe Rust a static's only route to a RUNTIME effect IS a deferred
-        // closure (a plain `static X = const_expr;` is const-evaluated and cannot perform I/O), so no
-        // edge to a pure static can ever fabricate. (Conservative on `&STATIC` without a deref — naming
-        // forces, matching the scan engine; over-approximation in the safe direction.)
-        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = expr.kind {
-            if let rustc_hir::def::Res::Def(DefKind::Static { .. }, did) = path.res {
-                if let (Some(static_local), Some(caller)) =
-                    (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
-                {
-                    self.calls.entry(caller).or_default().insert(static_local);
-                }
-            }
-        }
+        // Static-reference deferred-init force — see edge_static_force.
+        self.edge_static_force(cx, expr);
 
-        // `thread_local!` FORCE: a method call on a `LocalKey` receiver (`KEY.with(…)`, `with_borrow`,
-        // `set`, …) runs the thread_local's DEFERRED initializer. The macro places that init in a local fn
-        // referenced inside `LocalKey::new(…)` in KEY's initializer — but that reference sits in an inline
-        // const (charged to NO reportable item by `enclosing_named_fn`) and the accessor is non-local std,
-        // so the init's effects were orphaned from the call graph: a `.with()`-forced effectful
-        // thread_local read silently pure. Edge the forcing fn to the init fn (the thread_local analog of
-        // the LazyLock static-ref edge above; here the effect is NOT in the item's own initializer but
-        // behind the accessor). Sound + non-fabricating: only edges to a LOCAL fn the item references, so a
-        // pure-init thread_local (or a std/external LocalKey) contributes nothing. Teeth: ui/thread_local_effects.rs.
-        if let ExprKind::MethodCall(_, receiver, _, _) = expr.kind {
-            if let Some(typeck) = cx.maybe_typeck_results() {
-                if let rustc_middle::ty::TyKind::Adt(adt, _) =
-                    typeck.expr_ty(receiver).peel_refs().kind()
-                {
-                    if cx.tcx.item_name(adt.did()).as_str() == "LocalKey"
-                        && cx.tcx.crate_name(adt.did().krate).as_str() == "std"
-                    {
-                        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) = receiver.kind {
-                            if let rustc_hir::def::Res::Def(
-                                DefKind::Const { .. } | DefKind::Static { .. },
-                                tl_did,
-                            ) = p.res
-                            {
-                                if let (Some(tl_local), Some(caller)) =
-                                    (tl_did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
-                                {
-                                    for init in local_key_init_fns(cx.tcx, tl_local) {
-                                        self.calls.entry(caller).or_default().insert(init);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // `thread_local!` accessor force — see edge_thread_local_force.
+        self.edge_thread_local_force(cx, expr);
 
-        // IMPLICIT overloaded `Deref`/`DerefMut` calls the compiler inserts as expression ADJUSTMENTS
-        // (auto-deref during method resolution, field access through a smart pointer, deref-coercion at
-        // a call/arg/return/assignment site). These are NOT `Call`/`MethodCall`/`Unary(Deref)` HIR nodes
-        // — they live in `typeck.expr_adjustments(expr)` — so `resolve_callee` never sees them, and a
-        // LOCAL effectful `Deref` impl reached only this way was reported neither with its effect nor
-        // `Unknown`: silently pure (the smart-pointer hole). Add a call edge per overloaded-deref step
-        // EXACTLY as the explicit `Unary(Deref)` arm does. This runs for EVERY expr (a field access /
-        // coercion site is not a call, so the `resolve_callee` early-return below would skip it).
-        let deref_steps = overloaded_deref_steps(cx, expr);
-        if !deref_steps.is_empty() {
-            if let Some(caller) = enclosing_named_fn(cx.tcx, expr.hir_id) {
-                for step in deref_steps {
-                    match step {
-                        // Local impl → real edge (its body's effects propagate). Non-local std deref
-                        // (`Box`/`Rc`/`Arc`/`Pin`) → drop it: matches the std-trait pure calibration, no
-                        // fabrication.
-                        DerefStep::Static(did) => {
-                            if let Some(local) = did.as_local() {
-                                if matches!(cx.tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn) {
-                                    self.calls.entry(caller).or_default().insert(local);
-                                }
-                            }
-                        }
-                        // An unresolvable/generic overloaded deref: honest `Unknown`, never silent-pure.
-                        DerefStep::Unresolved => {
-                            self.direct.entry(caller).or_default().insert(UNKNOWN);
-                            self.unknown_why
-                                .entry(caller)
-                                .or_default()
-                                .insert("deref:unresolvable overloaded auto-deref".to_string());
-                            if self.explain.is_some() {
-                                let loc =
-                                    cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
-                                self.sites.entry(caller).or_default().push(EffectSite {
-                                    eff: UNKNOWN,
-                                    via: "unresolvable overloaded auto-deref".to_string(),
-                                    loc,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Implicit overloaded-deref adjustment steps — see edge_overloaded_derefs.
+        self.edge_overloaded_derefs(cx, expr);
 
         let Some(callee) = resolve_callee(cx, expr) else {
             return;
@@ -2676,45 +3271,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             add_edge(self, e);
         }
 
-        // Closure-flow bookkeeping: record what's passed at each arg position of a FREE fn call, so a
-        // callback parameter that fn invokes can later be resolved to these concrete targets. A named
-        // fn (`FnDef`) is a resolvable target; a closure / fn-pointer / generic value is unresolvable
-        // (forces that position back to `Unknown`). Free fns only → arg index == param index.
-        if let ExprKind::Call(_, args) = expr.kind {
-            if matches!(cx.tcx.def_kind(def_id), DefKind::Fn) {
-                if let Some(typeck) = cx.maybe_typeck_results() {
-                    for (i, arg) in args.iter().enumerate() {
-                        // ONLY a LOCAL named fn is a resolvable callback target (we can edge to its
-                        // body). A non-local fn-item, a closure, a fn-pointer, or any opaque/`dyn`
-                        // callable (`impl Fn` return, `&dyn Fn`, `Box<dyn Fn>`) we can't enumerate —
-                        // record it as a PER-SITE unresolvable so this caller's deferred `Unknown`
-                        // STANDS instead of being silently dropped. (A non-callable value at a
-                        // non-callback position also lands here; harmless — that key is consulted only
-                        // for an invoked param, where the arg is necessarily a callable.) SOUNDNESS:
-                        // routing a *non-local* fn into the resolvable set would let the resolver see a
-                        // non-empty target set, filter it to an empty `locals`, and add neither an edge
-                        // nor the `Unknown` → a false `pure`; routing it to the unresolvable set is the
-                        // honest fallback. The flow is keyed by the CALLER (per call site) so a
-                        // callback's effects reach the specific fn that passed it, never every caller of
-                        // the HOF (the union fabrication — see `callback_sites`).
-                        match typeck.expr_ty(arg).kind() {
-                            rustc_middle::ty::TyKind::FnDef(t, _)
-                                if t.as_local().is_some()
-                                    && matches!(cx.tcx.def_kind(*t), DefKind::Fn | DefKind::AssocFn) =>
-                            {
-                                self.callback_sites
-                                    .entry((caller, def_id, i))
-                                    .or_default()
-                                    .insert(*t);
-                            }
-                            _ => {
-                                self.callback_site_unknown.insert((caller, def_id, i));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Closure-flow bookkeeping (sending side) — see record_callback_flow.
+        self.record_callback_flow(cx, expr, caller, def_id);
 
         // Resolve a trait-method call to the impls whose effects it could perform. PREFER
         // devirtualization: a call on a CONCRETE (non-`dyn`) receiver of a LOCAL trait
@@ -2756,205 +3314,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             }
         }
 
-        // Honest `Unknown` only when dispatch is genuinely unresolvable here:
-        //  - a `dyn` call over a NON-local trait (we can't see its impl bodies), or
-        //  - (paranoid) any trait dispatch CHA couldn't pin to local impls.
-        // ...but NOT for conventionally-pure std traits (Display/Error/…), where the
-        // overwhelmingly-pure dispatch would otherwise flood reports with false Unknowns.
-        if let Some(td) = trait_did {
-            let tk = cx.tcx.crate_name(td.krate);
-            let tk = tk.as_str();
-            let ti = cx.tcx.item_name(td);
-            let ti = ti.as_str();
-            // `core::fmt::Write` is pure formatting — never `Unknown`, even via `&mut dyn fmt::Write`.
-            let pure = is_pure_std_trait(tk, ti) || is_pure_fmt_write(tk, ti);
-            // Generic (non-`dyn`) dispatch is assumed pure by default (marking it all Unknown floods —
-            // that's `CANDOR_PARANOID`). EXCEPT over a known-effectful std trait (`io::Read`/`Write`/…),
-            // where "assumed pure" is a real under-report: the reader/writer behind the generic could be
-            // a file or socket. So those are Unknown by default too — bounded, doesn't flood.
-            let effectful_dispatch = is_effectful_std_trait(tk, ti);
-            if !cha_resolved && !pure && (dynamic || self.paranoid || effectful_dispatch) {
-                self.direct.entry(caller).or_default().insert(UNKNOWN);
-                self.unknown_why
-                    .entry(caller)
-                    .or_default()
-                    .insert(format!("dispatch:{}", cx.tcx.def_path_str(td)));
-                if self.explain.is_some() {
-                    let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
-                    let via = format!("unresolvable dispatch over `{}`", cx.tcx.def_path_str(td));
-                    self.sites.entry(caller).or_default().push(EffectSite { eff: UNKNOWN, via, loc });
-                }
-            }
-        }
+        // Honest `Unknown` for genuinely-unresolvable dispatch — see note_unresolved_dispatch.
+        self.note_unresolved_dispatch(cx, expr, caller, trait_did, dynamic, cha_resolved);
 
-        // Record a directly-performed effect (built-in classifier, then project rules).
-        let crate_name = cx.tcx.crate_name(def_id.krate);
-        // Note every EXTERNAL crate we actually saw a resolved call into — ground truth for
-        // the coverage blind-spot check (catches deps declared in workspace members, which a
-        // root-manifest scan misses). std/local are excluded; the consumer filters the rest.
-        if !def_id.is_local()
-            && !matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
-        {
-            self.encountered.insert(crate_name.to_string());
-        }
-        let path = cx.tcx.def_path_str(def_id);
-        let builtin = classify(crate_name.as_str(), &path);
-        let effect = builtin.or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
-        // FLOOR DISCLOSURE (sweep [4]/[19]): a DIRECT external call (not a trait dispatch — those CHA-resolve
-        // to local impls, or are disclosed as `Unknown` above) that κ does NOT classify is a reach candor
-        // cannot see through. The deep engine floors it to pure like the syntactic engines; record the crate
-        // so the fn's `invisible` qualifies its pure verdict (the honesty contract, propagated below). std-
-        // like crates are known-pure-frontier, excluded — matching the `encountered` coverage filter.
-        if effect.is_none() && trait_did.is_none() && !def_id.is_local()
-            && !matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
-        {
-            self.invisible_direct.entry(caller).or_default().insert(crate_name.to_string());
-        }
-        if let Some(effect) = effect {
-            self.direct.entry(caller).or_default().insert(effect);
-            // Non-breaking Fs refinement: when the verb tells us read vs write, record it (propagated
-            // like effects below, surfaced as the report's `fs` detail). The `Fs` effect is unchanged.
-            // Gated to built-in Fs classification — see `fs_detail_for`.
-            let kinds = fs_detail_for(builtin, &path);
-            if !kinds.is_empty() {
-                self.fs_direct.entry(caller).or_default().extend(kinds.iter().copied());
-            }
-            // Non-breaking Net refinement: a literal address/URL argument tells us the endpoint.
-            // Gated to built-in Net classification (a user `extra` rule's arg shape is unknown).
-            if builtin == Some("Net") {
-                let hosts = net_hosts_in_call(expr);
-                if !hosts.is_empty() {
-                    self.net_hosts_direct.entry(caller).or_default().extend(hosts);
-                } else if candor_classify::is_net_establishing(path.rsplit("::").next().unwrap_or("")) {
-                    // a host-ESTABLISHING Net call with no captured host literal → runtime endpoint, invisible
-                    // to the gate (masking; sweep [3]/[7]). Use-verbs (write/read/send) are not establishing.
-                    self.incomplete_direct.entry(caller).or_default().insert("Net");
-                }
-            }
-            // Non-breaking Exec/Fs refinements: the literal command (`Command::new("git")`) / path
-            // (`fs::read("/etc/x")`) is the first string-literal argument. Gated to the built-in
-            // classifier (a user `extra` rule's arg shape is unknown). Feeds the `allow Exec/Fs …`
-            // allowlists, exactly as host literals feed `allow Net …`.
-            if builtin == Some("Exec") {
-                if let Some(cmd) = first_str_lit_arg(expr) {
-                    // Capture the program head + refine the cliff (spec §4 ⟨0.5⟩) ONLY at a program-
-                    // NAMING call (`new`/`cmd`), an ALLOWLIST — not "any method except a known modifier".
-                    // A whole-crate-Exec crate classifies EVERY method as Exec, so a denylist leaked a
-                    // getter (`get_env("psql")` reads a KEY) → fabricated Db + polluted `cmds` (review find).
-                    if is_cmd_naming_method(path.rsplit("::").next().unwrap_or("")) {
-                        self.direct
-                            .entry(caller)
-                            .or_default()
-                            .extend(classify_command_head(&cmd).iter().copied());
-                        self.exec_cmds_direct.entry(caller).or_default().insert(cmd);
-                    }
-                } else if is_cmd_naming_method(path.rsplit("::").next().unwrap_or("")) {
-                    // a program-NAMING Exec call (`Command::new(runtime_var)`) with no literal head → the
-                    // command is invisible to the gate (masking; sweep [3]/[7]).
-                    self.incomplete_direct.entry(caller).or_default().insert("Exec");
-                }
-            }
-            if builtin == Some("Fs") {
-                if let Some(p) = first_str_lit_arg(expr) {
-                    self.fs_paths_direct.entry(caller).or_default().insert(p);
-                } else {
-                    // a path-NAMING Fs call (`fs::write(p,…)`/`File::open(p)`) with no literal path → the
-                    // path is a runtime value, invisible to the gate (masking; the AS-EFF-008 guard
-                    // generalized from Net/Exec to Fs). Use the SHARED establishing-allowlist predicate
-                    // (`is_fs_path_arg`), and EXCLUDE the path-stat METHODS whose path is the RECEIVER, not
-                    // an arg (`p.metadata()`/`p.exists()` resolve to `std::path::Path::*`/`PathBuf::*`) —
-                    // those carry no path arg, so a missing literal there must not false-positive.
-                    let leaf = path.rsplit("::").next().unwrap_or("");
-                    let stat_method = path.starts_with("std::path::Path::")
-                        || path.starts_with("std::path::PathBuf::");
-                    if !stat_method && candor_classify::is_fs_path_arg(leaf) {
-                        self.incomplete_direct.entry(caller).or_default().insert("Fs");
-                    }
-                }
-            }
-            // Non-breaking Db refinement: table-position identifiers in a SQL string literal are the
-            // tables this call statically reaches. Same posture as hosts/cmds/paths: the decidable
-            // subset only — `tables_in_sql` yields nothing for a dynamically-built query (the gate's
-            // opaque case), never a guess. Feeds `allow Db in <scope> <table>…` (AS-EFF-008).
-            if builtin == Some("Db") {
-                if let Some(sql) = first_str_lit_arg(expr) {
-                    let ts = candor_classify::tables_in_sql(&sql);
-                    if !ts.is_empty() {
-                        self.db_tables_direct.entry(caller).or_default().extend(ts);
-                    }
-                    // (a literal SQL with no table — `SELECT 1` — is visible-but-tableless, NOT incomplete.)
-                } else if candor_classify::is_db_query_arg(path.rsplit("::").next().unwrap_or("")) {
-                    // a SQL-QUERY-bearing Db call (`con.execute(sql,…)`/`query`/`prepare`) with no literal
-                    // query → the table is a runtime value, invisible to the gate (masking; the AS-EFF-008
-                    // guard generalized from Net/Exec to Db). The allowlist excludes build-then-execute
-                    // terminals (`fetch_all`/`load`/`all`) and lifecycle ops (`connect`/`open`/`begin`),
-                    // whose query is built structurally (no maskable string literal).
-                    self.incomplete_direct.entry(caller).or_default().insert("Db");
-                }
-            }
-            if self.explain.is_some() {
-                let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
-                self.sites.entry(caller).or_default().push(EffectSite { eff: effect, via: path.clone(), loc });
-            }
-            // Taint heuristic: an injection-class effect on a parameter-derived argument.
-            if self.taint
-                && matches!(effect, "Fs" | "Exec" | "Db" | "Net" | "Env" | "Ipc")
-                && effect_arg_from_param(cx.tcx, expr, caller)
-            {
-                self.tainted.entry(caller).or_default().insert(effect);
-            }
-        } else if !def_id.is_local() {
-            // Cross-crate: a call into one of THIS project's other crates (its lib, a sibling
-            // workspace member). For a TRAIT-method call the callee `def_id` is the trait method, but
-            // the dependency keyed its report by the concrete IMPL method — so devirtualize to that
-            // impl first (when the receiver is concrete), else the lookup would always miss.
-            let key_did = match devirtualize(cx, expr, def_id) {
-                Some(Devirt::Static(did)) => did,
-                _ => def_id, // still-virtual / unresolvable → the trait method is the key fallback
-            };
-            // Layering across crates (AS-EFF-009): record this cross-crate callee (its DefPathHash +
-            // path) so check_crate_post can compute reachability — a direct dependency (callee path
-            // matches a `forbid -> B` scope) or one laundered through that crate (its `layerreach`
-            // summary, keyed by the hash). Recorded from the callee identity alone, so it works even
-            // with no sibling report loaded.
-            if !self.layer_rules.is_empty() {
-                let callee_path = cx.tcx.def_path_str(key_did);
-                self.cross_callees.entry(caller).or_default().push((dph(cx.tcx, key_did), callee_path));
-            }
-            if self.cross.is_empty() {
-                return;
-            }
-            // Inherit the callee's already-transitive effects, looked up by its stable DefPathHash
-            // (matches whether the dependency emitted it locally or we see it externally), plus its
-            // literal detail (hosts / commands / paths) into the caller's direct sets, so within-crate
-            // propagation carries them up to every transitive caller — the allowlists then see a value
-            // that physically lives in another crate.
-            let cross_key = dph(cx.tcx, key_did);
-            if let Some(hs) = self.cross_hosts.get(&cross_key) {
-                self.net_hosts_direct.entry(caller).or_default().extend(hs.iter().cloned());
-            }
-            if let Some(cs) = self.cross_cmds.get(&cross_key) {
-                self.exec_cmds_direct.entry(caller).or_default().extend(cs.iter().cloned());
-            }
-            if let Some(ps) = self.cross_paths.get(&cross_key) {
-                self.fs_paths_direct.entry(caller).or_default().extend(ps.iter().cloned());
-            }
-            if let Some(ts) = self.cross_tables.get(&cross_key) {
-                self.db_tables_direct.entry(caller).or_default().extend(ts.iter().cloned());
-            }
-            if let Some(effs) = self.cross.get(&cross_key).cloned() {
-                for e in &effs {
-                    self.via_cross.entry(caller).or_default().insert(*e);
-                }
-                if self.explain.is_some() {
-                    let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
-                    let via = format!("cross-crate call to `{}`", cx.tcx.def_path_str(key_did));
-                    for e in &effs {
-                        self.sites.entry(caller).or_default().push(EffectSite { eff: e, via: via.clone(), loc: loc.clone() });
-                    }
-                }
-            }
-        }
+        // Record the resolved call: direct effect + literal surface, or cross-crate inheritance.
+        self.record_resolved_call(cx, expr, caller, def_id, trait_did);
     }
 
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
@@ -2964,68 +3328,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             mir_spike::run(cx.tcx);
             return;
         }
-        // Closure-flow resolution (receiving side), PER CALL SITE. A HOF `H` that invokes a callback
-        // parameter doesn't perform the callback's effects ITSELF — the *caller* that passed the
-        // callback does. So instead of unioning every callback ever passed to `H` and edging `H` to all
-        // of them (which then leaked to EVERY caller of `H` — a pure caller passing a pure callback
-        // inheriting a sibling caller's effectful one, the fabrication this fixes), attribute each
-        // callback to the SPECIFIC caller that passed it: edge `caller -> callback_target`.
-        //
-        // The HOF stays HONEST in its OWN report (SPEC §4 trust contract: an unresolvable invocation is
-        // never silently pure). From `H`'s own standalone standpoint it invokes an opaque callable, so
-        // it ALWAYS carries `Unknown` for the invoked param — but a NON-PROPAGATING one (injected into
-        // the report AFTER the fixpoint, see `hof_param_unknown` below), so it never flows back down the
-        // normal `caller -> H` edge to re-pollute the precise local callers we just fixed. This is the
-        // crux of the per-site model: the HOF is honestly indeterminate standalone, while each caller
-        // gets the EXACT effect of the callback IT passed.
-        //
-        // No under-report: every concrete invocation of `H`'s param is attributed to SOME function that
-        // can't drop it — a local caller (edge to the resolvable target, or its own `Unknown` for an
-        // unresolvable callback, recorded in `callback_site_unknown`), AND `H` itself keeps the honest
-        // `Unknown` for any caller we can't see (an external crate, an entry point, or simply a HOF that
-        // is never called at all but still reported on its own).
-        let param_calls = std::mem::take(&mut self.param_calls);
-        let callback_sites = std::mem::take(&mut self.callback_sites);
-        let callback_site_unknown = std::mem::take(&mut self.callback_site_unknown);
-        // HOFs that must carry the non-propagating, report-only `Unknown` for an invoked param.
-        let mut hof_param_unknown: HashSet<LocalDefId> = HashSet::new();
-        for (hof, indices) in &param_calls {
-            for &i in indices {
-                // PER-SITE: edge each LOCAL caller to the resolvable named callback it passed HERE.
-                for ((caller, h, pi), targets) in &callback_sites {
-                    if *h == hof.to_def_id() && *pi == i {
-                        let locals: Vec<LocalDefId> = targets
-                            .iter()
-                            .filter(|t| matches!(cx.tcx.def_kind(**t), DefKind::Fn | DefKind::AssocFn))
-                            .filter_map(|t| t.as_local())
-                            .collect();
-                        if !locals.is_empty() {
-                            self.calls.entry(*caller).or_default().extend(locals);
-                        }
-                    }
-                }
-                // PER-SITE: a caller that passed an UNRESOLVABLE callback (closure / fn-ptr / non-local
-                // fn / generic value) carries the honest `Unknown` ITSELF — it genuinely can't see what
-                // it handed over. (This DOES propagate to that caller's callers, correctly: they reach
-                // an indeterminate effect through it.)
-                for (caller, h, pi) in &callback_site_unknown {
-                    if *h == hof.to_def_id() && *pi == i {
-                        self.direct.entry(*caller).or_default().insert(UNKNOWN);
-                        self.unknown_why
-                            .entry(*caller)
-                            .or_default()
-                            .insert("callback:unresolvable callback passed".to_string());
-                    }
-                }
-                // The HOF itself: ALWAYS honest `Unknown` for the invocation (it invokes an opaque
-                // param). Report-only (non-propagating) so it never leaks to the precise local callers.
-                hof_param_unknown.insert(*hof);
-                self.unknown_why
-                    .entry(*hof)
-                    .or_default()
-                    .insert("callback:invoked param (opaque from the HOF's own standpoint)".to_string());
-            }
-        }
+        // Closure-flow resolution (receiving side), per call site — see resolve_callback_sites.
+        let hof_param_unknown = self.resolve_callback_sites(cx);
 
         // Implicit-drop edges (narrow, production use of MIR): a value going out of scope runs its
         // `Drop::drop`, which HIR has no node for — so an effectful guard (I/O on drop) was silently
@@ -3102,40 +3406,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let pathsacc = propagate(self.fs_paths_direct.clone(), &self.calls);
         let tablesacc = propagate(self.db_tables_direct.clone(), &self.calls);
 
-        // CANDOR_EXPLAIN=<query>: for each matching function, trace the call path to where each of
-        // its effects originates (the leaf call + location). A dedicated query mode — print and
-        // return without the normal report/diagnostics.
+        // CANDOR_EXPLAIN=<query>: a dedicated query mode — print and return without the normal
+        // report/diagnostics. See run_explain.
         if let Some(query) = self.explain.clone() {
-            let mut targets: Vec<LocalDefId> = eff
-                .iter()
-                .filter(|(_, e)| !e.is_empty())
-                .map(|(f, _)| *f)
-                .filter(|f| cx.tcx.def_path_str(f.to_def_id()).contains(&query))
-                .collect();
-            targets.sort_by_cached_key(|f| cx.tcx.def_path_str(f.to_def_id()));
-            if targets.is_empty() {
-                eprintln!("candor explain: no effectful function matching `{query}`.");
-            }
-            for f in &targets {
-                eprintln!("\ncandor explain — {}", cx.tcx.def_path_str(f.to_def_id()));
-                for &e in eff[f].iter() {
-                    match self.find_source(*f, e) {
-                        Some(path) => {
-                            let leaf = *path.last().unwrap();
-                            let chain = path
-                                .iter()
-                                .map(|d| cx.tcx.def_path_str(d.to_def_id()))
-                                .collect::<Vec<_>>()
-                                .join(" → ");
-                            eprintln!("  {e:<9} {chain}");
-                            if let Some(s) = self.sites.get(&leaf).and_then(|v| v.iter().find(|s| s.eff == e)) {
-                                eprintln!("            └ {} via {} at {}", cx.tcx.def_path_str(leaf.to_def_id()), s.via, s.loc);
-                            }
-                        }
-                        None => eprintln!("  {e:<9} (origin not localizable — inherited or via an unresolved path)"),
-                    }
-                }
-            }
+            self.run_explain(cx, &eff, &query);
             return;
         }
 
@@ -3217,75 +3491,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // direct cross-crate, and third-crate-laundered layering. The sidecar we write below lets the
         // crates that depend on THIS one do the same. `reach` maps a `to`-scope → an example reached path
         // (for the diagnostic); only the scope set participates in propagation.
-        let mut layer_viol: HashMap<LocalDefId, Vec<(String, String)>> = HashMap::new();
-        if !self.layer_rules.is_empty() {
-            // Scope-match against the CRATE-PREFIXED path (`<crate>::<path>`), because a crate's own
-            // functions' `def_path_str` omits the crate name — so a `from`/`to` scope spelled as the
-            // crate name would otherwise match nothing (a silent no-op). Module/type-name scopes still
-            // match (the segment is present either way). Cross-crate callee paths already carry the
-            // crate, so those (in `cross_callees`) are matched as-is, not through `name_of`.
-            let name_of = |g: LocalDefId| format!("{krate}::{}", cx.tcx.def_path_str(g.to_def_id()));
-            let tos: BTreeSet<&str> = self.layer_rules.iter().map(|r| r.to.as_str()).collect();
-            // Seed: scopes each function reaches via a DIRECT callee (local path match, cross path match,
-            // or cross callee's sidecar reach). Track an example path per (fn, scope) for the message.
-            let mut seed: HashMap<LocalDefId, BTreeSet<String>> = HashMap::new();
-            let mut example: HashMap<(LocalDefId, String), String> = HashMap::new();
-            let note = |seed: &mut HashMap<LocalDefId, BTreeSet<String>>,
-                            example: &mut HashMap<(LocalDefId, String), String>,
-                            f: LocalDefId,
-                            scope: &str,
-                            via: &str| {
-                seed.entry(f).or_default().insert(scope.to_string());
-                example.entry((f, scope.to_string())).or_insert_with(|| via.to_string());
-            };
-            for (&f, callees) in &self.calls {
-                for &c in callees {
-                    let cpath = name_of(c);
-                    for to in &tos {
-                        if scope_matches(&cpath, to) {
-                            note(&mut seed, &mut example, f, to, &cpath);
-                        }
-                    }
-                }
-            }
-            for (&f, ccs) in &self.cross_callees {
-                for (hash, cpath) in ccs {
-                    for to in &tos {
-                        if scope_matches(cpath, to) {
-                            note(&mut seed, &mut example, f, to, cpath);
-                        }
-                    }
-                    if let Some(reached) = self.cross_layer_reach.get(hash) {
-                        for s in reached {
-                            note(&mut seed, &mut example, f, s, cpath);
-                        }
-                    }
-                }
-            }
-            let reach = propagate(seed, &self.calls);
-
-            // Write this crate's sidecar (hex DefPathHash -> reached scopes) for dependent crates.
-            if let Some(prefix) = &self.reports_prefix {
-                let mut sidecar: HashMap<String, Vec<String>> = HashMap::new();
-                for (f, scopes) in &reach {
-                    if !scopes.is_empty() {
-                        sidecar.insert(dph_hex(cx.tcx, f.to_def_id()), scopes.iter().cloned().collect());
-                    }
-                }
-                write_layer_reach(&layer_reach_path(prefix, &krate.to_string(), &kinds), &sidecar);
-            }
-
-            // Flag: a function in scope `from` that reaches its rule's `to` scope.
-            for (&f, scopes) in &reach {
-                let fname = name_of(f);
-                for rule in &self.layer_rules {
-                    if scopes.contains(&rule.to) && scope_matches(&fname, &rule.from) {
-                        let via = example.get(&(f, rule.to.clone())).cloned().unwrap_or_else(|| rule.to.clone());
-                        layer_viol.entry(f).or_default().push((rule.raw.clone(), via));
-                    }
-                }
-            }
-        }
+        // AS-EFF-009 layering — see compute_layer_violations.
+        let layer_viol = self.compute_layer_violations(cx, krate.as_str(), &kinds);
 
         let mut json_entries: Vec<ReportEntry> = Vec::new();
         let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -3653,128 +3860,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         }
 
         if let Some(prefix) = &json_path {
-            let file = format!("{prefix}.{krate}.{kinds}.json");
-            // v0.2: a self-describing envelope { candor: {version, toolchain}, functions: [...] }.
-            let meta = ReportMeta {
-                version: CANDOR_VERSION.into(),
-                toolchain: CANDOR_TOOLCHAIN.into(),
-                spec: candor_report::SPEC_VERSION.into(),
-            };
-            match candor_report::to_packaged_report_json(&meta, krate.as_str(), &json_entries) {
-                Ok(body) => match candor_report::write_atomic(std::path::Path::new(&file), body.as_bytes()) {
-                    Ok(()) => eprintln!("candor: wrote {} entries to {file}", json_entries.len()),
-                    Err(e) => eprintln!("candor: failed to write {file:?} ({e})"),
-                },
-                Err(e) => eprintln!("candor: failed to serialize report ({e})"),
-            }
-            // Full local call graph sidecar (every function's direct callees by path, INCLUDING pure
-            // ones the report omits). `cargo candor callers <fn>` reads it to answer "who (transitively)
-            // calls X" for ANY function — the pre-edit blast-radius question an agent asks before adding
-            // an effect ("I'm about to touch X; who depends on it?"). The main report only records
-            // effect-relevant edges, so it can't answer that for a pure X. 3-segment name ⇒ report_files
-            // ignores it. (Surfaced by the agent-use eval, eval/agentuse.)
-            // SPEC §2.2: EVERY analyzed function is a key — a LEAF with no local callees gets an empty
-            // list (iterating `eff`, which is seeded with every reportable item, not just `self.calls`,
-            // which only holds fns that make a call). Omitting leaves made an uncalled leaf invisible
-            // to `whatif`/`callers`, and an always-present key distinguishes "no callers" from "no such
-            // function".
-            let mut cg: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-            for f in eff.keys() {
-                let cs: Vec<String> = self
-                    .calls
-                    .get(f)
-                    .map(|callees| {
-                        let mut v: Vec<String> =
-                            callees.iter().map(|c| cx.tcx.def_path_str(c.to_def_id())).collect();
-                        v.sort();
-                        v
-                    })
-                    .unwrap_or_default();
-                cg.insert(cx.tcx.def_path_str(f.to_def_id()), cs);
-            }
-            let cgfile = format!("{prefix}.{krate}.{kinds}.callgraph.json");
-            if let Ok(body) = serde_json::to_string(&cg) {
-                let _ = candor_report::write_atomic(std::path::Path::new(&cgfile), body.as_bytes());
-            }
-            // Emit candor's calibrated crate set alongside the report, so downstream
-            // coverage checks read it from the engine rather than a duplicated copy. Also stamp
-            // the engine's build identity here so the report is self-describing (a consumer in any
-            // language, or the guard, can tell which candor produced it — and a newer engine can
-            // refuse to silently trust a sibling crate's report from a different version).
-            let calib = serde_json::json!({
-                "candor_version": CANDOR_VERSION,
-                "toolchain": CANDOR_TOOLCHAIN,
-                // `.as_slice()`: serde only derives Serialize for arrays up to length 32.
-                "crates": CALIBRATED_CRATES.as_slice(),
-                "prefixes": CALIBRATED_PREFIXES.as_slice(),
-                "path_crates": PATH_CALIBRATED_CRATES.as_slice(),
-            });
-            let cfile = format!("{prefix}.calibrated.json");
-            if let Err(e) = std::fs::write(&cfile, calib.to_string()) {
-                eprintln!("candor: failed to write {cfile:?} ({e})");
-            }
-            // Emit the external crates we actually saw called, one file per crate+kind (a
-            // package emits the same crate name as both rlib and bin — they must NOT share a
-            // file or the sparser one overwrites the other). Named `encountered-<krate>-<kind>`
-            // (a single middle segment) so it does NOT match the `.*.*.json` report glob.
-            let efile = format!("{prefix}.encountered-{krate}-{kinds}.json");
-            let seen: Vec<&str> = self.encountered.iter().map(|s| s.as_str()).collect();
-            if let Err(e) = std::fs::write(&efile, serde_json::to_string(&seen).unwrap_or_default()) {
-                eprintln!("candor: failed to write {efile:?} ({e})");
-            }
+            self.write_report_files(cx, prefix, krate.as_str(), &kinds, &json_entries, &eff);
         }
 
-        // ── the §3.3 gate verdict (CANDOR_GATE_JSON) ─────────────────────────────────────────────
-        // Assemble `{ spec, ok, violations }` at the target path from EVERY NDJSON record appended to
-        // `<path>.parts` so far (this crate's `record_violation`s + earlier workspace crates'), via
-        // the SHARED candor_report serializer — the same shape candor-scan's --gate-json emits, from
-        // the same data that feeds CANDOR_VIOLATIONS, so the verdict can never disagree with the gate.
-        // No parts file ⇒ the clean verdict { ok: true, violations: [] } (spec: written whenever the
-        // flag/env is given). WITHHELD when the guard could not evaluate this crate (an unloadable
-        // baseline): the gate did not complete, so there is no faithful verdict to emit — writing
-        // ok:true there would be the fail-open the wrapper's exit 2 exists to prevent.
-        if let Some(gate) = &self.gate_sink {
-            let guard_unavailable =
-                baseline.is_none() && std::env::var("CANDOR_BASELINE").is_ok();
-            if guard_unavailable {
-                eprintln!(
-                    "candor: CANDOR_GATE_JSON verdict NOT written — the regression guard could not \
-                     evaluate this crate, so no faithful verdict exists"
-                );
-            } else {
-                let parts = format!("{gate}.parts");
-                let mut violations: Vec<candor_report::GateViolation> = Vec::new();
-                let mut corrupt = false;
-                if let Ok(text) = std::fs::read_to_string(&parts) {
-                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                        match serde_json::from_str(line) {
-                            Ok(v) => violations.push(v),
-                            Err(e) => {
-                                eprintln!("candor: corrupt gate record in {parts:?} ({e})");
-                                corrupt = true;
-                            }
-                        }
-                    }
-                }
-                if corrupt {
-                    // A dropped record would make the verdict UNDER-report vs the exit code — withhold
-                    // it (the wrapper then fails closed on the missing file) rather than write a lie.
-                    eprintln!("candor: CANDOR_GATE_JSON verdict NOT written — corrupt violation records");
-                } else {
-                    match candor_report::gate_verdict_json(&mut violations) {
-                        Ok(json) => {
-                            if let Err(e) = candor_report::write_atomic(
-                                std::path::Path::new(gate),
-                                format!("{json}\n").as_bytes(),
-                            ) {
-                                eprintln!("candor: could not write CANDOR_GATE_JSON {gate}: {e}");
-                            }
-                        }
-                        Err(e) => eprintln!("candor: could not serialize the gate verdict ({e})"),
-                    }
-                }
-            }
-        }
+        // ── the §3.3 gate verdict (CANDOR_GATE_JSON) — see write_gate_verdict ─────────────────
+        let guard_unavailable = baseline.is_none() && std::env::var("CANDOR_BASELINE").is_ok();
+        self.write_gate_verdict(guard_unavailable);
     }
 }
 

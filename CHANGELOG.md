@@ -45,6 +45,15 @@ The lint's classifier-extension rules file is now pointed at by **`CANDOR_RULES`
 now means one thing family-wide: the spec-§3.4 config-file override path (which candor-scan already
 implemented). One variable meaning two incompatible things was worse than a break.
 
+### Internal — deep-engine mega-fns decomposed (no behavior change, byte-identity gated)
+
+`check_expr` (~615 lines) and `check_crate_post` (~795 lines) in src/lib.rs each carried a dozen
+concerns inline. Twelve per-concern helper methods extracted (value-reference/static-force/
+thread_local/deref edge probes, callback flow both sides, unresolved-dispatch disclosure, resolved-
+call recording, explain, layering, report emission, gate verdict) — bodies moved verbatim. Gated by
+a deep-engine byte-identity battery (reports, sidecars, ledgers, violations sentinels, gate
+verdicts, AS-EFF diagnostics — identical modulo the git build-id stamp).
+
 ### Internal — candor-scan main.rs split into modules (no behavior change, byte-identity gated)
 
 The 7.9k-line `crates/candor-scan/src/main.rs` is now 12 modules along its natural seams
