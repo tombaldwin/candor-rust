@@ -2441,3 +2441,172 @@ trait G {
             );
         }
     }
+
+    // ── cfg_eval: the 3-valued nested `cfg(all/any/not)` evaluator ──────────────────────────────────
+    // (Measured 0-covered — the evaluator had never executed under test. These pin the Kleene fold and
+    // its conservative direction: only a DEFINITE false may skip an item; anything unresolvable is kept.)
+
+    /// Drive `cfg_eval` over the `#[cfg(...)]` of a tiny parsed fn with EXPLICIT active/declared
+    /// feature sets — the evaluator is pure given these; no global CFG_FEATURES state is touched
+    /// (so this can never race the parallel `scan_one` tests).
+    fn eval_cfg(cfg: &str, active: &[&str], declared: &[&str]) -> Option<bool> {
+        let item: syn::ItemFn = syn::parse_str(&format!("#[cfg({cfg})] fn f() {{}}")).unwrap();
+        let attr = item.attrs.iter().find(|a| a.path().is_ident("cfg")).unwrap();
+        let active: std::collections::HashSet<String> = active.iter().map(|s| s.to_string()).collect();
+        let declared: std::collections::HashSet<String> =
+            declared.iter().map(|s| s.to_string()).collect();
+        let mut verdict = None;
+        let _ = attr.parse_nested_meta(|m| {
+            verdict = cfg_eval(&m, &active, &declared);
+            Ok(())
+        });
+        verdict
+    }
+
+    #[test]
+    fn cfg_eval_feature_predicate_is_three_valued() {
+        // active ⇒ definitely compiled; declared-but-inactive ⇒ definitely OUT (the one skippable
+        // verdict); undeclared ⇒ UNKNOWN — a dependent crate could enable it, so the item is KEPT.
+        let d = &["on", "off"];
+        assert_eq!(eval_cfg(r#"feature = "on""#, &["on"], d), Some(true));
+        assert_eq!(eval_cfg(r#"feature = "off""#, &["on"], d), Some(false));
+        assert_eq!(eval_cfg(r#"feature = "mystery""#, &["on"], d), None);
+    }
+
+    #[test]
+    fn cfg_eval_unknown_predicates_stay_unknown() {
+        // Target/platform predicates and `test` are not feature-resolvable → None (keep the item,
+        // never skip). `test` is deliberately left to `is_cfg_test`.
+        for p in [r#"target_os = "linux""#, "unix", "windows", "test", "doc"] {
+            assert_eq!(eval_cfg(p, &["on"], &["on"]), None, "predicate `{p}` must stay unknown");
+        }
+    }
+
+    #[test]
+    fn cfg_eval_not_folds_kleene() {
+        let (a, d) = (&["on"][..], &["on", "off"][..]);
+        assert_eq!(eval_cfg(r#"not(feature = "on")"#, a, d), Some(false));
+        assert_eq!(eval_cfg(r#"not(feature = "off")"#, a, d), Some(true));
+        // ¬unknown is still unknown — a `not(unix)` must NOT flip into a definite skip.
+        assert_eq!(eval_cfg("not(unix)", a, d), None);
+    }
+
+    #[test]
+    fn cfg_eval_all_folds_kleene() {
+        let (a, d) = (&["on"][..], &["on", "off"][..]);
+        assert_eq!(eval_cfg(r#"all(feature = "on", feature = "on")"#, a, d), Some(true));
+        // ANY definite false wins — even next to an unknown sibling.
+        assert_eq!(eval_cfg(r#"all(feature = "on", feature = "off")"#, a, d), Some(false));
+        assert_eq!(eval_cfg(r#"all(unix, feature = "off")"#, a, d), Some(false));
+        // true ∧ unknown = unknown (kept — the conservative direction).
+        assert_eq!(eval_cfg(r#"all(feature = "on", unix)"#, a, d), None);
+    }
+
+    #[test]
+    fn cfg_eval_any_folds_kleene() {
+        let (a, d) = (&["on"][..], &["on", "off"][..]);
+        // ANY definite true wins — even next to an unknown sibling.
+        assert_eq!(eval_cfg(r#"any(feature = "off", feature = "on")"#, a, d), Some(true));
+        assert_eq!(eval_cfg(r#"any(unix, feature = "on")"#, a, d), Some(true));
+        // all-children-false is the only definite false.
+        assert_eq!(eval_cfg(r#"any(feature = "off", not(feature = "on"))"#, a, d), Some(false));
+        // false ∨ unknown = unknown (kept).
+        assert_eq!(eval_cfg(r#"any(feature = "off", unix)"#, a, d), None);
+    }
+
+    #[test]
+    fn cfg_eval_nested_combinations() {
+        let (a, d) = (&["on"][..], &["on", "off"][..]);
+        // all(any(off, on), not(off)) = all(T, T) = T
+        assert_eq!(
+            eval_cfg(r#"all(any(feature = "off", feature = "on"), not(feature = "off"))"#, a, d),
+            Some(true)
+        );
+        // any(all(on, off), off) = any(F, F) = F — the nested definite skip.
+        assert_eq!(
+            eval_cfg(r#"any(all(feature = "on", feature = "off"), feature = "off")"#, a, d),
+            Some(false)
+        );
+        // not(all(on, unix)) = ¬unknown = unknown — nesting must not manufacture certainty.
+        assert_eq!(eval_cfg(r#"not(all(feature = "on", unix))"#, a, d), None);
+        // any(all(not(off), on), target_os) = any(T, unknown) = T.
+        assert_eq!(
+            eval_cfg(r#"any(all(not(feature = "off"), feature = "on"), target_os = "linux")"#, a, d),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn push_quoted_pulls_double_quoted_tokens() {
+        let mut out = Vec::new();
+        push_quoted(r#""std", "alloc-dep""#, &mut out);
+        assert_eq!(out, vec!["std", "alloc-dep"]);
+        // an UNTERMINATED trailing quote is dropped whole — never a half-captured token or a panic.
+        push_quoted(r#""ok", "dangling"#, &mut out);
+        assert_eq!(out, vec!["std", "alloc-dep", "ok"]);
+        // no quotes → nothing appended.
+        push_quoted("plain ] tokens", &mut out);
+        assert_eq!(out.len(), 3);
+        // the empty token `""` is a legal (empty) entry.
+        push_quoted(r#""""#, &mut out);
+        assert_eq!(out.last().map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn non_nominal_types_cannot_carry_local_impls() {
+        // `type Alias = <non-nominal>` must not let `Alias::assoc()` link to a same-named local
+        // struct's fn (the sled IVec fabrication — see `prim_aliases` in scan.rs).
+        let non: &[&str] = &[
+            "[u8; 32]", "[u8]", "(A, B)", "*const u8", "&str", "fn(u32) -> u32",
+            "u8", "u128", "usize", "i64", "f64", "bool", "char", "str",
+        ];
+        for t in non {
+            let ty: syn::Type = syn::parse_str(t).unwrap();
+            assert!(is_non_nominal_type(&ty), "`{t}` must be non-nominal");
+        }
+        // Nominal (or possibly-nominal) types keep the normal local-impl resolution: a generic path,
+        // a user type, a qualified path — and a PRIMITIVE-NAMED segment WITH arguments is not a prim.
+        let nominal: &[&str] = &["Vec<u8>", "MyStruct", "std::path::PathBuf", "Option<u8>", "String"];
+        for t in nominal {
+            let ty: syn::Type = syn::parse_str(t).unwrap();
+            assert!(!is_non_nominal_type(&ty), "`{t}` must stay nominal");
+        }
+    }
+
+    #[test]
+    fn annotated_tuple_destructure_types_its_elements() {
+        // collector::bind_tuple (never executed under test): `let (r, _): (Runner, u32) = …` must bind
+        // `r → Runner` so `r.go()` resolves to the LOCAL effectful method — an effectful call bound via
+        // tuple destructuring still attributes. And a REBIND of the same name to a different tuple type
+        // must CLEAR the stale binding (else the old type's effect is fabricated onto the new var).
+        let src = r#"
+struct Runner;
+impl Runner { fn go(&self) { std::process::Command::new("ls").status().unwrap(); } }
+fn make() -> (Runner, u32) { (Runner, 0) }
+pub fn user() { let (r, _): (Runner, u32) = make(); r.go(); }
+pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = (1, 2); r.go(); }
+"#;
+        let d = std::env::temp_dir().join(format!("candor-bindtuple-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"bt\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        let eff = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        assert!(eff("user").contains(&"Exec".to_string()),
+                "a tuple-destructured effectful binding must still attribute (bind_tuple):\n{v}");
+        assert!(!eff("rebound").contains(&"Exec".to_string()),
+                "a tuple REBIND must clear the stale Runner binding — Exec here is fabricated:\n{v}");
+    }

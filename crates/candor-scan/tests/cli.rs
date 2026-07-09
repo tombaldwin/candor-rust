@@ -546,3 +546,74 @@ fn candor_config_recognized_but_unimplemented_key_warns_loudly() {
         "the inert `baseline` key must be disclosed loudly: {stderr}");
     assert!(stderr.contains("config key 'taint'"), "every inert recognized key is disclosed: {stderr}");
 }
+
+#[test]
+fn cfg_feature_gated_statements_scope_effects_to_the_default_build() {
+    // End-to-end through the real binary: Cargo.toml [features] parsing (incl. the transitive
+    // `default` closure) → the 3-valued cfg evaluator → the collector's statement skip. A statement
+    // gated on a declared-but-inactive feature is compiled OUT under the default build, so its effect
+    // must NOT be the crate's (winnow's debug-trace `std::env::var` fabricated Env). An UNKNOWN
+    // predicate (target_os, an undeclared feature) keeps the statement — the conservative direction.
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-cfgfeat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(
+        d.join("Cargo.toml"),
+        "[package]\nname = \"cfgfeat\"\n\n[features]\ndefault = [\"on\"]\non = [\"deep\"]\ndeep = []\noff = []\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("src/lib.rs"),
+        r#"
+pub fn gated_out() {
+    #[cfg(feature = "off")]
+    { let _ = std::process::Command::new("sh").status(); }
+}
+pub fn gated_out_let() {
+    #[cfg(feature = "off")]
+    let _x = std::fs::read("/x");
+}
+pub fn nested_out() {
+    #[cfg(all(feature = "on", feature = "off"))]
+    { let _ = std::fs::read("/x"); }
+}
+pub fn unknown_kept() {
+    #[cfg(any(feature = "off", target_os = "linux"))]
+    { let _ = std::net::TcpStream::connect("h:1"); }
+}
+pub fn nested_in() {
+    #[cfg(all(feature = "deep", not(feature = "off")))]
+    { let _ = std::env::var("HOME"); }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .env_remove("CANDOR_POLICY")
+        .env_remove("CANDOR_CONFIG")
+        .env_remove("CANDOR_DEPS")
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json report");
+    let eff = |needle: &str| -> Vec<String> {
+        v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+            .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect()
+    };
+    // compiled-out statements contribute NOTHING (the report holds only effectful fns, so these are absent)
+    assert!(eff("gated_out").is_empty(), "a feature-inactive stmt fabricated its effect:\n{v}");
+    assert!(eff("nested_out").is_empty(), "all(on, off) is definite-false — Fs here is fabricated:\n{v}");
+    // unresolvable predicates KEEP the statement (kept = the sound, never-under-report direction)
+    assert!(eff("unknown_kept").contains(&"Net".to_string()),
+            "any(false, unknown) is unknown — the stmt must be kept, Net lost:\n{v}");
+    // the transitive default closure (default → on → deep) makes `deep` ACTIVE
+    assert!(eff("nested_in").contains(&"Env".to_string()),
+            "all(deep-active, not(off)) is definite-true — Env lost (default closure broken?):\n{v}");
+}
