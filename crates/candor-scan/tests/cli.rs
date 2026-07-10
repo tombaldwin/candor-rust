@@ -157,6 +157,40 @@ fn generic_struct_field_resolves_to_its_trait_bound_dispatch() {
 }
 
 #[test]
+fn trait_default_method_via_empty_impl_charges_the_default_body() {
+    // R30 (soundness 2026-07-11): a trait DEFAULT method reached via an empty `impl Trait for T {}` read
+    // silent-pure. The fallback that edges `t.m()` → `Trait::m` existed, but a type whose ONLY impl is an
+    // (empty/non-overriding) trait impl had no fn unit of its own, so it was absent from `local_types` →
+    // its typed call was un-`resolvable` → the fallback was gated out. Fix: register every trait-impl type
+    // as local. An OVERRIDE still wins (only the override's effect); a pure default stays pure.
+    let src = "
+        use std::fs;
+        trait Logger { fn flush(&self) { let _ = fs::write(\"/tmp/l\", \"x\"); } }  // Fs default
+        struct FileLogger;
+        impl Logger for FileLogger {}
+        pub fn use_default(l: &FileLogger) { l.flush(); }        // was silent → Fs
+        struct Quiet;
+        impl Logger for Quiet { fn flush(&self) {} }             // pure override
+        pub fn use_override(q: &Quiet) { q.flush(); }            // must stay pure (override wins, no fab)
+    ";
+    let d = make_crate("traitdefault", src);
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json").output().expect("run");
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    let eff = |name: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter()
+            .find(|f| f["fn"].as_str().map(|s| s == name || s.ends_with(&format!("::{name}"))).unwrap_or(false))
+            .and_then(|f| f["inferred"].as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    assert!(eff("use_default").contains(&"Fs".to_string()),
+            "a trait default reached via an empty impl must charge (was silent): {:?}", eff("use_default"));
+    assert!(!eff("use_override").contains(&"Fs".to_string()),
+            "an override of the default must win — no fabrication of the default's effect: {:?}", eff("use_override"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn json_prints_to_stdout_and_writes_no_files_exit_0() {
     // `--json` prints ONE JSON document to stdout and writes NOTHING to disk (no .candor/ dir).
     let d = make_crate("jsononly", "pub fn go() {}");

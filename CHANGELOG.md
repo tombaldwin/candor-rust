@@ -4,6 +4,19 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-scan 0.8.8] — 2026-07-11
+
+### ⚠ candor-scan: a trait DEFAULT method via an empty impl now charges (soundness R30 — report-affecting)
+
+A trait's provided (default) method reached through an EMPTY `impl Trait for T {}` read silent-pure —
+`impl Logger for FileLogger {}` + `l.flush()` inheriting `Logger::flush`'s effect was dropped. The
+caller-fallback that edges `t.m()` → the inherited `Trait::m` default body already existed, but a type whose
+ONLY impl is an (empty or non-overriding) trait impl has no fn unit of its OWN, so it never entered
+`local_types` — which made its typed call un-resolvable and GATED OUT the fallback. Fix: register every type
+with a local trait impl as local. An OVERRIDE still wins (only the override's effect flows; the default is
+not also charged — no fabrication); a pure default stays pure. Found by an autonomous cross-engine soundness
+sweep; gated by `trait_default_method_via_empty_impl_charges_the_default_body`.
+
 ## [candor-scan 0.8.7] — 2026-07-10
 
 ### ⚠ candor-scan: a bounded-generic struct field now dispatches (soundness R31 — report-affecting)

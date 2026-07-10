@@ -575,6 +575,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             type_to_traits.entry(ty_leaf).or_default().push(tr_leaf.clone());
         }
     }
+    // A type whose ONLY impl is an (empty / non-overriding) trait impl has NO fn unit of its own, so it
+    // never entered `local_types` (built from fn quals above) — which made its typed calls un-`resolvable`
+    // and GATED OUT the trait-default fallback below: `impl Logger for FileLogger {}` + `l.flush()`
+    // inheriting `Logger::flush`'s effect read silent-pure (R30). Every type with a local trait impl IS
+    // local — register it so the fallback (already present) can fire.
+    for ty in type_to_traits.keys() {
+        local_types.insert(ty.clone());
+    }
 
     // Method leaves that name a LOCAL method definition (a `Type::method` qual whose `Type` is local).
     // A bare-leaf method CALL (`x.fastrand()`, recorded path==leaf, no `::`) whose leaf matches one of
