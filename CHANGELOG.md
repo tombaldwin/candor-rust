@@ -4,6 +4,19 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-scan 0.8.7] — 2026-07-10
+
+### ⚠ candor-scan: a bounded-generic struct field now dispatches (soundness R31 — report-affecting)
+
+A stored field typed as the STRUCT's own bounded generic param — `struct Pipe<T: Saver> { item: T }`
+reaching `self.item.save()` — read silent-pure: field types were resolved with an EMPTY generic-bounds
+map, so `T` never resolved to its `Saver` bound and `item.save()` never dispatched to the trait's
+implementors. Now the struct's own `<T: Bound>` (and `where T: Bound`) seeds the field's trait leaves, so
+the existing dispatch-typed-field CHA fires. An unconstrained-generic field read (no method call) stays
+pure (no fabrication). Found by an autonomous cross-engine soundness sweep (the swift R27 analog); gated by
+`generic_struct_field_resolves_to_its_trait_bound_dispatch`. (Known open: R30 — a trait DEFAULT method used
+via an empty `impl Trait for T {}` still reads pure; tracked in candor-spec SOUNDNESS.md.)
+
 ## [candor-scan 0.8.6] — 2026-07-10
 
 ### ⚠ candor-scan: the `baseline` config key now ACTIVATES the AS-EFF-005 guard (spec §7 item 5)

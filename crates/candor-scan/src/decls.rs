@@ -467,7 +467,6 @@ pub(crate) fn collect_decls(
             collect_use(&u.tree, String::new(), uses);
         }
     }
-    let no_generics = HashMap::new();
     for it in items {
         // LAZY/deferred static NAME collection (crate-wide) — a forcing site (any fn naming the static)
         // edges to its synthetic init unit, and the forcing site lives anywhere, so the name set must be
@@ -481,6 +480,9 @@ pub(crate) fn collect_decls(
         }
         match it {
             syn::Item::Struct(s) => {
+                // the struct's OWN generic bounds (`struct Pipe<T: Saver>` / `where T: Saver`) — so a field
+                // typed as a bounded param resolves to its trait bound and dispatches (R31).
+                let struct_bounds = generic_bounds_of_generics(&s.generics);
                 match &s.fields {
                     syn::Fields::Named(named) => {
                         let entry = fields.entry(s.ident.to_string()).or_default();
@@ -495,7 +497,7 @@ pub(crate) fn collect_decls(
                             if let Some(name) = &f.ident {
                                 // Dispatch-typing first: `store: Box<dyn Store>` reads as concrete
                                 // `Box` to `type_path`, which would shadow the CHA route.
-                                let leaves = trait_leaves(&f.ty, &no_generics);
+                                let leaves = trait_leaves(&f.ty, &struct_bounds);
                                 if !leaves.is_empty() {
                                     trait_fields
                                         .entry(s.ident.to_string())

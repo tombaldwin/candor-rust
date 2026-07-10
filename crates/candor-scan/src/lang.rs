@@ -98,8 +98,15 @@ pub(crate) fn seed_fn_typed_vars(sig: &syn::Signature) -> std::collections::Hash
 /// `X -> [trait leaves]` for a signature's generic params, from both inline bounds (`fn f<X: Store>`)
 /// and where-clauses (`where X: Store`).
 pub(crate) fn generic_bounds_of(sig: &syn::Signature) -> HashMap<String, Vec<String>> {
+    generic_bounds_of_generics(&sig.generics)
+}
+
+/// Generic `T -> [trait bounds]` for any `syn::Generics` — a fn signature's OR a TYPE's own generics
+/// (`struct Pipe<T: Saver>`), covering both the inline `<T: P>` bound and the `where T: P` clause. Reused so
+/// a struct field typed `T` resolves to its bound (else `self.item.save()` on such a field read silent-pure).
+pub(crate) fn generic_bounds_of_generics(generics: &syn::Generics) -> HashMap<String, Vec<String>> {
     let mut m: HashMap<String, Vec<String>> = HashMap::new();
-    for gp in &sig.generics.params {
+    for gp in &generics.params {
         if let syn::GenericParam::Type(tp) = gp {
             let leaves = bound_leaves(&tp.bounds);
             if !leaves.is_empty() {
@@ -107,7 +114,7 @@ pub(crate) fn generic_bounds_of(sig: &syn::Signature) -> HashMap<String, Vec<Str
             }
         }
     }
-    if let Some(w) = &sig.generics.where_clause {
+    if let Some(w) = &generics.where_clause {
         for pred in &w.predicates {
             if let syn::WherePredicate::Type(pt) = pred {
                 if let syn::Type::Path(p) = &pt.bounded_ty {

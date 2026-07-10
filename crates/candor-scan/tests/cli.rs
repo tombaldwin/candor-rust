@@ -122,6 +122,41 @@ fn bare_scan_writes_report_files_and_exits_0() {
 }
 
 #[test]
+fn generic_struct_field_resolves_to_its_trait_bound_dispatch() {
+    // R31 (soundness 2026-07-10): a stored field typed as the STRUCT's own bounded generic param
+    // (`struct Pipe<T: Saver> { item: T }`) reaching `self.item.save()` read silent-pure — field types
+    // were resolved with an EMPTY generic-bounds map, so `T` never resolved to `Saver` and never
+    // dispatched. Now the struct's own `<T: Bound>` / `where T: Bound` seeds the field's trait leaves.
+    let src = "
+        use std::fs;
+        trait Saver { fn save(&self); }
+        struct DiskSaver;
+        impl Saver for DiskSaver { fn save(&self) { let _ = fs::write(\"/tmp/s\", \"x\"); } }
+        struct Pipe<T: Saver> { item: T }
+        impl<T: Saver> Pipe<T> { fn run(&self) { self.item.save(); } }
+        pub fn use_pipe(p: &Pipe<DiskSaver>) { p.run(); }
+        struct Plain<T> { item: T }
+        pub fn use_plain(p: &Plain<DiskSaver>) -> &DiskSaver { &p.item }  // no method call → must stay pure
+    ";
+    let d = make_crate("genfield", src);
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json").output().expect("run");
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json");
+    let eff = |fnname: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter()
+            .find(|f| f["fn"].as_str().unwrap_or("").ends_with(fnname))
+            .and_then(|f| f["inferred"].as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    assert!(eff("use_pipe").contains(&"Fs".to_string()),
+            "a bounded-generic struct field's method must dispatch (was silent-pure): {:?}", eff("use_pipe"));
+    assert!(!eff("use_plain").contains(&"Fs".to_string()),
+            "an unconstrained-generic field read (no method call) must not fabricate: {:?}", eff("use_plain"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn json_prints_to_stdout_and_writes_no_files_exit_0() {
     // `--json` prints ONE JSON document to stdout and writes NOTHING to disk (no .candor/ dir).
     let d = make_crate("jsononly", "pub fn go() {}");
