@@ -41,6 +41,7 @@ pub(crate) struct RemedyPlan<'a> {
     sites: BTreeSet<&'a str>,
     denied_span: BTreeSet<&'a str>,
     hoist_to: BTreeSet<&'a str>,
+    hoist_higher: BTreeSet<&'a str>,
     allow_edit: String,
 }
 
@@ -69,6 +70,7 @@ impl RemedyPlan<'_> {
             "site": self.sites.iter().collect::<Vec<_>>(),
             "deniedSpan": self.denied_span.iter().collect::<Vec<_>>(),
             "hoistTo": self.hoist_to.iter().collect::<Vec<_>>(),
+            "hoistHigher": self.hoist_higher.iter().collect::<Vec<_>>(),
             "policyAlternative": self.allow_edit,
         })
     }
@@ -93,6 +95,12 @@ impl RemedyPlan<'_> {
                 self.hoist_to.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", "));
             let _ = writeln!(out, "    · Pass the result down as a parameter; the {} function(s) above then stay pure.", self.denied_span.len());
             let _ = writeln!(out, "    · Re-run the gate — the {layer_label} blast radius for {} should be empty.", self.effect);
+            if !self.hoist_higher.is_empty() {
+                let tops: Vec<_> = self.hoist_higher.iter().take(4).map(|x| format!("`{x}`")).collect();
+                let more = if self.hoist_higher.len() > 4 { ", …" } else { "" };
+                let _ = writeln!(out, "    · TRADE-OFF — or hoist higher (up to {}{more}): the effect then originates further up,", tops.join(", "));
+                let _ = writeln!(out, "      keeping the {} intervening allowed-layer function(s) pure too, at the cost of threading it through more signatures.", self.hoist_higher.len());
+            }
             let _ = writeln!(out);
             let _ = writeln!(out, "  ALTERNATIVE — if the {layer_label} layer is MEANT to perform {}, it's a policy bug,", self.effect);
             let _ = writeln!(out, "  not a code one: relax the boundary with  `{}`.", self.allow_edit);
@@ -172,12 +180,33 @@ fn compute_remedy<'a>(
         }
     }
 
+    // higher hoist options: allowed-layer transitive callers of the minimal frontier that also route the
+    // effect — the places you COULD originate it instead. Hoisting higher keeps the frontier pure too, at the
+    // cost of threading the value through more signatures (FIX-SPEC: the trade-off, disclosed not hidden).
+    let mut hoist_higher: BTreeSet<&str> = BTreeSet::new();
+    let mut hq: VecDeque<&str> = hoist_to.iter().copied().collect();
+    let mut hseen: BTreeSet<&str> = hoist_to.iter().copied().collect();
+    while let Some(cur) = hq.pop_front() {
+        if let Some(cs) = rev.get(cur) {
+            for &caller in cs {
+                let Some(ce) = by_name.get(caller) else { continue };
+                if ce.inferred.iter().any(|e| e == effect)
+                    && denied_layer(caller, effect, rules).is_none()
+                    && hseen.insert(caller)
+                {
+                    hoist_higher.insert(caller);
+                    hq.push_back(caller);
+                }
+            }
+        }
+    }
+
     let allow_edit = if layer.is_empty() {
         format!("allow {effect}")
     } else {
         format!("allow {effect} {layer}")
     };
-    RemedyPlan { func: &start.func, effect, layer, sites, denied_span, hoist_to, allow_edit }
+    RemedyPlan { func: &start.func, effect, layer, sites, denied_span, hoist_to, hoist_higher, allow_edit }
 }
 
 /// Read + parse a policy, loud-failing (exit 2) on an unreadable path — the same fail-loud contract as

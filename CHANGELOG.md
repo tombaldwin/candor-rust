@@ -4,6 +4,17 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.5] — 2026-07-11
+
+### `fix`/`fix-gate`: the higher-hoist trade-off (FIX-SPEC's last refinement)
+
+Each remedy now carries `hoistHigher` alongside `hoistTo`: the allowed-layer transitive callers of the
+minimal frontier that also route the effect — every place you could originate it *further up*. The text
+surfaces the trade-off (hoisting higher keeps the frontier pure too, at the cost of threading the value
+through more signatures). `hoistTo` (the minimal fix) is unchanged. All four engines compute it identically,
+pinned by candor-spec conformance PART 12b (the leaf-normalized remedy tuple now includes it). Read-only,
+additive JSON field.
+
 ## [candor-query 0.8.4] — 2026-07-11
 
 ### `fix`/`fix-gate`: the pure span is now site-anchored (root-independent)

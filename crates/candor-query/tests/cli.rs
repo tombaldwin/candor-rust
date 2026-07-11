@@ -421,6 +421,44 @@ fn fix_orderflow_hoists_net_to_api() {
         "the pure span is exactly the two domain functions"
     );
     assert_eq!(v["policyAlternative"], serde_json::json!("allow Net domain"));
+    // api::get_quote is the top of this graph — no allowed-layer caller above it, so no higher option.
+    assert_eq!(v["hoistHigher"], serde_json::json!([]), "the frontier is the top; no higher hoist");
+}
+
+#[test]
+fn fix_surfaces_higher_hoist_tradeoff() {
+    // With an allowed-layer entry point ABOVE the minimal frontier, candor surfaces the trade-off: the
+    // minimal hoist is still `api::get_quote`, but `main::run` (which calls it, also allowed) is a higher
+    // option — hoisting there keeps api::get_quote pure too, threading the value through one more signature.
+    let f = Fixture::new("fixhigher");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "of",
+  "functions": [
+    { "fn": "main::run",          "loc": "src/main.rs:1:1",  "inferred": ["Net"], "hash": "of#mr", "paths": ["/x"], "calls": ["api::get_quote"] },
+    { "fn": "api::get_quote",     "loc": "src/api.rs:3:1",    "inferred": ["Net"], "hash": "of#gq", "paths": ["/x"], "calls": ["domain::quote_bulk"] },
+    { "fn": "domain::quote_bulk", "loc": "src/domain.rs:5:1", "inferred": ["Net"], "hash": "of#qb", "paths": ["/x"], "calls": ["domain::price_quote"] },
+    { "fn": "domain::price_quote","loc": "src/domain.rs:9:1", "inferred": ["Net"], "hash": "of#pq", "paths": ["/x"], "calls": ["infra::fetch_rate"] },
+    { "fn": "infra::fetch_rate",  "loc": "src/infra.rs:2:1",  "inferred": ["Net"], "direct": ["Net"], "hash": "of#fr", "paths": ["/x"], "calls": [] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let out = Command::new(bin())
+        .args(["fix", &f.prefix, "price_quote", "Net", &pol, "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["hoistTo"], serde_json::json!(["api::get_quote"]), "the MINIMAL frontier is unchanged");
+    assert_eq!(v["hoistHigher"], serde_json::json!(["main::run"]), "main::run is the higher hoist option");
+    // the text render carries the trade-off note.
+    let text = Command::new(bin())
+        .args(["fix", &f.prefix, "price_quote", "Net", &pol, "0"])
+        .output()
+        .expect("run candor-query");
+    let s = String::from_utf8(text.stdout).unwrap();
+    assert!(s.contains("TRADE-OFF") && s.contains("main::run"), "text must surface the higher-hoist trade-off, got:\n{s}");
 }
 
 #[test]
