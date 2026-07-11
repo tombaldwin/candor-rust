@@ -52,3 +52,16 @@ Reported per model. No post-hoc metric swaps; the grader is frozen (committed) b
 - The remedy is candor's REAL output (not hand-tuned for the eval).
 - Grading is deterministic and effect-preserving-aware, but "PASS" means "cleared the boundary without
   removing the effect," not "wrote idiomatic code" — a deliberately objective, narrow bar.
+
+## Pilot addendum (2026-07-11, after the N=8 haiku pilot on `orderflow`)
+
+The easy single-hoist fixture **saturated**: haiku scored **8/8 PASS in BOTH arms** (0 cheats). On a
+straightforward "hoist the call up one layer," the finding alone is enough — the remedy is redundant. That is
+itself an honest result (the remedy's value is not universal), and it redirected the eval to where the finding
+is plausibly *insufficient*:
+
+A second fixture, **`fixture-port`** (no-clean-hoist): `domain::run` is the top-level entry, so there is no
+allowed layer to hoist the network call *into*. candor's remedy for it is the PORT / dependency-inversion
+advice (or the `allow` relax). Getting there from the finding alone requires inventing dependency inversion;
+the remedy names it. The full run measures both arms on this fixture across four model tiers (N=10), with the
+`orderflow` pilot standing as the "easy case ⇒ no difference" baseline.
