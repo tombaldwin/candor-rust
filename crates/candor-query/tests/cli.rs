@@ -544,10 +544,12 @@ fn fix_no_clean_hoist_offers_port_and_policy() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("NO CLEAN HOIST"), "must say no clean hoist exists, got:\n{stdout}");
-    // The eval-driven advice (eval/fixloop): lead with the composition-root hoist, and recommend fn/closure
-    // injection over a trait port (candor resolves a trait dispatch back to its effectful impl).
+    // The eval-driven advice (eval/fixloop/DISPATCH-NOTE.md): lead with the composition-root hoist (PROVABLY
+    // pure), recommend fn/closure over a trait port, and name the Unknown-hole trade-off.
     assert!(stdout.contains("NEW ENTRY POINT"), "must offer the composition-root hoist, got:\n{stdout}");
+    assert!(stdout.contains("PROVABLY pure"), "must note the hoist is provably pure, got:\n{stdout}");
     assert!(stdout.contains("fn/closure") && stdout.contains("trait"), "must recommend fn-injection over a trait port, got:\n{stdout}");
+    assert!(stdout.contains("Unknown"), "must name the fn-injection Unknown-hole trade-off, got:\n{stdout}");
     assert!(stdout.contains("allow Net domain"), "must offer the policy-relax edit, got:\n{stdout}");
 }
 

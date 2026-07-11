@@ -1,6 +1,6 @@
 [package]
 name = "candor-query"
-version = "0.8.8"
+version = "0.8.9"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "candor's read-only report queries (show/where/callers/map/diff/containment/…) in Rust — used by cargo-candor."

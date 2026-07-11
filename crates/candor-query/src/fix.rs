@@ -119,14 +119,15 @@ impl RemedyPlan<'_> {
                 let _ = writeln!(out, "  NO CLEAN HOIST — every caller up to the entry points is also in a {}-forbidding layer.", self.effect);
             }
             let _ = writeln!(out, "  Three ways to fix it:");
-            let _ = writeln!(out, "    (a) HOIST TO A NEW ENTRY POINT — add a thin function ABOVE the {layer_label} layer that performs");
-            let _ = writeln!(out, "        {} and passes the result DOWN as a plain value; the {layer_label} functions take it as a parameter", self.effect);
-            let _ = writeln!(out, "        and stay pure. (candor says \"no clean hoist\" only because no allowed caller EXISTS yet — you can");
-            let _ = writeln!(out, "        add one; this is usually the simplest fix.)");
-            let _ = writeln!(out, "    (b) INJECT IT (dependency inversion) — give the {layer_label} layer a FUNCTION/CLOSURE parameter that");
-            let _ = writeln!(out, "        supplies the value, provided by an adapter in an allowed layer. Use a fn/closure, NOT a trait:");
-            let _ = writeln!(out, "        candor reads a call through a function value as Unknown (so `deny {}` clears), but RESOLVES a", self.effect);
-            let _ = writeln!(out, "        trait dispatch back to its implementor — a trait port whose impl performs {} still trips the gate.", self.effect);
+            let _ = writeln!(out, "    (a) HOIST TO A NEW ENTRY POINT (recommended) — add a thin function ABOVE the {layer_label} layer that");
+            let _ = writeln!(out, "        performs {} and passes the result DOWN as plain DATA; the {layer_label} functions take it as a", self.effect);
+            let _ = writeln!(out, "        parameter and become PROVABLY pure (candor verifies no effect — clean under any policy). candor");
+            let _ = writeln!(out, "        says \"no clean hoist\" only because no allowed caller EXISTS yet — you can add one; simplest fix.");
+            let _ = writeln!(out, "    (b) INJECT via a fn/closure — give the {layer_label} layer a FUNCTION/CLOSURE parameter, supplied by an");
+            let _ = writeln!(out, "        allowed adapter. This clears `deny {}`, but candor can't see THROUGH the injected function, so it", self.effect);
+            let _ = writeln!(out, "        reads the {layer_label} as Unknown — a hole a `deny {} Unknown` policy would still flag; prefer (a) for", self.effect);
+            let _ = writeln!(out, "        provable purity. Do NOT use a trait/interface port: candor resolves the dispatch back to its");
+            let _ = writeln!(out, "        {}-performing impl, so the {layer_label} still trips the gate.", self.effect);
             let _ = writeln!(out, "    (c) If the {layer_label} layer legitimately needs {}, relax the boundary:  `{}`.", self.effect, self.allow_edit);
         }
     }

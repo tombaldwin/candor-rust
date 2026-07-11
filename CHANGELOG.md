@@ -4,6 +4,19 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.9] — 2026-07-11
+
+### `fix`: the no-clean-hoist advice names the port purity hierarchy (soundness investigation)
+
+Following the fix-loop eval's finding that models reach for a TRAIT port (which candor's gate rejects — it
+resolves the dispatch back to the effect-performing impl), an empirical investigation (eval/fixloop/DISPATCH-
+NOTE.md) confirmed candor's behaviour is CORRECT (accepting a trait port would silently under-report the effect
+the layer reaches at runtime — the cardinal sin), and pinned the three fix shapes' distinct classifications:
+trait dispatch → the effect (resolved); fn/closure value → Unknown; plain data → pure. The no-clean-hoist
+advice now names the hierarchy: (a) hoist + thread DATA = provably pure (recommended); (b) fn/closure injection
+clears `deny E` but leaves an Unknown hole a `deny E Unknown` policy would flag; (c) a trait port doesn't clear
+the gate. Text-only; no gate change (the resolution is sound). A candor-scan test guards the classification.
+
 ## [candor-query 0.8.8] — 2026-07-11
 
 ### `fix`: no-clean-hoist advice rewritten (eval-driven — the remedy was steering agents wrong)

@@ -1060,3 +1060,50 @@ fn deps_appends_candor_deps_env_reports_to_the_chain() {
     assert!(calls["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Net")),
             "a CANDOR_DEPS sibling report must still chain under --deps:\n{v}");
 }
+
+/// The dispatch-classification hierarchy the fix `port` advice relies on (eval/fixloop/DISPATCH-NOTE.md):
+/// a call through a resolvable TRAIT object charges the impl's effect (sound — the domain CAN reach it); a
+/// call through a FUNCTION VALUE is Unknown (candor can't resolve it — the §4 marker, never "clean"); a plain
+/// DATA parameter is pure. This is WHY a trait "port" doesn't clear `deny Net domain` but a fn/closure does,
+/// and why the simplest hoist (pass data) is the only PROVABLY-pure fix. Guarding it so it can't silently
+/// regress (which would change what candor fix should advise).
+#[test]
+fn dispatch_classification_hierarchy_trait_net_fn_unknown_data_pure() {
+    let d = make_crate("dispatchclass", r#"
+pub mod tr {
+    pub trait R { fn g(&self) -> u64; }
+    pub struct NetImpl;
+    impl R for NetImpl { fn g(&self) -> u64 { let _ = std::net::TcpStream::connect("h:1"); 1 } }
+    pub fn via_trait(r: &dyn R) -> u64 { r.g() }
+}
+pub mod fnv {
+    pub fn via_fn(f: &dyn Fn() -> u64) -> u64 { f() }
+}
+pub mod dat {
+    pub fn via_data(x: u64) -> u64 { x + 1 }
+}
+"#);
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json report");
+    let eff = |needle: &str| -> Vec<String> {
+        v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+            .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect()
+    };
+    // trait dispatch → resolved to the Net impl → the caller performs Net.
+    assert!(eff("via_trait").contains(&"Net".to_string()),
+            "a trait call whose impl does Net must charge Net to the caller (resolved dispatch):\n{v}");
+    // fn-value → Unknown (candor can't see through a function value). NOT Net, NOT pure.
+    assert!(eff("via_fn").contains(&"Unknown".to_string()) && !eff("via_fn").contains(&"Net".to_string()),
+            "a call through a function value must be Unknown, not Net and not clean:\n{v}");
+    // plain data → pure (absent from the effectful report).
+    assert!(eff("via_data").is_empty(), "a plain-data parameter must stay pure (no effect, no Unknown):\n{v}");
+}
