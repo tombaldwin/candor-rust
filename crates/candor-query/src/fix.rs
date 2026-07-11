@@ -118,29 +118,12 @@ fn compute_remedy<'a>(
     effect: &'a str,
     layer: String,
 ) -> RemedyPlan<'a> {
-    // affected = start + every transitive caller (all gain `effect`).
-    let mut affected: BTreeSet<&str> = BTreeSet::new();
-    affected.insert(start.func.as_str());
-    let mut st = vec![start.func.as_str()];
-    while let Some(n) = st.pop() {
-        if let Some(cs) = rev.get(n) {
-            for &c in cs {
-                if affected.insert(c) {
-                    st.push(c);
-                }
-            }
-        }
-    }
-    // denied span D: affected functions in a deny-`effect` layer — these must become pure.
-    let denied_span: BTreeSet<&str> =
-        affected.iter().copied().filter(|f| denied_layer(f, effect, rules).is_some()).collect();
-
     // direct site(s) S: BFS from `start` through effect-carrying callees to the DIRECT source(s).
     let mut sites: BTreeSet<&str> = BTreeSet::new();
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut fseen: BTreeSet<&str> = BTreeSet::new();
     let mut q: VecDeque<&str> = VecDeque::new();
     q.push_back(start.func.as_str());
-    seen.insert(start.func.as_str());
+    fseen.insert(start.func.as_str());
     while let Some(cur) = q.pop_front() {
         let Some(f) = by_name.get(cur) else { continue };
         if f.direct.iter().any(|e| e == effect) {
@@ -149,20 +132,41 @@ fn compute_remedy<'a>(
         for c in &f.calls {
             if let Some(cf) = by_name.get(c.as_str())
                 && cf.inferred.iter().any(|e| e == effect)
-                && seen.insert(c.as_str())
+                && fseen.insert(c.as_str())
             {
                 q.push_back(c.as_str());
             }
         }
     }
 
-    // hoist frontier G: allowed-layer functions that call INTO the denied span (the boundary edges).
+    // ANCHOR on the site(s) (fall back to `start` for a cross-crate/Unknown source with no local site) and
+    // walk UP: denied-layer effect-carriers are the pure span; the allowed-layer callers where the climb
+    // stops are the hoist frontier. Site-anchored so the span is the SAME whichever inheriting function
+    // triggered it (root-independent) — the inheritors of one crossing collapse to one identical remedy.
+    let anchors: Vec<&str> = if sites.is_empty() { vec![start.func.as_str()] } else { sites.iter().copied().collect() };
+    let mut denied_span: BTreeSet<&str> = BTreeSet::new();
     let mut hoist_to: BTreeSet<&str> = BTreeSet::new();
-    for &d in &denied_span {
-        if let Some(cs) = rev.get(d) {
-            for &c in cs {
-                if denied_layer(c, effect, rules).is_none() {
-                    hoist_to.insert(c);
+    let mut up: VecDeque<&str> = VecDeque::new();
+    for &a in &anchors {
+        if denied_layer(a, effect, rules).is_some() {
+            denied_span.insert(a); // a site that is itself in the denied layer
+        }
+        up.push_back(a);
+    }
+    while let Some(cur) = up.pop_front() {
+        if let Some(cs) = rev.get(cur) {
+            for &caller in cs {
+                if let Some(ce) = by_name.get(caller)
+                    && !ce.inferred.iter().any(|e| e == effect)
+                {
+                    continue; // doesn't route the effect
+                }
+                if denied_layer(caller, effect, rules).is_some() {
+                    if denied_span.insert(caller) {
+                        up.push_back(caller); // denied → part of the span; keep climbing
+                    }
+                } else {
+                    hoist_to.insert(caller); // allowed → the boundary; the effect should originate here
                 }
             }
         }

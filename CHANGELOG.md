@@ -4,6 +4,18 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.4] — 2026-07-11
+
+### `fix`/`fix-gate`: the pure span is now site-anchored (root-independent)
+
+The remedy's `deniedSpan` (the forbidden-layer functions that must become pure) was computed as the
+caller-closure from the querying function, so in `fix-gate` — where many inheritors of one crossing collapse
+to a single plan — which inheritor won the dedup changed the span (a higher inheritor's closure omitted the
+functions *below* it). The cut now anchors on the direct site and walks UP through the denied layer, so the
+span is the complete set of forbidden-layer functions between the site and the hoist frontier, identical
+whichever function triggered it. Same fix applied to the candor-java port (0.8.8) — the two engines share the
+algorithm byte-for-byte. Regression tests unchanged (they already asserted the complete span).
+
 ## [candor-query 0.8.3] — 2026-07-11
 
 ### ✨ `candor-query fix-gate` + the edit-time loop hands the agent the FIX, not just the finding
