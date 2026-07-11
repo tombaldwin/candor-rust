@@ -2054,8 +2054,8 @@ trait G {
     #[test]
     fn repo_docs_carry_the_family_attribution_and_spec_floor() {
         // TESTING.md §9 / the family ruling: candor-java is the REFERENCE engine; this repo is the
-        // family's deep Rust engine, spec floor 0.8. A cheap grep gate so a doc rewrite can't quietly
-        // reintroduce "the reference implementation" or drop the spec-0.8 floor string. Skips outside
+        // family's deep Rust engine, spec floor 0.9. A cheap grep gate so a doc rewrite can't quietly
+        // reintroduce "the reference implementation" or drop the spec-0.9 floor string. Skips outside
         // a workspace checkout (registry/vendor layout), like the drift gate above.
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
         let (Ok(readme), Ok(agents)) = (
@@ -2071,8 +2071,8 @@ trait G {
             "README must not claim reference-implementation status (family ruling: candor-java is the reference)");
         assert!(!agents.to_lowercase().contains("the reference implementation of"),
             "AGENTS must not claim reference-implementation status");
-        assert!(readme.contains("spec 0.8"), "README must state the spec 0.8 floor");
-        assert!(agents.contains("spec 0.8"), "AGENTS must state the spec 0.8 floor");
+        assert!(readme.contains("spec 0.9"), "README must state the spec 0.9 floor");
+        assert!(agents.contains("spec 0.9"), "AGENTS must state the spec 0.9 floor");
     }
 
     #[test]
