@@ -42,12 +42,18 @@ pub(crate) struct RemedyPlan<'a> {
     denied_span: BTreeSet<&'a str>,
     hoist_to: BTreeSet<&'a str>,
     hoist_higher: BTreeSet<&'a str>,
+    clean_hoist: bool,
     allow_edit: String,
 }
 
 impl RemedyPlan<'_> {
     fn clean_hoist(&self) -> bool {
-        !self.hoist_to.is_empty()
+        self.clean_hoist
+    }
+    /// A hoist frontier exists, but it's SANDWICHED — a forbidden fn calls into it, so hoisting there would
+    /// leave that caller violating. Distinguishes the two no-clean-hoist shapes in the message.
+    fn sandwiched(&self) -> bool {
+        !self.clean_hoist && !self.hoist_to.is_empty()
     }
     /// A stable key so `fix-gate` collapses the many inheritors of one root cause (every function in the
     /// denied span carries the effect) to a single remedy: the plan is fixed by its effect, layer, site, and
@@ -105,7 +111,13 @@ impl RemedyPlan<'_> {
             let _ = writeln!(out, "  ALTERNATIVE — if the {layer_label} layer is MEANT to perform {}, it's a policy bug,", self.effect);
             let _ = writeln!(out, "  not a code one: relax the boundary with  `{}`.", self.allow_edit);
         } else {
-            let _ = writeln!(out, "  NO CLEAN HOIST — every caller up to the entry points is also in a {}-forbidding layer.", self.effect);
+            if self.sandwiched() {
+                let _ = writeln!(out, "  NO CLEAN HOIST — the nearest allowed layer ({}) is itself CALLED BY a {}-forbidding layer,",
+                    self.hoist_to.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", "), self.effect);
+                let _ = writeln!(out, "  so hoisting {} there would leave that caller violating (a forbidden layer sandwiching an allowed one).", self.effect);
+            } else {
+                let _ = writeln!(out, "  NO CLEAN HOIST — every caller up to the entry points is also in a {}-forbidding layer.", self.effect);
+            }
             let _ = writeln!(out, "  Two honest options:");
             let _ = writeln!(out, "    (a) Introduce a PORT: have the domain take an interface parameter (a trait) it receives,");
             let _ = writeln!(out, "        implemented by an adapter in an allowed layer that performs {} and injects the", self.effect);
@@ -185,30 +197,38 @@ fn compute_remedy<'a>(
     // higher hoist options: allowed-layer transitive callers of the minimal frontier that also route the
     // effect — the places you COULD originate it instead. Hoisting higher keeps the frontier pure too, at the
     // cost of threading the value through more signatures (FIX-SPEC: the trade-off, disclosed not hidden).
+    // The SANDWICHED-layer check (/code-review): a hoist is CLEAN only if no forbidden function sits ABOVE
+    // the frontier. If a denied fn calls into a hoist target (D1 → A, A the frontier), then hoisting the
+    // effect to A leaves D1 still inheriting it — so it isn't a clean hoist. Detected in the same upward
+    // climb that gathers `hoist_higher` (which collects the allowed ancestors).
     let mut hoist_higher: BTreeSet<&str> = BTreeSet::new();
+    let mut sandwiched = false;
     let mut hq: VecDeque<&str> = hoist_to.iter().copied().collect();
     let mut hseen: BTreeSet<&str> = hoist_to.iter().copied().collect();
     while let Some(cur) = hq.pop_front() {
         if let Some(cs) = rev.get(cur) {
             for &caller in cs {
                 let Some(ce) = by_name.get(caller) else { continue };
-                if ce.inferred.iter().any(|e| e == effect)
-                    && denied_layer(caller, effect, rules).is_none()
-                    && hseen.insert(caller)
-                {
+                if !ce.inferred.iter().any(|e| e == effect) {
+                    continue;
+                }
+                if denied_layer(caller, effect, rules).is_some() {
+                    sandwiched = true; // a forbidden fn calls into the frontier — hoisting there wouldn't clear it
+                } else if hseen.insert(caller) {
                     hoist_higher.insert(caller);
                     hq.push_back(caller);
                 }
             }
         }
     }
+    let clean_hoist = !hoist_to.is_empty() && !sandwiched;
 
     let allow_edit = if layer.is_empty() {
         format!("allow {effect}")
     } else {
         format!("allow {effect} {layer}")
     };
-    RemedyPlan { func: &start.func, effect, layer, sites, denied_span, hoist_to, hoist_higher, allow_edit }
+    RemedyPlan { func: &start.func, effect, layer, sites, denied_span, hoist_to, hoist_higher, clean_hoist, allow_edit }
 }
 
 /// Read + parse a policy, loud-failing (exit 2) on an unreadable path — the same fail-loud contract as

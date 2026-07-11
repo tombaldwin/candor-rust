@@ -4,6 +4,17 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.7] — 2026-07-11
+
+### `fix`: the sandwiched-layer case is now handled (last correctness gap closed)
+
+When an ALLOWED layer is CALLED BY a forbidden one (`D1 → A → D2 → site`, deny on the D layer), hoisting the
+effect to the nearest allowed frontier `A` would leave `D1` still inheriting it. `cleanHoist` is now `false`
+in that case (a forbidden fn calls into the frontier), with a message that names the sandwich and offers the
+port/relax options — instead of a misleading "hoist to A". Detected in the same upward climb that gathers
+`hoistHigher`; identical across all four engines, pinned four-way by conformance PART 12b's sandwiched
+sub-check. Read-only; additive.
+
 ## [candor-query 0.8.6] — 2026-07-11
 
 ### `fix`: cross-engine parity fixes (from a high-effort /code-review)

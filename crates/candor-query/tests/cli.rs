@@ -489,6 +489,40 @@ fn fix_prefers_the_effect_performing_match() {
 }
 
 #[test]
+fn fix_sandwiched_layer_is_not_a_clean_hoist() {
+    // A forbidden layer SANDWICHES an allowed one: domain::top → api::mid → domain::inner → infra::fetch,
+    // `deny Net domain`. The nearest allowed frontier is `api::mid`, but it's CALLED BY `domain::top`, so
+    // hoisting Net to api::mid would leave domain::top violating — NOT a clean hoist. (/code-review.)
+    let f = Fixture::new("fixsandwich");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "of",
+  "functions": [
+    { "fn": "domain::top",   "loc": "src/d.rs:1:1", "inferred": ["Net"], "hash": "of#t", "paths": ["/x"], "calls": ["api::mid"] },
+    { "fn": "api::mid",      "loc": "src/a.rs:1:1", "inferred": ["Net"], "hash": "of#m", "paths": ["/x"], "calls": ["domain::inner"] },
+    { "fn": "domain::inner", "loc": "src/d.rs:9:1", "inferred": ["Net"], "hash": "of#i", "paths": ["/x"], "calls": ["infra::fetch"] },
+    { "fn": "infra::fetch",  "loc": "src/i.rs:1:1", "inferred": ["Net"], "direct": ["Net"], "hash": "of#f", "paths": ["/x"], "calls": [] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let out = Command::new(bin())
+        .args(["fix", &f.prefix, "inner", "Net", &pol, "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["cleanHoist"], serde_json::json!(false), "a sandwiched frontier is NOT a clean hoist");
+    // and the text names the sandwiched reason (not the generic "every caller is forbidding").
+    let text = Command::new(bin())
+        .args(["fix", &f.prefix, "inner", "Net", &pol, "0"])
+        .output()
+        .expect("run candor-query");
+    let s = String::from_utf8(text.stdout).unwrap();
+    assert!(s.contains("CALLED BY") && s.contains("sandwich"), "text must explain the sandwich, got:\n{s}");
+}
+
+#[test]
 fn fix_no_clean_hoist_offers_port_and_policy() {
     // When every caller up to the entry is ALSO in the forbidden layer, candor does NOT invent a target:
     // it names the two honest options (port / policy relax), and cleanHoist is false.
