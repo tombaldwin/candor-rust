@@ -6,8 +6,10 @@ candor grades itself — no LLM judge."""
 import json, os, shutil, subprocess, sys, tempfile, collections
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FIXTURES = {"orderflow": os.path.join(HERE, "fixture-orderflow"),
-            "port": os.path.join(HERE, "fixture-port")}
+# each fixture: its crate dir + the DENIED effect the fix must preserve.
+FIXTURES = {"orderflow": {"dir": os.path.join(HERE, "fixture-orderflow"), "effect": "Net"},
+            "port":      {"dir": os.path.join(HERE, "fixture-port"),      "effect": "Net"},
+            "audit":     {"dir": os.path.join(HERE, "fixture-audit"),     "effect": "Fs"}}
 GRADE = os.path.join(HERE, "grade.sh")
 
 results = json.load(open(sys.argv[1]))
@@ -22,13 +24,15 @@ for r in results:
     if not src:
         verdict = "FAIL:no-output"
     else:
+        meta = FIXTURES[fixture]
         d = tempfile.mkdtemp()
         crate = os.path.join(d, "crate")
-        shutil.copytree(FIXTURES[fixture], crate)
+        shutil.copytree(meta["dir"], crate)
         with open(os.path.join(crate, "src", "lib.rs"), "w") as f:
             f.write(src)
+        policy = os.path.join(meta["dir"], ".candor-policy")
         try:
-            verdict = subprocess.run(["bash", GRADE, crate], capture_output=True, text=True, timeout=120).stdout.strip()
+            verdict = subprocess.run(["bash", GRADE, crate, meta["effect"], policy], capture_output=True, text=True, timeout=120).stdout.strip()
         except Exception as e:
             verdict = f"FAIL:grader-error({e})"
         shutil.rmtree(d, ignore_errors=True)
