@@ -1,0 +1,9 @@
+model	arm	trial	tokens	wall_ms	tool_calls	recall
+opus	control	1	21705	27130	13	16
+opus	treatment	1	15576	14196	2	16
+sonnet	control	1	26863	23658	3	16
+sonnet	treatment	1	21657	20052	3	16
+haiku	treatment	1	16094	11238	2	16
+fable	treatment	1	15577	24317	2	16
+haiku	control	1	22856	48845	13	16
+fable	control	1	20979	42406	3	16
