@@ -4,6 +4,24 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.3] — 2026-07-11
+
+### ✨ `candor-query fix-gate` + the edit-time loop hands the agent the FIX, not just the finding
+
+New subcommand `fix-gate <prefix> [policy] [0|1]`: a remedy for EVERY deny/`pure` (AS-EFF-006) boundary
+crossing in a report, not just one function. It reuses `fix`'s cut (now extracted to `compute_remedy`) and
+**collapses the inheritors of one root cause to a single plan** — a `deny Net domain` that trips five domain
+functions yields one remedy (one site, one hoist target), keyed by `(effect, layer, site, hoist)`. Text
+prints the plan block(s); `--json` emits `{ok, remedies:[…]}`.
+
+`integrations/claude-code/candor-review-source.sh` now folds that plan into the block message: when the
+edit-time gate fails (an `AS-EFF` finding) and a policy is set, the loop calls `candor-query fix-gate` and
+appends the remedy under the finding — so the agent self-corrects toward the *right* architecture instead of
+guessing (adding `allow Net domain`, shuffling the I/O one call up, or threading a client handle the wrong
+way). Graceful no-op when `candor-query` is absent or can't read the engine's report shape (`CANDOR_QUERY`
+overrides the binary; today the candor-scan report — ts/swift/java remedies are FIX-SPEC P3). This is P2 of
+the fix capability. Three regression tests pin the collapse, the clean case, and the fail-loud contract.
+
 ## [candor-query 0.8.2] — 2026-07-11
 
 ### ✨ `candor-query fix` — the boundary fix (the remedial inverse of `whatif`)

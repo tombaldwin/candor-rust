@@ -71,6 +71,7 @@ fn main() {
         "blindspots" => cmd_blindspots(rest),
         "whatif" => cmd_whatif(rest),
         "fix" => cmd_fix(rest),
+        "fix-gate" => cmd_fix_gate(rest),
         "rewire" => cmd_rewire(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
@@ -91,7 +92,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|whatif|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|merge-hook|--agents)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|whatif|fix|fix-gate|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|merge-hook|--agents)"
             );
             2
         }
@@ -138,6 +139,7 @@ fn print_help() {
         ("blindspots <prefix> [--json]", "the Unknown sources, ranked by their Unknown blast radius"),
         ("whatif   <prefix> <fn> <Effect> [policy] [0|1]", "pre-edit verdict: blast radius + policy violations"),
         ("fix      <prefix> <fn> <Effect> [policy] [0|1]", "the boundary fix: where the effect belongs + the hoist refactor"),
+        ("fix-gate <prefix> [policy] [0|1]", "a fix for EVERY boundary crossing — the loop's block-message remedy"),
         ("rewire   <cur_prefix> <base_prefix> [0|1]", "call edges a function DROPPED vs a baseline (de-wiring)"),
         ("parsepolicy <policy-file>", "dump a parsed CANDOR_POLICY as canonical JSON (conformance)"),
         ("receipt  <prefix>", "the Claude Code receipt's report-derived fields (key<TAB>value)"),

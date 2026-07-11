@@ -497,6 +497,57 @@ fn fix_no_policy_exits_2() {
     assert!(stderr.contains("policy is required"), "must explain a policy is required, got:\n{stderr}");
 }
 
+#[test]
+fn fix_gate_collapses_inheritors_to_one_remedy() {
+    // fix-gate computes a remedy for EVERY deny/pure crossing, but the two domain functions that both carry
+    // Net are ONE root cause — the dedup must collapse them to a single plan (same site, same hoist), not
+    // emit a near-identical plan per inheritor. This is what the loop folds into the block message.
+    let f = Fixture::new("fixgate");
+    write_orderflow_fixture(&f);
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let out = Command::new(bin())
+        .args(["fix-gate", &f.prefix, &pol, "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).expect("fix-gate --json must emit JSON");
+    assert_eq!(v["ok"], serde_json::json!(false), "a crossing exists → not ok");
+    let rem = v["remedies"].as_array().expect("remedies array");
+    assert_eq!(rem.len(), 1, "the two domain inheritors collapse to one remedy, got {}", rem.len());
+    assert_eq!(rem[0]["hoistTo"], serde_json::json!(["api::get_quote"]));
+    assert_eq!(rem[0]["site"], serde_json::json!(["infra::fetch_rate"]));
+}
+
+#[test]
+fn fix_gate_clean_report_is_ok() {
+    // No deny/pure crossing → ok:true, empty remedies, exit 0. (The scope pattern matches no function.)
+    let f = Fixture::new("fixgateok");
+    write_orderflow_fixture(&f);
+    let pol = write_policy(&f, "p.policy", "deny Net nonexistentlayer\n");
+    let out = Command::new(bin())
+        .args(["fix-gate", &f.prefix, &pol, "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(true), "no crossing → ok");
+    assert_eq!(v["remedies"].as_array().unwrap().len(), 0, "no remedies when clean");
+}
+
+#[test]
+fn fix_gate_unreadable_policy_exits_2() {
+    // Same fail-loud contract: an unreadable policy must exit 2, never emit an empty (falsely-clean) verdict.
+    let f = Fixture::new("fixgatebadpol");
+    write_orderflow_fixture(&f);
+    let bogus = f.dir.join("typo.policy");
+    let out = Command::new(bin())
+        .args(["fix-gate", &f.prefix, bogus.to_string_lossy().as_ref(), "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2), "an unreadable policy must exit 2");
+}
+
 // ── callers --include-unknown: the unresolved-dispatch frontier (⟨0.7⟩ — was conformance-only) ─────
 // TESTING.md §3: engine-local behavior needs in-repo coverage; this arm previously lived only in the
 // candor-spec conformance suite. Names are dot-separated (the swift/JVM report shape this arm serves).

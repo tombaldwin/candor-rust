@@ -1,7 +1,9 @@
-//! `candor fix` — the boundary fix (integrations/FIX-SPEC.md). When an edit makes a function perform an
-//! effect its layer forbids, this computes the *architectural* remedy: where the effect should live (hoist
-//! it to the nearest allowed-layer caller) and which functions become pure and thread the value. Read-only
-//! over the same report + policy the gate uses; the inverse of `whatif`. Advisory structure, never syntax;
+//! `candor fix` / `candor fix-gate` — the boundary fix (integrations/FIX-SPEC.md). When an edit makes a
+//! function perform an effect its layer forbids, this computes the *architectural* remedy: where the effect
+//! should live (hoist it to the nearest allowed-layer caller) and which functions become pure and thread the
+//! value. Read-only over the same report + policy the gate uses; the inverse of `whatif`. `fix` answers for
+//! one function; `fix-gate` computes a remedy for every deny/`pure` (AS-EFF-006) violation in a report, so
+//! the edit-time loop can hand the agent the *fix*, not just the finding. Advisory structure, never syntax;
 //! the gate re-scan remains the ground truth.
 
 use crate::load::load_entries;
@@ -30,6 +32,179 @@ fn denied_layer(fname: &str, effect: &str, rules: &[candor_classify::policy::Pol
     None
 }
 
+/// The computed remedy for one `(function, effect)` boundary crossing — the deterministic cut between
+/// "must stay pure" (`denied_span`) and "may perform the effect" (`hoist_to`). Borrows the report.
+pub(crate) struct RemedyPlan<'a> {
+    func: &'a str,
+    effect: &'a str,
+    layer: String,
+    sites: BTreeSet<&'a str>,
+    denied_span: BTreeSet<&'a str>,
+    hoist_to: BTreeSet<&'a str>,
+    allow_edit: String,
+}
+
+impl RemedyPlan<'_> {
+    fn clean_hoist(&self) -> bool {
+        !self.hoist_to.is_empty()
+    }
+    /// A stable key so `fix-gate` collapses the many inheritors of one root cause (every function in the
+    /// denied span carries the effect) to a single remedy: the plan is fixed by its effect, layer, site, and
+    /// hoist target — not by which inheriting function tripped the gate.
+    fn dedup_key(&self) -> String {
+        format!(
+            "{}|{}|{:?}|{:?}",
+            self.effect,
+            self.layer,
+            self.sites.iter().collect::<Vec<_>>(),
+            self.hoist_to.iter().collect::<Vec<_>>()
+        )
+    }
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "fn": self.func,
+            "effect": self.effect,
+            "layer": self.layer,
+            "cleanHoist": self.clean_hoist(),
+            "site": self.sites.iter().collect::<Vec<_>>(),
+            "deniedSpan": self.denied_span.iter().collect::<Vec<_>>(),
+            "hoistTo": self.hoist_to.iter().collect::<Vec<_>>(),
+            "policyAlternative": self.allow_edit,
+        })
+    }
+    fn render_text(&self, out: &mut String) {
+        use std::fmt::Write;
+        let layer_label = if self.layer.is_empty() { "this".to_string() } else { format!("`{}`", self.layer) };
+        let sitelist = if self.sites.is_empty() {
+            "(not a local source — a cross-crate or Unknown effect)".to_string()
+        } else {
+            self.sites.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ")
+        };
+        let _ = writeln!(out, "candor fix — hoist {} out of the {layer_label} boundary\n", self.effect);
+        let _ = writeln!(out, "  The violation: `{}` performs {}, which the {layer_label} layer forbids.", self.func, self.effect);
+        let _ = writeln!(out, "  Performed directly at: {sitelist}");
+        let span: Vec<_> = self.denied_span.iter().take(6).map(|x| format!("`{x}`")).collect();
+        let more = if self.denied_span.len() > 6 { ", …" } else { "" };
+        let _ = writeln!(out, "  Forbidden across {} function(s) in the layer (they inherited it): {}{more}", self.denied_span.len(), span.join(", "));
+        let _ = writeln!(out);
+        if self.clean_hoist() {
+            let _ = writeln!(out, "  THE FIX — hoist the effect to the boundary:");
+            let _ = writeln!(out, "    · Perform {} at: {}  (an allowed layer that already calls into the domain).", self.effect,
+                self.hoist_to.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", "));
+            let _ = writeln!(out, "    · Pass the result down as a parameter; the {} function(s) above then stay pure.", self.denied_span.len());
+            let _ = writeln!(out, "    · Re-run the gate — the {layer_label} blast radius for {} should be empty.", self.effect);
+            let _ = writeln!(out);
+            let _ = writeln!(out, "  ALTERNATIVE — if the {layer_label} layer is MEANT to perform {}, it's a policy bug,", self.effect);
+            let _ = writeln!(out, "  not a code one: relax the boundary with  `{}`.", self.allow_edit);
+        } else {
+            let _ = writeln!(out, "  NO CLEAN HOIST — every caller up to the entry points is also in a {}-forbidding layer.", self.effect);
+            let _ = writeln!(out, "  Two honest options:");
+            let _ = writeln!(out, "    (a) Introduce a PORT: have the domain take an interface parameter (a trait) it receives,");
+            let _ = writeln!(out, "        implemented by an adapter in an allowed layer that performs {} and injects the", self.effect);
+            let _ = writeln!(out, "        result (dependency inversion) — the domain depends on the abstraction, not the I/O.");
+            let _ = writeln!(out, "    (b) If the domain legitimately needs {}, relax the boundary:  `{}`.", self.effect, self.allow_edit);
+        }
+    }
+}
+
+/// The cut itself — pure over the report graph. `start` performs `effect` and sits in a deny-`effect` layer
+/// (`layer`); `rev` is the callee→callers adjacency. Returns the site(s), the denied span, and the hoist
+/// frontier. Shared by `cmd_fix` (one function) and `cmd_fix_gate` (every violation).
+fn compute_remedy<'a>(
+    by_name: &HashMap<&'a str, &'a ReportEntry>,
+    rev: &BTreeMap<&'a str, Vec<&'a str>>,
+    rules: &[candor_classify::policy::PolicyRule],
+    start: &'a ReportEntry,
+    effect: &'a str,
+    layer: String,
+) -> RemedyPlan<'a> {
+    // affected = start + every transitive caller (all gain `effect`).
+    let mut affected: BTreeSet<&str> = BTreeSet::new();
+    affected.insert(start.func.as_str());
+    let mut st = vec![start.func.as_str()];
+    while let Some(n) = st.pop() {
+        if let Some(cs) = rev.get(n) {
+            for &c in cs {
+                if affected.insert(c) {
+                    st.push(c);
+                }
+            }
+        }
+    }
+    // denied span D: affected functions in a deny-`effect` layer — these must become pure.
+    let denied_span: BTreeSet<&str> =
+        affected.iter().copied().filter(|f| denied_layer(f, effect, rules).is_some()).collect();
+
+    // direct site(s) S: BFS from `start` through effect-carrying callees to the DIRECT source(s).
+    let mut sites: BTreeSet<&str> = BTreeSet::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut q: VecDeque<&str> = VecDeque::new();
+    q.push_back(start.func.as_str());
+    seen.insert(start.func.as_str());
+    while let Some(cur) = q.pop_front() {
+        let Some(f) = by_name.get(cur) else { continue };
+        if f.direct.iter().any(|e| e == effect) {
+            sites.insert(cur);
+        }
+        for c in &f.calls {
+            if let Some(cf) = by_name.get(c.as_str())
+                && cf.inferred.iter().any(|e| e == effect)
+                && seen.insert(c.as_str())
+            {
+                q.push_back(c.as_str());
+            }
+        }
+    }
+
+    // hoist frontier G: allowed-layer functions that call INTO the denied span (the boundary edges).
+    let mut hoist_to: BTreeSet<&str> = BTreeSet::new();
+    for &d in &denied_span {
+        if let Some(cs) = rev.get(d) {
+            for &c in cs {
+                if denied_layer(c, effect, rules).is_none() {
+                    hoist_to.insert(c);
+                }
+            }
+        }
+    }
+
+    let allow_edit = if layer.is_empty() {
+        format!("allow {effect}")
+    } else {
+        format!("allow {effect} {layer}")
+    };
+    RemedyPlan { func: &start.func, effect, layer, sites, denied_span, hoist_to, allow_edit }
+}
+
+/// Read + parse a policy, loud-failing (exit 2) on an unreadable path — the same fail-loud contract as
+/// `whatif`, so a typo'd policy never yields a confident plan against a silently-empty ruleset. Returns the
+/// deny/`pure` rules on success.
+fn load_rules(policy_path: Option<String>) -> Result<Vec<candor_classify::policy::PolicyRule>, i32> {
+    let policy_path = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
+    let Some(pp) = policy_path else {
+        eprintln!("candor fix: a policy is required (pass a policy file or set CANDOR_POLICY) — the fix is the refactor that restores the boundary the edit crossed.");
+        return Err(2);
+    };
+    match std::fs::read_to_string(&pp) {
+        Ok(t) => Ok(candor_classify::policy::parse_policy(&t).rules),
+        Err(e) => {
+            eprintln!("candor: policy `{pp}` could not be read ({e}) — no fix computed.");
+            Err(2)
+        }
+    }
+}
+
+/// Build the callee→callers adjacency from the embedded call lists.
+fn reverse_graph(entries: &[ReportEntry]) -> BTreeMap<&str, Vec<&str>> {
+    let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for e in entries {
+        for c in &e.calls {
+            rev.entry(c.as_str()).or_default().push(e.func.as_str());
+        }
+    }
+    rev
+}
+
 pub(crate) fn cmd_fix(args: &[String]) -> i32 {
     if args.len() < 3 {
         eprintln!("usage: candor-query fix <prefix> <fn> <Effect> [policy-file] [0|1]");
@@ -49,20 +224,9 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
             other => policy_path = Some(other.to_string()),
         }
     }
-    if policy_path.is_none() {
-        policy_path = std::env::var("CANDOR_POLICY").ok();
-    }
-    // A fix is defined RELATIVE to the boundary it crosses — no policy, no boundary, nothing to fix.
-    let Some(pp) = policy_path else {
-        eprintln!("candor fix: a policy is required (pass a policy file or set CANDOR_POLICY) — the fix is the refactor that restores the boundary the edit crossed.");
-        return 2;
-    };
-    let rules = match std::fs::read_to_string(&pp) {
-        Ok(t) => candor_classify::policy::parse_policy(&t).rules,
-        Err(e) => {
-            eprintln!("candor: policy `{pp}` could not be read ({e}) — no fix computed.");
-            return 2;
-        }
+    let rules = match load_rules(policy_path) {
+        Ok(r) => r,
+        Err(c) => return c,
     };
 
     let entries = load_entries(prefix);
@@ -93,121 +257,90 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
         );
         return 0;
     };
-    let layer_label = if layer.is_empty() { "this".to_string() } else { format!("`{layer}`") };
 
-    // reverse adjacency: callee -> its direct callers (from the embedded call lists).
-    let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for e in &entries {
-        for c in &e.calls {
-            rev.entry(c.as_str()).or_default().push(e.func.as_str());
-        }
-    }
-    // the affected set: `start` + every transitive caller — all gain `effect`.
-    let mut affected: BTreeSet<&str> = BTreeSet::new();
-    affected.insert(start.func.as_str());
-    let mut st = vec![start.func.as_str()];
-    while let Some(n) = st.pop() {
-        if let Some(cs) = rev.get(n) {
-            for &c in cs {
-                if affected.insert(c) {
-                    st.push(c);
-                }
-            }
-        }
-    }
-    // the denied span D: affected functions in a deny-`effect` layer — these must become pure.
-    let denied_span: BTreeSet<&str> =
-        affected.iter().copied().filter(|f| denied_layer(f, effect, &rules).is_some()).collect();
-
-    // the direct site(s) S: BFS from `start` through effect-carrying callees to the DIRECT source(s).
-    let mut sites: BTreeSet<&str> = BTreeSet::new();
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    let mut q: VecDeque<&str> = VecDeque::new();
-    q.push_back(start.func.as_str());
-    seen.insert(start.func.as_str());
-    while let Some(cur) = q.pop_front() {
-        let Some(f) = by_name.get(cur) else { continue };
-        if f.direct.iter().any(|e| e == effect) {
-            sites.insert(cur);
-        }
-        for c in &f.calls {
-            if let Some(cf) = by_name.get(c.as_str())
-                && cf.inferred.iter().any(|e| e == effect)
-                && seen.insert(c.as_str())
-            {
-                q.push_back(c.as_str());
-            }
-        }
-    }
-
-    // the hoist frontier G: allowed-layer functions that call INTO the denied span (the boundary edges).
-    let mut hoist: BTreeSet<&str> = BTreeSet::new();
-    for &d in &denied_span {
-        if let Some(cs) = rev.get(d) {
-            for &c in cs {
-                if denied_layer(c, effect, &rules).is_none() {
-                    hoist.insert(c);
-                }
-            }
-        }
-    }
-
-    let allow_edit = if layer.is_empty() {
-        format!("allow {effect}")
-    } else {
-        format!("allow {effect} {layer}")
-    };
+    let rev = reverse_graph(&entries);
+    let plan = compute_remedy(&by_name, &rev, &rules, start, effect, layer);
 
     if want_json {
-        let out = serde_json::json!({
-            "fn": start.func,
-            "effect": effect,
-            "layer": layer,
-            "cleanHoist": !hoist.is_empty(),
-            "site": sites.iter().collect::<Vec<_>>(),
-            "deniedSpan": denied_span.iter().collect::<Vec<_>>(),
-            "hoistTo": hoist.iter().collect::<Vec<_>>(),
-            "policyAlternative": allow_edit,
-        });
+        println!("{}", serde_json::to_string_pretty(&plan.to_json()).unwrap());
+    } else {
+        let mut s = String::new();
+        plan.render_text(&mut s);
+        print!("{s}");
+        println!("\n  (Advisory: candor names the shape, you write the code; the gate re-scan verifies the fix.)");
+    }
+    0
+}
+
+/// `fix-gate <prefix> [policy] [--json|0|1]` — a remedy for EVERY deny/`pure` boundary crossing in the
+/// report. This is the loop's payoff: the edit-time gate blocks, and this hands the agent the fix for each
+/// crossing. Scope is AS-EFF-006 (effect-in-forbidden-layer) only — the one refactor candor can compute;
+/// allowlist/layering findings are a different shape and are left to the gate's own message. Advisory: the
+/// gate re-scan stays the ground truth.
+pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
+    if args.is_empty() {
+        eprintln!("usage: candor-query fix-gate <prefix> [policy-file] [0|1]");
+        return 2;
+    }
+    let prefix = &args[0];
+    let mut policy_path: Option<String> = None;
+    let mut want_json = false;
+    for a in &args[1..] {
+        match a.as_str() {
+            "0" => want_json = false,
+            "1" | "--json" => want_json = true,
+            other => policy_path = Some(other.to_string()),
+        }
+    }
+    let rules = match load_rules(policy_path) {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+
+    let entries = load_entries(prefix);
+    if entries.is_empty() {
+        eprintln!("candor fix-gate: no report for `{prefix}` — scan the crate first.");
+        return 2;
+    }
+    let by_name: HashMap<&str, &ReportEntry> = entries.iter().map(|e| (e.func.as_str(), e)).collect();
+    let rev = reverse_graph(&entries);
+
+    // Every (function, effect) that trips a deny/pure rule → its remedy, collapsed to one plan per root
+    // cause (dedup_key folds the inheritors of a single crossing together).
+    let mut plans: BTreeMap<String, RemedyPlan> = BTreeMap::new();
+    for e in &entries {
+        for effect in &e.inferred {
+            if let Some(layer) = denied_layer(&e.func, effect, &rules) {
+                let plan = compute_remedy(&by_name, &rev, &rules, e, effect, layer);
+                plans.entry(plan.dedup_key()).or_insert(plan);
+            }
+        }
+    }
+
+    if want_json {
+        let remedies: Vec<_> = plans.values().map(|p| p.to_json()).collect();
+        let out = serde_json::json!({ "ok": remedies.is_empty(), "remedies": remedies });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
 
-    let sitelist = |s: &BTreeSet<&str>| -> String {
-        if s.is_empty() { "(not a local source — a cross-crate or Unknown effect)".into() }
-        else { s.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ") }
-    };
-
-    println!("candor fix — hoist {effect} out of the {layer_label} boundary\n");
-    println!("  The violation: `{}` performs {effect}, which the {layer_label} layer forbids.", start.func);
-    println!("  Performed directly at: {}", sitelist(&sites));
-    println!(
-        "  Forbidden across {} function(s) in the layer (they inherited it): {}",
-        denied_span.len(),
-        denied_span.iter().take(6).map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ")
-            + if denied_span.len() > 6 { ", …" } else { "" }
-    );
-    println!();
-
-    if !hoist.is_empty() {
-        println!("  THE FIX — hoist the effect to the boundary:");
-        println!(
-            "    · Perform {effect} at: {}  (an allowed layer that already calls into the domain).",
-            hoist.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ")
-        );
-        println!("    · Pass the result down as a parameter; the {} function(s) above then stay pure.", denied_span.len());
-        println!("    · Re-run the gate — the {layer_label} blast radius for {effect} should be empty.");
-        println!();
-        println!("  ALTERNATIVE — if the {layer_label} layer is MEANT to perform {effect}, it's a policy bug,");
-        println!("  not a code one: relax the boundary with  `{allow_edit}`.");
-    } else {
-        println!("  NO CLEAN HOIST — every caller up to the entry points is also in a {effect}-forbidding layer.");
-        println!("  Two honest options:");
-        println!("    (a) Introduce a PORT: have the domain take an interface parameter (a trait) it receives,");
-        println!("        implemented by an adapter in an allowed layer that performs {effect} and injects the");
-        println!("        result (dependency inversion) — the domain depends on the abstraction, not the I/O.");
-        println!("    (b) If the domain legitimately needs {effect}, relax the boundary:  `{allow_edit}`.");
+    if plans.is_empty() {
+        println!("candor fix-gate: no deny/pure boundary crossings in this report ✓");
+        return 0;
     }
-    println!("\n  (Advisory: candor names the shape, you write the code; the gate re-scan verifies the fix.)");
+    let n = plans.len();
+    println!(
+        "candor fix — {n} boundary {} for this change:\n",
+        if n == 1 { "remedy" } else { "remedies" }
+    );
+    for (i, p) in plans.values().enumerate() {
+        if i > 0 {
+            println!("  ────────────────────────────────────────");
+        }
+        let mut s = String::new();
+        p.render_text(&mut s);
+        print!("{s}");
+    }
+    println!("\n  (Advisory: candor names the shape, you write the code; the gate re-scan verifies each fix.)");
     0
 }
