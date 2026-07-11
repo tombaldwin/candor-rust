@@ -6,8 +6,11 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## spec 0.9 — the remedial-loop rung (2026-07-11)
 
-candor-scan and candor-query now declare **spec `0.9`** (both at crate **0.9.0**; candor-report 0.5.9,
-candor-classify 0.5.10). 0.9 is a **tier-2 (pinned-tool-surface) rung** (candor-spec §"Conformance tiers"):
+candor-scan and candor-query now declare **spec `0.9`** (both at crate **0.9.0**). The internal library
+crates **candor-report** and **candor-classify** are **aligned to `0.9.0`** too (from 0.5.8 / 0.5.9): every
+candor crate now shares the toolchain version, so a crates.io visitor doesn't read the schema/classifier
+libs as lagging the engines. They carry no external-consumer contract, so the one-time 0.5→0.9 jump costs
+nothing; from here they move lockstep with the spec. 0.9 is a **tier-2 (pinned-tool-surface) rung** (candor-spec §"Conformance tiers"):
 no report-schema or verdict change — a 0.8 report and a 0.8 `--gate-json` verdict are byte-identical under
 0.9 — but the remedial tool loop (`fix`/`fix-gate`, `unverified`, and the gate's provable-purity
 auto-disclosure, all detailed below) is promoted into the pinned §3.1/§3.3 contract. `SPEC_VERSION` is
@@ -25,7 +28,7 @@ without having to know the `unverified` subcommand exists. **Advisory only**: it
 the exit code, the gate verdict, and `--gate-json` are all untouched. New `gate::unverified_holes` helper;
 emitted from `scan.rs` after `record_gate_violations`. Mirrors the port to candor-java/ts/swift (four-engine
 parity). Existing gate tests unchanged (115 pass). The gate note and `candor unverified` share ONE predicate
-(`candor_classify::policy::unverified_hole_rule` + `rule_and_upgrade`, candor-classify 0.5.10) — a single
+(`candor_classify::policy::unverified_hole_rule` + `rule_and_upgrade`, candor-classify 0.9.0) — a single
 definition of "what a hole is", so the scan-path and query-path disclosures cannot drift (PART 12d pins it).
 
 ## [candor-query 0.9.0] — 2026-07-11
