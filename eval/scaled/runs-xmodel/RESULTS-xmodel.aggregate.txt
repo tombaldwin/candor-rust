@@ -1,0 +1,19 @@
+top-level keys: ['summary', 'agentCount', 'logs', 'result', 'workflowProgress', 'totalTokens', 'totalToolCalls']
+results under key: result
+trials: 40
+
+=== STRICT — mean /16 over 5 trials ===
+model     control  treatment    lift
+opus         1.47       3.63   +2.17
+sonnet       1.07       4.40   +3.33
+haiku        0.00       1.20   +1.20
+fable        1.27       3.07   +1.80
+
+=== LENIENT — mean /16 over 5 trials ===
+model     control  treatment    lift
+opus         4.47      15.20  +10.73
+sonnet       1.07      14.27  +13.20
+haiku        0.00      14.00  +14.00
+fable        6.33      15.00   +8.67
+
+judges/cell (expect 15): {'opus-control': 15, 'opus-treatment': 14, 'sonnet-control': 15, 'sonnet-treatment': 15, 'haiku-control': 15, 'haiku-treatment': 15, 'fable-control': 15, 'fable-treatment': 15}
