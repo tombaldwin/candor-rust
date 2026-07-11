@@ -285,11 +285,11 @@
         let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
         // deliberately NOT the `….<crate>.scan.json` filename shape — only the envelope names it.
         std::fs::write(d.join("purity-claim.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.8"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.9"}},
             "package": "dep-c",
             "functions": []}}"#)).unwrap();
         std::fs::write(d.join("multi.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.8"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.9"}},
             "packages": ["alpha", "beta"],
             "functions": []}}"#)).unwrap();
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
@@ -2090,7 +2090,7 @@ trait G {
         inferred.insert("b".into(), ["Net"].into_iter().collect()); // covered by the UNIONed duplicate
         inferred.insert("newfn".into(), ["Db"].into_iter().collect()); // absent from baseline — exempt
         let report = |ver: &str| format!(
-            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec":"0.8"}},
+            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec":"0.9"}},
                 "functions":[{{"fn":"a","inferred":["Fs"]}},
                              {{"fn":"b","inferred":[]}},
                              {{"fn":"b","inferred":["Net"]}}]}}"#

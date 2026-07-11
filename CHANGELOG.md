@@ -4,7 +4,16 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## [candor-scan 0.8.9] — 2026-07-11
+## spec 0.9 — the remedial-loop rung (2026-07-11)
+
+candor-scan and candor-query now declare **spec `0.9`** (both at crate **0.9.0**; candor-report 0.5.9,
+candor-classify 0.5.10). 0.9 is a **tier-2 (pinned-tool-surface) rung** (candor-spec §"Conformance tiers"):
+no report-schema or verdict change — a 0.8 report and a 0.8 `--gate-json` verdict are byte-identical under
+0.9 — but the remedial tool loop (`fix`/`fix-gate`, `unverified`, and the gate's provable-purity
+auto-disclosure, all detailed below) is promoted into the pinned §3.1/§3.3 contract. `SPEC_VERSION` is
+`"0.9"` in candor-report; the envelope and `--gate-json` verdict declare it.
+
+## [candor-scan 0.9.0] — 2026-07-11
 
 ### ✨ Gate scans auto-disclose the provable-purity gap (no need to know to run `unverified`)
 
@@ -19,7 +28,7 @@ parity). Existing gate tests unchanged (115 pass). The gate note and `candor unv
 (`candor_classify::policy::unverified_hole_rule` + `rule_and_upgrade`, candor-classify 0.5.10) — a single
 definition of "what a hole is", so the scan-path and query-path disclosures cannot drift (PART 12d pins it).
 
-## [candor-query 0.8.10] — 2026-07-11
+## [candor-query 0.9.0] — 2026-07-11
 
 ### ✨ `unverified` — the provable-purity disclosure (policy guidance from the fix-loop investigation)
 
