@@ -15,7 +15,9 @@ layer PROVABLY clean. This closes the discovery gap — an author learns their "
 without having to know the `unverified` subcommand exists. **Advisory only**: it's a note, never a violation, so
 the exit code, the gate verdict, and `--gate-json` are all untouched. New `gate::unverified_holes` helper;
 emitted from `scan.rs` after `record_gate_violations`. Mirrors the port to candor-java/ts/swift (four-engine
-parity). Existing gate tests unchanged (115 pass).
+parity). Existing gate tests unchanged (115 pass). The gate note and `candor unverified` share ONE predicate
+(`candor_classify::policy::unverified_hole_rule` + `rule_and_upgrade`, candor-classify 0.5.10) — a single
+definition of "what a hole is", so the scan-path and query-path disclosures cannot drift (PART 12d pins it).
 
 ## [candor-query 0.8.10] — 2026-07-11
 

@@ -147,38 +147,16 @@ pub(crate) fn unverified_holes(
     all: &[String],
     inferred: &HashMap<String, BTreeSet<&'static str>>,
 ) -> Vec<(String, String)> {
-    use candor_classify::policy::{parse_policy, scope_matches};
-    let p = parse_policy(policy_text);
+    use candor_classify::policy::{parse_policy, rule_and_upgrade, unverified_hole_rule};
+    let rules = parse_policy(policy_text).rules;
     let empty: BTreeSet<&'static str> = BTreeSet::new();
     let mut out = Vec::new();
     for q in all {
-        let inf = inferred.get(q).unwrap_or(&empty);
-        if !inf.contains("Unknown") {
-            continue;
-        }
-        for r in &p.rules {
-            if let Some(s) = &r.scope {
-                if !scope_matches(q, s) {
-                    continue;
-                }
-            }
-            let violates = if r.effects.is_empty() {
-                inf.iter().any(|e| *e != "Unknown")
-            } else {
-                inf.iter().any(|e| r.effects.contains(e))
-            };
-            if violates {
-                continue; // a real violation — the gate reports it; not our concern here
-            }
-            let scope = r.scope.clone().unwrap_or_default();
-            let suffix = if scope.is_empty() { String::new() } else { format!(" {scope}") };
-            let upgrade = if r.effects.is_empty() {
-                format!("deny Unknown{suffix}")
-            } else {
-                format!("deny {} Unknown{suffix}", r.effects.iter().copied().collect::<Vec<_>>().join(" "))
-            };
-            out.push((q.clone(), upgrade));
-            break;
+        // Same predicate + upgrade reconstruction as `candor-query unverified` (candor_classify::policy):
+        // the two disclosure paths share ONE definition of a hole, so they cannot drift.
+        let effs: Vec<&str> = inferred.get(q).unwrap_or(&empty).iter().copied().collect();
+        if let Some(r) = unverified_hole_rule(q, &effs, &rules) {
+            out.push((q.clone(), rule_and_upgrade(r).1));
         }
     }
     out

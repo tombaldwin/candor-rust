@@ -149,6 +149,54 @@ pub fn scope_matches(name: &str, scope: &str) -> bool {
     })
 }
 
+/// Reconstruct a rule's source form and the `Unknown`-forbidding upgrade for it: `pure <scope>` →
+/// (`"pure <scope>"`, `"deny Unknown <scope>"`); `deny <E…> <scope>` → (`"deny <E…> <scope>"`,
+/// `"deny <E…> Unknown <scope>"`). Shared so the gate note and `candor unverified` name the identical
+/// rule and upgrade — one source of truth for the disclosure's advice.
+pub fn rule_and_upgrade(r: &PolicyRule) -> (String, String) {
+    let scope = r.scope.clone().unwrap_or_default();
+    let suffix = if scope.is_empty() { String::new() } else { format!(" {scope}") };
+    if r.effects.is_empty() {
+        // `pure` forbids real effects but not Unknown; to REQUIRE provable purity, add a deny-Unknown.
+        (format!("pure{suffix}"), format!("deny Unknown{suffix}"))
+    } else {
+        let effs = r.effects.iter().copied().collect::<Vec<_>>().join(" ");
+        (format!("deny {effs}{suffix}"), format!("deny {effs} Unknown{suffix}"))
+    }
+}
+
+/// The single predicate for a provable-purity hole (eval/fixloop/DISPATCH-NOTE.md): a function that is
+/// `Unknown`, sits in a `pure`/`deny <E>` scope, and PASSES that rule (carries none of its forbidden real
+/// effects) — so its compliance is asserted but not verified (the Unknown could hide the very effect the
+/// rule forbids; the classic case is a fn/closure-injected port). A *real* violation is the gate's job, not
+/// this. Returns the first governing rule under which the function is such a hole, or `None` if it is not
+/// one. Shared by candor-scan's gate note and candor-query's `unverified` so "what a hole is" has ONE
+/// definition — the two paths can never drift (conformance PART 12d pins their agreement).
+pub fn unverified_hole_rule<'a, S: AsRef<str>>(
+    name: &str,
+    effects: &[S],
+    rules: &'a [PolicyRule],
+) -> Option<&'a PolicyRule> {
+    if !effects.iter().any(|e| e.as_ref() == UNKNOWN) {
+        return None;
+    }
+    rules.iter().find(|r| {
+        // in the rule's scope (a scopeless rule governs the whole unit) …
+        if let Some(s) = &r.scope {
+            if !scope_matches(name, s) {
+                return false;
+            }
+        }
+        // … and PASSES it (no forbidden real effect — else it is a violation the gate already reports).
+        let violates = if r.effects.is_empty() {
+            effects.iter().any(|e| e.as_ref() != UNKNOWN)
+        } else {
+            effects.iter().any(|e| r.effects.contains(e.as_ref()))
+        };
+        !violates
+    })
+}
+
 /// Parse a CANDOR_POLICY file (SPEC §6.2). One rule per line; `#` comments and blanks ignored:
 ///
 /// ```text

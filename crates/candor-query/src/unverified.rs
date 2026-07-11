@@ -8,21 +8,8 @@
 //! 1 so CI can REQUIRE provable purity. The gate's verdict is untouched — this only discloses the gap.
 
 use crate::load::load_entries;
-use candor_classify::policy::{parse_policy, scope_matches, PolicyRule, UNKNOWN};
+use candor_classify::policy::{parse_policy, rule_and_upgrade, unverified_hole_rule, PolicyRule};
 use candor_report::ReportEntry;
-
-/// Reconstruct a rule's source form and the Unknown-forbidding upgrade for it.
-fn rule_and_upgrade(r: &PolicyRule) -> (String, String) {
-    let scope = r.scope.clone().unwrap_or_default();
-    let scope_suffix = if scope.is_empty() { String::new() } else { format!(" {scope}") };
-    if r.effects.is_empty() {
-        // `pure` forbids real effects but not Unknown; to require provable purity, ADD a deny-Unknown.
-        (format!("pure{scope_suffix}"), format!("deny Unknown{scope_suffix}"))
-    } else {
-        let effs = r.effects.iter().copied().collect::<Vec<_>>().join(" ");
-        (format!("deny {effs}{scope_suffix}"), format!("deny {effs} Unknown{scope_suffix}"))
-    }
-}
 
 pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     if args.is_empty() {
@@ -60,37 +47,18 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     }
 
     // A hole: a function that is Unknown, sits in a deny/pure scope, and PASSES that rule (carries none of its
-    // forbidden real effects) — so its compliance is asserted but not verified.
+    // forbidden real effects). The predicate is `unverified_hole_rule` — the SAME one candor-scan's gate note
+    // uses (candor_classify::policy), so the disclosure can never drift between the two paths.
     struct Hole<'a> {
         func: &'a ReportEntry,
         rule: &'a PolicyRule,
     }
-    let mut holes: Vec<Hole> = Vec::new();
-    for e in &entries {
-        if !e.inferred.iter().any(|x| x == UNKNOWN) {
-            continue;
-        }
-        for r in &rules {
-            let in_scope = r
-                .scope
-                .as_deref()
-                .is_none_or(|s| scope_matches(&e.func, s));
-            if !in_scope {
-                continue;
-            }
-            // already a VIOLATION of this rule (carries a forbidden real effect)? the gate handles it — skip.
-            let violates = if r.effects.is_empty() {
-                e.inferred.iter().any(|x| x != UNKNOWN)
-            } else {
-                e.inferred.iter().any(|x| r.effects.contains(x.as_str()))
-            };
-            if violates {
-                continue;
-            }
-            holes.push(Hole { func: e, rule: r });
-            break; // one disclosure per function (its first governing rule)
-        }
-    }
+    let holes: Vec<Hole> = entries
+        .iter()
+        .filter_map(|e| {
+            unverified_hole_rule(&e.func, &e.inferred, &rules).map(|rule| Hole { func: e, rule })
+        })
+        .collect();
 
     if want_json {
         let items: Vec<_> = holes
