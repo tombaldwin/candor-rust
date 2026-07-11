@@ -365,7 +365,7 @@ for v in deep["violations"]: print("viol:", v["rule"], v["fn"], ",".join(v["effe
 print("PARITY" if proj(deep) == proj(scan) else f"MISMATCH {proj(deep)} vs {proj(scan)}")
 PY
 )
-want "deep verdict declares spec 0.8 and fails"          "$gjcmp" "spec: 0.8 ok: False"
+want "deep verdict declares spec 0.9 and fails"          "$gjcmp" "spec: 0.9 ok: False"
 want "deep verdict pins the violation (rule/fn/effects)" "$gjcmp" "viol: AS-EFF-006 domain_logic Fs detail"
 want "deep and scan verdicts agree on the §3.3 projection" "$gjcmp" "PARITY"
 # A CLEAN gate writes the clean verdict { ok: true, violations: [] } and exits 0.

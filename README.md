@@ -278,7 +278,7 @@ JSON, from the *same* check that sets the exit code, for CI annotations / the PR
 ```sh
 cargo candor policy .candor/policy --gate-json verdict.json    # deep engine (also: guard --gate-json)
 candor-scan . --policy .candor/policy --gate-json verdict.json # stable scanner — identical shape
-# → { "spec": "0.8", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
+# → { "spec": "0.9", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
 ```
 
 `-` streams it to stdout. Exit semantics are pinned: violation → 1; a gate that could not run to
