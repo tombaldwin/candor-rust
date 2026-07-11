@@ -189,7 +189,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // `#[cfg(feature="X")]` compiled OUT under the default build is then skipped, so its effects don't
     // count as the crate's behaviour (winnow's debug-trace `std::env::var` fabricated Env). Set before the
     // parallel Pass B reads it; scan_one runs sequentially per workspace member, so members don't race.
-    set_cfg_features(parse_features(root));
+    // Read the manifest HERE (the scan I/O layer); `lang::parse_features` stays a pure text pass (an
+    // unreadable/absent Cargo.toml → empty string → no features, the same result as before the hoist).
+    let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+    set_cfg_features(parse_features(&cargo_toml));
 
     // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below). The walk +
     // path-shape filters run SEQUENTIALLY (cheap directory traversal, and the filter set is the report's

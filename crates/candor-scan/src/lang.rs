@@ -506,20 +506,20 @@ pub(crate) fn push_quoted(s: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Parse Cargo.toml `[features]` → (active, declared). `active` = closure of `default` over LOCAL feature
+/// Parse a Cargo.toml's `[features]` → (active, declared). `active` = closure of `default` over LOCAL feature
 /// names (entries that are themselves feature keys); `dep:`/`?`/`crate/feat` entries enable dependencies,
 /// not local features, so they don't expand the active SET (but they ARE recorded as declared if they name
 /// a key). Line-based (no toml dep), tolerating multi-line arrays via bracket-depth tracking.
-pub(crate) fn parse_features(root: &std::path::Path) -> (std::collections::HashSet<String>, std::collections::HashSet<String>) {
+///
+/// PURE — takes the manifest TEXT, not a path: the filesystem read is the caller's (the scan I/O layer),
+/// so this syntax-analysis pass stays effect-free (candor's own `deny Fs lang` fix, dogfooded 2026-07-11).
+/// An absent manifest is the caller's empty string → no `[features]` section → empty sets, as before.
+pub(crate) fn parse_features(cargo_toml: &str) -> (std::collections::HashSet<String>, std::collections::HashSet<String>) {
     use std::collections::{HashMap, HashSet};
-    let txt = match std::fs::read_to_string(root.join("Cargo.toml")) {
-        Ok(t) => t,
-        Err(_) => return (HashSet::new(), HashSet::new()),
-    };
     let mut feats: HashMap<String, Vec<String>> = HashMap::new();
     let mut in_features = false;
     let mut cur: Option<(String, Vec<String>)> = None; // (key, accumulating entries) for an open `[ … ]`
-    for line in txt.lines() {
+    for line in cargo_toml.lines() {
         if let Some((k, vals)) = cur.as_mut() {
             push_quoted(line, vals);
             if line.contains(']') {
