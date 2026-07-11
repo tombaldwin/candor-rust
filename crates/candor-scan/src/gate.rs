@@ -137,6 +137,53 @@ pub(crate) fn policy_violations(
     out
 }
 
+/// The provable-purity DISCLOSURE (eval/fixloop/DISPATCH-NOTE.md): functions that PASS a `pure`/`deny` layer
+/// but are `Unknown` — their compliance is asserted, not verified (the Unknown could hide the forbidden
+/// effect; the classic case is a fn/closure-injected port). Advisory — NEVER a violation, so the gate's
+/// verdict/exit is untouched; the caller emits it as a note so an author learns their layer isn't PROVABLY
+/// clean. Returns `(fn, deny-Unknown upgrade)` per hole. Mirrors `candor-query unverified`.
+pub(crate) fn unverified_holes(
+    policy_text: &str,
+    all: &[String],
+    inferred: &HashMap<String, BTreeSet<&'static str>>,
+) -> Vec<(String, String)> {
+    use candor_classify::policy::{parse_policy, scope_matches};
+    let p = parse_policy(policy_text);
+    let empty: BTreeSet<&'static str> = BTreeSet::new();
+    let mut out = Vec::new();
+    for q in all {
+        let inf = inferred.get(q).unwrap_or(&empty);
+        if !inf.contains("Unknown") {
+            continue;
+        }
+        for r in &p.rules {
+            if let Some(s) = &r.scope {
+                if !scope_matches(q, s) {
+                    continue;
+                }
+            }
+            let violates = if r.effects.is_empty() {
+                inf.iter().any(|e| *e != "Unknown")
+            } else {
+                inf.iter().any(|e| r.effects.contains(e))
+            };
+            if violates {
+                continue; // a real violation — the gate reports it; not our concern here
+            }
+            let scope = r.scope.clone().unwrap_or_default();
+            let suffix = if scope.is_empty() { String::new() } else { format!(" {scope}") };
+            let upgrade = if r.effects.is_empty() {
+                format!("deny Unknown{suffix}")
+            } else {
+                format!("deny {} Unknown{suffix}", r.effects.iter().copied().collect::<Vec<_>>().join(" "))
+            };
+            out.push((q.clone(), upgrade));
+            break;
+        }
+    }
+    out
+}
+
 /// What the AS-EFF-005 baseline guard decided for one crate scan (see [`check_baseline`]).
 pub(crate) enum BaselineOutcome {
     /// No baseline file exists — the ratchet is not adopted yet. A one-time stderr note was printed;

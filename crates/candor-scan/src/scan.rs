@@ -1168,6 +1168,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             return (2, json_body);
         }
         record_gate_violations(&v); // toward the final --gate-json verdict (written once, by scan_main)
+        // Provable-purity disclosure (advisory — NEVER changes the verdict/exit): pure/deny layers that PASS
+        // but are Unknown. Surfaces the gap automatically so an author learns their "pure" layer isn't
+        // PROVABLY pure (eval/fixloop/DISPATCH-NOTE.md); the `candor-query unverified` query has the detail.
+        let holes = crate::gate::unverified_holes(&text, &all, &inferred);
+        if !holes.is_empty() {
+            let mut upgrades: BTreeSet<String> = BTreeSet::new();
+            eprintln!(
+                "candor-scan: note — {} function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):",
+                holes.len()
+            );
+            for (fq, up) in &holes {
+                eprintln!("    `{fq}`  → add  `{up}`");
+                upgrades.insert(up.clone());
+            }
+            eprintln!(
+                "  (advisory; add the upgrade(s) to REQUIRE provable purity, or run `candor-query unverified` for detail — the gate verdict is unchanged)"
+            );
+        }
         if v.is_empty() {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
         } else {

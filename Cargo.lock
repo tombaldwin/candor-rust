@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "candor-scan"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "candor-classify",
  "candor-report",
