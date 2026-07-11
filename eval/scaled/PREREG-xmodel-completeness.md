@@ -48,3 +48,28 @@ from the completeness mean with a note — never scored as a model false-negativ
 A harness error (empty engineer return, build-failure that blocks `verify`, judge non-response) → one rerun,
 noted. No other exclusions. Runs recorded under `runs-xmodel/`. Cross-day / cross-serving-speed caveats do
 not apply (completeness is model-internal, not wall-clock).
+
+---
+
+## Amendment (pilot-driven, committed before the full run)
+
+The 1/cell pilot ([RESULTS-xmodel-pilot.md](RESULTS-xmodel-pilot.md)) validated the pipeline but showed the
+completeness metric at N=1 judge is dominated by blanket-credit variance (identical "reaches 16 callers up to
+`main`" summaries scored 5 vs 15). Fixes, pre-registered here:
+
+- **DUAL metric, reported separately** (Tom's call — removes the judge's weighting discretion):
+  - **STRICT** = number of the 16 functions the summary names EXPLICITLY (or in an unambiguous "all N of:
+    <list>").
+  - **LENIENT** = 16 if the summary makes a valid whole-set blanket claim ("the effect reaches all callers /
+    the whole call chain up to `main`"), else = STRICT.
+- **Deterministic judge protocol** (no discretion on the blanket's weight): each blind judge outputs, per
+  function, `named: yes|no` (explicit name only), plus one line `BLANKET: yes|no` (does the summary assert
+  the effect reaches the ENTIRE caller chain / all callers up to `main`?). The orchestrator computes STRICT =
+  Σ named, LENIENT = BLANKET ? 16 : STRICT. Judges never weight the blanket themselves.
+- **3 blind judges per summary**, mean each metric (averages residual judge variance).
+- **Verbatim summaries**: the engineer's full returned text is scored (the pilot hand-abridged; the Workflow
+  run captures the exact text).
+- **N = 5 trials/cell** (40 engineers). Total agents = 40 engineers + 120 judges = 160.
+- Baseline regenerated with the shipped **candor-scan 0.8.8** (the pilot saw a cross-build baseline warning).
+- Hypotheses H1–H4 unchanged, now evaluated on BOTH metrics (a claim that holds only under LENIENT is
+  reported as such).
