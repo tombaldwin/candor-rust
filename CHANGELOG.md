@@ -4,6 +4,24 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.2] — 2026-07-11
+
+### ✨ `candor-query fix` — the boundary fix (the remedial inverse of `whatif`)
+
+New subcommand: `fix <prefix> <fn> <Effect> [policy] [0|1]`. When an edit makes a function perform an effect
+its architecture layer forbids, `whatif` reports the violation; `fix` computes the *architectural remedy* —
+where the effect belongs and the smallest refactor that puts it there. Deterministic graph-plus-policy cut
+over what the report already holds (integrations/FIX-SPEC.md): the direct **site** (BFS through the effect-
+carrying subgraph to the direct source), the **pure span** (the forbidden-layer functions that must thread
+the value), and the **hoist frontier** (the nearest allowed-layer caller to perform the effect). Emits a
+plan (text or `--json`: `{fn, effect, layer, site, deniedSpan, hoistTo, policyAlternative, cleanHoist}`) and
+always offers the policy-relax alternative (`allow <Effect> <scope>`). No clean hoist (every caller up to the
+entry is also forbidden) → the two honest options (introduce a port / relax the boundary), never an invented
+target. Advisory only: candor names the structure, not the syntax; the gate re-scan stays the ground truth
+(a bad suggestion blocks again). `denied_layer` mirrors `whatif`'s violation predicate exactly; fail-loud on
+an unreadable/absent policy (exit 2). Six regression tests pin the worked example + every branch. This is P1
+of the fix capability; P2 folds a `remedy` field into `--gate-json` + the agent-loop block message.
+
 ## [candor-scan 0.8.8] — 2026-07-11
 
 ### ⚠ candor-scan: a trait DEFAULT method via an empty impl now charges (soundness R30 — report-affecting)

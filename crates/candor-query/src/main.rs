@@ -28,6 +28,7 @@ mod policy;
 mod diff;
 mod containment;
 mod state;
+mod fix;
 
 // One flat crate namespace, like the candor-scan split: modules re-export
 // crate-wide so no call site changed (byte-identical outputs gated the move).
@@ -40,6 +41,7 @@ pub(crate) use policy::*;
 pub(crate) use diff::*;
 pub(crate) use containment::*;
 pub(crate) use state::*;
+pub(crate) use fix::*;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -68,6 +70,7 @@ fn main() {
         "impact" => cmd_impact(rest),
         "blindspots" => cmd_blindspots(rest),
         "whatif" => cmd_whatif(rest),
+        "fix" => cmd_fix(rest),
         "rewire" => cmd_rewire(rest),
         "receipt" => cmd_receipt(rest),
         "gains" => cmd_gains(rest),
@@ -134,6 +137,7 @@ fn print_help() {
         ("impact   <prefix> <fn-substring> [--json]", "the blast radius of a fn: effectful callers + entry points"),
         ("blindspots <prefix> [--json]", "the Unknown sources, ranked by their Unknown blast radius"),
         ("whatif   <prefix> <fn> <Effect> [policy] [0|1]", "pre-edit verdict: blast radius + policy violations"),
+        ("fix      <prefix> <fn> <Effect> [policy] [0|1]", "the boundary fix: where the effect belongs + the hoist refactor"),
         ("rewire   <cur_prefix> <base_prefix> [0|1]", "call edges a function DROPPED vs a baseline (de-wiring)"),
         ("parsepolicy <policy-file>", "dump a parsed CANDOR_POLICY as canonical JSON (conformance)"),
         ("receipt  <prefix>", "the Claude Code receipt's report-derived fields (key<TAB>value)"),

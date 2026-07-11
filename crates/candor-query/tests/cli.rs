@@ -371,6 +371,132 @@ fn whatif_unknown_effect_exits_2() {
     assert!(stderr.contains("unknown effect"), "must report `unknown effect`, got:\n{stderr}");
 }
 
+// ── fix: the boundary hoist (integrations/FIX-SPEC.md) — the remedial inverse of whatif ────────────
+
+/// The `orderflow` shape: `api::get_quote → domain::quote_bulk → domain::price_quote → infra::fetch_rate`,
+/// every function carrying Net, the leaf performing it directly. A `deny Net domain` policy makes the two
+/// domain functions a violation — the api caller is the allowed-layer hoist target. Returns the prefix.
+fn write_orderflow_fixture(f: &Fixture) {
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "of",
+  "functions": [
+    { "fn": "api::get_quote",     "loc": "src/api.rs:3:1",    "inferred": ["Net"], "hash": "of#gq", "paths": ["/x"], "calls": ["domain::quote_bulk"] },
+    { "fn": "domain::quote_bulk", "loc": "src/domain.rs:5:1", "inferred": ["Net"], "hash": "of#qb", "paths": ["/x"], "calls": ["domain::price_quote"] },
+    { "fn": "domain::price_quote","loc": "src/domain.rs:9:1", "inferred": ["Net"], "hash": "of#pq", "paths": ["/x"], "calls": ["infra::fetch_rate"] },
+    { "fn": "infra::fetch_rate",  "loc": "src/infra.rs:2:1",  "inferred": ["Net"], "direct": ["Net"], "hash": "of#fr", "paths": ["/x"], "calls": [] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+}
+
+fn write_policy(f: &Fixture, name: &str, body: &str) -> String {
+    let p = f.dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+#[test]
+fn fix_orderflow_hoists_net_to_api() {
+    // GROUND TRUTH (FIX-SPEC worked example): Net violates `deny Net domain` at price_quote; the direct
+    // site is the infra leaf; the two domain functions are the pure span; the hoist target is the nearest
+    // allowed-layer caller, api::get_quote. The plan must name exactly those, and offer the `allow` edit.
+    let f = Fixture::new("fixof");
+    write_orderflow_fixture(&f);
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let out = Command::new(bin())
+        .args(["fix", &f.prefix, "price_quote", "Net", &pol, "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0), "a computable fix must exit 0");
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).expect("fix --json must emit JSON");
+    assert_eq!(v["cleanHoist"], serde_json::json!(true), "a clean hoist exists");
+    assert_eq!(v["layer"], serde_json::json!("domain"));
+    assert_eq!(v["site"], serde_json::json!(["infra::fetch_rate"]), "the direct site is the infra leaf");
+    assert_eq!(v["hoistTo"], serde_json::json!(["api::get_quote"]), "hoist to the nearest allowed caller");
+    assert_eq!(
+        v["deniedSpan"],
+        serde_json::json!(["domain::price_quote", "domain::quote_bulk"]),
+        "the pure span is exactly the two domain functions"
+    );
+    assert_eq!(v["policyAlternative"], serde_json::json!("allow Net domain"));
+}
+
+#[test]
+fn fix_no_clean_hoist_offers_port_and_policy() {
+    // When every caller up to the entry is ALSO in the forbidden layer, candor does NOT invent a target:
+    // it names the two honest options (port / policy relax), and cleanHoist is false.
+    let f = Fixture::new("fixnc");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "nc",
+  "functions": [
+    { "fn": "domain::main_flow",   "loc": "src/d.rs:1:1", "inferred": ["Net"], "hash": "nc#mf", "paths": ["/x"], "calls": ["domain::price_quote"] },
+    { "fn": "domain::price_quote", "loc": "src/d.rs:9:1", "inferred": ["Net"], "direct": ["Net"], "hash": "nc#pq", "paths": ["/x"], "calls": [] }
+  ]
+}"#;
+    std::fs::write(format!("{}.nc.scan.json", f.prefix), report).unwrap();
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let out = Command::new(bin())
+        .args(["fix", &f.prefix, "price_quote", "Net", &pol, "0"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("NO CLEAN HOIST"), "must say no clean hoist exists, got:\n{stdout}");
+    assert!(stdout.contains("port") || stdout.contains("PORT"), "must offer the port option, got:\n{stdout}");
+    assert!(stdout.contains("allow Net domain"), "must offer the policy-relax edit, got:\n{stdout}");
+}
+
+#[test]
+fn fix_non_violation_is_a_no_op() {
+    // A function that performs the effect in an ALLOWED layer isn't a boundary crossing — no fix, exit 0,
+    // and it must say so rather than manufacturing a hoist.
+    let f = Fixture::new("fixok");
+    write_orderflow_fixture(&f);
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let out = Command::new(bin())
+        .args(["fix", &f.prefix, "get_quote", "Net", &pol, "0"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("no policy forbids it"), "must report a non-violation, got:\n{stdout}");
+}
+
+#[test]
+fn fix_unreadable_policy_exits_2() {
+    // Same fail-loud contract as whatif: a specified-but-unreadable policy must never yield a confident
+    // plan against a silently-empty ruleset.
+    let f = Fixture::new("fixbadpol");
+    write_orderflow_fixture(&f);
+    let bogus = f.dir.join("typo.policy");
+    let out = Command::new(bin())
+        .args(["fix", &f.prefix, "price_quote", "Net", bogus.to_string_lossy().as_ref(), "0"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2), "an unreadable policy must exit 2, not emit a plan");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("could not be read"), "must report the read failure, got:\n{stderr}");
+}
+
+#[test]
+fn fix_no_policy_exits_2() {
+    // A fix is defined relative to a boundary — with no policy there is no boundary, and the command must
+    // fail loud (exit 2) rather than print an empty or misleading plan.
+    let f = Fixture::new("fixnopol");
+    write_orderflow_fixture(&f);
+    let out = Command::new(bin())
+        .args(["fix", &f.prefix, "price_quote", "Net"])
+        .env_remove("CANDOR_POLICY")
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2), "no policy must exit 2");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("policy is required"), "must explain a policy is required, got:\n{stderr}");
+}
+
 // ── callers --include-unknown: the unresolved-dispatch frontier (⟨0.7⟩ — was conformance-only) ─────
 // TESTING.md §3: engine-local behavior needs in-repo coverage; this arm previously lived only in the
 // candor-spec conformance suite. Names are dot-separated (the swift/JVM report shape this arm serves).

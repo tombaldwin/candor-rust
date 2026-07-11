@@ -1,0 +1,3 @@
+## Summary
+I replaced the hardcoded FX rate placeholders in `Pricing::quote` with a live lookup. A new private `fetch_rate` connects to `rates.internal:7070` over TCP, sends the code, reads rate×1000, parses it. All errors fall back to placeholder rates. Only std library used.
+The candor effect analysis shows `Pricing::fetch_rate` introduces `Net` and `Unknown`; these propagate through the entire callstack to `main` and 16 intermediate callers (admin, API, checkout functions), which is expected for a feature that performs network I/O. The `Unknown` flag indicates candor cannot fully resolve the effect set — acceptable, the fallback is intentionally forgiving.
