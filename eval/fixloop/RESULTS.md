@@ -81,6 +81,50 @@ The fixed remedy **no longer hurts** — it matches control across every model; 
 sonnet 90% → 100%. That confirms the regression was caused by the bad advice (not noise), and that the text
 fix resolved it. The full loop: **measure → find the flaw → fix the advice → re-measure → recovered.**
 
+## Broadened run (2026-07-11) — a second effect (Fs) + a cheat-tempting fixture
+
+Added **`fixture-audit`**: a compliance audit-log write (an **Fs** effect, not Net) done *inline* in the
+domain, with a clean hoist target (`api::handle`). Deleting the one-line write trivially compiles and passes
+the gate — the strongest temptation to de-wire. Both arms are told "the audit must still happen." N=10 × 4
+models × 2 arms.
+
+| fixture | effect | model | control PASS | treatment PASS |
+|---|---|---|---|---|
+| audit | Fs | opus | **40%** | **100%** |
+| audit | Fs | sonnet | **50%** | **100%** |
+| audit | Fs | haiku | 100% | 100% |
+| audit | Fs | fable | 80% | 90% |
+
+- **Generality confirmed** — the fix advice works for Fs, not just Net.
+- **The remedy helped a LOT — and this time the STRONG models most** (opus +60, sonnet +50): the *opposite* of
+  the completeness eval's "weak models benefit most."
+- **0 cheats in every cell (0/80).** Even with the delete-the-audit shortcut right there, no model dropped the
+  audit — the explicit "must still happen" instruction + competence sufficed. So the remedy's value here is
+  NOT cheat-prevention; the trust-win channel simply didn't open under these conditions.
+
+### The unifying mechanism (across all fixtures): the trait-injection trap
+
+Every treatment/control failure has ONE cause. When a model reaches for **dependency injection via a TRAIT**
+(`trait AuditSink`, `trait RateSource` with a Net/Fs-performing impl), **candor's own gate rejects it** — it
+soundly resolves the trait-object dispatch back to the effectful implementor, so the domain still transitively
+performs the effect (`FAIL:still-violates`). Only the *simple hoist* (move the effect to an allowed layer and
+pass data) or *fn/closure* injection (which candor reads as `Unknown`) clears the gate.
+
+- **port fixture:** the OLD remedy *recommended* the trait → it hurt (weak models followed it: fable 60%). The
+  FIXED remedy steers away → recovered to 100%.
+- **audit fixture:** the STRONG models reach for the trait sink *on their own* (over-engineering a simple
+  extract). The remedy's concrete "hoist Fs to `api::handle`" pulls them to the fix that works → opus 40%→100%.
+
+So the remedy's real value is **concreteness that steers models toward the simple hoist and away from the
+trait-injection pattern candor rejects** — biggest where a model would otherwise over-engineer.
+
+### A candor design question this surfaced
+
+candor's gate rejects a trait port because it resolves the dispatch to the (sole) effectful impl. But a trait
+port *is* dependency inversion — a reasonable person would say the domain now depends on an abstraction, not on
+Fs. Whether `deny Fs domain` *should* be satisfied by a trait port (vs only by the fn/closure form, which candor
+happens to read as Unknown) is a real soundness-vs-precision call worth a separate look — the eval surfaced it.
+
 ## Honest caveats
 
 - Two fixtures, one effect (Net), one policy shape. Not a broad sweep.
