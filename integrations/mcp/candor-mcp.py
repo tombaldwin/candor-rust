@@ -80,6 +80,27 @@ TOOLS = [
         },
     },
     {
+        "name": "candor_fix",
+        "description": "THE BOUNDARY FIX (INSTANT): when a function performs an effect its architecture layer "
+                       "forbids (a policy violation `candor_whatif`/the gate reports), this computes the "
+                       "architectural REMEDY — not just 'the domain can't do Net', but WHERE the effect "
+                       "belongs and the refactor to put it there: the direct call site to hoist, the "
+                       "forbidden-layer functions that become pure and thread the value as a parameter, and "
+                       "the nearest allowed-layer caller to perform the effect. The remedial inverse of "
+                       "candor_whatif. Call this INSTEAD OF guessing a fix (adding `allow` to the domain, "
+                       "shuffling the I/O one call up, or threading a handle the wrong way) — it also prints "
+                       "the policy-relax alternative when the effect is meant to live where it is. Advisory: "
+                       "it names the structure, you write the code; the gate re-scan verifies. Needs a policy.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function": {"type": "string", "description": "the function that crossed the boundary (name; exact/segment-suffix preferred over substring)"},
+                "effect": {"type": "string", "description": "the forbidden effect to hoist out: Net Fs Db Exec Env Clock Ipc Log Rand Clipboard"},
+            },
+            "required": ["function", "effect"],
+        },
+    },
+    {
         "name": "candor_diff",
         "description": "How your recent edits changed each function's effect surface vs the committed "
                        "baseline (INSTANT) — what gained or lost an effect, INCLUDING the non-local blast "
@@ -120,6 +141,8 @@ def dispatch(name, args):
             return run_query(["callers", arg(args, "function"), "--json"])
         if name == "candor_whatif":
             return run_query(["whatif", arg(args, "function"), arg(args, "effect"), "--json"])
+        if name == "candor_fix":
+            return run_query(["fix", arg(args, "function"), arg(args, "effect"), "--json"])
         if name == "candor_diff":
             return run_query(["diff", "--json"])
     except ValueError as e:

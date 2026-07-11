@@ -229,7 +229,7 @@ load_config() {
 # The ONE command list, shared by `help` and the unknown-command usage (they had drifted apart,
 # each silently missing different commands). Keep in lockstep with the `case "$cmd"` dispatch below
 # and the header comment above.
-CMDS="setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|whatif|rewire|map|containment|reachable|path|impact|explain|policy|risk|strict|no-ambient|update|help"
+CMDS="setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|whatif|fix|rewire|map|containment|reachable|path|impact|explain|policy|risk|strict|no-ambient|update|help"
 
 # Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
 [ "${1:-}" = "candor" ] && shift
@@ -688,6 +688,22 @@ case "$cmd" in
     # default the policy to the conventional .candor/policy when the caller didn't name one
     [ "${#wargs[@]}" -eq 2 ] && [ -f .candor/policy ] && wargs+=(".candor/policy")
     query whatif .candor/report "${wargs[@]}" ${json:+"$json"}
+    exit "$?" ;;
+
+  fix)
+    # THE BOUNDARY FIX (integrations/FIX-SPEC.md): given a function performing an effect its policy layer
+    # forbids, compute the architectural remedy — where the effect belongs + the hoist refactor (perform the
+    # effect at the nearest allowed-layer caller; the forbidden span threads the value). The remedial inverse
+    # of `whatif`. A policy is required — the fix is defined relative to the boundary the edit crossed.
+    #   cargo candor fix domain::price_quote Net            # uses .candor/policy or $CANDOR_POLICY
+    #   cargo candor fix domain::price_quote Net rules.txt  # against an explicit policy file
+    json=""; wargs=()
+    for a in "$@"; do case "$a" in --json) json="1" ;; -*) ;; *) wargs+=("$a") ;; esac; done
+    [ "${#wargs[@]}" -ge 2 ] || { echo "usage: cargo candor fix <fn> <Effect> [policy-file] [--json]" >&2; exit 2; }
+    ensure_report || exit 1
+    # default the policy to the conventional .candor/policy when the caller didn't name one
+    [ "${#wargs[@]}" -eq 2 ] && [ -f .candor/policy ] && wargs+=(".candor/policy")
+    query fix .candor/report "${wargs[@]}" ${json:+"$json"}
     exit "$?" ;;
 
   rewire)
