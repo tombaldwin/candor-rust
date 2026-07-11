@@ -1,0 +1,144 @@
+//! `candor unverified` — the provable-purity disclosure (a policy-guidance companion to `fix`, from
+//! eval/fixloop/DISPATCH-NOTE.md). A `deny <E>` or `pure` rule PASSES a function that carries none of its
+//! forbidden effects — but if that function is `Unknown` (candor could not resolve one of its calls), the
+//! pass is UNVERIFIED: the Unknown could hide the very effect the rule forbids (the classic case is a
+//! fn/closure-injected "port" — the layer reads as Unknown, so `deny Net domain`/`pure domain` clear it even
+//! though the domain may reach Net at runtime). This names every such function in a governed layer and the
+//! `deny <E> Unknown <scope>` upgrade that makes the intent provable. Advisory: exit 0, or `--strict` → exit
+//! 1 so CI can REQUIRE provable purity. The gate's verdict is untouched — this only discloses the gap.
+
+use crate::load::load_entries;
+use candor_classify::policy::{parse_policy, scope_matches, PolicyRule, UNKNOWN};
+use candor_report::ReportEntry;
+
+/// Reconstruct a rule's source form and the Unknown-forbidding upgrade for it.
+fn rule_and_upgrade(r: &PolicyRule) -> (String, String) {
+    let scope = r.scope.clone().unwrap_or_default();
+    let scope_suffix = if scope.is_empty() { String::new() } else { format!(" {scope}") };
+    if r.effects.is_empty() {
+        // `pure` forbids real effects but not Unknown; to require provable purity, ADD a deny-Unknown.
+        (format!("pure{scope_suffix}"), format!("deny Unknown{scope_suffix}"))
+    } else {
+        let effs = r.effects.iter().copied().collect::<Vec<_>>().join(" ");
+        (format!("deny {effs}{scope_suffix}"), format!("deny {effs} Unknown{scope_suffix}"))
+    }
+}
+
+pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
+    if args.is_empty() {
+        eprintln!("usage: candor-query unverified <prefix> [policy] [--strict] [0|1]");
+        return 2;
+    }
+    let prefix = &args[0];
+    let mut policy_path: Option<String> = None;
+    let mut want_json = false;
+    let mut strict = false;
+    for a in &args[1..] {
+        match a.as_str() {
+            "0" => want_json = false,
+            "1" | "--json" => want_json = true,
+            "--strict" => strict = true,
+            other => policy_path = Some(other.to_string()),
+        }
+    }
+    let policy_path = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
+    let Some(pp) = policy_path else {
+        eprintln!("candor unverified: a policy is required (the check is relative to your pure/deny layers).");
+        return 2;
+    };
+    let rules = match std::fs::read_to_string(&pp) {
+        Ok(t) => parse_policy(&t).rules,
+        Err(e) => {
+            eprintln!("candor: policy `{pp}` could not be read ({e}) — nothing checked.");
+            return 2;
+        }
+    };
+    let entries = load_entries(prefix);
+    if entries.is_empty() {
+        eprintln!("candor unverified: no report for `{prefix}` — scan the crate first.");
+        return 2;
+    }
+
+    // A hole: a function that is Unknown, sits in a deny/pure scope, and PASSES that rule (carries none of its
+    // forbidden real effects) — so its compliance is asserted but not verified.
+    struct Hole<'a> {
+        func: &'a ReportEntry,
+        rule: &'a PolicyRule,
+    }
+    let mut holes: Vec<Hole> = Vec::new();
+    for e in &entries {
+        if !e.inferred.iter().any(|x| x == UNKNOWN) {
+            continue;
+        }
+        for r in &rules {
+            let in_scope = r
+                .scope
+                .as_deref()
+                .is_none_or(|s| scope_matches(&e.func, s));
+            if !in_scope {
+                continue;
+            }
+            // already a VIOLATION of this rule (carries a forbidden real effect)? the gate handles it — skip.
+            let violates = if r.effects.is_empty() {
+                e.inferred.iter().any(|x| x != UNKNOWN)
+            } else {
+                e.inferred.iter().any(|x| r.effects.contains(x.as_str()))
+            };
+            if violates {
+                continue;
+            }
+            holes.push(Hole { func: e, rule: r });
+            break; // one disclosure per function (its first governing rule)
+        }
+    }
+
+    if want_json {
+        let items: Vec<_> = holes
+            .iter()
+            .map(|h| {
+                let (rule, upgrade) = rule_and_upgrade(h.rule);
+                serde_json::json!({
+                    "fn": h.func.func,
+                    "rule": rule,
+                    "unknownWhy": h.func.unknown_why,
+                    "upgrade": upgrade,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({ "ok": items.is_empty(), "unverified": items });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return if strict && !holes.is_empty() { 1 } else { 0 };
+    }
+
+    if holes.is_empty() {
+        println!("candor unverified: every function in a pure/deny layer is PROVABLY clean (no Unknown holes) ✓");
+        return 0;
+    }
+    println!(
+        "candor unverified — {} function(s) PASS their policy but aren't PROVABLY clean:\n",
+        holes.len()
+    );
+    let mut upgrades: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for h in &holes {
+        let (rule, upgrade) = rule_and_upgrade(h.rule);
+        upgrades.insert(upgrade.clone());
+        println!("  `{}`  (in `{rule}`)", h.func.func);
+        let why = if h.func.unknown_why.is_empty() {
+            "an unresolvable call".to_string()
+        } else {
+            h.func.unknown_why.join(", ")
+        };
+        println!("     is Unknown ({why}) — candor can't confirm it's free of the forbidden effect(s);");
+        println!("     the Unknown could hide the very effect the rule forbids (e.g. a fn/closure-injected port).");
+        println!("     → make it provable:  add  `{upgrade}`");
+        println!();
+    }
+    println!("  The gate still PASSES — this is advisory. To REQUIRE provable purity, add:");
+    for u in &upgrades {
+        println!("      {u}");
+    }
+    if strict {
+        return 1;
+    }
+    0
+}

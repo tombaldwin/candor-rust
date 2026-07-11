@@ -229,7 +229,7 @@ load_config() {
 # The ONE command list, shared by `help` and the unknown-command usage (they had drifted apart,
 # each silently missing different commands). Keep in lockstep with the `case "$cmd"` dispatch below
 # and the header comment above.
-CMDS="setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|whatif|fix|rewire|map|containment|reachable|path|impact|explain|policy|risk|strict|no-ambient|update|help"
+CMDS="setup|scan|audit|snapshot|guard|diff|watch|show|where|callers|whatif|fix|unverified|rewire|map|containment|reachable|path|impact|explain|policy|risk|strict|no-ambient|update|help"
 
 # Cargo invokes external subcommands as `cargo-candor candor …`; drop the leading word.
 [ "${1:-}" = "candor" ] && shift
@@ -710,6 +710,23 @@ case "$cmd" in
       [ -f "$polfile" ] && wargs+=("$polfile")
     fi
     query fix .candor/report "${wargs[@]}" ${json:+"$json"}
+    exit "$?" ;;
+
+  unverified)
+    # PROVABLE-PURITY disclosure (integrations/FIX-SPEC.md): pure/deny layers that PASS the gate but contain
+    # `Unknown` functions — candor can't confirm they're free of the forbidden effect (the fn/closure-port
+    # hole). Names the `deny E Unknown <scope>` upgrade. Advisory (exit 0); `--strict` → exit 1 so CI can
+    # require provable purity. Resolves the policy like `policy`/`fix` do (§3.4).
+    #   cargo candor unverified            # uses .candor/config or .candor/policy
+    #   cargo candor unverified --strict   # exit 1 if any layer isn't provably clean
+    json=""; strict=""; uargs=()
+    for a in "$@"; do case "$a" in --json) json="1" ;; --strict) strict="--strict" ;; -*) ;; *) uargs+=("$a") ;; esac; done
+    ensure_report || exit 1
+    if [ "${#uargs[@]}" -eq 0 ]; then
+      polfile="${CANDOR_POLICY:-${CFG_POLICY:-.candor/policy}}"
+      [ -f "$polfile" ] && uargs+=("$polfile")
+    fi
+    query unverified .candor/report "${uargs[@]}" ${strict:+"$strict"} ${json:+"$json"}
     exit "$?" ;;
 
   rewire)

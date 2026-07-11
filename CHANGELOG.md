@@ -4,6 +4,20 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.10] — 2026-07-11
+
+### ✨ `unverified` — the provable-purity disclosure (policy guidance from the fix-loop investigation)
+
+New subcommand `unverified <prefix> [policy] [--strict]`. A `pure`/`deny <E>` layer PASSES a function that has
+no such effect — but if that function is `Unknown` (candor couldn't resolve one of its calls), the pass is
+UNVERIFIED: the Unknown could hide the very effect the rule forbids. The classic case is a fn/closure-injected
+"port" — the domain reads as Unknown, so `deny Net domain`/`pure domain` clear it though it may reach Net at
+runtime (eval/fixloop/DISPATCH-NOTE.md). `unverified` names every such function in a governed layer, its
+`unknownWhy`, and the `deny <E> Unknown <scope>` upgrade that makes the layer PROVABLY clean. Advisory (exit 0);
+`--strict` → exit 1 so CI can require provable purity. Text or `--json {ok, unverified[]}`. The gate verdict is
+untouched — this only discloses the gap. Wired into `cargo candor unverified` + the `candor_unverified` MCP
+tool. 2 regression tests. Rust-only for now; a java/ts/swift port is a natural follow-on.
+
 ## [candor-query 0.8.9] — 2026-07-11
 
 ### `fix`: the no-clean-hoist advice names the port purity hierarchy (soundness investigation)

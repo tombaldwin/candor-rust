@@ -51,3 +51,9 @@ For a layer that must be free of effect `E`, the three fixes are NOT equivalent 
 - The `fix` no-clean-hoist advice already steers to (1)/(2) and away from (3); refined it to name the
   provably-pure vs Unknown-hole trade-off between (1) and (2), so the advice is soundness-precise.
 - Recorded the trait-port-vs-`deny E` interaction so it's not re-litigated as a bug.
+- **New `candor unverified` query (candor-query, 2026-07-11)** — the policy-guidance follow-through. A
+  `pure`/`deny <E>` layer that PASSES the gate but contains `Unknown` functions is disclosed as "not PROVABLY
+  clean," with the `deny <E> Unknown <scope>` upgrade that makes the intent enforceable. `--strict` → exit 1
+  (CI can require provable purity). Advisory — the gate's verdict is untouched; this only surfaces the gap the
+  hierarchy above creates. Wired into `cargo candor unverified` + the `candor_unverified` MCP tool. Rust-only
+  for now (the primary query engine); a java/ts/swift port is a natural follow-on.

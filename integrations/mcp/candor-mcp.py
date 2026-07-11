@@ -101,6 +101,18 @@ TOOLS = [
         },
     },
     {
+        "name": "candor_unverified",
+        "description": "PROVABLE-PURITY check (INSTANT): a `pure`/`deny <E>` policy layer PASSES a function that "
+                       "has no such effect — but if that function is Unknown (candor couldn't resolve one of "
+                       "its calls), the pass is UNVERIFIED: the Unknown could hide the very effect the rule "
+                       "forbids. The classic case is a fn/closure-injected 'port' — the domain reads as Unknown, "
+                       "so `deny Net domain`/`pure domain` clear it even though it may reach Net at runtime. "
+                       "Returns each such function + the `deny <E> Unknown <scope>` upgrade that makes the layer "
+                       "PROVABLY clean. Use to check whether your pure/deny layers are truly effect-free or just "
+                       "effect-free-as-far-as-candor-could-resolve. Uses the repo's checked-in policy.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "candor_diff",
         "description": "How your recent edits changed each function's effect surface vs the committed "
                        "baseline (INSTANT) — what gained or lost an effect, INCLUDING the non-local blast "
@@ -143,6 +155,8 @@ def dispatch(name, args):
             return run_query(["whatif", arg(args, "function"), arg(args, "effect"), "--json"])
         if name == "candor_fix":
             return run_query(["fix", arg(args, "function"), arg(args, "effect"), "--json"])
+        if name == "candor_unverified":
+            return run_query(["unverified", "--json"])
         if name == "candor_diff":
             return run_query(["diff", "--json"])
     except ValueError as e:

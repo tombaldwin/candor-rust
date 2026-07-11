@@ -652,6 +652,63 @@ fn fix_gate_unreadable_policy_exits_2() {
     assert_eq!(out.status.code(), Some(2), "an unreadable policy must exit 2");
 }
 
+#[test]
+fn unverified_flags_an_unknown_in_a_deny_scope() {
+    // A domain fn is Unknown (not the denied Net, so `deny Net domain` PASSES it) — but the Unknown could
+    // hide Net (a fn/closure-injected port). `unverified` discloses it + names the `deny Net Unknown domain`
+    // upgrade; `--strict` exits 1. A provably-pure domain fn is not flagged. (eval/fixloop/DISPATCH-NOTE.md.)
+    let f = Fixture::new("fixunv");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "of",
+  "functions": [
+    { "fn": "domain::price", "loc": "src/d.rs:1:1", "inferred": ["Unknown"], "unknownWhy": ["callback:injected"], "hash": "of#p", "paths": ["/x"] },
+    { "fn": "domain::calc",  "loc": "src/d.rs:9:1", "inferred": [], "hash": "of#c", "paths": ["/x"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let out = Command::new(bin())
+        .args(["unverified", &f.prefix, &pol, "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0), "advisory by default → exit 0");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(false), "an Unknown-in-scope hole exists");
+    let items = v["unverified"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "only the Unknown fn is flagged, not the provably-pure one");
+    assert_eq!(items[0]["fn"], serde_json::json!("domain::price"));
+    assert_eq!(items[0]["upgrade"], serde_json::json!("deny Net Unknown domain"));
+    // --strict → exit 1 (CI can require provable purity).
+    let strict = Command::new(bin())
+        .args(["unverified", &f.prefix, &pol, "--strict"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(strict.status.code(), Some(1), "--strict must exit 1 on an unverified hole");
+}
+
+#[test]
+fn unverified_provably_pure_scope_is_clean() {
+    // A domain with only real-effect-free, resolvable functions → no Unknown holes → clean, exit 0 even strict.
+    let f = Fixture::new("fixunvok");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "of",
+  "functions": [
+    { "fn": "domain::calc", "loc": "src/d.rs:1:1", "inferred": [], "hash": "of#c", "paths": ["/x"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    let out = Command::new(bin())
+        .args(["unverified", &f.prefix, &pol, "--strict", "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0), "no Unknown holes → clean, exit 0 even under --strict");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(true));
+}
+
 // ── callers --include-unknown: the unresolved-dispatch frontier (⟨0.7⟩ — was conformance-only) ─────
 // TESTING.md §3: engine-local behavior needs in-repo coverage; this arm previously lived only in the
 // candor-spec conformance suite. Names are dot-separated (the swift/JVM report shape this arm serves).
