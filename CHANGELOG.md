@@ -4,6 +4,20 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.8] — 2026-07-11
+
+### `fix`: no-clean-hoist advice rewritten (eval-driven — the remedy was steering agents wrong)
+
+The fix-loop eval (candor-rust/eval/fixloop) measured that on the no-clean-hoist case candor's remedy did NOT
+help and HURT weaker models (fable 60% vs control 100%): agents followed the literal "introduce a PORT (a
+trait)" advice and wrote a trait port, which candor's OWN gate then rejected — it resolves the trait dispatch
+back to the effect-performing impl, so the layer still violates. And "NO CLEAN HOIST" was computed on the
+existing graph, so it wrongly declared impossible the simplest valid fix (add a thin composition root above
+the layer). The advice now (a) LEADS with the composition-root hoist, and (b) recommends fn/closure injection
+with candor's trait-dispatch caveat ("a trait port whose impl performs the effect still trips the gate").
+Text-only (the cut/JSON is unchanged; conformance PART 12b still MATCHES). Re-running the eval: the fixed
+remedy recovers the treatment arm to 100% across all four models (fable 60% → 100%). See eval/fixloop/RESULTS.md.
+
 ## [candor-query 0.8.7] — 2026-07-11
 
 ### `fix`: the sandwiched-layer case is now handled (last correctness gap closed)

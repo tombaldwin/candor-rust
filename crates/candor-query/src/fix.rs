@@ -118,11 +118,16 @@ impl RemedyPlan<'_> {
             } else {
                 let _ = writeln!(out, "  NO CLEAN HOIST — every caller up to the entry points is also in a {}-forbidding layer.", self.effect);
             }
-            let _ = writeln!(out, "  Two honest options:");
-            let _ = writeln!(out, "    (a) Introduce a PORT: have the domain take an interface parameter (a trait) it receives,");
-            let _ = writeln!(out, "        implemented by an adapter in an allowed layer that performs {} and injects the", self.effect);
-            let _ = writeln!(out, "        result (dependency inversion) — the domain depends on the abstraction, not the I/O.");
-            let _ = writeln!(out, "    (b) If the domain legitimately needs {}, relax the boundary:  `{}`.", self.effect, self.allow_edit);
+            let _ = writeln!(out, "  Three ways to fix it:");
+            let _ = writeln!(out, "    (a) HOIST TO A NEW ENTRY POINT — add a thin function ABOVE the {layer_label} layer that performs");
+            let _ = writeln!(out, "        {} and passes the result DOWN as a plain value; the {layer_label} functions take it as a parameter", self.effect);
+            let _ = writeln!(out, "        and stay pure. (candor says \"no clean hoist\" only because no allowed caller EXISTS yet — you can");
+            let _ = writeln!(out, "        add one; this is usually the simplest fix.)");
+            let _ = writeln!(out, "    (b) INJECT IT (dependency inversion) — give the {layer_label} layer a FUNCTION/CLOSURE parameter that");
+            let _ = writeln!(out, "        supplies the value, provided by an adapter in an allowed layer. Use a fn/closure, NOT a trait:");
+            let _ = writeln!(out, "        candor reads a call through a function value as Unknown (so `deny {}` clears), but RESOLVES a", self.effect);
+            let _ = writeln!(out, "        trait dispatch back to its implementor — a trait port whose impl performs {} still trips the gate.", self.effect);
+            let _ = writeln!(out, "    (c) If the {layer_label} layer legitimately needs {}, relax the boundary:  `{}`.", self.effect, self.allow_edit);
         }
     }
 }

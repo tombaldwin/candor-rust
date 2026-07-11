@@ -62,6 +62,25 @@ gate then rejected**. Two distinct causes:
 - Add a **"hoist by introducing a composition root"** option: when there's no existing allowed caller, adding
   a thin entry-point *above* the denied layer (and threading the value as data) is usually simpler than a port.
 
+## Re-measure — the remedy fix recovered the treatment arm (2026-07-11)
+
+The two flaws were fixed in the remedy TEXT (candor-query 0.8.8 / candor-java 0.8.12 / candor-ts 0.8.14): the
+no-clean-hoist advice now **leads with the composition-root hoist** ("add a thin entry point above the layer,
+thread the value down") and **recommends fn/closure injection with candor's own trait-dispatch caveat** ("a
+trait port whose impl performs Net still trips the gate"). Re-running the treatment arm on the port fixture
+with the new remedy (same N=10 × 4 models):
+
+| model | control | treatment (OLD remedy) | treatment (FIXED remedy) |
+|---|---|---|---|
+| opus | 100% | 100% | **100%** |
+| sonnet | 100% | 90% | **100%** |
+| haiku | 100% | 100% | **100%** |
+| fable | 100% | **60%** | **100%** |
+
+The fixed remedy **no longer hurts** — it matches control across every model; fable recovered 60% → 100%,
+sonnet 90% → 100%. That confirms the regression was caused by the bad advice (not noise), and that the text
+fix resolved it. The full loop: **measure → find the flaw → fix the advice → re-measure → recovered.**
+
 ## Honest caveats
 
 - Two fixtures, one effect (Net), one policy shape. Not a broad sweep.
