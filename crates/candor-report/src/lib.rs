@@ -376,7 +376,7 @@ mod tests {
         assert!(!empty.contains("unknownWhy"), "empty unknownWhy must be omitted: {empty}");
         assert!(!empty.contains("entryPoint"), "false entryPoint must be omitted: {empty}");
         // the spec contract version (§2.1) is emitted in the envelope header.
-        assert!(s.contains("\"spec\":\"0.8\""), "envelope must carry the spec version: {s}");
+        assert!(s.contains("\"spec\":\"0.9\""), "envelope must carry the spec version: {s}");
         assert_eq!(SPEC_VERSION, "0.9");
     }
 
