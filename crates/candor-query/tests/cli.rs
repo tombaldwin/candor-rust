@@ -462,6 +462,33 @@ fn fix_surfaces_higher_hoist_tradeoff() {
 }
 
 #[test]
+fn fix_prefers_the_effect_performing_match() {
+    // A bare leaf `save` matches BOTH a pure `cache::save` (sorts first) and the effectful, denied
+    // `repo::save`. Resolution must prefer the match that performs the effect — otherwise `fix save Net`
+    // resolves to `cache::save`, prints "nothing to hoist", and gives a false all-clear while ts/swift
+    // (which prefer the effectful match) emit the real fix. (/code-review — start-resolution parity.)
+    let f = Fixture::new("fixresolve");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.8" },
+  "package": "of",
+  "functions": [
+    { "fn": "cache::save", "loc": "src/c.rs:1:1", "inferred": [], "hash": "of#cs", "paths": ["/x"], "calls": [] },
+    { "fn": "repo::save",  "loc": "src/r.rs:1:1", "inferred": ["Net"], "direct": ["Net"], "hash": "of#rs", "paths": ["/x"], "calls": [] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+    let pol = write_policy(&f, "p.policy", "deny Net repo\n");
+    let out = Command::new(bin())
+        .args(["fix", &f.prefix, "save", "Net", &pol, "1"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["fn"], serde_json::json!("repo::save"), "must resolve to the effectful, denied match");
+    assert_eq!(v["site"], serde_json::json!(["repo::save"]), "repo::save is the direct site");
+}
+
+#[test]
 fn fix_no_clean_hoist_offers_port_and_policy() {
     // When every caller up to the entry is ALSO in the forbidden layer, candor does NOT invent a target:
     // it names the two honest options (port / policy relax), and cleanHoist is false.

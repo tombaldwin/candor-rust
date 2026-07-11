@@ -164,10 +164,12 @@ fn compute_remedy<'a>(
     while let Some(cur) = up.pop_front() {
         if let Some(cs) = rev.get(cur) {
             for &caller in cs {
-                if let Some(ce) = by_name.get(caller)
-                    && !ce.inferred.iter().any(|e| e == effect)
-                {
-                    continue; // doesn't route the effect
+                // skip a caller that doesn't route the effect — INCLUDING one absent from the report (a pure
+                // callgraph-only node never carries the effect). Matches candor-swift; avoids classifying a
+                // pure node into the span/hoist. (/code-review — was `if let Some(ce) = … && !…`.)
+                let Some(ce) = by_name.get(caller) else { continue };
+                if !ce.inferred.iter().any(|e| e == effect) {
+                    continue;
                 }
                 if denied_layer(caller, effect, rules).is_some() {
                     if denied_span.insert(caller) {
@@ -269,11 +271,17 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
     }
     let by_name: HashMap<&str, &ReportEntry> = entries.iter().map(|e| (e.func.as_str(), e)).collect();
 
+    // Resolve `target` among the best-tier name matches, PREFERRING one that actually performs the effect —
+    // so a bare leaf (`save`) resolves to the violating `Repo.save`, not a same-named pure `Cache.save` that
+    // happens to sort first. (Must match candor-ts/candor-java/candor-swift exactly — a divergence here flips
+    // a real remedy into a false "nothing to hoist" on some engines. /code-review.)
     let tier = best_tier(entries.iter().map(|e| e.func.as_str()), target);
-    let Some(start) = entries
+    let matches: Vec<&ReportEntry> = entries.iter().filter(|e| tier > 0 && q_match(&e.func, target, tier)).collect();
+    let Some(start) = matches
         .iter()
-        .find(|e| &e.func == target)
-        .or_else(|| entries.iter().find(|e| q_match(&e.func, target, tier)))
+        .copied()
+        .find(|e| e.inferred.iter().any(|x| x == effect))
+        .or_else(|| matches.first().copied())
     else {
         eprintln!("candor fix: no function matching `{target}`.");
         return 2;
@@ -340,9 +348,16 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
 
     // Every (function, effect) that trips a deny/pure rule → its remedy, collapsed to one plan per root
     // cause (dedup_key folds the inheritors of a single crossing together).
+    // Iterate functions (and effects) in sorted order so the first-writer-wins `fn` representative of a
+    // collapsed remedy is deterministic across engines (load_entries doesn't sort; java/swift/ts all iterate
+    // a sorted key set). The BTreeMap already emits remedies in dedup-key order. (/code-review.)
+    let mut sorted: Vec<&ReportEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.func.cmp(&b.func));
     let mut plans: BTreeMap<String, RemedyPlan> = BTreeMap::new();
-    for e in &entries {
-        for effect in &e.inferred {
+    for e in sorted {
+        let mut effs: Vec<&String> = e.inferred.iter().collect();
+        effs.sort();
+        for effect in effs {
             if let Some(layer) = denied_layer(&e.func, effect, &rules) {
                 let plan = compute_remedy(&by_name, &rev, &rules, e, effect, layer);
                 plans.entry(plan.dedup_key()).or_insert(plan);

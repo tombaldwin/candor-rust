@@ -4,6 +4,22 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## [candor-query 0.8.6] — 2026-07-11
+
+### `fix`: cross-engine parity fixes (from a high-effort /code-review)
+
+- **Start resolution** now prefers a name match that PERFORMS the effect (so `fix save Net` resolves to the
+  effectful `Repo.save`, not a pure `Cache.save` that sorts first) — matching candor-ts/swift. Previously
+  Rust/Java could give a false "nothing to hoist" all-clear while the other engines emitted the real fix.
+- **`byName`-absent caller** in the up-walk is now skipped (a pure callgraph-only node never routes the
+  effect), instead of being classified into the span/hoist — matching candor-swift; avoids naming a pure
+  node as a hoist target.
+- **`fix-gate` determinism**: functions/effects are iterated in sorted order, so the collapsed remedy's `fn`
+  representative is deterministic across engines (the remedy set + order were already dedup-key-sorted).
+- **`cargo candor fix`** now resolves the policy the way the `policy` command does (`CANDOR_POLICY` →
+  `.candor/config` → `.candor/policy`), so the MCP `candor_fix` tool works zero-config in a repo that checks
+  its policy into `.candor/config` — where it previously failed "policy required" though `candor_gate` worked.
+
 ## [candor-query 0.8.5] — 2026-07-11
 
 ### `fix`/`fix-gate`: the higher-hoist trade-off (FIX-SPEC's last refinement)

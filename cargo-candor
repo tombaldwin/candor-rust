@@ -701,8 +701,14 @@ case "$cmd" in
     for a in "$@"; do case "$a" in --json) json="1" ;; -*) ;; *) wargs+=("$a") ;; esac; done
     [ "${#wargs[@]}" -ge 2 ] || { echo "usage: cargo candor fix <fn> <Effect> [policy-file] [--json]" >&2; exit 2; }
     ensure_report || exit 1
-    # default the policy to the conventional .candor/policy when the caller didn't name one
-    [ "${#wargs[@]}" -eq 2 ] && [ -f .candor/policy ] && wargs+=(".candor/policy")
+    # When the caller didn't name a policy, resolve it the SAME way the `policy` command does (spec §3.4):
+    # $CANDOR_POLICY → .candor/config's `policy` key ($CFG_POLICY) → the conventional .candor/policy. Without
+    # this, `cargo candor fix` (and the MCP `candor_fix`) fails 'policy required' in a repo that checks its
+    # policy into .candor/config — exactly where `candor_gate` resolves it. (/code-review.)
+    if [ "${#wargs[@]}" -eq 2 ]; then
+      polfile="${CANDOR_POLICY:-${CFG_POLICY:-.candor/policy}}"
+      [ -f "$polfile" ] && wargs+=("$polfile")
+    fi
     query fix .candor/report "${wargs[@]}" ${json:+"$json"}
     exit "$?" ;;
 
