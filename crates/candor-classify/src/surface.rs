@@ -109,8 +109,18 @@ pub struct Find {
     pub score: i64,
 }
 
+/// Test code: excluded from surfacing. A function is test code when any MODULE segment (every `::`-segment
+/// EXCEPT the final leaf) is, case-insensitively, `test`/`tests` (a test module), or — original case — ends
+/// with `Test`/`Tests` (an XCTest-style `*Tests` type). Never based on the leaf, so a production
+/// `Foo::test_connection` (leaf `test_connection`) is KEPT; a top-level `tests::helper` or a nested
+/// `foo::tests::helper` is excluded. Matches the java/swift ports' segment rule (TS uses a path predicate).
 fn is_test(qual: &str) -> bool {
-    qual.contains("::tests::") || qual.contains("::test::")
+    let mut segs: Vec<&str> = qual.split("::").collect();
+    segs.pop(); // the final segment is the leaf — never the exclusion basis
+    segs.iter().any(|s| {
+        let l = s.to_ascii_lowercase();
+        l == "test" || l == "tests" || s.ends_with("Test") || s.ends_with("Tests")
+    })
 }
 
 /// Does a set contain the effect `e`? Membership via `AsRef<str>` so it works over both

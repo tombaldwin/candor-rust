@@ -7,19 +7,30 @@
 
 use crate::*;
 
+/// The report's `package` name (the §2 envelope field), or `None` if absent/unreadable — the tour header
+/// prefers it (meaningful, locator-independent) over the prefix basename.
+fn report_package(prefix: &str) -> Option<String> {
+    let path = glob_reports(prefix).into_iter().next()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("package")?.as_str().filter(|s| !s.is_empty()).map(String::from)
+}
+
 /// `tour [<N>]` — the N (default 10) most surprising reaches in the report's crate, each with a
 /// ready-to-run `candor path <fn> <effect>` command. §3.3.1 grammar: report DISCOVERED or via `--report`,
 /// `--json` for machines. The optional positional integer sets how many to list. Read-only.
 pub(crate) fn cmd_tour(args: &[String]) -> i32 {
     let g = parse(args, Shape { verb_args: 1, sentinel: false, has_policy: false });
     let want_json = g.want_json;
-    // The lone optional positional is N (how many to list); default 10. A non-integer is a usage error.
+    // The lone optional positional is N (how many to list); default 10. It MUST be a positive integer —
+    // a non-integer OR zero is a usage error (exit 2). `tour 0` must never print the honest-sounding
+    // "nothing hidden" over an effectful crate: that would be a false all-clear (the §4 cardinal sin).
     let n: usize = match g.positional.first() {
         None => 10,
         Some(s) => match s.parse::<usize>() {
-            Ok(v) => v,
-            Err(_) => {
-                eprintln!("usage: candor-query tour [<N>] [--report <locator>] [--json]   (N is a positive integer)");
+            Ok(v) if v >= 1 => v,
+            _ => {
+                eprintln!("usage: candor-query tour [<N>] [--report <locator>] [--json]   (N is a positive integer ≥ 1)");
                 return 2;
             }
         },
@@ -67,7 +78,9 @@ pub(crate) fn cmd_tour(args: &[String]) -> i32 {
 
     let finds = candor_classify::surface::best_finds(&inferred, &direct, &calls, &loc, n);
 
-    let crate_name = prefix_base(pre);
+    // The header names the report's PACKAGE (from the §2 envelope) — meaningful and locator-independent,
+    // so every engine and every --report form print the same crate. Falls back to the prefix basename.
+    let crate_name = report_package(pre).unwrap_or_else(|| prefix_base(pre));
     if want_json {
         #[derive(Serialize)]
         struct Reach {
