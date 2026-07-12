@@ -1,7 +1,8 @@
 # candor scan — surface the best find (the cold-repo hook)
 
-_Design doc. Status: **scoped**, from the 2026-07-12 top-of-funnel work. Makes the two-minute cold-repo demo
-deterministic instead of lucky._
+_Design doc. Status: **P1 shipped** (2026-07-12) — candor-scan emits the scan-time note (`src/surface.rs`).
+P2 (`candor tour` top-N) and P3 (cross-engine parity + conformance pin) remain. Makes the two-minute
+cold-repo demo deterministic instead of lucky._
 
 ## Why
 

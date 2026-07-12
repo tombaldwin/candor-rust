@@ -53,6 +53,7 @@ mod config;
 mod gate;
 mod propagate;
 mod scan;
+mod surface;
 
 // One flat crate namespace: main.rs was a single 7.9k-line file until 2026-07; the
 // split into modules kept every item reachable exactly as before (byte-identical

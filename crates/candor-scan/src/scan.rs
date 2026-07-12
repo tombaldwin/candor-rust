@@ -1099,6 +1099,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         );
     }
 
+    // The cold-repo hook: after the effect summary + κ ledger, surface the SINGLE most surprising
+    // transitive reach + a ready-to-run `candor path` command — so the two-minute demo opener is
+    // deterministic, not lucky. Pure call-graph + name analysis (no LLM); honest fallback when
+    // nothing clears the bar. See surface.rs / SURFACE-BEST-FIND-DESIGN.md. STDERR only (stdout may
+    // carry the JSON report), and AFTER the histogram + κ ledger in output order.
+    if !quiet {
+        crate::surface::emit(&inferred, &direct, &calls, &loc);
+    }
+
     // Human gate output (the violation lines AND the ✓/count summaries) goes to STDERR whenever
     // stdout carries a JSON document — the report (`--json`) or the streamed verdict
     // (`--gate-json -`) — so stdout stays a single pure JSON document (pipeable to `jq` /
