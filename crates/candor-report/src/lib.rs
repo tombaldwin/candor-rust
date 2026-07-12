@@ -30,6 +30,20 @@ pub struct ReportFile {
 /// disagree about which files are reports.
 pub fn report_files(prefix: &str) -> Vec<ReportFile> {
     let p = Path::new(prefix);
+    // A locator that is an existing FILE ending `.json` is a DIRECT single-report reference (SPEC
+    // §3.3.1: "a path ending `.json` → that single report file loaded directly", ANY filename, whatever
+    // its internal dot-segments — so one engine can query another's report by path). It is NOT globbed
+    // as a prefix: return exactly that file. `<crate>.<type>` are parsed best-effort from the name (for
+    // `report_backend`/`audit` labelling) and default to the whole stem / `""` when the name isn't the
+    // canonical `<base>.<crate>.<type>.json` shape.
+    if prefix.ends_with(".json") && p.is_file() {
+        let stem = p.file_name().and_then(|s| s.to_str()).and_then(|n| n.strip_suffix(".json")).unwrap_or("");
+        let (krate, kind) = match stem.rsplit_once('.') {
+            Some((rest, kind)) => (rest.rsplit_once('.').map(|(_, k)| k).unwrap_or(rest).to_string(), kind.to_string()),
+            None => (stem.to_string(), String::new()),
+        };
+        return vec![ReportFile { path: p.to_path_buf(), krate, kind }];
+    }
     let dir = p
         .parent()
         .filter(|d| !d.as_os_str().is_empty())

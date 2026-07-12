@@ -59,14 +59,12 @@ pub(crate) fn cmd_diff(args: &[String]) -> i32 {
     }
     // Old form: a `0|1` sentinel in the third slot (before the version stamps). Detect + strip it.
     let mut rest: Vec<String> = pos[2..].to_vec();
-    if let Some(first) = rest.first() {
-        if first == "0" || first == "1" {
-            deprecation_note("a trailing `0|1` JSON sentinel");
-            if first == "1" {
-                want_json = true;
-            }
-            rest.remove(0);
+    if matches!(rest.first().map(String::as_str), Some("0") | Some("1")) {
+        deprecation_note("a trailing `0|1` JSON sentinel");
+        if rest.first().map(String::as_str) == Some("1") {
+            want_json = true;
         }
+        rest.remove(0);
     }
     let cur_loc = resolve_locator(&pos[0]);
     let base_loc = resolve_locator(&pos[1]);
@@ -325,12 +323,10 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
             return 2;
         }
     };
-    if let Some(last) = pos.get(2) {
-        if last == "0" || last == "1" {
-            deprecation_note("a trailing `0|1` JSON sentinel");
-            if last == "1" {
-                want_json = true;
-            }
+    if matches!(pos.get(2).map(String::as_str), Some("0") | Some("1")) {
+        deprecation_note("a trailing `0|1` JSON sentinel");
+        if pos.get(2).map(String::as_str) == Some("1") {
+            want_json = true;
         }
     }
     let (cur_pre, base_pre) = (cur_loc.as_str(), base_loc.as_str());

@@ -36,52 +36,36 @@ pub(crate) fn deprecation_note(what: &str) {
     });
 }
 
-/// Resolve a `--report <locator>` to a report PREFIX/path per the §3.3.1 one rule:
-///   - a directory            → `<dir>/.candor/report`
-///   - a path ending `.json`  → that full report path (returned as-is; callers glob its own prefix)
-///   - otherwise              → a prefix, used verbatim
+/// Resolve a `--report`/`CANDOR_REPORT` `<locator>` to a report reference per the §3.3.1 ONE rule
+/// (resolved IDENTICALLY for both sources):
+///   - a directory → `<dir>/.candor/report` (a prefix);
+///   - a path ending `.json` → that SINGLE report file, loaded directly (returned verbatim; ANY `.json`
+///     filename, whatever its internal dot-segments — `report_files` recognises an existing `.json` file
+///     as a direct single-report reference, not a prefix);
+///   - otherwise → a prefix, used verbatim.
 pub(crate) fn resolve_locator(loc: &str) -> String {
     let p = Path::new(loc);
     if p.is_dir() {
         return p.join(".candor").join("report").to_string_lossy().into_owned();
     }
-    if loc.ends_with(".json") {
-        // A full report path like `out/report.lib.jvm.json`: strip the `.<crate>.<backend>.json` tail so
-        // the result is a PREFIX the existing loaders (which glob `<prefix>.<crate>.<backend>.json`) can
-        // use. If the tail doesn't match that shape, fall back to the path as-is.
-        if let Some(pre) = strip_report_suffix(loc) {
-            return pre;
-        }
-        return loc.to_string();
-    }
+    // A `.json` locator names a single report file directly — pass it through unchanged so the loaders
+    // (via `report_files`) load THAT file, regardless of whether its name matches the canonical
+    // `<base>.<crate>.<backend>.json` shape.
     loc.to_string()
-}
-
-/// Strip a `<crate>.<backend>.json` tail from a full report path, yielding its prefix. `None` when the
-/// name doesn't have at least the two trailing dot-segments + `.json`.
-fn strip_report_suffix(path: &str) -> Option<String> {
-    let p = Path::new(path);
-    let dir = p.parent();
-    let name = p.file_name()?.to_str()?;
-    let rest = name.strip_suffix(".json")?;
-    // rest = `<base>.<crate>.<backend>` — drop the last two dot-segments to recover `<base>`.
-    let backend_dot = rest.rfind('.')?;
-    let crate_dot = rest[..backend_dot].rfind('.')?;
-    let base = &rest[..crate_dot];
-    Some(match dir {
-        Some(d) if !d.as_os_str().is_empty() => d.join(base).to_string_lossy().into_owned(),
-        _ => base.to_string(),
-    })
 }
 
 /// Discover the report prefix with no `--report`: `CANDOR_REPORT` if set, else walk UP from CWD for a
 /// `.candor/` directory and use `<that>/.candor/report`. `None` if neither is found (the caller then
 /// fails loud via the usual no-files path).
 pub(crate) fn discover_report_prefix() -> Option<String> {
-    if let Ok(env) = std::env::var("CANDOR_REPORT") {
-        if !env.is_empty() {
-            return Some(env);
-        }
+    if let Ok(env) = std::env::var("CANDOR_REPORT")
+        && !env.is_empty()
+    {
+        // `CANDOR_REPORT` resolves by the SAME §3.3.1 locator rule as `--report`: a directory →
+        // `<dir>/.candor/report`; a `.json` path → that single report file; else a prefix. Passing the
+        // raw value through as a prefix made `CANDOR_REPORT=<dir>` glob `<dir>.<crate>.<backend>.json`
+        // and fail "no report files" instead of finding `<dir>/.candor/report.*`.
+        return Some(resolve_locator(&env));
     }
     let mut dir = std::env::current_dir().ok()?;
     loop {
@@ -143,7 +127,11 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
                     report = Some(resolve_locator(v));
                     i += 1;
                 } else {
-                    eprintln!("candor-query: --report requires a <locator> argument");
+                    // A `--report` with no value is a LOUD failure (SPEC §3.3.1), never a silent
+                    // fall-through to discovery against a DIFFERENT report — that would answer a query
+                    // the user did not ask (the §4 cardinal-sin posture on the wrong report).
+                    eprintln!("candor-query: --report requires a <locator> argument (a directory, a `.json` report file, or a prefix)");
+                    std::process::exit(2);
                 }
             }
             "--policy" => {
@@ -165,16 +153,15 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
 
     // (a) trailing `0|1` JSON sentinel (all report queries appended it). Only when there's an extra
     //     positional beyond the verb's own args — never strip a lone verb argument that happens to be "0".
-    if shape.sentinel && positional.len() > shape.verb_args {
-        if let Some(last) = positional.last() {
-            if last == "0" || last == "1" {
-                deprecation_note("a trailing `0|1` JSON sentinel");
-                if last == "1" {
-                    want_json = true;
-                }
-                positional.pop();
-            }
+    if shape.sentinel
+        && positional.len() > shape.verb_args
+        && matches!(positional.last().map(String::as_str), Some("0") | Some("1"))
+    {
+        deprecation_note("a trailing `0|1` JSON sentinel");
+        if positional.last().map(String::as_str) == Some("1") {
+            want_json = true;
         }
+        positional.pop();
     }
 
     // (b) positional policy (whatif/fix/fix-gate/unverified) — the OLD grammar put it AFTER the report +

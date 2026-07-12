@@ -105,10 +105,14 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
 }
 
 pub(crate) fn cmd_containment(args: &[String]) -> i32 {
-    // `containment [<baseline-locator>]`: the report discovers / comes via --report; the first positional
-    // is the OPTIONAL baseline. The deprecated old form drove the report as a leading positional (handled
-    // by the grammar's alias detection), so `pos` then still leaves the baseline (if any) in slot 0.
-    let g = parse(args, Shape { verb_args: 0, sentinel: false, has_policy: false });
+    // `containment [<baseline-locator>]`: the report discovers / comes via `--report`; the SINGLE
+    // canonical positional is the OPTIONAL baseline (verb_args: 1). A lone bare positional is therefore
+    // the BASELINE (the gating ratchet), never re-read as the deprecated leading report — which would
+    // silently drop to non-gating report mode (the §4 cardinal-sin, gate-off, the bug this fixes). The
+    // deprecated old form drove the report as a leading positional AHEAD of the baseline; it is arity-
+    // gated (only when positionals EXCEED 1), so `<report> <baseline>` still peels the report and leaves
+    // the baseline in slot 0.
+    let g = parse(args, Shape { verb_args: 1, sentinel: false, has_policy: false });
     let want_json = g.want_json;
     let Some(cur_pre) = report_or_discover(&g) else {
         eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
