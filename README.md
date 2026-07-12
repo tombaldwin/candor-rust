@@ -169,8 +169,8 @@ what the compiler *resolves*. It catches path-qualified effect calls (`std::fs::
 implementors — syntactic CHA, bounded like the JVM engine's — or reads `Unknown` when the trait has no
 visible impl or too many). It **discloses `Unknown`** where it can see the boundary it can't see
 through: an invoked fn-value/callback, an FFI `extern` call, an untrusted chained report. For
-dependencies, the receipt **names what the classifier can't see** (the κ-coverage ledger:
-`κ doesn't know N dependencies this code calls into…`) and `--deps` **closes it**:
+dependencies, the receipt **names what the classifier can't see** (the coverage ledger:
+`candor's classifier doesn't cover N dependencies this code calls into…`) and `--deps` **closes it**:
 scan the whole `Cargo.lock` tree once (unbuilt registry sources, ~0.23s/dep measured) and the root
 scan chains over the reports — effects cross every crate boundary without the classifier knowing the
 crates (spec §2 report chaining). It **misses** — *silently*, by design — effects reached only through

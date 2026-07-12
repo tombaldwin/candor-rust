@@ -84,7 +84,7 @@ pub(crate) fn scan_main() {
                 println!("  --deps            scan the Cargo.lock dependency tree first (registry sources from");
                 println!("                    ~/.cargo/registry/src) into <dir>/.candor/deps/, then scan <dir>");
                 println!("                    CHAINED over those reports — effects cross every crate boundary");
-                println!("                    without κ needing to know the crates.");
+                println!("                    without the classifier needing to know the crates.");
                 println!("  --policy <file>   enforce a CANDOR_POLICY file (deny/pure/allow/forbid, spec §6.2)");
                 println!("  --gate-json <f>   write the structured gate verdict {{ spec, ok, violations }} as JSON (spec §3.3)");
                 println!("                    over this scan; exit 1 on violation. ADVISORY FLOOR: the syntactic");
@@ -99,7 +99,7 @@ pub(crate) fn scan_main() {
                 println!("  CANDOR_DEPS=<p:…> chain sibling reports (files or directories of *.json): an");
                 println!("                    unclassified call into a crate a report covers inherits that");
                 println!("                    function's effects + literal surfaces (spec §2). Scan the dep");
-                println!("                    once, chain it everywhere; the κ ledger names what to scan next.");
+                println!("                    once, chain it everywhere; the coverage ledger names what to scan next.");
                 println!("  -V, --version     print the installed build + spec contract (offline) and the upgrade line");
                 println!();
                 println!("Syntactic, so it under-reports vs the full candor nightly lint (Unknown only for");
@@ -1090,10 +1090,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             unlisted.iter().take(8).map(|(cr, n)| format!("{cr} ({n} call{})", if *n == 1 { "" } else { "s" })).collect();
         let more = if unlisted.len() > 8 { format!(" + {} more", unlisted.len() - 8) } else { String::new() };
         eprintln!(
-            "candor-scan: κ doesn't know {} dependenc{} this code calls into — effects through {} are INVISIBLE (not Unknown): {}{}",
+            "candor-scan: candor's classifier doesn't cover {} dependenc{} this code calls into — their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): {}{}",
             unlisted.len(),
             if unlisted.len() == 1 { "y" } else { "ies" },
-            if unlisted.len() == 1 { "it" } else { "them" },
             shown.join(", "),
             more
         );

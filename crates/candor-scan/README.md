@@ -54,9 +54,9 @@ under-report, never a wrong label.
   The Deref and generic-field shapes are measured in the wild (the PROVE-IT dogfood on `ureq`): 14 of a
   16-function blast radius found, those two shapes the remainder — under-reported, never fabricated.
 
-- **The κ-coverage ledger:** the receipt names every `Cargo.toml` dependency the code demonstrably
-  calls that the classifier knows nothing about (`κ doesn't know N dependencies… effects through
-  them are INVISIBLE (not Unknown)`). The curated-classifier caveat as per-scan evidence instead of
+- **The coverage ledger:** the receipt names every `Cargo.toml` dependency the code demonstrably
+  calls that the classifier knows nothing about (`candor's classifier doesn't cover N dependencies…
+  their effects are INVISIBLE to the scan`). The curated-classifier caveat as per-scan evidence instead of
   a doc footnote: never conclude "no effect" through a crate that line names.
 - **Close a named blind spot by CHAINING (`CANDOR_DEPS`):** scan the dependency itself (the scanner
   reads unbuilt source — `~/.cargo/registry/src/...` works directly), then point `CANDOR_DEPS` at
@@ -64,7 +64,7 @@ under-report, never a wrong label.
   a report covers inherits that function's recorded effects AND literal surfaces (hosts/cmds/paths/
   tables) across the crate boundary, joined unambiguous-tail-first like every other resolution
   (spec §2; reports from a different scanner version are downgraded to `Unknown`, §2.1). The ledger
-  names what's invisible; one dep scan closes it — κ only ever has to know the std/builtin frontier.
+  names what's invisible; one dep scan closes it — the classifier only ever has to know the std/builtin frontier.
 
 **The policy gate floor.** `candor-scan <dir> --policy <file>` (or `CANDOR_POLICY=…`) enforces a
 spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid` — parsed by the same shared grammar as the nightly and

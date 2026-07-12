@@ -22,6 +22,16 @@ still accepted** (a deprecation note on stderr; they parse and run exactly as be
 and the conformance goldens keep working unchanged. Pinned by the cross-engine conformance suite as
 **PART 17**. No behavioural change to classification, the report schema, or the gate verdict.
 
+### 🔤 coverage-ledger wording — drop the internal `κ` from user- and agent-facing output
+
+The coverage-ledger line and the `--help`/README wording that mentioned the internal classifier shorthand
+`κ` now read in plain English — nobody outside the maintainers can decode the Greek letter, and it was the
+first thing a cold user met in scan output. The ledger line is now
+`candor-scan: candor's classifier doesn't cover N dependencies this code calls into — their effects are
+INVISIBLE to the scan (absent from the report, NOT a claim they're pure): …`, and the **stable greppable
+marker** every engine shares is **`classifier doesn't cover`** (was `κ doesn't know`). `κ` stays only as
+internal maintainer vocabulary (code identifiers, these history entries). No behavioural or schema change.
+
 ## spec 0.9 — the remedial-loop rung (2026-07-11)
 
 candor-scan and candor-query now declare **spec `0.9`** (both at crate **0.9.0**). The internal library

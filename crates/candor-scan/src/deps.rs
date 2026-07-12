@@ -120,7 +120,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // EMPTY report ({functions: []}) is an all-pure purity claim for that package, covered and
         // never a κ blind spot. Keyed on the envelope so the exemption doesn't depend on the file
         // NAME or on any join firing (found live: an empty chained report named outside the
-        // `….<crate>.scan.json` shape still drew a "κ doesn't know" line here while candor-java and
+        // `….<crate>.scan.json` shape still drew a "classifier doesn't cover" line here while candor-java and
         // candor-ts correctly stayed quiet). A hyphenated package name also registers in Rust ident
         // form (`dep-c` → `dep_c`), the form call paths carry.
         for pkg in v

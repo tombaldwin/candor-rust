@@ -516,7 +516,7 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
     // SPEC §2 chaining rule 3 / §7.14: a dependency covered by a CHAINED report is exempt from the
     // κ ledger — INCLUDING an EMPTY report ({functions: []}, package field intact), which is that
     // crate's all-pure purity CLAIM, not a blind spot. Found live: the exemption was keyed on the
-    // filename shape + entry hashes, so an empty report still drew "κ doesn't know 1 dependency…"
+    // filename shape + entry hashes, so an empty report still drew a "classifier doesn't cover 1 dependency…" line
     // (candor-java/candor-ts stay correctly quiet on the same shape).
     let d = std::env::temp_dir().join(format!("candor-scan-cli-kappaempty-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -536,7 +536,7 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
     let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
         .output().expect("run candor-scan");
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("κ doesn't know") && stderr.contains("depc"),
+    assert!(stderr.contains("classifier doesn't cover") && stderr.contains("depc"),
         "without chaining, the called-but-unknown dep must be disclosed: {stderr}");
 
     // CHAINED empty report: NO ledger line, and the join-less call reads pure (the claim honored).
@@ -546,7 +546,7 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
     let _ = std::fs::remove_dir_all(&d);
     assert_eq!(out.status.code(), Some(0));
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(!stderr.contains("κ doesn't know"),
+    assert!(!stderr.contains("classifier doesn't cover"),
         "an empty chained report is coverage — the ledger must stay quiet: {stderr}");
     let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim())
         .expect("pure JSON report");
