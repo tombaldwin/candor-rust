@@ -33,3 +33,25 @@ duration ARE capturable via subagents.
 1. **Token claim**: refuted for a tier if median(treatment tokens) ≥ median(control tokens).
 2. **Recall floor**: treatment recall ≥ control recall at every tier (candor must not cost completeness).
 3. **Consistency**: the token ratio > 1 at every tier (the saving isn't frontier-only). Reported per tier.
+
+---
+
+## AMENDMENT (2026-07-12): scale to N=5/cell
+
+The N=1/cell run ([RESULTS-speed-xmodel.md](RESULTS-speed-xmodel.md)) showed the token saving is consistent
+across every tier (1.24–1.42×, median 1.37×). This amendment scales to **N=5/cell** to give tight per-tier
+medians and reduce single-draw noise.
+
+- **Cells:** opus/sonnet/haiku/fable × control/treatment × **5 trials** = **40 engineers**, same directed
+  task ("list EVERY function affected by the blast radius"), same orderflow report, same arms (control =
+  unaided; treatment = the `cargo-candor whatif`/report available).
+- **Primary metric (clean):** median TREATMENT vs CONTROL output tokens per cell (Agent completion telemetry:
+  `subagent_tokens`). Reported as the per-tier token-saving ratio over N=5 medians. Tokens are NOT
+  concurrency-sensitive, so the concurrent Workflow gives clean numbers.
+- **Secondary (noisy):** wall-clock `duration_ms` — reported but caveated (concurrent runs contend on serving
+  capacity). A tight wall-clock number would need a serial pass; out of scope for this amendment unless the
+  token medians motivate it.
+- **Recall control:** both arms must still name all/most affected fns (a token saving that drops recall is
+  not a saving) — spot-checked, not the headline.
+- **Hypothesis:** median treatment tokens < control at every tier (the N=1 direction holds at N=5).
+Run under `speed-xmodel/runs-n5/`.
