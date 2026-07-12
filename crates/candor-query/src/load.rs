@@ -71,6 +71,9 @@ pub(crate) fn prefix_base(prefix: &str) -> String {
 /// Encountered-crate sidecars: `<base>.encountered-*.json` (not matched by the `.*.*.json` report
 /// glob — only two dot-segments). Each holds a JSON array of crate names candor *saw called*.
 pub(crate) fn glob_encountered(prefix: &str) -> Vec<PathBuf> {
+    // Strip a `.json` direct-file locator (§3.3.1) so the encountered-crate sidecars glob matches
+    // `<stem>.encountered-*.json` — otherwise audit/receipt κ-coverage silently drops them.
+    let prefix = prefix.strip_suffix(".json").unwrap_or(prefix);
     let dir = match Path::new(prefix).parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
@@ -128,6 +131,11 @@ pub(crate) fn load_calibrated(prefix: &str, base: &str) -> (BTreeSet<String>, BT
 /// frontier falls back to a simple-name match, which over-lists — the safe lower-bound direction).
 pub(crate) fn load_hierarchy(prefix: &str) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // A `--report <file>.json` locator arrives here verbatim (§3.3.1 direct-file load); its sidecars are
+    // named `<stem>.hierarchy.json`, NOT `<stem>.json.*.hierarchy.json`, so strip the `.json` before
+    // forming the glob prefix — otherwise the sidecar is silently dropped (a report loaded by `.json` path
+    // would lose its type hierarchy / call graph, under-reporting transitive queries at exit 0).
+    let prefix = prefix.strip_suffix(".json").unwrap_or(prefix);
     let p = Path::new(prefix);
     let dir = p
         .parent()
@@ -161,6 +169,9 @@ pub(crate) fn load_hierarchy(prefix: &str) -> BTreeMap<String, Vec<String>> {
 /// Load + merge every `<prefix>.*.callgraph.json` sidecar into one `caller -> [callees]` map (by path).
 pub(crate) fn load_callgraph(prefix: &str) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Strip a `.json` (a §3.3.1 direct-file locator) so the sidecar glob matches `<stem>.callgraph.json`
+    // and never silently drops the call graph — see load_hierarchy for the full note.
+    let prefix = prefix.strip_suffix(".json").unwrap_or(prefix);
     let p = Path::new(prefix);
     let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return out };
