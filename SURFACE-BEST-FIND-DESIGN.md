@@ -1,10 +1,14 @@
 # candor scan — surface the best find (the cold-repo hook)
 
-_Design doc. Status: **P1 + P3 shipped** (2026-07-12) — the scan-time note emits on all four engines
+_Design doc. Status: **P1 + P2 + P3 shipped** (2026-07-12) — the scan-time note emits on all four engines
 (candor-scan `src/surface.rs`, candor-java `Surface.java`, candor-ts `surface.mjs`, candor-swift
 `Surface.swift`), pinned four-way by conformance PART 4f (a parallel fixture where every engine surfaces
-the same benign `load → Fs` reach). P2 (`candor tour` top-N on demand) remains. Makes the two-minute
-cold-repo demo deterministic instead of lucky._
+the same benign `load → Fs` reach). **P2 (`candor tour` top-N on demand) is shipped on the Rust engine**:
+the heuristic now lives in the SHARED `candor_classify::surface` crate (`best_finds`/`any_effectful`), so
+the scan-time note (candor-scan delegates) and the `tour` verb (candor-query) can't drift; `tour [<N>]`
+lists the N most surprising reaches from an existing report with no re-scan (default 10, `--json` for
+machines, wired into `cargo candor tour`). Makes the two-minute cold-repo demo deterministic instead of
+lucky._
 
 ## Why
 
@@ -69,7 +73,9 @@ the frictionless cold-repo funnel is Rust-first (no build, no deps).
 
 - **P1** — the scan-time note (top-1): the name-benignity lexicon + the score + the ready-to-run command +
   the honest fallback. candor-scan.
-- **P2** — `candor tour` (top-N, on demand; the guided-poke experience).
+- **P2** — `candor tour` (top-N, on demand; the guided-poke experience). SHIPPED (Rust): the heuristic
+  moved to the shared `candor_classify::surface` crate so scan-note + tour can't drift; `candor-query tour
+  [<N>]` + `cargo candor tour`.
 - **P3** — cross-engine parity (java/ts/swift) + a conformance pin so the opener is consistent per engine.
 
 The product point this closes: the two-minute demo becomes **deterministic** — every cold repo gets handed

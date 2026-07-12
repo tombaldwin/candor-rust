@@ -33,6 +33,7 @@ mod containment;
 mod state;
 mod fix;
 mod unverified;
+mod tour;
 
 // One flat crate namespace, like the candor-scan split: modules re-export
 // crate-wide so no call site changed (byte-identical outputs gated the move).
@@ -48,6 +49,7 @@ pub(crate) use containment::*;
 pub(crate) use state::*;
 pub(crate) use fix::*;
 pub(crate) use unverified::*;
+pub(crate) use tour::*;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -75,6 +77,7 @@ fn main() {
         "path" => cmd_path(rest),
         "impact" => cmd_impact(rest),
         "blindspots" => cmd_blindspots(rest),
+        "tour" => cmd_tour(rest),
         "whatif" => cmd_whatif(rest),
         "fix" => cmd_fix(rest),
         "fix-gate" => cmd_fix_gate(rest),
@@ -99,7 +102,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|whatif|fix|fix-gate|unverified|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|merge-hook|--agents)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|tour|whatif|fix|fix-gate|unverified|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|merge-hook|--agents)"
             );
             2
         }
@@ -145,6 +148,7 @@ fn print_help() {
         ("path     <fn-substring> <Effect> [--report <loc>] [--json]", "the call chain by which a fn comes to perform an effect"),
         ("impact   <fn-substring> [--report <loc>] [--json]", "the blast radius of a fn: effectful callers + entry points"),
         ("blindspots [--report <loc>] [--json]", "the Unknown sources, ranked by their Unknown blast radius"),
+        ("tour     [<N>] [--report <loc>] [--json]", "the N most surprising transitive reaches (default 10)"),
         ("whatif   <fn> <Effect> [--report <loc>] [--policy <f>] [--json]", "pre-edit verdict: blast radius + policy violations"),
         ("fix      <fn> <Effect> [--report <loc>] [--policy <f>] [--json]", "the boundary fix: where the effect belongs + the hoist refactor"),
         ("fix-gate [--report <loc>] [--policy <f>] [--json]", "a fix for EVERY boundary crossing — the loop's block-message remedy"),

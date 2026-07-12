@@ -7,6 +7,10 @@ use candor_report::EFFECTS;
 /// The canonical CANDOR_POLICY DSL parser (SPEC §6.2), shared by the nightly gate and candor-query.
 pub mod policy;
 
+/// The SURPRISE heuristic (the cold-repo hook) — SHARED so candor-scan's scan-time note and
+/// candor-query's `tour` verb can't drift. Generic over the effect element type.
+pub mod surface;
+
 /// Project-supplied rules, consulted only when the built-in `classify` returns None.
 pub fn classify_extra(
     crate_name: &str,

@@ -247,7 +247,7 @@ esac
 # or broken dylib first.
 case "$cmd" in
   setup|install|-h|--help|help|scan) LIB="" ;;
-  audit|show|where|callers|map|containment|reachable|path|impact)
+  audit|show|where|callers|map|containment|reachable|path|impact|tour)
     # Read-only queries: prefer the nightly lint (soundness, Unknown), but DON'T hard-fail without it —
     # fall back to the stable scanner so these work zero-install. Use an existing dylib if present; only
     # attempt a build when one's already around to refresh. If none, LIB stays empty and the command's
@@ -675,6 +675,18 @@ case "$cmd" in
     for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) iargs+=("$a") ;; esac; done
     ensure_report || exit 1
     query impact ${iargs[@]:+"${iargs[@]}"} --report .candor/report ${json:+$json}
+    exit 0 ;;
+
+  tour)
+    # The GUIDED POKE: the N most surprising transitive reaches in the report (benign-named functions
+    # reaching scary effects, a few hops down) — the on-demand, top-N version of the scan-time opener.
+    # An optional positional N (default 10) sets how many to list; each row hands you a `candor path`.
+    #   cargo candor tour        # the top 10
+    #   cargo candor tour 5      # the top 5
+    json=""; targs=()
+    for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) targs+=("$a") ;; esac; done
+    ensure_report || exit 1
+    query tour ${targs[@]:+"${targs[@]}"} --report .candor/report ${json:+$json}
     exit 0 ;;
 
   whatif)
