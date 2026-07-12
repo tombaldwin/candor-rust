@@ -1,54 +1,100 @@
-#compdef candor cargo-candor
-# zsh completion for candor (the `candor` command — a symlink to cargo-candor; also `cargo-candor`).
-# Static: subcommands + flags. Dynamic: the effect vocabulary, and the FUNCTION NAMES candor found in the
-# scanned report (.candor/report*.scan.json, or $CANDOR_REPORT) — so `candor path <TAB>` tabs through the
-# functions candor knows about. Put this file on your $fpath as `_candor`, or let install.sh wire it in.
+#compdef candor cargo-candor candor-ts-query candor-java candor-swift candor-agents
+# zsh completion for the whole candor family. Since candor-spec §3.3.1 every engine drives a query the SAME
+# way — `<cmd> <verb> <args…> [--report <loc>] [--policy <file>] [--json]` with the report DISCOVERED from a
+# `.candor/` ancestor — so this is ONE grammar. Static: subcommands + flags. Dynamic: the effect vocabulary,
+# the FUNCTION NAMES candor found, and the SMART part — on `path <fn> <TAB>`, only that function's effects.
+# Put this file on your $fpath as `_candor`, or let install.sh print the fpath line to add.
 
-_candor_fns() {
-  local -a files fns
-  files=(${(f)"$( { ls .candor/report*.scan.json 2>/dev/null; ls ${CANDOR_REPORT}*.scan.json 2>/dev/null; } | grep -v callgraph )"})
-  (( ${#files} )) || return
-  local f
-  for f in $files; do
-    fns+=(${(f)"$(python3 -c 'import json,sys
-try:
-    print("\n".join(e.get("fn","") for e in json.load(open(sys.argv[1])).get("functions",[]) if e.get("fn")))
-except Exception: pass' "$f" 2>/dev/null)"})
-  done
-  (( ${#fns} )) && compadd -a fns
+# report file(s) the engine would use for THIS line: `--report <loc>` (dir/.json/prefix), else $CANDOR_REPORT,
+# else discovery (walk UP from $PWD for `.candor/`). Mirrors the shared §3.3.1 rule; never per-engine.
+_candor_reports() {
+  local i loc="" pfx="" d
+  for (( i=1; i<=${#words}; i++ )); do [[ ${words[i]} == "--report" ]] && loc=${words[i+1]}; done
+  if [[ -n $loc ]]; then
+    if [[ -d $loc ]]; then pfx="$loc/.candor/report"
+    elif [[ $loc == *.json ]]; then print -- "$loc"; return
+    else pfx="$loc"; fi
+  elif [[ -n $CANDOR_REPORT ]]; then pfx="$CANDOR_REPORT"
+  else
+    d=$PWD
+    while true; do [[ -d $d/.candor ]] && { pfx="$d/.candor/report"; break }; [[ $d == "/" ]] && break; d=${d:h}; done
+  fi
+  [[ -n $pfx ]] && ls ${pfx}*.json 2>/dev/null | grep -v -e callgraph -e hierarchy | head -12
 }
 
+_candor_fns() {  # $1 = "__fns__" | a fn-name → its effects
+  local -a files; files=(${(f)"$(_candor_reports)"})
+  (( ${#files} )) || return
+  local -a out; local f
+  for f in $files; do
+    out+=(${(f)"$(python3 -c 'import json,sys
+mode=sys.argv[1]; out=[]
+try:
+    fns=json.load(open(sys.argv[2])).get("functions",[])
+    if mode=="__fns__": out=[e.get("fn","") for e in fns if e.get("fn")]
+    else:
+        for e in fns:
+            if e.get("fn")==mode: out+=e.get("inferred",[])
+    print("\n".join(sorted(set(out))))
+except Exception: pass' "$1" "$f" 2>/dev/null)"})
+  done
+  print -l -- $out
+}
+
+_candor_subs() { case $1 in
+  candor|cargo-candor) print "setup scan audit snapshot guard diff watch show where callers whatif fix fix-gate unverified rewire map containment reachable path impact explain policy risk no-ambient strict update help" ;;
+  candor-ts-query)     print "show where callers map containment diff reachable impact blindspots gains path whatif fix fix-gate unverified parsepolicy agents" ;;
+  candor-java)         print "show where callers map diff containment reachable path impact blindspots gains whatif fix fix-gate unverified rewire parsepolicy" ;;
+  candor-swift)        print "fix fix-gate unverified parsepolicy" ;;
+  candor-agents)       print "scan observe drift guard digest stats savings log-gate" ;;
+esac }
+_candor_argtypes() { case $1 in
+  where)               print "effect" ;;
+  path|whatif|fix)     print "fn effect" ;;
+  show|callers|impact) print "fn" ;;
+esac }
+
 _candor() {
-  local -a subs effects
-  subs=(
-    setup scan audit snapshot guard diff watch show where callers whatif fix fix-gate
-    unverified rewire map containment reachable path impact explain policy risk
-    no-ambient strict update help
-  )
+  local cmd=${service:t}
+  local -a effects subs flags
   effects=(Net Fs Db Exec Env Clock Rand Ipc Clipboard Log Unknown)
+  flags=(--report --policy --json --strict --include-unknown --gate-json --out --version -V --help -h)
 
   if (( CURRENT == 2 )); then
-    _describe -t commands 'candor command' subs
+    if [[ ${words[CURRENT]} == -* ]]; then _values 'flag' --version -V --help -h --agents
+    else subs=(${=$(_candor_subs $cmd)}); _describe -t commands 'candor command' subs; fi
     return
   fi
+  case ${words[CURRENT-1]} in --report|--policy|--out|--gate-json) _files; return ;; esac
+  if [[ ${words[CURRENT]} == -* ]]; then _values 'flag' $flags; return; fi
 
   local sub=${words[2]}
-  if [[ ${words[CURRENT]} == -* ]]; then
-    _values 'flag' '--json' '--policy' '--gate-json' '--strict' '--out' '--link' '-h' '--help'
-    return
-  fi
-  case $sub in
-    where)
-      _describe -t effects 'effect' effects ;;
-    path|whatif|fix|fix-gate)
-      if (( CURRENT >= 4 )); then _describe -t effects 'effect' effects
-      else _candor_fns; fi ;;
-    show|callers|impact|reachable|containment|unverified)
-      _candor_fns ;;
-    scan|audit|guard|diff|snapshot|watch)
-      _files -/ ;;
-    --policy|--gate-json|--out)
-      _files ;;
+  case $sub in parsepolicy|diff|gains) _files; return ;; esac
+  case $cmd in
+    candor|cargo-candor) case $sub in scan|audit|guard|snapshot|watch) _files -/; return ;; esac ;;
+    candor-agents)       _files -/; return ;;
+  esac
+
+  local -a types; types=(${=$(_candor_argtypes $sub)})
+  (( ${#types} )) || return
+  # positional slot = non-flag tokens after the verb; pfn = the last one (precedes an effect slot)
+  local i tok pfn=""; integer pos=0
+  for (( i=3; i<CURRENT; i++ )); do
+    tok=${words[i]}
+    case $tok in
+      --report|--policy|--out|--gate-json) (( i++ )); continue ;;
+      -*) continue ;;
+    esac
+    pfn=$tok; (( pos++ ))
+  done
+  case ${types[pos+1]} in
+    effect)
+      local -a fneffs
+      if (( pos >= 1 )) && [[ -n $pfn ]]; then fneffs=(${(f)"$(_candor_fns $pfn)"}); fi
+      (( ${#fneffs} )) && _describe -t effects 'effect' fneffs || _describe -t effects 'effect' effects ;;
+    fn)
+      local -a fns; fns=(${(f)"$(_candor_fns __fns__)"})
+      (( ${#fns} )) && compadd -a fns ;;
   esac
 }
 
