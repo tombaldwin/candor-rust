@@ -137,19 +137,3 @@ pub(crate) fn sorted(v: &[String]) -> Vec<String> {
 pub(crate) fn q_or(s: &str) -> &str {
     if s.is_empty() { "?" } else { s }
 }
-
-/// (prefix, query, want_json) from `[prefix, query, 0|1]`.
-pub(crate) fn three(args: &[String]) -> Option<(&str, &str, bool)> {
-    match args {
-        [a, b, c, ..] => Some((a.as_str(), b.as_str(), c == "1")),
-        _ => None,
-    }
-}
-
-/// (prefix, want_json) from `[prefix, 0|1]`.
-pub(crate) fn two(args: &[String]) -> Option<(&str, bool)> {
-    match args {
-        [a, b, ..] => Some((a.as_str(), b == "1")),
-        _ => None,
-    }
-}

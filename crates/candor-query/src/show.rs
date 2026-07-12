@@ -23,13 +23,16 @@ pub(crate) struct ShowJson {
 }
 
 pub(crate) fn cmd_show(args: &[String]) -> i32 {
-    let (pre, q, want_json) = match three(args) {
-        Some(t) => t,
-        None => {
-            eprintln!("usage: candor-query show <prefix> <query> <0|1>");
-            return 2;
-        }
+    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
+    let Some(q) = g.positional.first().map(String::as_str) else {
+        eprintln!("usage: candor-query show <fn> [--report <locator>] [--json]");
+        return 2;
     };
+    let Some(pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+        return 2;
+    };
+    let (pre, want_json) = (pre.as_str(), g.want_json);
     let all = match load_entries_loud(pre) {
         Ok(v) => v,
         Err(c) => return c,
@@ -101,13 +104,16 @@ pub(crate) struct WhereJson {
 }
 
 pub(crate) fn cmd_where(args: &[String]) -> i32 {
-    let (pre, eff, want_json) = match three(args) {
-        Some(t) => t,
-        None => {
-            eprintln!("usage: candor-query where <prefix> <Effect> <0|1>");
-            return 2;
-        }
+    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
+    let Some(eff) = g.positional.first().map(String::as_str) else {
+        eprintln!("usage: candor-query where <Effect> [--report <locator>] [--json]");
+        return 2;
     };
+    let Some(pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+        return 2;
+    };
+    let (pre, want_json) = (pre.as_str(), g.want_json);
     let all = match load_entries_loud(pre) {
         Ok(v) => v,
         Err(c) => return c,
@@ -156,13 +162,12 @@ pub(crate) struct MapJson {
 }
 
 pub(crate) fn cmd_map(args: &[String]) -> i32 {
-    let (pre, want_json) = match two(args) {
-        Some(t) => t,
-        None => {
-            eprintln!("usage: candor-query map <prefix> <0|1>");
-            return 2;
-        }
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false });
+    let Some(pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+        return 2;
     };
+    let (pre, want_json) = (pre.as_str(), g.want_json);
     let entries = match load_entries_loud(pre) {
         Ok(v) => v,
         Err(c) => return c,

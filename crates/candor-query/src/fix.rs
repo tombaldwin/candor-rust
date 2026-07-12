@@ -6,6 +6,7 @@
 //! the edit-time loop can hand the agent the *fix*, not just the finding. Advisory structure, never syntax;
 //! the gate re-scan remains the ground truth.
 
+use crate::grammar::{parse, report_or_discover, Shape};
 use crate::load::load_entries;
 use crate::matching::{best_tier, q_match};
 use candor_report::ReportEntry;
@@ -267,24 +268,23 @@ fn reverse_graph(entries: &[ReportEntry]) -> BTreeMap<&str, Vec<&str>> {
 }
 
 pub(crate) fn cmd_fix(args: &[String]) -> i32 {
-    if args.len() < 3 {
-        eprintln!("usage: candor-query fix <prefix> <fn> <Effect> [policy-file] [0|1]");
+    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: true });
+    let (Some(target), Some(effect)) = (g.positional.first().cloned(), g.positional.get(1).cloned()) else {
+        eprintln!("usage: candor-query fix <fn> <Effect> [--report <locator>] [--policy <file>] [--json]");
         return 2;
-    }
-    let (prefix, target, effect) = (&args[0], &args[1], args[2].as_str());
+    };
+    let (target, effect) = (&target, effect.as_str());
     if candor_classify::cap_from_name(effect).is_none() && effect != "Unknown" {
         eprintln!("candor: unknown effect `{effect}` (expected a candor effect name, e.g. Net/Fs/Db/Exec, or Unknown)");
         return 2;
     }
-    let mut policy_path: Option<String> = None;
-    let mut want_json = false;
-    for a in &args[3..] {
-        match a.as_str() {
-            "0" => want_json = false,
-            "1" | "--json" => want_json = true,
-            other => policy_path = Some(other.to_string()),
-        }
-    }
+    let Some(prefix) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+        return 2;
+    };
+    let prefix = &prefix;
+    let want_json = g.want_json;
+    let policy_path = g.policy.clone();
     let rules = match load_rules(policy_path) {
         Ok(r) => r,
         Err(c) => return c,
@@ -345,20 +345,14 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
 /// allowlist/layering findings are a different shape and are left to the gate's own message. Advisory: the
 /// gate re-scan stays the ground truth.
 pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("usage: candor-query fix-gate <prefix> [policy-file] [0|1]");
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true });
+    let Some(prefix) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
         return 2;
-    }
-    let prefix = &args[0];
-    let mut policy_path: Option<String> = None;
-    let mut want_json = false;
-    for a in &args[1..] {
-        match a.as_str() {
-            "0" => want_json = false,
-            "1" | "--json" => want_json = true,
-            other => policy_path = Some(other.to_string()),
-        }
-    }
+    };
+    let prefix = &prefix;
+    let want_json = g.want_json;
+    let policy_path = g.policy.clone();
     let rules = match load_rules(policy_path) {
         Ok(r) => r,
         Err(c) => return c,

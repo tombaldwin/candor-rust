@@ -29,12 +29,13 @@ pub(crate) const AMBIENT: &[&str] = &["Log", "Clock", "Rand", "Env"];
 /// Reverse-BFS over the report's effect-relevant `calls` edges (the channel `Unknown` propagates along),
 /// the same graph `impact` uses.
 pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
-    let want_json = args.iter().any(|a| a == "--json");
-    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
-    let Some(pre) = pos.first() else {
-        eprintln!("usage: candor-query blindspots <prefix> [--json]");
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false });
+    let want_json = g.want_json;
+    let Some(pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
         return 2;
     };
+    let pre = pre.as_str();
     let entries = match load_entries_loud(pre) {
         Ok(v) => v,
         Err(c) => return c,
@@ -104,12 +105,18 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
 }
 
 pub(crate) fn cmd_containment(args: &[String]) -> i32 {
-    let want_json = args.iter().any(|a| a == "--json");
-    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
-    let Some(cur_pre) = pos.first() else {
-        eprintln!("usage: candor-query containment <prefix> [baseline_prefix] [--json]");
+    // `containment [<baseline-locator>]`: the report discovers / comes via --report; the first positional
+    // is the OPTIONAL baseline. The deprecated old form drove the report as a leading positional (handled
+    // by the grammar's alias detection), so `pos` then still leaves the baseline (if any) in slot 0.
+    let g = parse(args, Shape { verb_args: 0, sentinel: false, has_policy: false });
+    let want_json = g.want_json;
+    let Some(cur_pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
         return 2;
     };
+    let cur_pre = cur_pre.as_str();
+    // A baseline locator, if given, resolves by the same --report rule (dir/.json/prefix).
+    let base_locator: Option<String> = g.positional.first().map(|b| resolve_locator(b));
     if glob_reports(cur_pre).is_empty() {
         eprintln!("candor: no report files at prefix `{cur_pre}` — check the path.");
         return 2;
@@ -130,7 +137,7 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
     }
 
     // RATCHET mode: a baseline prefix was given — flag any NEW (contained-effect, layer), note removals.
-    if let Some(base_pre) = pos.get(1) {
+    if let Some(base_pre) = base_locator.as_deref() {
         let base = load_fninfo(base_pre);
         let bnames: Vec<&String> = base.keys().collect();
         let bpl = common_prefix_len(&bnames);

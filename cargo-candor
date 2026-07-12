@@ -509,8 +509,8 @@ case "$cmd" in
     # The agent-facing sibling of `guard`: instead of pass/fail, DESCRIBE the per-function effect
     # delta vs the baseline — what each function gained or lost. This is the signal an agent can't
     # cheaply self-compute (transitive effects across the call graph). `--json` for machine reading.
-    json=0; pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
-    for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) pre="$a" ;; esac; done
+    json=0; jflag=""; pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
+    for a in "$@"; do case "$a" in --json) json=1; jflag="--json" ;; -*) ;; *) pre="$a" ;; esac; done
     if ! report_exists "$pre"; then
       echo "candor: no baseline at '$pre.*' — create one with 'cargo candor snapshot $pre'." >&2
       exit 2
@@ -542,7 +542,8 @@ case "$cmd" in
       cur="$tmp/cur"
     fi
     bv=""; [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
-    query diff "$cur" "$pre" "$json" "$bv" "$(engine_ver)"
+    # NEW grammar: two locators, `--json`, then the optional <baseline_ver> <engine_ver> stamps.
+    query diff "$cur" "$pre" ${jflag:+"$jflag"} "$bv" "$(engine_ver)"
     exit 0 ;;
 
   watch)
@@ -595,39 +596,39 @@ case "$cmd" in
   show)
     # INSTANT: a function's effect surface, read from the fresh report (no recompile). Replaces the
     # agent reading source to answer "what does this function do?". `--json` for machine reading.
-    json=0; q=""
-    for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$q" ] && q="$a" ;; esac; done
+    json=""; q=""
+    for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) [ -z "$q" ] && q="$a" ;; esac; done
     [ -n "$q" ] || { echo "usage: cargo candor show <function-name-substring> [--json]" >&2; exit 2; }
     ensure_report || exit 1
-    query show .candor/report "$q" "$json"
+    query show "$q" --report .candor/report ${json:+"$json"}
     exit 0 ;;
 
   where)
     # INSTANT: which functions perform an effect, read from the fresh report (no recompile). Replaces
     # grepping the codebase for "what touches the network/DB/…". Splits sources from inheritors.
-    json=0; eff=""
-    for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$eff" ] && eff="$a" ;; esac; done
+    json=""; eff=""
+    for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) [ -z "$eff" ] && eff="$a" ;; esac; done
     [ -n "$eff" ] || { echo "usage: cargo candor where <Effect> [--json]   (Net|Fs|Db|Exec|Env|Clock|Ipc|Log|Rand|Clipboard|Unknown)" >&2; exit 2; }
     ensure_report || exit 1
-    query where .candor/report "$eff" "$json"
+    query where "$eff" --report .candor/report ${json:+"$json"}
     exit 0 ;;
 
   callers)
     # INSTANT: which functions directly call <fn>, read from the report's (effect-relevant) call
     # graph — replaces grepping the codebase for callers before you edit. Substring match on the name.
-    json=0; q=""
-    for a in "$@"; do case "$a" in --json) json=1 ;; -*) ;; *) [ -z "$q" ] && q="$a" ;; esac; done
+    json=""; q=""
+    for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) [ -z "$q" ] && q="$a" ;; esac; done
     [ -n "$q" ] || { echo "usage: cargo candor callers <function-name-substring> [--json]" >&2; exit 2; }
     ensure_report || exit 1
-    query callers .candor/report "$q" "$json"
+    query callers "$q" --report .candor/report ${json:+"$json"}
     exit 0 ;;
 
   map)
     # INSTANT: a compact module -> effects overview of the whole project, read from the report. Load
     # it once at the start of a session to understand the codebase's effect structure without grepping.
-    json=0; for a in "$@"; do [ "$a" = "--json" ] && json=1; done
+    json=""; for a in "$@"; do [ "$a" = "--json" ] && json="--json"; done
     ensure_report || exit 1
-    query map .candor/report "$json"
+    query map --report .candor/report ${json:+"$json"}
     exit 0 ;;
 
   containment)
@@ -636,12 +637,13 @@ case "$cmd" in
     # if a boundary effect leaks into a new layer, and note when one is cleaned up. `--json` for machines.
     #   cargo candor containment                    # the diagnostic
     #   cargo candor containment .candor/baseline   # gate vs a committed snapshot (for CI)
-    cargs=(.candor/report)
+    cargs=()
     for a in "$@"; do case "$a" in --json) cargs+=("--json") ;; -*) ;; *) cargs+=("$a") ;; esac; done
     ensure_report || exit 1
     # Explicit exit-code propagation (a ratchet violation is candor-query's exit 1): don't lean on
     # `set -e` aborting mid-function to carry the status out — make the gate's verdict deliberate.
-    rc=0; query containment "${cargs[@]}" || rc=$?
+    # `${cargs[@]:+…}` guards the empty-array expansion under `set -u` (no baseline / no --json).
+    rc=0; query containment --report .candor/report ${cargs[@]:+"${cargs[@]}"} || rc=$?
     exit "$rc" ;;
 
   reachable)
@@ -649,10 +651,10 @@ case "$cmd" in
     # #[no_mangle] here; the whole reflective surface on the JVM port). `inferred` is already
     # transitive, so a root's set is its full reachable surface. `--json` for machines.
     #   cargo candor reachable
-    rargs=(.candor/report)
+    rargs=()
     for a in "$@"; do case "$a" in --json) rargs+=("--json") ;; -*) ;; *) rargs+=("$a") ;; esac; done
     ensure_report || exit 1
-    query reachable "${rargs[@]}"
+    query reachable --report .candor/report ${rargs[@]:+"${rargs[@]}"}
     exit 0 ;;
 
   path)
@@ -662,7 +664,7 @@ case "$cmd" in
     json=""; pargs=()
     for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) pargs+=("$a") ;; esac; done
     ensure_report || exit 1
-    query path .candor/report "${pargs[@]}" ${json:+$json}
+    query path ${pargs[@]:+"${pargs[@]}"} --report .candor/report ${json:+$json}
     exit 0 ;;
 
   impact)
@@ -672,7 +674,7 @@ case "$cmd" in
     json=""; iargs=()
     for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) iargs+=("$a") ;; esac; done
     ensure_report || exit 1
-    query impact .candor/report "${iargs[@]}" ${json:+$json}
+    query impact ${iargs[@]:+"${iargs[@]}"} --report .candor/report ${json:+$json}
     exit 0 ;;
 
   whatif)
@@ -681,13 +683,14 @@ case "$cmd" in
     # BEFORE you write the code instead of edit -> run the gate -> revert. Exit 1 if it would violate.
     #   cargo candor whatif my_function Net            # uses .candor/policy or $CANDOR_POLICY if present
     #   cargo candor whatif my_function Net rules.txt  # against an explicit policy file
-    json=""; wargs=()
-    for a in "$@"; do case "$a" in --json) json="1" ;; -*) ;; *) wargs+=("$a") ;; esac; done
+    json=""; wargs=(); pol=""
+    for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) wargs+=("$a") ;; esac; done
     [ "${#wargs[@]}" -ge 2 ] || { echo "usage: cargo candor whatif <fn> <Effect> [policy-file] [--json]" >&2; exit 2; }
     ensure_report || exit 1
-    # default the policy to the conventional .candor/policy when the caller didn't name one
-    [ "${#wargs[@]}" -eq 2 ] && [ -f .candor/policy ] && wargs+=(".candor/policy")
-    query whatif .candor/report "${wargs[@]}" ${json:+"$json"}
+    # A 3rd positional is the explicit policy file; else default to the conventional .candor/policy.
+    if [ "${#wargs[@]}" -ge 3 ]; then pol="${wargs[2]}"; wargs=("${wargs[0]}" "${wargs[1]}")
+    elif [ -f .candor/policy ]; then pol=".candor/policy"; fi
+    query whatif "${wargs[@]}" --report .candor/report ${pol:+--policy "$pol"} ${json:+"$json"}
     exit "$?" ;;
 
   fix)
@@ -697,19 +700,21 @@ case "$cmd" in
     # of `whatif`. A policy is required — the fix is defined relative to the boundary the edit crossed.
     #   cargo candor fix domain::price_quote Net            # uses .candor/policy or $CANDOR_POLICY
     #   cargo candor fix domain::price_quote Net rules.txt  # against an explicit policy file
-    json=""; wargs=()
-    for a in "$@"; do case "$a" in --json) json="1" ;; -*) ;; *) wargs+=("$a") ;; esac; done
+    json=""; wargs=(); pol=""
+    for a in "$@"; do case "$a" in --json) json="--json" ;; -*) ;; *) wargs+=("$a") ;; esac; done
     [ "${#wargs[@]}" -ge 2 ] || { echo "usage: cargo candor fix <fn> <Effect> [policy-file] [--json]" >&2; exit 2; }
     ensure_report || exit 1
-    # When the caller didn't name a policy, resolve it the SAME way the `policy` command does (spec §3.4):
-    # $CANDOR_POLICY → .candor/config's `policy` key ($CFG_POLICY) → the conventional .candor/policy. Without
-    # this, `cargo candor fix` (and the MCP `candor_fix`) fails 'policy required' in a repo that checks its
-    # policy into .candor/config — exactly where `candor_gate` resolves it. (/code-review.)
-    if [ "${#wargs[@]}" -eq 2 ]; then
+    # An explicit 3rd positional is the policy file. When the caller didn't name one, resolve it the SAME
+    # way the `policy` command does (spec §3.4): $CANDOR_POLICY → .candor/config's `policy` key
+    # ($CFG_POLICY) → the conventional .candor/policy. Without this, `cargo candor fix` (and the MCP
+    # `candor_fix`) fails 'policy required' in a repo that checks its policy into .candor/config — exactly
+    # where `candor_gate` resolves it. (/code-review.)
+    if [ "${#wargs[@]}" -ge 3 ]; then pol="${wargs[2]}"; wargs=("${wargs[0]}" "${wargs[1]}")
+    else
       polfile="${CANDOR_POLICY:-${CFG_POLICY:-.candor/policy}}"
-      [ -f "$polfile" ] && wargs+=("$polfile")
+      [ -f "$polfile" ] && pol="$polfile"
     fi
-    query fix .candor/report "${wargs[@]}" ${json:+"$json"}
+    query fix "${wargs[@]}" --report .candor/report ${pol:+--policy "$pol"} ${json:+"$json"}
     exit "$?" ;;
 
   unverified)
@@ -719,14 +724,16 @@ case "$cmd" in
     # require provable purity. Resolves the policy like `policy`/`fix` do (§3.4).
     #   cargo candor unverified            # uses .candor/config or .candor/policy
     #   cargo candor unverified --strict   # exit 1 if any layer isn't provably clean
-    json=""; strict=""; uargs=()
-    for a in "$@"; do case "$a" in --json) json="1" ;; --strict) strict="--strict" ;; -*) ;; *) uargs+=("$a") ;; esac; done
+    json=""; strict=""; uargs=(); pol=""
+    for a in "$@"; do case "$a" in --json) json="--json" ;; --strict) strict="--strict" ;; -*) ;; *) uargs+=("$a") ;; esac; done
     ensure_report || exit 1
-    if [ "${#uargs[@]}" -eq 0 ]; then
+    # An explicit positional is the policy file; else resolve it the §3.4 way (as `fix` does).
+    if [ "${#uargs[@]}" -ge 1 ]; then pol="${uargs[0]}"
+    else
       polfile="${CANDOR_POLICY:-${CFG_POLICY:-.candor/policy}}"
-      [ -f "$polfile" ] && uargs+=("$polfile")
+      [ -f "$polfile" ] && pol="$polfile"
     fi
-    query unverified .candor/report "${uargs[@]}" ${strict:+"$strict"} ${json:+"$json"}
+    query unverified --report .candor/report ${pol:+--policy "$pol"} ${strict:+"$strict"} ${json:+"$json"}
     exit "$?" ;;
 
   rewire)

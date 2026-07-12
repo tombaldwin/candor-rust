@@ -9,15 +9,17 @@ pub(crate) fn cmd_callers(args: &[String]) -> i32 {
     // candor-query is the query engine for candor-swift too (swift is analyze-only), so this serves swift
     // reports (which emit `dispatch:owner.member` + a hierarchy sidecar) as well as rust reports (no
     // `dispatch:` → empty frontier). Without the flag, the {of,direct,transitive} shape is unchanged.
-    let include_unknown = args.iter().any(|a| a == "--include-unknown");
-    let pos: Vec<String> = args.iter().filter(|a| *a != "--include-unknown").cloned().collect();
-    let (pre, q, want_json) = match three(&pos) {
-        Some(t) => t,
-        None => {
-            eprintln!("usage: candor-query callers <prefix> <query> <0|1> [--include-unknown]");
-            return 2;
-        }
+    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
+    let include_unknown = g.include_unknown;
+    let Some(q) = g.positional.first().map(String::as_str) else {
+        eprintln!("usage: candor-query callers <fn> [--report <locator>] [--json] [--include-unknown]");
+        return 2;
     };
+    let Some(pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+        return 2;
+    };
+    let (pre, want_json) = (pre.as_str(), g.want_json);
     // Prefer the full call-graph sidecar (the engine emits `<prefix>.<crate>.<kind>.callgraph.json`
     // alongside the report). It records EVERY function's callees — including pure ones — so we can
     // answer "who TRANSITIVELY calls X" for any function: the blast radius an agent needs *before*
@@ -219,12 +221,18 @@ pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str,
 }
 
 pub(crate) fn cmd_impact(args: &[String]) -> i32 {
-    let want_json = args.iter().any(|a| a == "--json");
-    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
-    let (Some(pre), Some(fn_arg)) = (pos.first(), pos.get(1)) else {
-        eprintln!("usage: candor-query impact <prefix> <fn-substring> [--json]");
+    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
+    let want_json = g.want_json;
+    let Some(fn_arg) = g.positional.first().cloned() else {
+        eprintln!("usage: candor-query impact <fn-substring> [--report <locator>] [--json]");
         return 2;
     };
+    let fn_arg = &fn_arg;
+    let Some(pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+        return 2;
+    };
+    let pre = pre.as_str();
     let entries = match load_entries_loud(pre) {
         Ok(v) => v,
         Err(c) => return c,
@@ -233,7 +241,7 @@ pub(crate) fn cmd_impact(args: &[String]) -> i32 {
         entries.iter().map(|e| (e.func.as_str(), e)).collect();
     let target = entries
         .iter()
-        .find(|e| &e.func == *fn_arg)
+        .find(|e| e.func == *fn_arg)
         .or_else(|| entries.iter().find(|e| e.func.contains(fn_arg.as_str())));
     let Some(target) = target else {
         eprintln!("candor-query impact: no function matching '{fn_arg}'");
@@ -319,13 +327,18 @@ pub(crate) fn cmd_impact(args: &[String]) -> i32 {
 /// source), through callees that carry the effect. Answers "this performs Net — through WHAT?", the chain
 /// `where`/`callers` describe the ends of but don't connect. Mirrors the JVM port's `path`. Read-only.
 pub(crate) fn cmd_path(args: &[String]) -> i32 {
-    let want_json = args.iter().any(|a| a == "--json");
-    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
-    let (Some(pre), Some(fn_arg), Some(effect)) = (pos.first(), pos.get(1), pos.get(2)) else {
-        eprintln!("usage: candor-query path <prefix> <fn-substring> <Effect> [--json]");
+    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: false });
+    let want_json = g.want_json;
+    let (Some(fn_arg), Some(effect)) = (g.positional.first().cloned(), g.positional.get(1).cloned()) else {
+        eprintln!("usage: candor-query path <fn-substring> <Effect> [--report <locator>] [--json]");
         return 2;
     };
-    let effect = effect.as_str();
+    let (fn_arg, effect) = (&fn_arg, effect.as_str());
+    let Some(pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+        return 2;
+    };
+    let pre = pre.as_str();
     let entries = match load_entries_loud(pre) {
         Ok(v) => v,
         Err(c) => return c,
@@ -334,7 +347,7 @@ pub(crate) fn cmd_path(args: &[String]) -> i32 {
         entries.iter().map(|e| (e.func.as_str(), e)).collect();
     let start = entries
         .iter()
-        .find(|e| &e.func == *fn_arg)
+        .find(|e| e.func == *fn_arg)
         .or_else(|| entries.iter().find(|e| e.func.contains(fn_arg.as_str())));
     let Some(start) = start else {
         eprintln!("candor-query path: no function matching '{fn_arg}'");
@@ -432,12 +445,13 @@ pub(crate) fn cmd_path(args: &[String]) -> i32 {
 /// `inferred` is already transitive, a root's set IS its full reachable surface, so the union answers
 /// "what does this binary actually do" without a per-fn dump. Mirrors the JVM port's `reachable`.
 pub(crate) fn cmd_reachable(args: &[String]) -> i32 {
-    let want_json = args.iter().any(|a| a == "--json");
-    let pos: Vec<&String> = args.iter().filter(|a| *a != "--json").collect();
-    let Some(pre) = pos.first() else {
-        eprintln!("usage: candor-query reachable <prefix> [--json]");
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false });
+    let want_json = g.want_json;
+    let Some(pre) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
         return 2;
     };
+    let pre = pre.as_str();
     let entries = match load_entries_loud(pre) {
         Ok(v) => v,
         Err(c) => return c,

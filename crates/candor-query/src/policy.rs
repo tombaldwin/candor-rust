@@ -58,11 +58,12 @@ pub(crate) fn cmd_parsepolicy(args: &[String]) -> i32 {
 /// "if I add a network call here, what happens and is it allowed?" BEFORE the edit, instead of edit →
 /// run the gate → revert. Read-only over the call-graph sidecar + the policy file.
 pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
-    if args.len() < 3 {
-        eprintln!("usage: candor-query whatif <prefix> <fn> <Effect> [policy-file] [0|1]");
+    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: true });
+    let (Some(target), Some(effect)) = (g.positional.first().cloned(), g.positional.get(1).cloned()) else {
+        eprintln!("usage: candor-query whatif <fn> <Effect> [--report <locator>] [--policy <file>] [--json]");
         return 2;
-    }
-    let (prefix, target, effect) = (&args[0], &args[1], &args[2]);
+    };
+    let (target, effect) = (&target, &effect);
     // Validate the effect against the vocabulary: a typo'd/lowercase effect (`net`) matches no deny
     // rule and would print an authoritative-looking clean verdict — a false green light for the very
     // edit the policy forbids (/code-review). Reject it as a usage error, not a pass.
@@ -70,18 +71,14 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
         eprintln!("candor: unknown effect `{effect}` (expected a candor effect name, e.g. Net/Fs/Db/Exec, or Unknown)");
         return 2;
     }
-    let mut policy_path: Option<String> = None;
-    let mut want_json = false;
-    for a in &args[3..] {
-        match a.as_str() {
-            "0" => want_json = false,
-            "1" | "--json" => want_json = true,
-            other => policy_path = Some(other.to_string()),
-        }
-    }
-    if policy_path.is_none() {
-        policy_path = std::env::var("CANDOR_POLICY").ok();
-    }
+    let Some(prefix) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
+        return 2;
+    };
+    let prefix = &prefix;
+    let want_json = g.want_json;
+    // Policy: --policy / deprecated positional (both via `g`), else CANDOR_POLICY.
+    let policy_path: Option<String> = g.policy.clone().or_else(|| std::env::var("CANDOR_POLICY").ok());
 
     let cg = load_callgraph(prefix);
     if cg.is_empty() {

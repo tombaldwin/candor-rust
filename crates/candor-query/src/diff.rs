@@ -46,13 +46,33 @@ pub(crate) struct DiffJson<'a> {
 }
 
 pub(crate) fn cmd_diff(args: &[String]) -> i32 {
-    // diff <cur_pre> <base_pre> <0|1> <bver> <ever>
-    if args.len() < 5 {
-        eprintln!("usage: candor-query diff <cur_prefix> <base_prefix> <0|1> <baseline_ver> <engine_ver>");
+    // `diff <current> <baseline> [--json]` — the two-locator comparative verb (SPEC §3.3.1 exception: it
+    // does NOT discover). Locators resolve by the shared --report rule (dir/.json/prefix). The optional
+    // `<baseline_ver> <engine_ver>` stamps trail the two locators (the version banner). The DEPRECATED old
+    // form put JSON as a `<0|1>` sentinel in the THIRD positional slot: `diff <cur> <base> <0|1> <bver>
+    // <ever>` — still accepted with a stderr note.
+    let mut want_json = args.iter().any(|a| a == "--json");
+    let pos: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
+    if pos.len() < 2 {
+        eprintln!("usage: candor-query diff <current> <baseline> [--json] [<baseline_ver> <engine_ver>]");
         return 2;
     }
-    let (cur_pre, base_pre, want_json, bver, ever) =
-        (&args[0], &args[1], args[2] == "1", args[3].as_str(), args[4].as_str());
+    // Old form: a `0|1` sentinel in the third slot (before the version stamps). Detect + strip it.
+    let mut rest: Vec<String> = pos[2..].to_vec();
+    if let Some(first) = rest.first() {
+        if first == "0" || first == "1" {
+            deprecation_note("a trailing `0|1` JSON sentinel");
+            if first == "1" {
+                want_json = true;
+            }
+            rest.remove(0);
+        }
+    }
+    let cur_loc = resolve_locator(&pos[0]);
+    let base_loc = resolve_locator(&pos[1]);
+    let (cur_pre, base_pre) = (&cur_loc, &base_loc);
+    let bver = rest.first().map(String::as_str).unwrap_or("");
+    let ever = rest.get(1).map(String::as_str).unwrap_or("");
 
     // A prefix that matches NO report files must fail LOUD, not read as an empty report: a typo'd
     // `cur` would otherwise show zero gains (a gained-effect gate built on this output would silently
@@ -292,13 +312,28 @@ pub(crate) fn cmd_receipt(args: &[String]) -> i32 {
 /// `review-seen` file and formats the prompt — the seen-file state stays in bash so this stays a
 /// read-only query.
 pub(crate) fn cmd_gains(args: &[String]) -> i32 {
-    let (cur_pre, base_pre) = match args {
-        [a, b, ..] => (a.as_str(), b.as_str()),
+    // `gains <current> <baseline> [--json]` — the two-locator comparative verb (does NOT discover, like
+    // `diff`). Locators resolve by the shared --report rule. The DEPRECATED old form allowed a trailing
+    // `1` sentinel for JSON (handled below alongside `--json`).
+    let mut want_json = args.iter().any(|a| a == "--json");
+    let pos: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
+    // Old trailing `1` sentinel → JSON (with a note); a `0` is the explicit non-JSON old form.
+    let (cur_loc, base_loc) = match pos.as_slice() {
+        [a, b, ..] => (resolve_locator(a), resolve_locator(b)),
         _ => {
-            eprintln!("usage: candor-query gains <cur_prefix> <base_prefix> [--json]");
+            eprintln!("usage: candor-query gains <current> <baseline> [--json]");
             return 2;
         }
     };
+    if let Some(last) = pos.get(2) {
+        if last == "0" || last == "1" {
+            deprecation_note("a trailing `0|1` JSON sentinel");
+            if last == "1" {
+                want_json = true;
+            }
+        }
+    }
+    let (cur_pre, base_pre) = (cur_loc.as_str(), base_loc.as_str());
     // Same no-files-fails-loud rule as cmd_diff, and for the same reason: a typo'd current prefix
     // shows zero gains (a gate built on this silently PASSES); a typo'd baseline shows every effect
     // as newly gained.
@@ -319,7 +354,7 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         }
     }
     out.sort();
-    if args.iter().any(|a| a == "--json" || a == "1") {
+    if want_json {
         // The package-level supply-chain alarm (spec §5.1): `gained` is the UNION of effects the
         // surface gained between the two reports — a dependency that grew a Net/Exec reach between
         // releases — with the per-function detail under `byFunction`. Machine-readable so a CI gate

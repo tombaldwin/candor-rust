@@ -7,28 +7,21 @@
 //! `deny <E> Unknown <scope>` upgrade that makes the intent provable. Advisory: exit 0, or `--strict` → exit
 //! 1 so CI can REQUIRE provable purity. The gate's verdict is untouched — this only discloses the gap.
 
+use crate::grammar::{parse, report_or_discover, Shape};
 use crate::load::load_entries;
 use candor_classify::policy::{parse_policy, rule_and_upgrade, unverified_hole_rule, PolicyRule};
 use candor_report::ReportEntry;
 
 pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("usage: candor-query unverified <prefix> [policy] [--strict] [0|1]");
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true });
+    let Some(prefix) = report_or_discover(&g) else {
+        eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
         return 2;
-    }
-    let prefix = &args[0];
-    let mut policy_path: Option<String> = None;
-    let mut want_json = false;
-    let mut strict = false;
-    for a in &args[1..] {
-        match a.as_str() {
-            "0" => want_json = false,
-            "1" | "--json" => want_json = true,
-            "--strict" => strict = true,
-            other => policy_path = Some(other.to_string()),
-        }
-    }
-    let policy_path = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
+    };
+    let prefix = &prefix;
+    let want_json = g.want_json;
+    let strict = g.strict;
+    let policy_path = g.policy.clone().or_else(|| std::env::var("CANDOR_POLICY").ok());
     let Some(pp) = policy_path else {
         eprintln!("candor unverified: a policy is required (the check is relative to your pure/deny layers).");
         return 2;
