@@ -1,0 +1,4 @@
+task	renderer
+condition	control
+runid	renderer-fable-control-4
+effect	Exec

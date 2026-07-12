@@ -1,0 +1,4 @@
+task	renderer
+condition	control
+runid	renderer-sonnet-control-3
+effect	Exec

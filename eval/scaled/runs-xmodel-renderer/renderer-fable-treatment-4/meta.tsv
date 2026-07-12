@@ -1,0 +1,4 @@
+task	renderer
+condition	treatment
+runid	renderer-fable-treatment-4
+effect	Exec

@@ -1,0 +1,4 @@
+task	renderer
+condition	control
+runid	renderer-haiku-control-1
+effect	Exec
