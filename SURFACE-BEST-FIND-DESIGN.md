@@ -1,7 +1,9 @@
 # candor scan — surface the best find (the cold-repo hook)
 
-_Design doc. Status: **P1 shipped** (2026-07-12) — candor-scan emits the scan-time note (`src/surface.rs`).
-P2 (`candor tour` top-N) and P3 (cross-engine parity + conformance pin) remain. Makes the two-minute
+_Design doc. Status: **P1 + P3 shipped** (2026-07-12) — the scan-time note emits on all four engines
+(candor-scan `src/surface.rs`, candor-java `Surface.java`, candor-ts `surface.mjs`, candor-swift
+`Surface.swift`), pinned four-way by conformance PART 4f (a parallel fixture where every engine surfaces
+the same benign `load → Fs` reach). P2 (`candor tour` top-N on demand) remains. Makes the two-minute
 cold-repo demo deterministic instead of lucky._
 
 ## Why
