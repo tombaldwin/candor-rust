@@ -4,6 +4,24 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## spec 0.10 — the canonical query grammar (2026-07-12) — current floor
+
+candor-scan and candor-query now declare **spec `0.10`** (both at crate **0.10.0**; the internal
+**candor-report** and **candor-classify** libs move lockstep to **0.10.0**). **0.10 is the current spec
+floor** — the ratchet from 0.9. This is a **tier-2 (pinned-tool-surface) rung** (candor-spec §"Conformance
+tiers"): no report-schema or verdict change — a 0.9 report and a 0.9 `--gate-json` verdict are byte-identical
+under 0.10 — the bump promotes the new §3.3.1 query grammar into the pinned contract.
+
+### ✨ §3.3.1 canonical query grammar — report discovery + explicit `--report` / `--json` / `--policy` flags
+
+The query surface gains a single canonical grammar (candor-spec §3.3.1): a query auto-**discovers** the
+report (the `.candor/report*.json` in scope) so the report path no longer has to be spelled out, and the
+inputs are named by explicit flags — **`--report <path>`**, **`--json`** (machine output), and
+**`--policy <path>`** — rather than by argument position. The **old positional forms are deprecated but
+still accepted** (a deprecation note on stderr; they parse and run exactly as before), so existing scripts
+and the conformance goldens keep working unchanged. Pinned by the cross-engine conformance suite as
+**PART 17**. No behavioural change to classification, the report schema, or the gate verdict.
+
 ## spec 0.9 — the remedial-loop rung (2026-07-11)
 
 candor-scan and candor-query now declare **spec `0.9`** (both at crate **0.9.0**). The internal library
