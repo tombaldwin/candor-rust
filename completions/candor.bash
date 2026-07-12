@@ -34,7 +34,7 @@ _cc_reports() {
     if   [ -d "$loc" ];      then pfx="$loc/.candor/report"
     elif [[ "$loc" == *.json ]]; then echo "$loc"; return
     else                          pfx="$loc"; fi
-  elif [ -n "$CANDOR_REPORT" ]; then pfx="$CANDOR_REPORT"
+  elif [ -n "${CANDOR_REPORT:-}" ]; then pfx="$CANDOR_REPORT"
   else
     d="$PWD"
     while :; do [ -d "$d/.candor" ] && { pfx="$d/.candor/report"; break; }; [ "$d" = "/" ] && break; d="$(dirname "$d")"; done

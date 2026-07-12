@@ -89,6 +89,15 @@ jobs:
       - name: Wrapper smoke (every subcommand + fail-closed negatives)
         run: bash ci/wrapper-smoke.sh
 
+      # The shell completions (bash + zsh) are plain script whose dynamic arm derives function names and
+      # per-function effects from the discovered report. Assert the static surface AND the context-aware
+      # `path <fn> <TAB>` effect completion, so a completion regression can't ship silently. (zsh is
+      # installed to exercise its lane; the test skips it gracefully if absent.)
+      - name: Shell completion contract
+        run: |
+          sudo apt-get install -y -qq zsh >/dev/null 2>&1 || true
+          bash completions/test.sh
+
       # Workspace-scale enforcement: AS-EFF-008 host allowlist catching a forbidden endpoint that
       # lives in a SIBLING crate (the cross-crate host-propagation + CANDOR_REPORTS path). Teeth:
       # the verify script also confirms the violation is missed without cross-crate resolution.
