@@ -49,9 +49,12 @@ mkdir -p "$CACHE/lib" "$CACHE/bin"
 cp -f "$S" "$CACHE/bin/"   # the stable scanner — usable with NO nightly toolchain (the zero-install floor)
 printf '%s\n' "$CLONE" > "$CACHE/clone"
 
-# 3. `cargo candor` everywhere: symlink the wrapper onto PATH.
+# 3. `cargo candor` everywhere: symlink the wrapper onto PATH. Also a plain `candor` command (the wrapper
+#    already drops a leading `candor` word, so `candor <cmd>` and `cargo candor <cmd>` both work) — this is
+#    the form the docs use, and the one tab-completion attaches to.
 mkdir -p "$BIN"
 ln -sf "$CLONE/cargo-candor" "$BIN/cargo-candor"
+ln -sf "$CLONE/cargo-candor" "$BIN/candor"
 
 echo "candor: installed ✓" >&2
 if [ -n "$LIB" ]; then
@@ -61,7 +64,16 @@ else
   echo "           enforcement (guard/policy) needs the lint. Re-run with the nightly available to add it." >&2
 fi
 echo "  stable   $CACHE/  (query + scan${LIB:+ + dylib} — survives 'cargo clean')" >&2
-echo "  command  $BIN/cargo-candor  →  use 'cargo candor …' in any project" >&2
+echo "  command  $BIN/candor  →  'candor …' (or 'cargo candor …') in any project" >&2
+# Tab completion: static subcommands/flags + DYNAMIC effect & function-name completion from the scanned
+# report (`candor path <TAB>` tabs through the functions candor found). Printed, never auto-appended — you
+# own your shell config.
+COMP="$CLONE/completions"
+case "${SHELL##*/}" in
+  zsh)  echo "  complete  add to ~/.zshrc:  fpath=($COMP \$fpath); autoload -Uz compinit; compinit" >&2 ;;
+  bash) echo "  complete  add to ~/.bashrc:  source $COMP/candor.bash" >&2 ;;
+  *)    echo "  complete  source $COMP/candor.bash (bash), or add $COMP to fpath (zsh)" >&2 ;;
+esac
 case ":$PATH:" in
   *":$BIN:"*) echo "  PATH     ok" >&2 ;;
   *) echo "  ⚠ PATH   $BIN is not on your PATH — add it so 'cargo candor' resolves." >&2 ;;

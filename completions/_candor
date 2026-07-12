@@ -1,0 +1,55 @@
+#compdef candor cargo-candor
+# zsh completion for candor (the `candor` command — a symlink to cargo-candor; also `cargo-candor`).
+# Static: subcommands + flags. Dynamic: the effect vocabulary, and the FUNCTION NAMES candor found in the
+# scanned report (.candor/report*.scan.json, or $CANDOR_REPORT) — so `candor path <TAB>` tabs through the
+# functions candor knows about. Put this file on your $fpath as `_candor`, or let install.sh wire it in.
+
+_candor_fns() {
+  local -a files fns
+  files=(${(f)"$( { ls .candor/report*.scan.json 2>/dev/null; ls ${CANDOR_REPORT}*.scan.json 2>/dev/null; } | grep -v callgraph )"})
+  (( ${#files} )) || return
+  local f
+  for f in $files; do
+    fns+=(${(f)"$(python3 -c 'import json,sys
+try:
+    print("\n".join(e.get("fn","") for e in json.load(open(sys.argv[1])).get("functions",[]) if e.get("fn")))
+except Exception: pass' "$f" 2>/dev/null)"})
+  done
+  (( ${#fns} )) && compadd -a fns
+}
+
+_candor() {
+  local -a subs effects
+  subs=(
+    setup scan audit snapshot guard diff watch show where callers whatif fix fix-gate
+    unverified rewire map containment reachable path impact explain policy risk
+    no-ambient strict update help
+  )
+  effects=(Net Fs Db Exec Env Clock Rand Ipc Clipboard Log Unknown)
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'candor command' subs
+    return
+  fi
+
+  local sub=${words[2]}
+  if [[ ${words[CURRENT]} == -* ]]; then
+    _values 'flag' '--json' '--policy' '--gate-json' '--strict' '--out' '--link' '-h' '--help'
+    return
+  fi
+  case $sub in
+    where)
+      _describe -t effects 'effect' effects ;;
+    path|whatif|fix|fix-gate)
+      if (( CURRENT >= 4 )); then _describe -t effects 'effect' effects
+      else _candor_fns; fi ;;
+    show|callers|impact|reachable|containment|unverified)
+      _candor_fns ;;
+    scan|audit|guard|diff|snapshot|watch)
+      _files -/ ;;
+    --policy|--gate-json|--out)
+      _files ;;
+  esac
+}
+
+_candor "$@"
