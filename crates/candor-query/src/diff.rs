@@ -355,12 +355,40 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         // surface gained between the two reports — a dependency that grew a Net/Exec reach between
         // releases — with the per-function detail under `byFunction`. Machine-readable so a CI gate
         // can alarm on a dependency update that quietly gains a capability.
+        //
+        // ⟨0.12 staged⟩ each entry carries `origin` — the candor-gains prototype's key finding
+        // promoted into the open query. A gain on a fn that EXISTED at the baseline (shipped pure,
+        // now does Net — the supply-chain attack signal) is a different alarm from a NEW fn that
+        // does Net (a feature). Reports OMIT pure functions (§2), so existence is keyed on the
+        // baseline CALLGRAPH (a baseline-pure fn is a graph node with no report entry):
+        //   "existing" — in the baseline report, or a baseline-callgraph node (caller or callee);
+        //   "new"      — in neither (the fn did not exist at the baseline);
+        //   "unknown"  — absent from the baseline report AND no baseline callgraph sidecar was
+        //                found: existence is undecidable, DISCLOSED rather than guessed (§4).
+        // JSON-only: the human `fn\teffect` TSV is a pinned consumer surface (candor-run.sh's
+        // seen-file dedup matches whole lines) and stays byte-stable.
+        let base_cg = load_callgraph(base_pre);
+        let base_cg_nodes: BTreeSet<&str> = base_cg
+            .iter()
+            .flat_map(|(k, vs)| std::iter::once(k.as_str()).chain(vs.iter().map(String::as_str)))
+            .collect();
+        let origin_of = |f: &str| -> &'static str {
+            if base.contains_key(f) {
+                "existing"
+            } else if base_cg.is_empty() {
+                "unknown"
+            } else if base_cg_nodes.contains(f) {
+                "existing"
+            } else {
+                "new"
+            }
+        };
         let mut gained: Vec<&str> = out.iter().map(|(_, e)| e.as_str()).collect();
         gained.sort_unstable();
         gained.dedup();
         let by_function: Vec<_> = out
             .iter()
-            .map(|(f, e)| serde_json::json!({ "fn": f, "effect": e }))
+            .map(|(f, e)| serde_json::json!({ "effect": e, "fn": f, "origin": origin_of(f) }))
             .collect();
         let v = serde_json::json!({ "gained": gained, "byFunction": by_function });
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
