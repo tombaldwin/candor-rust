@@ -4,7 +4,47 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## spec 0.10 — the canonical query grammar (2026-07-12) — current floor
+## spec 0.11 — the surprising-reach surface (2026-07-13) — current floor
+
+candor-scan and candor-query now declare **spec `0.11`** (both at crate **0.11.0**; the internal
+**candor-report** and **candor-classify** libs move lockstep to **0.11.0**). **0.11 is the current spec
+floor** — the ratchet from 0.10. No report-schema or verdict change — a 0.10 report and a 0.10
+`--gate-json` verdict are byte-identical under 0.11 — the bump pins the surprising-reach surface and the
+corrupt-report loud-fail rule into the contract.
+
+### ✨ the surprising-reach surface — scan-time opener + `tour` top-N + `candor path` suggestions
+
+After the effect summary and coverage ledger, a scan emits ONE more stderr line: the single most
+surprising transitive reach — a benign-named function (settings/config/util/load/…) inheriting a
+boundary effect from a few hops away — with a ready-to-run **`candor path <fn> <effect>`** that
+re-derives the chain, so a find is never wrong. **`candor tour [N]`** (default 10) lists the top-N
+such reaches on demand from an existing report — no re-scan — with `--json` and the §3.3.1 grammar;
+wired into `cargo candor tour`. The ranking is **deterministic** (pure call-graph + name analysis, no
+LLM) and lives in one shared place, so the scan-time note and `tour` can't drift (conformance
+**PART 4f**). Two calibration rules keep the opener from over-promising: a **salience floor** —
+Clock/Log/Rand reaches never surface as "surprising" (**PART 4j**) — and test code is excluded by
+whole module segment. A repo whose reaches are all mundane gets a plain "nothing hidden" line, never a
+manufactured find.
+
+### 🔊 a corrupt report fails loud — never an empty all-clear
+
+A report that is FOUND but unparseable — or that parses as JSON of the wrong shape, a bare junk array
+with every entry dropped — now **fails loud with exit 2** and a disclosure on every loud-consuming
+verb. Previously it degraded to an empty entry list: `tour` printed "nothing hidden" and a policy
+map/gate over the empty report would PASS — the §4 cardinal sin over corrupt input. A well-formed
+`functions: []` report (a genuinely effect-free crate) is **still valid** and still exits 0, and one
+corrupt file among several still yields the others (disclosed). Pinned four-way by conformance
+**PART 4k**.
+
+### 🏷 tour header — the plural `packages` envelope
+
+The `tour` header honours the plural `packages` envelope (SPEC §2, the JVM shape): one package
+verbatim, several by their longest common dotted prefix (whole segments only), basename fallback when
+none is shared (conformance 4g addendum). 0.11.0 is also the first tagged build carrying the coverage
+ledger's plain-English marker — **`classifier doesn't cover`** (was the internal `κ`; SPEC §7 item 14,
+PART 4c) — recorded in detail under the 0.10 entry below, where it landed post-tag.
+
+## spec 0.10 — the canonical query grammar (2026-07-12)
 
 candor-scan and candor-query now declare **spec `0.10`** (both at crate **0.10.0**; the internal
 **candor-report** and **candor-classify** libs move lockstep to **0.10.0**). **0.10 is the current spec
