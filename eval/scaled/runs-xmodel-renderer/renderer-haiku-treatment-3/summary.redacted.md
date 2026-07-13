@@ -1,0 +1,3 @@
+## Summary
+
+`Engine::expand` was enhanced with a new `exec:` template directive that executes shell commands—the new `expand_exec` function runs commands via `sh -c` and returns their trimmed stdout. The `Exec` effect is newly introduced by `expand_exec` and propagates transitively through six intermediate callers (`api::render_many`, `api::render_one`, `page::Page::render`, and three others) before reaching the `main` entry point. Any code that uses the `Engine::expand` method or any of the template rendering APIs (`api::render_one`, `api::render_many`, `page::Page::render`) now performs external command execution as a side effect.

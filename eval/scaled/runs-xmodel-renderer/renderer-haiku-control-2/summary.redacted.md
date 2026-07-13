@@ -1,0 +1,3 @@
+## Summary
+
+The `Engine::expand` method now recognizes tokens prefixed with `exec:` and executes them as shell commands via `sh -c`, capturing and trimming the stdout as the expansion result. Non-exec tokens continue using the existing TTL'd snippet cache. This change affects `Page::render_token`, which calls `expand` for all token types, and transitively affects `Page::render`, `api::render_one`, `api::render_many`, and `report::build_all`, all of which ultimately invoke `render_token` for template expansion. The implementation includes error handling for command execution failures (returns `None` if the shell command fails or produces non-UTF8 output) and trim-whitespace normalization of command output to match snippet behavior.
