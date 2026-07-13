@@ -24,7 +24,8 @@ pub(crate) fn load_entries(prefix: &str) -> Vec<ReportEntry> {
 /// The shared loader. Returns the merged entries AND whether a matched file wholly FAILED to read or
 /// parse (`hard_fail`) — the loud wrapper needs that bit to tell "an empty-but-valid report" apart from
 /// "every report we found was corrupt", which must never read as an empty (all-clear) answer.
-fn load_entries_inner(prefix: &str) -> (Vec<ReportEntry>, bool) {
+/// pub(crate): diff.rs's `load_fninfo_loud` threads the same bit through its fn-info map.
+pub(crate) fn load_entries_inner(prefix: &str) -> (Vec<ReportEntry>, bool) {
     let mut out = Vec::new();
     let mut hard_fail = false;
     for path in glob_reports(prefix) {
@@ -199,15 +200,26 @@ pub(crate) fn load_hierarchy(prefix: &str) -> BTreeMap<String, Vec<String>> {
 
 /// Load + merge every `<prefix>.*.callgraph.json` sidecar into one `caller -> [callees]` map (by path).
 pub(crate) fn load_callgraph(prefix: &str) -> BTreeMap<String, Vec<String>> {
+    load_callgraph_flagged(prefix).0
+}
+
+/// `load_callgraph`, also returning whether the merged graph is PARTIAL: `true` iff a MATCHED sidecar
+/// failed to read or parse (the two disclosed drop arms below), so the graph is missing edges we KNOW
+/// existed. A genuinely absent sidecar is NOT partial — that's the ordinary empty case. gains' origin
+/// classification needs the bit: a fn absent from a PARTIAL baseline graph may have lived in the dropped
+/// file, so calling it "new" would downgrade the supply-chain attack signal (an EXISTING fn gaining an
+/// effect) to a feature ("a new fn does Net"). Partial-or-absent must read "unknown", never "new".
+pub(crate) fn load_callgraph_flagged(prefix: &str) -> (BTreeMap<String, Vec<String>>, bool) {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut partial = false;
     // Strip a `.json` (a §3.3.1 direct-file locator) so the sidecar glob matches `<stem>.callgraph.json`
     // and never silently drops the call graph — see load_hierarchy for the full note.
     let prefix = prefix.strip_suffix(".json").unwrap_or(prefix);
     let p = Path::new(prefix);
     let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-    let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return out };
+    let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return (out, partial) };
     let pfx = format!("{base}.");
-    let Ok(rd) = std::fs::read_dir(&dir) else { return out };
+    let Ok(rd) = std::fs::read_dir(&dir) else { return (out, partial) };
     for ent in rd.flatten() {
         let name = ent.file_name();
         let Some(name) = name.to_str() else { continue };
@@ -222,6 +234,7 @@ pub(crate) fn load_callgraph(prefix: &str) -> BTreeMap<String, Vec<String>> {
         let path = ent.path();
         let Ok(text) = std::fs::read_to_string(&path) else {
             eprintln!("candor: callgraph {} could not be read — its edges are OMITTED, so blast-radius queries (whatif/rewire/callers) UNDER-report", path.display());
+            partial = true;
             continue;
         };
         match serde_json::from_str::<BTreeMap<String, Vec<String>>>(&text) {
@@ -230,10 +243,13 @@ pub(crate) fn load_callgraph(prefix: &str) -> BTreeMap<String, Vec<String>> {
                     out.entry(k).or_default().extend(v);
                 }
             }
-            Err(_) => eprintln!("candor: callgraph {} failed to parse — its edges are OMITTED, so blast-radius queries (whatif/rewire/callers) UNDER-report (corrupt or mid-write); re-run the scan", path.display()),
+            Err(_) => {
+                eprintln!("candor: callgraph {} failed to parse — its edges are OMITTED, so blast-radius queries (whatif/rewire/callers) UNDER-report (corrupt or mid-write); re-run the scan", path.display());
+                partial = true;
+            }
         }
     }
-    out
+    (out, partial)
 }
 
 /// `reports <prefix> [--exists]` — the canonical report-file discovery for a prefix, via
@@ -254,6 +270,26 @@ pub(crate) fn report_backend(prefix: &str) -> &'static str {
     } else {
         "lint"
     }
+}
+
+/// The producing-build version stamped in the FIRST report file at a prefix: the §2 envelope's
+/// `candor.version` (via the shared `candor_report::report_version`), falling back to `meta.version`
+/// for older report shapes; `""` when absent or unreadable. Feeds the gains provenance fields
+/// (`baseline_version`/`engine_version`) and the §2.1 producing-build mismatch disclosure — parity
+/// with candor-ts's `reportVersion` and candor-java's `reportVersion` (both also return empty-ish
+/// when unknown; the JSON emits `""`, never a guess).
+pub(crate) fn report_build_version(prefix: &str) -> String {
+    let Some(path) = glob_reports(prefix).into_iter().next() else { return String::new() };
+    let Ok(text) = std::fs::read_to_string(&path) else { return String::new() };
+    if let Some(v) = candor_report::report_version(&text) {
+        return v;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return String::new() };
+    v.get("meta")
+        .and_then(|m| m.get("version"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Is a filename (relative to the prefix's directory) a STABLE-backend artifact for <base>? True for

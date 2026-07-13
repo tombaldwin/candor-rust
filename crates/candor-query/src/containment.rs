@@ -121,11 +121,13 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
     let cur_pre = cur_pre.as_str();
     // A baseline locator, if given, resolves by the same --report rule (dir/.json/prefix).
     let base_locator: Option<String> = g.positional.first().map(|b| resolve_locator(b));
-    if glob_reports(cur_pre).is_empty() {
-        eprintln!("candor: no report files at prefix `{cur_pre}` — check the path.");
-        return 2;
-    }
-    let cur = load_fninfo(cur_pre);
+    // Loud load (load_fninfo_loud): no-files AND found-but-corrupt both exit 2 — a corrupt report
+    // read as an empty map here would score every effect fully contained (and the ratchet below would
+    // see zero leaks): a false architecture all-clear over corrupt input, the §4 cardinal sin.
+    let cur = match load_fninfo_loud(cur_pre, "") {
+        Ok(m) => m,
+        Err(c) => return c,
+    };
     let names: Vec<&String> = cur.keys().collect();
     let pl = common_prefix_len(&names);
     // effect -> (layer -> count of functions performing it DIRECTLY)
@@ -142,7 +144,13 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
 
     // RATCHET mode: a baseline prefix was given — flag any NEW (contained-effect, layer), note removals.
     if let Some(base_pre) = base_locator.as_deref() {
-        let base = load_fninfo(base_pre);
+        // The baseline loads loud too: a corrupt (or typo'd) baseline reads as an empty layer map, so
+        // every boundary effect looks like a NEW leak — a false ratchet FAIL is noisier than the
+        // all-clear case but just as untrustworthy, and the corrupt report deserves the same refusal.
+        let base = match load_fninfo_loud(base_pre, "baseline") {
+            Ok(m) => m,
+            Err(c) => return c,
+        };
         let bnames: Vec<&String> = base.keys().collect();
         let bpl = common_prefix_len(&bnames);
         let mut base_layers: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();

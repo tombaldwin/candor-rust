@@ -11,10 +11,16 @@ pub(crate) struct FnInfo {
     pub(crate) calls: BTreeSet<String>,
 }
 
-/// fn -> its effect info, last write wins (mirrors Python's `out[e['fn']] = …`).
-pub(crate) fn load_fninfo(prefix: &str) -> BTreeMap<String, FnInfo> {
+/// The shared fn-info loader (fn -> merged effect info, mirroring Python's `out[e['fn']] = …`).
+/// Returns the map AND the `hard_fail` bit `load_entries_inner` threads (load.rs): a matched report
+/// wholly failed to read/parse, or parsed but yielded zero usable entries while non-empty (the
+/// semantic-corruption rule). The loud wrapper needs the bit to tell an empty-but-VALID report apart
+/// from "every report we found was corrupt". Every fn-info consumer (diff/gains/containment) loads
+/// via `load_fninfo_loud` below.
+fn load_fninfo_flagged(prefix: &str) -> (BTreeMap<String, FnInfo>, bool) {
     let mut out: BTreeMap<String, FnInfo> = BTreeMap::new();
-    for e in load_entries(prefix) {
+    let (entries, hard_fail) = load_entries_inner(prefix);
+    for e in entries {
         // MERGE (union) rather than overwrite: two crates can render a function with the same printed
         // name (`main`, a shared generic monomorphization). Overwriting dropped one crate's effects, so
         // diff/gains could miss a newly-introduced effect in the shadowed crate. Union over-approximates
@@ -24,7 +30,29 @@ pub(crate) fn load_fninfo(prefix: &str) -> BTreeMap<String, FnInfo> {
         info.direct.extend(e.direct);
         info.calls.extend(e.calls);
     }
-    out
+    (out, hard_fail)
+}
+
+/// `load_fninfo`, but both a no-files prefix AND a found-but-corrupt report fail LOUD (exit 2) instead
+/// of reading as an empty map — `load_entries_loud`'s rule (load.rs:75) applied to the comparative
+/// verbs. diff/gains/containment previously loaded via the QUIET path, so a FOUND-but-corrupt current
+/// report yielded an empty map and an exit-0 empty answer (`{"gained":[],"byFunction":[]}` — a
+/// supply-chain all-clear over corrupt input, the §4 cardinal sin). A legitimately effect-free crate
+/// still writes a report that LISTS its functions, so empty-because-of-hard-fail is always the corrupt
+/// case; a CLEAN-empty valid report stays Ok. `which` labels the side in the message ("current" /
+/// "baseline"; "" for the single-report verbs) — the pre-existing no-files wording is preserved.
+pub(crate) fn load_fninfo_loud(prefix: &str, which: &str) -> Result<BTreeMap<String, FnInfo>, i32> {
+    let at = if which.is_empty() { String::new() } else { format!("{which} ") };
+    if glob_reports(prefix).is_empty() {
+        eprintln!("candor: no report files at {at}prefix `{prefix}` — check the path.");
+        return Err(2);
+    }
+    let (map, hard_fail) = load_fninfo_flagged(prefix);
+    if map.is_empty() && hard_fail {
+        eprintln!("candor: every report found at {at}prefix `{prefix}` failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan.");
+        return Err(2);
+    }
+    Ok(map)
 }
 
 #[derive(Serialize, Clone)]
@@ -72,18 +100,19 @@ pub(crate) fn cmd_diff(args: &[String]) -> i32 {
     let bver = rest.first().map(String::as_str).unwrap_or("");
     let ever = rest.get(1).map(String::as_str).unwrap_or("");
 
-    // A prefix that matches NO report files must fail LOUD, not read as an empty report: a typo'd
-    // `cur` would otherwise show zero gains (a gained-effect gate built on this output would silently
-    // PASS with the wrong path), and a typo'd baseline would show every effect as newly gained. A
-    // legitimately effect-free crate still writes a report file, so "no files" is always an error.
-    for (which, pre) in [("current", cur_pre), ("baseline", base_pre)] {
-        if glob_reports(pre).is_empty() {
-            eprintln!("candor: no report files at {which} prefix `{pre}` — check the path.");
-            return 2;
-        }
-    }
-    let cur = load_fninfo(cur_pre);
-    let base = load_fninfo(base_pre);
+    // Both sides load LOUD (load_fninfo_loud): a prefix matching NO report files must fail, not read
+    // as an empty report — a typo'd `cur` would otherwise show zero gains (a gained-effect gate built
+    // on this output would silently PASS with the wrong path), and a typo'd baseline would show every
+    // effect as newly gained. And a FOUND-but-corrupt report must fail the same way, never read as an
+    // empty (all-clear) diff — see load_fninfo_loud.
+    let cur = match load_fninfo_loud(cur_pre, "current") {
+        Ok(m) => m,
+        Err(c) => return c,
+    };
+    let base = match load_fninfo_loud(base_pre, "baseline") {
+        Ok(m) => m,
+        Err(c) => return c,
+    };
     let empty = BTreeSet::new();
 
     let mut changes: Vec<Change> = Vec::new();
@@ -309,6 +338,26 @@ pub(crate) fn cmd_receipt(args: &[String]) -> i32 {
 /// minus baseline `inferred`), sorted. `candor-run.sh`'s opt-in self-review dedups these against its
 /// `review-seen` file and formats the prompt — the seen-file state stays in bash so this stays a
 /// read-only query.
+/// The origin ladder for a gained-effect fn (⟨0.12 staged⟩, gains --json): baseline-report hit →
+/// "existing"; else a baseline-callgraph node (a baseline-PURE fn has no report entry but is still a
+/// graph caller/callee) → "existing"; else a graph that is empty OR PARTIAL (a matched sidecar was
+/// dropped — the fn may have lived there) → "unknown"; else "new". Factored out of cmd_gains so the
+/// partial-graph rule is unit-pinned (a partial graph must never mint "new").
+fn gain_origin(
+    func: &str,
+    base: &BTreeMap<String, FnInfo>,
+    cg_nodes: &BTreeSet<&str>,
+    cg_empty_or_partial: bool,
+) -> &'static str {
+    if base.contains_key(func) || cg_nodes.contains(func) {
+        "existing"
+    } else if cg_empty_or_partial {
+        "unknown"
+    } else {
+        "new"
+    }
+}
+
 pub(crate) fn cmd_gains(args: &[String]) -> i32 {
     // `gains <current> <baseline> [--json]` — the two-locator comparative verb (does NOT discover, like
     // `diff`). Locators resolve by the shared --report rule. The DEPRECATED old form allowed a trailing
@@ -330,17 +379,17 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         }
     }
     let (cur_pre, base_pre) = (cur_loc.as_str(), base_loc.as_str());
-    // Same no-files-fails-loud rule as cmd_diff, and for the same reason: a typo'd current prefix
-    // shows zero gains (a gate built on this silently PASSES); a typo'd baseline shows every effect
-    // as newly gained.
-    for (which, pre) in [("current", cur_pre), ("baseline", base_pre)] {
-        if glob_reports(pre).is_empty() {
-            eprintln!("candor: no report files at {which} prefix `{pre}` — check the path.");
-            return 2;
-        }
-    }
-    let cur = load_fninfo(cur_pre);
-    let base = load_fninfo(base_pre);
+    // Same loud rule as cmd_diff, and for the same reason: a typo'd (or FOUND-but-corrupt) current
+    // prefix shows zero gains — an exit-0 `{"gained":[]}` supply-chain all-clear a gate silently
+    // PASSES on; a typo'd baseline shows every effect as newly gained. See load_fninfo_loud.
+    let cur = match load_fninfo_loud(cur_pre, "current") {
+        Ok(m) => m,
+        Err(c) => return c,
+    };
+    let base = match load_fninfo_loud(base_pre, "baseline") {
+        Ok(m) => m,
+        Err(c) => return c,
+    };
     let empty = BTreeSet::new();
     let mut out: Vec<(String, String)> = Vec::new();
     for (func, info) in &cur {
@@ -363,26 +412,30 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         // baseline CALLGRAPH (a baseline-pure fn is a graph node with no report entry):
         //   "existing" — in the baseline report, or a baseline-callgraph node (caller or callee);
         //   "new"      — in neither (the fn did not exist at the baseline);
-        //   "unknown"  — absent from the baseline report AND no baseline callgraph sidecar was
-        //                found: existence is undecidable, DISCLOSED rather than guessed (§4).
+        //   "unknown"  — absent from the baseline report AND the baseline callgraph is
+        //                PARTIAL-OR-ABSENT (no sidecar found, or a matched sidecar failed to
+        //                read/parse — the fn may have lived in the dropped file): existence is
+        //                undecidable, DISCLOSED rather than guessed (§4). Without the partial arm a
+        //                dropped sidecar made its fns read "new", downgrading the supply-chain
+        //                attack signal (an EXISTING fn gaining an effect) to a feature.
         // JSON-only: the human `fn\teffect` TSV is a pinned consumer surface (candor-run.sh's
         // seen-file dedup matches whole lines) and stays byte-stable.
-        let base_cg = load_callgraph(base_pre);
+        let (base_cg, base_cg_partial) = load_callgraph_flagged(base_pre);
         let base_cg_nodes: BTreeSet<&str> = base_cg
             .iter()
             .flat_map(|(k, vs)| std::iter::once(k.as_str()).chain(vs.iter().map(String::as_str)))
             .collect();
-        let origin_of = |f: &str| -> &'static str {
-            if base.contains_key(f) {
-                "existing"
-            } else if base_cg.is_empty() {
-                "unknown"
-            } else if base_cg_nodes.contains(f) {
-                "existing"
-            } else {
-                "new"
-            }
-        };
+        let cg_unusable = base_cg.is_empty() || base_cg_partial;
+        let origin_of = |f: &str| gain_origin(f, &base, &base_cg_nodes, cg_unusable);
+        // §2.1 provenance: which engine BUILD produced each side (the report's `candor.version`,
+        // `meta.version` for older shapes; "" when unknown — the candor-ts/candor-java parity shape).
+        // When both are known and differ, a "gained capability" may be the newer engine
+        // RECLASSIFYING, not the dependency changing — disclosed, never silently conflated.
+        let baseline_version = report_build_version(base_pre);
+        let engine_version = report_build_version(cur_pre);
+        if !baseline_version.is_empty() && !engine_version.is_empty() && baseline_version != engine_version {
+            eprintln!("candor: ⚠ baseline @{baseline_version} ≠ engine @{engine_version} — a \"gained capability\" may be the engine reclassifying, not the dependency changing; regenerate both reports with one build to compare releases.");
+        }
         let mut gained: Vec<&str> = out.iter().map(|(_, e)| e.as_str()).collect();
         gained.sort_unstable();
         gained.dedup();
@@ -390,7 +443,14 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
             .iter()
             .map(|(f, e)| serde_json::json!({ "effect": e, "fn": f, "origin": origin_of(f) }))
             .collect();
-        let v = serde_json::json!({ "gained": gained, "byFunction": by_function });
+        // Top-level keys ALPHABETICAL (baseline_version, byFunction, engine_version, gained) — the
+        // cross-engine gains shape candor-ts/candor-java emit.
+        let v = serde_json::json!({
+            "baseline_version": baseline_version,
+            "byFunction": by_function,
+            "engine_version": engine_version,
+            "gained": gained,
+        });
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
         return 0;
     }
@@ -398,4 +458,128 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         println!("{func}\t{e}");
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A FOUND-but-corrupt report must make the comparative verbs fail LOUD (exit 2) — never an exit-0
+    /// empty answer. `gains --json` over a corrupt current report printed `{"gained":[],"byFunction":[]}`
+    /// — a supply-chain ALL-CLEAR over corrupt input, the §4 cardinal sin (and `diff` the same via its
+    /// quiet loads). Pins load_fninfo_loud end-to-end through cmd_gains and cmd_diff.
+    #[test]
+    fn corrupt_report_fails_gains_and_diff_loud_not_empty() {
+        let dir = std::env::temp_dir().join(format!("candor-gains-loud-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (cur, base) = (dir.join("cur"), dir.join("base"));
+        let (cur_s, base_s) = (cur.to_string_lossy().into_owned(), base.to_string_lossy().into_owned());
+        let valid = serde_json::json!({
+            "candor": { "version": "b1", "toolchain": "stable", "spec": candor_report::SPEC_VERSION },
+            "functions": [ { "fn": "a::f", "inferred": ["Fs"], "direct": ["Fs"] } ]
+        });
+        std::fs::write(dir.join("base.demo.scan.json"), serde_json::to_string(&valid).unwrap()).unwrap();
+
+        // (a) current FOUND but truncated/garbage → exit 2 from gains AND diff, JSON or not.
+        std::fs::write(dir.join("cur.demo.scan.json"), r#"{ "candor": {}, "functions": [ { "fn": "x."#).unwrap();
+        let args = |j: bool| -> Vec<String> {
+            let mut v = vec![cur_s.clone(), base_s.clone()];
+            if j { v.push("--json".into()) }
+            v
+        };
+        assert_eq!(cmd_gains(&args(true)), 2, "gains --json over a corrupt current report must exit 2");
+        assert_eq!(cmd_gains(&args(false)), 2, "gains (TSV) over a corrupt current report must exit 2");
+        assert_eq!(cmd_diff(&args(true)), 2, "diff over a corrupt current report must exit 2");
+
+        // (b) semantic corruption — parses as a bare array but every entry is junk → still loud.
+        std::fs::write(dir.join("cur.demo.scan.json"), "[1, 2, 3]").unwrap();
+        assert_eq!(load_fninfo_loud(&cur_s, "current").err(), Some(2), "all-junk array must fail loud");
+
+        // (c) a corrupt BASELINE is just as untrustworthy (every effect would read newly gained).
+        std::fs::write(dir.join("cur.demo.scan.json"), serde_json::to_string(&valid).unwrap()).unwrap();
+        std::fs::write(dir.join("base.demo.scan.json"), "not json").unwrap();
+        assert_eq!(cmd_gains(&args(true)), 2, "gains over a corrupt baseline must exit 2");
+
+        // (d) both sides valid → exit 0 (the tolerant path unchanged); a CLEAN-empty report stays Ok.
+        std::fs::write(dir.join("base.demo.scan.json"), serde_json::to_string(&valid).unwrap()).unwrap();
+        assert_eq!(cmd_gains(&args(true)), 0, "valid reports still succeed");
+        let clean_empty = serde_json::json!({
+            "candor": { "version": "b1", "toolchain": "stable", "spec": candor_report::SPEC_VERSION },
+            "functions": []
+        });
+        std::fs::write(dir.join("cur.demo.scan.json"), serde_json::to_string(&clean_empty).unwrap()).unwrap();
+        assert!(load_fninfo_loud(&cur_s, "current").is_ok(), "a well-formed empty report is not corrupt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A PARTIAL baseline callgraph (a matched sidecar failed to read/parse) must classify a fn absent
+    /// from the surviving graph as origin "unknown", never "new" — the fn may have lived in the dropped
+    /// file, and "new" downgrades the supply-chain attack signal (an EXISTING fn gaining an effect) to
+    /// a feature. A genuinely ABSENT sidecar stays the ordinary empty (→ unknown) case, and a fully
+    /// valid graph still mints "new"/"existing" as before.
+    #[test]
+    fn partial_baseline_callgraph_reads_unknown_not_new() {
+        let dir = std::env::temp_dir().join(format!("candor-cg-partial-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let base = dir.join("base");
+        let base_s = base.to_string_lossy().into_owned();
+        std::fs::write(dir.join("base.a.scan.callgraph.json"), r#"{"a::caller":["a::callee"]}"#).unwrap();
+        std::fs::write(dir.join("base.b.scan.callgraph.json"), r#"{"b::caller": ["b::"#).unwrap(); // corrupt
+
+        let (cg, partial) = load_callgraph_flagged(&base_s);
+        assert!(partial, "a matched-but-corrupt sidecar must flag the graph PARTIAL");
+        assert!(cg.contains_key("a::caller"), "the surviving sidecar still merges");
+
+        let nodes: BTreeSet<&str> =
+            cg.iter().flat_map(|(k, vs)| std::iter::once(k.as_str()).chain(vs.iter().map(String::as_str))).collect();
+        let report_base: BTreeMap<String, FnInfo> = BTreeMap::new();
+        let unusable = cg.is_empty() || partial;
+        // the fn that lived only in the CORRUPT sidecar: absent from graph + report → unknown, not new.
+        assert_eq!(gain_origin("b::caller", &report_base, &nodes, unusable), "unknown");
+        // a surviving graph node is still existing (partial never erases positive evidence).
+        assert_eq!(gain_origin("a::callee", &report_base, &nodes, unusable), "existing");
+
+        // the same graph, both sidecars valid → partial=false, and an absent fn is genuinely "new".
+        std::fs::write(dir.join("base.b.scan.callgraph.json"), r#"{"b::caller":["b::callee"]}"#).unwrap();
+        let (cg2, partial2) = load_callgraph_flagged(&base_s);
+        assert!(!partial2, "two valid sidecars are not partial");
+        let nodes2: BTreeSet<&str> =
+            cg2.iter().flat_map(|(k, vs)| std::iter::once(k.as_str()).chain(vs.iter().map(String::as_str))).collect();
+        assert_eq!(gain_origin("never::existed", &report_base, &nodes2, cg2.is_empty()), "new");
+
+        // an ABSENT sidecar (no callgraph files at all) is NOT partial — it's the empty (unknown) case.
+        let bare = dir.join("bare");
+        let (cg3, partial3) = load_callgraph_flagged(&bare.to_string_lossy());
+        assert!(cg3.is_empty() && !partial3, "a genuinely absent sidecar is empty, not partial");
+        assert_eq!(gain_origin("anything", &report_base, &BTreeSet::new(), true), "unknown");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The gains provenance sources: report_build_version reads the envelope's `candor.version`, falls
+    /// back to `meta.version` (older shapes), and returns "" when absent/unreadable — the "" is what
+    /// gains --json emits as baseline_version/engine_version when unknown (candor-ts parity).
+    #[test]
+    fn report_build_version_reads_envelope_with_meta_fallback() {
+        let dir = std::env::temp_dir().join(format!("candor-buildver-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let pre = dir.join("r");
+        let pre_s = pre.to_string_lossy().into_owned();
+        let report = dir.join("r.demo.scan.json");
+
+        std::fs::write(&report, r#"{"candor":{"version":"0.9.9","toolchain":"t"},"functions":[]}"#).unwrap();
+        assert_eq!(report_build_version(&pre_s), "0.9.9", "the §2 envelope candor.version");
+
+        std::fs::write(&report, r#"{"meta":{"version":"0.1.1","toolchain":"t"},"functions":[]}"#).unwrap();
+        assert_eq!(report_build_version(&pre_s), "0.1.1", "older meta.version shape");
+
+        std::fs::write(&report, r#"{"functions":[]}"#).unwrap();
+        assert_eq!(report_build_version(&pre_s), "", "no version anywhere → empty string");
+
+        std::fs::write(&report, "not json").unwrap();
+        assert_eq!(report_build_version(&pre_s), "", "unreadable → empty string, never a guess");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
