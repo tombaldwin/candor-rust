@@ -186,6 +186,7 @@ candor-query impact   <prefix> <fn-query>  [--json]   # the blast radius: {fn,af
 candor-query map      <prefix>             <0|1>
 candor-query whatif   <prefix> <fn> <Effect> [policy-file] [0|1]
 candor-query path     <prefix> <fn> <Effect> [--json]
+candor-query tour     [<N>] [--report <locator>] [--json]   # the N (default 10) most surprising transitive reaches
 candor-query gains    <cur_prefix> <base_prefix> [--json]   # supply-chain alarm: effects a surface gained
 candor-query diff     <cur_prefix> <base_prefix> <0|1> <baseline_ver> <engine_ver>
 ```
