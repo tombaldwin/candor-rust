@@ -4,4 +4,5 @@
 runs*/*/work/
 runs*/*/target/
 runs*/*/baseline.*.json
-/speed-xmodel/
+/speed-xmodel/control/
+/speed-xmodel/treatment/
