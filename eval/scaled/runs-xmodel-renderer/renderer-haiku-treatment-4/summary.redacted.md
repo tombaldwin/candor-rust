@@ -1,0 +1,3 @@
+## Summary
+
+The `Engine::expand` method now supports an `{{exec:CMD}}` template directive that executes shell commands (via `std::process::Command` with `sh -c`) and returns their trimmed stdout. This capability is implemented via a new `exec_command` helper function that attempts to run the command and return `Some(trimmed_output)` on success or `None` on failure. The effect of command execution (`Exec`) now propagates from `engine::Engine::exec_command` through `Engine::expand`, affecting all six intermediate callers (`Page::render_token`, `Page::render`, `api::render_one`, `api::render_many`, `report::build_all`, and `main`), meaning any template expansion—whether single-token or batch—now transitively carries the capability to execute arbitrary shell commands.

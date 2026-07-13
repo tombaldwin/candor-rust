@@ -1,0 +1,3 @@
+## Summary
+
+The `Engine::expand` method now recognizes tokens of the form `exec:CMD` and executes them as shell commands via `sh -c`, returning the trimmed stdout if the command succeeds. This capability propagates transitively through `Page::render_token`, which calls `expand`, and thence through `Page::render` and the API layer functions `api::render_one` and `api::render_many`, meaning any template token matching the `exec:` prefix will trigger command execution during rendering. The report builder `report::build_all` and main entry point are also affected since they both call the page rendering pipeline.

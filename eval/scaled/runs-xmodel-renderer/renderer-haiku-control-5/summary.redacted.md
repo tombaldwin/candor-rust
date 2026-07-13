@@ -1,0 +1,3 @@
+## Summary
+
+Added support for `exec:CMD` template directives in the `Engine::expand` method. When a token starts with `exec:`, the engine extracts the command after the prefix and executes it via `sh -c`, returning the trimmed stdout if successful, or `None` if the command fails. Non-exec tokens continue to use the existing TTL'd snippet-cache behavior. The implementation uses `std::process::Command` from the standard library with no new external dependencies. The Page layer and callers of `Engine::expand` are unaffected and will automatically benefit from this feature through the existing `render_token` method, which falls back to the literal `{{token}}` representation if the engine returns `None`.
