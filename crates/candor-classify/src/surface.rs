@@ -76,12 +76,15 @@ fn has_token(name: &str, lexicon: &[&str]) -> Option<String> {
     tokenize(name).into_iter().find(|t| lexicon.contains(&t.as_str()))
 }
 
-/// Salience of an effect — the boundary/security-relevant effects a reviewer cares about score higher.
+/// Salience of an effect — only the boundary/security-relevant effects a reviewer cares about are ever
+/// surfaced as "surprising": Net/Exec/Db/Ipc (sharpest), then Fs/Env (medium). Clock/Log/Rand — and anything
+/// else, including Unknown — score 0, so they're NEVER the opener. A "settings" method that reads the clock
+/// or logs isn't a find a reviewer files away; calling it "the most surprising reach" over-promises. A repo
+/// whose only reaches are mundane honestly reports "nothing hidden" instead (corpus-dogfood refinement).
 fn salience(effect: &str) -> i64 {
     match effect {
         "Net" | "Exec" | "Db" | "Ipc" => 5,
         "Fs" | "Env" => 3,
-        "Clock" | "Log" | "Rand" => 1,
         _ => 0,
     }
 }
