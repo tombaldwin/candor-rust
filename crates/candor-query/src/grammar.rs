@@ -1,4 +1,4 @@
-//! The canonical query CLI grammar (SPEC §3.3.1, spec 0.10) shared by every query verb.
+//! The canonical query CLI grammar (SPEC §3.3.1 ⟨0.10⟩) shared by every query verb.
 //!
 //!   candor-query <verb> <verb-args…> [--report <locator>] [--policy <file>] [--json] [--strict] [--include-unknown]
 //!

@@ -5,7 +5,7 @@
 //! bash wrapper only swaps `python3 - … <<'PY'` for `candor-query …`; everything downstream (the
 //! integration tests, the MCP server, the agent) sees identical bytes.
 //!
-//! Usage — the canonical query grammar (candor-spec §3.3.1, spec 0.10):
+//! Usage — the canonical query grammar (candor-spec §3.3.1 ⟨0.10⟩):
 //!   candor-query <verb> <verb-args…> [--report <locator>] [--policy <file>] [--json] [--strict] [--include-unknown]
 //!   candor-query show    <fn>          [--report <locator>] [--json]
 //!   candor-query where   <Effect>      [--report <locator>] [--json]
