@@ -8,12 +8,43 @@
 use crate::*;
 
 /// The report's `package` name (the §2 envelope field), or `None` if absent/unreadable — the tour header
-/// prefers it (meaningful, locator-independent) over the prefix basename.
+/// prefers it (meaningful, locator-independent) over the prefix basename. A `packages` PLURAL envelope
+/// (the JVM shape, SPEC §2) is honoured too: one entry names it verbatim; several name their longest
+/// common dotted prefix (`com.uflexi.actions` + `com.uflexi.dao` → `com.uflexi`); none shared → None.
 fn report_package(prefix: &str) -> Option<String> {
     let path = glob_reports(prefix).into_iter().next()?;
     let text = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("package")?.as_str().filter(|s| !s.is_empty()).map(String::from)
+    if let Some(p) = v.get("package").and_then(|p| p.as_str()).filter(|s| !s.is_empty()) {
+        return Some(p.to_string());
+    }
+    let pkgs: Vec<&str> = v
+        .get("packages")?
+        .as_array()?
+        .iter()
+        .filter_map(|p| p.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    packages_label(&pkgs)
+}
+
+/// The longest common dot-separated prefix of a plural `packages` list — the tour header's label for a
+/// multi-package (JVM-shape) report. Whole segments only (`com.ab` + `com.ac` share `com`, not `com.a`).
+fn packages_label(pkgs: &[&str]) -> Option<String> {
+    let first: Vec<&str> = pkgs.first()?.split('.').collect();
+    let mut n = first.len();
+    for p in &pkgs[1..] {
+        let segs: Vec<&str> = p.split('.').collect();
+        let mut i = 0;
+        while i < n.min(segs.len()) && segs[i] == first[i] {
+            i += 1;
+        }
+        n = i;
+        if n == 0 {
+            return None; // nothing shared — the basename fallback is more honest than a wrong name
+        }
+    }
+    Some(first[..n].join("."))
 }
 
 /// `tour [<N>]` — the N (default 10) most surprising reaches in the report's crate, each with a
