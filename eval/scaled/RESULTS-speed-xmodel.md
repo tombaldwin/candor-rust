@@ -73,3 +73,36 @@ the tool carries weak models most where the manual work is tedious. Direction re
 the prior Opus N=8 (1.81× total-token); the output-token lens just makes the gap starker.
 Runs: `speed-xmodel/` (this workflow measured per-cell output tokens; per-trial `subagent_tokens` would need
 direct-agent notifications — the direction is unambiguous either way).
+
+---
+
+## SERIAL WALL-CLOCK RESULT (2026-07-13, per PREREG amendment 2)
+
+The clean number the prior passes deferred: 40 trials, **strictly serial** (one agent in flight at a
+time — no self-contention), arms alternating C,T within each model block, same verbatim prompt + the
+byte-untouched fixture dirs (query binary candor-query 0.11.0). Primary = median `duration_ms`/cell.
+
+| model  | control (med) | treatment (med) | wall-clock ratio | token ratio | recall ctl → tmt (of 80) |
+|--------|---------------|-----------------|------------------|-------------|--------------------------|
+| opus   | 25.5 s        | 13.4 s          | **1.90×**        | 1.35×       | 80 → 80 |
+| sonnet | 22.2 s        | 7.3 s           | **3.04×**        | 1.28×       | 79 → 80 |
+| haiku  | 47.3 s        | 17.7 s          | **2.67×**        | 1.34×       | 76 → 80 |
+| fable  | 37.4 s        | 18.2 s          | **2.06×**        | 1.37×       | 80 → 80 |
+
+- **Bar 1 (treatment faster, every tier): HOLD** — 1.90–3.04×, all four tiers.
+- **Bar 2 (recall floor): HOLD** — treatment ≥ control everywhere; treatment is a PERFECT 16/16 in all
+  20 trials, while serial control shows the cracks the concurrent passes missed: haiku dropped a
+  function in **4 of 5** control trials (`main` ×3 — even after *reading* main.rs; `quote_bulk` ×1 —
+  *named in its own trace*, dropped from the final list) and sonnet dropped `main` once. On the same
+  directed task where the concurrent N=5 scored 16/16 both arms, unaided weak-tier enumeration is not
+  actually at the floor — the deterministic query is.
+- **Bar 3 (ratio > 1 every tier): HOLD.**
+- **Bar 4 (the anchor): REPLICATES** — opus serial 1.90× vs the prior human-orchestrated serial Opus
+  N=8 at 1.81× (30.0→16.5 s). Two harnesses, same number.
+- Token medians land inside the N=1 band (1.24–1.42×) at every tier — three passes, three lenses
+  (total tokens, output tokens, serial wall-clock), one direction.
+
+Slowest unaided = haiku (47.3 s median — the flail is wall-clock too, not just tokens); the treatment
+band is tight (7–18 s) because the answer is one query, not model effort. External serving variance
+remains (one sitting, 2026-07-13); the serial protocol removes only self-contention.
+Runs: `speed-xmodel/runs-serial/` (telemetry.tsv, ground-truth.txt, per-trial verbatim summaries).
