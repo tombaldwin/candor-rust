@@ -18,10 +18,19 @@ pub(crate) fn glob_reports(prefix: &str) -> Vec<PathBuf> {
 /// (one corrupt file doesn't kill the merged query), but the blind spot is now visible. With atomic
 /// report writes (candor_report::write_atomic) this only fires on genuine corruption, not a mid-write race.
 pub(crate) fn load_entries(prefix: &str) -> Vec<ReportEntry> {
+    load_entries_inner(prefix).0
+}
+
+/// The shared loader. Returns the merged entries AND whether a matched file wholly FAILED to read or
+/// parse (`hard_fail`) — the loud wrapper needs that bit to tell "an empty-but-valid report" apart from
+/// "every report we found was corrupt", which must never read as an empty (all-clear) answer.
+fn load_entries_inner(prefix: &str) -> (Vec<ReportEntry>, bool) {
     let mut out = Vec::new();
+    let mut hard_fail = false;
     for path in glob_reports(prefix) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             eprintln!("candor: report {} could not be read — its functions are OMITTED from this query", path.display());
+            hard_fail = true;
             continue;
         };
         match report_entries_counted(&text) {
@@ -38,13 +47,16 @@ pub(crate) fn load_entries(prefix: &str) -> Vec<ReportEntry> {
                 }
                 out.extend(es);
             }
-            None => eprintln!(
-                "candor: report {} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan",
-                path.display()
-            ),
+            None => {
+                eprintln!(
+                    "candor: report {} failed to parse — its functions are OMITTED from this query (corrupt or mid-write); re-run the scan",
+                    path.display()
+                );
+                hard_fail = true;
+            }
         }
     }
-    out
+    (out, hard_fail)
 }
 
 /// `load_entries`, but a prefix matching NO report files fails LOUD (exit 2) instead of reading as an
@@ -58,7 +70,19 @@ pub(crate) fn load_entries_loud(prefix: &str) -> Result<Vec<ReportEntry>, i32> {
         eprintln!("candor: no report files at prefix `{prefix}` — check the path.");
         return Err(2);
     }
-    Ok(load_entries(prefix))
+    let (entries, hard_fail) = load_entries_inner(prefix);
+    // A report file was FOUND but yielded no usable entries because it failed to read/parse — that is a
+    // corrupt report, NOT an effect-free crate. Returning `Ok(empty)` here would let a caller read the
+    // emptiness as "no effects": `tour` prints "nothing hidden", a policy `map`/gate PASSES — the §4
+    // cardinal-sin false all-clear. A legitimately effect-free crate still writes a report that LISTS its
+    // functions, so empty-after-a-parse-failure is always the corrupt case. Fail loud (the disclosure
+    // above already named the file). One corrupt file among several still merges — that stays tolerant
+    // (entries non-empty → Ok), only a net-empty parse failure is fatal.
+    if entries.is_empty() && hard_fail {
+        eprintln!("candor: every report found at prefix `{prefix}` failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan.");
+        return Err(2);
+    }
+    Ok(entries)
 }
 
 // ── audit ───────────────────────────────────────────────────────────────────────────────────────
@@ -231,4 +255,43 @@ pub(crate) fn is_scan_artifact(base: &str, name: &str) -> bool {
     name.strip_prefix(base)
         .and_then(|r| r.strip_prefix('.'))
         .is_some_and(|rest| rest.contains(".scan.") || rest.ends_with(".scan.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A report file that is FOUND but wholly fails to parse must make `load_entries_loud` return
+    /// Err(2) — NOT Ok(empty). Ok(empty) would let a caller (tour, a policy map/gate) read the emptiness
+    /// as "no effects": the §4 cardinal-sin false all-clear over a corrupt report. A valid report always
+    /// lists its functions, so empty-after-a-parse-failure is always the corrupt case (dogfood find).
+    #[test]
+    fn corrupt_report_fails_loud_not_empty() {
+        let dir = std::env::temp_dir().join(format!("candor-loud-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let prefix = dir.join("report");
+        let prefix_s = prefix.to_string_lossy().into_owned();
+
+        // (a) no report files at all → loud (the pre-existing guard).
+        assert_eq!(load_entries_loud(&prefix_s).err(), Some(2), "no files must fail loud");
+
+        // (b) a FOUND but truncated/garbage report → loud (the fix): parse fails, entries empty.
+        let corrupt = dir.join("report.demo.scan.json");
+        std::fs::File::create(&corrupt).unwrap()
+            .write_all(br#"{ "candor": {}, "functions": [ { "fn": "x."#).unwrap();
+        assert_eq!(load_entries_loud(&prefix_s).err(), Some(2), "a corrupt report must fail loud, never Ok(empty)");
+
+        // (c) a VALID report → Ok with entries (the tolerant path is unchanged).
+        let valid = serde_json::json!({
+            "meta": { "version": "t", "toolchain": "stable", "spec": candor_report::SPEC_VERSION },
+            "crate": "demo",
+            "functions": [ { "fn": "a::f", "inferred": ["Fs"], "direct": ["Fs"] } ]
+        });
+        std::fs::write(&corrupt, serde_json::to_string(&valid).unwrap()).unwrap();
+        let got = load_entries_loud(&prefix_s).expect("a valid report loads");
+        assert!(!got.is_empty(), "a valid report yields entries");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
