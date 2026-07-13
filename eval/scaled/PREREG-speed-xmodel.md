@@ -55,3 +55,39 @@ medians and reduce single-draw noise.
   not a saving) — spot-checked, not the headline.
 - **Hypothesis:** median treatment tokens < control at every tier (the N=1 direction holds at N=5).
 Run under `speed-xmodel/runs-n5/`.
+
+---
+
+## AMENDMENT 2 (2026-07-13): the serial wall-clock pass (N=5/cell)
+
+The N=1 and N=5 runs left wall-clock as the caveated secondary — trials ran concurrently, so
+`duration_ms` was inflated by self-inflicted serving contention. This pass measures the clean number the
+prior amendments deferred: **median serial wall-clock per cell**.
+
+- **Serial protocol:** exactly ONE engineer agent in flight at any time; the next trial launches only
+  after the previous completes. Removes self-contention (external serving variance remains — all trials
+  run in one sitting; noted, not controllable).
+- **Order (fixed, pre-registered):** model blocks opus → sonnet → haiku → fable; within each block the
+  arms alternate C,T,C,T,… (5 pairs), so slow serving drift within a block hits both arms evenly.
+- **Cells:** 4 models × 2 arms × 5 trials = **40 trials**. Same verbatim PREREG-speed prompt + tool
+  clauses; the SAME `speed-xmodel/control|treatment` fixture dirs as the prior runs, byte-untouched for
+  comparability (treatment's `.candor/` report is the one the N=1/N=5 runs queried; the query binary is
+  the current build, candor-query 0.11.0 — noted, additive contract, `callers`/`whatif` unchanged).
+- **Primary metric:** median `duration_ms` per cell (Agent completion telemetry), per-tier speed ratio
+  control/treatment. THIS pass exists for this number.
+- **Secondary:** median `subagent_tokens` per cell (should replicate the N=1 total-token ratios,
+  1.24–1.42×).
+- **Recall floor:** the returned list vs the 16-fn ground-truth set, both arms, every trial (a speed win
+  that drops recall is not a win). Summaries captured orchestrator-side (the harness gotcha: weak models
+  return text but skip file writes).
+
+### Falsification bars
+
+1. **Wall-clock claim:** refuted for a tier if median(treatment `duration_ms`) ≥ median(control).
+2. **Recall floor:** treatment recall ≥ control recall at every tier.
+3. **Consistency:** the wall-clock ratio > 1 at every tier.
+4. **Anchor:** the prior human-orchestrated serial Opus run measured 1.81× (30.0s → 16.5s); the opus cell
+   should land the same direction (the magnitude may differ — different agent harness).
+
+Runs under `speed-xmodel/runs-serial/`: `telemetry.tsv` (model, arm, trial, duration_ms, subagent_tokens,
+recall) + each trial's verbatim returned list.
