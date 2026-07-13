@@ -44,6 +44,13 @@ fn load_entries_inner(prefix: &str) -> (Vec<ReportEntry>, bool) {
                         if dropped == 1 { "y" } else { "ies" },
                         if dropped == 1 { "is" } else { "are" },
                     );
+                    // A file that parsed but whose entries were ALL junk (es empty, dropped > 0) yielded no
+                    // trustworthy functions — the same corruption as a whole-file parse failure. Mark it so
+                    // the loud wrapper won't let a net-empty result read as an all-clear (e.g. a bare `[1,2,3]`
+                    // array-shaped report). A CLEAN-empty report (dropped == 0) stays a non-fatal empty.
+                    if es.is_empty() {
+                        hard_fail = true;
+                    }
                 }
                 out.extend(es);
             }
@@ -282,7 +289,13 @@ mod tests {
             .write_all(br#"{ "candor": {}, "functions": [ { "fn": "x."#).unwrap();
         assert_eq!(load_entries_loud(&prefix_s).err(), Some(2), "a corrupt report must fail loud, never Ok(empty)");
 
-        // (c) a VALID report → Ok with entries (the tolerant path is unchanged).
+        // (c) a SEMANTIC corruption — a bare array whose entries are all junk (no `fn`). It parses as a
+        // legacy bare array, every entry is dropped, and the net-empty result must fail loud too (not read
+        // as an effect-free crate) — the dogfood find that also bit the JVM engine.
+        std::fs::write(&corrupt, "[1, 2, 3]").unwrap();
+        assert_eq!(load_entries_loud(&prefix_s).err(), Some(2), "an all-junk array report must fail loud");
+
+        // (d) a VALID report → Ok with entries (the tolerant path is unchanged).
         let valid = serde_json::json!({
             "meta": { "version": "t", "toolchain": "stable", "spec": candor_report::SPEC_VERSION },
             "crate": "demo",
@@ -291,6 +304,15 @@ mod tests {
         std::fs::write(&corrupt, serde_json::to_string(&valid).unwrap()).unwrap();
         let got = load_entries_loud(&prefix_s).expect("a valid report loads");
         assert!(!got.is_empty(), "a valid report yields entries");
+
+        // (e) a WELL-FORMED EMPTY report (functions: []) is NOT corruption — it stays a non-fatal empty
+        // (Ok), so the loud rule never over-fires on a genuinely effect-free crate (parity with the ports).
+        let empty = serde_json::json!({
+            "meta": { "version": "t", "toolchain": "stable", "spec": candor_report::SPEC_VERSION },
+            "crate": "demo", "functions": []
+        });
+        std::fs::write(&corrupt, serde_json::to_string(&empty).unwrap()).unwrap();
+        assert!(load_entries_loud(&prefix_s).is_ok(), "a well-formed empty report is not corrupt — Ok(empty)");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
