@@ -278,7 +278,7 @@ JSON, from the *same* check that sets the exit code, for CI annotations / the PR
 ```sh
 cargo candor policy .candor/policy --gate-json verdict.json    # deep engine (also: guard --gate-json)
 candor-scan . --policy .candor/policy --gate-json verdict.json # stable scanner — identical shape
-# → { "spec": "0.11", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
+# → { "spec": "0.12", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
 ```
 
 `-` streams it to stdout. Exit semantics are pinned: violation → 1; a gate that could not run to
@@ -587,7 +587,7 @@ effects the kernel actually observed — ground truth that trusts nothing about 
 
 ## Status
 
-Beta — the candor family's **deep Rust engine**, declaring **spec 0.11** (the same contract the
+Beta — the candor family's **deep Rust engine**, declaring **spec 0.12** (the same contract the
 reference engine, [candor-java](https://github.com/tombaldwin/candor-java), declares; the
 cross-engine conformance suite pins the agreement). The stable scanner is
 [calibrated on 35 real crates](eval/calibration/CALIBRATION.md) (no false positives in library

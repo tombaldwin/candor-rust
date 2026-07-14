@@ -4,7 +4,39 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## spec 0.11 — the surprising-reach surface (2026-07-13) — current floor
+## spec 0.12 — the gains origin field (2026-07-14) — current floor
+
+candor-scan and candor-query now declare **spec `0.12`** (both at crate **0.12.0**; the internal
+**candor-report** and **candor-classify** libs move lockstep to **0.12.0**). **0.12 is the current spec
+floor** — the ratchet from 0.11. No report-schema or verdict change — a 0.11 report and a 0.11
+`--gate-json` verdict are byte-identical under 0.12 — the bump pins the gains `origin` field and the
+comparative-verb loud-fail completion into the contract.
+
+### 🧬 gains `--json` carries `origin` — existing | new | unknown
+
+Every gained effect in `candor gains --json` now says whether the function **existed at the
+baseline**: a fn that shipped pure and now does Net (the supply-chain attack signal) is a different
+alarm from a brand-new fn that does Net (a feature). Reports omit pure functions (§2), so existence
+is keyed on the **baseline callgraph** sidecar (caller keys + callees), and the ladder never guesses:
+baseline report/graph hit → `existing`; no sidecar or a **partial** graph (a disclosed-and-dropped
+corrupt file) → `unknown` — never a downgrade to `new`. JSON-only: the human TSV is a pinned consumer
+surface (the `candor-run.sh` seen-file dedup) and stays byte-stable; `byFunction` keys are emitted
+alphabetically (`effect`, `fn`, `origin`). The JSON also carries **`baseline_version` /
+`engine_version`** provenance (envelope `candor.version`, `meta.version` fallback, empty when
+unknown) plus the §2.1 version-mismatch ⚠ stderr disclosure. Pinned four-way by conformance
+**PART 5b**.
+
+### 🔊 the comparative verbs complete the loud-fail rule
+
+`gains`, `diff`, and `containment` loaded reports through a quiet path, so a FOUND-but-corrupt
+report yielded an exit-0 empty answer — a supply-chain all-clear over corrupt input, the same §4
+cardinal sin the 0.11 rung closed for the single-report verbs. The loud rule now covers **both
+locators** of the comparatives (and containment's current AND baseline): found-but-corrupt →
+**exit 2** with a disclosure; a well-formed empty report is still valid. The quiet loader is
+deleted, so no future verb can reach for it. (The plural-`packages` `tour` header shipped inside
+0.11.0 and is recorded under the 0.11 entry below.)
+
+## spec 0.11 — the surprising-reach surface (2026-07-13)
 
 candor-scan and candor-query now declare **spec `0.11`** (both at crate **0.11.0**; the internal
 **candor-report** and **candor-classify** libs move lockstep to **0.11.0**). **0.11 is the current spec
