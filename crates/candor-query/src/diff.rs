@@ -2,6 +2,14 @@
 
 use crate::*;
 
+/// The receipt's own display order (Db-first), preserved byte-for-byte from the Python it replaces.
+/// It MUST be exactly a permutation of the `candor_report::EFFECTS` vocabulary — a new effect added to
+/// EFFECTS but not here would silently drop from the receipt (while `audit` still showed it). The
+/// invariant is enforced by the `receipt_order_is_a_permutation_of_effects` unit test below, which runs
+/// in CI (unlike the old `debug_assert_eq!`, which was compiled out in the release binary CI ships).
+const RECEIPT_ORDER: [&str; 11] =
+    ["Db", "Net", "Llm", "Fs", "Exec", "Env", "Clock", "Ipc", "Rand", "Clipboard", "Log"];
+
 // ── diff ────────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Default, Clone)]
@@ -303,17 +311,10 @@ pub(crate) fn cmd_receipt(args: &[String]) -> i32 {
     };
     let (tally, unresolved) = tally_effects(&fns);
     let unresolved = unresolved.len();
-    // The receipt's own display order (Db-first), preserved byte-for-byte from the Python it replaces.
-    // It must list exactly the EFFECTS vocabulary; the assert catches a new effect added to EFFECTS but
-    // not here (which would silently drop it from the receipt while `audit` still showed it).
-    const ORDER: [&str; 11] =
-        ["Db", "Net", "Llm", "Fs", "Exec", "Env", "Clock", "Ipc", "Rand", "Clipboard", "Log"];
-    debug_assert_eq!(
-        ORDER.iter().copied().collect::<BTreeSet<_>>(),
-        EFFECTS.iter().copied().collect::<BTreeSet<_>>(),
-        "receipt ORDER must be a permutation of candor_report::EFFECTS",
-    );
-    let effects = ORDER
+    // Receipt display order (`RECEIPT_ORDER`, module-level): a permutation of `candor_report::EFFECTS`,
+    // enforced by the `receipt_order_is_a_permutation_of_effects` CI test (the old in-fn `debug_assert_eq!`
+    // was compiled out of the release binary, so drift shipped silently).
+    let effects = RECEIPT_ORDER
         .iter()
         .filter(|k| tally.get(**k).copied().unwrap_or(0) > 0)
         .map(|k| format!("{} {k}", tally[*k]))
@@ -465,6 +466,20 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The receipt's `RECEIPT_ORDER` must stay a permutation of `candor_report::EFFECTS` — a new effect
+    /// added to EFFECTS but not to RECEIPT_ORDER would silently vanish from the receipt (`audit` would
+    /// still show it — a divergence). This RUNS in CI (`cargo test`), unlike the old in-fn
+    /// `debug_assert_eq!` which the release binary CI ships compiled OUT. Fails loud if the arrays drift.
+    #[test]
+    fn receipt_order_is_a_permutation_of_effects() {
+        assert_eq!(
+            RECEIPT_ORDER.iter().copied().collect::<BTreeSet<_>>(),
+            EFFECTS.iter().copied().collect::<BTreeSet<_>>(),
+            "receipt RECEIPT_ORDER must be a permutation of candor_report::EFFECTS \
+             (a new effect was added to one array but not the other)",
+        );
+    }
 
     /// A FOUND-but-corrupt report must make the comparative verbs fail LOUD (exit 2) — never an exit-0
     /// empty answer. `gains --json` over a corrupt current report printed `{"gained":[],"byFunction":[]}`

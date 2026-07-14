@@ -825,10 +825,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
-                // §1 ⟨0.13⟩ model-SDK dispatch is `Llm` + `Net` — add Net alongside the `Llm` that
-                // `classified` carried (Net is never dropped; a model call IS network I/O).
+                // §1 ⟨0.13⟩ model-SDK dispatch is `Llm` + `Net`, added UNCONDITIONALLY — a model-SDK
+                // crate call IS a model dispatch AND is network I/O, regardless of what `classified`
+                // carried. Insert BOTH: a model-SDK crate whose call ALSO resolves via `classify` to
+                // `Net` (e.g. `aws_sdk_bedrockruntime::…::send`) short-circuits the `.or(Some("Llm"))`
+                // fallback, so `eff == "Net"` and the `Llm` would be DROPPED (a gate evasion — the
+                // model surface silently vanishes behind the plain Net) unless we add it here. Matches
+                // the deep engine (src/lib.rs) and candor-java, which both add Llm+Net unconditionally.
                 if model_sdk && !suppress_bare_leaf && !resolved_local {
-                    direct.entry(f.qual.clone()).or_default().insert("Net");
+                    let d = direct.entry(f.qual.clone()).or_default();
+                    d.insert("Llm");
+                    d.insert("Net");
                 }
                 // A host-ESTABLISHING Net / program-NAMING Exec call with NO captured literal → the endpoint
                 // is invisible to the gate (a runtime value). Mark the surface incomplete so a benign captured
@@ -859,21 +866,39 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 }
                 if let Some(s) = &c.str_arg {
                     match eff {
-                        "Net" => {
+                        // `Net` and `Llm` share the host surface: `Llm` ⟨0.13⟩ rides the Net host literal
+                        // (`allow Llm <host>` certifies against the SAME captured host), so a model-SDK
+                        // call reaching `Llm` via the `.or(Some("Llm"))` fallback (classify returned None)
+                        // with an endpoint literal MUST capture that host — else `allow Llm <host>` has no
+                        // literal to certify and fails closed. Identical capture logic to `Net`.
+                        "Net" | "Llm" => {
                             let h = host_part(s);
-                            // §1 ⟨0.13⟩ Ollama dotless-host (`localhost:11434`): refine to `Llm` WITHOUT
-                            // capturing the bare host as a Net literal (the dotless-host gate — `allow Llm
-                            // localhost` has no literal to certify, fails closed). A dotted model host (incl.
-                            // `127.0.0.1:11434`) IS captured and rides `is_model_host` below. Matches java.
-                            if h.contains('.') || !h.rsplit_once(':').is_some_and(|(_, p)| p == "11434") {
+                            // A DOTLESS host is NOT a certifiable Net allowlist literal — java/ts/swift
+                            // `hostLiteral` REJECT dotless hosts (`localhost:8080` is a bare label, not a
+                            // routable name), so rust must NOT capture one into the host surface either
+                            // (a cross-engine divergence — rust over-captured `localhost:8080` where the
+                            // siblings dropped it). The ONE exception is the port-based Ollama refinement:
+                            // a dotless `:11434` still adds `Llm` (the model signal is the PORT, not the
+                            // host name) but is likewise never captured. So:
+                            //   • dotless `:11434`  → add `Llm`, no host capture (Ollama, matches java);
+                            //   • dotless otherwise → nothing captured (Net effect stays; no literal — a
+                            //     dotless host has no gate-certifiable surface, matching the siblings);
+                            //   • dotted host       → model-host refinement + capture (rides `allow Net`
+                            //     / `allow Llm <host>`), incl. `127.0.0.1:11434` which IS dotted.
+                            if h.contains('.') {
                                 // §1 ⟨0.13⟩ host-literal refinement: a known model host adds `Llm` (Net kept).
                                 if candor_classify::is_model_host(&h) {
                                     direct.entry(f.qual.clone()).or_default().insert("Llm");
                                 }
                                 hosts.entry(f.qual.clone()).or_default().insert(h);
-                            } else {
+                            } else if h.rsplit_once(':').is_some_and(|(_, p)| p == "11434") {
+                                // §1 ⟨0.13⟩ Ollama dotless-host (`localhost:11434`): refine to `Llm` WITHOUT
+                                // capturing the bare host (`allow Llm localhost` has no literal to certify —
+                                // fails closed; `deny Llm` still catches it). Matches java's dotless branch.
                                 direct.entry(f.qual.clone()).or_default().insert("Llm");
                             }
+                            // else: a plain dotless host (`localhost:8080`) — Net effect already recorded;
+                            // no host captured (matches sibling `hostLiteral`; `allow Net` can't certify it).
                         }
                         "Exec" => {
                             // Capture the program head + refine the cliff (spec §4 ⟨0.5⟩) ONLY at a
