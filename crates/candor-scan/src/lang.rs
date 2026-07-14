@@ -392,6 +392,86 @@ pub(crate) fn first_str_lit(args: &syn::punctuated::Punctuated<syn::Expr, syn::t
     None
 }
 
+/// The LITERAL string VALUE of a `const NAME: &str = "…";` / `static NAME: … = "…";` initializer — the
+/// input to const-string propagation (SPEC §1: a STATICALLY-KNOWN host, even when the call builds the URL
+/// with `format!`/a `const`, classifies Llm — candor-java gets this free because javac inlines a `static
+/// final String`; the syntactic scanner must inline it itself). Returns `Some(value)` ONLY when the
+/// initializer is a PLAIN string literal, or a `concat!(…)` of plain string literals (the trivial compile-
+/// time concatenation `concat!("https://", "api.openai.com")`). Any RUNTIME initializer — a fn call, an
+/// env read, a field, another identifier, an interpolation — returns `None`: we NEVER resolve a const to a
+/// non-literal value (the no-fabrication invariant; an unknown-valued const must leave the call exactly as
+/// it is today, bare Net with the host masked).
+pub(crate) fn const_str_value(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => {
+            let v = s.value();
+            (!v.trim().is_empty()).then_some(v)
+        }
+        // `concat!("a", "b", …)` of PLAIN string literals only — a trivial compile-time concat. A
+        // non-literal token inside (an ident, a nested macro) aborts the whole thing → None (never a
+        // partial/guessed value).
+        syn::Expr::Macro(m) if m.mac.path.segments.last().is_some_and(|s| s.ident == "concat") => {
+            let parsed: syn::punctuated::Punctuated<syn::Expr, syn::Token![,]> =
+                m.mac.parse_body_with(syn::punctuated::Punctuated::parse_terminated).ok()?;
+            let mut out = String::new();
+            for part in &parsed {
+                match part {
+                    syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => out.push_str(&s.value()),
+                    _ => return None, // a non-string-literal part — not a trivial literal concat
+                }
+            }
+            (!out.trim().is_empty()).then_some(out)
+        }
+        _ => None,
+    }
+}
+
+/// The single leaf identifier of a bare-path expression (`API_BASE`, `crate::foo::API_BASE` → "API_BASE"),
+/// for looking a reference up in the crate-wide const-string index. `None` for anything that isn't a plain
+/// path (a method call, an index, a literal, …). We key the const index by LEAF only — a module-qualified
+/// reference and its declaration share the leaf, and a genuine leaf collision at worst resolves to another
+/// const's LITERAL string, which still runs through the same sound host refinement (no fabrication: a
+/// non-model literal stays bare Net).
+pub(crate) fn path_leaf_ident(expr: &syn::Expr) -> Option<String> {
+    if let syn::Expr::Path(p) = expr {
+        if p.qself.is_none() {
+            return p.path.segments.last().map(|s| s.ident.to_string());
+        }
+    }
+    None
+}
+
+/// The `format!` argument shape that anchors a host to a `const`: a `format!(FMT, ARGS…)` whose format
+/// string BEGINS with `{}` (the interpolated value is the URL PREFIX) and whose FIRST value arg is the
+/// given expr. Returns that first value expr when the shape matches, so the caller can resolve it against
+/// the const index. Returns `None` when the format string has ANY literal prefix before the first hole
+/// (`format!("https://{}/x", h)` — the host is the LITERAL, not the arg; already captured elsewhere) or
+/// the first hole isn't a bare positional `{}` — in either case the first arg is NOT the host prefix and
+/// must NOT be resolved (soundness: only a leading-`{}` prefix makes the const the host anchor).
+pub(crate) fn format_const_prefix_arg(
+    m: &syn::Macro,
+) -> Option<syn::Expr> {
+    if !is_format_macro(m.path.segments.last()?.ident.to_string().as_str()) {
+        return None;
+    }
+    let parsed: syn::punctuated::Punctuated<syn::Expr, syn::Token![,]> =
+        m.parse_body_with(syn::punctuated::Punctuated::parse_terminated).ok()?;
+    let mut it = parsed.iter();
+    // The format string must be the FIRST token and a plain literal that starts with a bare `{}` hole.
+    let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(fmt), .. }) = it.next()? else {
+        return None;
+    };
+    let fmt = fmt.value();
+    // Must LEAD with `{}` (not `{{`, not a literal prefix, not `{0}`/`{named}`): the first interpolated
+    // value is the URL prefix. `{{` is an escaped brace, not a hole.
+    if !fmt.starts_with("{}") {
+        return None;
+    }
+    // Skip any leading NAMED args (`format!("{}", url = x)` is unusual, but a `name = expr` is not the
+    // first POSITIONAL value); the first positional value arg is the `{}` prefix.
+    it.find(|e| !matches!(e, syn::Expr::Assign(_))).cloned()
+}
+
 /// The bound identifier of a simple binding pattern: `c` / `mut c` / `&c` / `(c)` -> "c". `None` for a
 /// destructuring/wildcard pattern (no single name to bind an element type to). Used for loop vars and
 /// closure params.

@@ -18,6 +18,7 @@ pub(crate) fn scan_items(
     traits: TraitIndexes,
     elems: ElemIndexes,
     lazy_statics: &std::collections::HashSet<String>,
+    const_strings: &HashMap<String, String>,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -38,7 +39,7 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics));
+                out.push(fninfo(&n, &qual(&n), &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -56,7 +57,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics));
+                        out.push(fninfo(&n, &q, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings));
                     }
                 }
             }
@@ -67,7 +68,7 @@ pub(crate) fn scan_items(
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, &mut subuses, out);
+                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, &mut subuses, out);
                 }
             }
             // A trait's PROVIDED (default) methods have bodies that can perform effects directly
@@ -91,7 +92,7 @@ pub(crate) fn scan_items(
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), &loc, &m.sig, block,
-                            Some(&tname), uses, fields, returns, traits, elems, lazy_statics));
+                            Some(&tname), uses, fields, returns, traits, elems, lazy_statics, const_strings));
                     }
                 }
             }
@@ -111,7 +112,7 @@ pub(crate) fn scan_items(
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
                 let q = format!("{LAZY_UNIT_PREFIX}::{name}");
-                out.push(fninfo(&name, &q, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics));
+                out.push(fninfo(&name, &q, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings));
             }
         }
     }
@@ -316,6 +317,7 @@ pub(crate) fn fninfo(
     traits: TraitIndexes,
     elems: ElemIndexes,
     lazy_statics: &std::collections::HashSet<String>,
+    const_strings: &HashMap<String, String>,
 ) -> FnInfo {
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
@@ -376,6 +378,8 @@ pub(crate) fn fninfo(
         forced_lazies: std::collections::HashSet::new(),
         unresolved: false,
         err_ret_leaf: result_err_leaf(&sig.output, uses),
+        const_strings,
+        str_locals: std::collections::HashMap::new(),
     };
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
@@ -461,6 +465,7 @@ pub(crate) fn collect_decls(
     drop_types: &mut std::collections::HashSet<String>,
     deref_target: &mut HashMap<String, String>,
     lazy_statics: &mut std::collections::HashSet<String>,
+    const_strings: &mut HashMap<String, String>,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
@@ -477,6 +482,27 @@ pub(crate) fn collect_decls(
             if let Some((name, _)) = lazy_static_unit(it) {
                 lazy_statics.insert(name);
             }
+        }
+        // CONST-STRING index (crate-wide, Pass A) — `const NAME: &str = "lit"` / `static NAME: … = "lit"`
+        // whose initializer is a PLAIN string literal (or a trivial `concat!` of literals). Keyed by NAME
+        // (leaf); a later `client.post(format!("{}/x", NAME))` / `post(NAME)` resolves the host from this
+        // map, feeding the SAME §1 host refinement as an inline literal (SPEC §1: a statically-known host,
+        // even via a const, classifies Llm — parity with candor-java, where javac inlines a `static final
+        // String`). ONLY literal-valued consts land here — a runtime-valued const contributes nothing, so
+        // its call stays bare Net with the host masked (no fabrication). `#[cfg(test)]`-gated consts are
+        // excluded from a production scan, matching the lazy-static / field discipline above.
+        match it {
+            syn::Item::Const(c) if include_tests || !is_cfg_test(&c.attrs) => {
+                if let Some(v) = const_str_value(&c.expr) {
+                    const_strings.insert(c.ident.to_string(), v);
+                }
+            }
+            syn::Item::Static(s) if include_tests || !is_cfg_test(&s.attrs) => {
+                if let Some(v) = const_str_value(&s.expr) {
+                    const_strings.insert(s.ident.to_string(), v);
+                }
+            }
+            _ => {}
         }
         match it {
             syn::Item::Struct(s) => {
@@ -639,6 +665,15 @@ pub(crate) fn collect_decls(
                     if let syn::ImplItem::Fn(m) = ii {
                         record_return(&m.sig, uses, rets, self_ty.as_deref());
                     }
+                    // `impl X { const BASE: &str = "https://api.openai.com/v1"; }` — an associated const
+                    // string. Indexed by its LEAF (`BASE`) exactly like a module const, so a body's
+                    // `format!("{}/chat", Self::BASE)` / `format!("{}/chat", X::BASE)` (both resolve by
+                    // leaf) picks it up. Literal-valued only, same soundness gate.
+                    if let syn::ImplItem::Const(cst) = ii {
+                        if let Some(v) = const_str_value(&cst.expr) {
+                            const_strings.insert(cst.ident.to_string(), v);
+                        }
+                    }
                 }
             }
             syn::Item::Mod(m) => {
@@ -651,7 +686,7 @@ pub(crate) fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings);
                 }
             }
             _ => {}

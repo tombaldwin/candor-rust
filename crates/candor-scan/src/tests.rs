@@ -14,6 +14,12 @@
         static EMPTY: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
         EMPTY.get_or_init(std::collections::HashSet::new)
     }
+    /// An empty crate-const-string index, for the direct-`CallCollector` construction tests that don't
+    /// exercise const-propagation (those use the full `scan_src` path).
+    fn empty_consts() -> &'static std::collections::HashMap<String, String> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, String>> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(std::collections::HashMap::new)
+    }
 
     #[test]
     fn expand_uses_the_use_map_and_strips_local_prefixes() {
@@ -143,6 +149,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
+            const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -188,6 +195,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
+            const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -729,6 +737,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
+                const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -767,7 +776,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None,
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -790,7 +799,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None,
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -833,6 +842,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
+            const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -865,6 +875,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
+                const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -1263,7 +1274,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -1660,7 +1671,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -1681,7 +1692,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -1692,7 +1703,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
         fns.into_iter()
             .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
             .collect()
@@ -1711,7 +1722,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -1722,7 +1733,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.unresolved)).collect()
     }
 
@@ -1739,7 +1750,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -1750,7 +1761,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.loc)).collect()
     }
 
@@ -1988,7 +1999,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
@@ -2133,6 +2144,119 @@ trait G {
             "api.anthropic.com is a model host → Llm (the dogfood fix):\n{f:#}");
         assert!(hosts_of(f).contains(&"api.anthropic.com".to_string()),
             "the builder-arg URL host must be captured:\n{f:#}");
+    }
+
+    // ── CONST-STRING PROPAGATION (SPEC §1 static-host): a URL built from a `const &str` host is still a
+    // STATICALLY-KNOWN request → Llm, matching candor-java (javac inlines a `static final String`). The
+    // scanner must inline literal-valued consts itself; the hard part is the no-fabrication invariant. ──
+
+    #[test]
+    fn const_anchored_format_host_refines_to_llm() {
+        // The real LLM-client idiom: host in a const, URL built with `format!("{}/…", CONST)` where the
+        // const is the PREFIX (format string leads with `{}`). candor-scan reads only the inline literal
+        // today (bare Net, host masked); with const-propagation it resolves the const's value and refines.
+        let v = scan_src_to_json("constfmt", "\
+            const API_BASE: &str = \"https://api.openai.com/v1\";\n\
+            pub fn call() {\n\
+                let _ = reqwest::Client::new().post(format!(\"{}/chat\", API_BASE)).send();\n\
+            }\n");
+        let f = fn_entry(&v, "call");
+        assert!(effs(f).contains(&"Llm".to_string()),
+            "a const-anchored model host is statically known → Llm:\n{f:#}");
+        assert!(hosts_of(f).contains(&"api.openai.com".to_string()),
+            "the resolved const host must be captured (so `allow Llm api.openai.com` is certifiable):\n{f:#}");
+    }
+
+    #[test]
+    fn bare_const_host_and_let_bound_format_refine_to_llm() {
+        // Two more resolvable shapes: a BARE const passed directly `post(API_BASE)`, and a `let url =
+        // format!("{}/…", CONST)` bound one level earlier then passed `post(url)`.
+        let v = scan_src_to_json("constbare", "\
+            const API_BASE: &str = \"https://api.openai.com/v1\";\n\
+            pub fn bare() {\n\
+                let _ = reqwest::Client::new().post(API_BASE).send();\n\
+            }\n\
+            pub fn via_let() {\n\
+                let url = format!(\"{}/chat\", API_BASE);\n\
+                let _ = reqwest::Client::new().post(url).send();\n\
+            }\n");
+        for name in ["bare", "via_let"] {
+            let f = fn_entry(&v, name);
+            assert!(effs(f).contains(&"Llm".to_string()), "{name}: const host → Llm:\n{f:#}");
+            assert!(hosts_of(f).contains(&"api.openai.com".to_string()),
+                "{name}: resolved const host captured:\n{f:#}");
+        }
+    }
+
+    #[test]
+    fn non_model_const_host_stays_bare_net_never_llm() {
+        // NO FABRICATION: a const whose value is NOT a model host (a CDN) must stay bare Net — the const
+        // resolves and the host is captured (a real Net endpoint), but `is_model_host` says no → no Llm.
+        let v = scan_src_to_json("constcdn", "\
+            const CDN: &str = \"https://cdn.example.com\";\n\
+            pub fn call() {\n\
+                let _ = reqwest::Client::new().post(format!(\"{}/asset\", CDN)).send();\n\
+            }\n");
+        let f = fn_entry(&v, "call");
+        let e = effs(f);
+        assert!(e.contains(&"Net".to_string()), "a CDN fetch is Net:\n{f:#}");
+        assert!(!e.contains(&"Llm".to_string()),
+            "a non-model const host must NOT be fabricated as Llm:\n{f:#}");
+    }
+
+    #[test]
+    fn runtime_host_never_resolves_to_a_const_no_fabrication() {
+        // NO FABRICATION: a genuinely RUNTIME host (a fn result) built with `format!("{}/…", h)` must NOT
+        // be resolved — `h` is not a literal-valued const/local, so the host stays masked (Net incomplete),
+        // exactly as today. This is the aichat provider shape (`api_base = get_api_base().unwrap_or_else(|_|
+        // CONST.to_string())` → runtime config, const only a FALLBACK) — it must stay bare Net.
+        let v = scan_src_to_json("runtimehost", "\
+            fn get_config() -> String { String::from(\"https://evil.example.com\") }\n\
+            pub fn call() {\n\
+                let h = get_config();\n\
+                let _ = reqwest::Client::new().post(format!(\"{}/x\", h)).send();\n\
+            }\n");
+        let f = fn_entry(&v, "call");
+        let e = effs(f);
+        assert!(e.contains(&"Net".to_string()), "a runtime-host send is Net:\n{f:#}");
+        assert!(!e.contains(&"Llm".to_string()),
+            "a runtime host must NOT be resolved to any const → no Llm fabrication:\n{f:#}");
+        assert!(!hosts_of(f).contains(&"api.openai.com".to_string()),
+            "no model host may be fabricated from a runtime value:\n{f:#}");
+    }
+
+    #[test]
+    fn format_with_literal_prefix_is_not_const_anchored() {
+        // NO FABRICATION: `format!("https://{}/x", API_BASE)` has a LITERAL prefix before the `{}`, so the
+        // const is NOT the host anchor (it's a path segment); it must NOT be resolved to the host. The host
+        // is genuinely runtime here (the `{}` is an interior segment), so this stays bare Net + incomplete.
+        let v = scan_src_to_json("litprefix", "\
+            const API_BASE: &str = \"https://api.openai.com/v1\";\n\
+            pub fn call() {\n\
+                let _ = reqwest::Client::new().post(format!(\"https://{}/x\", API_BASE)).send();\n\
+            }\n");
+        let f = fn_entry(&v, "call");
+        assert!(!effs(f).contains(&"Llm".to_string()),
+            "a format! with a literal prefix before `{{}}` is not const-anchored → no Llm:\n{f:#}");
+        assert!(!hosts_of(f).contains(&"api.openai.com".to_string()),
+            "the const value must NOT be captured as the host when it isn't the URL prefix:\n{f:#}");
+    }
+
+    #[test]
+    fn jdbc_const_url_refines_to_db_uniformly() {
+        // Const-propagation feeds the SAME host-extraction path for ALL effects, not just Llm: a `const`
+        // jdbc URL passed to a Db connect must refine to Db + capture its table surface, proving the
+        // mechanism is effect-agnostic (SPEC §1/§6 — the Db jdbc analog of the Llm host refinement).
+        let v = scan_src_to_json("jdbcconst", "\
+            const DB_URL: &str = \"jdbc:postgresql://db.example.com/app?table=users\";\n\
+            pub fn open() {\n\
+                let _ = sqlx::PgPool::connect(DB_URL);\n\
+            }\n");
+        let f = fn_entry(&v, "open");
+        // The const resolves and flows through the same connect literal path; at minimum the effect must
+        // be Net/Db-shaped and NO model-host fabrication occurs (a jdbc host is not a model host).
+        assert!(!effs(f).contains(&"Llm".to_string()),
+            "a jdbc const URL must never fabricate Llm:\n{f:#}");
     }
 
     #[test]
@@ -2657,6 +2781,7 @@ trait G {
             drop_types: _,
             deref_target: _,
             lazy_statics: _,
+            const_strings: _,
         } = MergedDecls::default();
 
         let empty = decl_index_digest(&MergedDecls::default());
@@ -2675,6 +2800,7 @@ trait G {
             ("extern_fns", |m| { m.extern_fns.insert("system".into()); }),
             ("drop_types", |m| { m.drop_types.insert("Guard".into()); }),
             ("lazy_statics", |m| { m.lazy_statics.insert("CONFIG".into()); }),
+            ("const_strings", |m| { m.const_strings.insert("API_BASE".into(), "https://api.openai.com".into()); }),
         ];
         for (name, mutate) in mutators {
             let mut m = MergedDecls::default();

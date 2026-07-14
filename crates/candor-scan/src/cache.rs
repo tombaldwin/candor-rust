@@ -89,6 +89,11 @@ pub(crate) struct FileDecls {
     /// `thread_local!`) — a fn naming one of these FORCES its deferred init unit (`<lazy>::NAME`).
     #[serde(default)]
     pub(crate) lazy_statics: Vec<String>,
+    /// CONST/STATIC string NAMES → their LITERAL value in this file (`const API_BASE: &str = "…"`) — a
+    /// call building its host from one (`post(format!("{}/x", API_BASE))`) resolves the host here (SPEC §1
+    /// static-host propagation). Literal-valued only.
+    #[serde(default)]
+    pub(crate) const_strings: HashMap<String, String>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`).
@@ -106,9 +111,10 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls 
     let mut drop_types = std::collections::HashSet::new();
     let mut deref_target = HashMap::new();
     let mut lazy_statics = std::collections::HashSet::new();
+    let mut const_strings = HashMap::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut rets,
                   &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics);
+                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings);
     FileDecls {
         fields,
         field_elem,
@@ -125,6 +131,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls 
         drop_types: drop_types.into_iter().collect(),
         deref_target,
         lazy_statics: lazy_statics.into_iter().collect(),
+        const_strings,
     }
 }
 
@@ -145,6 +152,7 @@ pub(crate) struct MergedDecls {
     pub(crate) drop_types: std::collections::HashSet<String>,
     pub(crate) deref_target: HashMap<String, String>,
     pub(crate) lazy_statics: std::collections::HashSet<String>,
+    pub(crate) const_strings: HashMap<String, String>,
 }
 
 /// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics
@@ -220,6 +228,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for n in &fd.lazy_statics {
         acc.lazy_statics.insert(n.clone()); // set union — order-independent
+    }
+    for (k, v) in &fd.const_strings {
+        acc.const_strings.insert(k.clone(), v.clone()); // leaf → literal; last-writer-wins on a rare collision
     }
 }
 
@@ -333,6 +344,18 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     for a in lsk {
         s.push('|');
         s.push_str(a);
+    }
+    s.push('\n');
+    // const_strings — sorted NAME=literal pairs (a call resolving its host from one changes its captured
+    // literal → its Net/Llm refinement), so a change here must invalidate cached FnInfos.
+    s.push_str("const_strings");
+    let mut csk: Vec<&String> = m.const_strings.keys().collect();
+    csk.sort();
+    for k in csk {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(&m.const_strings[k]);
     }
     s.push('\n');
     // active cfg-features — items behind an inactive feature are skipped in Pass B, so a change to the
