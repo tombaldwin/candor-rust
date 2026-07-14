@@ -4,7 +4,21 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## spec 0.13 — the Llm effect (2026-07-14) — current floor
+## spec 0.14 — floor alignment (2026-07-14) — current floor
+
+candor-scan and candor-query now declare **spec `0.14`** (both at crate **0.14.0**; the internal
+**candor-report** and **candor-classify** libs move lockstep to **0.14.0**). **0.14 is the current spec
+floor** — the ratchet from 0.13. This is a **declared-version alignment only**: reports and
+`--gate-json` verdicts are **byte-identical** with 0.13 — there is no engine-local behaviour change.
+
+The ⟨0.14⟩ rung is a **top-level-initializer fix in candor-ts / candor-swift**: those engines were
+dropping a module's top-level effects as false-pure (the `<module>` / `<main>` initializer unit went
+unattributed). **Rust has no top-level executable code** — a `const` / `static` must be
+const-evaluable, so nothing runs at module load to attribute — so the rung is **N/A** for this engine.
+candor-scan declares 0.14 purely to keep the family floor uniform; see the candor-spec 0.14 entry for
+the contract change.
+
+## spec 0.13 — the Llm effect (2026-07-14)
 
 candor-scan and candor-query now declare **spec `0.13`** (both at crate **0.13.0**; the internal
 **candor-report** and **candor-classify** libs move lockstep to **0.13.0**). **0.13 is the current spec

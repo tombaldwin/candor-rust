@@ -392,7 +392,7 @@ fn gate_json_writes_the_structured_verdict_faithful_to_the_exit_code() {
         serde_json::from_str(&std::fs::read_to_string(&gp).expect("gate.json written")).expect("valid JSON");
     let _ = std::fs::remove_dir_all(&d);
 
-    assert_eq!(verdict["spec"], "0.13", "verdict declares the spec version");
+    assert_eq!(verdict["spec"], "0.14", "verdict declares the spec version");
     assert_eq!(verdict["ok"], false, "ok:false on a failing gate");
     let viols = verdict["violations"].as_array().expect("violations array");
     assert_eq!(viols.len(), 1, "one violation: {verdict}");
@@ -528,7 +528,7 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
     // `package` field alone must carry the coverage claim.
     let rep = d.join("depc-purity.json");
     std::fs::write(&rep, format!(r#"{{
-        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.13"}},
+        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.14"}},
         "package": "depc",
         "functions": []}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
 
@@ -1036,7 +1036,7 @@ fn deps_appends_candor_deps_env_reports_to_the_chain() {
     std::fs::create_dir_all(&extra).unwrap();
     let me = env!("CARGO_PKG_VERSION");
     std::fs::write(extra.join("report.extdep.scan.json"), format!(r#"{{
-        "candor": {{"version": "scan-{me}", "toolchain": "stable", "spec": "0.13"}},
+        "candor": {{"version": "scan-{me}", "toolchain": "stable", "spec": "0.14"}},
         "package": "extdep",
         "functions": [{{"fn": "ping", "inferred": ["Net"], "hash": "extdep#ping"}}]}}"#)).unwrap();
     let d = make_crate("extroot", "pub fn calls() { extdep::ping(); }");
