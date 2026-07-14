@@ -2016,6 +2016,140 @@ trait G {
         }
     }
 
+    /// End-to-end scan helper: write a one-file crate, scan it, return the parsed report JSON.
+    #[cfg(test)]
+    fn scan_src_to_json(tag: &str, src: &str) -> serde_json::Value {
+        let d = std::env::temp_dir().join(format!("candor-scan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{tag}\"\n")).unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let idx = DepIndex::default();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, quiet: true, deps_idx: &idx,
+        });
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+        serde_json::from_str(&body.unwrap()).unwrap()
+    }
+
+    #[cfg(test)]
+    fn fn_entry<'a>(v: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == name)
+            .unwrap_or_else(|| panic!("`{name}` must be in the report:\n{v:#}"))
+    }
+    #[cfg(test)]
+    fn effs(f: &serde_json::Value) -> Vec<String> {
+        f["inferred"].as_array().unwrap().iter().map(|e| e.as_str().unwrap().to_string()).collect()
+    }
+    #[cfg(test)]
+    fn hosts_of(f: &serde_json::Value) -> Vec<String> {
+        f["hosts"].as_array().map(|a| a.iter().map(|e| e.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn model_sdk_call_that_also_classifies_net_still_gets_llm() {
+        // FINDING 2 (gate evasion): a model-SDK crate whose call ALSO resolves via `classify` to `Net`
+        // (`aws_sdk_bedrockruntime::…::send` → classify=Net) short-circuits the `.or(Some("Llm"))`
+        // fallback, so without the unconditional add the `Llm` is DROPPED and only `{Net}` surfaces —
+        // a model dispatch silently hiding behind plain Net. The scanner must add BOTH.
+        let v = scan_src_to_json("bedrock", "\
+            pub fn ask() {\n\
+                let out = aws_sdk_bedrockruntime::Client::invoke_model().send();\n\
+                let _ = out;\n\
+            }\n");
+        let f = fn_entry(&v, "ask");
+        let e = effs(f);
+        assert!(e.contains(&"Net".to_string()), "bedrock send is Net:\n{f:#}");
+        assert!(e.contains(&"Llm".to_string()), "bedrock send must ALSO be Llm (not dropped):\n{f:#}");
+    }
+
+    #[test]
+    fn model_sdk_call_with_literal_endpoint_captures_the_host() {
+        // FINDING 3: a model-SDK call reaching `Llm` via the fallback (classify=None) with a literal
+        // endpoint must CAPTURE the host — else `allow Llm <host>` has no literal and fails closed.
+        // `ollama_rs` is a MODEL_SDK crate with no `classify` rule → effect becomes Llm; the URL arg
+        // must land on the host surface (Llm rides the Net host literal).
+        let v = scan_src_to_json("ollamahost", "\
+            pub fn ask() {\n\
+                ollama_rs::Ollama::generate(\"http://api.example.com/v1/chat\");\n\
+            }\n");
+        let f = fn_entry(&v, "ask");
+        assert!(effs(f).contains(&"Llm".to_string()), "ollama_rs is a model SDK → Llm:\n{f:#}");
+        assert!(hosts_of(f).contains(&"api.example.com".to_string()),
+            "the endpoint literal must be captured so `allow Llm` is certifiable:\n{f:#}");
+    }
+
+    #[test]
+    fn dotless_non_model_host_is_not_captured_as_a_net_literal() {
+        // FINDING 10 (cross-engine divergence): a plain DOTLESS host (`localhost:8080`) must NOT enter
+        // the Net host surface — java/ts/swift `hostLiteral` reject dotless hosts. The Net EFFECT still
+        // fires (a reqwest send), but no allowlist literal is captured.
+        let v = scan_src_to_json("dotless", "\
+            pub fn call() {\n\
+                reqwest::Client::new().post(\"http://localhost:8080/hook\").send();\n\
+            }\n");
+        let f = fn_entry(&v, "call");
+        assert!(effs(f).contains(&"Net".to_string()), "a reqwest send is Net:\n{f:#}");
+        assert!(!hosts_of(f).iter().any(|h| h.starts_with("localhost")),
+            "a dotless host must NOT be captured (matches sibling engines):\n{f:#}");
+    }
+
+    #[test]
+    fn dotless_ollama_11434_refines_to_llm_without_capture() {
+        // The :11434 refinement is PORT-based (separate from FINDING 10): a bare `localhost:11434`
+        // still adds `Llm` but is NOT captured as a host literal.
+        let v = scan_src_to_json("ollamaport", "\
+            pub fn call() {\n\
+                reqwest::Client::new().post(\"http://localhost:11434/api/generate\").send();\n\
+            }\n");
+        let f = fn_entry(&v, "call");
+        let e = effs(f);
+        assert!(e.contains(&"Net".to_string()) && e.contains(&"Llm".to_string()),
+            "localhost:11434 is Net + Llm (Ollama):\n{f:#}");
+        assert!(!hosts_of(f).iter().any(|h| h.starts_with("localhost")),
+            "the dotless Ollama host is refined but not captured:\n{f:#}");
+    }
+
+    #[test]
+    fn reqwest_builder_chain_to_anthropic_is_net_llm_with_host() {
+        // THE DOGFOOD FIX (real silent under-report): the DOMINANT reqwest idiom is the builder chain
+        // `Client::builder().build()?.post(url).send()` — the URL literal rides `.post(url)`, NOT the
+        // `.send()` dispatch, so before the fix the endpoint (and the Llm refinement) were NEVER seen.
+        // ebman's actual `api.anthropic.com` call read as bare Net, undisclosed as Llm. Now: {Net, Llm,
+        // host=api.anthropic.com}.
+        let v = scan_src_to_json("anthropic", "\
+            pub fn ask() -> Result<(), Box<dyn std::error::Error>> {\n\
+                let c = reqwest::Client::builder().build()?;\n\
+                let _r = c.post(\"https://api.anthropic.com/v1/messages\").send();\n\
+                Ok(())\n\
+            }\n");
+        let f = fn_entry(&v, "ask");
+        let e = effs(f);
+        assert!(e.contains(&"Net".to_string()), "builder chain dispatch is Net:\n{f:#}");
+        assert!(e.contains(&"Llm".to_string()),
+            "api.anthropic.com is a model host → Llm (the dogfood fix):\n{f:#}");
+        assert!(hosts_of(f).contains(&"api.anthropic.com".to_string()),
+            "the builder-arg URL host must be captured:\n{f:#}");
+    }
+
+    #[test]
+    fn reqwest_client_new_chain_to_openai_is_net_llm_with_host() {
+        // The `Client::new()` variant of the builder chain (no `.builder().build()`), also rootable.
+        let v = scan_src_to_json("openai", "\
+            pub fn ask() {\n\
+                let _r = reqwest::Client::new().post(\"https://api.openai.com/v1/chat/completions\").send();\n\
+            }\n");
+        let f = fn_entry(&v, "ask");
+        let e = effs(f);
+        assert!(e.contains(&"Net".to_string()) && e.contains(&"Llm".to_string()),
+            "Client::new() chain to api.openai.com is Net + Llm:\n{f:#}");
+        assert!(hosts_of(f).contains(&"api.openai.com".to_string()),
+            "the URL host must be captured:\n{f:#}");
+    }
+
     #[test]
     fn scan_emits_unknown_on_an_extern_call_as_the_agents_contract_states() {
         // TESTING.md §9 (load-bearing doc claims get drift gates): AGENTS.md §1/§4 states Path A

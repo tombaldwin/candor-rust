@@ -349,16 +349,36 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // I/O. (Found by the eval: ebman's reqwest calls to the Anthropic API + webhooks
     // were silently classified network-free because reqwest wasn't recognized.)
     if crate_name == "reqwest" || crate_name == "isahc" {
-        // The builder chain is pure; the dispatch (`::send`/`::execute`) is the I/O. PLUS the one-shot
-        // CONVENIENCE functions `reqwest::get` / `reqwest::blocking::get` / `isahc::get`, which send
-        // immediately — they're not the `Client::get` builder (a different path, `reqwest::Client::get`),
-        // so an exact match avoids false-positiving the builder. (Found running on `xh`: a one-shot
-        // `reqwest::get(url)` was classified network-free.)
+        // The dispatch (`::send`/`::execute`) is the I/O. PLUS the one-shot CONVENIENCE functions
+        // `reqwest::get` / `reqwest::blocking::get` / `isahc::get`, which send immediately — they're
+        // an EXACT match (not `Client::get`, the builder) to avoid false-positiving the builder path.
+        // (Found running on `xh`: a one-shot `reqwest::get(url)` was classified network-free.)
         if path.ends_with("::send")
             || path.ends_with("::execute")
             || path == "reqwest::get"
             || path == "reqwest::blocking::get"
             || path == "isahc::get"
+        {
+            return Some("Net");
+        }
+        // THE URL-BEARING BUILDER METHODS: `Client::{get,post,put,delete,patch,head,request}(URL)`.
+        // Real code almost never uses `reqwest::get(url)`; the DOMINANT idiom is the builder chain
+        // `Client::new().post(url).send()` / `Client::builder().build()?.post(url).send()`. The `.send()`
+        // already classifies `Net` — but the URL literal rides the `.post(url)` call, NOT `.send()`, so
+        // without classifying the URL-naming step `Net` the endpoint is NEVER captured and the `Llm`
+        // host refinement can't fire (ebman's `api.anthropic.com` call read as bare Net, undisclosed as
+        // Llm — the dogfood silent under-report). Classifying these `Net` (idempotent with the eventual
+        // `.send()`) makes the scanner capture the URL from their string arg. `request(method, url)`'s
+        // url is its SECOND arg — the scanner's first-string-literal capture still gets it when the
+        // method is a literal string, and misses it (honest under-report) when the method is an
+        // expression. The pure builder surface (`::header`, `::json`, `::body`, `::query`, …) stays None.
+        if path.ends_with("::get")
+            || path.ends_with("::post")
+            || path.ends_with("::put")
+            || path.ends_with("::delete")
+            || path.ends_with("::patch")
+            || path.ends_with("::head")
+            || path.ends_with("::request")
         {
             return Some("Net");
         }
@@ -1427,18 +1447,18 @@ pub const MODEL_HOSTS: &[&str] = &[
 /// Whether an endpoint HOST literal is a known model provider (case-insensitive; a subdomain of a
 /// `MODEL_HOSTS` entry counts). Strips a `:port` suffix first. Two special forms carry their own rule,
 /// matching candor-java's `Literals.isModelHost` exactly: any host whose port is `11434` is a local
-/// Ollama endpoint (`localhost:11434`, `127.0.0.1:11434`, even a bare host); and an AWS Bedrock runtime
-/// host — a host containing `bedrock` that ends `.amazonaws.com` (`bedrock-runtime.<region>.amazonaws.com`).
+/// Ollama endpoint (a LOOPBACK host — `localhost`/`127.0.0.1`/`::1` — on port 11434); and an AWS Bedrock
+/// runtime host (the model-inference service label `bedrock-runtime`/`bedrock-agent-runtime`).
 pub fn is_model_host(host_literal: &str) -> bool {
-    // Ollama: a `:11434` port anywhere is the local model endpoint (keep it simple, per SPEC §1) — this
-    // fires even for a bare `localhost:11434` / `127.0.0.1:11434` that the dotted-host gate would reject.
-    if let Some((_, port)) = host_literal.rsplit_once(':') {
-        if port == "11434" {
-            return true;
-        }
-    }
     // Strip any `:port` (via the shared host_part) and lowercase for the name comparisons.
     let host = policy::host_part(host_literal).to_ascii_lowercase();
+    // Ollama is a LOCAL endpoint: :11434 → Llm ONLY on a loopback host (max-review r3 parity fix — "any
+    // host on :11434" fabricated Llm on unrelated internal services on that port).
+    if let Some((_, port)) = host_literal.rsplit_once(':') {
+        if port == "11434" {
+            return matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
+        }
+    }
     if MODEL_HOSTS.contains(&host.as_str()) {
         return true;
     }
@@ -1446,9 +1466,11 @@ pub fn is_model_host(host_literal: &str) -> bool {
     if MODEL_HOSTS.iter().any(|m| host.ends_with(&format!(".{m}"))) {
         return true;
     }
-    // `*.bedrock*.amazonaws.com` — the AWS Bedrock runtime endpoint. Match by substring + suffix (not an
-    // exact region list) so every region works.
-    host.ends_with(".amazonaws.com") && host.contains("bedrock")
+    // AWS Bedrock runtime: the FIRST label is the model-inference service (`bedrock-runtime.<region>.
+    // amazonaws.com`), NOT the substring "bedrock" (which caught `bedrock-backups.s3.amazonaws.com`, an
+    // S3 bucket) and NOT the control-plane `bedrock.<region>.amazonaws.com`.
+    host.ends_with(".amazonaws.com")
+        && matches!(host.split('.').next(), Some("bedrock-runtime") | Some("bedrock-agent-runtime"))
 }
 
 /// Curated Rust model-provider SDK crates — the SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface, the Rust analog
@@ -1733,18 +1755,21 @@ mod tests {
         assert!(m("openrouter.ai"));
         // a subdomain of a known host counts
         assert!(m("eu.api.openai.com"));
-        // Ollama: any :11434 endpoint, incl. bare localhost / 127.0.0.1 (dotless)
+        // Ollama: :11434 on a LOOPBACK host only (max-review r3 — a remote host on 11434 is not Ollama)
         assert!(m("localhost:11434"));
         assert!(m("127.0.0.1:11434"));
-        assert!(m("ollama.internal:11434"));
-        // Bedrock: contains "bedrock" AND ends .amazonaws.com
+        assert!(!m("ollama.internal:11434")); // a remote/internal service on 11434 is NOT a model host
+        // Bedrock: the FIRST label is the model-inference service, not the substring "bedrock"
         assert!(m("bedrock-runtime.us-east-1.amazonaws.com"));
         assert!(m("bedrock-runtime.eu-west-1.amazonaws.com"));
+        assert!(m("bedrock-agent-runtime.us-east-1.amazonaws.com"));
         // NOT model hosts (never guessed)
         assert!(!m("example.com"));
         assert!(!m("api.stripe.com"));
         assert!(!m("localhost:8080")); // a non-Ollama local port
         assert!(!m("s3.us-east-1.amazonaws.com")); // amazonaws but not bedrock
+        assert!(!m("bedrock-backups.s3.amazonaws.com")); // an S3 bucket merely NAMED bedrock — not the runtime
+        assert!(!m("bedrock.us-east-1.amazonaws.com")); // the Bedrock CONTROL plane — not model inference
         assert!(!m("openai.com.evil.com")); // suffix trick — not a subdomain of a known host
     }
 
@@ -1987,11 +2012,21 @@ mod tests {
         assert_eq!(classify("std", "std::process::Command::new"), Some("Exec"));
         assert_eq!(classify("std", "std::env::var"), Some("Env"));
         assert_eq!(classify("reqwest", "reqwest::Client::execute"), Some("Net"));
-        // one-shot convenience fns send immediately → Net; the `Client::get` builder stays pure.
+        // one-shot convenience fns send immediately → Net.
         assert_eq!(classify("reqwest", "reqwest::get"), Some("Net"));
         assert_eq!(classify("reqwest", "reqwest::blocking::get"), Some("Net"));
-        assert_eq!(classify("reqwest", "reqwest::Client::get"), None);
+        // the URL-BEARING builder methods classify Net too — the DOMINANT idiom is the builder chain
+        // `Client::new().post(url).send()`, whose URL literal rides the `.post(url)` step (NOT `.send()`),
+        // so the endpoint (and the Llm host refinement) only get captured if the URL-naming step is Net.
+        assert_eq!(classify("reqwest", "reqwest::Client::get"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::Client::post"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::Client::put"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::Client::delete"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::Client::request"), Some("Net"));
+        // the PURE builder surface stays None (no URL, no dispatch).
         assert_eq!(classify("reqwest", "reqwest::RequestBuilder::header"), None);
+        assert_eq!(classify("reqwest", "reqwest::RequestBuilder::json"), None);
+        assert_eq!(classify("reqwest", "reqwest::ClientBuilder::build"), None);
         // nix routes through the libc syscall table (same leaves): I/O classified, generic fd ops skipped.
         assert_eq!(classify("nix", "nix::fcntl::open"), Some("Fs"));
         assert_eq!(classify("nix", "nix::sys::socket::connect"), Some("Net"));

@@ -1950,8 +1950,18 @@ fn net_host_literal(s: &str) -> Option<String> {
     if authority.is_empty() || authority.contains(char::is_whitespace) {
         return None;
     }
-    // must look like a host: a dotted name / IP, or a `host:port`
-    if authority.contains('.') || authority.contains(':') {
+    // Must look like a CERTIFIABLE host: a DOTTED name / IP (`api.example.com`, `127.0.0.1:8080`).
+    // A DOTLESS host (`localhost:8080`) is REJECTED — java/ts/swift `hostLiteral` reject dotless
+    // labels (not a routable name, nothing an `allow Net` allowlist could certify), and rust must
+    // match them (this was a cross-engine divergence where rust over-captured `localhost:8080`).
+    // The ONE dotless exception is the port-based Ollama endpoint (`localhost:11434`): it is kept so
+    // the caller's `is_ollama_dotless` refinement can add `Llm` (then it partitions the host OUT — it
+    // is never captured as a Net literal). Any OTHER dotless host yields None (not captured).
+    if authority.contains('.') {
+        Some(authority.to_string())
+    } else if authority.rsplit_once(':').is_some_and(|(_, p)| p == "11434") {
+        // Dotless Ollama port — passed through solely for the `is_ollama_dotless` Llm refinement;
+        // the caller partitions it out of the captured set (it never enters the Net host surface).
         Some(authority.to_string())
     } else {
         None
@@ -2609,8 +2619,12 @@ impl Candor {
                 self.fs_direct.entry(caller).or_default().extend(kinds.iter().copied());
             }
             // Non-breaking Net refinement: a literal address/URL argument tells us the endpoint.
-            // Gated to built-in Net classification (a user `extra` rule's arg shape is unknown).
-            if builtin == Some("Net") {
+            // Gated to built-in Net classification (a user `extra` rule's arg shape is unknown), OR a
+            // model-SDK call (whose `effect` became `Llm` when `classify` returned None — a model
+            // dispatch IS network I/O, so its endpoint literal rides the SAME Net host surface). Without
+            // the `model_sdk` arm a model-SDK client called with a literal endpoint captured NO host, so
+            // `allow Llm <host>` had no literal to certify and always failed closed (FINDING 3, deep).
+            if builtin == Some("Net") || model_sdk {
                 // §1 ⟨0.13⟩ Ollama dotless-host: a local endpoint names a BARE host (`localhost`:11434)
                 // whose Llm signal is the PORT, not a recognizable host name. Refine to `Llm` WITHOUT
                 // capturing the bare host as a Net literal (the dotted-host gate stays intact — a dotted
@@ -3953,10 +3967,13 @@ mod tests {
         // AWS: only request dispatch, never the builder setters/accessors.
         assert_eq!(classify("aws_sdk_ec2", "aws_sdk_ec2::op::run::send"), Some("Net"));
         assert_eq!(classify("aws_sdk_ec2", "aws_sdk_ec2::op::run::instance_id"), None);
-        // HTTP clients: dispatch only, not the builder chain (found by the eval).
+        // HTTP clients: dispatch + the URL-bearing builder methods (so the builder-chain URL literal on
+        // `.post(url)` is captured — the dominant real-world idiom); the pure builder surface stays None.
         assert_eq!(classify("reqwest", "reqwest::RequestBuilder::send"), Some("Net"));
         assert_eq!(classify("reqwest", "reqwest::RequestBuilder::json"), None);
         assert_eq!(classify("reqwest", "reqwest::Client::execute"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::Client::post"), Some("Net"));
+        assert_eq!(classify("reqwest", "reqwest::Client::get"), Some("Net"));
         // Raw sockets are network — the regression guard against AWS-only detection.
         assert_eq!(classify("std", "std::net::TcpStream::connect"), Some("Net"));
         assert_eq!(classify("std", "std::net::UdpSocket::bind"), Some("Net"));
@@ -4347,6 +4364,15 @@ mod tests {
         assert_eq!(net_host_literal("rates.internal:7070"), Some("rates.internal:7070".into()));
         assert_eq!(net_host_literal("1.2.3.4:80"), Some("1.2.3.4:80".into()));
         assert_eq!(net_host_literal("user:pass@db.internal:5432"), Some("db.internal:5432".into()));
+        // FINDING 10: a plain DOTLESS host is REJECTED (matches java/ts/swift `hostLiteral`; rust used to
+        // over-capture `localhost:8080` — a cross-engine divergence). No allowlist literal → not captured.
+        assert_eq!(net_host_literal("http://localhost:8080/hook"), None);
+        assert_eq!(net_host_literal("localhost:8080"), None);
+        assert_eq!(net_host_literal("myservice:9000"), None);
+        // …the ONE dotless exception is the port-based Ollama endpoint — kept ONLY so the caller's
+        // `is_ollama_dotless` refinement adds `Llm` (it then partitions the host out; never captured).
+        assert_eq!(net_host_literal("http://localhost:11434/api"), Some("localhost:11434".into()));
+        assert!(is_ollama_dotless(&net_host_literal("localhost:11434").unwrap()));
         // Non-host strings (an HTTP verb, a header value, a path) are NOT mistaken for hosts.
         assert_eq!(net_host_literal("GET"), None);
         assert_eq!(net_host_literal("application/json"), None);

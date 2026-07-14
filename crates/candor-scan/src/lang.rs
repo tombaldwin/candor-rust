@@ -239,6 +239,28 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
         syn::Expr::Paren(p) => ctor_type(&p.expr, uses, returns),
         syn::Expr::Try(t) => ctor_type(&t.expr, uses, returns),
         syn::Expr::Await(a) => ctor_type(&a.base, uses, returns),
+        // A BUILDER-terminated chain in a `let` binding: `let c = reqwest::Client::builder().build()?;`
+        // The value's crate type is the CHAIN ROOT (`reqwest::Client::builder()` → `reqwest::Client`), so
+        // a later `c.post(url).send()` resolves to `reqwest::Client::post`/`::send` and the URL is
+        // captured (the dominant real-world reqwest idiom split across two statements — the fully-inline
+        // form roots directly through `resolve_recv_type`'s MethodCall walk; this is its `let`-bound
+        // sibling). Walk to the receiver's ctor type through builder steps. GUARDED with the SAME
+        // type-CHANGE blocklist as `resolve_recv_type`: a method that yields a DIFFERENT (std) type
+        // (`.iter()`/`.as_str()`/…) breaks the one-crate-type assumption → None (honest miss, never the
+        // base crate's coarse rule fabricated onto a std value). The imprecision of a builder-vs-built
+        // type name (`ClientBuilder` vs `Client`) is harmless: the reqwest rule matches the METHOD leaf
+        // (`::post`/`::send`) regardless of the type segment, so either roots the same classification.
+        syn::Expr::MethodCall(m) => {
+            if matches!(
+                m.method.to_string().as_str(),
+                "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice"
+                    | "as_bytes" | "as_str" | "to_vec" | "keys" | "values" | "values_mut"
+                    | "chars" | "bytes" | "get_argv" | "into_inner" | "lines"
+            ) {
+                return None;
+            }
+            ctor_type(&m.receiver, uses, returns)
+        }
         syn::Expr::Call(c) => {
             let syn::Expr::Path(p) = &*c.func else { return None };
             let full = path_to_string(&p.path);
