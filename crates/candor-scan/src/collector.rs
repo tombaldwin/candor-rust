@@ -59,6 +59,16 @@ pub(crate) struct CallCollector<'a> {
     /// `E2::from` when `E2` locally `impl From` (see `charge_from`). `None` for a non-fallible fn or an
     /// unresolvable/`Box<dyn Error>`/external error type → no `?` edge (the no-flood default).
     pub(crate) err_ret_leaf: Option<String>,
+    /// Crate-wide CONST/STATIC string index (`API_BASE -> "https://api.openai.com/v1"`), literal-valued
+    /// only (Pass A). Resolves a host built from a const — `post(API_BASE)` / `post(format!("{}/x",
+    /// API_BASE))` — so the SPEC §1 static-host refinement (Llm / Db jdbc / Net-allowlist) fires just as
+    /// it does on an inline literal (parity with candor-java's inlined `static final String`).
+    pub(crate) const_strings: &'a std::collections::HashMap<String, String>,
+    /// LOCAL string bindings we can resolve to a literal host — `let url = format!("{}/x", API_BASE)` /
+    /// `let url = "https://…"` / `let url = API_BASE` — so a later `post(url)` recovers the host (ONE level
+    /// of local `let` following; a rebind to a non-resolvable value clears the entry). Grown in source
+    /// order, like `vars`. Literal/const-anchored only — a runtime-built binding contributes nothing.
+    pub(crate) str_locals: std::collections::HashMap<String, String>,
 }
 
 impl<'a> CallCollector<'a> {
@@ -268,6 +278,52 @@ impl<'a> CallCollector<'a> {
     /// resolve from the supplied `target_leaf` (the enclosing fn's error type for `?`; a context type for
     /// `.into()`) and edge to `Target::from` ONLY when `Target` locally `impl From`. A None/unknown target
     /// → NO edge (no flood — the overwhelming case is std `From` like `String: From<&str>`, never local).
+    /// CONST-STRING PROPAGATION (SPEC §1 static-host): recover a host literal from a call's args when the
+    /// URL is built from a `const` rather than written inline. Used ONLY as a FALLBACK when `first_str_lit`
+    /// found no inline literal — the inline path is unchanged. Resolves exactly three sound shapes for the
+    /// FIRST relevant value expr and NOTHING else (never a guess):
+    ///   • a bare const/local path         `post(API_BASE)`            → the const's / local's literal;
+    ///   • a `let`-bound resolvable string  `post(url)`  (url set earlier from a resolvable shape);
+    ///   • a leading-`{}` format!           `post(format!("{}/chat", API_BASE))` → the prefix arg's literal.
+    /// Returns `None` — leaving the call bare Net with the host masked, exactly as today — for a runtime
+    /// value, an unknown identifier, a non-const format arg, or a format string with a literal prefix
+    /// before the first hole. NO FABRICATION: only a genuinely literal-valued const/local ever resolves.
+    fn resolve_host_arg(
+        &self,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+    ) -> Option<String> {
+        let first = args.iter().next()?;
+        self.resolve_str_expr(first)
+    }
+
+    /// Resolve a single expr to a literal string via const/local propagation (the shared resolver for a
+    /// call arg AND a `let` initializer). Bare path → const or local; leading-`{}` `format!` → its prefix
+    /// arg resolved the same way. One level deep — a nested/runtime shape yields `None` (no fabrication).
+    fn resolve_str_expr(&self, expr: &syn::Expr) -> Option<String> {
+        match expr {
+            // A bare path: a local resolvable string binding first (`let url = …`), then a crate const.
+            syn::Expr::Path(_) => {
+                let leaf = path_leaf_ident(expr)?;
+                self.str_locals
+                    .get(&leaf)
+                    .or_else(|| self.const_strings.get(&leaf))
+                    .cloned()
+            }
+            // A `format!("{}…", CONST, …)` whose FIRST hole is a bare `{}` (the const is the URL PREFIX).
+            syn::Expr::Macro(m) => {
+                let prefix_arg = format_const_prefix_arg(&m.mac)?;
+                // The prefix arg must itself resolve to a const/local literal — NOT another format!/runtime
+                // expr (one level of const anchoring, no recursion into a nested format).
+                let leaf = path_leaf_ident(&prefix_arg)?;
+                self.str_locals
+                    .get(&leaf)
+                    .or_else(|| self.const_strings.get(&leaf))
+                    .cloned()
+            }
+            _ => None,
+        }
+    }
+
     fn charge_from(&mut self, target_leaf: &str) {
         if let Some(impls) = self.trait_impls.get("From") {
             if impls.iter().any(|t| t == target_leaf) {
@@ -523,7 +579,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             }
                         }
                         let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
-                        self.calls.push(Call { path, leaf, str_arg: first_str_lit(&node.args), typed: false, method, is_macro: false });
+                        // Inline literal, else const-string propagation (`reqwest::get(API_BASE)` /
+                        // `Client::post(format!("{}/x", API_BASE))`) — SPEC §1 static-host, same refinement.
+                        let str_arg = first_str_lit(&node.args).or_else(|| self.resolve_host_arg(&node.args));
+                        self.calls.push(Call { path, leaf, str_arg, typed: false, method, is_macro: false });
                     }
                 }
             }
@@ -536,7 +595,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     }
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let leaf = node.method.to_string();
-        let str_arg = first_str_lit(&node.args);
+        // Inline literal first (unchanged); fall back to const-string propagation so `post(API_BASE)` /
+        // `post(format!("{}/x", API_BASE))` / `post(url)` recover a statically-known host (SPEC §1). The
+        // resolved literal flows through the SAME Net/Llm/Db host refinement in scan.rs as an inline one.
+        let str_arg = first_str_lit(&node.args).or_else(|| self.resolve_host_arg(&node.args));
         // IMPLICIT ITERATOR FORCING via a consuming combinator: `it.count()`, `it.collect()`,
         // `it.for_each(..)`, `it.fold(..)`, … each drive `Iterator::next` to completion. When `it`
         // is a CONCRETE LOCAL type with a local `impl Iterator` (incl. a builder `build().count()`
@@ -867,6 +929,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
             }
         } else if let syn::Pat::Ident(id) = &node.pat {
+            // CONST-STRING PROPAGATION, local level: `let url = format!("{}/x", API_BASE)` / `let url =
+            // "https://…"` / `let url = API_BASE` — record `url`'s resolved literal so a later `post(url)`
+            // recovers the host (SPEC §1). One level only; a rebind to a non-resolvable value CLEARS the
+            // entry (a literal `String`-typed binding first, an inline `&str`, or a const-anchored format).
+            let name = id.ident.to_string();
+            self.str_locals.remove(&name); // clear stale binding on any rebind
+            if let Some(init) = &node.init {
+                let resolved = const_str_value(&init.expr).or_else(|| self.resolve_str_expr(&init.expr));
+                if let Some(v) = resolved {
+                    self.str_locals.insert(name, v);
+                }
+            }
             if let Some(init) = &node.init {
                 if matches!(&*init.expr, syn::Expr::Closure(_)) {
                     // `let f = |..| ..` — remember `f` so a later `f()` is seen as a closure call.
