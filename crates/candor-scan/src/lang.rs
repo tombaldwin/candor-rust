@@ -472,6 +472,68 @@ pub(crate) fn format_const_prefix_arg(
     it.find(|e| !matches!(e, syn::Expr::Assign(_))).cloned()
 }
 
+/// LITERAL-HEAD HOST EXTRACTION (SPEC §1 static-host): the host from a `format!(FMT, args…)` whose FORMAT
+/// STRING literal already SPELLS OUT a complete authority BEFORE its first interpolation hole — the most
+/// common real-world URL shape `format!("https://api.openai.com/v1/{}", path)`, where the host is fully
+/// present in the literal and only the PATH is interpolated. Returns the host (`api.openai.com`, `:port`
+/// stripped) ONLY when the static prefix — the text before the first `{}`/`{name}` hole — contains a
+/// COMPLETE authority: a `<scheme>://<authority>/…` with a `/` AFTER the `://` and WITHIN the prefix. That
+/// trailing `/` is the proof the authority is TERMINATED in the literal (no hole can have leaked into the
+/// host). Returns `None` — leaving the call bare Net with the host masked, exactly as today — when:
+///   • there is no `://` in the prefix, or no `/` after it (`format!("https://{}/v1/y", h)`,
+///     `format!("https://api.{}.com/y", x)`, `format!("https://api.openai{}/v1", x)`,
+///     `format!("https://api.openai.com:{}/v1", port)` — the authority is NOT terminated before a hole);
+///   • the format string has no leading static text before the first hole (that is the const-anchored
+///     `{}`-at-head case, resolved separately by `format_const_prefix_arg` — this helper defers to it).
+/// NO FABRICATION: the returned host is a substring of the LITERAL format string, never a resolved value.
+/// The host still runs through the caller's `is_model_host` refinement, so a non-model literal (a CDN)
+/// captures the host but stays bare Net.
+pub(crate) fn format_literal_head_host(m: &syn::Macro) -> Option<String> {
+    if !is_format_macro(m.path.segments.last()?.ident.to_string().as_str()) {
+        return None;
+    }
+    let parsed: syn::punctuated::Punctuated<syn::Expr, syn::Token![,]> =
+        m.parse_body_with(syn::punctuated::Punctuated::parse_terminated).ok()?;
+    let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(fmt), .. }) = parsed.iter().next()? else {
+        return None;
+    };
+    literal_head_host(&fmt.value())
+}
+
+/// The host in a format-string's STATIC PREFIX — the text before its first interpolation hole — when that
+/// prefix already contains a COMPLETE `<scheme>://<authority>/…` authority. Shared by the `format!` head
+/// extraction; factored out so it is unit-testable in isolation. `{{`/`}}` are ESCAPED braces (literal
+/// text, not holes); the first UNESCAPED `{` ends the static prefix.
+pub(crate) fn literal_head_host(fmt: &str) -> Option<String> {
+    // The static prefix = text up to the first UNESCAPED `{`. `{{` is a literal brace, so consume it and
+    // keep going; a lone `{` opens a hole and terminates the prefix.
+    let mut prefix = String::new();
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next(); // an escaped `{{` → one literal `{`
+                prefix.push('{');
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next(); // an escaped `}}` → one literal `}`
+                prefix.push('}');
+            }
+            '{' => break, // a real hole opens here — the static prefix ends
+            _ => prefix.push(c),
+        }
+    }
+    // The authority is complete ONLY when there is a `/` AFTER the `://` WITHIN the prefix — that `/`
+    // proves the authority is terminated in the literal (no hole leaked into the host). Absent it, a hole
+    // could sit inside the authority (`https://api.{}.com/`, `https://{}/`, `https://host:{}/`) → bail.
+    let after_scheme = prefix.split_once("://")?.1;
+    let authority = after_scheme.split_once('/')?.0;
+    // Strip `:port` and any `user@` — the routable host, matching `host_part`. Reject an empty authority.
+    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = host.split_once(':').map(|(h, _)| h).unwrap_or(host);
+    (!host.trim().is_empty()).then(|| host.to_string())
+}
+
 /// The bound identifier of a simple binding pattern: `c` / `mut c` / `&c` / `(c)` -> "c". `None` for a
 /// destructuring/wildcard pattern (no single name to bind an element type to). Used for loop vars and
 /// closure params.
