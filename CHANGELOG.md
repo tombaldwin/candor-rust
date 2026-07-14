@@ -4,7 +4,35 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## spec 0.12 — the gains origin field (2026-07-14) — current floor
+## spec 0.13 — the Llm effect (2026-07-14) — current floor
+
+candor-scan and candor-query now declare **spec `0.13`** (both at crate **0.13.0**; the internal
+**candor-report** and **candor-classify** libs move lockstep to **0.13.0**). **0.13 is the current spec
+floor** — the ratchet from 0.12. The report schema is unchanged (`Llm` is a value in the existing
+effect set), but a report that previously read `Net` on a model-provider call now reads `Llm` — the
+new precision the bump pins into the contract.
+
+### 🤖 the `Llm` effect — a model-provider call, refining Net
+
+A call to a machine-learning model provider is now its own boundary effect, **`Llm`**, refining the
+broad `Net` the same way `Db` does (both engines — the stable scanner and the deep dylint). It fires
+on two signals: a **known model-host literal** (the `api.anthropic.com`-class hosts in the shared
+`MODEL_HOSTS` table, verbatim from the java reference — a loopback Ollama `:11434` counts, an
+arbitrary host on that port does not), OR a **model-SDK crate** (a curated list — `async-openai`,
+`aws-sdk-bedrockruntime`, `ollama-rs`, …). A model call always carries `Net` alongside `Llm`, so it
+never evades a `Net` gate; `Llm` sits in the boundary / ambient / injection / salience sets and takes
+its own `deny`/`allow` gate, with a masked model host failing closed. The host classifier is tightened
+to match the reference across engines (Bedrock keys off the first-label service, not a bare `bedrock`
+substring that caught an S3 bucket).
+
+### 🔗 the reqwest builder-chain Net gap, fixed alongside
+
+The `Client::builder()…post(url).send()` builder chain was not being read as `Net`, so a real
+model call made through it was seen as `Env`-only — a claimed-covered crate dropping its dominant
+idiom. The chain is now classified `Net` with the host captured, so `Llm` fires on the model hosts
+reached through it (verified on a real `api.anthropic.com` call).
+
+## spec 0.12 — the gains origin field (2026-07-14)
 
 candor-scan and candor-query now declare **spec `0.12`** (both at crate **0.12.0**; the internal
 **candor-report** and **candor-classify** libs move lockstep to **0.12.0**). **0.12 is the current spec
