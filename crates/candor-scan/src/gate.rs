@@ -71,14 +71,20 @@ pub(crate) fn policy_violations(
                 continue;
             }
             let lits = match r.effect {
-                "Net" => hostsacc.get(q),
+                // `Llm` ⟨0.13⟩ rides the Net host surface (SPEC §1) — `allow Llm <host>` certifies the same
+                // captured hosts as `allow Net`, restricted to the MODEL hosts (a model call's host WAS
+                // captured as a Net literal). Matches candor-java's checkAllowlist("Llm", hostFixpoint, …).
+                "Net" | "Llm" => hostsacc.get(q),
                 "Exec" => cmdsacc.get(q),
                 "Db" => tablesacc.get(q),
                 _ => pathsacc.get(q),
             };
             // An INCOMPLETE surface (a structurally-invisible reach) can't be certified even with visible
             // hosts — else a benign literal masks the invisible forbidden endpoint (the masking evasion).
-            let surface_incomplete = incompleteacc.get(q).is_some_and(|s| s.contains(r.effect));
+            // `Llm` keys off the NET incompleteness (it rides the Net host literal): a runtime/masked model
+            // host that fails-closes Net must fail-close `allow Llm` too (incompleteAsLlm in candor-java).
+            let inc_key = if r.effect == "Llm" { "Net" } else { r.effect };
+            let surface_incomplete = incompleteacc.get(q).is_some_and(|s| s.contains(inc_key));
             match lits {
                 Some(ls) if !ls.is_empty() && !surface_incomplete => {
                     let bad: Vec<&str> =

@@ -1107,3 +1107,87 @@ pub mod dat {
     // plain data → pure (absent from the effectful report).
     assert!(eff("via_data").is_empty(), "a plain-data parameter must stay pure (no effect, no Unknown):\n{v}");
 }
+
+// ── SPEC §1 ⟨0.13⟩ `Llm` — the Rust mirror of candor-java's LlmEffectTest ────────────────────────────
+
+/// Helper: scan a fixture `--json` and return a fn's inferred effects (by fn-name substring).
+fn llm_scan_effects(d: &std::path::Path, needle: &str) -> Vec<String> {
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json").output().expect("run");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json report");
+    v["functions"].as_array().into_iter().flatten()
+        .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+        .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+            .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+        .collect()
+}
+
+#[test]
+fn llm_host_literal_refinement_keeps_net_and_adds_llm_only_for_model_hosts() {
+    // (a) host-literal refinement: a statically-known request to a KNOWN model host carries Llm + Net
+    // (Net is never dropped — a model call IS network I/O); an UNKNOWN host stays bare Net (never guessed);
+    // a local Ollama endpoint (:11434) carries Llm too.
+    let src = "\
+        use std::net::TcpStream;\n\
+        pub fn anthropic() { let _ = TcpStream::connect(\"api.anthropic.com:443\"); }\n\
+        pub fn ollama() { let _ = TcpStream::connect(\"localhost:11434\"); }\n\
+        pub fn other() { let _ = TcpStream::connect(\"example.com:443\"); }\n";
+    let d = make_crate("llmhost", src);
+    for m in ["anthropic", "ollama"] {
+        let e = llm_scan_effects(&d, m);
+        assert!(e.contains(&"Net".to_string()), "{m} must keep Net (a model call IS network I/O), got {e:?}");
+        assert!(e.contains(&"Llm".to_string()), "{m} must carry Llm, got {e:?}");
+    }
+    let other = llm_scan_effects(&d, "other");
+    assert!(other.contains(&"Net".to_string()), "an unknown host is Net, got {other:?}");
+    assert!(!other.contains(&"Llm".to_string()), "an unknown host must NOT be Llm (never guessed), got {other:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn deny_llm_gates_a_model_host_reach_and_names_llm() {
+    let d = make_crate("denyllm",
+        "pub fn chat() { let _ = std::net::TcpStream::connect(\"api.openai.com:443\"); }");
+    let pol = d.join("p.policy");
+    std::fs::write(&pol, "deny Llm chat\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--policy").arg(pol.to_string_lossy().as_ref())
+        .output().expect("run");
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(1), "deny Llm on a model-host reach must fail the gate (exit 1):\n{all}");
+    assert!(all.contains("AS-EFF-006") && all.contains("Llm"),
+            "the AS-EFF-006 diagnostic must name Llm:\n{all}");
+}
+
+#[test]
+fn allow_llm_fails_closed_on_a_masked_model_host() {
+    // A runtime-computed host (structurally invisible) marks the Net surface incomplete. Because Llm rides
+    // the Net host literal, `allow Llm` must fail closed too — a benign visible model host cannot MASK the
+    // invisible one (the gate-evasion defense).
+    let src = "\
+        use std::net::TcpStream;\n\
+        pub fn chat(h: &str) { let _ = TcpStream::connect(h); let _ = TcpStream::connect(\"api.openai.com:443\"); }\n";
+    let d = make_crate("maskllm", src);
+    let pol = d.join("p.policy");
+    std::fs::write(&pol, "allow Llm in chat api.openai.com\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref()).arg("--policy").arg(pol.to_string_lossy().as_ref())
+        .output().expect("run");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(1),
+        "an incomplete (masked) host surface must fail-close `allow Llm` — a benign model host cannot certify a hidden reach");
+}
+
+#[test]
+fn model_sdk_crate_call_classifies_llm_and_net() {
+    // (b) model-SDK surface: a call into a curated model-provider crate (async-openai) classifies Llm + Net
+    // with NO method gating (single-purpose client) — the analog of java's isModelSdkOwner.
+    let src = "\
+        pub fn ask() { let c = async_openai::Client::new(); let _ = c.chat().create(); }\n";
+    let d = make_crate("sdkllm", src);
+    let e = llm_scan_effects(&d, "ask");
+    let _ = std::fs::remove_dir_all(&d);
+    assert!(e.contains(&"Llm".to_string()), "a call into a curated model-SDK crate must be Llm, got {e:?}");
+    assert!(e.contains(&"Net".to_string()), "a model-SDK dispatch is also Net, got {e:?}");
+}

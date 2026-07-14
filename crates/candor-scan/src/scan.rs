@@ -636,8 +636,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         let mut drops_here: BTreeSet<String> = BTreeSet::new();
         for c in &f.calls {
             let cr = c.path.split("::").next().unwrap_or("");
+            // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface (candor_classify::MODEL_SDK_CRATES): a qualified call
+            // into a curated model-provider client → `Llm` + `Net` (Net is never dropped — a model call IS
+            // network I/O). No method gating (single-purpose clients), the analog of java's isModelSdkOwner.
+            let model_sdk = c.path.contains("::") && candor_classify::is_model_sdk_crate(cr);
             let classified = candor_classify::classify(cr, &c.path)
-                .or_else(|| scan_builder_entry_effect(cr, &c.path));
+                .or_else(|| scan_builder_entry_effect(cr, &c.path))
+                .or(if model_sdk { Some("Llm") } else { None });
             // DROP-GLUE detection: a `T::assoc()` ASSOCIATED-FN call (a CONSTRUCTOR like `Guard::new`)
             // where `T` is a LOCAL drop type means a `T` value is CREATED in this scope and dropped at exit.
             // Record `T` so we edge to `T::drop` after the loop. CRUCIALLY gated to `!c.method`: a METHOD
@@ -820,6 +825,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
+                // §1 ⟨0.13⟩ model-SDK dispatch is `Llm` + `Net` — add Net alongside the `Llm` that
+                // `classified` carried (Net is never dropped; a model call IS network I/O).
+                if model_sdk && !suppress_bare_leaf && !resolved_local {
+                    direct.entry(f.qual.clone()).or_default().insert("Net");
+                }
                 // A host-ESTABLISHING Net / program-NAMING Exec call with NO captured literal → the endpoint
                 // is invisible to the gate (a runtime value). Mark the surface incomplete so a benign captured
                 // literal can't certify it (the masking evasion). Establishing-allowlist via the SHARED
@@ -849,7 +859,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 }
                 if let Some(s) = &c.str_arg {
                     match eff {
-                        "Net" => { hosts.entry(f.qual.clone()).or_default().insert(host_part(s)); }
+                        "Net" => {
+                            let h = host_part(s);
+                            // §1 ⟨0.13⟩ Ollama dotless-host (`localhost:11434`): refine to `Llm` WITHOUT
+                            // capturing the bare host as a Net literal (the dotless-host gate — `allow Llm
+                            // localhost` has no literal to certify, fails closed). A dotted model host (incl.
+                            // `127.0.0.1:11434`) IS captured and rides `is_model_host` below. Matches java.
+                            if h.contains('.') || !h.rsplit_once(':').is_some_and(|(_, p)| p == "11434") {
+                                // §1 ⟨0.13⟩ host-literal refinement: a known model host adds `Llm` (Net kept).
+                                if candor_classify::is_model_host(&h) {
+                                    direct.entry(f.qual.clone()).or_default().insert("Llm");
+                                }
+                                hosts.entry(f.qual.clone()).or_default().insert(h);
+                            } else {
+                                direct.entry(f.qual.clone()).or_default().insert("Llm");
+                            }
+                        }
                         "Exec" => {
                             // Capture the program head + refine the cliff (spec §4 ⟨0.5⟩) ONLY at a
                             // program-NAMING call (`new`/`cmd`), an ALLOWLIST — not "any method except a
@@ -1046,7 +1071,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     *counts.entry(x.as_str()).or_insert(0) += 1;
                 }
             }
-            let breakdown = ["Net", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
+            let breakdown = ["Net", "Llm", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
                 .iter()
                 .filter_map(|k| counts.get(k).map(|n| format!("{k} {n}")))
                 .collect::<Vec<_>>()

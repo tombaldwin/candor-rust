@@ -113,7 +113,8 @@ pub fn db_table_covered(a: &str, r: &str) -> bool {
 /// `Db` table by qualified name or `schema.*`.
 pub fn literal_allowed(effect: &str, reached: &str, allow: &BTreeSet<String>) -> bool {
     match effect {
-        "Net" => allow.iter().any(|a| host_part(a) == host_part(reached)),
+        // `Llm` ⟨0.13⟩ rides the Net host literal (SPEC §1) — matched by hostname like `Net`.
+        "Net" | "Llm" => allow.iter().any(|a| host_part(a) == host_part(reached)),
         "Exec" => allow.iter().any(|a| cmd_base(a) == cmd_base(reached)),
         "Fs" => allow.iter().any(|a| fs_path_covered(a, reached)),
         "Db" => allow.iter().any(|a| db_table_covered(a, reached)),
@@ -243,12 +244,16 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
             "allow" => {
                 let effect = match toks.next().unwrap_or("") {
                     "Net" => "Net",
+                    // `Llm` ⟨0.13⟩ rides the Net host literal (SPEC §1) — `allow Llm <host…>` restricts which
+                    // MODEL hosts a scope may reach, matched by hostname like Net (its reached surface IS the
+                    // Net host surface). Match candor-java's Policy.parsePolicy.
+                    "Llm" => "Llm",
                     "Exec" => "Exec",
                     "Fs" => "Fs",
                     "Db" => "Db",
                     _ => {
                         eprintln!(
-                            "candor: ignoring policy rule (allow supports only Net hosts / Exec commands / Fs paths / Db tables): {line}"
+                            "candor: ignoring policy rule (allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables): {line}"
                         );
                         continue;
                     }
