@@ -309,16 +309,23 @@ impl<'a> CallCollector<'a> {
                     .or_else(|| self.const_strings.get(&leaf))
                     .cloned()
             }
-            // A `format!("{}…", CONST, …)` whose FIRST hole is a bare `{}` (the const is the URL PREFIX).
             syn::Expr::Macro(m) => {
-                let prefix_arg = format_const_prefix_arg(&m.mac)?;
-                // The prefix arg must itself resolve to a const/local literal — NOT another format!/runtime
-                // expr (one level of const anchoring, no recursion into a nested format).
-                let leaf = path_leaf_ident(&prefix_arg)?;
-                self.str_locals
-                    .get(&leaf)
-                    .or_else(|| self.const_strings.get(&leaf))
-                    .cloned()
+                // (a) A `format!("{}…", CONST, …)` whose FIRST hole is a bare `{}` — the const is the URL
+                // PREFIX (host). Resolve the const/local literal (one level; no nested-format recursion).
+                if let Some(prefix_arg) = format_const_prefix_arg(&m.mac) {
+                    if let Some(leaf) = path_leaf_ident(&prefix_arg) {
+                        if let Some(v) = self.str_locals.get(&leaf).or_else(|| self.const_strings.get(&leaf)) {
+                            return Some(v.clone());
+                        }
+                    }
+                    return None;
+                }
+                // (b) LITERAL-HEAD: a `format!("https://api.openai.com/v1/{}", path)` whose format-string
+                // literal already spells out a COMPLETE authority before its first hole — the host is the
+                // literal, only the PATH is interpolated. `format_literal_head_host` returns it ONLY when
+                // the authority is terminated by a `/` in the literal (else a hole could be inside the host
+                // → bare Net). The returned bare host runs through the caller's host refinement unchanged.
+                format_literal_head_host(&m.mac)
             }
             _ => None,
         }

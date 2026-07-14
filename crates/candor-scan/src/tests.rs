@@ -76,6 +76,26 @@
     }
 
     #[test]
+    fn literal_head_host_extracts_only_a_terminated_authority() {
+        // POSITIVE: a complete authority in the static prefix (terminated by a `/` before the first hole).
+        assert_eq!(literal_head_host("https://api.openai.com/v1/{}").as_deref(), Some("api.openai.com"));
+        assert_eq!(literal_head_host("https://api.openai.com/{}").as_deref(), Some("api.openai.com"));
+        // NEGATIVE: a hole is (or could be) inside the authority — no `/` after `://` in the prefix.
+        assert_eq!(literal_head_host("https://api.{}.com/v1/y"), None);
+        assert_eq!(literal_head_host("https://{}/v1/y"), None);
+        assert_eq!(literal_head_host("https://api.openai{}/v1"), None);
+        assert_eq!(literal_head_host("https://api.openai.com:{}/v1"), None); // port hole before the `/`
+        // The leading-`{}` const-anchored shape has NO static prefix → defer (handled elsewhere).
+        assert_eq!(literal_head_host("{}/chat"), None);
+        // `:port` in a fully-literal authority is stripped, matching the routable-host convention.
+        assert_eq!(literal_head_host("http://host.example:8080/{}").as_deref(), Some("host.example"));
+        // `{{` is an escaped brace, not a hole — the authority is still terminated after it.
+        assert_eq!(literal_head_host("https://api.openai.com/a{{b}}/{}").as_deref(), Some("api.openai.com"));
+        // Not a URL at all → None.
+        assert_eq!(literal_head_host("plain text {}"), None);
+    }
+
+    #[test]
     fn propagate_is_transitive_across_the_call_graph() {
         // leaf has Fs directly; mid calls leaf; top calls mid — both must inherit Fs.
         let mut direct: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
@@ -2240,6 +2260,75 @@ trait G {
             "a format! with a literal prefix before `{{}}` is not const-anchored → no Llm:\n{f:#}");
         assert!(!hosts_of(f).contains(&"api.openai.com".to_string()),
             "the const value must NOT be captured as the host when it isn't the URL prefix:\n{f:#}");
+    }
+
+    #[test]
+    fn format_literal_head_host_refines_to_llm() {
+        // LITERAL-HEAD (the most common real-world shape, from dogfooding): the host is spelled out in the
+        // `format!` FORMAT-STRING literal before the first hole — `format!("https://api.openai.com/v1/{}",
+        // p)` — with `{}` in the PATH only. The authority is terminated by the `/` in the literal, so the
+        // host is statically known → SPEC §1 refines to Llm + captures the host (both `/v1/` and root `/`).
+        let v = scan_src_to_json("litheadpos", "\
+            pub fn v1(p: &str) {\n\
+                let _ = reqwest::Client::new().post(format!(\"https://api.openai.com/v1/{}\", p)).send();\n\
+            }\n\
+            pub fn root(p: &str) {\n\
+                let _ = reqwest::Client::new().post(format!(\"https://api.openai.com/{}\", p)).send();\n\
+            }\n");
+        for name in ["v1", "root"] {
+            let f = fn_entry(&v, name);
+            assert!(effs(f).contains(&"Llm".to_string()),
+                "{name}: a literal-head model host is statically known → Llm:\n{f:#}");
+            assert!(hosts_of(f).contains(&"api.openai.com".to_string()),
+                "{name}: the literal-head host must be captured (so `allow Llm api.openai.com` certifies):\n{f:#}");
+        }
+    }
+
+    #[test]
+    fn format_literal_head_incomplete_authority_stays_bare_net() {
+        // NO FABRICATION: a `format!` whose format-string prefix does NOT contain a COMPLETE authority — a
+        // hole sits inside (or truncates) the host — must stay bare Net with NO host, NO Llm. Four shapes:
+        // split authority, whole-host hole, host not terminated before the hole, and a `:port` hole before
+        // the `/` (the authority isn't terminated by a `/` in the literal). All → bare Net, no host.
+        let v = scan_src_to_json("litheadneg", "\
+            pub fn split(x: &str) {\n\
+                let _ = reqwest::Client::new().post(format!(\"https://api.{}.com/v1/y\", x)).send();\n\
+            }\n\
+            pub fn whole(h: &str) {\n\
+                let _ = reqwest::Client::new().post(format!(\"https://{}/v1/y\", h)).send();\n\
+            }\n\
+            pub fn unterminated(x: &str) {\n\
+                let _ = reqwest::Client::new().post(format!(\"https://api.openai{}/v1\", x)).send();\n\
+            }\n\
+            pub fn port(port: u16) {\n\
+                let _ = reqwest::Client::new().post(format!(\"https://api.openai.com:{}/v1\", port)).send();\n\
+            }\n");
+        for name in ["split", "whole", "unterminated", "port"] {
+            let f = fn_entry(&v, name);
+            let e = effs(f);
+            assert!(e.contains(&"Net".to_string()), "{name}: still a Net send:\n{f:#}");
+            assert!(!e.contains(&"Llm".to_string()),
+                "{name}: an unterminated authority must NOT fabricate Llm:\n{f:#}");
+            assert!(!hosts_of(f).contains(&"api.openai.com".to_string()),
+                "{name}: no host may be extracted when a hole could be inside the authority:\n{f:#}");
+        }
+    }
+
+    #[test]
+    fn format_literal_head_non_model_host_stays_bare_net_never_llm() {
+        // FABRICATION GUARD: a literal-head host that is NOT a model host (a CDN) — the host IS captured (a
+        // real Net endpoint, `allow Net cdn.example.com` certifiable) but `is_model_host` says no → NO Llm.
+        let v = scan_src_to_json("litheadcdn", "\
+            pub fn asset(p: &str) {\n\
+                let _ = reqwest::Client::new().post(format!(\"https://cdn.example.com/v1/{}\", p)).send();\n\
+            }\n");
+        let f = fn_entry(&v, "asset");
+        let e = effs(f);
+        assert!(e.contains(&"Net".to_string()), "a CDN fetch is Net:\n{f:#}");
+        assert!(!e.contains(&"Llm".to_string()),
+            "a non-model literal-head host must NOT be fabricated as Llm:\n{f:#}");
+        assert!(hosts_of(f).contains(&"cdn.example.com".to_string()),
+            "the real Net host must still be captured:\n{f:#}");
     }
 
     #[test]
