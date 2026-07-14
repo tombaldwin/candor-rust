@@ -399,6 +399,17 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         }
     }
     out.sort();
+    // §2.1 provenance: which engine BUILD produced each side (the report's `candor.version`,
+    // `meta.version` for older shapes; "" when unknown — the candor-ts/candor-java parity shape).
+    // When both are known and differ, a "gained capability" may be the newer engine RECLASSIFYING,
+    // not the dependency changing — disclosed in BOTH output modes (java/swift parity; the TSV form
+    // is what candor-run.sh's self-review consumes, and it deserves the warning most — max-review
+    // find: the disclosure was --json-scoped, so one engine presented a reclassification as real).
+    let baseline_version = report_build_version(base_pre);
+    let engine_version = report_build_version(cur_pre);
+    if !baseline_version.is_empty() && !engine_version.is_empty() && baseline_version != engine_version {
+        eprintln!("candor: ⚠ baseline @{baseline_version} ≠ engine @{engine_version} — a \"gained capability\" may be the engine reclassifying, not the dependency changing; regenerate both reports with one build to compare releases.");
+    }
     if want_json {
         // The package-level supply-chain alarm (spec §5.1): `gained` is the UNION of effects the
         // surface gained between the two reports — a dependency that grew a Net/Exec reach between
@@ -427,15 +438,6 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
             .collect();
         let cg_unusable = base_cg.is_empty() || base_cg_partial;
         let origin_of = |f: &str| gain_origin(f, &base, &base_cg_nodes, cg_unusable);
-        // §2.1 provenance: which engine BUILD produced each side (the report's `candor.version`,
-        // `meta.version` for older shapes; "" when unknown — the candor-ts/candor-java parity shape).
-        // When both are known and differ, a "gained capability" may be the newer engine
-        // RECLASSIFYING, not the dependency changing — disclosed, never silently conflated.
-        let baseline_version = report_build_version(base_pre);
-        let engine_version = report_build_version(cur_pre);
-        if !baseline_version.is_empty() && !engine_version.is_empty() && baseline_version != engine_version {
-            eprintln!("candor: ⚠ baseline @{baseline_version} ≠ engine @{engine_version} — a \"gained capability\" may be the engine reclassifying, not the dependency changing; regenerate both reports with one build to compare releases.");
-        }
         let mut gained: Vec<&str> = out.iter().map(|(_, e)| e.as_str()).collect();
         gained.sort_unstable();
         gained.dedup();
