@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 /// The ten effects candor classifies (excluding the synthetic `Unknown`). Defined once here so the
 /// lint and the CLI share one vocabulary instead of each keeping its own copy (which had already
 /// drifted in ordering). Order is irrelevant to consumers — both tally by name and sort the output.
-pub const EFFECTS: [&str; 10] =
-    ["Net", "Db", "Fs", "Exec", "Ipc", "Env", "Clock", "Rand", "Clipboard", "Log"];
+pub const EFFECTS: [&str; 11] =
+    ["Net", "Db", "Llm", "Fs", "Exec", "Ipc", "Env", "Clock", "Rand", "Clipboard", "Log"];
 
 /// A discovered per-crate report file. candor's report naming convention is
 /// `<prefix>.<crate>.<type>.json`; the sidecars (`<prefix>.calibrated.json`,

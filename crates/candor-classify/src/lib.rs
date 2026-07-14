@@ -1403,6 +1403,77 @@ pub fn classify_command_head(cmd: &str) -> &'static [&'static str] {
     }
 }
 
+/// Known machine-learning MODEL-provider hosts — the SPEC §1 ⟨0.13⟩ `Llm` host-literal refinement:
+/// a statically-known `Net` request to one of these classifies `Llm` IN ADDITION to `Net` (Net is
+/// never dropped — a model call IS network I/O, exactly as an `Exec`-refined subprocess keeps `Exec`),
+/// just as a jdbc URL classifies `Db`. Matched by host, case-insensitive; a SUBDOMAIN of a listed host
+/// counts. The reference engines share this table VERBATIM with candor-java's `Literals.MODEL_HOSTS`
+/// (the analog of `classify_command_head`) so the `Net` boundary refines to `Llm` identically. An
+/// UNKNOWN host stays bare `Net` — never guessed. Curated STARTER set; the §7 coverage ledger
+/// discloses an uncovered provider like any other.
+pub const MODEL_HOSTS: &[&str] = &[
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "api.mistral.ai",
+    "api.cohere.ai",
+    "api.cohere.com",
+    "api.groq.com",
+    "api.together.xyz",
+    "api.perplexity.ai",
+    "openrouter.ai",
+];
+
+/// Whether an endpoint HOST literal is a known model provider (case-insensitive; a subdomain of a
+/// `MODEL_HOSTS` entry counts). Strips a `:port` suffix first. Two special forms carry their own rule,
+/// matching candor-java's `Literals.isModelHost` exactly: any host whose port is `11434` is a local
+/// Ollama endpoint (`localhost:11434`, `127.0.0.1:11434`, even a bare host); and an AWS Bedrock runtime
+/// host — a host containing `bedrock` that ends `.amazonaws.com` (`bedrock-runtime.<region>.amazonaws.com`).
+pub fn is_model_host(host_literal: &str) -> bool {
+    // Ollama: a `:11434` port anywhere is the local model endpoint (keep it simple, per SPEC §1) — this
+    // fires even for a bare `localhost:11434` / `127.0.0.1:11434` that the dotted-host gate would reject.
+    if let Some((_, port)) = host_literal.rsplit_once(':') {
+        if port == "11434" {
+            return true;
+        }
+    }
+    // Strip any `:port` (via the shared host_part) and lowercase for the name comparisons.
+    let host = policy::host_part(host_literal).to_ascii_lowercase();
+    if MODEL_HOSTS.contains(&host.as_str()) {
+        return true;
+    }
+    // A subdomain of a known model host counts (`eu.api.openai.com` → api.openai.com).
+    if MODEL_HOSTS.iter().any(|m| host.ends_with(&format!(".{m}"))) {
+        return true;
+    }
+    // `*.bedrock*.amazonaws.com` — the AWS Bedrock runtime endpoint. Match by substring + suffix (not an
+    // exact region list) so every region works.
+    host.ends_with(".amazonaws.com") && host.contains("bedrock")
+}
+
+/// Curated Rust model-provider SDK crates — the SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface, the Rust analog
+/// of candor-java's `Rules.MODEL_SDK_PACKAGES`. A resolved call into one of these crates classifies
+/// `Llm` + `Net` (the caller adds both — a model dispatch IS network I/O). NO method-name gating: these
+/// are single-purpose provider clients, so ANY call into the crate is a model dispatch (matches the java
+/// reference's judgment call). Curated STARTER list; the §7 coverage ledger discloses the rest.
+pub const MODEL_SDK_CRATES: &[&str] = &[
+    "async_openai",           // async-openai — the de-facto OpenAI client
+    "anthropic_sdk",          // anthropic-sdk
+    "anthropic",              // anthropic (community client crate)
+    "aws_sdk_bedrockruntime", // AWS Bedrock runtime (invoke/converse) — the model surface of the aws-sdk family
+    "ollama_rs",              // ollama-rs — local Ollama client
+    "langchain_rust",         // langchain-rust — the LangChain invoke surfaces
+    "mistralai",              // mistralai (Mistral client)
+    "genai",                  // genai — a multi-provider model client
+];
+
+/// Whether a resolved call's CRATE is a curated model-provider SDK (`MODEL_SDK_CRATES`) → the SPEC §1
+/// ⟨0.13⟩ `Llm` model-SDK classification (the caller adds both `Llm` and `Net`). Crate-level, no
+/// method gating — a single-purpose client, matching candor-java's `isModelSdkOwner`.
+pub fn is_model_sdk_crate(crate_name: &str) -> bool {
+    MODEL_SDK_CRATES.contains(&crate_name)
+}
+
 /// Whether a subprocess-builder method only MODIFIES the command (`.arg`, `.env`, `.current_dir`)
 /// rather than NAMING the program (`Command::new`, `duct::cmd`). A WHOLE-CRATE-Exec crate
 /// (`portable_pty`, `duct`, `async_process`) classifies *every* method as `Exec`, so the
@@ -1645,6 +1716,49 @@ pub fn tables_in_sql(sql: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_host_recognizes_known_providers_and_special_forms() {
+        use super::is_model_host as m;
+        // exact known hosts (case-insensitive), with/without a port
+        assert!(m("api.openai.com"));
+        assert!(m("API.OpenAI.com"));
+        assert!(m("api.anthropic.com:443"));
+        assert!(m("generativelanguage.googleapis.com"));
+        assert!(m("api.mistral.ai"));
+        assert!(m("api.cohere.ai"));
+        assert!(m("api.cohere.com")); // BOTH cohere hosts
+        assert!(m("api.groq.com"));
+        assert!(m("api.together.xyz"));
+        assert!(m("api.perplexity.ai"));
+        assert!(m("openrouter.ai"));
+        // a subdomain of a known host counts
+        assert!(m("eu.api.openai.com"));
+        // Ollama: any :11434 endpoint, incl. bare localhost / 127.0.0.1 (dotless)
+        assert!(m("localhost:11434"));
+        assert!(m("127.0.0.1:11434"));
+        assert!(m("ollama.internal:11434"));
+        // Bedrock: contains "bedrock" AND ends .amazonaws.com
+        assert!(m("bedrock-runtime.us-east-1.amazonaws.com"));
+        assert!(m("bedrock-runtime.eu-west-1.amazonaws.com"));
+        // NOT model hosts (never guessed)
+        assert!(!m("example.com"));
+        assert!(!m("api.stripe.com"));
+        assert!(!m("localhost:8080")); // a non-Ollama local port
+        assert!(!m("s3.us-east-1.amazonaws.com")); // amazonaws but not bedrock
+        assert!(!m("openai.com.evil.com")); // suffix trick — not a subdomain of a known host
+    }
+
+    #[test]
+    fn model_sdk_crate_is_crate_level_no_method_gating() {
+        use super::is_model_sdk_crate as s;
+        assert!(s("async_openai"));
+        assert!(s("aws_sdk_bedrockruntime"));
+        assert!(s("ollama_rs"));
+        assert!(s("langchain_rust"));
+        assert!(!s("reqwest"));
+        assert!(!s("aws_sdk_s3"));
+    }
+
     #[test]
     fn sql_table_extraction_is_conservative() {
         use super::tables_in_sql as t;

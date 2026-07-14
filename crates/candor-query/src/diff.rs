@@ -306,8 +306,8 @@ pub(crate) fn cmd_receipt(args: &[String]) -> i32 {
     // The receipt's own display order (Db-first), preserved byte-for-byte from the Python it replaces.
     // It must list exactly the EFFECTS vocabulary; the assert catches a new effect added to EFFECTS but
     // not here (which would silently drop it from the receipt while `audit` still showed it).
-    const ORDER: [&str; 10] =
-        ["Db", "Net", "Fs", "Exec", "Env", "Clock", "Ipc", "Rand", "Clipboard", "Log"];
+    const ORDER: [&str; 11] =
+        ["Db", "Net", "Llm", "Fs", "Exec", "Env", "Clock", "Ipc", "Rand", "Clipboard", "Log"];
     debug_assert_eq!(
         ORDER.iter().copied().collect::<BTreeSet<_>>(),
         EFFECTS.iter().copied().collect::<BTreeSet<_>>(),

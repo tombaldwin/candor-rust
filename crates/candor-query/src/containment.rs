@@ -8,11 +8,11 @@ use crate::*;
 /// raw counts, which are domain-dependent). AMBIENT effects are expected to be cross-cutting (logging /
 /// timestamps everywhere is fine), so they're reported but not scored. `Unknown` is excluded. `Clipboard`
 /// is a §6.1 boundary effect (external-resource I/O), so it is contained/scored like the rest.
-pub(crate) const CONTAINED: &[&str] = &["Db", "Net", "Exec", "Fs", "Ipc", "Clipboard"];
+pub(crate) const CONTAINED: &[&str] = &["Db", "Net", "Llm", "Exec", "Fs", "Ipc", "Clipboard"];
 
 pub(crate) const AMBIENT: &[&str] = &["Log", "Clock", "Rand", "Env"];
 
-/// `containment` — how well each BOUNDARY effect (Db/Net/Exec/Fs/Ipc/Clipboard) stays in one layer: the
+/// `containment` — how well each BOUNDARY effect (Db/Net/Llm/Exec/Fs/Ipc/Clipboard) stays in one layer: the
 /// domain-INDEPENDENT architecture signal behind the "leaky cross-cutting" intuition (a ratio /
 /// structure, not a count). With a baseline prefix it's a RATCHET — exit 1 if a boundary effect appears
 /// in a layer it wasn't in ("Db → actions"), and NOTE when one leaves a layer ("✓ Db ⊘ legacy").

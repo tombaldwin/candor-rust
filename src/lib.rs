@@ -321,8 +321,8 @@ struct EffectSite {
 /// Effects that represent *ambient authority* — a global resource reachable just by
 /// naming it (vs. a capability you must be handed). These are what `CANDOR_NO_AMBIENT`
 /// and cap-std care about. `Log` is intentionally excluded (not an authority).
-const AMBIENT: [&str; 9] =
-    ["Net", "Fs", "Exec", "Env", "Clock", "Clipboard", "Rand", "Db", "Ipc"];
+const AMBIENT: [&str; 10] =
+    ["Net", "Fs", "Exec", "Env", "Clock", "Clipboard", "Rand", "Db", "Llm", "Ipc"];
 
 /// The engine's build identity, stamped by build.rs. `CANDOR_VERSION` is the source commit the
 /// dylib was built from (not the source tree's current HEAD — see build.rs). Emitted into every
@@ -1981,6 +1981,16 @@ fn net_hosts_in_call(expr: &Expr<'_>) -> BTreeSet<String> {
     out
 }
 
+/// SPEC §1 ⟨0.13⟩ Ollama dotless-host: whether a captured host literal is a BARE (dotless) host on the
+/// Ollama port `11434` — `localhost:11434`. Its Llm signal is the PORT, not a recognizable host name, so
+/// the caller adds `Llm` WITHOUT keeping it as a Net literal (the dotless-host gate; a dotted model host,
+/// incl. `127.0.0.1:11434`, rides the captured-literal `is_model_host` path instead — it stays captured).
+/// Mirrors the java reference's dotless-host branch: `deny Llm` catches it, `allow Llm localhost` has no
+/// literal to certify.
+fn is_ollama_dotless(host: &str) -> bool {
+    !host.contains('.') && host.rsplit_once(':').is_some_and(|(_, p)| p == "11434")
+}
+
 /// The first string-literal argument of a call, if any. The program for `Command::new("git")` and the
 /// path for `fs::read("/etc/x")` are both the first arg, so this serves the `Exec`/`Fs` allowlists the
 /// way `net_hosts_in_call` serves `Net`. Called only for a call already classified with that effect.
@@ -2565,7 +2575,20 @@ impl Candor {
         }
         let path = cx.tcx.def_path_str(def_id);
         let builtin = classify(crate_name.as_str(), &path);
-        let effect = builtin.or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra));
+        // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface (candor_classify::MODEL_SDK_CRATES): a call resolving into
+        // a curated model-provider client dispatches a request → `Llm` + `Net` (Net is never dropped — a
+        // model call IS network I/O). No method gating (single-purpose clients), the Rust analog of the java
+        // reference's `isModelSdkOwner`. Additive to whatever `classify` found; `effect` becomes `Llm` so the
+        // injection-taint surface (a caller-derived prompt) fires exactly as it does for a Net/Db arg.
+        let model_sdk = !def_id.is_local() && candor_classify::is_model_sdk_crate(crate_name.as_str());
+        let effect = builtin
+            .or_else(|| classify_extra(crate_name.as_str(), &path, &self.extra))
+            .or(if model_sdk { Some("Llm") } else { None });
+        if model_sdk {
+            let d = self.direct.entry(caller).or_default();
+            d.insert("Llm");
+            d.insert("Net");
+        }
         // FLOOR DISCLOSURE (sweep [4]/[19]): a DIRECT external call (not a trait dispatch — those CHA-resolve
         // to local impls, or are disclosed as `Unknown` above) that κ does NOT classify is a reach candor
         // cannot see through. The deep engine floors it to pure like the syntactic engines; record the crate
@@ -2588,12 +2611,36 @@ impl Candor {
             // Non-breaking Net refinement: a literal address/URL argument tells us the endpoint.
             // Gated to built-in Net classification (a user `extra` rule's arg shape is unknown).
             if builtin == Some("Net") {
-                let hosts = net_hosts_in_call(expr);
+                // §1 ⟨0.13⟩ Ollama dotless-host: a local endpoint names a BARE host (`localhost`:11434)
+                // whose Llm signal is the PORT, not a recognizable host name. Refine to `Llm` WITHOUT
+                // capturing the bare host as a Net literal (the dotted-host gate stays intact — a dotted
+                // model host, incl. `127.0.0.1:11434`, IS captured and rides `is_model_host` below). So
+                // `deny Llm` catches it but `allow Llm localhost` has no literal to certify (fails closed).
+                // Matches candor-java's dotless-host branch. Partition it out of the captured set.
+                let mut hosts = net_hosts_in_call(expr);
+                let dotless_ollama: Vec<String> =
+                    hosts.iter().filter(|h| is_ollama_dotless(h)).cloned().collect();
+                for h in &dotless_ollama {
+                    hosts.remove(h);
+                }
+                if !dotless_ollama.is_empty() {
+                    self.direct.entry(caller).or_default().insert("Llm");
+                }
                 if !hosts.is_empty() {
+                    // SPEC §1 ⟨0.13⟩ `Llm` host-literal refinement: a captured host that is a known model
+                    // provider adds `Llm` IN ADDITION to `Net` (the jdbc-URL-→-Db analog; Net is kept). The
+                    // host stays captured as the Net literal so `allow Llm <host>` (which rides the Net host
+                    // surface) can certify it.
+                    if hosts.iter().any(|h| candor_classify::is_model_host(h)) {
+                        self.direct.entry(caller).or_default().insert("Llm");
+                    }
                     self.net_hosts_direct.entry(caller).or_default().extend(hosts);
-                } else if candor_classify::is_net_establishing(path.rsplit("::").next().unwrap_or("")) {
+                } else if dotless_ollama.is_empty()
+                    && candor_classify::is_net_establishing(path.rsplit("::").next().unwrap_or(""))
+                {
                     // a host-ESTABLISHING Net call with no captured host literal → runtime endpoint, invisible
                     // to the gate (masking; sweep [3]/[7]). Use-verbs (write/read/send) are not establishing.
+                    // A dotless Ollama host IS visible (we saw the literal), so it's not an incomplete surface.
                     self.incomplete_direct.entry(caller).or_default().insert("Net");
                 }
             }
@@ -2664,7 +2711,7 @@ impl Candor {
             }
             // Taint heuristic: an injection-class effect on a parameter-derived argument.
             if self.taint
-                && matches!(effect, "Fs" | "Exec" | "Db" | "Net" | "Env" | "Ipc")
+                && matches!(effect, "Fs" | "Exec" | "Db" | "Net" | "Llm" | "Env" | "Ipc")
                 && effect_arg_from_param(cx.tcx, expr, caller)
             {
                 self.tainted.entry(caller).or_default().insert(effect);
@@ -3774,9 +3821,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 if !effs.contains(rule.effect) {
                     continue; // the effect isn't performed ⇒ the allowlist is trivially satisfied
                 }
-                // The transitive literal surface for this effect (hosts / commands / paths).
+                // The transitive literal surface for this effect (hosts / commands / paths). `Llm` ⟨0.13⟩
+                // rides the Net host surface (SPEC §1) — `allow Llm <host>` certifies the same captured
+                // hosts, restricted to the MODEL hosts (matches candor-java + candor-scan).
                 let reached = match rule.effect {
-                    "Net" => hostsacc.get(&f),
+                    "Net" | "Llm" => hostsacc.get(&f),
                     "Exec" => cmdsacc.get(&f),
                     "Fs" => pathsacc.get(&f),
                     "Db" => tablesacc.get(&f),
@@ -3802,7 +3851,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 // The surface is INCOMPLETE for this effect (a host-establishing / cmd-naming call left the
                 // endpoint invisible): can't certify even with visible literals, else a benign literal masks
                 // the runtime endpoint (the masking evasion; sweep [3]/[7]). Matches candor-scan / the family.
-                let surface_incomplete = incompleteacc.get(&f).is_some_and(|s| s.contains(rule.effect));
+                // `Llm` ⟨0.13⟩ keys off the NET incompleteness (it rides the Net host literal): a masked model
+                // host that fails-closes Net fails-closes `allow Llm` too (candor-java's incompleteAsLlm).
+                let inc_key = if rule.effect == "Llm" { "Net" } else { rule.effect };
+                let surface_incomplete = incompleteacc.get(&f).is_some_and(|s| s.contains(inc_key));
                 if !bad.is_empty() || opaque || surface_incomplete {
                     let scope = rule.scope.as_deref().map(|s| format!(" (scope `{s}`)")).unwrap_or_default();
                     let noun = match rule.effect {
@@ -4300,6 +4352,19 @@ mod tests {
         assert_eq!(net_host_literal("application/json"), None);
         assert_eq!(net_host_literal("hello world"), None);
         assert_eq!(net_host_literal(""), None);
+    }
+
+    #[test]
+    fn ollama_dotless_is_the_bare_localhost_11434_case_only() {
+        // §1 ⟨0.13⟩ the dotless-host gate: a BARE (dotless) host on :11434 is Llm WITHOUT being captured.
+        assert!(is_ollama_dotless("localhost:11434"));
+        assert!(is_ollama_dotless("ollama:11434")); // any bare hostname on the model port
+        // a DOTTED model host (incl. 127.0.0.1:11434) is NOT dotless — it rides the captured `is_model_host`
+        // literal path instead (so it stays captured and `is_model_host` fires on it).
+        assert!(!is_ollama_dotless("127.0.0.1:11434"));
+        assert!(candor_classify::is_model_host("127.0.0.1:11434")); // …and IS a model host via the port
+        // a bare host on a NON-model port is neither.
+        assert!(!is_ollama_dotless("localhost:8080"));
     }
 
     #[test]
