@@ -818,6 +818,28 @@ fn baseline_guard_sidecar_corrupt_fails_closed_exit_2() {
 }
 
 #[test]
+fn baseline_guard_pure_to_unknown_only_gain_is_advisory_not_a_regression_exit_0() {
+    // ⟨0.16⟩ the ratchet fires only on gaining a REAL boundary effect. A formerly-pure fn that gains
+    // ONLY Unknown (an unresolved call — the §4 trust marker, not an effect) is DISCLOSED as advisory,
+    // exit 0 — on real version bumps an Unknown-only gain is dominated by resolution noise, so failing
+    // on it would break CI on innocuous updates (SOUNDNESS-LOG 2026-07-16).
+    let d = make_crate("blunk", "pub fn helper()->usize{ 0 }\npub fn fmt(s:&str)->usize{ s.len() }\n");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    // fmt was pure; now it calls a fn pointer → Unknown-ONLY (no real effect).
+    std::fs::write(d.join("src/lib.rs"),
+        "pub fn helper()->usize{ 0 }\npub fn fmt(s:&str)->usize{ let g: fn()->usize = helper; g() }\n").unwrap();
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    let all = format!("{stdout}{stderr}");
+    assert_eq!(rc, Some(0), "an Unknown-only gain is advisory, not a regression: {all}");
+    assert!(!all.contains("[AS-EFF-005]"), "no violation for an Unknown-only gain: {all}");
+    assert!(stderr.contains("Unknown") && stderr.contains("advisory"),
+        "the advisory note discloses the Unknown-gain: {stderr}");
+}
+
+#[test]
 fn baseline_guard_config_key_resolves_against_the_config_home_and_env_wins() {
     // The `.candor/config` `baseline` key drives the guard with a RELATIVE value anchored to the
     // config's HOME dir (spec §3.4) — never the process CWD — and the CANDOR_BASELINE env overrides it.
