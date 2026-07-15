@@ -341,6 +341,7 @@ pub(crate) fn check_baseline(
     let empty: BTreeSet<&'static str> = BTreeSet::new();
     let empty_base: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
+    let mut unknown_only: Vec<String> = Vec::new(); // ⟨0.16⟩ advisory: gained ONLY Unknown
     for q in all {
         // Existence: in the baseline report, OR (⟨0.16 staged⟩) a baseline-callgraph node — a
         // baseline-pure leaf has no report entry but IS a graph node, so its baseline effect set is ∅
@@ -353,18 +354,39 @@ pub(crate) fn check_baseline(
         };
         let gained: Vec<&str> =
             inferred.get(q).unwrap_or(&empty).iter().copied().filter(|e| !prior.contains(*e)).collect();
-        if !gained.is_empty() {
-            out.push(GateViolation {
-                rule: "AS-EFF-005".into(),
-                func: q.clone(),
-                effects: gained.iter().map(|s| s.to_string()).collect(),
-                detail: format!(
-                    "`{q}` gained effect {{ {} }} not present in the baseline; an existing function \
-                     started performing a new effect",
-                    gained.join(", ")
-                ),
-            });
+        if gained.is_empty() {
+            continue;
         }
+        // ⟨0.16 staged⟩ the ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain
+        // is the §4 trust marker, not an effect (`pure` policies exclude it), and on version bumps it is
+        // dominated by resolution noise (SOUNDNESS-LOG 2026-07-16) — DISCLOSE it, don't fail on it.
+        let real: Vec<&str> = gained.iter().copied().filter(|e| *e != "Unknown").collect();
+        if real.is_empty() {
+            unknown_only.push(q.clone());
+            continue;
+        }
+        out.push(GateViolation {
+            rule: "AS-EFF-005".into(),
+            func: q.clone(),
+            effects: real.iter().map(|s| s.to_string()).collect(),
+            detail: format!(
+                "`{q}` gained effect {{ {} }} not present in the baseline; an existing function \
+                 started performing a new effect",
+                real.join(", ")
+            ),
+        });
+    }
+    if !unknown_only.is_empty() {
+        unknown_only.sort();
+        let shown: Vec<&str> = unknown_only.iter().take(3).map(String::as_str).collect();
+        let more = if unknown_only.len() > 3 { format!(" (+{} more)", unknown_only.len() - 3) } else { String::new() };
+        eprintln!(
+            "candor-scan: note — {} function(s) gained an unresolved call (Unknown) vs the baseline but \
+             no real effect — advisory, NOT a regression (Unknown is the §4 trust marker, dominated by \
+             resolution noise on version bumps): {}{more}",
+            unknown_only.len(),
+            shown.join(", ")
+        );
     }
     out.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     BaselineOutcome::Checked(out)
