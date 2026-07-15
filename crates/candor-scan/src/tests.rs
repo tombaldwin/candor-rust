@@ -3191,7 +3191,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         e.sort();
         assert_eq!(e, vec!["Fs", "Net"], "both cfg_if arms must be scanned");
         assert!(
-            f.get("invisible").and_then(|i| i.as_array()).map_or(true, |a| a.is_empty()),
+            f.get("invisible").and_then(|i| i.as_array()).is_none_or(|a| a.is_empty()),
             "an EXPANDED cfg_if is covered, not an invisible blind: {f:#}"
         );
     }
