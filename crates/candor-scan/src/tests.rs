@@ -50,6 +50,58 @@
     }
 
     #[test]
+    fn glob_reexport_records_external_prelude_and_resolves_a_reexported_name() {
+        // A `use x::prelude::*` glob records the EXTERNAL prelude PATH under `GLOB_KEY`; a `use crate::net`
+        // re-bind in the same scope then resolves `net` THROUGH that glob to its origin crate — so a later
+        // `net::connect(..)` attributes to `x`, not the dead `crate::net` (the cardinal-sin hole).
+        let mut u = HashMap::new();
+        collect_use(&syn::parse_str("mycore::driver_prelude::*").unwrap(), String::new(), &mut u);
+        assert_eq!(u.get(GLOB_KEY).map(String::as_str), Some("mycore::driver_prelude"));
+        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u);
+        assert_eq!(u.get("net").map(String::as_str), Some("mycore::driver_prelude::net"));
+        assert_eq!(expand("net::connect_tcp", &u), "mycore::driver_prelude::net::connect_tcp");
+        // TWO external globs → ambiguous origin → never guess: the re-bind keeps the literal (under-report).
+        let mut u2 = HashMap::new();
+        collect_use(&syn::parse_str("a::p1::*").unwrap(), String::new(), &mut u2);
+        collect_use(&syn::parse_str("b::p2::*").unwrap(), String::new(), &mut u2);
+        collect_use(&syn::parse_str("crate::net").unwrap(), String::new(), &mut u2);
+        assert_eq!(u2.get("net").map(String::as_str), Some("crate::net"));
+    }
+
+    #[test]
+    fn crate_rooted_call_resolves_through_seeded_root_reexport() {
+        // A `crate::net::foo` in ANY file resolves through the crate-ROOT re-exports seeded under
+        // `crate::<name>` (a DIRECT `pub use x::net`) or `crate::` + GLOB_KEY (a `pub use x::…::*` glob).
+        let mut direct = seed_root_reexports(&collect_root_reexports(&syn::parse_file(
+            "pub use mycore::net;").unwrap().items));
+        assert_eq!(expand("crate::net::connect_tcp", &direct), "mycore::net::connect_tcp");
+        // a `use super::core::foo` re-bind is RELATIVE (not crate-root) and must keep its literal so the
+        // local `core::foo` def still resolves by tail2 — seeding a root re-export must not hijack it.
+        collect_use(&syn::parse_str("super::core::display_width").unwrap(), String::new(), &mut direct);
+        assert_eq!(direct.get("display_width").map(String::as_str), Some("super::core::display_width"));
+
+        let glob = seed_root_reexports(&collect_root_reexports(&syn::parse_file(
+            "pub use mycore::driver_prelude::*;").unwrap().items));
+        assert_eq!(expand("crate::net::connect_tcp", &glob), "mycore::driver_prelude::net::connect_tcp");
+    }
+
+    #[test]
+    fn genuinely_local_module_is_not_glob_hijacked() {
+        // ATTRIBUTION, not suspicion: a crate with a re-export glob must NOT rewrite a BARE call into a
+        // real external crate (`dotenvy::var` stays `dotenvy::*`, not `glob::dotenvy::var`) — else the
+        // classifier loses its crate identity (the sqlx `dotenvy::var` → dropped `Env` regression). Only a
+        // `use`-imported name (resolved at collect time) or a `crate::`-rooted call is glob-attributed.
+        let mut u = HashMap::new();
+        collect_use(&syn::parse_str("mycore::prelude::*").unwrap(), String::new(), &mut u);
+        assert_eq!(expand("dotenvy::var", &u), "dotenvy::var");
+        // A crate WITHOUT any re-export glob leaves a `crate::helper::foo` local path untouched — no glob to
+        // attribute to, so a genuine local module keeps its path (and resolves locally by tail2).
+        let mut noglob = HashMap::new();
+        collect_use(&syn::parse_str("std::fs::read").unwrap(), String::new(), &mut noglob);
+        assert_eq!(expand("crate::helper::foo", &noglob), "helper::foo");
+    }
+
+    #[test]
     fn module_path_mirrors_file_based_resolution() {
         assert_eq!(module_path(Path::new("src/lib.rs")), "");
         assert_eq!(module_path(Path::new("src/main.rs")), "");
@@ -2871,6 +2923,7 @@ trait G {
             deref_target: _,
             lazy_statics: _,
             const_strings: _,
+            root_reexports: _,
         } = MergedDecls::default();
 
         let empty = decl_index_digest(&MergedDecls::default());
@@ -2890,6 +2943,7 @@ trait G {
             ("drop_types", |m| { m.drop_types.insert("Guard".into()); }),
             ("lazy_statics", |m| { m.lazy_statics.insert("CONFIG".into()); }),
             ("const_strings", |m| { m.const_strings.insert("API_BASE".into(), "https://api.openai.com".into()); }),
+            ("root_reexports", |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); }),
         ];
         for (name, mutate) in mutators {
             let mut m = MergedDecls::default();
