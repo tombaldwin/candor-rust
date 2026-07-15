@@ -3353,3 +3353,40 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "an inner fn's use must not leak Exec onto the enclosing fn:\n{v:#}"
         );
     }
+
+    /// ⟨0.15 staged⟩ The `coverage` envelope field (spec §2): a scan whose code calls an uncovered
+    /// dependency emits the κ ledger as data — same name, same call count as the stderr disclosure
+    /// line (both read the one shared `coverage_ledger`) — and the calling fn carries the
+    /// per-function `invisible` attribution. A fully-covered (std-only) scan OMITS the field
+    /// entirely, so its report stays byte-identical to a ⟨0.14⟩ one (the wire-compatibility rule).
+    #[test]
+    fn coverage_envelope_names_uncovered_deps_and_is_omitted_when_covered() {
+        let run = |name: &str, deps: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-cov-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n{deps}")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // An uncovered dep: in [dependencies], demonstrably called, in no calibrated tier.
+        let v = run("covdep", "[dependencies]\nsomedep = \"1\"\n", "pub fn f() { somedep::do_thing(); }\n");
+        assert_eq!(
+            v["coverage"]["uncovered"],
+            serde_json::json!([{ "name": "somedep", "calls": 1 }]),
+            "the κ ledger must travel as envelope data:\n{v:#}"
+        );
+        // …and the per-fn attribution (`invisible`, formalized ⟨0.15⟩ — already on the wire).
+        assert_eq!(fn_entry(&v, "f")["invisible"], serde_json::json!(["somedep"]), "{v:#}");
+        // Fully covered (std only) → NO `coverage` key at all.
+        let v = run("covstd", "", "pub fn g() { let _ = std::fs::read(\"/x\"); }\n");
+        assert!(v.get("coverage").is_none(), "a fully-covered scan must omit the field:\n{v:#}");
+    }

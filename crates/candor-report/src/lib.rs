@@ -182,10 +182,34 @@ pub struct ReportMeta {
     pub spec: String,
 }
 
+/// ⟨0.15 staged⟩ One uncovered package of the κ-coverage ledger: an external package/module this
+/// code demonstrably calls that the classifier could not see through, with the call-site count as
+/// the engine counts it. Same names/counts as the per-scan stderr disclosure — this is that line
+/// as data.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CoverageEntry {
+    pub name: String,
+    pub calls: usize,
+}
+
+/// ⟨0.15 staged⟩ The `coverage` envelope field (spec §2): the κ-coverage ledger (§7 item 14)
+/// travelling WITH the report instead of evaporating on stderr. `uncovered` effects are INVISIBLE
+/// to the scan — absent from the report, NOT a claim they're pure. OMITTED entirely when nothing
+/// is uncovered (the `extensions`-field precedent), so a fully-covered scan's report is
+/// byte-identical to a pre-⟨0.15⟩ one.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Coverage {
+    pub uncovered: Vec<CoverageEntry>,
+}
+
 /// The v0.2 self-describing report: a provenance header plus the function entries.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Report {
     pub candor: ReportMeta,
+    /// ⟨0.15 staged⟩ the optional coverage ledger; `None` (omitted) when fully covered. `default`
+    /// so every pre-⟨0.15⟩ report still deserializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Coverage>,
     pub functions: Vec<ReportEntry>,
 }
 
@@ -252,14 +276,37 @@ pub fn to_packaged_report_json(
     package: &str,
     functions: &[ReportEntry],
 ) -> serde_json::Result<String> {
+    to_packaged_report_json_with_coverage(candor, package, functions, None)
+}
+
+/// ⟨0.15 staged⟩ Like [`to_packaged_report_json`], with the optional `coverage` envelope field
+/// (spec §2): the κ-coverage ledger as data. `None` omits the field entirely — a fully-covered
+/// scan's report stays byte-identical to a pre-⟨0.15⟩ one (the wire-compatibility contract).
+pub fn to_packaged_report_json_with_coverage(
+    candor: &ReportMeta,
+    package: &str,
+    functions: &[ReportEntry],
+    coverage: Option<&Coverage>,
+) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
         candor: &'a ReportMeta,
         #[serde(skip_serializing_if = "str::is_empty")]
         package: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        coverage: Option<&'a Coverage>,
         functions: &'a [ReportEntry],
     }
-    serde_json::to_string_pretty(&Out { candor, package, functions })
+    serde_json::to_string_pretty(&Out { candor, package, coverage, functions })
+}
+
+/// ⟨0.15 staged⟩ Parse a report's `coverage` envelope field (spec §2). `None` when the field is
+/// absent (a fully-covered scan, or any pre-⟨0.15⟩ report), the text isn't a JSON object, or the
+/// field doesn't deserialize — absence of the ledger is never an error, just "no disclosure
+/// travelled" (the pre-⟨0.15⟩ posture).
+pub fn report_coverage(text: &str) -> Option<Coverage> {
+    let val: serde_json::Value = serde_json::from_str(text).ok()?;
+    serde_json::from_value(val.get("coverage")?.clone()).ok()
 }
 
 /// One structured gate violation (candor-spec §3.3 ⟨0.8⟩), shared by every backend so the verdict
@@ -285,17 +332,42 @@ pub struct GateViolation {
 /// regardless of which crate/member recorded first. Pretty-printed; callers append the trailing
 /// newline when writing to a file.
 pub fn gate_verdict_json(violations: &mut [GateViolation]) -> serde_json::Result<String> {
+    gate_verdict_json_with_coverage(violations, None)
+}
+
+/// ⟨0.15 staged⟩ The gate verdict's ADVISORY coverage note (spec §3.3): how many uncovered
+/// packages the scanned/queried report's κ ledger names, and which. Disclosure only — a gate does
+/// NOT fail on uncovered deps (nearly every real scan has some); the policy author sees the note
+/// and decides. `deny Unknown` remains the opt-in strict posture.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GateCoverage {
+    pub uncovered: usize,
+    pub packages: Vec<String>,
+}
+
+/// ⟨0.15 staged⟩ Like [`gate_verdict_json`], with the optional advisory `coverage` note appended
+/// after the pinned `{ spec, ok, violations }` fields. VERDICT-PRESERVING by construction:
+/// `ok`/`violations` are computed exactly as before (the ⟨0.9⟩ provable-purity auto-disclosure
+/// precedent), and `None` omits the field — the verdict is then byte-identical to the pre-⟨0.15⟩
+/// one, so a fully-covered gate is unchanged on the wire.
+pub fn gate_verdict_json_with_coverage(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     #[derive(Serialize)]
     struct Verdict<'a> {
         spec: &'static str,
         ok: bool,
         violations: &'a [GateViolation],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        coverage: Option<&'a GateCoverage>,
     }
     serde_json::to_string_pretty(&Verdict {
         spec: SPEC_VERSION,
         ok: violations.is_empty(),
         violations,
+        coverage,
     })
 }
 
@@ -366,6 +438,7 @@ mod tests {
     fn round_trips() {
         let r = Report {
             candor: ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() },
+            coverage: None,
             functions: vec![ReportEntry {
                 func: "f".into(),
                 inferred: vec!["Db".into(), "Unknown".into()],
@@ -433,6 +506,83 @@ mod tests {
         // round-trips (candor-query gate-verdict re-parses NDJSON records of this shape).
         let back: GateViolation = serde_json::from_str(&serde_json::to_string(&arr[0]).unwrap()).unwrap();
         assert_eq!(back.func, "c");
+    }
+
+    /// ⟨0.15 staged⟩ The `coverage` envelope field: emitted when the ledger is non-empty, OMITTED
+    /// entirely when `None` — a fully-covered scan's report must stay BYTE-IDENTICAL to the
+    /// pre-⟨0.15⟩ serializer's output (the wire-compatibility contract), and a consumer must
+    /// tolerate the field (§2 forward compatibility).
+    #[test]
+    fn coverage_envelope_emitted_omitted_and_tolerated() {
+        let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
+        let fns = vec![ReportEntry { func: "f".into(), inferred: vec!["Net".into()], ..Default::default() }];
+        // None → byte-identical to the pre-⟨0.15⟩ shape (the delegating old entry point).
+        let plain = to_packaged_report_json(&meta, "pkg", &fns).unwrap();
+        let with_none = to_packaged_report_json_with_coverage(&meta, "pkg", &fns, None).unwrap();
+        assert_eq!(plain, with_none, "None coverage must not change a byte");
+        assert!(!plain.contains("coverage"), "omitted when nothing is uncovered: {plain}");
+        // Some → the §2 shape, between `package` and `functions`.
+        let cov = Coverage {
+            uncovered: vec![
+                CoverageEntry { name: "serde_json".into(), calls: 165 },
+                CoverageEntry { name: "somedep".into(), calls: 1 },
+            ],
+        };
+        let with = to_packaged_report_json_with_coverage(&meta, "pkg", &fns, Some(&cov)).unwrap();
+        assert!(with.contains("\"coverage\""), "{with}");
+        assert!(with.contains("\"name\": \"serde_json\""), "{with}");
+        assert!(with.contains("\"calls\": 165"), "{with}");
+        // The reader round-trips it; absence reads None (a pre-⟨0.15⟩ report).
+        assert_eq!(report_coverage(&with), Some(cov));
+        assert_eq!(report_coverage(&plain), None);
+        assert_eq!(report_coverage("not json"), None);
+        // §2 forward compatibility: the entries loader TOLERATES the new envelope field — every
+        // report-consuming verb loads through this, so a coverage-carrying report queries fine.
+        let entries = report_entries(&with).expect("a coverage-carrying report must still parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].func, "f");
+        // And the typed Report round-trips the optional field.
+        let r: Report = serde_json::from_str(&with).unwrap();
+        assert_eq!(r.coverage.as_ref().map(|c| c.uncovered.len()), Some(2));
+        let r: Report = serde_json::from_str(&plain).unwrap();
+        assert!(r.coverage.is_none());
+    }
+
+    /// ⟨0.15 staged⟩ The gate verdict's advisory coverage note is VERDICT-PRESERVING: `spec`, `ok`
+    /// and `violations` are byte-for-byte what the pre-⟨0.15⟩ serializer emits (the pinned §3.3
+    /// fields conformance PARTs 12/12b/12d compare); the note only APPENDS, and `None` omits it.
+    #[test]
+    fn gate_verdict_coverage_note_is_advisory_and_verdict_preserving() {
+        let mk = || {
+            vec![GateViolation {
+                rule: "AS-EFF-006".into(),
+                func: "f".into(),
+                effects: vec!["Net".into()],
+                detail: "d".into(),
+            }]
+        };
+        let cov = GateCoverage { uncovered: 2, packages: vec!["anyhow".into(), "bstr".into()] };
+        // None → byte-identical to the pre-⟨0.15⟩ verdict.
+        assert_eq!(
+            gate_verdict_json_with_coverage(&mut mk(), None).unwrap(),
+            gate_verdict_json(&mut mk()).unwrap(),
+        );
+        // Some → the pinned fields are UNCHANGED; `coverage` is appended.
+        let with = gate_verdict_json_with_coverage(&mut mk(), Some(&cov)).unwrap();
+        let without = gate_verdict_json(&mut mk()).unwrap();
+        let vw: serde_json::Value = serde_json::from_str(&with).unwrap();
+        let vo: serde_json::Value = serde_json::from_str(&without).unwrap();
+        for k in ["spec", "ok", "violations"] {
+            assert_eq!(vw[k], vo[k], "pinned verdict field `{k}` must be unchanged by the note");
+        }
+        assert_eq!(vw["ok"], false, "a violating gate stays failing with the note");
+        assert_eq!(vw["coverage"]["uncovered"], 2);
+        assert_eq!(vw["coverage"]["packages"], serde_json::json!(["anyhow", "bstr"]));
+        // A clean gate with a non-empty ledger stays ok:true — disclosure, never a gate-failure.
+        let clean = gate_verdict_json_with_coverage(&mut [], Some(&cov)).unwrap();
+        let vc: serde_json::Value = serde_json::from_str(&clean).unwrap();
+        assert_eq!(vc["ok"], true);
+        assert_eq!(vc["coverage"]["uncovered"], 2);
     }
 
     /// The ONE discrimination rule shared by the lint's cross-crate loader and the CLI: a report is

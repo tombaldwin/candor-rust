@@ -359,6 +359,36 @@ fn gain_origin(
     }
 }
 
+/// ⟨0.15 staged⟩ Attach the coverage disclosure to the `gains --json` value. `coverage` is the
+/// CURRENT report's envelope ledger verbatim (absent when the current report carries none — a
+/// fully-covered scan or a pre-⟨0.15⟩ report, keeping the output shape unchanged for them).
+/// `coverageDelta` — the cross-engine shape, matching candor-java exactly — appears whenever the
+/// uncovered NAME sets differ (a call-count wobble is ordinary code change; a package
+/// entering/leaving the uncovered set is the signal): `nowUncovered` names packages that BECAME
+/// uncovered since the baseline (a dep dropping out of coverage is itself a supply-chain signal),
+/// `noLongerUncovered` the ones that left the set. An absent envelope field reads as the EMPTY set
+/// (a fully-covered scan), so current-has/baseline-lacks still discloses. Factored out of
+/// `cmd_gains` so the delta rule is unit-pinned without capturing stdout.
+fn attach_coverage(
+    v: &mut serde_json::Value,
+    cur: Option<candor_report::Coverage>,
+    base: Option<candor_report::Coverage>,
+) {
+    let cur_set: BTreeSet<&str> =
+        cur.iter().flat_map(|c| c.uncovered.iter()).map(|e| e.name.as_str()).collect();
+    let base_set: BTreeSet<&str> =
+        base.iter().flat_map(|c| c.uncovered.iter()).map(|e| e.name.as_str()).collect();
+    if cur_set != base_set {
+        let now_uncovered: Vec<&str> = cur_set.difference(&base_set).copied().collect();
+        let no_longer: Vec<&str> = base_set.difference(&cur_set).copied().collect();
+        v["coverageDelta"] =
+            serde_json::json!({ "nowUncovered": now_uncovered, "noLongerUncovered": no_longer });
+    }
+    if let Some(cur) = &cur {
+        v["coverage"] = serde_json::to_value(cur).unwrap_or_default();
+    }
+}
+
 pub(crate) fn cmd_gains(args: &[String]) -> i32 {
     // `gains <current> <baseline> [--json]` — the two-locator comparative verb (does NOT discover, like
     // `diff`). Locators resolve by the shared --report rule. The DEPRECATED old form allowed a trailing
@@ -447,13 +477,19 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
             .map(|(f, e)| serde_json::json!({ "effect": e, "fn": f, "origin": origin_of(f) }))
             .collect();
         // Top-level keys ALPHABETICAL (baseline_version, byFunction, engine_version, gained) — the
-        // cross-engine gains shape candor-ts/candor-java emit.
-        let v = serde_json::json!({
+        // cross-engine gains shape candor-ts/candor-java emit. (serde_json's default map is ordered,
+        // so the ⟨0.15⟩ coverage keys inserted below land alphabetically too.)
+        let mut v = serde_json::json!({
             "baseline_version": baseline_version,
             "byFunction": by_function,
             "engine_version": engine_version,
             "gained": gained,
         });
+        // ⟨0.15 staged⟩ coverage disclosure (spec §3.1/§3.3 verb conditionality): a "no gains" over
+        // an uncovered dep reads clean with false confidence, so the CURRENT report's envelope
+        // `coverage` travels into the verdict — and a dep BECOMING uncovered between scans is itself
+        // a signal, disclosed as `coverageDelta`. JSON-only (the TSV is a pinned consumer surface).
+        attach_coverage(&mut v, load_coverage(cur_pre), load_coverage(base_pre));
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
         return 0;
     }
@@ -598,5 +634,55 @@ mod tests {
         assert_eq!(report_build_version(&pre_s), "", "unreadable → empty string, never a guess");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⟨0.15 staged⟩ The `gains --json` coverage disclosure (attach_coverage): `coverage` mirrors
+    /// the CURRENT report's envelope ledger; `coverageDelta` (candor-java's exact shape —
+    /// `nowUncovered`/`noLongerUncovered`) appears whenever the uncovered NAME sets differ, names
+    /// only (a call-count wobble is not a delta), treating an absent envelope field as the empty
+    /// set. Neither key appears when both sides are fully covered — the pre-⟨0.15⟩ output shape.
+    #[test]
+    fn gains_json_coverage_block_and_delta() {
+        use candor_report::{Coverage, CoverageEntry};
+        let cov = |names: &[(&str, usize)]| {
+            Some(Coverage {
+                uncovered: names.iter().map(|(n, c)| CoverageEntry { name: n.to_string(), calls: *c }).collect(),
+            })
+        };
+        let base_v = || serde_json::json!({ "gained": [] });
+        // Current carries a ledger, baseline none → coverage present; the set CHANGED (∅ → {somedep}),
+        // so the delta discloses the newly-uncovered dep (itself a supply-chain signal).
+        let mut v = base_v();
+        attach_coverage(&mut v, cov(&[("somedep", 3)]), None);
+        assert_eq!(v["coverage"], serde_json::json!({ "uncovered": [{ "name": "somedep", "calls": 3 }] }));
+        assert_eq!(
+            v["coverageDelta"],
+            serde_json::json!({ "nowUncovered": ["somedep"], "noLongerUncovered": [] })
+        );
+        // Same NAME sets (counts differ) → coverage yes, NO coverageDelta: names only.
+        let mut v = base_v();
+        attach_coverage(&mut v, cov(&[("a", 1)]), cov(&[("a", 99)]));
+        assert_eq!(v["coverage"]["uncovered"][0]["name"], "a");
+        assert!(v.get("coverageDelta").is_none(), "a call-count wobble is not a delta: {v:#}");
+        // Differing sets → both directions named, java's field names exactly.
+        let mut v = base_v();
+        attach_coverage(&mut v, cov(&[("newdep", 1)]), cov(&[("olddep", 2)]));
+        assert_eq!(
+            v["coverageDelta"],
+            serde_json::json!({ "nowUncovered": ["newdep"], "noLongerUncovered": ["olddep"] })
+        );
+        // Current fully covered, baseline had a ledger → no coverage block; the delta still
+        // discloses the packages that LEFT the uncovered set.
+        let mut v = base_v();
+        attach_coverage(&mut v, None, cov(&[("olddep", 2)]));
+        assert!(v.get("coverage").is_none());
+        assert_eq!(
+            v["coverageDelta"],
+            serde_json::json!({ "nowUncovered": [], "noLongerUncovered": ["olddep"] })
+        );
+        // Neither side carries one → the value is untouched (pre-⟨0.15⟩ consumers see no new keys).
+        let mut v = base_v();
+        attach_coverage(&mut v, None, None);
+        assert_eq!(v, base_v());
     }
 }

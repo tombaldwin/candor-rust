@@ -292,6 +292,32 @@ pub(crate) fn report_build_version(prefix: &str) -> String {
         .to_string()
 }
 
+/// ⟨0.15 staged⟩ The merged `coverage` envelope field (spec §2) across every report file at a
+/// prefix: `None` when no file carries one (a fully-covered scan, or any pre-⟨0.15⟩ report —
+/// absence is never an error). A multi-crate prefix (workspace members under one base) merges the
+/// ledgers by package name, summing calls, sorted count-desc then name — the scanner's own ledger
+/// order. Feeds `gains --json`'s coverage disclosure.
+pub(crate) fn load_coverage(prefix: &str) -> Option<candor_report::Coverage> {
+    let mut merged: BTreeMap<String, usize> = BTreeMap::new();
+    let mut any = false;
+    for path in glob_reports(prefix) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        if let Some(cov) = candor_report::report_coverage(&text) {
+            any = true;
+            for e in cov.uncovered {
+                *merged.entry(e.name).or_insert(0) += e.calls;
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    let mut uncovered: Vec<candor_report::CoverageEntry> =
+        merged.into_iter().map(|(name, calls)| candor_report::CoverageEntry { name, calls }).collect();
+    uncovered.sort_by(|a, b| b.calls.cmp(&a.calls).then(a.name.cmp(&b.name)));
+    Some(candor_report::Coverage { uncovered })
+}
+
 /// Is a filename (relative to the prefix's directory) a STABLE-backend artifact for <base>? True for
 /// `<base>.<crate>.scan.json` and its `.scan.callgraph.json` sidecar — i.e. a `.scan.` segment.
 pub(crate) fn is_scan_artifact(base: &str, name: &str) -> bool {
@@ -351,5 +377,60 @@ mod tests {
         assert!(load_entries_loud(&prefix_s).is_ok(), "a well-formed empty report is not corrupt — Ok(empty)");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⟨0.15 staged⟩ `load_coverage` reads the §2 `coverage` envelope field: absent everywhere →
+    /// None (a fully-covered scan or any pre-⟨0.15⟩ report — never an error); a multi-crate prefix
+    /// merges by package name summing calls, sorted count-desc then name (the scanner's ledger
+    /// order). Also pins §2 forward-compatibility end-to-end: a coverage-carrying report still
+    /// loads its entries through the ordinary query path.
+    #[test]
+    fn load_coverage_merges_the_envelope_ledger_and_entries_still_load() {
+        let dir = std::env::temp_dir().join(format!("candor-loadcov-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let prefix = dir.join("report").to_string_lossy().into_owned();
+        std::fs::write(
+            dir.join("report.a.scan.json"),
+            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.14"},
+                "coverage":{"uncovered":[{"name":"x","calls":2}]},
+                "functions":[{"fn":"a::f","inferred":["Net"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("report.b.scan.json"),
+            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.14"},
+                "coverage":{"uncovered":[{"name":"x","calls":1},{"name":"y","calls":5}]},
+                "functions":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("report.c.scan.json"),
+            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.14"},"functions":[]}"#,
+        )
+        .unwrap();
+        let cov = load_coverage(&prefix).expect("a ledger-carrying prefix must load");
+        let got: Vec<(String, usize)> = cov.uncovered.iter().map(|e| (e.name.clone(), e.calls)).collect();
+        assert_eq!(
+            got,
+            vec![("y".to_string(), 5), ("x".to_string(), 3)],
+            "merged by name (x: 2+1), sorted count-desc then name"
+        );
+        // Tolerance: the coverage-carrying reports' entries load through the ordinary query path.
+        let entries = load_entries(&prefix);
+        assert_eq!(entries.len(), 1, "a coverage-carrying report must still yield its functions");
+        assert_eq!(entries[0].func, "a::f");
+        // A coverage-free prefix → None (never an error, never a fabricated empty ledger).
+        let plain = std::env::temp_dir().join(format!("candor-loadcov-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&plain);
+        let _ = std::fs::create_dir_all(&plain);
+        std::fs::write(
+            plain.join("report.d.scan.json"),
+            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.14"},"functions":[]}"#,
+        )
+        .unwrap();
+        assert!(load_coverage(&plain.join("report").to_string_lossy()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&plain);
     }
 }

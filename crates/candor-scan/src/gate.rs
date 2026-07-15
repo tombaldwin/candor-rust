@@ -321,6 +321,25 @@ pub(crate) fn record_gate_violations(violations: &[GateViolation]) {
     acc.lock().unwrap().extend(violations.iter().cloned());
 }
 
+/// ⟨0.15 staged⟩ Uncovered packages ACCUMULATED across `scan_one` calls (workspace members union, like
+/// GATE_VIOLATIONS) toward the `--gate-json` verdict's ADVISORY `coverage` note. Names only — the
+/// advisory shape is `{ uncovered: N, packages: […] }`; the per-package call counts live in each
+/// member report's own `coverage` envelope field.
+pub(crate) static GATE_COVERAGE: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+    std::sync::OnceLock::new();
+
+/// ⟨0.15 staged⟩ Record one scan's κ-coverage ledger toward the `--gate-json` verdict's advisory
+/// `coverage` note (spec §3.3 verb conditionality — a gate verdict over partially-covered code
+/// re-discloses the gap, VERDICT-PRESERVING). A no-op unless `--gate-json` was given, mirroring
+/// `record_gate_violations`.
+pub(crate) fn record_gate_coverage(ledger: &[(String, usize)]) {
+    if ledger.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    let acc = GATE_COVERAGE.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    acc.lock().unwrap().extend(ledger.iter().map(|(cr, _)| cr.clone()));
+}
+
 /// Write the structured gate verdict `{ spec, ok, violations }` (candor-spec §3.3 ⟨0.8⟩) — the machine
 /// analog of the AS-EFF console lines, accumulated from the SAME `policy_violations` that set the exit
 /// code, so it can never disagree with the gate. Called ONCE, by `scan_main`, after the whole scan (every
@@ -338,7 +357,19 @@ pub(crate) fn write_gate_json(exit_code: i32) {
     // (rule, detail), the same order the console prints — so the verdict is deterministic and
     // byte-comparable across backends. Members already record in that order per crate.
     let mut violations = acc.lock().unwrap().clone();
-    match candor_report::gate_verdict_json(&mut violations) {
+    // ⟨0.15 staged⟩ the advisory coverage note: present only when a scanned target's κ ledger was
+    // non-empty. Verdict-preserving — ok/violations/exit are computed exactly as before (the ⟨0.9⟩
+    // provable-purity auto-disclosure precedent); a fully-covered scan's verdict is byte-unchanged.
+    let packages: Vec<String> = GATE_COVERAGE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    let coverage =
+        (!packages.is_empty()).then_some(candor_report::GateCoverage { uncovered: packages.len(), packages });
+    match candor_report::gate_verdict_json_with_coverage(&mut violations, coverage.as_ref()) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
             if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {
