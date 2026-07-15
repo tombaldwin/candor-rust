@@ -3,6 +3,34 @@
 
 use crate::*;
 
+/// Collect every `use` binding that appears ANYWHERE in a function body — the top-level body statements
+/// AND any nested block (an inner `{ }`, an `if`/`else`/`match` arm, a loop body). A plain top-of-body
+/// loop over `block.stmts` misses the nested ones, so a call through a block-local `use` binding resolved
+/// to nothing and read silent-pure (fd's `else { use std::process::{Command, Stdio}; … }`). syn's `Visit`
+/// walks the whole tree; every `ItemUse` it reaches (statement-position `use` only — a `use` can appear
+/// nowhere else in a body) is expanded into `out`. Over-approximating scope to the whole fn is deliberate
+/// and matches the module fallback: it only ever ATTRIBUTES a name to its declared origin (never invents an
+/// effect for a name that has none).
+struct LocalUseCollector<'a> {
+    out: &'a mut HashMap<String, String>,
+}
+
+impl<'ast, 'a> Visit<'ast> for LocalUseCollector<'a> {
+    fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
+        collect_use(&u.tree, String::new(), self.out);
+        // A `use` tree contains no further `use` items — no need to recurse into it.
+    }
+    // A nested `fn`/`impl`/`mod` item inside a body is a SEPARATE scope: its `use`s belong to it, not the
+    // enclosing fn, and it is scanned as its own unit. Don't let the default walk descend into one and
+    // leak its imports up here. (`Visit` has no dedicated hook for "item that isn't a use", so stop the
+    // three item kinds that carry their own bodies; every other item kind has no fn body to mis-attribute.)
+    fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {}
+    fn visit_item_impl(&mut self, _: &'ast syn::ItemImpl) {}
+    fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {}
+    // A CLOSURE body is still the same fn's code path (its calls are visited by CallCollector under this
+    // fn), so a `use` inside a closure block should stay in scope — the default walk descends into it.
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn scan_items(
     items: &[syn::Item],
@@ -322,13 +350,19 @@ pub(crate) fn fninfo(
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
     // fails to resolve to its crate and is under-reported (found on coreutils `date`: its rustix clock
-    // read is imported by a fn-local `use`). Merge them in. (Top-level body stmts — the overwhelmingly
-    // common placement; a `use` buried in a nested block is rare and left to the module fallback.)
+    // read is imported by a fn-local `use`). Merge them in. This walks the WHOLE body tree, so a `use`
+    // buried in a NESTED block — an inner `{ }`, an `if`/`else`/`match` arm, a loop body — is captured too
+    // (found on fd `src/main.rs`: `else { use std::process::{Command, Stdio}; Command::new(..).status() }`
+    // read silent-pure because the nested `use` was never collected). Scope is treated conservatively — a
+    // `use` anywhere in the fn makes the binding available for the whole fn body (over-approximation, the
+    // same posture the syntactic backend takes for the module fallback); the point is the ORIGIN is no
+    // longer LOST, so a std/covered call classifies as it would at module level and an external crate is
+    // disclosed in the ledger exactly as a module-level `use` would disclose it. Never fabrication: it only
+    // resolves a name to its already-declared origin — a genuinely-local pure call stays pure.
     let mut local_uses = HashMap::new();
-    for stmt in &block.stmts {
-        if let syn::Stmt::Item(syn::Item::Use(u)) = stmt {
-            collect_use(&u.tree, String::new(), &mut local_uses);
-        }
+    {
+        let mut c = LocalUseCollector { out: &mut local_uses };
+        c.visit_block(block);
     }
     let merged: HashMap<String, String>;
     let uses: &HashMap<String, String> = if local_uses.is_empty() {

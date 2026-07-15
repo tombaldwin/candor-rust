@@ -3266,3 +3266,90 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "an unparseable cfg_if! is opaque, never fabricated:\n{v:#}"
         );
     }
+
+    #[test]
+    fn use_in_a_nested_block_resolves_the_call_to_its_origin() {
+        // The bug (dogfound on fd `src/main.rs`): a `use` buried in a NESTED block — an inner `{ }`, an
+        // `if`/`else`/`match` arm, a loop body — was NOT collected, so a call through that binding resolved
+        // to nothing and the fn read SILENT-PURE. fd's `else { use std::process::{Command, Stdio};
+        // Command::new("gls").status() }` reported ZERO Exec. Every nesting form must now resolve the call
+        // exactly as a module-level or fn-body-top-level `use` does.
+        let v = scan_src_to_json("nesteduse", "\
+            pub fn f_block() { { use std::process::Command; let _ = Command::new(\"ls\").status(); } }\n\
+            pub fn f_else(x: bool) { if x { let _ = 1; } else { use std::process::{Command, Stdio}; let mut c = Command::new(\"gls\"); c.stdin(Stdio::null()); let _ = c.status(); } }\n\
+            pub fn f_match(x: u8) { match x { 0 => { use std::process::Command; let _ = Command::new(\"ls\").status(); }, _ => {} } }\n\
+            pub fn f_loop() { for _ in 0..1 { use std::process::Command; let _ = Command::new(\"ls\").status(); } }\n");
+        for name in ["f_block", "f_else", "f_match", "f_loop"] {
+            assert!(
+                effs(fn_entry(&v, name)).contains(&"Exec".to_string()),
+                "a `use` in a nested block must resolve the call to Exec ({name} was silent-pure):\n{v:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn use_in_a_nested_block_matches_module_level_resolution() {
+        // Parity: a nested-block `use std::net::TcpStream` resolves the SAME effect + host as the identical
+        // module-level `use` — the origin is no longer LOST, so a std/covered call classifies exactly as it
+        // would at module level (not merely "an effect appears").
+        let nested = scan_src_to_json("nestednet",
+            "pub fn f() { { use std::net::TcpStream; let _ = TcpStream::connect(\"10.0.0.1:80\"); } }\n");
+        let module = scan_src_to_json("modnet",
+            "use std::net::TcpStream;\npub fn f() { let _ = TcpStream::connect(\"10.0.0.1:80\"); }\n");
+        let nf = fn_entry(&nested, "f");
+        let mf = fn_entry(&module, "f");
+        assert_eq!(effs(nf), effs(mf), "nested-block use must classify identically to module-level:\n{nested:#}");
+        assert!(effs(nf).contains(&"Net".to_string()), "std::net → Net:\n{nested:#}");
+        assert_eq!(hosts_of(nf), hosts_of(mf), "host literal must be captured for the nested use too");
+    }
+
+    #[test]
+    fn use_in_a_nested_block_discloses_an_external_crate_like_module_level() {
+        // An EXTERNAL-crate `use` inside a nested block discloses the crate/effect EXACTLY as the same
+        // `use` at module level would (here reqwest → Net + the endpoint host). Attribution, not
+        // suspicion: the binding is resolved to its declared origin crate.
+        let nested = scan_src_to_json("nestedext",
+            "pub fn f() { { use reqwest::get; let _ = get(\"http://api.example.com/x\"); } }\n");
+        let module = scan_src_to_json("modext",
+            "use reqwest::get;\npub fn f() { let _ = get(\"http://api.example.com/x\"); }\n");
+        let nf = fn_entry(&nested, "f");
+        assert_eq!(effs(nf), effs(fn_entry(&module, "f")),
+            "external-crate use in a nested block discloses like module-level:\n{nested:#}");
+        assert!(effs(nf).contains(&"Net".to_string()), "reqwest is a Net crate:\n{nested:#}");
+        assert!(hosts_of(nf).contains(&"api.example.com".to_string()), "the endpoint must be captured");
+    }
+
+    #[test]
+    fn use_in_a_nested_block_does_not_fabricate_on_a_pure_call() {
+        // NO-FABRICATION negative: a `use` in a nested block that imports a PURE, genuinely-local name
+        // must NOT invent an effect. The presence of a nested `use` never turns a pure fn effectful; only
+        // a call that genuinely reaches an effect does. `helper()` is local + pure → the fn stays pure.
+        let v = scan_src_to_json("nestedpure", "\
+            mod util { pub fn helper() -> u32 { 42 } }\n\
+            pub fn stays_pure() { { use crate::util::helper; let _ = helper(); } }\n");
+        assert!(
+            v["functions"].as_array().unwrap().iter()
+                .all(|f| f["fn"] != "stays_pure" || effs(f).is_empty()),
+            "a nested use of a pure local name must not fabricate an effect:\n{v:#}"
+        );
+    }
+
+    #[test]
+    fn use_in_an_inner_fn_does_not_leak_into_the_enclosing_fn() {
+        // Scope guard: a `use` inside a NESTED fn item belongs to that inner fn, NOT the outer one, so the
+        // whole-body use-walk must stop at a nested `fn`/`impl`/`mod` item (each is its own scan scope).
+        // Here `outer`'s only real call is a pure local `noop()`; it must stay pure even though the inner
+        // fn imports (and uses) std::process::Command. Without the `visit_item_fn` stop the walk would
+        // collect the inner `use` and fabricate Exec on `outer` — over-attribution the guard prevents.
+        let v = scan_src_to_json("innerfnuse", "\
+            fn noop() {}\n\
+            pub fn outer() {\n\
+                fn inner() { use std::process::Command; let _ = Command::new(\"ls\").status(); }\n\
+                noop();\n\
+            }\n");
+        assert!(
+            v["functions"].as_array().unwrap().iter()
+                .all(|f| f["fn"] != "outer" || effs(f).is_empty()),
+            "an inner fn's use must not leak Exec onto the enclosing fn:\n{v:#}"
+        );
+    }
