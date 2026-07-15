@@ -991,17 +991,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let blind_acc = propagate_str(&blind_direct, &calls, &all); // transitive per-fn blind reach
     // The genuinely-blind dep crates (the per-scan κ "unlisted" set): seen, never classified, not
     // dep-report-covered, not calibrated. A fn's `invisible` = its transitive blind reach ∩ this set.
-    let global_blind: std::collections::HashSet<String> = dep_seen
-        .keys()
-        .filter(|cr| {
+    // ⟨0.15 staged⟩ Computed ONCE, with the call counts, as the κ-coverage LEDGER: the same list (same
+    // names, same counts, same order) feeds the envelope's `coverage` field (spec §2), the stderr
+    // disclosure below, and the --gate-json advisory note — three surfaces that can never disagree
+    // because they share this one computation. Sorted by call count (desc) then name, the stderr
+    // line's long-standing order. (A crate with a loaded sibling report is COVERED even when no join
+    // fired: the report omits pure functions, so join-less calls are its honest purity claim — the
+    // opposite of invisible. A RENAMED dep is covered under its real package name.)
+    let mut coverage_ledger: Vec<(String, usize)> = dep_seen
+        .iter()
+        .filter(|(cr, _)| {
             !dep_classified.contains(*cr)
                 && !deps_idx.crates.contains(dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str()))
                 && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
         })
-        .cloned()
+        .map(|(cr, n)| (cr.clone(), *n))
         .collect();
+    coverage_ledger.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let global_blind: std::collections::HashSet<String> =
+        coverage_ledger.iter().map(|(cr, _)| cr.clone()).collect();
     // A dep-inherited invisible crate is genuinely blind (the dep's own scan confirmed it) but transitive,
     // so it never appears in `dep_seen` — keep it so the consumer's `invisible` survives the filter ([8]).
     let global_blind: std::collections::HashSet<String> =
@@ -1072,7 +1082,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         toolchain: "stable".into(),
         spec: candor_report::SPEC_VERSION.into(),
     };
-    let body = candor_report::to_packaged_report_json(&meta, &crate_name, &entries).unwrap_or_default();
+    // ⟨0.15 staged⟩ the `coverage` envelope field (spec §2): the κ ledger as data, so "what the scan
+    // couldn't see" travels WITH the report instead of evaporating on stderr. Omitted when empty —
+    // a fully-covered scan's report is byte-identical to a ⟨0.14⟩ one (wire-compatible rung).
+    let coverage = (!coverage_ledger.is_empty()).then(|| candor_report::Coverage {
+        uncovered: coverage_ledger
+            .iter()
+            .map(|(cr, n)| candor_report::CoverageEntry { name: cr.clone(), calls: *n })
+            .collect(),
+    });
+    let body = candor_report::to_packaged_report_json_with_coverage(&meta, &crate_name, &entries, coverage.as_ref())
+        .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave
     // concatenated, unparseable JSON for a workspace scan.
@@ -1123,31 +1143,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // nothing about. Their effects are INVISIBLE — not Unknown — so the report's silence about them
     // is not purity evidence. This turns the curated-κ caveat from a doc footnote into per-scan,
     // named evidence (the argon2 lesson: the blind spot landed on exactly the call a security review
-    // cared about).
-    let mut unlisted: Vec<(&String, usize)> = dep_seen
-        .iter()
-        .filter(|(cr, _)| {
-            !dep_classified.contains(*cr)
-                // A crate with a loaded sibling report is COVERED even when no join fired: the
-                // report omits pure functions, so join-less calls are its honest purity claim —
-                // the opposite of invisible. (Without this, --deps named serde_json a blind spot.)
-                // A RENAMED dep is covered under its real package name.
-                && !deps_idx.crates.contains(dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str()))
-                && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
-                && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
-                && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
-        })
-        .map(|(cr, n)| (cr, *n))
-        .collect();
-    if !unlisted.is_empty() && !quiet {
-        unlisted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        let shown: Vec<String> =
-            unlisted.iter().take(8).map(|(cr, n)| format!("{cr} ({n} call{})", if *n == 1 { "" } else { "s" })).collect();
-        let more = if unlisted.len() > 8 { format!(" + {} more", unlisted.len() - 8) } else { String::new() };
+    // cared about). ⟨0.15 staged⟩ the list itself is `coverage_ledger`, computed once above and shared
+    // with the report's `coverage` envelope field — this line and the JSON can never disagree.
+    if !quiet {
+        // ⟨0.15 staged⟩ ...and the same ledger rides the --gate-json verdict as an ADVISORY note
+        // (spec §3.3 verb conditionality; verdict-preserving). Target/member scans only — quiet
+        // dependency scans under --deps are not the gated surface, and their gaps are exactly what
+        // chaining just closed. A no-op unless --gate-json was given.
+        record_gate_coverage(&coverage_ledger);
+    }
+    if !coverage_ledger.is_empty() && !quiet {
+        let shown: Vec<String> = coverage_ledger
+            .iter()
+            .take(8)
+            .map(|(cr, n)| format!("{cr} ({n} call{})", if *n == 1 { "" } else { "s" }))
+            .collect();
+        let more =
+            if coverage_ledger.len() > 8 { format!(" + {} more", coverage_ledger.len() - 8) } else { String::new() };
         eprintln!(
             "candor-scan: candor's classifier doesn't cover {} dependenc{} this code calls into — their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): {}{}",
-            unlisted.len(),
-            if unlisted.len() == 1 { "y" } else { "ies" },
+            coverage_ledger.len(),
+            if coverage_ledger.len() == 1 { "y" } else { "ies" },
             shown.join(", "),
             more
         );

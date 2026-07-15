@@ -273,8 +273,29 @@ pub(crate) fn cmd_rewire(args: &[String]) -> i32 {
 /// would make the verdict under-report vs the gate's exit code, the §3.3 forbidden disagreement. An
 /// unwritable output also exits 2 (never silent).
 pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
-    let (Some(parts), Some(out)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: candor-query gate-verdict <parts-file> <out-file|->");
+    // ⟨0.15 staged⟩ optional `--report <locator>`: the report whose envelope `coverage` ledger this
+    // verdict re-discloses as the ADVISORY `coverage` note (spec §3.3 verb conditionality — a gate
+    // verdict over partially-covered code carries the caveat). VERDICT-PRESERVING: ok/violations/exit
+    // are computed exactly as before; without the flag, or with a fully-covered report, the output is
+    // byte-identical to the pre-⟨0.15⟩ verdict.
+    let mut report_loc: Option<String> = None;
+    let mut pos: Vec<&str> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--report" {
+            match it.next() {
+                Some(l) => report_loc = Some(resolve_locator(l)),
+                None => {
+                    eprintln!("candor-query: --report requires a locator argument");
+                    return 2;
+                }
+            }
+        } else {
+            pos.push(a.as_str());
+        }
+    }
+    let (Some(parts), Some(out)) = (pos.first().copied(), pos.get(1).copied()) else {
+        eprintln!("usage: candor-query gate-verdict <parts-file> <out-file|-> [--report <locator>]");
         return 2;
     };
     let mut violations: Vec<candor_report::GateViolation> = Vec::new();
@@ -296,7 +317,15 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
             return 2;
         }
     }
-    let json = match candor_report::gate_verdict_json(&mut violations) {
+    // ⟨0.15 staged⟩ the advisory note, from the named report's envelope ledger — absent when the flag
+    // wasn't given, the report carries no `coverage` field, or the ledger is empty. Package names
+    // alphabetical (the same order the scan-time gate advisory uses).
+    let coverage = report_loc.as_deref().and_then(load_coverage).filter(|c| !c.uncovered.is_empty()).map(|c| {
+        let mut packages: Vec<String> = c.uncovered.iter().map(|e| e.name.clone()).collect();
+        packages.sort();
+        candor_report::GateCoverage { uncovered: packages.len(), packages }
+    });
+    let json = match candor_report::gate_verdict_json_with_coverage(&mut violations, coverage.as_ref()) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("candor-query: could not serialize the gate verdict ({e})");
@@ -312,4 +341,67 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
         return 2;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ⟨0.15 staged⟩ `gate-verdict … --report <loc>`: the advisory coverage note rides the
+    /// assembled verdict when the named report's envelope ledger is non-empty, and is
+    /// VERDICT-PRESERVING — spec/ok/violations (and the exit code) are identical with and without
+    /// the flag; without it, or over a fully-covered report, the verdict is byte-identical to the
+    /// pre-⟨0.15⟩ output (the pinned §3.3 fields conformance compares are untouched).
+    #[test]
+    fn gate_verdict_report_flag_attaches_the_advisory_coverage_note() {
+        let dir = std::env::temp_dir().join(format!("candor-gvcov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let parts = dir.join("parts.ndjson");
+        std::fs::write(&parts, "{\"rule\":\"AS-EFF-006\",\"fn\":\"f\",\"effects\":[\"Net\"],\"detail\":\"d\"}\n")
+            .unwrap();
+        let covered = dir.join("rep-cov");
+        let _ = std::fs::create_dir_all(&covered);
+        std::fs::write(
+            covered.join("r.demo.scan.json"),
+            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.14"},
+                "coverage":{"uncovered":[{"name":"somedep","calls":3},{"name":"anotherdep","calls":1}]},
+                "functions":[]}"#,
+        )
+        .unwrap();
+        let full = dir.join("rep-full");
+        let _ = std::fs::create_dir_all(&full);
+        std::fs::write(
+            full.join("r.demo.scan.json"),
+            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.14"},"functions":[]}"#,
+        )
+        .unwrap();
+        let (plain, with_cov, fully) = (dir.join("v0.json"), dir.join("v1.json"), dir.join("v2.json"));
+        let args = |out: &std::path::Path, rep: Option<&std::path::Path>| -> Vec<String> {
+            let mut a = vec![s(&parts), s(out)];
+            if let Some(r) = rep {
+                a.push("--report".into());
+                a.push(s(&r.join("r")));
+            }
+            a
+        };
+        assert_eq!(cmd_gate_verdict(&args(&plain, None)), 0);
+        assert_eq!(cmd_gate_verdict(&args(&with_cov, Some(&covered))), 0, "same exit with the note");
+        assert_eq!(cmd_gate_verdict(&args(&fully, Some(&full))), 0);
+        let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap();
+        let (v0, v1) = (read(&plain), read(&with_cov));
+        let (j0, j1): (serde_json::Value, serde_json::Value) =
+            (serde_json::from_str(&v0).unwrap(), serde_json::from_str(&v1).unwrap());
+        for k in ["spec", "ok", "violations"] {
+            assert_eq!(j0[k], j1[k], "pinned verdict field `{k}` must be unchanged by the note");
+        }
+        assert_eq!(j0["ok"], false, "the violation still fails the verdict");
+        assert!(j0.get("coverage").is_none(), "no flag → no note (pre-⟨0.15⟩ shape): {v0}");
+        assert_eq!(j1["coverage"]["uncovered"], 2);
+        assert_eq!(j1["coverage"]["packages"], serde_json::json!(["anotherdep", "somedep"]));
+        // A fully-covered report attaches nothing: byte-identical to the no-flag verdict.
+        assert_eq!(read(&fully), v0, "fully covered → byte-identical verdict");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
