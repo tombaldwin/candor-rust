@@ -119,21 +119,34 @@ fn print_version() {
     println!("upgrade: cargo install candor-query --force");
 }
 
-/// `--help` / `-h` — banner + USAGE + the dispatched subcommands (each with a one-line description
-/// derived from its `usage:` string / doc) + the github footer. The list MUST match the real set the
-/// `match cmd` dispatches (and the unknown-command list); keep all three in lockstep.
+/// `--help` / `-h` — the family house-style help: identity line, model paragraph, USAGE,
+/// COMMON ACTIONS, ALL ACTIONS (every dispatched subcommand with a one-line description),
+/// OPTIONS, EXAMPLES, footer. No spec strings here — the spec disclosure belongs to
+/// `--version` only. The ALL ACTIONS list MUST match the real set the `match cmd`
+/// dispatches (and the unknown-command list); keep all three in lockstep.
 fn print_help() {
-    println!(
-        "candor-query {} — read-only effect-report queries over candor's reports (candor-spec {})",
-        env!("CARGO_PKG_VERSION"),
-        candor_report::SPEC_VERSION
-    );
+    println!("candor-query — read-only queries over a candor effect report.");
     println!();
-    println!("USAGE:  candor-query <command> [args…]");
-    println!("        candor-query --version | --help");
+    println!("Every answer comes from the report alone — no rebuild, no network. The report is");
+    println!("discovered when --report is absent (walk up from the CWD for .candor/; a");
+    println!("CANDOR_REPORT env var overrides discovery), and every family engine speaks the");
+    println!("same grammar, so actions and flags carry across unchanged.");
     println!();
-    println!("COMMANDS:");
-    // The query verbs take the canonical §3.3.1 grammar: the report is DISCOVERED (or via `--report`),
+    println!("USAGE");
+    println!("  candor-query <action> [args…] [options]");
+    println!("  candor-query --version | --help");
+    println!();
+    println!("COMMON ACTIONS");
+    println!("  where <Effect>            the functions that perform an effect");
+    println!("  path <fn> <Effect>        the call path by which a function reaches an effect");
+    println!("  callers <fn>              who calls a function, direct and transitive");
+    println!("  tour [N]                  the N most surprising transitive reaches (default 10)");
+    println!("  blindspots                the Unknown sources worth resolving, ranked by reach");
+    println!("  gains <current> <base>    what a new version newly reaches (the supply-chain diff)");
+    println!("  fix <fn> <Effect>         the boundary hoist that would clear a violation");
+    println!();
+    println!("ALL ACTIONS");
+    // The query verbs take the canonical grammar: the report is DISCOVERED (or via `--report`),
     // `--json` selects JSON, `--policy` supplies a policy. The old positional forms (leading report, `0|1`
     // sentinel, positional policy) still work as deprecated aliases. Descriptions in dispatch order.
     let rows: &[(&str, &str)] = &[
@@ -154,15 +167,15 @@ fn print_help() {
         ("fix-gate [--report <loc>] [--policy <f>] [--json]", "a fix for EVERY boundary crossing — the loop's block-message remedy"),
         ("unverified [--report <loc>] [--policy <f>] [--strict]", "pure/deny layers that PASS but are Unknown (not PROVABLY clean)"),
         ("rewire   <cur_prefix> <base_prefix> [0|1]", "call edges a function DROPPED vs a baseline (de-wiring)"),
-        ("parsepolicy <policy-file>", "dump a parsed CANDOR_POLICY as canonical JSON (conformance)"),
         ("receipt  <prefix>", "the Claude Code receipt's report-derived fields (key<TAB>value)"),
         ("gains    <current> <baseline> [--json]", "every effect a fn gained since the baseline (self-review)"),
         ("state    [<root>]", "a stable content hash of the .rs tree (source-freshness key)"),
         ("reports  <prefix> [--exists|--backend|--clear-other <scan|lint>]", "list/probe/clean the report artifacts for a prefix"),
         ("locate   <lib|scan> <dir>…", "print the newest matching report file under the dirs"),
-        ("gate-verdict <parts-file> <out|-> [--report <loc>]", "assemble the §3.3 gate verdict from NDJSON violation records"),
+        ("gate-verdict <parts-file> <out|-> [--report <loc>]", "assemble the gate verdict from NDJSON violation records"),
         ("engine-version <lib-path>", "print the candor-build-version tag embedded in a binary"),
         ("merge-hook <settings.json> <hook-command>", "idempotently merge candor's Stop hook into a settings file"),
+        ("parsepolicy <policy-file>", "dump a parsed CANDOR_POLICY as canonical JSON (conformance)"),
         ("--agents", "print the agent contract embedded in this installed build"),
     ];
     let w = rows.iter().map(|(u, _)| u.len()).max().unwrap_or(0);
@@ -170,10 +183,21 @@ fn print_help() {
         println!("  {usage:<w$}  {desc}");
     }
     println!();
-    println!("  -V, --version    print the installed build + spec contract (offline) and the upgrade line");
-    println!("  -h, --help       print this help");
+    println!("OPTIONS  (uniform across the report-backed actions)");
+    println!("  --report <locator>   use this report instead of discovering .candor/");
+    println!("  --policy <file>      evaluate a CANDOR_POLICY file — exit 1 on a violation");
+    println!("  --json               machine-readable output");
+    println!("  -V, --version        print the installed build and its contract version (offline),");
+    println!("                       and the upgrade line");
+    println!("  -h, --help           print this help");
     println!();
-    println!("See https://github.com/tombaldwin/candor");
+    println!("EXAMPLES");
+    println!("  candor-query where Db");
+    println!("  candor-query path render Net");
+    println!("  candor-query gains ./new/.candor/report ./old/.candor/report");
+    println!("  candor-query fix OrderService::render Net --policy candor.policy");
+    println!();
+    println!("Docs: candor.poly.io   ·   Verify an install: candor doctor");
 }
 
 #[cfg(test)]

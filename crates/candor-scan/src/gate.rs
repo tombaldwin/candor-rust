@@ -198,9 +198,23 @@ static NOTED_ABSENT: std::sync::OnceLock<std::sync::Mutex<std::collections::Hash
 ///     only to its OWN producing build (§2.1) — engine upgrades change reports, so evaluating produces a
 ///     bogus AS-EFF-005 wave and skipping is an unbounded fail-open window.
 ///   - valid + same build               → compare per-fn TRANSITIVE sets: any fn GAINING an effect vs its
-///     baseline set is one violation. A fn absent from the baseline is exempt — new code is reviewed as
-///     new code; the guard is for regressions in EXISTING functions (both reference engines omit pure
-///     fns from reports, so a formerly-pure fn reads as new — the shared family semantics).
+///     baseline set is one violation.
+///
+/// EXISTENCE — what counts as a "new function" (exempt) vs an "existing function" (guarded):
+///   - ⟨0.16 staged⟩ When the baseline **callgraph sidecar** is present (sibling of the resolved report —
+///     the report path with `.json` swapped for `.callgraph.json`; SPEC §2.2 records EVERY analyzed fn,
+///     including PURE leaves reports omit), existence is keyed on it: a fn that is a callgraph node (even
+///     with an EMPTY/∅ baseline effect set — a baseline-pure leaf) that now performs ANY effect is a GAIN
+///     violation. This catches the pure→effectful transition — the sharpest supply-chain shape, which the
+///     report-only rule missed because a formerly-pure fn is absent from the report and read as exempt
+///     "new". A fn genuinely absent from the callgraph stays exempt (real new code). This is the `gains`
+///     `origin` existence rule (§3.1 ⟨0.12⟩) applied to the scan-time ratchet — see candor-query diff.rs
+///     `gain_origin`.
+///   - sidecar ABSENT → degrade to today's report-only existence (pre-⟨0.16⟩): a fn absent from the
+///     baseline report is exempt (a formerly-pure fn reads as new — the shared pre-0.16 family semantics).
+///     Still catches WIDENING on already-effectful fns. A one-time stderr note that the guard is weaker.
+///   - sidecar PRESENT-but-corrupt → `Invalid` (exit 2), mirroring the corrupt-baseline handling above: a
+///     broken sidecar must not silently narrow the guard by making its pure leaves read as exempt "new".
 ///
 /// Same-named baseline entries (rlib+bin `main`) are UNIONed, not last-write-wins — the baseline is the
 /// over-approximation of what a name was already permitted to reach (mirrors the deep engine).
@@ -277,10 +291,66 @@ pub(crate) fn check_baseline(
     for e in entries {
         base.entry(e.func).or_default().extend(e.inferred);
     }
+    // ⟨0.16 staged⟩ Existence keys on the baseline callgraph sidecar when present (SPEC §7 item 5): the
+    // sidecar lists PURE leaves the report omits, so a formerly-pure fn is a graph node and no longer
+    // reads as exempt "new". Derive the sidecar from the resolved report path (`<stem>.json` →
+    // `<stem>.callgraph.json`), mirroring the write in scan.rs and load_callgraph in candor-query.
+    let cg_file = file.strip_suffix(".json").map(|s| format!("{s}.callgraph.json")).unwrap_or_else(|| format!("{file}.callgraph.json"));
+    // The set of names present in the baseline callgraph (callers AND callees) — the same node set
+    // candor-query's `gain_origin` treats as "existing". `None` == no sidecar (degrade to report-only).
+    let cg_nodes: Option<BTreeSet<String>> = if Path::new(&cg_file).is_file() {
+        let Ok(cg_text) = std::fs::read_to_string(&cg_file) else {
+            eprintln!(
+                "candor-scan: baseline callgraph {cg_file} exists but could not be read — failing (exit 2), \
+                 guard NOT evaluated; a broken sidecar must not silently narrow the guard (§7 item 5); {regen}"
+            );
+            return BaselineOutcome::Invalid;
+        };
+        match serde_json::from_str::<BTreeMap<String, Vec<String>>>(&cg_text) {
+            Ok(map) => {
+                let mut nodes: BTreeSet<String> = BTreeSet::new();
+                for (caller, callees) in map {
+                    nodes.insert(caller);
+                    nodes.extend(callees);
+                }
+                Some(nodes)
+            }
+            Err(_) => {
+                eprintln!(
+                    "candor-scan: baseline callgraph {cg_file} exists but could not be parsed \
+                     (corrupt/truncated?) — failing (exit 2), guard NOT evaluated; a broken sidecar must \
+                     not silently narrow the guard (§7 item 5, the unreadable-policy class); {regen}"
+                );
+                return BaselineOutcome::Invalid;
+            }
+        }
+    } else {
+        // Pre-⟨0.16⟩ degradation: no sidecar, so existence falls back to report-only. A formerly-pure
+        // fn (absent from the report) reads as new and escapes — disclose the weakened guard once.
+        let noted = NOTED_ABSENT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        if noted.lock().unwrap().insert(cg_file.clone()) {
+            eprintln!(
+                "candor-scan: baseline callgraph sidecar {cg_file} is absent — the guard degrades to \
+                 report-only existence (a formerly-PURE fn that turns effectful reads as new code and \
+                 ESCAPES; widening on already-effectful fns is still caught). Regenerate the baseline \
+                 with this build to record the sidecar: candor-scan {dir} --out {value}"
+            );
+        }
+        None
+    };
     let empty: BTreeSet<&'static str> = BTreeSet::new();
+    let empty_base: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
     for q in all {
-        let Some(prior) = base.get(q) else { continue }; // new function — not a regression
+        // Existence: in the baseline report, OR (⟨0.16 staged⟩) a baseline-callgraph node — a
+        // baseline-pure leaf has no report entry but IS a graph node, so its baseline effect set is ∅
+        // and ANY current effect is a gain. A fn in neither is genuinely new and stays exempt.
+        let in_cg = cg_nodes.as_ref().is_some_and(|n| n.contains(q));
+        let prior = match base.get(q) {
+            Some(p) => p,
+            None if in_cg => &empty_base, // baseline-pure callgraph node: ∅ baseline effects
+            None => continue,             // new function — not a regression
+        };
         let gained: Vec<&str> =
             inferred.get(q).unwrap_or(&empty).iter().copied().filter(|e| !prior.contains(*e)).collect();
         if !gained.is_empty() {
