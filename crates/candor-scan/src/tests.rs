@@ -365,11 +365,11 @@
         let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
         // deliberately NOT the `….<crate>.scan.json` filename shape — only the envelope names it.
         std::fs::write(d.join("purity-claim.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.14"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.15"}},
             "package": "dep-c",
             "functions": []}}"#)).unwrap();
         std::fs::write(d.join("multi.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.14"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.15"}},
             "packages": ["alpha", "beta"],
             "functions": []}}"#)).unwrap();
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
@@ -2453,8 +2453,8 @@ trait G {
     #[test]
     fn repo_docs_carry_the_family_attribution_and_spec_floor() {
         // TESTING.md §9 / the family ruling: candor-java is the REFERENCE engine; this repo is the
-        // family's deep Rust engine, spec floor 0.14. A cheap grep gate so a doc rewrite can't quietly
-        // reintroduce "the reference implementation" or drop the spec-0.14 floor string. Skips outside
+        // family's deep Rust engine, spec floor 0.15. A cheap grep gate so a doc rewrite can't quietly
+        // reintroduce "the reference implementation" or drop the spec-0.15 floor string. Skips outside
         // a workspace checkout (registry/vendor layout), like the drift gate above.
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
         let (Ok(readme), Ok(agents)) = (
@@ -2470,8 +2470,8 @@ trait G {
             "README must not claim reference-implementation status (family ruling: candor-java is the reference)");
         assert!(!agents.to_lowercase().contains("the reference implementation of"),
             "AGENTS must not claim reference-implementation status");
-        assert!(readme.contains("spec 0.14"), "README must state the spec 0.14 floor");
-        assert!(agents.contains("spec 0.14"), "AGENTS must state the spec 0.14 floor");
+        assert!(readme.contains("spec 0.15"), "README must state the spec 0.15 floor");
+        assert!(agents.contains("spec 0.15"), "AGENTS must state the spec 0.15 floor");
     }
 
     #[test]
@@ -2489,7 +2489,7 @@ trait G {
         inferred.insert("b".into(), ["Net"].into_iter().collect()); // covered by the UNIONed duplicate
         inferred.insert("newfn".into(), ["Db"].into_iter().collect()); // absent from baseline — exempt
         let report = |ver: &str| format!(
-            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec":"0.14"}},
+            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec":"0.15"}},
                 "functions":[{{"fn":"a","inferred":["Fs"]}},
                              {{"fn":"b","inferred":[]}},
                              {{"fn":"b","inferred":["Net"]}}]}}"#

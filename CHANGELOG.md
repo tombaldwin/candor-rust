@@ -4,7 +4,60 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## spec 0.14 — floor alignment (2026-07-14) — current floor
+## spec 0.15 — the coverage envelope (2026-07-15) — current floor
+
+candor-scan and candor-query now declare **spec `0.15`** (both at crate **0.15.0**; the internal
+**candor-report** and **candor-classify** libs move lockstep to **0.15.0**). **0.15 is the current spec
+floor** — the ratchet from 0.14, and unlike 0.14 it is a **feature rung for this engine**: the
+coverage envelope, two host-resolution recall upgrades, and three soundness fixes from real-world
+corpus testing.
+
+### 📦 the coverage envelope ⟨0.15⟩ — the κ ledger travels WITH the report
+
+The κ-coverage ledger is no longer stderr-only: a scan with an uncovered dependency now emits the
+§2 **`coverage` envelope field** — `{"uncovered":[{"name","calls"}]}` — **omitted when empty**, so a
+fully-covered scan's report stays **byte-identical** with a ⟨0.14⟩ one (the wire-compatibility rule).
+One shared ledger computation feeds all three surfaces: the stderr line (bytes unchanged), the
+envelope, and the **`--gate-json` coverage advisory** (`{"uncovered":N,"packages":[…]}`) — which is
+**verdict-preserving**: `ok` / `violations` / the exit code are untouched (the ⟨0.9⟩ advisory
+precedent). `gains --json` re-discloses the current ledger and adds **`coverageDelta`**
+(`{nowUncovered, noLongerUncovered}`, names-only — the java reference shape); the TSV output is
+untouched. `candor-query gate-verdict` gains an optional `--report` as the advisory source. Pinned by
+conformance PART 4s.
+
+### 🔎 host-resolution recall — statically-known hosts
+
+Two upgrades let a **statically-known host** run the §1 Llm/Db/Net host refinement exactly like an
+inline literal (previously bare `Net`):
+
+- **const-string propagation** — a URL/host built from a literal-valued `const`/`static`
+  (`const API_BASE = "…"; format!("{}/x", API_BASE)` — interpolation, bare ref, or const-left
+  concat), matching candor-java's inlined static-final String. The const index is folded into the
+  decl-cache digest, so incremental scans stay correct. PART 4q.
+- **literal-head extraction** — a `format!` whose literal completes the authority before the first
+  placeholder (`format!("https://api.openai.com/v1/{}", p)`).
+
+Both keep the conservative boundary: a split authority, whole-host placeholder, runtime/config host,
+or plain variable stays bare `Net` — no fabrication. PARTs 4q/4r.
+
+### 🧯 soundness fixes — real-world corpus testing finds
+
+Three silent-drop classes found by real-world corpus testing, each recovering real effects with
+**zero fabrication** (the 1337-crate realworld-oracle stays green; clap/ripgrep byte-identical):
+
+- **glob-reexport / `use crate::` rebind** — a cross-crate effectful call reached via
+  `use x::prelude::*` or a `use crate::name` submodule rebind read pure and undisclosed, even under
+  `--deps` chaining (real hit: sqlx-postgres's TCP dial to Postgres — `PgListener::connect` now
+  discloses `Net`, `begin` discloses `Db`, and both chain).
+- **`cfg_if!` macro arms** — effects inside a `cfg_if::cfg_if!` arm were dropped as a misleading
+  "uncovered" ledger entry; the arm grammar is now parsed and every arm walked (all-arm
+  over-approximation, like the existing cfg-branch handling). Recovers sqlx-core's `connect_tcp` →
+  `Net`; a non-conforming shape falls back to the opaque path, never panics.
+- **block-nested `use` bindings** — a `use path::X` inside a nested block (if/else arm, loop body)
+  was not collected, so a call through it resolved to nothing → pure. The whole body tree is now
+  walked, with a scope guard so an inner fn's imports don't leak. Recovers fd's gls-check → `Exec`.
+
+## spec 0.14 — floor alignment (2026-07-14)
 
 candor-scan and candor-query now declare **spec `0.14`** (both at crate **0.14.0**; the internal
 **candor-report** and **candor-classify** libs move lockstep to **0.14.0**). **0.14 is the current spec
