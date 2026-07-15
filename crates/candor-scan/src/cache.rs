@@ -94,10 +94,19 @@ pub(crate) struct FileDecls {
     /// static-host propagation). Literal-valued only.
     #[serde(default)]
     pub(crate) const_strings: HashMap<String, String>,
+    /// The crate-ROOT re-exports, populated ONLY for the root file (`lib.rs`/`main.rs`, module path "").
+    /// `name -> resolved path` plus the `GLOB_KEY` sentinel for a `pub use x::prelude::*`. Seeded into every
+    /// file's `use` map under `crate::<name>` so a submodule's `use crate::net` / `crate::net::foo` resolves
+    /// through the crate-root re-export it can't otherwise see (files are scanned with per-file `use` maps).
+    /// See `collect_root_reexports`. Empty for a non-root file.
+    #[serde(default)]
+    pub(crate) root_reexports: HashMap<String, String>,
 }
 
-/// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`).
-pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls {
+/// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`). `modpath` is the
+/// file's module path — the ROOT file (`""`) additionally contributes its crate-root re-exports, a
+/// crate-wide fact seeded into every file's `use` map (see `root_reexports`).
+pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str) -> FileDecls {
     let mut uses = HashMap::new();
     let mut fields = HashMap::new();
     let mut field_elem = HashMap::new();
@@ -132,6 +141,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool) -> FileDecls 
         deref_target,
         lazy_statics: lazy_statics.into_iter().collect(),
         const_strings,
+        // Crate-root re-exports are a ROOT-file fact only; a submodule's `use crate::X` seeds against them.
+        root_reexports: if modpath.is_empty() { collect_root_reexports(items) } else { HashMap::new() },
     }
 }
 
@@ -153,6 +164,10 @@ pub(crate) struct MergedDecls {
     pub(crate) deref_target: HashMap<String, String>,
     pub(crate) lazy_statics: std::collections::HashSet<String>,
     pub(crate) const_strings: HashMap<String, String>,
+    /// The crate-ROOT re-exports (`name -> path`, plus the `GLOB_KEY` sentinel), contributed by the root
+    /// file. Seeded — under `crate::<name>` keys — into every file's `use` map at Pass B so a `use crate::X`
+    /// / `crate::X::foo` in ANY file resolves through the crate-root re-export (`root_reexports`).
+    pub(crate) root_reexports: HashMap<String, String>,
 }
 
 /// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics
@@ -231,6 +246,10 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for (k, v) in &fd.const_strings {
         acc.const_strings.insert(k.clone(), v.clone()); // leaf → literal; last-writer-wins on a rare collision
+    }
+    for (k, v) in &fd.root_reexports {
+        // Only the ROOT file populates this, so there is at most one contributor — a plain insert.
+        acc.root_reexports.insert(k.clone(), v.clone());
     }
 }
 
@@ -356,6 +375,18 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(k);
         s.push('=');
         s.push_str(&m.const_strings[k]);
+    }
+    s.push('\n');
+    // root_reexports — sorted NAME=path pairs. Seeded into every file's `use` map, so a change re-resolves
+    // `use crate::X` / `crate::X::foo` in OTHER files → must invalidate their cached FnInfos.
+    s.push_str("root_reexports");
+    let mut rrk: Vec<&String> = m.root_reexports.keys().collect();
+    rrk.sort();
+    for k in rrk {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(&m.root_reexports[k]);
     }
     s.push('\n');
     // active cfg-features — items behind an inactive feature are skipped in Pass B, so a change to the

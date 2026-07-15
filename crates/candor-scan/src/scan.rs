@@ -388,7 +388,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             None => {
                 // A freshly-parsed file (or a parse failure → skip the file entirely, as before).
                 let Some((sf, locs)) = r1 else { continue };
-                let fd = file_decls(&sf.0.items, include_tests);
+                let fd = file_decls(&sf.0.items, include_tests, &module_path(Path::new(&rel)));
                 decls_per_file.push((rel.clone(), ch, fd));
                 parsed_locs.insert(rel.clone(), locs);
                 parsed_files.insert(rel, sf.0);
@@ -473,7 +473,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // Locs were resolved on the parse worker (spans are dead on this thread); reuse them positionally.
         let locs = parsed_locs.get(rel).map(Vec::as_slice).unwrap_or(&[]);
         let mut loc_idx = 0usize;
-        let mut uses = HashMap::new();
+        // Seed the crate-ROOT re-exports under `crate::<name>` (and `crate::` + GLOB_KEY for the root glob)
+        // so a `use crate::net` / `crate::net::foo` in THIS file resolves through the root re-export it can't
+        // otherwise see (each file starts with a fresh `use` map). Crate-rooted only: a bare `net::foo` never
+        // looks up a `crate::…` key, so a genuine external-crate call is never hijacked (see `expand`).
+        let mut uses = seed_root_reexports(&merged.root_reexports);
         let mut file_fns: Vec<FnInfo> = Vec::new();
         scan_items(&file.items, &modpath, locs, &mut loc_idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, &mut uses, &mut file_fns);
         fns.extend(file_fns.iter().cloned());

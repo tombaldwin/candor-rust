@@ -376,8 +376,47 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
             let rest = &segs[1..];
             return if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
         }
+        // A BARE qualifier with no `use` binding is NOT glob-rewritten here: it could be a genuine external
+        // crate call (`dotenvy::var`) whose crate identity the classifier still needs — rewriting it under a
+        // prelude glob would HIJACK that (sqlx's `dotenvy::var` → lost `Env`). A glob-imported bare name is
+        // instead resolved at COLLECT time (its `use crate::name` re-bind, `collect_use`/`rebound`); the
+        // only glob path handled HERE is a `crate::`-ROOTED call (below), which is definitively crate-local
+        // and so safe to attribute to a re-export glob (iso_C: `crate::net::connect_tcp`).
+        return segs.join("::");
+    }
+    // CRATE-ROOTED resolution via the crate-ROOT re-exports (seeded under `crate::<name>` / `crate::` +
+    // GLOB_KEY, see `collect_root_reexports`). A `crate::net::foo`:
+    //  1. If the root DIRECTLY re-exports `net` (`pub use x::net`, seeded `crate::net -> x::net`), use it.
+    //  2. Else, if the root has EXACTLY ONE external re-export glob (`pub use x::prelude::*`), attribute
+    //     `net` to it (`x::prelude::net::foo`) — the name was re-exported into the root by the glob.
+    // Both DISCLOSE the origin crate in the κ ledger and let `--deps` chaining recover the effect, matching
+    // a DIRECT `use`. ATTRIBUTION only: the tail2 (`net::foo`) is unchanged, so a genuinely-LOCAL `net`
+    // module still resolves to its local def downstream (local wins) and stays pure — no fabrication. A
+    // `crate::`-rooted path can never be a genuine external-crate call, so this can't hijack one (unlike a
+    // bare qualifier). Two-plus globs are ambiguous → honest under-report.
+    if let Some(full) = uses.get(&format!("crate::{}", segs[0])) {
+        let rest = &segs[1..];
+        return if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
+    }
+    // The crate's UNIQUE re-export glob: the seeded root glob (`crate::` + GLOB_KEY, the cross-file case) or,
+    // failing that, a glob in THIS file's own `use` map (`GLOB_KEY` — the single-file/collect-time case,
+    // iso_A/iso_C). Attribution only; a genuinely-local `net` module still resolves by tail2 downstream.
+    if let Some(glob) = root_glob(uses).or_else(|| unique_glob(uses)) {
+        return format!("{glob}::{}", segs.join("::"));
     }
     segs.join("::")
+}
+
+/// The single crate-ROOT re-export glob (seeded under `crate::` + `GLOB_KEY`), if unambiguous — see
+/// `collect_root_reexports` and `expand`'s crate-rooted branch.
+fn root_glob(uses: &HashMap<String, String>) -> Option<&str> {
+    let list = uses.get(&format!("crate::{GLOB_KEY}"))?;
+    let mut it = list.split('\u{1}');
+    let first = it.next()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some(first)
 }
 
 pub(crate) fn first_str_lit(args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>) -> Option<String> {
@@ -857,8 +896,46 @@ pub(crate) fn is_non_nominal_type(ty: &syn::Type) -> bool {
     }
 }
 
+/// Reserved key under which `collect_use` records GLOB re-export PATHs (`use x::y::*`) in the `use` map.
+/// `*` can never be a Rust identifier, so it never collides with a real imported name. The value is a
+/// `\u{1}`-separated list of the glob PATHs whose ROOT is an external crate (not `crate`/`self`/`super`) —
+/// the ones that let `expand` attribute an otherwise-unresolved qualifier to its ORIGIN crate. See
+/// `expand`'s glob-fallback: a call `net::foo` where `net` was brought in by `use mycore::prelude::*`
+/// resolves to `mycore::prelude::net::foo` (tail2 `net::foo`, crate `mycore`), so the origin crate is
+/// disclosed in the ledger and `--deps` chaining recovers the effect — parity with a DIRECT `use`.
+pub(crate) const GLOB_KEY: &str = "*";
+
 pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap<String, String>) {
     let join = |p: &str, s: &str| if p.is_empty() { s.to_string() } else { format!("{p}::{s}") };
+    // A crate-LOCAL re-bind (`use crate::net`, `use super::net`) names a target in THIS crate. Store what
+    // that target ALREADY resolves to in the (inherited) `use` map rather than the literal `crate::net`,
+    // which names no local def and reads silent-pure (iso_B): a submodule's `use crate::net` must inherit
+    // the crate-root `net` binding — a direct `use mycore::net` (→ `mycore::net`) or a glob re-export
+    // (→ `mycore::…::net`). Resolving the FULL rebind path through `expand` (which follows the glob
+    // fallback) recovers the origin crate; a target that resolves to nothing local is stored as-is.
+    let rebound = |full: &str, out: &HashMap<String, String>| -> String {
+        // ONLY a `crate::`-rooted re-bind (`use crate::net`) is re-resolved: `crate::X` names the CRATE
+        // ROOT, where a re-export can bring an external name into scope. `self::`/`super::` are RELATIVE to
+        // the current module (whose path `collect_use` doesn't know) — a `use super::core::foo` must keep
+        // its literal so downstream tail2 resolution (`core::foo`) links it to the local def; re-resolving
+        // it here would DROP the module context and break that edge (clap's `super::core::display_width`).
+        // A non-`crate` path is likewise authoritative and stored as-is.
+        if full.split("::").next() != Some("crate") {
+            return full.to_string();
+        }
+        // `crate::net` — does the crate ROOT re-export `net`? Consult the seeded root re-exports via
+        // `expand` (a crate-root DIRECT re-export `pub use x::net`, iso_B/iso_D/reqwest; or the crate's
+        // UNIQUE re-export glob `pub use x::…::*`, iso_A/iso_C/sqlx). `expand` strips the `crate::` root, so
+        // an UNRESOLVED `crate::net` comes back as the bare local path `net` (unchanged meaning); a FIRED
+        // re-export comes back rooted at the external crate (`mycore::…::net`, `http::header`). Take the
+        // resolved value ONLY when a re-export actually fired — else keep the literal `crate::net` so a
+        // genuine crate-local `net` module still resolves by tail2 (no meaning change, no fabrication).
+        // This closes the cardinal-sin hole: a cross-crate effect reached via a root re-export was read
+        // silent-pure because `crate::net` named no local def and disclosed no origin crate.
+        let local = full.strip_prefix("crate::").unwrap_or(full);
+        let resolved = expand(full, out);
+        if resolved == local { full.to_string() } else { resolved }
+    };
     match tree {
         syn::UseTree::Path(p) => collect_use(&p.tree, join(&prefix, &p.ident.to_string()), out),
         syn::UseTree::Name(n) => {
@@ -869,22 +946,92 @@ pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap
                 // `b::self` and the module alias was lost. (Found on coreutils `ls`: `use std::fs::{self,
                 // Metadata}` then `fs::read_dir` was unresolved → a file lister reporting ZERO Fs.)
                 if let Some(last) = prefix.rsplit("::").next() {
-                    out.insert(last.to_string(), prefix.clone());
+                    let v = rebound(&prefix, out);
+                    out.insert(last.to_string(), v);
                 }
             } else {
-                out.insert(id.clone(), join(&prefix, &id));
+                let v = rebound(&join(&prefix, &id), out);
+                out.insert(id.clone(), v);
             }
         }
         syn::UseTree::Rename(r) => {
-            out.insert(r.rename.to_string(), join(&prefix, &r.ident.to_string()));
+            let v = rebound(&join(&prefix, &r.ident.to_string()), out);
+            out.insert(r.rename.to_string(), v);
         }
         syn::UseTree::Group(g) => {
             for t in &g.items {
                 collect_use(t, prefix.clone(), out);
             }
         }
-        syn::UseTree::Glob(_) => {}
+        // A GLOB re-export `use PATH::*` brings PATH's public items into scope under their own names. We
+        // can't enumerate those names syntactically (PATH's source may be an unscanned external crate), but
+        // a later call `name::foo` — where `name` resolves to no local module and no direct `use` — is
+        // then attributable to PATH's crate (`PATH::name::foo`). Record the glob PATH so `expand` can apply
+        // it as a fallback. ONLY external-rooted globs (`mycore::driver_prelude::*`) are recorded: a
+        // crate-LOCAL glob (`crate::prelude::*`) attributes to no external crate, and its names resolve
+        // locally through tail2 anyway. Without this, a cross-crate effectful call reached via a driver-
+        // prelude glob (`use sqlx_core::driver_prelude::*; net::connect(..)`) read SILENT-PURE and was
+        // disclosed NOWHERE — the cardinal sin (sqlx `PgStream::connect`).
+        syn::UseTree::Glob(_) => {
+            let rooted_local = matches!(prefix.split("::").next(), Some("crate" | "self" | "super"));
+            if !prefix.is_empty() && !rooted_local {
+                let e = out.entry(GLOB_KEY.to_string()).or_default();
+                // `\u{1}`-separated list (a char that can't appear in a path) — a module may have several.
+                if e.is_empty() {
+                    *e = prefix;
+                } else {
+                    e.push('\u{1}');
+                    e.push_str(&prefix);
+                }
+            }
+        }
     }
+}
+
+/// The CRATE-ROOT re-exports that a `use crate::name` in ANY file (even another one) resolves through —
+/// a crate is scanned FILE-BY-FILE with a fresh `use` map per file, so a submodule's `use crate::net`
+/// otherwise can't see that the crate ROOT re-exported `net` (from a `pub use x::prelude::*` glob or a
+/// `pub use x::net`). Collected once from the root file (`lib.rs`/`main.rs`, module path ""), keyed by
+/// the introduced name, and seeded into every file's `use` map under `crate::<name>` so resolution of a
+/// crate-rooted path finds them WITHOUT letting a bare `net::foo` (which Rust would NOT resolve to a root
+/// re-export) pick them up. The single glob is stored under `crate::` + `GLOB_KEY`. Real-world seam:
+/// sqlx-postgres re-exports the whole `sqlx_core::driver_prelude::*` at its root; every driver file then
+/// does `use crate::net; net::connect_tcp(..)` — the TCP dial that read SILENT-PURE before this.
+pub(crate) fn collect_root_reexports(items: &[syn::Item]) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    for it in items {
+        if let syn::Item::Use(u) = it {
+            collect_use(&u.tree, String::new(), &mut m);
+        }
+    }
+    m
+}
+
+/// Build a per-file `use` map seeded with the crate-ROOT re-exports under `crate::<name>` keys (the root
+/// glob under `crate::` + `GLOB_KEY`). A `use crate::net` / `crate::net::foo` in the file then resolves
+/// through the root re-export via `expand`, while a bare `net::foo` — which never keys on `crate::…` —
+/// keeps its own crate identity. Called once per file at Pass B; the returned map is where `scan_items`
+/// then accumulates the file's own `use` statements.
+pub(crate) fn seed_root_reexports(root: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut m = HashMap::with_capacity(root.len());
+    for (k, v) in root {
+        m.insert(format!("crate::{k}"), v.clone());
+    }
+    m
+}
+
+/// The external-rooted GLOB re-export PATHs recorded in a `use` map, if EXACTLY ONE — the unambiguous
+/// origin `expand` can attribute an otherwise-unresolved qualifier to. Zero (no glob) or two-plus
+/// (ambiguous — never guess which prelude a name came from; the honest under-report, matching the
+/// keying-collision discipline elsewhere) both yield `None`.
+fn unique_glob(uses: &HashMap<String, String>) -> Option<&str> {
+    let list = uses.get(GLOB_KEY)?;
+    let mut it = list.split('\u{1}');
+    let first = it.next()?;
+    if it.next().is_some() {
+        return None; // 2+ globs — ambiguous origin
+    }
+    Some(first)
 }
 
 /// Module path implied by a file's location under `src/` (root files → ""; `foo.rs`/`foo/mod.rs` →
