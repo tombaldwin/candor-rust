@@ -743,6 +743,80 @@ fn baseline_guard_unparseable_or_empty_value_fails_closed() {
     assert!(stderr.contains("EMPTY value"), "the diagnostic names the empty value: {stderr}");
 }
 
+// ── ⟨0.16 staged⟩ callgraph-sidecar existence: a formerly-PURE fn turning effectful is a GAIN ──
+// (spec §7 item 5 ⟨0.16 staged⟩; the `gains --json` `origin` existence rule applied to the scan ratchet.)
+
+/// The two-fn probe of §7 item 5: `util::fmt` is PURE (omitted from the report but a callgraph node),
+/// `api::fetch` performs Net. The sidecar sits beside `<pre>.<crate>.scan.json` as
+/// `<pre>.<crate>.scan.callgraph.json` and lists BOTH names, so existence keyed on it sees the pure leaf.
+const PROBE_SRC: &str = "pub mod util { pub fn fmt(s:&str)->String{ s.to_uppercase() } }\n\
+     pub mod api { pub fn fetch(h:&str){ let _=std::net::TcpStream::connect((h,80)); } }";
+
+#[test]
+fn baseline_guard_sidecar_present_flags_pure_to_effectful_transition_exit_1() {
+    // The sharpest supply-chain shape: a fn that was PURE in the baseline (absent from the report, but a
+    // node in the callgraph sidecar) now performs an effect. Report-only existence read it as exempt
+    // "new"; keyed on the sidecar its baseline set is ∅ and any current effect is an AS-EFF-005 gain.
+    let d = make_crate("blcgpure", PROBE_SRC);
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "recording the baseline (with its callgraph sidecar) is a plain scan");
+    assert!(d.join("base.blcgpure.scan.callgraph.json").is_file(), "the baseline records a callgraph sidecar");
+    // util::fmt gains Fs; it was pure in the baseline → a gain, not exempt new code.
+    std::fs::write(d.join("src/lib.rs"),
+        "pub mod util { pub fn fmt(s:&str)->String{ let _=std::fs::read_to_string(\"x\"); s.to_uppercase() } }\n\
+         pub mod api { pub fn fetch(h:&str){ let _=std::net::TcpStream::connect((h,80)); } }").unwrap();
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    let all = format!("{stdout}{stderr}");
+    assert_eq!(rc, Some(1), "a formerly-pure fn turning effectful is a violation (exit 1): {all}");
+    assert!(all.contains("[AS-EFF-005] `util::fmt` gained effect { Fs }"),
+        "the violation names the pure leaf and its gained effect: {all}");
+}
+
+#[test]
+fn baseline_guard_sidecar_absent_degrades_to_report_only_with_a_note_exit_0() {
+    // Delete the sidecar: existence degrades to pre-⟨0.16⟩ report-only, so the formerly-pure fn reads as
+    // exempt "new" and ESCAPES (exit 0), with a one-time stderr note that the guard is weaker. This is a
+    // degradation, not a failure — a baseline recorded by an older build simply has no sidecar.
+    let d = make_crate("blcgabsent", PROBE_SRC);
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    std::fs::remove_file(d.join("base.blcgabsent.scan.callgraph.json")).unwrap();
+    std::fs::write(d.join("src/lib.rs"),
+        "pub mod util { pub fn fmt(s:&str)->String{ let _=std::fs::read_to_string(\"x\"); s.to_uppercase() } }\n\
+         pub mod api { pub fn fetch(h:&str){ let _=std::net::TcpStream::connect((h,80)); } }").unwrap();
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    let all = format!("{stdout}{stderr}");
+    assert_eq!(rc, Some(0), "an absent sidecar degrades, it does not fail: {all}");
+    assert!(!all.contains("[AS-EFF-005]"), "the pure→effectful fn escapes under report-only existence: {all}");
+    assert!(stderr.contains("sidecar") && stderr.contains("degrades to"),
+        "the note discloses the weakened guard: {stderr}");
+}
+
+#[test]
+fn baseline_guard_sidecar_corrupt_fails_closed_exit_2() {
+    // A PRESENT-but-corrupt sidecar must fail closed (exit 2), mirroring a corrupt baseline: a broken
+    // sidecar must not silently narrow the guard by making its pure leaves read as exempt "new".
+    let d = make_crate("blcgcorrupt", PROBE_SRC);
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    std::fs::write(d.join("base.blcgcorrupt.scan.callgraph.json"), "{").unwrap();
+    std::fs::write(d.join("src/lib.rs"),
+        "pub mod util { pub fn fmt(s:&str)->String{ let _=std::fs::read_to_string(\"x\"); s.to_uppercase() } }\n\
+         pub mod api { pub fn fetch(h:&str){ let _=std::net::TcpStream::connect((h,80)); } }").unwrap();
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    let all = format!("{stdout}{stderr}");
+    assert_eq!(rc, Some(2), "a corrupt sidecar is invalid gate input (exit 2): {all}");
+    assert!(stderr.contains("callgraph") && stderr.contains("could not be parsed"),
+        "the diagnostic names the broken sidecar: {stderr}");
+    assert!(!all.contains("[AS-EFF-005]"), "the guard is NOT evaluated on a broken sidecar: {all}");
+}
+
 #[test]
 fn baseline_guard_config_key_resolves_against_the_config_home_and_env_wins() {
     // The `.candor/config` `baseline` key drives the guard with a RELATIVE value anchored to the
