@@ -1293,6 +1293,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
         } else {
             eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
+            // Append-only remedy pointer (gate-FAILURE path only): the summary line above is
+            // conformance-pinned, so this extra line must never alter it, the violation lines,
+            // or the exit code — and a zero-violation run stays byte-identical.
+            eprintln!("→ candor-query fix-gate names the remedy for each (or `candor fix <fn> <Effect>` for one)");
             return (1, json_body);
         }
     }
