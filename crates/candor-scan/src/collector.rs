@@ -1032,6 +1032,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // builder table, and κ blind-disclosure still apply (they key on the path/crate, not the edge).
         let mpath = expand(&path_to_string(&node.path), self.uses);
         let mleaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
+        // `cfg_if::cfg_if! { if #[cfg(..)] { .. } else if #[cfg(..)] { .. } else { .. } }` (and the bare
+        // `cfg_if!` after `use cfg_if::cfg_if`) is a MACRO that syn leaves opaque, so every effectful call
+        // inside an arm reads pure and the reach is disclosed only as an `invisible: ["cfg_if"]` blind —
+        // MISLEADING when the arm holds the user's own COVERED std call (sqlx-core's platform code). Expand
+        // it: parse the arm grammar and walk EVERY arm's block through the normal effect walk (the same
+        // sound all-cfg-branches over-approximation candor-scan already applies to `#[cfg(unix)]`/etc. —
+        // it never fabricates, the calls are real, just cfg-gated). On an unexpected token shape the parse
+        // fails and we fall through to the opaque-macro path below (never panic). Because a successful
+        // expansion COVERS the reach, it is NOT recorded as an invisible macro call.
+        if mleaf == "cfg_if" {
+            if let Ok(arms) = syn::parse2::<CfgIfArms>(node.tokens.clone()) {
+                for block in &arms.0 {
+                    self.visit_block(block);
+                }
+                return;
+            }
+        }
         if mpath.contains("::") {
             self.calls.push(Call { path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true });
         }
@@ -1125,5 +1142,43 @@ pub(crate) fn resolve_target<'a>(
         None
     } else {
         by_leaf.get(leaf).filter(|v| v.len() == 1)
+    }
+}
+
+/// The parsed BLOCKS of a `cfg_if::cfg_if! { .. }` body — one per arm. `cfg_if`'s grammar is a chain of
+/// `if #[cfg(COND)] { BLOCK }` clauses (each cfg is an outer attribute on the arm), optionally chained by
+/// `else if #[cfg(COND)] { BLOCK }`, and optionally terminated by a bare `else { BLOCK }`. We keep EVERY
+/// arm's block (sound over-approximation — see the call site) and DISCARD the `#[cfg(..)]` conditions
+/// themselves: they only decide which arm compiles, not what any arm does, and candor-scan already scans
+/// all `#[cfg(unix)]`/`#[cfg(windows)]`/… branches regardless. Parsing is strict — any token that isn't
+/// this exact `if #[cfg(..)] { } [else if #[cfg(..)] { }]* [else { }]?` shape makes the parse fail, so the
+/// caller falls back to treating the macro as opaque rather than mis-reading a novel `cfg_if` extension.
+struct CfgIfArms(Vec<syn::Block>);
+
+impl syn::parse::Parse for CfgIfArms {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut blocks = Vec::new();
+        loop {
+            // `if #[cfg(..)] { .. }` — require the `if`, the (discarded) outer `#[cfg(..)]` attribute(s),
+            // then the arm block.
+            input.parse::<syn::Token![if]>()?;
+            let _attrs = input.call(syn::Attribute::parse_outer)?;
+            blocks.push(input.parse::<syn::Block>()?);
+            if input.is_empty() {
+                break;
+            }
+            // A trailing chain: `else { .. }` (final arm) or `else if #[cfg(..)] { .. }` (loop again).
+            input.parse::<syn::Token![else]>()?;
+            if input.peek(syn::Token![if]) {
+                continue; // `else if` — the loop head parses the next `if #[cfg(..)] { .. }`
+            }
+            blocks.push(input.parse::<syn::Block>()?); // bare `else { .. }` — the last arm
+            break;
+        }
+        if !input.is_empty() {
+            // Trailing tokens after a well-formed chain ⇒ not the grammar we understand; bail to opaque.
+            return Err(input.error("unexpected trailing tokens in cfg_if! body"));
+        }
+        Ok(CfgIfArms(blocks))
     }
 }

@@ -3172,3 +3172,97 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(rc, 2, "--deps without Cargo.lock must fail closed");
     }
+
+    #[test]
+    fn cfg_if_macro_expands_all_arms() {
+        // `cfg_if::cfg_if! { if #[cfg(..)] {A} else {B} }` was opaque, so a std::net/std::fs call inside
+        // an arm read pure (the sqlx-core `connect_tcp` blind spot). Expand it: walk BOTH arms (the sound
+        // all-cfg-branches over-approximation) so both a `std::net::TcpStream::connect` and a
+        // `std::fs::read` surface — and the misleading `invisible: ["cfg_if"]` disclosure is gone.
+        let v = scan_src_to_json("cfgifboth", "\
+            pub fn effect_inside_cfgif() {\n\
+                cfg_if::cfg_if! {\n\
+                    if #[cfg(unix)] { let _ = std::net::TcpStream::connect(\"h:80\"); }\n\
+                    else { let _ = std::fs::read(\"/x\"); }\n\
+                }\n\
+            }\n");
+        let f = fn_entry(&v, "effect_inside_cfgif");
+        let mut e = effs(f);
+        e.sort();
+        assert_eq!(e, vec!["Fs", "Net"], "both cfg_if arms must be scanned");
+        assert!(
+            f.get("invisible").and_then(|i| i.as_array()).map_or(true, |a| a.is_empty()),
+            "an EXPANDED cfg_if is covered, not an invisible blind: {f:#}"
+        );
+    }
+
+    #[test]
+    fn cfg_if_macro_bare_path_after_use() {
+        // sqlx-core writes `use cfg_if::cfg_if;` then a BARE `cfg_if! { .. }` — expansion must key on the
+        // resolved leaf, not the literal path, and a single-arm `if #[cfg(..)] { .. }` with NO else still
+        // contributes its arm's effect.
+        let v = scan_src_to_json("cfgifbare", "\
+            use cfg_if::cfg_if;\n\
+            pub fn only_if_no_else() {\n\
+                cfg_if! {\n\
+                    if #[cfg(unix)] { let _ = std::fs::read(\"/y\"); }\n\
+                }\n\
+            }\n");
+        let f = fn_entry(&v, "only_if_no_else");
+        assert_eq!(effs(f), vec!["Fs"], "the single cfg_if arm's Fs effect must surface");
+    }
+
+    #[test]
+    fn cfg_if_macro_with_pure_arms_stays_pure() {
+        // A cfg_if! whose every arm is effect-free stays pure — expansion cannot fabricate an effect the
+        // source doesn't perform. (A pure fn is omitted from the report entirely.)
+        let v = scan_src_to_json("cfgifpure", "\
+            pub fn pure_cfgif() {\n\
+                cfg_if::cfg_if! {\n\
+                    if #[cfg(unix)] { let _ = 1 + 2; }\n\
+                    else { let _ = 3 + 4; }\n\
+                }\n\
+            }\n");
+        assert!(
+            v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "pure_cfgif"),
+            "a cfg_if! with only pure arms must stay pure (omitted):\n{v:#}"
+        );
+    }
+
+    #[test]
+    fn cfg_if_macro_does_not_swallow_surrounding_effects() {
+        // Effects BEFORE and AFTER a cfg_if! are still caught (the block-walk doesn't consume the fn),
+        // and a genuinely-pure fn in the same crate stays pure.
+        let v = scan_src_to_json("cfgifaround", "\
+            pub fn around() {\n\
+                let _ = std::env::var(\"A\");\n\
+                cfg_if::cfg_if! { if #[cfg(unix)] { let _ = 1; } }\n\
+                let _ = std::fs::read(\"/z\");\n\
+            }\n\
+            pub fn genuinely_pure() { let _ = 1 + 2; }\n");
+        let f = fn_entry(&v, "around");
+        let mut e = effs(f);
+        e.sort();
+        assert_eq!(e, vec!["Env", "Fs"], "effects around a cfg_if! must remain");
+        assert!(
+            v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "genuinely_pure"),
+            "a pure fn stays pure:\n{v:#}"
+        );
+    }
+
+    #[test]
+    fn cfg_if_unexpected_shape_falls_back_to_opaque() {
+        // A `cfg_if!` body that ISN'T the `if #[cfg(..)] {..} [else ..]` grammar (here a bare block) must
+        // NOT panic — it falls back to the opaque-macro path (recorded as an invisible qualified macro),
+        // exactly the pre-fix behaviour, so a novel cfg_if extension never crashes the scan.
+        let v = scan_src_to_json("cfgifbadshape", "\
+            pub fn weird() {\n\
+                cfg_if::cfg_if! { let _ = 1; }\n\
+            }\n");
+        // No panic reaching here is the core assertion; the fn is pure/absent (the opaque macro adds no
+        // classified effect), consistent with any other unmodelled macro reach.
+        assert!(
+            v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "weird" || effs(f).is_empty()),
+            "an unparseable cfg_if! is opaque, never fabricated:\n{v:#}"
+        );
+    }
