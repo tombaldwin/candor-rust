@@ -29,6 +29,19 @@ pub fn emit(
     let finds = candor_classify::surface::best_finds(inferred, direct, calls, loc, 1);
     let Some(f) = finds.first() else {
         // effectful, but nothing cleared the bar — the honest fallback (never a manufactured surprise).
+        // BUT do NOT reassure "nothing hidden" over a meaningfully-Unknown graph: those Unknowns (unresolved
+        // calls) ARE the hidden part, their transitive effects unanalyzed. ≥⅓ of effectful fns Unknown →
+        // qualify + point at blindspots (corpus re-audit cardinal sin; four-way with candor-ts).
+        let total = inferred.values().filter(|s| !s.is_empty()).count();
+        let unknown = inferred.values().filter(|s| s.contains("Unknown")).count();
+        if total > 0 && unknown * 3 >= total {
+            eprintln!(
+                "candor: no surprising reaches — but {unknown} of {total} function(s) are Unknown \
+                 (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; \
+                 unresolvable imports or missing project config are the usual cause."
+            );
+            return;
+        }
         eprintln!("candor: nothing hidden — every effect sits where its name says it should.");
         return;
     };

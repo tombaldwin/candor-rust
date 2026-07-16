@@ -141,7 +141,20 @@ pub(crate) fn cmd_tour(args: &[String]) -> i32 {
 
     if finds.is_empty() {
         // Effectful-but-nothing-surprising vs genuinely-pure both land here; either way the honest line
-        // is the useful answer (never a manufactured surprise) — mirrors the scan-note fallback.
+        // is the useful answer (never a manufactured surprise) — mirrors the scan-note fallback. BUT never
+        // reassure "nothing hidden" over a meaningfully-Unknown graph: the Unknowns (unresolved calls) ARE
+        // the hidden part, their transitive effects unanalyzed. ≥⅓ effectful Unknown → qualify + blindspots
+        // (re-audit cardinal sin; four-way with candor-ts / the scan opener).
+        let total = entries.iter().filter(|e| !e.inferred.is_empty()).count();
+        let unknown = entries.iter().filter(|e| e.inferred.iter().any(|x| x == "Unknown")).count();
+        if total > 0 && unknown * 3 >= total {
+            println!(
+                "candor: no surprising reaches — but {unknown} of {total} function(s) are Unknown \
+                 (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; \
+                 unresolvable imports or missing project config are the usual cause."
+            );
+            return 0;
+        }
         println!("candor: nothing hidden — every effect sits where its name says it should.");
         return 0;
     }
