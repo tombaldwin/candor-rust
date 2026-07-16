@@ -392,7 +392,7 @@ fn gate_json_writes_the_structured_verdict_faithful_to_the_exit_code() {
         serde_json::from_str(&std::fs::read_to_string(&gp).expect("gate.json written")).expect("valid JSON");
     let _ = std::fs::remove_dir_all(&d);
 
-    assert_eq!(verdict["spec"], "0.15", "verdict declares the spec version");
+    assert_eq!(verdict["spec"], "0.16", "verdict declares the spec version");
     assert_eq!(verdict["ok"], false, "ok:false on a failing gate");
     let viols = verdict["violations"].as_array().expect("violations array");
     assert_eq!(viols.len(), 1, "one violation: {verdict}");
@@ -743,8 +743,8 @@ fn baseline_guard_unparseable_or_empty_value_fails_closed() {
     assert!(stderr.contains("EMPTY value"), "the diagnostic names the empty value: {stderr}");
 }
 
-// ── ⟨0.16 staged⟩ callgraph-sidecar existence: a formerly-PURE fn turning effectful is a GAIN ──
-// (spec §7 item 5 ⟨0.16 staged⟩; the `gains --json` `origin` existence rule applied to the scan ratchet.)
+// ── ⟨0.16⟩ callgraph-sidecar existence: a formerly-PURE fn turning effectful is a GAIN ──
+// (spec §7 item 5 ⟨0.16⟩; the `gains --json` `origin` existence rule applied to the scan ratchet.)
 
 /// The two-fn probe of §7 item 5: `util::fmt` is PURE (omitted from the report but a callgraph node),
 /// `api::fetch` performs Net. The sidecar sits beside `<pre>.<crate>.scan.json` as

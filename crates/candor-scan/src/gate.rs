@@ -201,7 +201,7 @@ static NOTED_ABSENT: std::sync::OnceLock<std::sync::Mutex<std::collections::Hash
 ///     baseline set is one violation.
 ///
 /// EXISTENCE — what counts as a "new function" (exempt) vs an "existing function" (guarded):
-///   - ⟨0.16 staged⟩ When the baseline **callgraph sidecar** is present (sibling of the resolved report —
+///   - ⟨0.16⟩ When the baseline **callgraph sidecar** is present (sibling of the resolved report —
 ///     the report path with `.json` swapped for `.callgraph.json`; SPEC §2.2 records EVERY analyzed fn,
 ///     including PURE leaves reports omit), existence is keyed on it: a fn that is a callgraph node (even
 ///     with an EMPTY/∅ baseline effect set — a baseline-pure leaf) that now performs ANY effect is a GAIN
@@ -291,7 +291,7 @@ pub(crate) fn check_baseline(
     for e in entries {
         base.entry(e.func).or_default().extend(e.inferred);
     }
-    // ⟨0.16 staged⟩ Existence keys on the baseline callgraph sidecar when present (SPEC §7 item 5): the
+    // ⟨0.16⟩ Existence keys on the baseline callgraph sidecar when present (SPEC §7 item 5): the
     // sidecar lists PURE leaves the report omits, so a formerly-pure fn is a graph node and no longer
     // reads as exempt "new". Derive the sidecar from the resolved report path (`<stem>.json` →
     // `<stem>.callgraph.json`), mirroring the write in scan.rs and load_callgraph in candor-query.
@@ -343,7 +343,7 @@ pub(crate) fn check_baseline(
     let mut out = Vec::new();
     let mut unknown_only: Vec<String> = Vec::new(); // ⟨0.16⟩ advisory: gained ONLY Unknown
     for q in all {
-        // Existence: in the baseline report, OR (⟨0.16 staged⟩) a baseline-callgraph node — a
+        // Existence: in the baseline report, OR (⟨0.16⟩) a baseline-callgraph node — a
         // baseline-pure leaf has no report entry but IS a graph node, so its baseline effect set is ∅
         // and ANY current effect is a gain. A fn in neither is genuinely new and stays exempt.
         let in_cg = cg_nodes.as_ref().is_some_and(|n| n.contains(q));
@@ -357,7 +357,7 @@ pub(crate) fn check_baseline(
         if gained.is_empty() {
             continue;
         }
-        // ⟨0.16 staged⟩ the ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain
+        // ⟨0.16⟩ the ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain
         // is the §4 trust marker, not an effect (`pure` policies exclude it), and on version bumps it is
         // dominated by resolution noise (SOUNDNESS-LOG 2026-07-16) — DISCLOSE it, don't fail on it.
         let real: Vec<&str> = gained.iter().copied().filter(|e| *e != "Unknown").collect();
