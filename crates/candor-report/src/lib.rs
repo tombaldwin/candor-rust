@@ -202,6 +202,18 @@ pub struct Coverage {
     pub uncovered: Vec<CoverageEntry>,
 }
 
+/// ⟨proposed — COMPLETENESS-MANIFEST-DESIGN.md, Gap 2⟩ One unit of the TARGET's own source that candor
+/// could NOT analyze — a file that failed to read/parse, or a scope it skipped. Its effects are absent
+/// from the report NOT because they're pure but because the code was never seen. Disclosed on stderr
+/// today (and the gate fails exit 2 when a policy is configured), but INVISIBLE to a machine reading the
+/// JSON report — so a `--json` consumer saw a report that looked complete. This carries it into the wire.
+/// Distinct from `coverage` (an unmodeled *dependency*): `unanalyzed` is the target's own unseen source.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnanalyzedUnit {
+    pub path: String,
+    pub reason: String,
+}
+
 /// The v0.2 self-describing report: a provenance header plus the function entries.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Report {
@@ -210,6 +222,10 @@ pub struct Report {
     /// so every pre-⟨0.15⟩ report still deserializes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<Coverage>,
+    /// ⟨proposed⟩ the target source candor couldn't analyze (Gap 2). Empty (omitted) on a complete
+    /// scan — wire-compatible with a pre-rung report. `default` so older reports still deserialize.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unanalyzed: Vec<UnanalyzedUnit>,
     pub functions: Vec<ReportEntry>,
 }
 
@@ -288,6 +304,19 @@ pub fn to_packaged_report_json_with_coverage(
     functions: &[ReportEntry],
     coverage: Option<&Coverage>,
 ) -> serde_json::Result<String> {
+    to_packaged_report_json_full(candor, package, functions, coverage, &[])
+}
+
+/// ⟨proposed — Gap 2⟩ Like [`to_packaged_report_json_with_coverage`], additionally carrying the
+/// `unanalyzed` list (the target source the scan couldn't see). An empty slice omits the field, so a
+/// complete scan's report is byte-identical to a pre-rung one (the wire-compatibility contract).
+pub fn to_packaged_report_json_full(
+    candor: &ReportMeta,
+    package: &str,
+    functions: &[ReportEntry],
+    coverage: Option<&Coverage>,
+    unanalyzed: &[UnanalyzedUnit],
+) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
         candor: &'a ReportMeta,
@@ -295,9 +324,22 @@ pub fn to_packaged_report_json_with_coverage(
         package: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         coverage: Option<&'a Coverage>,
+        // Keys sort by serde field order in the struct; `unanalyzed` after `coverage`, before `functions`.
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        unanalyzed: &'a [UnanalyzedUnit],
         functions: &'a [ReportEntry],
     }
-    serde_json::to_string_pretty(&Out { candor, package, coverage, functions })
+    serde_json::to_string_pretty(&Out { candor, package, coverage, unanalyzed, functions })
+}
+
+/// ⟨proposed — Gap 2⟩ Parse a report's `unanalyzed` field. Empty when absent (a complete scan or any
+/// pre-rung report) — absence is never an error, just "nothing unanalyzed travelled."
+pub fn report_unanalyzed(text: &str) -> Vec<UnanalyzedUnit> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("unanalyzed").cloned())
+        .and_then(|u| serde_json::from_value(u).ok())
+        .unwrap_or_default()
 }
 
 /// ⟨0.15 staged⟩ Parse a report's `coverage` envelope field (spec §2). `None` when the field is
@@ -399,6 +441,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unanalyzed_round_trips_and_omits_when_empty() {
+        // Gap 2: the `unanalyzed` field carries the target source the scan couldn't see into the wire,
+        // and is OMITTED when empty (byte-compat with a pre-rung report).
+        let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
+        // present: a parse failure travels
+        let units = vec![UnanalyzedUnit { path: "src/broken.rs".into(), reason: "source failed to read/parse".into() }];
+        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units).unwrap();
+        assert!(json.contains("\"unanalyzed\""), "unanalyzed must serialize when non-empty");
+        let parsed = report_unanalyzed(&json);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, "src/broken.rs");
+        // empty: omitted entirely (a complete scan is byte-identical to a pre-rung report)
+        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[]).unwrap();
+        assert!(!clean.contains("unanalyzed"), "an empty unanalyzed must be omitted");
+        assert!(report_unanalyzed(&clean).is_empty());
+    }
+
+    #[test]
     fn parses_envelope_and_bare_array() {
         let env = r#"{"candor":{"version":"v9","toolchain":"t"},"functions":[{"fn":"a","inferred":["Net"]}]}"#;
         let e = report_entries(env).unwrap();
@@ -439,6 +499,7 @@ mod tests {
         let r = Report {
             candor: ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() },
             coverage: None,
+            unanalyzed: vec![],
             functions: vec![ReportEntry {
                 func: "f".into(),
                 inferred: vec!["Db".into(), "Unknown".into()],

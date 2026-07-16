@@ -389,6 +389,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // when a policy is configured AND analysis was incomplete — a gateless-green over unanalyzed code
     // is a missed-effect = false-pure hole. (`unparsed` borrows `per_file`, consumed below; keep a flag.)
     let had_parse_failure = !unparsed.is_empty();
+    // ⟨Gap 2⟩ Also carry the unparsed set into the REPORT (owned, so it survives `per_file`'s consumption):
+    // the stderr warning above is invisible to a machine reading `--json`, so a bare report looked complete.
+    // The gated path still exits 2 with no verdict (SPEC §3.3.1); this is the bare-report disclosure.
+    let unanalyzed_units: Vec<candor_report::UnanalyzedUnit> = unparsed
+        .iter()
+        .map(|p| candor_report::UnanalyzedUnit { path: p.to_string(), reason: "source failed to read/parse".into() })
+        .collect();
 
     // Per-file Pass A decls (cache or fresh) + a place to hold a parsed file for Pass B. A file dropped
     // by a read/parse failure (no cache AND round-1 parse failed) is excluded entirely, preserving the
@@ -1115,7 +1122,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             .map(|(cr, n)| candor_report::CoverageEntry { name: cr.clone(), calls: *n })
             .collect(),
     });
-    let body = candor_report::to_packaged_report_json_with_coverage(&meta, &crate_name, &entries, coverage.as_ref())
+    let body = candor_report::to_packaged_report_json_full(&meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units)
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave
