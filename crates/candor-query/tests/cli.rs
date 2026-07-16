@@ -404,6 +404,25 @@ fn callers_nonexistent_fn_exits_2() {
     assert_eq!(ok.status.code(), Some(0), "callers of a real fn resolves at exit 0");
 }
 
+#[test]
+fn unknown_flag_exits_2_but_cross_engine_flag_tolerated() {
+    // corpus re-audit #2: a typo'd flag (`--polciy`) must be a LOUD error (exit 2) with a did-you-mean —
+    // never swallowed as a positional (which runs the query with NO policy and exits green: a CI author who
+    // typos --policy ships a gate that never fires). But a VALID cross-engine flag (`--text`, candor-ts's
+    // output-mode flag) must be TOLERATED (rust prose is the default) so `candor <verb> --text` never errors.
+    let f = Fixture::new("flag");
+    f.write_report();
+    let bad = Command::new(bin()).arg("where").arg("Fs").arg("--polciy").arg("/x").arg("--report").arg(f.report_path())
+        .output().expect("run candor-query");
+    assert_eq!(bad.status.code(), Some(2), "a typo'd flag must exit 2, not run green with no policy");
+    let se = String::from_utf8_lossy(&bad.stderr);
+    assert!(se.contains("unknown flag") && se.contains("--policy"),
+        "must name the unknown flag + suggest --policy, got:\n{se}");
+    let txt = Command::new(bin()).arg("where").arg("Fs").arg("--text").arg("--report").arg(f.report_path())
+        .output().expect("run candor-query");
+    assert_ne!(txt.status.code(), Some(2), "--text (a valid cross-engine flag) must be tolerated, not rejected");
+}
+
 // ── fix: the boundary hoist (integrations/FIX-SPEC.md) — the remedial inverse of whatif ────────────
 
 /// The `orderflow` shape: `api::get_quote → domain::quote_bulk → domain::price_quote → infra::fetch_rate`,
