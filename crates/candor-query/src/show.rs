@@ -118,6 +118,16 @@ pub(crate) fn cmd_where(args: &[String]) -> i32 {
         Ok(v) => v,
         Err(c) => return c,
     };
+    // A typo'd/unknown effect NAME is a LOUD error (exit 2) — never a false-empty 0-result at exit 0 that
+    // reads as an authoritative "nothing performs Net" when the user actually typed "Network" (corpus-audit
+    // #3). A KNOWN effect that is simply absent stays a valid 0-result; an unknown name PRESENT in the report
+    // (a spec extension effect) is allowed — so error only when the name is NEITHER known nor present.
+    const KNOWN_EFFECTS: &[&str] =
+        &["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
+    if !KNOWN_EFFECTS.contains(&eff) && !all.iter().any(|e| e.inferred.iter().any(|x| x == eff)) {
+        eprintln!("candor-query where: unknown effect '{eff}' (known: {})", KNOWN_EFFECTS.join(", "));
+        return 2;
+    }
     let mut direct: Vec<String> =
         all.iter().filter(|e| e.direct.iter().any(|x| x == eff)).map(|e| e.func.clone()).collect();
     let mut inherit: Vec<String> = all

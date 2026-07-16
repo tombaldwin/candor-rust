@@ -221,6 +221,16 @@ fn is_ascii_ws(c: char) -> bool {
 }
 
 pub fn parse_policy(text: &str) -> ParsedPolicy {
+    parse_policy_impl(text, true)
+}
+/// Same as [`parse_policy`] but SILENT about malformed rules — for a SECOND, advisory re-parse within the
+/// same run (candor-scan parses once for the gate check and again for the `unverified` disclosure), so the
+/// CI log doesn't print every "ignoring policy rule …" warning twice (#21). The first parse already warned.
+pub fn parse_policy_quiet(text: &str) -> ParsedPolicy {
+    parse_policy_impl(text, false)
+}
+fn parse_policy_impl(text: &str, warn: bool) -> ParsedPolicy {
+    macro_rules! warn_ignore { ($($a:tt)*) => { if warn { eprintln!($($a)*); } } }
     let mut out = ParsedPolicy::default();
     // `str::lines()` splits on \n and \r\n but NOT bare \r — a classic-Mac file then collapses to ONE
     // line, and since \r is also an in-line ASCII-ws token separator (is_ascii_ws), every rule after the
@@ -252,8 +262,8 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
                     "Fs" => "Fs",
                     "Db" => "Db",
                     _ => {
-                        eprintln!(
-                            "candor: ignoring policy rule (allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables): {line}"
+                        warn_ignore!(
+"candor: ignoring policy rule (allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables): {line}"
                         );
                         continue;
                     }
@@ -268,7 +278,7 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
                 };
                 let literals: BTreeSet<String> = rest.iter().map(|h| h.to_string()).collect();
                 if literals.is_empty() {
-                    eprintln!("candor: ignoring policy rule (allow {effect} names no values): {line}");
+                    warn_ignore!("candor: ignoring policy rule (allow {effect} names no values): {line}");
                     continue;
                 }
                 out.allow_rules.push(AllowRule { effect, scope, literals, raw: line.to_string() });
@@ -289,7 +299,7 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
                     }
                 }
                 if effects.is_empty() {
-                    eprintln!("candor: ignoring policy rule (no known effect named): {line}");
+                    warn_ignore!("candor: ignoring policy rule (no known effect named): {line}");
                     continue;
                 }
                 out.rules.push(PolicyRule { effects, scope, raw: line.to_string() });
@@ -304,7 +314,7 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
                 let arrow = toks.next().unwrap_or("");
                 let b = toks.next().unwrap_or("");
                 if a.is_empty() || arrow != "->" || b.is_empty() {
-                    eprintln!("candor: ignoring layering rule (want `forbid <scope> -> <scope>`): {line}");
+                    warn_ignore!("candor: ignoring layering rule (want `forbid <scope> -> <scope>`): {line}");
                     continue;
                 }
                 out.layer_rules.push(LayerRule {
@@ -313,7 +323,7 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
                     raw: line.to_string(),
                 });
             }
-            other => eprintln!("candor: ignoring policy rule (unknown kind `{other}`): {line}"),
+            other => warn_ignore!("candor: ignoring policy rule (unknown kind `{other}`): {line}"),
         }
     }
     out

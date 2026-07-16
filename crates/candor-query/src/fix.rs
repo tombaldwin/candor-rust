@@ -83,7 +83,9 @@ impl RemedyPlan<'_> {
     }
     fn render_text(&self, out: &mut String) {
         use std::fmt::Write;
-        let layer_label = if self.layer.is_empty() { "this".to_string() } else { format!("`{}`", self.layer) };
+        // An empty scope is a GLOBAL rule (`deny Exec` with no layer — forbid it program-wide); render a
+        // real word, not the literal "this", which read like an unsubstituted template variable (#12a).
+        let layer_label = if self.layer.is_empty() { "global".to_string() } else { format!("`{}`", self.layer) };
         let sitelist = if self.sites.is_empty() {
             "(not a local source — a cross-crate or Unknown effect)".to_string()
         } else {

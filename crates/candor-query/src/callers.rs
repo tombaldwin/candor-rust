@@ -25,6 +25,10 @@ pub(crate) fn cmd_callers(args: &[String]) -> i32 {
     // answer "who TRANSITIVELY calls X" for any function: the blast radius an agent needs *before*
     // adding an effect to X. The report alone only records effect-relevant edges (can't see a pure X).
     let mut cg = load_callgraph(pre);
+    // The sidecar records EVERY function (incl. pure leaves), so a no-match against it is a DEFINITIVE
+    // "no such function" (loud exit 2). The fallback below is effect-relevant edges ONLY, so a pure leaf
+    // called only by pure functions is invisible there — a no-match is INCONCLUSIVE, not proof of absence.
+    let complete_graph = !cg.is_empty();
     // Fallback (no call-graph sidecar): build a graph from the report's effect-relevant `calls` edges
     // and run the SAME query, so the output shape ({of,direct,transitive}) and JSON contract are
     // identical to the sidecar path. The old fallback emitted a {callee:[callers]} map — diverging from
@@ -41,9 +45,9 @@ pub(crate) fn cmd_callers(args: &[String]) -> i32 {
             Ok(v) => v,
             Err(c) => return c,
         };
-        callers_via_callgraph_frontier(&cg, &entries, &load_hierarchy(pre), q, want_json)
+        callers_via_callgraph_frontier(&cg, &entries, &load_hierarchy(pre), q, want_json, complete_graph)
     } else {
-        callers_via_callgraph(&cg, q, want_json)
+        callers_via_callgraph(&cg, q, want_json, complete_graph)
     }
 }
 
@@ -57,6 +61,7 @@ pub(crate) fn callers_via_callgraph_frontier(
     hier: &BTreeMap<String, Vec<String>>,
     q: &str,
     want_json: bool,
+    complete: bool,
 ) -> i32 {
     let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (caller, callees) in cg {
@@ -69,12 +74,23 @@ pub(crate) fn callers_via_callgraph_frontier(
     let tier = best_tier(names.iter().copied(), q);
     let targets: Vec<String> = names.iter().copied().filter(|n| q_match(n, q, tier)).map(String::from).collect();
     if targets.is_empty() {
-        if want_json {
-            println!("{{}}");
-        } else {
-            println!("candor: no function matching `{q}` found in the call graph.");
+        // A nonexistent function is a LOUD error (exit 2), like `path`/`impact` — never an empty result at
+        // exit 0, which reads as an authoritative "nothing calls it" for a fn that doesn't exist (corpus-audit
+        // #3). Gated on a non-empty call graph so a report without one isn't misreported as "no such fn".
+        if names.is_empty() {
+            if want_json { println!("{{}}"); } else { println!("candor: no call graph in the report."); }
+            return 0;
         }
-        return 0;
+        // Only a COMPLETE graph (the sidecar, which lists every fn incl. pure leaves) can prove a name is
+        // absent. On the effect-only fallback (no sidecar), a miss is INCONCLUSIVE — a pure leaf called only
+        // by pure fns is simply invisible — so answer empty at exit 0, never a false "no such function" (#5).
+        if !complete {
+            if want_json { println!("{{}}"); }
+            else { println!("candor: no caller of `{q}` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers)."); }
+            return 0;
+        }
+        eprintln!("candor-query callers: no function matching '{q}' in the call graph");
+        return 2;
     }
     let direct: BTreeSet<String> =
         targets.iter().flat_map(|t| rev.get(t.as_str()).into_iter().flatten().map(|s| s.to_string())).collect();
@@ -159,7 +175,7 @@ pub(crate) fn callers_via_callgraph_frontier(
 
 /// "Who reaches `q`?" over the full call graph: the DIRECT callers and the full TRANSITIVE set (the
 /// blast radius if `q` gained an effect). Works for any function, effectful or pure.
-pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str, want_json: bool) -> i32 {
+pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str, want_json: bool, complete: bool) -> i32 {
     // reverse adjacency: callee -> its direct callers.
     let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (caller, callees) in cg {
@@ -173,12 +189,23 @@ pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str,
     let tier = best_tier(names.iter().copied(), q);
     let targets: Vec<&str> = names.iter().copied().filter(|n| q_match(n, q, tier)).collect();
     if targets.is_empty() {
-        if want_json {
-            println!("{{}}");
-        } else {
-            println!("candor: no function matching `{q}` found in the call graph.");
+        // A nonexistent function is a LOUD error (exit 2), like `path`/`impact` — never an empty result at
+        // exit 0, which reads as an authoritative "nothing calls it" for a fn that doesn't exist (corpus-audit
+        // #3). Gated on a non-empty call graph so a report without one isn't misreported as "no such fn".
+        if names.is_empty() {
+            if want_json { println!("{{}}"); } else { println!("candor: no call graph in the report."); }
+            return 0;
         }
-        return 0;
+        // Only a COMPLETE graph (the sidecar, which lists every fn incl. pure leaves) can prove a name is
+        // absent. On the effect-only fallback (no sidecar), a miss is INCONCLUSIVE — a pure leaf called only
+        // by pure fns is simply invisible — so answer empty at exit 0, never a false "no such function" (#5).
+        if !complete {
+            if want_json { println!("{{}}"); }
+            else { println!("candor: no caller of `{q}` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers)."); }
+            return 0;
+        }
+        eprintln!("candor-query callers: no function matching '{q}' in the call graph");
+        return 2;
     }
 
     let direct: BTreeSet<&str> = targets.iter().flat_map(|t| rev.get(t).into_iter().flatten().copied()).collect();

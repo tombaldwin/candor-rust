@@ -4,7 +4,7 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## spec 0.16 — the callgraph-aware baseline guard (2026-07-16) — current floor
+## spec 0.17 — the callgraph-aware baseline guard (2026-07-16) — current floor
 
 candor-scan and candor-query now declare **spec `0.16`** (both at crate **0.16.0**; the internal
 **candor-report** and **candor-classify** libs move lockstep to **0.16.0**). **0.16 is the current spec

@@ -167,7 +167,7 @@ pub struct ReportEntry {
 /// from the engine build id (`ReportMeta::version`) and from the crate release version. Bumped only when
 /// the spec contract changes; emitted as the envelope's `spec` so a consumer can see which contract a
 /// report conforms to. Both backends and the JVM port declare the SAME value — see candor-spec §2.1.
-pub const SPEC_VERSION: &str = "0.16";
+pub const SPEC_VERSION: &str = "0.17";
 
 /// The envelope header: which engine produced the report (`version` = build id, `toolchain`), and which
 /// candor-spec contract it implements (`spec`).
@@ -463,8 +463,8 @@ mod tests {
         assert!(!empty.contains("unknownWhy"), "empty unknownWhy must be omitted: {empty}");
         assert!(!empty.contains("entryPoint"), "false entryPoint must be omitted: {empty}");
         // the spec contract version (§2.1) is emitted in the envelope header.
-        assert!(s.contains("\"spec\":\"0.16\""), "envelope must carry the spec version: {s}");
-        assert_eq!(SPEC_VERSION, "0.16");
+        assert!(s.contains("\"spec\":\"0.17\""), "envelope must carry the spec version: {s}");
+        assert_eq!(SPEC_VERSION, "0.17");
     }
 
     #[test]

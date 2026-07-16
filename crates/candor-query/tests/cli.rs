@@ -207,7 +207,7 @@ fn write_containment_report(dir: &std::path::Path, name: &str, web_has_db: bool)
     let prefix = dir.join(name).to_string_lossy().into_owned();
     let web_direct = if web_has_db { r#","direct":["Db"]"# } else { "" };
     let report = format!(
-        r#"{{"candor":{{"version":"scan-test","toolchain":"stable","spec": "0.16"}},"package":"cnt","functions":[
+        r#"{{"candor":{{"version":"scan-test","toolchain":"stable","spec": "0.17"}},"package":"cnt","functions":[
             {{"fn":"app::data::save","inferred":["Db"],"direct":["Db"]}},
             {{"fn":"app::web::page","inferred":["Db"]{web_direct}}}
         ]}}"#
@@ -257,7 +257,7 @@ fn gate_verdict_absent_parts_is_the_clean_verdict() {
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["spec"], "0.16");
+    assert_eq!(v["spec"], "0.17");
     assert_eq!(v["violations"], serde_json::json!([]));
 }
 
@@ -337,7 +337,7 @@ fn diff_reports_a_gained_effect() {
     let cur = f.dir.join("c").to_string_lossy().into_owned();
     let mk = |prefix: &str, effs: &str| {
         std::fs::write(format!("{prefix}.d.scan.json"), format!(
-            r#"{{"candor":{{"version":"scan-test","toolchain":"stable","spec": "0.16"}},"functions":[
+            r#"{{"candor":{{"version":"scan-test","toolchain":"stable","spec": "0.17"}},"functions":[
                 {{"fn":"worker","inferred":[{effs}],"direct":[{effs}]}}]}}"#)).unwrap();
     };
     mk(&base, r#""Fs""#);
@@ -371,6 +371,39 @@ fn whatif_unknown_effect_exits_2() {
     assert!(stderr.contains("unknown effect"), "must report `unknown effect`, got:\n{stderr}");
 }
 
+#[test]
+fn where_unknown_effect_exits_2() {
+    // corpus-audit #3: a typo'd / unknown effect NAME must be a LOUD error (exit 2), never a false-empty
+    // {directly:[],inherited:[]} at exit 0 (reads as "nothing performs Net" when the user typed "Network").
+    let f = Fixture::new("wheff");
+    f.write_report();
+    let out = Command::new(bin()).arg("where").arg("Networkxyz").arg("--report").arg(f.report_path())
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2), "where with an unknown effect must exit 2");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown effect"),
+        "must report `unknown effect`, got:\n{}", String::from_utf8_lossy(&out.stderr));
+    // a VALID effect that is simply absent stays a legitimate 0-result at exit 0
+    let ok = Command::new(bin()).arg("where").arg("Db").arg("--report").arg(f.report_path())
+        .output().expect("run candor-query");
+    assert_eq!(ok.status.code(), Some(0), "a known-but-absent effect is a valid 0-result, not an error");
+}
+
+#[test]
+fn callers_nonexistent_fn_exits_2() {
+    // corpus-audit #3: a nonexistent function must exit 2, like path/impact — never empty at exit 0.
+    let f = Fixture::new("cleff");
+    f.write_report();
+    let out = Command::new(bin()).arg("callers").arg("zzz_no_such_fn").arg("--report").arg(f.report_path())
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2), "callers of a nonexistent fn must exit 2");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no function matching"),
+        "must report `no function matching`, got:\n{}", String::from_utf8_lossy(&out.stderr));
+    // a real function resolves normally at exit 0
+    let ok = Command::new(bin()).arg("callers").arg("inner").arg("--report").arg(f.report_path())
+        .output().expect("run candor-query");
+    assert_eq!(ok.status.code(), Some(0), "callers of a real fn resolves at exit 0");
+}
+
 // ── fix: the boundary hoist (integrations/FIX-SPEC.md) — the remedial inverse of whatif ────────────
 
 /// The `orderflow` shape: `api::get_quote → domain::quote_bulk → domain::price_quote → infra::fetch_rate`,
@@ -378,7 +411,7 @@ fn whatif_unknown_effect_exits_2() {
 /// domain functions a violation — the api caller is the allowed-layer hoist target. Returns the prefix.
 fn write_orderflow_fixture(f: &Fixture) {
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "of",
   "functions": [
     { "fn": "api::get_quote",     "loc": "src/api.rs:3:1",    "inferred": ["Net"], "hash": "of#gq", "paths": ["/x"], "calls": ["domain::quote_bulk"] },
@@ -432,7 +465,7 @@ fn fix_surfaces_higher_hoist_tradeoff() {
     // option — hoisting there keeps api::get_quote pure too, threading the value through one more signature.
     let f = Fixture::new("fixhigher");
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "of",
   "functions": [
     { "fn": "main::run",          "loc": "src/main.rs:1:1",  "inferred": ["Net"], "hash": "of#mr", "paths": ["/x"], "calls": ["api::get_quote"] },
@@ -469,7 +502,7 @@ fn fix_prefers_the_effect_performing_match() {
     // (which prefer the effectful match) emit the real fix. (/code-review — start-resolution parity.)
     let f = Fixture::new("fixresolve");
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "of",
   "functions": [
     { "fn": "cache::save", "loc": "src/c.rs:1:1", "inferred": [], "hash": "of#cs", "paths": ["/x"], "calls": [] },
@@ -495,7 +528,7 @@ fn fix_sandwiched_layer_is_not_a_clean_hoist() {
     // hoisting Net to api::mid would leave domain::top violating — NOT a clean hoist. (/code-review.)
     let f = Fixture::new("fixsandwich");
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "of",
   "functions": [
     { "fn": "domain::top",   "loc": "src/d.rs:1:1", "inferred": ["Net"], "hash": "of#t", "paths": ["/x"], "calls": ["api::mid"] },
@@ -528,7 +561,7 @@ fn fix_no_clean_hoist_offers_port_and_policy() {
     // it names the two honest options (port / policy relax), and cleanHoist is false.
     let f = Fixture::new("fixnc");
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "nc",
   "functions": [
     { "fn": "domain::main_flow",   "loc": "src/d.rs:1:1", "inferred": ["Net"], "hash": "nc#mf", "paths": ["/x"], "calls": ["domain::price_quote"] },
@@ -659,7 +692,7 @@ fn unverified_flags_an_unknown_in_a_deny_scope() {
     // upgrade; `--strict` exits 1. A provably-pure domain fn is not flagged. (eval/fixloop/DISPATCH-NOTE.md.)
     let f = Fixture::new("fixunv");
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "of",
   "functions": [
     { "fn": "domain::price", "loc": "src/d.rs:1:1", "inferred": ["Unknown"], "unknownWhy": ["callback:injected"], "hash": "of#p", "paths": ["/x"] },
@@ -692,7 +725,7 @@ fn unverified_provably_pure_scope_is_clean() {
     // A domain with only real-effect-free, resolvable functions → no Unknown holes → clean, exit 0 even strict.
     let f = Fixture::new("fixunvok");
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "of",
   "functions": [
     { "fn": "domain::calc", "loc": "src/d.rs:1:1", "inferred": [], "hash": "of#c", "paths": ["/x"] }
@@ -718,7 +751,7 @@ fn unverified_provably_pure_scope_is_clean() {
 /// disclosure depends on the hierarchy gate.
 fn write_frontier_fixture(f: &Fixture, with_hierarchy: bool) {
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "app",
   "functions": [
     { "fn": "mod.Target.work", "inferred": ["Fs"], "direct": ["Fs"] },
@@ -814,7 +847,7 @@ fn blindspots_ranks_sources_by_unknown_blast_radius() {
     // transitive caller set; totalUnknown counts every Unknown-carrying fn (sources + inheritors).
     let f = Fixture::new("blindspots");
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.16" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.17" },
   "package": "bs",
   "functions": [
     { "fn": "src_a", "inferred": ["Unknown"], "unknownWhy": ["callback:unresolved call"] },
