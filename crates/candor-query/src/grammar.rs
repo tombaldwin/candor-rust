@@ -158,7 +158,13 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
                     policy = Some(v.clone());
                     i += 1;
                 } else {
+                    // A `--policy` with no value is a LOUD failure (exit 2), exactly like `--report` above —
+                    // never a warn-and-continue that leaves `policy = None`. Continuing silently gated against
+                    // whatever `CANDOR_POLICY`/.candor/config resolved (a DIFFERENT policy than the user named
+                    // on the line), or answered a policy-optional verb with no verdict at exit 0 — a gate
+                    // firing on the wrong policy, or not at all (Fable-review finding G).
                     eprintln!("candor-query: --policy requires a <file> argument");
+                    std::process::exit(2);
                 }
             }
             // A `-`-prefixed token that is not a known candor flag is a TYPO, not a positional — reject it

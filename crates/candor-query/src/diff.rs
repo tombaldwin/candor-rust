@@ -406,9 +406,17 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         match a.as_str() {
             "--json" => want_json = true,
             "--strict" => strict = true,
-            other if other.starts_with("--") => {
+            // candor-ts output-mode flags (#2): tolerate for cross-engine `candor gains --text` (swift's gains
+            // parser and the shared grammar both do — this bespoke parser must too, or it breaks the #2 rule).
+            "--text" | "--human" => {}
+            // ANY `-`-prefixed token of length > 1 that is not recognized is a TYPO — reject it LOUD (exit 2),
+            // matching the shared grammar (`starts_with('-') && len > 1`). Matching only `--` let a single-dash
+            // `-strict` fall through to a positional and be DROPPED (only the first two positionals are read),
+            // so `gains cur base -strict` ran at exit 0 with the gate silently disarmed (Fable-review finding
+            // C — the exact swallow #3 exists to close, in the reference engine). A bare `-` stays positional.
+            other if other.starts_with('-') && other.len() > 1 => {
                 let hint = if other == "--policy" {
-                    " — gains is a diff view; to FAIL CI on a newly-gained effect gate at scan time with a `deny <E> gained` policy (AS-EFF-005), or use `--strict` to fail on ANY gain"
+                    " — gains is a diff view; to FAIL CI on a newly-gained effect, gate at scan time with a `deny <E> gained` policy (AS-EFF-005), or use `--strict` to fail on ANY gain"
                 } else {
                     ""
                 };
