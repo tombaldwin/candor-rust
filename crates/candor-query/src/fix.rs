@@ -391,7 +391,10 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         let remedies: Vec<_> = plans.values().map(|p| p.to_json()).collect();
         let out = serde_json::json!({ "ok": remedies.is_empty(), "remedies": remedies });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
-        return 0;
+        // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes
+        // the exit code follow `ok`, so a CI job can REQUIRE zero outstanding crossings (mirrors
+        // `unverified --strict`). exit 2 (no report / unreadable policy) already returned above.
+        return if g.strict && !plans.is_empty() { 1 } else { 0 };
     }
 
     if plans.is_empty() {
@@ -412,5 +415,12 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         print!("{s}");
     }
     println!("\n  (Advisory: candor names the shape, you write the code; the gate re-scan verifies each fix.)");
+    if g.strict {
+        // `--strict` turns the advisory into a CI gate: a non-empty remedy set is a failure (exit 1), so a
+        // job can REQUIRE the boundary be clean before merge (mirrors `unverified --strict`). Without it the
+        // remedy prints and the run stays green — the agent-loop default.
+        println!("  (--strict: {n} outstanding boundary crossing(s) → exit 1)");
+        return 1;
+    }
     0
 }
