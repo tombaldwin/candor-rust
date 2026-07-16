@@ -692,6 +692,65 @@ fn fix_gate_clean_report_is_ok() {
 }
 
 #[test]
+fn fix_gate_strict_exits_1_on_a_crossing_advisory_otherwise() {
+    // #3 exit-code contract: fix-gate is ADVISORY (exit 0) by default so the agent fix-loop reads the remedy
+    // and edits — but `--strict` makes a non-empty remedy set a CI failure (exit 1), matching `unverified
+    // --strict`. Same crossing, two exit codes by flag; JSON `ok` is unchanged (still false).
+    let f = Fixture::new("fixgatestrict");
+    write_orderflow_fixture(&f);
+    let pol = write_policy(&f, "p.policy", "deny Net domain\n");
+    // default: advisory, exit 0
+    let adv = Command::new(bin()).args(["fix-gate", "--report", &f.prefix, "--policy", &pol])
+        .output().expect("run candor-query");
+    assert_eq!(adv.status.code(), Some(0), "fix-gate is advisory by default (exit 0)");
+    // --strict: a crossing exists → exit 1
+    let strict = Command::new(bin()).args(["fix-gate", "--report", &f.prefix, "--policy", &pol, "--strict"])
+        .output().expect("run candor-query");
+    assert_eq!(strict.status.code(), Some(1), "--strict with an outstanding crossing must exit 1");
+    // --strict --json: exit follows ok, ok stays false
+    let sj = Command::new(bin()).args(["fix-gate", "--report", &f.prefix, "--policy", &pol, "--strict", "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(sj.status.code(), Some(1), "--strict --json with a crossing exits 1");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(sj.stdout).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(false), "ok is still false regardless of --strict");
+    // --strict over a CLEAN report → exit 0 (no crossing to fail on)
+    let cleanpol = write_policy(&f, "clean.policy", "deny Net nonexistentlayer\n");
+    let clean = Command::new(bin()).args(["fix-gate", "--report", &f.prefix, "--policy", &cleanpol, "--strict"])
+        .output().expect("run candor-query");
+    assert_eq!(clean.status.code(), Some(0), "--strict over a clean report exits 0");
+}
+
+#[test]
+fn gains_strict_exits_1_and_rejects_silently_swallowed_policy() {
+    // #3: gains is a diff view (exit 0 by default). Two fixes: (a) `--strict` fails on ANY gained effect so a
+    // supply-chain CI job can require a bump introduce no new capability; (b) an unknown flag (notably a
+    // `--policy` a user reaches for expecting a gate) is REJECTED loud (exit 2), never swallowed → an exit-0
+    // false-clean. The effect-specific gate stays the scan-time `deny <E> gained` policy.
+    let f = Fixture::new("gainsstrict");
+    // baseline: a fn doing Fs; current: same fn now does Fs+Net → a gained Net effect.
+    let base_pre = format!("{}.base", f.prefix);
+    let cur_pre = format!("{}.cur", f.prefix);
+    let base_report = r#"{"candor":{"version":"t","spec":"0.17"},"package":"lib","functions":[{"fn":"lib::f","loc":"s:1","inferred":["Fs"],"hash":"h"}]}"#;
+    let cur_report = r#"{"candor":{"version":"t","spec":"0.17"},"package":"lib","functions":[{"fn":"lib::f","loc":"s:1","inferred":["Fs","Net"],"hash":"h"}]}"#;
+    std::fs::write(format!("{base_pre}.lib.scan.json"), base_report).unwrap();
+    std::fs::write(format!("{cur_pre}.lib.scan.json"), cur_report).unwrap();
+    let (curs, bases) = (cur_pre.clone(), base_pre.clone());
+    // default: advisory, exit 0 even though Net was gained
+    let adv = Command::new(bin()).args(["gains", &curs, &bases]).output().expect("run");
+    assert_eq!(adv.status.code(), Some(0), "gains is advisory by default (exit 0)");
+    assert!(String::from_utf8_lossy(&adv.stdout).contains("Net"), "gained Net must be listed");
+    // --strict: a gain exists → exit 1
+    let strict = Command::new(bin()).args(["gains", &curs, &bases, "--strict"]).output().expect("run");
+    assert_eq!(strict.status.code(), Some(1), "--strict with a gained effect must exit 1");
+    // a silently-swallowed --policy is now a loud exit-2 error pointing at the real gate
+    let pol = Command::new(bin()).args(["gains", &curs, &bases, "--policy", "/x"]).output().expect("run");
+    assert_eq!(pol.status.code(), Some(2), "an unknown flag (--policy) must be rejected, not swallowed");
+    let se = String::from_utf8_lossy(&pol.stderr);
+    assert!(se.contains("unknown flag") && se.contains("gained"),
+        "must name the unknown flag + point at the `deny <E> gained` scan gate, got:\n{se}");
+}
+
+#[test]
 fn fix_gate_unreadable_policy_exits_2() {
     // Same fail-loud contract: an unreadable policy must exit 2, never emit an empty (falsely-clean) verdict.
     let f = Fixture::new("fixgatebadpol");

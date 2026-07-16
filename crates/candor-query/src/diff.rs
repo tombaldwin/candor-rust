@@ -393,13 +393,36 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
     // `gains <current> <baseline> [--json]` — the two-locator comparative verb (does NOT discover, like
     // `diff`). Locators resolve by the shared --report rule. The DEPRECATED old form allowed a trailing
     // `1` sentinel for JSON (handled below alongside `--json`).
-    let mut want_json = args.iter().any(|a| a == "--json");
-    let pos: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
+    // gains has its OWN arg parser (two positional locators, not the discovering §3.3.1 grammar). Recognize
+    // `--json` and `--strict`; REJECT any other `--`-flag loud (exit 2). Silently swallowing an unknown flag
+    // let `candor gains cur base --policy p` drop `--policy` on the floor and exit 0 — a CI author who thinks
+    // they gated a supply-chain diff ships a gate that never fires (the same silent-guess cardinal sin as the
+    // query grammar's typo'd-flag reject). gains has no `--policy` of its own: the effect-specific gate is a
+    // `deny <E> gained` policy at SCAN time (AS-EFF-005); `--strict` here fails on ANY gained effect.
+    let mut want_json = false;
+    let mut strict = false;
+    let mut pos: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--json" => want_json = true,
+            "--strict" => strict = true,
+            other if other.starts_with("--") => {
+                let hint = if other == "--policy" {
+                    " — gains is a diff view; to FAIL CI on a newly-gained effect gate at scan time with a `deny <E> gained` policy (AS-EFF-005), or use `--strict` to fail on ANY gain"
+                } else {
+                    ""
+                };
+                eprintln!("candor-query gains: unknown flag `{other}`{hint}\n  known flags: --json, --strict");
+                return 2;
+            }
+            _ => pos.push(a.clone()),
+        }
+    }
     // Old trailing `1` sentinel → JSON (with a note); a `0` is the explicit non-JSON old form.
     let (cur_loc, base_loc) = match pos.as_slice() {
         [a, b, ..] => (resolve_locator(a), resolve_locator(b)),
         _ => {
-            eprintln!("usage: candor-query gains <current> <baseline> [--json]");
+            eprintln!("usage: candor-query gains <current> <baseline> [--json] [--strict]");
             return 2;
         }
     };
@@ -491,10 +514,18 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         // a signal, disclosed as `coverageDelta`. JSON-only (the TSV is a pinned consumer surface).
         attach_coverage(&mut v, load_coverage(cur_pre), load_coverage(base_pre));
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
-        return 0;
+        // Advisory by default (exit 0 — gains is a diff view); `--strict` fails on ANY gained effect so a
+        // supply-chain CI job can require a dependency bump introduce no new capability (mirrors
+        // `unverified --strict`). The effect-SPECIFIC gate stays the scan-time `deny <E> gained` policy.
+        return if strict && !out.is_empty() { 1 } else { 0 };
     }
+    let gained_any = !out.is_empty();
     for (func, e) in out {
         println!("{func}\t{e}");
+    }
+    if strict && gained_any {
+        eprintln!("candor gains --strict: the surface gained new effect(s) vs the baseline → exit 1");
+        return 1;
     }
     0
 }
