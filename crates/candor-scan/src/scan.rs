@@ -1198,7 +1198,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // deterministic, not lucky. Pure call-graph + name analysis (no LLM); honest fallback when
     // nothing clears the bar. See surface.rs / SURFACE-BEST-FIND-DESIGN.md. STDERR only (stdout may
     // carry the JSON report), and AFTER the histogram + κ ledger in output order.
-    if !quiet {
+    // The surface opener is for EXPLORATION scans; under an active policy gate the headline is the VERDICT,
+    // and a reassuring "nothing hidden" / "most surprising reach" line ABOVE the violation lines reads as a
+    // contradiction in a CI log (#18). Suppress it when gating — the gate summary + fix-gate pointer carry.
+    if !quiet && policy_path.is_none() {
         crate::surface::emit(&inferred, &direct, &calls, &loc);
     }
 
@@ -1291,6 +1294,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         }
         if v.is_empty() {
             eprintln!("candor-scan: policy ✓ (advisory floor — the syntactic backend under-reports; the nightly engine is the sound gate)");
+            // A CLEAN gate has no violation lines for the exploration opener to contradict, so emit it HERE
+            // (after the ✓) — the pre-gate suppression at the top only exists to avoid a "nothing hidden"
+            // line ABOVE a FAILING gate's violations (#18); a passing gated scan should not lose it (#8).
+            if !quiet {
+                crate::surface::emit(&inferred, &direct, &calls, &loc);
+            }
         } else {
             eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
             // Append-only remedy pointer (gate-FAILURE path only): the summary line above is

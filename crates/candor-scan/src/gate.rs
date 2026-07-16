@@ -153,8 +153,11 @@ pub(crate) fn unverified_holes(
     all: &[String],
     inferred: &HashMap<String, BTreeSet<&'static str>>,
 ) -> Vec<(String, String)> {
-    use candor_classify::policy::{parse_policy, rule_and_upgrade, unverified_hole_rule};
-    let rules = parse_policy(policy_text).rules;
+    use candor_classify::policy::{parse_policy_quiet, rule_and_upgrade, unverified_hole_rule};
+    // QUIET re-parse: the gate check already parsed this same policy and emitted any malformed-rule
+    // warnings — parsing again here (for the advisory `unverified` disclosure) would print each twice in
+    // the CI log (#21). The verdict path (gate check) keeps the warnings; this advisory path stays silent.
+    let rules = parse_policy_quiet(policy_text).rules;
     let empty: BTreeSet<&'static str> = BTreeSet::new();
     let mut out = Vec::new();
     for q in all {
