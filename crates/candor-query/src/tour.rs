@@ -134,7 +134,17 @@ pub(crate) fn cmd_tour(args: &[String]) -> i32 {
                 score: f.score,
             })
             .collect();
-        let out = serde_json::json!({ "reaches": reaches });
+        // The MACHINE half of the mostly-Unknown disclosure (Fable-review finding E): the text branch below
+        // qualifies "nothing hidden" over a ≥⅓-Unknown graph, but a JSON consumer (the agent loop) got a bare
+        // `{"reaches":[]}` and read it as clean — the same false all-clear, unreadable. ADDITIVE + present
+        // only when the threshold trips (byte-identical otherwise), like gains' `coverage` field. Same
+        // total/unknown denominators as the text gate.
+        let mut out = serde_json::json!({ "reaches": reaches });
+        let total = entries.iter().filter(|e| !e.inferred.is_empty()).count();
+        let unknown = entries.iter().filter(|e| e.inferred.iter().any(|x| x == "Unknown")).count();
+        if total > 0 && unknown * 3 >= total {
+            out["unknown"] = serde_json::json!({ "count": unknown, "total": total });
+        }
         println!("{}", serde_json::to_string(&out).unwrap());
         return 0;
     }

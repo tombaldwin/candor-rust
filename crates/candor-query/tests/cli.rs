@@ -748,6 +748,28 @@ fn gains_strict_exits_1_and_rejects_silently_swallowed_policy() {
     let se = String::from_utf8_lossy(&pol.stderr);
     assert!(se.contains("unknown flag") && se.contains("gained"),
         "must name the unknown flag + point at the `deny <E> gained` scan gate, got:\n{se}");
+    // Fable-review finding C: a SINGLE-dash typo must also reject (exit 2), not fall through to a positional
+    // and be dropped (which ran the gate disarmed at exit 0). Matches the shared grammar's `-`+len>1 rule.
+    let dash = Command::new(bin()).args(["gains", &curs, &bases, "-strict"]).output().expect("run");
+    assert_eq!(dash.status.code(), Some(2), "a single-dash typo (`-strict`) must reject, not silently drop");
+    // Fable-review finding D: a valid cross-engine output flag (`--text`) must be TOLERATED (exit != 2), like
+    // every other verb under the #2 contract — the bespoke gains parser must not be the one that rejects it.
+    let txt = Command::new(bin()).args(["gains", &curs, &bases, "--text"]).output().expect("run");
+    assert_ne!(txt.status.code(), Some(2), "--text (a valid cross-engine flag) must be tolerated by gains");
+}
+
+#[test]
+fn valueless_policy_flag_exits_2_not_silent() {
+    // Fable-review finding G: `--policy` with no value must exit 2 (like `--report`), never warn-and-continue
+    // with policy=None — which silently gated against CANDOR_POLICY/.candor/config (a DIFFERENT policy than
+    // named) or answered a policy-optional verb with no verdict at exit 0.
+    let f = Fixture::new("valpol");
+    f.write_report();
+    let out = Command::new(bin()).args(["where", "Fs", "--report", &f.report_path(), "--policy"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2), "a valueless --policy must exit 2");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--policy requires"),
+        "must name the missing argument");
 }
 
 #[test]
