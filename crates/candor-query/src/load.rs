@@ -392,21 +392,21 @@ mod tests {
         let prefix = dir.join("report").to_string_lossy().into_owned();
         std::fs::write(
             dir.join("report.a.scan.json"),
-            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.15"},
+            r#"{"candor":{"version":"v","toolchain":"t","spec": "0.16"},
                 "coverage":{"uncovered":[{"name":"x","calls":2}]},
                 "functions":[{"fn":"a::f","inferred":["Net"]}]}"#,
         )
         .unwrap();
         std::fs::write(
             dir.join("report.b.scan.json"),
-            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.15"},
+            r#"{"candor":{"version":"v","toolchain":"t","spec": "0.16"},
                 "coverage":{"uncovered":[{"name":"x","calls":1},{"name":"y","calls":5}]},
                 "functions":[]}"#,
         )
         .unwrap();
         std::fs::write(
             dir.join("report.c.scan.json"),
-            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.15"},"functions":[]}"#,
+            r#"{"candor":{"version":"v","toolchain":"t","spec": "0.16"},"functions":[]}"#,
         )
         .unwrap();
         let cov = load_coverage(&prefix).expect("a ledger-carrying prefix must load");
@@ -426,7 +426,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&plain);
         std::fs::write(
             plain.join("report.d.scan.json"),
-            r#"{"candor":{"version":"v","toolchain":"t","spec":"0.15"},"functions":[]}"#,
+            r#"{"candor":{"version":"v","toolchain":"t","spec": "0.16"},"functions":[]}"#,
         )
         .unwrap();
         assert!(load_coverage(&plain.join("report").to_string_lossy()).is_none());
