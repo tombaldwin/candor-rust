@@ -106,6 +106,22 @@ pub(crate) struct Shape {
 }
 
 /// Parse the canonical grammar, accepting the deprecated old forms with a stderr note.
+/// Suggest the nearest known flag for a typo'd one (longest shared prefix ≥3): `--polciy` → `--policy`.
+fn did_you_mean_flag(unknown: &str) -> String {
+    const KNOWN: [&str; 6] = ["--report", "--policy", "--json", "--text", "--strict", "--include-unknown"];
+    let u = unknown.trim_start_matches('-').to_lowercase();
+    KNOWN
+        .iter()
+        .filter_map(|k| {
+            let kn = k.trim_start_matches('-');
+            let shared = u.chars().zip(kn.chars()).take_while(|(a, b)| a == b).count();
+            (shared >= 3).then_some((shared, *k))
+        })
+        .max_by_key(|(s, _)| *s)
+        .map(|(_, k)| format!(" — did you mean `{k}`?"))
+        .unwrap_or_default()
+}
+
 pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
     let mut report: Option<String> = None;
     let mut policy: Option<String> = None;
@@ -120,6 +136,9 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
         let a = args[i].as_str();
         match a {
             "--json" => want_json = true,
+            // candor-ts output-mode flags (#8): rust prose is always the default, so accept + ignore them —
+            // cross-engine `candor <verb> --text` must not error just because it routed to a rust report.
+            "--text" | "--human" => {}
             "--strict" => strict = true,
             "--include-unknown" => include_unknown = true,
             "--report" => {
@@ -141,6 +160,18 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
                 } else {
                     eprintln!("candor-query: --policy requires a <file> argument");
                 }
+            }
+            // A `-`-prefixed token that is not a known candor flag is a TYPO, not a positional — reject it
+            // LOUD (exit 2), never silently swallow it. Silently ignoring `--polciy` runs the query with NO
+            // policy and exits green: a CI author who typos `--policy` ships a gate that never fires (corpus
+            // re-audit cardinal sin — "an ambiguous target is a loud error, never a silent guess"). A bare
+            // `-` (a stdin/stdout stand-in some tools use) stays a positional.
+            other if other.starts_with('-') && other.len() > 1 => {
+                eprintln!(
+                    "candor-query: unknown flag `{other}`{}\n  known flags: --report, --policy, --json, --text, --strict, --include-unknown",
+                    did_you_mean_flag(other)
+                );
+                std::process::exit(2);
             }
             _ => positional.push(args[i].clone()),
         }
