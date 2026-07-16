@@ -365,11 +365,11 @@
         let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
         // deliberately NOT the `….<crate>.scan.json` filename shape — only the envelope names it.
         std::fs::write(d.join("purity-claim.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.17"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.18"}},
             "package": "dep-c",
             "functions": []}}"#)).unwrap();
         std::fs::write(d.join("multi.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.17"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.18"}},
             "packages": ["alpha", "beta"],
             "functions": []}}"#)).unwrap();
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
@@ -2470,8 +2470,8 @@ trait G {
             "README must not claim reference-implementation status (family ruling: candor-java is the reference)");
         assert!(!agents.to_lowercase().contains("the reference implementation of"),
             "AGENTS must not claim reference-implementation status");
-        assert!(readme.contains("spec 0.17"), "README must state the spec 0.17 floor");
-        assert!(agents.contains("spec 0.17"), "AGENTS must state the spec 0.17 floor");
+        assert!(readme.contains("spec 0.18"), "README must state the spec 0.18 floor");
+        assert!(agents.contains("spec 0.18"), "AGENTS must state the spec 0.18 floor");
     }
 
     #[test]
@@ -2489,7 +2489,7 @@ trait G {
         inferred.insert("b".into(), ["Net"].into_iter().collect()); // covered by the UNIONed duplicate
         inferred.insert("newfn".into(), ["Db"].into_iter().collect()); // absent from baseline — exempt
         let report = |ver: &str| format!(
-            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec": "0.17"}},
+            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec": "0.18"}},
                 "functions":[{{"fn":"a","inferred":["Fs"]}},
                              {{"fn":"b","inferred":[]}},
                              {{"fn":"b","inferred":["Net"]}}]}}"#
