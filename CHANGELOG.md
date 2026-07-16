@@ -4,7 +4,34 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## spec 0.15 — the coverage envelope (2026-07-15) — current floor
+## spec 0.16 — the callgraph-aware baseline guard (2026-07-16) — current floor
+
+candor-scan and candor-query now declare **spec `0.16`** (both at crate **0.16.0**; the internal
+**candor-report** and **candor-classify** libs move lockstep to **0.16.0**). **0.16 is the current spec
+floor** — the ratchet from 0.15. It sharpens the scan-time baseline ratchet so the hardest
+supply-chain shape can no longer slip through as "new code".
+
+### 🕸️ callgraph-aware baseline guard ⟨0.16⟩ — pure→effectful is caught
+
+The scan-time ratchet (`candor-scan --gate --baseline`) now keys function EXISTENCE on the baseline
+**callgraph sidecar** when present (the resolved report path with `.json` swapped for
+`.callgraph.json`; SPEC §2.2 records every analyzed fn, including PURE leaves that reports omit). A fn
+that is a baseline callgraph node — even a **baseline-pure leaf** with an empty effect set — that now
+performs ANY effect is a **GAIN violation** (exit 1). This closes the report-only blind spot where a
+**formerly-pure function turning effectful** was absent from the baseline report and so read as exempt
+"new code". A fn genuinely absent from the callgraph stays exempt (real new code). This is the `gains`
+`origin` existence rule (§3.1 ⟨0.12⟩) applied to the scan ratchet. When the sidecar is **absent** the
+guard degrades to the pre-0.16 report-only existence (with a one-time stderr note that it is weaker);
+a **corrupt** sidecar is `Invalid` (exit 2), never a silent narrowing.
+
+### ⚠️ Unknown-only gain is advisory, not exit 1 ⟨0.16⟩
+
+A baseline→current gain consisting **only of `Unknown`** (no real §6 boundary effect gained) is now an
+**advisory**, not a hard violation: the ratchet fires only on gaining a REAL boundary effect. An
+Unknown-only widening surfaces as a disclosed advisory (verdict-preserving), keeping the gate focused
+on genuine supply-chain effect gains rather than resolution noise.
+
+## spec 0.15 — the coverage envelope (2026-07-15)
 
 candor-scan and candor-query now declare **spec `0.15`** (both at crate **0.15.0**; the internal
 **candor-report** and **candor-classify** libs move lockstep to **0.15.0**). **0.15 is the current spec

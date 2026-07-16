@@ -587,7 +587,7 @@ effects the kernel actually observed — ground truth that trusts nothing about 
 
 ## Status
 
-Beta — the candor family's **deep Rust engine**, declaring **spec 0.15** (the same contract the
+Beta — the candor family's **deep Rust engine**, declaring **spec 0.16** (the same contract the
 reference engine, [candor-java](https://github.com/tombaldwin/candor-java), declares; the
 cross-engine conformance suite pins the agreement). The stable scanner is
 [calibrated on 35 real crates](eval/calibration/CALIBRATION.md) (no false positives in library

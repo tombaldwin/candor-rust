@@ -257,7 +257,7 @@ fn gate_verdict_absent_parts_is_the_clean_verdict() {
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["spec"], "0.15");
+    assert_eq!(v["spec"], "0.16");
     assert_eq!(v["violations"], serde_json::json!([]));
 }
 
