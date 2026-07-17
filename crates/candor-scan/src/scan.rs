@@ -1152,7 +1152,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             .map(|(cr, n)| candor_report::CoverageEntry { name: cr.clone(), calls: *n })
             .collect(),
     });
-    let body = candor_report::to_packaged_report_json_full(&meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units)
+    // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed universe = every fn candor formed a judgment for =
+    // `all` (the §2.2 callgraph node set, pure leaves included — NOT the effectful-only `entries`). count lets
+    // a bare-envelope consumer compute the pure count (count − |functions|); digest fingerprints the set for
+    // same-engine re-scan agreement. Recorded toward the --gate-json verdict too (analyzed:{count}).
+    let analyzed = {
+        let mut sorted = all.clone();
+        sorted.sort();
+        candor_report::Analyzed { count: sorted.len(), digest: candor_report::fnv1a_hex(&sorted) }
+    };
+    crate::gate::record_gate_analyzed(analyzed.count, &unanalyzed_units);
+    let body = candor_report::to_packaged_report_json_full(
+        &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed))
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave
