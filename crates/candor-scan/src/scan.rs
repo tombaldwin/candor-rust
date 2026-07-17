@@ -1020,6 +1020,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let tablesacc = propagate_str(&tables, &calls, &all);
     let incompleteacc = propagate(&incomplete, &calls, &all); // transitive masking-incompleteness
     let blind_acc = propagate_str(&blind_direct, &calls, &all); // transitive per-fn blind reach
+    // Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the Unknown reason CLASS must travel the
+    // call graph the same way the Unknown EFFECT does, so `deny E Unknown[reflect]` at a caller inheriting
+    // Unknown from a reflect-caused callee still fires. Classify each fn's DIRECT unknown_why tokens to
+    // class tokens, then propagate transitively (mirrors the java gate's reasonClassAcc). Report unchanged.
+    let reason_class_direct: HashMap<String, BTreeSet<String>> = unknown_why
+        .iter()
+        .map(|(f, whys)| {
+            let classes = whys
+                .iter()
+                .map(|w| candor_classify::policy::ReasonClass::classify(w).token().to_string())
+                .collect();
+            (f.clone(), classes)
+        })
+        .collect();
+    let reason_class_acc = propagate_str(&reason_class_direct, &calls, &all);
     // The genuinely-blind dep crates (the per-scan κ "unlisted" set): seen, never classified, not
     // dep-report-covered, not calibrated. A fn's `invisible` = its transitive blind reach ∩ this set.
     // ⟨0.15 staged⟩ Computed ONCE, with the call counts, as the κ-coverage LEDGER: the same list (same
@@ -1263,7 +1278,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
             return (2, json_body);
         };
-        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc);
+        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc);
         for gv in &v {
             let line = format!("[{}] {}", gv.rule, gv.detail);
             if stdout_is_json {

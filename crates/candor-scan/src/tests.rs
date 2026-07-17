@@ -997,7 +997,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
         let v = policy_violations(
             "deny Net api\nallow Net in api good.example.com\nforbid ui -> db\n",
-            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc,
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty,
         );
         assert_eq!(v.len(), 3, "{}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
         // 006 names the denied effect in `effects` (the denied SET, not just the message text).
@@ -1006,15 +1006,62 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // 009 is a layer-flow — no single effect, so `effects` is empty.
         assert!(v.iter().any(|g| g.rule == "AS-EFF-009" && g.func == "ui::draw" && g.effects.is_empty()));
         // clean policy -> no violations; `pure` flags ANY effect incl. the Db fn.
-        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).is_empty());
-        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).len(), 1);
+        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty).is_empty());
+        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty).len(), 1);
         // the Db table allowlist: db::run reaches audit.log — outside `ledger.*` -> violation;
         // covered by `audit.*` -> clean. ui::draw INHERITS Db but the literal propagation is the
         // caller's tablesacc, supplied here only for db::run, so only db::run flags.
-        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc);
+        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty);
         assert_eq!(bad.len(), 1, "{}", bad.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
         assert!(bad[0].detail.contains("audit.log"));
-        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc).is_empty());
+        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty).is_empty());
+    }
+
+    #[test]
+    fn reason_scoped_unknown_gate_fires_on_match_tolerates_mismatch() {
+        // A fn whose only effect is Unknown, classified `native` (rust's `native:extern fn` reason).
+        let all = vec!["dom::svc".to_string()];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inferred.insert("dom::svc".into(), ["Unknown"].into_iter().collect());
+        let calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let empty: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        let mut rc: HashMap<String, BTreeSet<String>> = HashMap::new();
+        rc.insert("dom::svc".into(), ["native".to_string()].into_iter().collect());
+        let gate = |pol: &str, rc: &HashMap<String, BTreeSet<String>>| {
+            policy_violations(pol, &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, rc)
+        };
+        // matching class → fires
+        assert_eq!(gate("deny Net Unknown[native]\n", &rc).len(), 1, "Unknown[native] must fire on a native-class Unknown");
+        // non-matching class → tolerated
+        assert!(gate("deny Net Unknown[reflect]\n", &rc).is_empty(), "Unknown[reflect] must tolerate a native-class Unknown");
+        // bare Unknown → fires regardless of class
+        assert_eq!(gate("deny Net Unknown\n", &rc).len(), 1, "bare deny Unknown fires on any Unknown");
+        // an Unknown with NO recorded reason class → treated as `unresolved` (conservative)
+        let none: HashMap<String, BTreeSet<String>> = HashMap::new();
+        assert_eq!(gate("deny Net Unknown[unresolved]\n", &none).len(), 1, "no reason class ⇒ unresolved");
+        assert!(gate("deny Net Unknown[reflect]\n", &none).is_empty(), "no reason class must NOT match a specific class");
+    }
+
+    #[test]
+    fn reason_class_propagates_transitively_to_callers() {
+        // The scale case: a caller inheriting Unknown from a native-caused callee is a native-class Unknown,
+        // even though the `native:` reason lives on the callee. propagate_str carries the class up (mirrors
+        // the java gate's reasonClassAcc); regression for the transitive-reason under-gating gap.
+        let all = vec!["dom::caller".to_string(), "dom::callee".to_string()];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inferred.insert("dom::caller".into(), ["Unknown"].into_iter().collect());
+        inferred.insert("dom::callee".into(), ["Unknown"].into_iter().collect());
+        let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+        calls.insert("dom::caller".into(), ["dom::callee".to_string()].into_iter().collect());
+        // only the callee carries the direct reason; propagate_str lifts the class to the caller.
+        let mut rc_direct: HashMap<String, BTreeSet<String>> = HashMap::new();
+        rc_direct.insert("dom::callee".into(), ["native".to_string()].into_iter().collect());
+        let rc_acc = crate::propagate::propagate_str(&rc_direct, &calls, &all);
+        let empty: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        let v = policy_violations("deny Net Unknown[native]\n", &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, &rc_acc);
+        assert_eq!(v.len(), 2, "Unknown[native] must fire on BOTH the native callee and the caller inheriting its Unknown");
     }
 
     #[test]
@@ -1036,7 +1083,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         inc.insert("a::mask".into(), ["Net"].into_iter().collect()); // mask also has an invisible reach
         let v = policy_violations(
             "allow Net api.stripe.com\n",
-            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &inc,
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &inc, &empty,
         );
         assert!(v.iter().any(|g| g.func == "a::mask" && g.detail.contains("cannot be certified")), "{:?}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
         assert!(!v.iter().any(|g| g.func == "a::clean"), "clean must certify: {:?}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());

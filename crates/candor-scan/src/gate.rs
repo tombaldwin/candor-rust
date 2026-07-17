@@ -27,6 +27,10 @@ pub(crate) fn policy_violations(
     pathsacc: &HashMap<String, BTreeSet<String>>,
     tablesacc: &HashMap<String, BTreeSet<String>>,
     incompleteacc: &HashMap<String, BTreeSet<&'static str>>,
+    // Transitive reason-CLASS tokens per fn (reflect/dispatch/…): the Unknown EFFECT propagates along the
+    // call graph, so its REASON must too — else a `deny E Unknown[reflect]` at a caller inheriting Unknown
+    // from a reflect-caused callee would see no class and NOT fire (under-gating). See the java reference.
+    reasonclassacc: &HashMap<String, BTreeSet<String>>,
 ) -> Vec<GateViolation> {
     use candor_classify::policy::{literal_allowed, parse_policy, scope_matches};
     let p = parse_policy(policy_text);
@@ -41,7 +45,7 @@ pub(crate) fn policy_violations(
                     continue;
                 }
             }
-            let hits: Vec<&str> = if r.effects.is_empty() {
+            let mut hits: Vec<&str> = if r.effects.is_empty() {
                 // `pure` — every EFFECT, but NOT `Unknown`: the §4 trust marker is not an effect
                 // (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). The reference
                 // engine and the deep backend exclude it identically — this engine wrongly counted an
@@ -51,6 +55,22 @@ pub(crate) fn policy_violations(
             } else {
                 inf.iter().copied().filter(|e| r.effects.contains(e)).collect()
             };
+            // Reason-scoped Unknown: a `deny E Unknown[classes]` (non-empty filter) keeps its Unknown hit
+            // ONLY for a fn whose TRANSITIVE reason classes include one of those classes; else tolerate it
+            // (wrong reason-class). Concrete effects in `hits` are untouched — only Unknown is scoped.
+            if hits.contains(&"Unknown") && !r.unknown_classes.is_empty() {
+                let want: BTreeSet<&str> = r.unknown_classes.iter().map(|c| c.token()).collect();
+                let fn_classes = reasonclassacc.get(q);
+                let matched = match fn_classes {
+                    // An Unknown with NO recorded reason is `unresolved` (conservative — stays in `[*]`/`[unresolved]`).
+                    None => want.contains("unresolved"),
+                    Some(cs) if cs.is_empty() => want.contains("unresolved"),
+                    Some(cs) => cs.iter().any(|t| want.contains(t.as_str())),
+                };
+                if !matched {
+                    hits.retain(|e| *e != "Unknown");
+                }
+            }
             if !hits.is_empty() {
                 out.push(GateViolation {
                     rule: "AS-EFF-006".into(),
