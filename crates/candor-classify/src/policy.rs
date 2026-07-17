@@ -14,12 +14,100 @@ use std::collections::BTreeSet;
 /// The honesty marker (SPEC §4). Denyable so `deny Unknown <scope>` forbids the *unverifiable* case.
 pub const UNKNOWN: &str = "Unknown";
 
+/// The NORMATIVE projection of a raw `unknown_why` reason onto a fixed, cross-engine reason CLASS
+/// (candor-spec REASON-SCOPED-UNKNOWN-DESIGN.md §1). Reason-scoped policies (`deny E Unknown[class]`)
+/// quantify over these classes, so the mapping MUST be identical in every engine — this mirrors the
+/// java reference `ReasonClass` (its `classify(String)` path, since rust emits raw string reasons). The
+/// class set is CLOSED (six members); a raw reason matching no pinned prefix maps to `Unresolved` —
+/// conservative: it stays in scope of any `Unknown[*]` / `Unknown[dynamic]` policy, never silently
+/// tolerated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReasonClass {
+    /// reflection / metaprogramming
+    Reflect,
+    /// unresolved virtual/dynamic dispatch, same-name ambiguity, invokedynamic
+    Dispatch,
+    /// callback / closure / function-value / async-continuation indirection
+    Indirect,
+    /// FFI / native boundary
+    Native,
+    /// generic unresolvable call/import, AND the catch-all for any unrecognized raw reason
+    Unresolved,
+    /// analysis not wired up (fixable, not a real dynamic hole): missing-config / no-tsconfig
+    Setup,
+}
+
+impl ReasonClass {
+    /// The lowercase policy-facing token (`deny E Unknown[<token>]`).
+    pub fn token(self) -> &'static str {
+        match self {
+            ReasonClass::Reflect => "reflect",
+            ReasonClass::Dispatch => "dispatch",
+            ReasonClass::Indirect => "indirect",
+            ReasonClass::Native => "native",
+            ReasonClass::Unresolved => "unresolved",
+            ReasonClass::Setup => "setup",
+        }
+    }
+
+    /// Parse a policy-facing token back to a class; `None` if it names no class.
+    pub fn from_token(t: &str) -> Option<ReasonClass> {
+        Some(match t {
+            "reflect" => ReasonClass::Reflect,
+            "dispatch" => ReasonClass::Dispatch,
+            "indirect" => ReasonClass::Indirect,
+            "native" => ReasonClass::Native,
+            "unresolved" => ReasonClass::Unresolved,
+            "setup" => ReasonClass::Setup,
+            _ => return None,
+        })
+    }
+
+    /// Map a raw `unknown_why` reason to its normative class — prefix-based (raw reasons carry a
+    /// `kind:detail` shape, e.g. `dispatch:foo::Bar`), unrecognized → `Unresolved`. Byte-identical
+    /// intent to the java `ReasonClass.classify(String)`.
+    pub fn classify(why: &str) -> ReasonClass {
+        let w = why.trim().to_ascii_lowercase();
+        if w.starts_with("reflect") || w == "dynamicmemberlookup" {
+            ReasonClass::Reflect
+        } else if w.starts_with("native") {
+            ReasonClass::Native
+        } else if w.starts_with("callback") || w.starts_with("closure") || w.starts_with("task-handoff") {
+            ReasonClass::Indirect
+        } else if w.starts_with("dispatch") || w.starts_with("indy") || w.starts_with("ambiguous") {
+            ReasonClass::Dispatch
+        } else if w.starts_with("missing-config") || w.starts_with("no-tsconfig") || w.starts_with("no-node_modules") {
+            ReasonClass::Setup
+        } else {
+            ReasonClass::Unresolved
+        }
+    }
+
+    /// The `dynamic` alias — every GENUINE blind-spot class (excludes `setup`), incl. `unresolved` (the
+    /// catch-all) so `Unknown[dynamic]` never under-gates. The design's recommended usable strict gate.
+    pub fn dynamic_set() -> BTreeSet<ReasonClass> {
+        [
+            ReasonClass::Reflect,
+            ReasonClass::Dispatch,
+            ReasonClass::Indirect,
+            ReasonClass::Native,
+            ReasonClass::Unresolved,
+        ]
+        .into_iter()
+        .collect()
+    }
+}
+
 /// One `deny <Effect…> [scope]` / `pure <scope>` rule (AS-EFF-006). `effects` empty ⇒ a `pure` rule
 /// (ANY effect forbidden). `scope` is a path segment-scope the rule applies to (None = whole unit).
 #[derive(Debug, Clone)]
 pub struct PolicyRule {
     pub effects: BTreeSet<&'static str>,
     pub scope: Option<String>,
+    /// Reason-class filter on an `Unknown` membership (REASON-SCOPED-UNKNOWN-DESIGN.md): empty ⇒
+    /// `Unknown[*]` (any reason — the bare form); non-empty ⇒ the Unknown hit fires ONLY for a fn whose
+    /// (transitive) reason classes include one of these. Ignored when `effects` doesn't contain `Unknown`.
+    pub unknown_classes: BTreeSet<ReasonClass>,
     pub raw: String,
 }
 
@@ -286,11 +374,38 @@ fn parse_policy_impl(text: &str, warn: bool) -> ParsedPolicy {
             "deny" => {
                 let mut effects = BTreeSet::new();
                 let mut scope = None;
+                // Reason-class filter on `Unknown` (REASON-SCOPED-UNKNOWN-DESIGN.md): empty ⇒ `Unknown[*]`
+                // (any reason — the bare form); non-empty ⇒ only those classes. `*` = all.
+                let mut unknown_classes: BTreeSet<ReasonClass> = BTreeSet::new();
+                let mut unknown_star = false;
                 for t in toks {
+                    // `Unknown[dispatch,reflect]` / `Unknown[*]` / `Unknown[dynamic]`: the reason-scoped form.
+                    if let Some(inner) = t.strip_prefix("Unknown[").and_then(|s| s.strip_suffix(']')) {
+                        effects.insert(UNKNOWN);
+                        for cn in inner.split(',') {
+                            let cn = cn.trim();
+                            if cn.is_empty() {
+                                continue;
+                            }
+                            if cn == "*" {
+                                unknown_star = true;
+                            } else if cn == "dynamic" {
+                                unknown_classes.extend(ReasonClass::dynamic_set());
+                            } else if let Some(rc) = ReasonClass::from_token(cn) {
+                                unknown_classes.insert(rc);
+                            } else {
+                                warn_ignore!("candor: policy rule names unknown reason-class `{cn}` (known: reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*): {line}");
+                            }
+                        }
+                        continue;
+                    }
                     let e = if t == UNKNOWN { Some(UNKNOWN) } else { cap_from_name(t) };
                     match e {
                         Some(e) => {
                             effects.insert(e);
+                            if e == UNKNOWN {
+                                unknown_star = true; // bare Unknown ⇒ all classes
+                            }
                         }
                         None => {
                             scope = Some(t.to_string());
@@ -302,11 +417,20 @@ fn parse_policy_impl(text: &str, warn: bool) -> ParsedPolicy {
                     warn_ignore!("candor: ignoring policy rule (no known effect named): {line}");
                     continue;
                 }
-                out.rules.push(PolicyRule { effects, scope, raw: line.to_string() });
+                // `*` (or bare `Unknown`) means all classes ⇒ empty filter (matches any Unknown).
+                if unknown_star {
+                    unknown_classes.clear();
+                } else if !unknown_classes.is_empty() && !unknown_classes.contains(&ReasonClass::Unresolved) {
+                    // A2 under-gating lint: a narrowed scope that omits `unresolved` (the catch-all for holes
+                    // an engine couldn't classify) may silently tolerate exactly those — flag it (advisory).
+                    warn_ignore!("candor: policy rule narrows `Unknown[…]` but omits `unresolved` — may UNDER-gate on holes the engine couldn't classify; add `unresolved` (or use `dynamic`) to stay conservative: {line}");
+                }
+                out.rules.push(PolicyRule { effects, scope, unknown_classes, raw: line.to_string() });
             }
             "pure" => out.rules.push(PolicyRule {
                 effects: BTreeSet::new(),
                 scope: toks.next().map(str::to_string),
+                unknown_classes: BTreeSet::new(),
                 raw: line.to_string(),
             }),
             "forbid" => {
@@ -396,6 +520,32 @@ mod tests {
         assert_eq!(nb.rules.len(), 1);
         assert_eq!(nb.rules[0].effects, ["Net"].into_iter().collect::<BTreeSet<_>>());
         assert_eq!(nb.rules[0].scope.as_deref(), Some("\u{a0}domain"));
+    }
+
+    #[test]
+    fn reason_scoped_unknown_parses() {
+        use super::ReasonClass::*;
+        // `Unknown[dispatch,indirect]` narrows the Unknown membership to those classes.
+        let p = parse_policy("deny Net Unknown[dispatch,indirect] dom\n");
+        let r = &p.rules[0];
+        assert!(r.effects.contains("Unknown") && r.effects.contains("Net"));
+        assert_eq!(r.scope.as_deref(), Some("dom"));
+        assert_eq!(r.unknown_classes, [Dispatch, Indirect].into_iter().collect());
+        // bare `Unknown` and `Unknown[*]` ⇒ empty filter (all classes).
+        assert!(parse_policy("deny Net Unknown dom\n").rules[0].unknown_classes.is_empty(), "bare Unknown ⇒ all");
+        assert!(parse_policy("deny Net Unknown[*] dom\n").rules[0].unknown_classes.is_empty(), "Unknown[*] ⇒ all");
+        // `dynamic` alias = every genuine class incl. unresolved, excl. setup.
+        assert_eq!(
+            parse_policy("deny Net Unknown[dynamic] dom\n").rules[0].unknown_classes,
+            [Reflect, Dispatch, Indirect, Native, Unresolved].into_iter().collect()
+        );
+        // classify: raw reason tokens → normative classes (mirrors java ReasonClass.classify).
+        assert_eq!(ReasonClass::classify("reflect:Class.forName"), Reflect);
+        assert_eq!(ReasonClass::classify("native:extern fn"), Native);
+        assert_eq!(ReasonClass::classify("callback:unresolved call"), Indirect);
+        assert_eq!(ReasonClass::classify("ambiguous:same-name local defs"), Dispatch);
+        assert_eq!(ReasonClass::classify("unresolved"), Unresolved);
+        assert_eq!(ReasonClass::classify("whatever-new"), Unresolved); // conservative catch-all
     }
 
     #[test]

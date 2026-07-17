@@ -26,10 +26,19 @@ pub(crate) fn cmd_parsepolicy(args: &[String]) -> i32 {
         .rules
         .iter()
         .map(|r| {
-            serde_json::json!({
+            let mut m = serde_json::json!({
                 "effects": r.effects.iter().copied().collect::<Vec<&str>>(),
                 "scope": r.scope.as_deref().unwrap_or(""),
-            })
+            });
+            // Reason-scoped `Unknown[class…]`: emit sorted class tokens ONLY when the rule narrows Unknown,
+            // so a bare `deny E`/`deny E Unknown` dump is byte-identical to pre-feature and the four-way
+            // parsepolicy differential pins reason-class parsing across engines (matches candor-java).
+            if !r.unknown_classes.is_empty() {
+                let mut toks: Vec<&str> = r.unknown_classes.iter().map(|c| c.token()).collect();
+                toks.sort_unstable(); // sort by TOKEN string (matches java's `.sorted()` on tokens)
+                m["unknownClasses"] = serde_json::json!(toks);
+            }
+            m
         })
         .collect();
     let mut allow: Vec<serde_json::Value> = p
