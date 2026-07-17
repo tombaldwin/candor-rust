@@ -77,7 +77,7 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
         }
         println!("  {sources_n} Unknown source(s) by reason class (of {total_unknown} Unknown function(s)) — size the blind-spot cost before `deny E Unknown[…]`:");
         let mut rows: Vec<(&str, usize)> = ORDER.iter().map(|k| (*k, by_class[k])).filter(|(_, v)| *v > 0).collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1)); // most-common class first
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1)); // most-common class first
         for (k, v) in rows {
             let hint = if k == "setup" { "   ← fixable: the scan isn't configured, not a real blind spot" } else { "" };
             println!("  {k:<12} {v:>4}{hint}");
