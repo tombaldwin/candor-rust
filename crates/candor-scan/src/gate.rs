@@ -11,6 +11,30 @@ use crate::*;
 /// `[{rule}] {detail}`; --gate-json serializes these records verbatim.
 pub(crate) use candor_report::GateViolation;
 
+/// ⟨0.21⟩ The `Net` destination classes an fn reaches (transitive) — the SINGLE derivation shared by the
+/// report's `netClass` field (scan.rs) and the gate: an exact host-literal match (`net_dest_class`) for the
+/// visible hosts, plus the fail-closed `unknown-host` when the Net surface is masked (`incomplete` has Net)
+/// OR carries no visible host (a runtime endpoint). Call only for an fn known to have Net; returns sorted.
+pub(crate) fn net_classes_of(
+    q: &str,
+    hostsacc: &HashMap<String, BTreeSet<String>>,
+    incompleteacc: &HashMap<String, BTreeSet<&'static str>>,
+    partners: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut classes: BTreeSet<String> = hostsacc
+        .get(q)
+        .into_iter()
+        .flatten()
+        .map(|h| candor_classify::net_dest_class(h, partners).to_string())
+        .collect();
+    let masked = incompleteacc.get(q).is_some_and(|s| s.contains("Net"));
+    let no_hosts = hostsacc.get(q).map(|s| s.is_empty()).unwrap_or(true);
+    if masked || no_hosts {
+        classes.insert("unknown-host".to_string());
+    }
+    classes.into_iter().collect()
+}
+
 /// Evaluate a CANDOR_POLICY (parsed by the SHARED §6.2 parser in candor-classify, so this gate can
 /// never disagree with the nightly/JVM gates on grammar) over a finished scan. Returns one line per
 /// violation: deny/pure (AS-EFF-006) against the transitive `inferred` sets, literal allowlists
@@ -33,6 +57,9 @@ pub(crate) fn policy_violations(
     reasonclassacc: &HashMap<String, BTreeSet<String>>,
     // ⟨0.19⟩ `.candor/config` `unknown-alias` definitions, so `Unknown[<alias>]` resolves (SPEC §6.2).
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
+    // ⟨0.21⟩ `.candor/config` `net-partner` hosts, so a `deny Net[unknown-host]` tolerates declared partners
+    // and the verdict's `netClass` classifies them (NET-DESTINATION-CLASS-DESIGN.md).
+    net_partners: &BTreeSet<String>,
 ) -> Vec<GateViolation> {
     use candor_classify::policy::{literal_allowed, parse_policy_with_aliases, scope_matches};
     let p = parse_policy_with_aliases(policy_text, unknown_aliases);
@@ -73,11 +100,27 @@ pub(crate) fn policy_violations(
                     hits.retain(|e| *e != "Unknown");
                 }
             }
+            // Net destination-class: a `deny Net[dest…]` (non-empty filter) keeps its Net hit ONLY for a fn
+            // reaching one of those destination classes; else tolerate (only asserted-safe destinations).
+            // Fail-closed: a masked surface / a Net with no visible host is unknown-host (net_classes_of).
+            if hits.contains(&"Net") && !r.net_classes.is_empty() {
+                let fn_net = net_classes_of(q, hostsacc, incompleteacc, net_partners);
+                let matched = fn_net.iter().any(|c| r.net_classes.contains(c));
+                if !matched {
+                    hits.retain(|e| *e != "Net");
+                }
+            }
             if !hits.is_empty() {
                 // §6.2: when Unknown is denied, report ALL reason classes on the fn (transitive), so the
                 // consumer sees every reason the strict gate bit — not just the class the rule matched.
                 let reason_class = if hits.contains(&"Unknown") {
                     reasonclassacc.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                // ⟨0.21⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
+                let net_class = if hits.contains(&"Net") {
+                    net_classes_of(q, hostsacc, incompleteacc, net_partners)
                 } else {
                     Vec::new()
                 };
@@ -87,6 +130,7 @@ pub(crate) fn policy_violations(
                     effects: hits.iter().map(|s| s.to_string()).collect(),
                     detail: format!("`{q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
                     reason_class,
+                    net_class,
                 });
             }
         }

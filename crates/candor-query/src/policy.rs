@@ -44,6 +44,13 @@ pub(crate) fn cmd_parsepolicy(args: &[String]) -> i32 {
                 toks.sort_unstable(); // sort by TOKEN string (matches java's `.sorted()` on tokens)
                 m["unknownClasses"] = serde_json::json!(toks);
             }
+            // Net destination-class `Net[dest…]`: emit sorted dest tokens ONLY when the rule narrows Net, so a
+            // bare `deny Net` dump is byte-identical and the four-way parsepolicy differential pins the
+            // destination-class parsing across engines (matches candor-java).
+            if !r.net_classes.is_empty() {
+                let toks: Vec<&str> = r.net_classes.iter().map(String::as_str).collect(); // BTreeSet ⇒ sorted
+                m["netClasses"] = serde_json::json!(toks);
+            }
             m
         })
         .collect();

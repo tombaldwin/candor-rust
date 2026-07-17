@@ -3662,6 +3662,28 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     // Effects with a masking-incomplete surface — carried so a cross-crate consumer inherits
                     // the incompleteness ([3]/[7]/[30]); the gate already fails closed locally on it.
                     incomplete: incompleteacc.get(&f).map(|s| s.iter().map(|e| e.to_string()).collect()).unwrap_or_default(),
+                    // ⟨0.21⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md). The nightly engine does not
+                    // wire the `.candor/config` `net-partner` set (it lags the stable backend on config surfaces,
+                    // like the reason-scoped gate), so it classifies with EMPTY partners: a config-declared
+                    // partner reads as `unknown-host` here — the fail-closed OVER-report direction (sound). The
+                    // stable backend + JVM reference carry the partner set. Same fail-closed masked/no-host rule.
+                    net_class: if effs.contains(&"Net") {
+                        let no_partners = std::collections::BTreeSet::new();
+                        let mut classes: BTreeSet<String> = hostsacc
+                            .get(&f)
+                            .into_iter()
+                            .flatten()
+                            .map(|h| candor_classify::net_dest_class(h.as_str(), &no_partners).to_string())
+                            .collect();
+                        let masked = incompleteacc.get(&f).is_some_and(|s| s.contains(&"Net"));
+                        let no_hosts = hostsacc.get(&f).map(|s| s.is_empty()).unwrap_or(true);
+                        if masked || no_hosts {
+                            classes.insert("unknown-host".to_string());
+                        }
+                        classes.into_iter().collect()
+                    } else {
+                        Vec::new()
+                    },
                 });
                 continue;
             }

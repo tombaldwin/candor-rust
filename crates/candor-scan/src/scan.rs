@@ -1063,6 +1063,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let global_blind: std::collections::HashSet<String> =
         global_blind.into_iter().chain(dep_invisible).collect();
 
+    // ⟨0.21⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the config `net-partner` hosts, read
+    // here (before the entries) so the report's per-fn `netClass` carries known-partner — the SAME set the
+    // gate resolves from `.candor/config`. Empty when no config declares partners (telemetry-only asserts).
+    let net_partners = candor_classify::policy::discover_config_text(std::path::Path::new(dir))
+        .map(|t| candor_classify::policy::parse_net_partners(&t))
+        .unwrap_or_default();
+
     let mut entries: Vec<ReportEntry> = Vec::new();
     let mut cg: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for q in &all {
@@ -1119,6 +1126,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // Masking-incomplete effects — carried so a CANDOR_DEPS consumer inherits the incompleteness
             // across the crate boundary (sweep [30]); the gate already fails closed locally on it.
             incomplete: incompleteacc.get(q).map(|s| s.iter().map(|e| e.to_string()).collect()).unwrap_or_default(),
+            // ⟨0.21⟩ Net destination-class: the classes present in this fn's transitive Net surface. Exact
+            // host-literal match for the visible hosts; fail-closed unknown-host when the Net surface is masked
+            // (`incomplete` has Net) OR carries no visible host (a runtime endpoint). Empty when no Net.
+            net_class: if inf.contains("Net") {
+                crate::gate::net_classes_of(q, &hostsacc, &incompleteacc, &net_partners)
+            } else {
+                Vec::new()
+            },
         });
     }
     entries.sort_by(|a, b| a.func.cmp(&b.func));
@@ -1283,7 +1298,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         let unknown_aliases = candor_classify::policy::discover_config_text(std::path::Path::new(dir))
             .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
             .unwrap_or_default();
-        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases);
+        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
         for gv in &v {
             let line = format!("[{}] {}", gv.rule, gv.detail);
             if stdout_is_json {

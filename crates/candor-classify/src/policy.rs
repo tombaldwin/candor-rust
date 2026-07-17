@@ -149,6 +149,30 @@ pub fn parse_unknown_aliases(config_text: &str) -> std::collections::BTreeMap<St
     out
 }
 
+/// ⟨0.21⟩ Parse `net-partner <host>` lines from `.candor/config` (NET-DESTINATION-CLASS-DESIGN.md): the
+/// per-project set of business-partner hosts the `Net` destination-class classifier treats as
+/// `known-partner`. Multi-value (repeatable key); the value is host-normalized (`:port` stripped,
+/// lowercased) like `MODEL_HOSTS`. Case-insensitive key match, mirroring `parse_unknown_aliases` + the
+/// java/ts/swift config loaders. A partner is per-project — never a universal list.
+pub fn parse_net_partners(config_text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for raw in config_text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.splitn(2, char::is_whitespace);
+        if !it.next().is_some_and(|k| k.eq_ignore_ascii_case("net-partner")) {
+            continue;
+        }
+        let val = it.next().unwrap_or("").trim();
+        if !val.is_empty() {
+            out.insert(host_part(val).to_ascii_lowercase());
+        }
+    }
+    out
+}
+
 /// Discover `.candor/config` text for a policy/scan anchored at `start`: `$CANDOR_CONFIG` if set + readable,
 /// else the nearest `.candor/config` walking UP from `start`, else `None`. Read-only + lenient (no
 /// process-exit — the caller decides fail-closed); used to resolve `unknown-alias` for the §6.2 gate +
@@ -179,6 +203,10 @@ pub struct PolicyRule {
     /// `Unknown[*]` (any reason — the bare form); non-empty ⇒ the Unknown hit fires ONLY for a fn whose
     /// (transitive) reason classes include one of these. Ignored when `effects` doesn't contain `Unknown`.
     pub unknown_classes: BTreeSet<ReasonClass>,
+    /// Destination-class filter on a `Net` membership (NET-DESTINATION-CLASS-DESIGN.md): empty ⇒ `Net[*]`
+    /// (any destination — the bare form); non-empty ⇒ the Net hit fires ONLY for a fn whose (transitive)
+    /// destination classes include one of these. Ignored when `effects` doesn't contain `Net`.
+    pub net_classes: BTreeSet<String>,
     pub raw: String,
 }
 
@@ -456,7 +484,29 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                 // (any reason — the bare form); non-empty ⇒ only those classes. `*` = all.
                 let mut unknown_classes: BTreeSet<ReasonClass> = BTreeSet::new();
                 let mut unknown_star = false;
+                // Destination-class filter on `Net` (NET-DESTINATION-CLASS-DESIGN.md): empty ⇒ `Net[*]`
+                // (any destination — the bare form); non-empty ⇒ only those classes. `*` = all.
+                let mut net_classes: BTreeSet<String> = BTreeSet::new();
+                let mut net_star = false;
                 for t in toks {
+                    // `Net[unknown-host]` / `Net[*]` / `Net[known-telemetry,unknown-host]`: the destination-scoped form.
+                    if let Some(inner) = t.strip_prefix("Net[").and_then(|s| s.strip_suffix(']')) {
+                        effects.insert("Net");
+                        for cn in inner.split(',') {
+                            let cn = cn.trim();
+                            if cn.is_empty() {
+                                continue;
+                            }
+                            if cn == "*" {
+                                net_star = true;
+                            } else if crate::NET_DEST_CLASSES.contains(&cn) {
+                                net_classes.insert(cn.to_string());
+                            } else {
+                                warn_ignore!("candor: policy rule names unknown Net destination-class `{cn}` (known: known-telemetry,known-partner,unknown-host, or *): {line}");
+                            }
+                        }
+                        continue;
+                    }
                     // `Unknown[dispatch,reflect]` / `Unknown[*]` / `Unknown[dynamic]`: the reason-scoped form.
                     if let Some(inner) = t.strip_prefix("Unknown[").and_then(|s| s.strip_suffix(']')) {
                         effects.insert(UNKNOWN);
@@ -486,6 +536,9 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                             if e == UNKNOWN {
                                 unknown_star = true; // bare Unknown ⇒ all classes
                             }
+                            if e == "Net" {
+                                net_star = true; // bare Net ⇒ all destinations
+                            }
                         }
                         None => {
                             scope = Some(t.to_string());
@@ -505,12 +558,17 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                     // an engine couldn't classify) may silently tolerate exactly those — flag it (advisory).
                     warn_ignore!("candor: policy rule narrows `Unknown[…]` but omits `unresolved` — may UNDER-gate on holes the engine couldn't classify; add `unresolved` (or use `dynamic`) to stay conservative: {line}");
                 }
-                out.rules.push(PolicyRule { effects, scope, unknown_classes, raw: line.to_string() });
+                // `*` (or bare `Net`) means all destinations ⇒ empty filter (matches any Net).
+                if net_star {
+                    net_classes.clear();
+                }
+                out.rules.push(PolicyRule { effects, scope, unknown_classes, net_classes, raw: line.to_string() });
             }
             "pure" => out.rules.push(PolicyRule {
                 effects: BTreeSet::new(),
                 scope: toks.next().map(str::to_string),
                 unknown_classes: BTreeSet::new(),
+                net_classes: BTreeSet::new(),
                 raw: line.to_string(),
             }),
             "forbid" => {
@@ -639,6 +697,36 @@ mod tests {
         assert_eq!(ReasonClass::classify("ambiguous:same-name local defs"), Dispatch);
         assert_eq!(ReasonClass::classify("unresolved"), Unresolved);
         assert_eq!(ReasonClass::classify("whatever-new"), Unresolved); // conservative catch-all
+    }
+
+    #[test]
+    fn net_destination_class_parses_and_classifies() {
+        // `Net[unknown-host,known-telemetry]` narrows the Net membership to those destination classes.
+        let p = parse_policy("deny Net[unknown-host,known-telemetry] dom\n");
+        let r = &p.rules[0];
+        assert!(r.effects.contains("Net"));
+        assert_eq!(r.scope.as_deref(), Some("dom"));
+        assert_eq!(
+            r.net_classes,
+            ["unknown-host", "known-telemetry"].iter().map(|s| s.to_string()).collect()
+        );
+        // bare `Net` and `Net[*]` ⇒ empty filter (all destinations).
+        assert!(parse_policy("deny Net dom\n").rules[0].net_classes.is_empty(), "bare Net ⇒ all");
+        assert!(parse_policy("deny Net[*] dom\n").rules[0].net_classes.is_empty(), "Net[*] ⇒ all");
+        // an unknown destination-class is dropped-with-warning → empty filter (behaves like bare Net[*]).
+        assert!(parse_policy("deny Net[nope] dom\n").rules[0].net_classes.is_empty());
+        // the classifier: telemetry (subdomain-aware), model host, unresolved, and the config-partner path.
+        let no_partners = BTreeSet::new();
+        assert_eq!(crate::net_dest_class("sentry.io", &no_partners), "known-telemetry");
+        assert_eq!(crate::net_dest_class("o1.ingest.sentry.io", &no_partners), "known-telemetry");
+        assert_eq!(crate::net_dest_class("api.openai.com", &no_partners), "known-partner", "a model host is known-partner");
+        assert_eq!(crate::net_dest_class("evil.example.com", &no_partners), "unknown-host");
+        let partners: BTreeSet<String> = ["api.stripe.com".to_string()].into_iter().collect();
+        assert_eq!(crate::net_dest_class("api.stripe.com", &partners), "known-partner", "config-declared partner");
+        assert_eq!(crate::net_dest_class("api.stripe.com", &no_partners), "unknown-host", "partner is config-only");
+        // `net-partner` config parsing: host-normalized, case-insensitive key, multi-value.
+        let pset = super::parse_net_partners("net-partner Api.Stripe.com:443\nNET-PARTNER hooks.stripe.com\n");
+        assert!(pset.contains("api.stripe.com") && pset.contains("hooks.stripe.com"));
     }
 
     #[test]
