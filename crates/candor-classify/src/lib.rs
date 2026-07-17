@@ -1494,6 +1494,16 @@ pub const TELEMETRY_HOSTS: &[&str] = &[
     "nr-data.net",
     "honeycomb.io",
     "logtail.com",
+    // ⟨0.20.1⟩ corpus-grown (a real-repo dogfood): more single-purpose analytics / session-replay / RUM
+    // providers — vendor-specific product domains only (no general-purpose host), so no under-gate risk.
+    "posthog.com",
+    "plausible.io",
+    "usefathom.com",
+    "heapanalytics.com",
+    "fullstory.com",
+    "hotjar.com",
+    "logrocket.com",
+    "cloudflareinsights.com",
 ];
 
 /// Whether an endpoint HOST literal is in `set` (case-insensitive; a subdomain of a listed host counts).

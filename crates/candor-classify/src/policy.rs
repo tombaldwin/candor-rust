@@ -718,6 +718,7 @@ mod tests {
         // the classifier: telemetry (subdomain-aware), model host, unresolved, and the config-partner path.
         let no_partners = BTreeSet::new();
         assert_eq!(crate::net_dest_class("sentry.io", &no_partners), "known-telemetry");
+        assert_eq!(crate::net_dest_class("us.i.posthog.com", &no_partners), "known-telemetry"); // 0.20.1 corpus-grown
         assert_eq!(crate::net_dest_class("o1.ingest.sentry.io", &no_partners), "known-telemetry");
         assert_eq!(crate::net_dest_class("api.openai.com", &no_partners), "known-partner", "a model host is known-partner");
         assert_eq!(crate::net_dest_class("evil.example.com", &no_partners), "unknown-host");
