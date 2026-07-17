@@ -1012,6 +1012,22 @@ fn blindspots_stats_reason_class_distribution() {
     assert_eq!(v["byClass"]["native"], 1, "native → native: {v}");
     assert_eq!(v["sources"], 2);
     assert_eq!(v["totalUnknown"], 3);
+
+    // --class drill-down: keep only sources of the named class(es). native → src_b only.
+    let out = Command::new(bin())
+        .arg("blindspots").arg(&f.prefix).arg("--class").arg("native").arg("--json")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    let names: Vec<&str> = v["sources"].as_array().unwrap().iter().map(|s| s["fn"].as_str().unwrap()).collect();
+    assert_eq!(names, ["src_b"], "--class native keeps only the native source: {v}");
+    // --stats composes with --class: the distribution restricted to `indirect`.
+    let out = Command::new(bin())
+        .arg("blindspots").arg(&f.prefix).arg("--stats").arg("--class").arg("indirect").arg("--json")
+        .output().expect("run candor-query");
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    assert_eq!(v["sources"], 1, "--stats --class indirect counts only the indirect source: {v}");
+    assert_eq!(v["byClass"]["native"], 0);
 }
 
 #[test]
