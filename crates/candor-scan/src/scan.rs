@@ -1063,7 +1063,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let global_blind: std::collections::HashSet<String> =
         global_blind.into_iter().chain(dep_invisible).collect();
 
-    // ⟨0.21⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the config `net-partner` hosts, read
+    // ⟨0.20⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the config `net-partner` hosts, read
     // here (before the entries) so the report's per-fn `netClass` carries known-partner — the SAME set the
     // gate resolves from `.candor/config`. Empty when no config declares partners (telemetry-only asserts).
     let net_partners = candor_classify::policy::discover_config_text(std::path::Path::new(dir))
@@ -1126,7 +1126,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // Masking-incomplete effects — carried so a CANDOR_DEPS consumer inherits the incompleteness
             // across the crate boundary (sweep [30]); the gate already fails closed locally on it.
             incomplete: incompleteacc.get(q).map(|s| s.iter().map(|e| e.to_string()).collect()).unwrap_or_default(),
-            // ⟨0.21⟩ Net destination-class: the classes present in this fn's transitive Net surface. Exact
+            // ⟨0.20⟩ Net destination-class: the classes present in this fn's transitive Net surface. Exact
             // host-literal match for the visible hosts; fail-closed unknown-host when the Net surface is masked
             // (`incomplete` has Net) OR carries no visible host (a runtime endpoint). Empty when no Net.
             net_class: if inf.contains("Net") {

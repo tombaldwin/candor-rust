@@ -11,7 +11,7 @@ use crate::*;
 /// `[{rule}] {detail}`; --gate-json serializes these records verbatim.
 pub(crate) use candor_report::GateViolation;
 
-/// ⟨0.21⟩ The `Net` destination classes an fn reaches (transitive) — the SINGLE derivation shared by the
+/// ⟨0.20⟩ The `Net` destination classes an fn reaches (transitive) — the SINGLE derivation shared by the
 /// report's `netClass` field (scan.rs) and the gate: an exact host-literal match (`net_dest_class`) for the
 /// visible hosts, plus the fail-closed `unknown-host` when the Net surface is masked (`incomplete` has Net)
 /// OR carries no visible host (a runtime endpoint). Call only for an fn known to have Net; returns sorted.
@@ -57,7 +57,7 @@ pub(crate) fn policy_violations(
     reasonclassacc: &HashMap<String, BTreeSet<String>>,
     // ⟨0.19⟩ `.candor/config` `unknown-alias` definitions, so `Unknown[<alias>]` resolves (SPEC §6.2).
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
-    // ⟨0.21⟩ `.candor/config` `net-partner` hosts, so a `deny Net[unknown-host]` tolerates declared partners
+    // ⟨0.20⟩ `.candor/config` `net-partner` hosts, so a `deny Net[unknown-host]` tolerates declared partners
     // and the verdict's `netClass` classifies them (NET-DESTINATION-CLASS-DESIGN.md).
     net_partners: &BTreeSet<String>,
 ) -> Vec<GateViolation> {
@@ -118,7 +118,7 @@ pub(crate) fn policy_violations(
                 } else {
                     Vec::new()
                 };
-                // ⟨0.21⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
+                // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
                 let net_class = if hits.contains(&"Net") {
                     net_classes_of(q, hostsacc, incompleteacc, net_partners)
                 } else {

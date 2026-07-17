@@ -3662,7 +3662,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     // Effects with a masking-incomplete surface — carried so a cross-crate consumer inherits
                     // the incompleteness ([3]/[7]/[30]); the gate already fails closed locally on it.
                     incomplete: incompleteacc.get(&f).map(|s| s.iter().map(|e| e.to_string()).collect()).unwrap_or_default(),
-                    // ⟨0.21⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md). The nightly engine does not
+                    // ⟨0.20⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md). The nightly engine does not
                     // wire the `.candor/config` `net-partner` set (it lags the stable backend on config surfaces,
                     // like the reason-scoped gate), so it classifies with EMPTY partners: a config-declared
                     // partner reads as `unknown-host` here — the fail-closed OVER-report direction (sound). The

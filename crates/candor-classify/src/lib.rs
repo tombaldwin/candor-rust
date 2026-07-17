@@ -1473,7 +1473,7 @@ pub fn is_model_host(host_literal: &str) -> bool {
         && matches!(host.split('.').next(), Some("bedrock-runtime") | Some("bedrock-agent-runtime"))
 }
 
-/// ⟨0.21⟩ Curated telemetry / analytics / APM hosts — the `Net` destination-class `known-telemetry` set
+/// ⟨0.20⟩ Curated telemetry / analytics / APM hosts — the `Net` destination-class `known-telemetry` set
 /// (NET-DESTINATION-CLASS-DESIGN.md), shared VERBATIM with candor-java's `Literals.TELEMETRY_HOSTS` (like
 /// `MODEL_HOSTS`). A benign observability endpoint. Matched by host, case-insensitive; a SUBDOMAIN of a
 /// listed host counts. Tight, high-precision STARTER set — mis-including an exfil-capable host would
@@ -1509,7 +1509,7 @@ pub fn is_telemetry_host(host_literal: &str) -> bool {
     host_in_set(host_literal, TELEMETRY_HOSTS)
 }
 
-/// ⟨0.21⟩ The `Net` DESTINATION CLASS of a host literal (NET-DESTINATION-CLASS-DESIGN.md): `known-telemetry`
+/// ⟨0.20⟩ The `Net` DESTINATION CLASS of a host literal (NET-DESTINATION-CLASS-DESIGN.md): `known-telemetry`
 /// (curated), `known-partner` (config `net-partner` OR a model host — a declared-ish external API), else
 /// `unknown-host` — the HONEST default (candor makes no claim; the security gate bites this). A partner set
 /// is per-project (config-declared). Never fabricated onto a safe class: an unresolved host is unknown-host.
@@ -1527,7 +1527,7 @@ pub fn net_dest_class(host_literal: &str, partners: &std::collections::BTreeSet<
     "unknown-host"
 }
 
-/// ⟨0.21⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
+/// ⟨0.20⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
 pub const NET_DEST_CLASSES: &[&str] = &["known-telemetry", "known-partner", "unknown-host"];
 
 /// Curated Rust model-provider SDK crates — the SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface, the Rust analog

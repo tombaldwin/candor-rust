@@ -161,7 +161,7 @@ pub struct ReportEntry {
     /// primary surface.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incomplete: Vec<String>,
-    /// ⟨0.21⟩ Net DESTINATION classes present in this function's (transitive) `Net` surface —
+    /// ⟨0.20⟩ Net DESTINATION classes present in this function's (transitive) `Net` surface —
     /// `known-telemetry` / `known-partner` / `unknown-host` (NET-DESTINATION-CLASS-DESIGN.md). An exact
     /// host-literal match for the visible hosts, plus the fail-closed `unknown-host` when the Net surface is
     /// masked (`incomplete` has `Net`) OR carries no visible host (a runtime endpoint). The class travels the
@@ -174,7 +174,7 @@ pub struct ReportEntry {
 /// from the engine build id (`ReportMeta::version`) and from the crate release version. Bumped only when
 /// the spec contract changes; emitted as the envelope's `spec` so a consumer can see which contract a
 /// report conforms to. Both backends and the JVM port declare the SAME value — see candor-spec §2.1.
-pub const SPEC_VERSION: &str = "0.19";
+pub const SPEC_VERSION: &str = "0.20";
 
 /// The envelope header: which engine produced the report (`version` = build id, `toolchain`), and which
 /// candor-spec contract it implements (`spec`).
@@ -377,7 +377,7 @@ pub struct GateViolation {
     /// gate bit, not just the matched one. Empty/omitted otherwise (SPEC §6.2).
     #[serde(rename = "reasonClass", default, skip_serializing_if = "Vec::is_empty")]
     pub reason_class: Vec<String>,
-    /// Net destination-class ⟨0.21⟩: on an AS-EFF-006 violation whose `effects` include `Net`, ALL the
+    /// Net destination-class ⟨0.20⟩: on an AS-EFF-006 violation whose `effects` include `Net`, ALL the
     /// destination classes present (transitively) on the function — so a consumer sees which class the
     /// security gate bit. Empty/omitted otherwise (SPEC §6.2, NET-DESTINATION-CLASS-DESIGN.md).
     #[serde(rename = "netClass", default, skip_serializing_if = "Vec::is_empty")]
@@ -541,8 +541,8 @@ mod tests {
         assert!(!empty.contains("unknownWhy"), "empty unknownWhy must be omitted: {empty}");
         assert!(!empty.contains("entryPoint"), "false entryPoint must be omitted: {empty}");
         // the spec contract version (§2.1) is emitted in the envelope header.
-        assert!(s.contains("\"spec\":\"0.19\""), "envelope must carry the spec version: {s}");
-        assert_eq!(SPEC_VERSION, "0.19");
+        assert!(s.contains("\"spec\":\"0.20\""), "envelope must carry the spec version: {s}");
+        assert_eq!(SPEC_VERSION, "0.20");
     }
 
     #[test]
