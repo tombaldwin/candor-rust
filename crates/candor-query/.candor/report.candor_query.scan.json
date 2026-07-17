@@ -2,7 +2,7 @@
   "candor": {
     "version": "scan-0.18.0",
     "toolchain": "stable",
-    "spec": "0.20"
+    "spec": "0.21"
   },
   "package": "candor_query",
   "coverage": {
