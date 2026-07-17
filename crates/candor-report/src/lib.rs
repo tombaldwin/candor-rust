@@ -356,7 +356,7 @@ pub fn report_coverage(text: &str) -> Option<Coverage> {
 /// set (006), the allow rule's effect (008), the gained set (005), or `[]` (009 layer-flow, no single
 /// effect); `detail` is the message BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The
 /// console gates print `[{rule}] {detail}`; `--gate-json` serializes these records verbatim.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct GateViolation {
     pub rule: String,
     #[serde(rename = "fn")]
@@ -365,6 +365,11 @@ pub struct GateViolation {
     pub effects: Vec<String>,
     #[serde(default)]
     pub detail: String,
+    /// Reason-scoped Unknown ⟨0.19⟩: on an AS-EFF-006 violation whose `effects` include `Unknown`, ALL the
+    /// reason classes present (transitively) on the function — so a consumer sees every reason the strict
+    /// gate bit, not just the matched one. Empty/omitted otherwise (SPEC §6.2).
+    #[serde(rename = "reasonClass", default, skip_serializing_if = "Vec::is_empty")]
+    pub reason_class: Vec<String>,
 }
 
 /// Serialize the §3.3 gate verdict `{ spec, ok, violations }` — the machine analog of the `AS-EFF`
@@ -552,9 +557,9 @@ mod tests {
         assert_eq!(v["violations"], serde_json::json!([]));
         // Violations sort by (rule, detail) and serialize under the pinned field names (`fn`, not func).
         let mut vs = vec![
-            GateViolation { rule: "AS-EFF-009".into(), func: "b".into(), effects: vec![], detail: "z".into() },
-            GateViolation { rule: "AS-EFF-006".into(), func: "a".into(), effects: vec!["Net".into()], detail: "y".into() },
-            GateViolation { rule: "AS-EFF-006".into(), func: "c".into(), effects: vec!["Db".into()], detail: "x".into() },
+            GateViolation { rule: "AS-EFF-009".into(), func: "b".into(), effects: vec![], detail: "z".into(), ..Default::default() },
+            GateViolation { rule: "AS-EFF-006".into(), func: "a".into(), effects: vec!["Net".into()], detail: "y".into(), ..Default::default() },
+            GateViolation { rule: "AS-EFF-006".into(), func: "c".into(), effects: vec!["Db".into()], detail: "x".into(), ..Default::default() },
         ];
         let s = gate_verdict_json(&mut vs).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -620,6 +625,7 @@ mod tests {
                 func: "f".into(),
                 effects: vec!["Net".into()],
                 detail: "d".into(),
+                ..Default::default()
             }]
         };
         let cov = GateCoverage { uncovered: 2, packages: vec!["anyhow".into(), "bstr".into()] };
