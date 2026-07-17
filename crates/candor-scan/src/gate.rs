@@ -31,9 +31,11 @@ pub(crate) fn policy_violations(
     // call graph, so its REASON must too — else a `deny E Unknown[reflect]` at a caller inheriting Unknown
     // from a reflect-caused callee would see no class and NOT fire (under-gating). See the java reference.
     reasonclassacc: &HashMap<String, BTreeSet<String>>,
+    // ⟨0.19⟩ `.candor/config` `unknown-alias` definitions, so `Unknown[<alias>]` resolves (SPEC §6.2).
+    unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
 ) -> Vec<GateViolation> {
-    use candor_classify::policy::{literal_allowed, parse_policy, scope_matches};
-    let p = parse_policy(policy_text);
+    use candor_classify::policy::{literal_allowed, parse_policy_with_aliases, scope_matches};
+    let p = parse_policy_with_aliases(policy_text, unknown_aliases);
     let empty: BTreeSet<&'static str> = BTreeSet::new();
     let mut out = Vec::new();
     for q in all {

@@ -98,6 +98,74 @@ impl ReasonClass {
     }
 }
 
+/// Parse `unknown-alias <name> = <class,…>` lines from `.candor/config` text (⟨0.19⟩, SPEC §6.2) into a
+/// name→classes map. A name that shadows a built-in (`*`/`dynamic`/a class token) is warned-and-skipped (a
+/// config alias may not redefine a built-in), as is a definition naming no valid class. Byte-shape with the
+/// java reference `Config.addAlias`.
+pub fn parse_unknown_aliases(config_text: &str) -> std::collections::BTreeMap<String, BTreeSet<ReasonClass>> {
+    let mut out = std::collections::BTreeMap::new();
+    for raw in config_text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.splitn(2, char::is_whitespace);
+        if it.next() != Some("unknown-alias") {
+            continue;
+        }
+        let val = it.next().unwrap_or("").trim();
+        let Some((name, classes)) = val.split_once('=') else {
+            eprintln!("candor: ignoring `unknown-alias` (want `unknown-alias <name> = <class,…>`): {val}");
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || name == "*" || name == "dynamic" || ReasonClass::from_token(name).is_some() {
+            eprintln!("candor: ignoring `unknown-alias` with reserved/empty name `{name}` (may not shadow `*`/`dynamic`/a class token)");
+            continue;
+        }
+        let mut set = BTreeSet::new();
+        for cn in classes.split(',') {
+            let cn = cn.trim();
+            if cn.is_empty() {
+                continue;
+            }
+            if cn == "dynamic" {
+                set.extend(ReasonClass::dynamic_set());
+            } else if let Some(rc) = ReasonClass::from_token(cn) {
+                set.insert(rc);
+            } else {
+                eprintln!("candor: `unknown-alias {name}` names unknown reason-class `{cn}` — skipped");
+            }
+        }
+        if set.is_empty() {
+            eprintln!("candor: ignoring `unknown-alias {name}` — no valid reason-class");
+        } else {
+            out.insert(name.to_string(), set);
+        }
+    }
+    out
+}
+
+/// Discover `.candor/config` text for a policy/scan anchored at `start`: `$CANDOR_CONFIG` if set + readable,
+/// else the nearest `.candor/config` walking UP from `start`, else `None`. Read-only + lenient (no
+/// process-exit — the caller decides fail-closed); used to resolve `unknown-alias` for the §6.2 gate +
+/// `parsepolicy` so both reflect the same checked-in config.
+pub fn discover_config_text(start: &std::path::Path) -> Option<String> {
+    if let Ok(p) = std::env::var("CANDOR_CONFIG") {
+        return std::fs::read_to_string(&p).ok();
+    }
+    let start = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+    let mut cur = if start.is_dir() { Some(start.as_path()) } else { start.parent() };
+    while let Some(d) = cur {
+        let cand = d.join(".candor/config");
+        if cand.is_file() {
+            return std::fs::read_to_string(&cand).ok();
+        }
+        cur = d.parent();
+    }
+    None
+}
+
 /// One `deny <Effect…> [scope]` / `pure <scope>` rule (AS-EFF-006). `effects` empty ⇒ a `pure` rule
 /// (ANY effect forbidden). `scope` is a path segment-scope the rule applies to (None = whole unit).
 #[derive(Debug, Clone)]
@@ -309,15 +377,22 @@ fn is_ascii_ws(c: char) -> bool {
 }
 
 pub fn parse_policy(text: &str) -> ParsedPolicy {
-    parse_policy_impl(text, true)
+    parse_policy_impl(text, true, &std::collections::BTreeMap::new())
+}
+/// As [`parse_policy`] but with `.candor/config` `unknown-alias` definitions (⟨0.19⟩, SPEC §6.2): an
+/// `Unknown[<name>]` filter resolves a user-defined `<name>` to its reason classes. The gate + `parsepolicy`
+/// pass the discovered aliases (via [`parse_unknown_aliases`]); a config alias never changes what bare
+/// `deny E Unknown` means (always `Unknown[*]`), so the rule stays legible from the policy alone.
+pub fn parse_policy_with_aliases(text: &str, aliases: &std::collections::BTreeMap<String, std::collections::BTreeSet<ReasonClass>>) -> ParsedPolicy {
+    parse_policy_impl(text, true, aliases)
 }
 /// Same as [`parse_policy`] but SILENT about malformed rules — for a SECOND, advisory re-parse within the
 /// same run (candor-scan parses once for the gate check and again for the `unverified` disclosure), so the
 /// CI log doesn't print every "ignoring policy rule …" warning twice (#21). The first parse already warned.
 pub fn parse_policy_quiet(text: &str) -> ParsedPolicy {
-    parse_policy_impl(text, false)
+    parse_policy_impl(text, false, &std::collections::BTreeMap::new())
 }
-fn parse_policy_impl(text: &str, warn: bool) -> ParsedPolicy {
+fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMap<String, std::collections::BTreeSet<ReasonClass>>) -> ParsedPolicy {
     macro_rules! warn_ignore { ($($a:tt)*) => { if warn { eprintln!($($a)*); } } }
     let mut out = ParsedPolicy::default();
     // `str::lines()` splits on \n and \r\n but NOT bare \r — a classic-Mac file then collapses to ONE
@@ -393,8 +468,10 @@ fn parse_policy_impl(text: &str, warn: bool) -> ParsedPolicy {
                                 unknown_classes.extend(ReasonClass::dynamic_set());
                             } else if let Some(rc) = ReasonClass::from_token(cn) {
                                 unknown_classes.insert(rc);
+                            } else if let Some(a) = aliases.get(cn) {
+                                unknown_classes.extend(a.iter().copied()); // ⟨0.19⟩ config `unknown-alias`
                             } else {
-                                warn_ignore!("candor: policy rule names unknown reason-class `{cn}` (known: reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*): {line}");
+                                warn_ignore!("candor: policy rule names unknown reason-class/alias `{cn}` (known: reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*, or a config `unknown-alias`): {line}");
                             }
                         }
                         continue;
@@ -539,6 +616,16 @@ mod tests {
             parse_policy("deny Net Unknown[dynamic] dom\n").rules[0].unknown_classes,
             [Reflect, Dispatch, Indirect, Native, Unresolved].into_iter().collect()
         );
+        // config `unknown-alias` (⟨0.19⟩): a user-defined name resolves; a reserved name is rejected.
+        let aliases = super::parse_unknown_aliases(
+            "unknown-alias risky = reflect,native\nunknown-alias telemetry = indirect\nunknown-alias reflect = native\n");
+        assert_eq!(aliases.get("risky"), Some(&[Reflect, Native].into_iter().collect()));
+        assert_eq!(aliases.get("telemetry"), Some(&[Indirect].into_iter().collect()));
+        assert!(!aliases.contains_key("reflect"), "a config alias may not shadow a class token");
+        let pr = super::parse_policy_with_aliases("deny Net Unknown[risky] api\n", &aliases);
+        assert_eq!(pr.rules[0].unknown_classes, [Reflect, Native].into_iter().collect());
+        // an UNDEFINED alias name is dropped-with-warning → empty filter (behaves like bare Unknown[*])
+        assert!(super::parse_policy_with_aliases("deny Net Unknown[nope] api\n", &aliases).rules[0].unknown_classes.is_empty());
         // classify: raw reason tokens → normative classes (mirrors java ReasonClass.classify).
         assert_eq!(ReasonClass::classify("reflect:Class.forName"), Reflect);
         assert_eq!(ReasonClass::classify("native:extern fn"), Native);

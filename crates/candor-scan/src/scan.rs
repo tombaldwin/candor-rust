@@ -1278,7 +1278,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
             return (2, json_body);
         };
-        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc);
+        // ⟨0.19⟩ reason-class aliases (SPEC §6.2): a multi-value `unknown-alias` config key the single-value
+        // cfg map can't hold — read straight from the discovered config so `Unknown[<alias>]` resolves.
+        let unknown_aliases = candor_classify::policy::discover_config_text(std::path::Path::new(dir))
+            .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
+            .unwrap_or_default();
+        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases);
         for gv in &v {
             let line = format!("[{}] {}", gv.rule, gv.detail);
             if stdout_is_json {
