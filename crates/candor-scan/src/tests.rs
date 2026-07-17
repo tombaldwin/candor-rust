@@ -2603,7 +2603,7 @@ trait G {
         // prefix form: `<value>.<crate>.scan.json`
         std::fs::write(d.join("base.mycrate.scan.json"), report(&this_build)).unwrap();
         let pre = d.join("base").to_string_lossy().into_owned();
-        match check_baseline(&pre, ".", "mycrate", &all, &inferred) {
+        match check_baseline(&pre, ".", "mycrate", &all, &inferred, false) {
             BaselineOutcome::Checked(v) => {
                 assert_eq!(v.len(), 1, "only the real gain flags: {v:?}",
                     v = v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
@@ -2616,19 +2616,64 @@ trait G {
         }
         // direct-file form resolves the same way
         let direct = d.join("base.mycrate.scan.json").to_string_lossy().into_owned();
-        assert!(matches!(check_baseline(&direct, ".", "mycrate", &all, &inferred),
+        assert!(matches!(check_baseline(&direct, ".", "mycrate", &all, &inferred, false),
             BaselineOutcome::Checked(v) if v.len() == 1));
         // version mismatch / missing provenance / empty value → Invalid (exit 2, never evaluated)
         std::fs::write(d.join("stale.mycrate.scan.json"), report("scan-0.0.1")).unwrap();
         let stale = d.join("stale").to_string_lossy().into_owned();
-        assert!(matches!(check_baseline(&stale, ".", "mycrate", &all, &inferred), BaselineOutcome::Invalid));
+        assert!(matches!(check_baseline(&stale, ".", "mycrate", &all, &inferred, false), BaselineOutcome::Invalid));
         std::fs::write(d.join("bare.mycrate.scan.json"), r#"[{"fn":"a","inferred":["Fs"]}]"#).unwrap();
         let bare = d.join("bare").to_string_lossy().into_owned();
-        assert!(matches!(check_baseline(&bare, ".", "mycrate", &all, &inferred), BaselineOutcome::Invalid));
-        assert!(matches!(check_baseline("", ".", "mycrate", &all, &inferred), BaselineOutcome::Invalid));
+        assert!(matches!(check_baseline(&bare, ".", "mycrate", &all, &inferred, false), BaselineOutcome::Invalid));
+        assert!(matches!(check_baseline("", ".", "mycrate", &all, &inferred, false), BaselineOutcome::Invalid));
         // absent file → Inactive (note; exit unchanged)
         let absent = d.join("nosuch").to_string_lossy().into_owned();
-        assert!(matches!(check_baseline(&absent, ".", "mycrate", &all, &inferred), BaselineOutcome::Inactive));
+        assert!(matches!(check_baseline(&absent, ".", "mycrate", &all, &inferred, false), BaselineOutcome::Inactive));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn baseline_unknown_ratchet_grandfathers_and_fails_new_unknown() {
+        // ⟨unknown-ratchet⟩ OPT-IN (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET) on the AS-EFF-005
+        // guard — candor-java Policy.checkBaseline is the model. Baseline: X is already Unknown, Y is pure.
+        // Current: X is STILL Unknown (grandfathered — no gain), Y is NOW Unknown (a NEW blind spot). The
+        // ratchet OFF must be byte-identical to the ⟨0.16⟩ advisory posture (0 violations); the ratchet ON
+        // fails EXACTLY Y (the newly-introduced Unknown), never X (already Unknown ⇒ grandfathered).
+        let d = std::env::temp_dir().join(format!("candor-scan-blratchet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let this_build = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // Y must be an EXISTING function (present in the baseline report) so its new Unknown reads as a gain,
+        // not as exempt new code — record it as a pure entry (empty inferred). X carries Unknown already.
+        let report = format!(
+            r#"{{"candor":{{"version":"{this_build}","toolchain":"stable","spec": "0.21"}},
+                "functions":[{{"fn":"x","inferred":["Unknown"]}},
+                             {{"fn":"y","inferred":[]}}]}}"#
+        );
+        std::fs::write(d.join("base.mycrate.scan.json"), &report).unwrap();
+        let pre = d.join("base").to_string_lossy().into_owned();
+        let all: Vec<String> = vec!["x".into(), "y".into()];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        inferred.insert("x".into(), ["Unknown"].into_iter().collect()); // still Unknown — grandfathered
+        inferred.insert("y".into(), ["Unknown"].into_iter().collect()); // NEW Unknown — fails under ratchet
+        // ratchet OFF: an Unknown-only gain stays advisory ⇒ zero violations (byte-identical to ⟨0.16⟩).
+        match check_baseline(&pre, ".", "mycrate", &all, &inferred, false) {
+            BaselineOutcome::Checked(v) => assert!(v.is_empty(), "ratchet OFF must not flag an Unknown gain: {v:?}",
+                v = v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>()),
+            _ => panic!("a valid same-build baseline must be evaluated"),
+        }
+        // ratchet ON: exactly Y (the newly-introduced Unknown) fails; X (already Unknown) is grandfathered.
+        match check_baseline(&pre, ".", "mycrate", &all, &inferred, true) {
+            BaselineOutcome::Checked(v) => {
+                assert_eq!(v.len(), 1, "ratchet ON must flag EXACTLY the new Unknown: {v:?}",
+                    v = v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
+                assert_eq!(v[0].rule, "AS-EFF-005");
+                assert_eq!(v[0].func, "y");
+                assert_eq!(v[0].effects, vec!["Unknown".to_string()]);
+                assert!(v[0].detail.contains("unknown-ratchet"), "{}", v[0].detail);
+            }
+            _ => panic!("a valid same-build baseline must be evaluated"),
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

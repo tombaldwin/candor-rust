@@ -298,12 +298,17 @@ static NOTED_ABSENT: std::sync::OnceLock<std::sync::Mutex<std::collections::Hash
 ///
 /// Same-named baseline entries (rlib+bin `main`) are UNIONed, not last-write-wins — the baseline is the
 /// over-approximation of what a name was already permitted to reach (mirrors the deep engine).
+///
+/// `unknown_ratchet` (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET, default OFF) flips an Unknown-ONLY
+/// gain from advisory to an AS-EFF-005 FAILURE — a fn already Unknown in the baseline is grandfathered (no
+/// gain), only a NEWLY-introduced Unknown fails. Default OFF leaves the guard's output byte-identical.
 pub(crate) fn check_baseline(
     value: &str,
     dir: &str,
     crate_name: &str,
     all: &[String],
     inferred: &HashMap<String, BTreeSet<&'static str>>,
+    unknown_ratchet: bool,
 ) -> BaselineOutcome {
     if value.trim().is_empty() {
         eprintln!(
@@ -442,7 +447,28 @@ pub(crate) fn check_baseline(
         // dominated by resolution noise (SOUNDNESS-LOG 2026-07-16) — DISCLOSE it, don't fail on it.
         let real: Vec<&str> = gained.iter().copied().filter(|e| *e != "Unknown").collect();
         if real.is_empty() {
-            unknown_only.push(q.clone());
+            // ⟨unknown-ratchet⟩ OPT-IN (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET, default OFF —
+            // candor-java Policy.checkBaseline is the model). This is what makes `deny Unknown` adoptable on
+            // legacy DI/reflection-heavy code: the CURRENT Unknown surface is GRANDFATHERED (a fn already
+            // Unknown in the baseline shows no gain ⇒ never flagged), and only a NEWLY-introduced Unknown —
+            // a blind spot the baseline did not have — fails. So a team freezes today's report as the
+            // baseline and the strict gate ratchets the Unknown surface DOWN instead of failing everywhere on
+            // day one; grandfather one by regenerating the baseline. Default OFF preserves the ⟨0.16⟩ advisory
+            // posture (Unknown-gains = resolution noise), leaving the guard's output byte-identical.
+            if unknown_ratchet {
+                out.push(GateViolation {
+                    rule: "AS-EFF-005".into(),
+                    func: q.clone(),
+                    effects: vec!["Unknown".to_string()],
+                    detail: format!(
+                        "`{q}` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot \
+                         (unknown-ratchet); resolve it, or regenerate the baseline to grandfather it"
+                    ),
+                    ..Default::default()
+                });
+            } else {
+                unknown_only.push(q.clone());
+            }
             continue;
         }
         out.push(GateViolation {
@@ -477,6 +503,17 @@ pub(crate) fn check_baseline(
 /// paths never RECORD). Mirrors the `CFG_FEATURES` OnceLock idiom; a plain path so it threads no ScanOpts.
 /// Members record via `record_gate_violations`; `scan_main` writes the single final verdict.
 pub(crate) static GATE_JSON_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// The `unknown-ratchet` / `CANDOR_UNKNOWN_RATCHET` opt-in (config `flag`), resolved once in `scan_main`
+/// and read at each `check_baseline` call — a process-wide mode like `GATE_JSON_PATH`, so it threads no
+/// ScanOpts through scan_target/run_with_deps. Default OFF (unset OnceLock reads `false`). When ON, an
+/// Unknown-ONLY gain vs the baseline FAILS (AS-EFF-005) instead of staying advisory — see `check_baseline`.
+pub(crate) static UNKNOWN_RATCHET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether the `unknown-ratchet` opt-in is active for this process (default OFF).
+pub(crate) fn unknown_ratchet() -> bool {
+    matches!(UNKNOWN_RATCHET.get(), Some(true))
+}
 
 /// Violations ACCUMULATED across `scan_one` calls. A `[workspace]` root runs the gate once per member;
 /// writing the verdict per member let the LAST member overwrite the first's violations — `gate.json` said
