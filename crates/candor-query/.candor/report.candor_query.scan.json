@@ -1,0 +1,1004 @@
+{
+  "candor": {
+    "version": "scan-0.18.0",
+    "toolchain": "stable",
+    "spec": "0.18"
+  },
+  "package": "candor_query",
+  "coverage": {
+    "uncovered": [
+      {
+        "name": "serde_json",
+        "calls": 75
+      },
+      {
+        "name": "candor_classify",
+        "calls": 14
+      },
+      {
+        "name": "candor_report",
+        "calls": 4
+      }
+    ]
+  },
+  "functions": [
+    {
+      "fn": "audit::cmd_audit",
+      "loc": "src/audit.rs:30:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#audit::cmd_audit",
+      "calls": [
+        "audit::tally_effects",
+        "load::encountered_set",
+        "load::load_calibrated",
+        "load::prefix_base",
+        "matching::sorted"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::callers_via_callgraph",
+      "loc": "src/callers.rs:176:1",
+      "inferred": [],
+      "hash": "candor_query#callers::callers_via_callgraph",
+      "calls": [
+        "matching::best_tier",
+        "matching::q_match"
+      ],
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "callers::callers_via_callgraph_frontier",
+      "loc": "src/callers.rs:54:1",
+      "inferred": [],
+      "hash": "candor_query#callers::callers_via_callgraph_frontier",
+      "calls": [
+        "matching::best_tier",
+        "matching::declaring_type",
+        "matching::is_subtype_of",
+        "matching::q_match",
+        "matching::simple_method"
+      ],
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "callers::cmd_callers",
+      "loc": "src/callers.rs:7:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#callers::cmd_callers",
+      "calls": [
+        "callers::callers_via_callgraph",
+        "callers::callers_via_callgraph_frontier",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_callgraph",
+        "load::load_entries_loud",
+        "load::load_hierarchy"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::cmd_impact",
+      "loc": "src/callers.rs:250:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#callers::cmd_impact",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::cmd_path",
+      "loc": "src/callers.rs:352:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#callers::cmd_path",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "callers::cmd_reachable",
+      "loc": "src/callers.rs:470:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#callers::cmd_reachable",
+      "calls": [
+        "callers::reachable_leaf",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "containment::cmd_blindspots",
+      "loc": "src/containment.rs:15:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#containment::cmd_blindspots",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "containment::cmd_containment",
+      "loc": "src/containment.rs:107:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#containment::cmd_containment",
+      "calls": [
+        "diff::load_fninfo_loud",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "grammar::resolve_locator",
+        "matching::common_prefix_len",
+        "matching::layer_of"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::attach_coverage",
+      "loc": "src/diff.rs:362:1",
+      "inferred": [],
+      "hash": "candor_query#diff::attach_coverage",
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "diff::cmd_diff",
+      "loc": "src/diff.rs:84:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#diff::cmd_diff",
+      "calls": [
+        "audit::gained_effects",
+        "diff::load_fninfo_loud",
+        "diff::rank",
+        "grammar::deprecation_note",
+        "grammar::resolve_locator",
+        "matching::q_or"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::cmd_gains",
+      "loc": "src/diff.rs:392:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#diff::cmd_gains",
+      "calls": [
+        "audit::gained_effects",
+        "diff::attach_coverage",
+        "diff::gain_origin",
+        "diff::load_fninfo_loud",
+        "grammar::deprecation_note",
+        "grammar::resolve_locator",
+        "load::load_callgraph_flagged",
+        "load::load_coverage",
+        "load::report_build_version"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::cmd_receipt",
+      "loc": "src/diff.rs:298:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#diff::cmd_receipt",
+      "calls": [
+        "audit::tally_effects",
+        "load::encountered_set",
+        "load::load_calibrated",
+        "load::load_entries_loud",
+        "load::prefix_base"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::load_fninfo_flagged",
+      "loc": "src/diff.rs:22:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#diff::load_fninfo_flagged",
+      "calls": [
+        "load::load_entries_inner"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "diff::load_fninfo_loud",
+      "loc": "src/diff.rs:44:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#diff::load_fninfo_loud",
+      "calls": [
+        "diff::load_fninfo_flagged",
+        "load::glob_reports"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "fix::RemedyPlan::to_json",
+      "loc": "src/fix.rs:71:5",
+      "inferred": [],
+      "hash": "candor_query#fix::RemedyPlan::to_json",
+      "invisible": [
+        "serde_json"
+      ]
+    },
+    {
+      "fn": "fix::cmd_fix",
+      "loc": "src/fix.rs:272:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_query#fix::cmd_fix",
+      "calls": [
+        "fix::RemedyPlan::render_text",
+        "fix::RemedyPlan::to_json",
+        "fix::compute_remedy",
+        "fix::denied_layer",
+        "fix::load_rules",
+        "fix::reverse_graph",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries",
+        "matching::best_tier",
+        "matching::q_match"
+      ],
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "fix::cmd_fix_gate",
+      "loc": "src/fix.rs:344:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_query#fix::cmd_fix_gate",
+      "calls": [
+        "fix::RemedyPlan::dedup_key",
+        "fix::compute_remedy",
+        "fix::denied_layer",
+        "fix::load_rules",
+        "fix::reverse_graph",
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries"
+      ],
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "fix::compute_remedy",
+      "loc": "src/fix.rs:139:1",
+      "inferred": [],
+      "hash": "candor_query#fix::compute_remedy",
+      "calls": [
+        "fix::denied_layer"
+      ],
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "fix::denied_layer",
+      "loc": "src/fix.rs:15:1",
+      "inferred": [],
+      "hash": "candor_query#fix::denied_layer",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "fix::load_rules",
+      "loc": "src/fix.rs:243:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_query#fix::load_rules",
+      "invisible": [
+        "candor_classify"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "grammar::discover_report_prefix",
+      "loc": "src/grammar.rs:57:1",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "hash": "candor_query#grammar::discover_report_prefix",
+      "calls": [
+        "grammar::resolve_locator"
+      ]
+    },
+    {
+      "fn": "load::encountered_set",
+      "loc": "src/load.rs:132:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::encountered_set",
+      "calls": [
+        "load::glob_encountered"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::glob_encountered",
+      "loc": "src/load.rs:103:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::glob_encountered",
+      "calls": [
+        "load::prefix_base"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_calibrated",
+      "loc": "src/load.rs:145:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::load_calibrated",
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_callgraph",
+      "loc": "src/load.rs:201:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::load_callgraph",
+      "calls": [
+        "load::load_callgraph_flagged"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_callgraph_flagged",
+      "loc": "src/load.rs:206:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::load_callgraph_flagged",
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_coverage",
+      "loc": "src/load.rs:295:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::load_coverage",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_entries",
+      "loc": "src/load.rs:15:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::load_entries",
+      "calls": [
+        "load::load_entries_inner"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_entries_inner",
+      "loc": "src/load.rs:24:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::load_entries_inner",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_entries_loud",
+      "loc": "src/load.rs:70:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::load_entries_loud",
+      "calls": [
+        "load::glob_reports",
+        "load::load_entries_inner"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::load_hierarchy",
+      "loc": "src/load.rs:162:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::load_hierarchy",
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "load::report_build_version",
+      "loc": "src/load.rs:275:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#load::report_build_version",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "main",
+      "loc": "src/main.rs:54:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "entryPoint": true,
+      "hash": "candor_query#main",
+      "calls": [
+        "audit::cmd_audit",
+        "callers::cmd_callers",
+        "callers::cmd_impact",
+        "callers::cmd_path",
+        "callers::cmd_reachable",
+        "containment::cmd_blindspots",
+        "containment::cmd_containment",
+        "diff::cmd_diff",
+        "diff::cmd_gains",
+        "diff::cmd_receipt",
+        "fix::cmd_fix",
+        "fix::cmd_fix_gate",
+        "policy::cmd_gate_verdict",
+        "policy::cmd_parsepolicy",
+        "policy::cmd_rewire",
+        "policy::cmd_whatif",
+        "print_help",
+        "print_version",
+        "show::cmd_map",
+        "show::cmd_show",
+        "show::cmd_where",
+        "state::cmd_engine_version",
+        "state::cmd_locate",
+        "state::cmd_merge_hook",
+        "state::cmd_reports",
+        "state::cmd_state",
+        "tour::cmd_tour",
+        "unverified::cmd_unverified"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::cmd_gate_verdict",
+      "loc": "src/policy.rs:282:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#policy::cmd_gate_verdict",
+      "calls": [
+        "grammar::resolve_locator"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::cmd_parsepolicy",
+      "loc": "src/policy.rs:7:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#policy::cmd_parsepolicy",
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::cmd_rewire",
+      "loc": "src/policy.rs:228:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#policy::cmd_rewire",
+      "calls": [
+        "load::load_callgraph",
+        "policy::dropped_edges"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "policy::cmd_whatif",
+      "loc": "src/policy.rs:70:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_query#policy::cmd_whatif",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_callgraph",
+        "matching::best_tier",
+        "matching::q_match"
+      ],
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "show::cmd_map",
+      "loc": "src/show.rs:174:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#show::cmd_map",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "show::cmd_show",
+      "loc": "src/show.rs:25:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#show::cmd_show",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud",
+        "matching::best_tier",
+        "matching::q_match",
+        "matching::sorted"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "show::cmd_where",
+      "loc": "src/show.rs:106:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#show::cmd_where",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries_loud"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::clear_other_reports",
+      "loc": "src/state.rs:40:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#state::clear_other_reports",
+      "calls": [
+        "load::is_scan_artifact"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_engine_version",
+      "loc": "src/state.rs:144:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#state::cmd_engine_version",
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_locate",
+      "loc": "src/state.rs:130:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#state::cmd_locate",
+      "calls": [
+        "state::locate_newest"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_merge_hook",
+      "loc": "src/state.rs:168:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#state::cmd_merge_hook",
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_reports",
+      "loc": "src/state.rs:70:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#state::cmd_reports",
+      "calls": [
+        "load::report_backend",
+        "state::clear_other_reports"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::cmd_state",
+      "loc": "src/state.rs:6:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#state::cmd_state",
+      "calls": [
+        "state::collect_rs"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::collect_rs",
+      "loc": "src/state.rs:234:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#state::collect_rs",
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "state::locate_newest",
+      "loc": "src/state.rs:96:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#state::locate_newest",
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "tour::cmd_tour",
+      "loc": "src/tour.rs:50:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_query#tour::cmd_tour",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_callgraph",
+        "load::load_entries_loud",
+        "load::prefix_base",
+        "tour::report_package"
+      ],
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "tour::report_package",
+      "loc": "src/tour.rs:10:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_query#tour::report_package",
+      "calls": [
+        "load::glob_reports",
+        "tour::packages_label"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "unverified::cmd_unverified",
+      "loc": "src/unverified.rs:15:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_query#unverified::cmd_unverified",
+      "calls": [
+        "grammar::parse",
+        "grammar::report_or_discover",
+        "load::load_entries"
+      ],
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    }
+  ]
+}
