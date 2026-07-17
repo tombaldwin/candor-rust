@@ -1,0 +1,1014 @@
+{
+  "candor": {
+    "version": "scan-0.18.0",
+    "toolchain": "stable",
+    "spec": "0.18"
+  },
+  "package": "candor_scan",
+  "coverage": {
+    "uncovered": [
+      {
+        "name": "syn",
+        "calls": 102
+      },
+      {
+        "name": "candor_classify",
+        "calls": 25
+      },
+      {
+        "name": "candor_report",
+        "calls": 8
+      },
+      {
+        "name": "rayon",
+        "calls": 7
+      },
+      {
+        "name": "serde_json",
+        "calls": 5
+      },
+      {
+        "name": "proc_macro2",
+        "calls": 1
+      }
+    ]
+  },
+  "functions": [
+    {
+      "fn": "cache::file_decls",
+      "loc": "src/cache.rs:106:1",
+      "inferred": [],
+      "hash": "candor_scan#cache::file_decls",
+      "calls": [
+        "decls::collect_decls",
+        "lang::collect_root_reexports"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::bind_tuple",
+      "loc": "src/collector.rs:499:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::bind_tuple",
+      "calls": [
+        "lang::elem_type",
+        "lang::single_pat_ident",
+        "lang::type_path"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::charge_format_args",
+      "loc": "src/collector.rs:342:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::charge_format_args",
+      "calls": [
+        "collector::CallCollector::charge_coercion",
+        "lang::parse_format_holes"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::expr_is_fn_typed",
+      "loc": "src/collector.rs:445:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::expr_is_fn_typed",
+      "calls": [
+        "lang::block_tail_expr"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::resolve_host_arg",
+      "loc": "src/collector.rs:274:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::resolve_host_arg",
+      "calls": [
+        "collector::CallCollector::resolve_str_expr"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::resolve_str_expr",
+      "loc": "src/collector.rs:299:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::resolve_str_expr",
+      "calls": [
+        "lang::format_const_prefix_arg",
+        "lang::format_literal_head_host",
+        "lang::path_leaf_ident"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::scoped_var",
+      "loc": "src/collector.rs:475:5",
+      "inferred": [
+        "Unknown"
+      ],
+      "direct": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "candor_scan#collector::CallCollector::scoped_var",
+      "unknownWhy": [
+        "callback:unresolved call"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_arm",
+      "loc": "src/collector.rs:784:5",
+      "inferred": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "candor_scan#collector::CallCollector::visit_arm",
+      "calls": [
+        "collector::CallCollector::scoped_var",
+        "lang::arm_payload_binding"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_binary",
+      "loc": "src/collector.rs:1090:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_expr_binary",
+      "calls": [
+        "collector::CallCollector::charge_coercion",
+        "lang::binop_trait"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_call",
+      "loc": "src/collector.rs:533:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_expr_call",
+      "calls": [
+        "collector::CallCollector::resolve_host_arg",
+        "lang::expand",
+        "lang::first_str_lit",
+        "lang::path_to_string",
+        "lang::type_path"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_closure",
+      "loc": "src/collector.rs:830:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_expr_closure",
+      "calls": [
+        "lang::single_pat_ident",
+        "lang::type_path"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_for_loop",
+      "loc": "src/collector.rs:763:5",
+      "inferred": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "candor_scan#collector::CallCollector::visit_expr_for_loop",
+      "calls": [
+        "collector::CallCollector::charge_iter_next",
+        "collector::CallCollector::resolve_elem_type",
+        "collector::CallCollector::scoped_var",
+        "lang::single_pat_ident"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_index",
+      "loc": "src/collector.rs:1114:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_expr_index",
+      "calls": [
+        "collector::CallCollector::charge_coercion"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_method_call",
+      "loc": "src/collector.rs:603:5",
+      "inferred": [
+        "Unknown"
+      ],
+      "unresolved": true,
+      "hash": "candor_scan#collector::CallCollector::visit_expr_method_call",
+      "calls": [
+        "collector::CallCollector::charge_coercion",
+        "collector::CallCollector::charge_iter_next",
+        "collector::CallCollector::resolve_elem_type",
+        "collector::CallCollector::resolve_host_arg",
+        "collector::CallCollector::resolve_recv_traits",
+        "collector::CallCollector::resolve_recv_type",
+        "collector::CallCollector::scoped_var",
+        "lang::expand",
+        "lang::first_str_lit",
+        "lang::is_iter_consumer",
+        "lang::path_to_string",
+        "lang::single_pat_ident"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_path",
+      "loc": "src/collector.rs:802:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_expr_path",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_try",
+      "loc": "src/collector.rs:1079:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_expr_try",
+      "calls": [
+        "collector::CallCollector::charge_from"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_expr_unary",
+      "loc": "src/collector.rs:1102:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_expr_unary",
+      "calls": [
+        "collector::CallCollector::charge_coercion"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_local",
+      "loc": "src/collector.rs:851:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_local",
+      "calls": [
+        "collector::CallCollector::bind_tuple",
+        "collector::CallCollector::charge_from",
+        "collector::CallCollector::expr_is_fn_typed",
+        "collector::CallCollector::resolve_elem_type",
+        "collector::CallCollector::resolve_str_expr",
+        "lang::const_str_value",
+        "lang::ctor_type",
+        "lang::elem_type",
+        "lang::expand",
+        "lang::expr_is_into_call",
+        "lang::is_callable_type",
+        "lang::path_to_string",
+        "lang::single_pat_ident",
+        "lang::trait_leaves",
+        "lang::tuple_types",
+        "lang::type_path"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_macro",
+      "loc": "src/collector.rs:1020:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_macro",
+      "calls": [
+        "collector::CallCollector::charge_format_args",
+        "lang::expand",
+        "lang::is_format_macro",
+        "lang::path_to_string"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CallCollector::visit_stmt",
+      "loc": "src/collector.rs:524:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CallCollector::visit_stmt",
+      "calls": [
+        "lang::stmt_cfg_inactive"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "collector::CfgIfArms::parse",
+      "loc": "src/collector.rs:1159:5",
+      "inferred": [],
+      "hash": "candor_scan#collector::CfgIfArms::parse",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "config::load_candor_config",
+      "loc": "src/config.rs:15:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_scan#config::load_candor_config",
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "decls::collect_decls",
+      "loc": "src/decls.rs:481:1",
+      "inferred": [],
+      "hash": "candor_scan#decls::collect_decls",
+      "calls": [
+        "decls::lazy_unit_emitted",
+        "decls::record_return",
+        "lang::collect_use",
+        "lang::const_str_value",
+        "lang::elem_type",
+        "lang::generic_bounds_of_generics",
+        "lang::has_cfg",
+        "lang::impl_type_name",
+        "lang::is_cfg_test",
+        "lang::is_non_nominal_type",
+        "lang::trait_leaves",
+        "lang::type_path",
+        "lazy::lazy_static_unit"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "decls::fn_locs",
+      "loc": "src/decls.rs:177:1",
+      "inferred": [],
+      "hash": "candor_scan#decls::fn_locs",
+      "calls": [
+        "decls::lazy_unit_emitted",
+        "lang::is_cfg_test"
+      ],
+      "invisible": [
+        "proc_macro2",
+        "syn"
+      ]
+    },
+    {
+      "fn": "decls::fninfo",
+      "loc": "src/decls.rs:334:1",
+      "inferred": [],
+      "hash": "candor_scan#decls::fninfo",
+      "calls": [
+        "collector::CallCollector::visit_stmt",
+        "decls::seed_elem_of",
+        "decls::seed_trait_vars",
+        "decls::seed_vars",
+        "lang::result_err_leaf",
+        "lang::seed_fn_typed_vars"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "decls::lazy_unit_emitted",
+      "loc": "src/decls.rs:149:1",
+      "inferred": [],
+      "hash": "candor_scan#decls::lazy_unit_emitted",
+      "calls": [
+        "lang::is_cfg_test",
+        "lazy::lazy_static_unit"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "decls::record_return",
+      "loc": "src/decls.rs:430:1",
+      "inferred": [],
+      "hash": "candor_scan#decls::record_return",
+      "calls": [
+        "lang::generic_bounds_of",
+        "lang::is_callable_type",
+        "lang::type_path",
+        "lang::unwrap_result_option"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "decls::scan_items",
+      "loc": "src/decls.rs:34:1",
+      "inferred": [],
+      "hash": "candor_scan#decls::scan_items",
+      "calls": [
+        "decls::fninfo",
+        "decls::lazy_unit_emitted",
+        "decls::next_loc",
+        "lang::collect_use",
+        "lang::impl_type_name",
+        "lang::is_cfg_test",
+        "lazy::lazy_static_unit"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "decls::seed_trait_vars",
+      "loc": "src/decls.rs:316:1",
+      "inferred": [],
+      "hash": "candor_scan#decls::seed_trait_vars",
+      "calls": [
+        "lang::generic_bounds_of",
+        "lang::trait_leaves"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "deps::cargo_deps",
+      "loc": "src/deps.rs:235:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#deps::cargo_deps",
+      "calls": [
+        "deps::cargo_toml_deps"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "deps::dirs_cargo_registry_src",
+      "loc": "src/deps.rs:364:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_scan#deps::dirs_cargo_registry_src",
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "deps::has_workspace_table",
+      "loc": "src/deps.rs:438:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#deps::has_workspace_table",
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "deps::load_dep_reports",
+      "loc": "src/deps.rs:72:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#deps::load_dep_reports",
+      "calls": [
+        "lang::tail2"
+      ],
+      "invisible": [
+        "candor_classify",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "deps::read_crate_name",
+      "loc": "src/deps.rs:379:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#deps::read_crate_name",
+      "calls": [
+        "deps::toml_scalar",
+        "deps::toml_section"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "deps::workspace_members",
+      "loc": "src/deps.rs:447:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#deps::workspace_members",
+      "calls": [
+        "deps::toml_string_array"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "gate::check_baseline",
+      "loc": "src/gate.rs:224:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#gate::check_baseline",
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "gate::policy_violations",
+      "loc": "src/gate.rs:14:1",
+      "inferred": [],
+      "hash": "candor_scan#gate::policy_violations",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::unverified_holes",
+      "loc": "src/gate.rs:179:1",
+      "inferred": [],
+      "hash": "candor_scan#gate::unverified_holes",
+      "invisible": [
+        "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::write_gate_json",
+      "loc": "src/gate.rs:472:1",
+      "inferred": [],
+      "hash": "candor_scan#gate::write_gate_json",
+      "invisible": [
+        "candor_report"
+      ]
+    },
+    {
+      "fn": "lang::bound_leaves",
+      "loc": "src/lang.rs:10:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::bound_leaves",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::cfg_eval",
+      "loc": "src/lang.rs:774:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::cfg_eval",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::cfg_meta_requires_test",
+      "loc": "src/lang.rs:631:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::cfg_meta_requires_test",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::const_str_value",
+      "loc": "src/lang.rs:434:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::const_str_value",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::format_const_prefix_arg",
+      "loc": "src/lang.rs:483:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::format_const_prefix_arg",
+      "calls": [
+        "lang::is_format_macro"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::format_literal_head_host",
+      "loc": "src/lang.rs:514:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::format_literal_head_host",
+      "calls": [
+        "lang::is_format_macro",
+        "lang::literal_head_host"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::generic_bounds_of",
+      "loc": "src/lang.rs:98:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::generic_bounds_of",
+      "calls": [
+        "lang::generic_bounds_of_generics"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::generic_bounds_of_generics",
+      "loc": "src/lang.rs:104:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::generic_bounds_of_generics",
+      "calls": [
+        "lang::bound_leaves"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::has_cfg",
+      "loc": "src/lang.rs:612:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::has_cfg",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::is_callable_type",
+      "loc": "src/lang.rs:56:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::is_callable_type",
+      "calls": [
+        "lang::trait_leaves"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::is_cfg_inactive",
+      "loc": "src/lang.rs:819:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::is_cfg_inactive",
+      "calls": [
+        "lang::cfg_cell",
+        "lang::cfg_eval"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::is_cfg_test",
+      "loc": "src/lang.rs:653:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::is_cfg_test",
+      "calls": [
+        "lang::cfg_meta_requires_test"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::seed_fn_typed_vars",
+      "loc": "src/lang.rs:81:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::seed_fn_typed_vars",
+      "calls": [
+        "lang::generic_bounds_of",
+        "lang::is_callable_type"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::stmt_cfg_inactive",
+      "loc": "src/lang.rs:859:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::stmt_cfg_inactive",
+      "calls": [
+        "lang::expr_attrs",
+        "lang::is_cfg_inactive"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lang::trait_leaves",
+      "loc": "src/lang.rs:23:1",
+      "inferred": [],
+      "hash": "candor_scan#lang::trait_leaves",
+      "calls": [
+        "lang::bound_leaves"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lazy::LazyStaticDecl::parse",
+      "loc": "src/lazy.rs:122:5",
+      "inferred": [],
+      "hash": "candor_scan#lazy::LazyStaticDecl::parse",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lazy::ThreadLocalDecl::parse",
+      "loc": "src/lazy.rs:151:5",
+      "inferred": [],
+      "hash": "candor_scan#lazy::ThreadLocalDecl::parse",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lazy::closure_or_block_stmts",
+      "loc": "src/lazy.rs:47:1",
+      "inferred": [],
+      "hash": "candor_scan#lazy::closure_or_block_stmts",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lazy::lazy_init_body",
+      "loc": "src/lazy.rs:33:1",
+      "inferred": [],
+      "hash": "candor_scan#lazy::lazy_init_body",
+      "calls": [
+        "lazy::closure_or_block_stmts"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lazy::lazy_static_macro_body",
+      "loc": "src/lazy.rs:95:1",
+      "inferred": [],
+      "hash": "candor_scan#lazy::lazy_static_macro_body",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lazy::lazy_static_unit",
+      "loc": "src/lazy.rs:60:1",
+      "inferred": [],
+      "hash": "candor_scan#lazy::lazy_static_unit",
+      "calls": [
+        "lang::path_to_string",
+        "lazy::lazy_init_body",
+        "lazy::lazy_static_macro_body",
+        "lazy::thread_local_macro_body"
+      ],
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "lazy::thread_local_macro_body",
+      "loc": "src/lazy.rs:106:1",
+      "inferred": [],
+      "hash": "candor_scan#lazy::thread_local_macro_body",
+      "invisible": [
+        "syn"
+      ]
+    },
+    {
+      "fn": "main",
+      "loc": "src/main.rs:73:1",
+      "inferred": [],
+      "entryPoint": true,
+      "hash": "candor_scan#main",
+      "invisible": [
+        "rayon"
+      ]
+    },
+    {
+      "fn": "scan::run_with_deps",
+      "loc": "src/scan.rs:1403:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env",
+        "Fs"
+      ],
+      "hash": "candor_scan#scan::run_with_deps",
+      "calls": [
+        "deps::dirs_cargo_registry_src",
+        "deps::load_dep_reports",
+        "scan::scan_one",
+        "scan::scan_target"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "rayon",
+        "serde_json",
+        "syn"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "scan::scan_main",
+      "loc": "src/scan.rs:6:1",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "hash": "candor_scan#scan::scan_main",
+      "calls": [
+        "<lazy>::INCREMENTAL",
+        "config::load_candor_config",
+        "deps::load_dep_reports",
+        "gate::write_gate_json",
+        "scan::run_with_deps",
+        "scan::scan_target"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "rayon",
+        "serde_json",
+        "syn"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "scan::scan_one",
+      "loc": "src/scan.rs:205:1",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "hash": "candor_scan#scan::scan_one",
+      "calls": [
+        "<lazy>::INCREMENTAL",
+        "cache::cache_schema",
+        "cache::decl_index_digest",
+        "cache::file_decls",
+        "cache::fnv1a",
+        "cache::merge_decls",
+        "collector::resolve_target",
+        "decls::fn_locs",
+        "decls::scan_items",
+        "deps::cargo_deps",
+        "deps::read_crate_name",
+        "deps::scan_builder_entry_effect",
+        "gate::check_baseline",
+        "gate::host_part",
+        "gate::policy_violations",
+        "gate::record_gate_coverage",
+        "gate::record_gate_violations",
+        "gate::unverified_holes",
+        "lang::is_build_script",
+        "lang::is_test_file_stem",
+        "lang::module_path",
+        "lang::parse_features",
+        "lang::seed_root_reexports",
+        "lang::set_cfg_features",
+        "lang::tail2",
+        "propagate::propagate",
+        "propagate::propagate_str",
+        "surface::emit"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "rayon",
+        "serde_json",
+        "syn"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "scan::scan_target",
+      "loc": "src/scan.rs:1344:1",
+      "inferred": [
+        "Fs"
+      ],
+      "hash": "candor_scan#scan::scan_target",
+      "calls": [
+        "deps::has_workspace_table",
+        "deps::read_crate_name",
+        "deps::workspace_members",
+        "scan::scan_one"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "rayon",
+        "serde_json",
+        "syn"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "surface::emit",
+      "loc": "src/surface.rs:14:1",
+      "inferred": [],
+      "hash": "candor_scan#surface::emit",
+      "invisible": [
+        "candor_classify"
+      ]
+    }
+  ]
+}

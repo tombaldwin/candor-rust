@@ -110,7 +110,10 @@ pub fn parse_unknown_aliases(config_text: &str) -> std::collections::BTreeMap<St
             continue;
         }
         let mut it = line.splitn(2, char::is_whitespace);
-        if it.next() != Some("unknown-alias") {
+        // Case-INSENSITIVE key match, like the config loaders in java/ts/swift (which lowercase the key) —
+        // a case-sensitive match here made `Unknown-Alias …` define an alias everywhere BUT rust (a four-way
+        // parse divergence; caught in review). The rest of the line (name + classes) stays case-sensitive.
+        if !it.next().is_some_and(|k| k.eq_ignore_ascii_case("unknown-alias")) {
             continue;
         }
         let val = it.next().unwrap_or("").trim();
@@ -622,6 +625,9 @@ mod tests {
         assert_eq!(aliases.get("risky"), Some(&[Reflect, Native].into_iter().collect()));
         assert_eq!(aliases.get("telemetry"), Some(&[Indirect].into_iter().collect()));
         assert!(!aliases.contains_key("reflect"), "a config alias may not shadow a class token");
+        // the `unknown-alias` KEY matches case-insensitively (parity with java/ts/swift, which lowercase it)
+        assert_eq!(super::parse_unknown_aliases("Unknown-Alias hot = native\n").get("hot"),
+                   Some(&[Native].into_iter().collect()), "the unknown-alias key must match case-insensitively");
         let pr = super::parse_policy_with_aliases("deny Net Unknown[risky] api\n", &aliases);
         assert_eq!(pr.rules[0].unknown_classes, [Reflect, Native].into_iter().collect());
         // an UNDEFINED alias name is dropped-with-warning → empty filter (behaves like bare Unknown[*])
