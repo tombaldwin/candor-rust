@@ -88,6 +88,7 @@ pub(crate) struct Query {
     pub(crate) strict: bool,
     pub(crate) include_unknown: bool,
     pub(crate) stats: bool,
+    pub(crate) class: Option<String>,
 }
 
 /// A verb's positional shape, used to tell the canonical grammar from the deprecated old forms.
@@ -109,7 +110,7 @@ pub(crate) struct Shape {
 /// Parse the canonical grammar, accepting the deprecated old forms with a stderr note.
 /// Suggest the nearest known flag for a typo'd one (longest shared prefix ≥3): `--polciy` → `--policy`.
 fn did_you_mean_flag(unknown: &str) -> String {
-    const KNOWN: [&str; 7] = ["--report", "--policy", "--json", "--text", "--strict", "--include-unknown", "--stats"];
+    const KNOWN: [&str; 8] = ["--report", "--policy", "--json", "--text", "--strict", "--include-unknown", "--stats", "--class"];
     let u = unknown.trim_start_matches('-').to_lowercase();
     KNOWN
         .iter()
@@ -130,6 +131,7 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
     let mut strict = false;
     let mut include_unknown = false;
     let mut stats = false;
+    let mut class: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
 
     // Pass 1: pull the named flags out; keep the rest positional (order preserved).
@@ -144,6 +146,15 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
             "--strict" => strict = true,
             "--include-unknown" => include_unknown = true,
             "--stats" => stats = true,
+            "--class" => {
+                if let Some(v) = args.get(i + 1) {
+                    class = Some(v.clone());
+                    i += 1;
+                } else {
+                    eprintln!("candor-query: --class requires a <class,…> argument (reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)");
+                    std::process::exit(2);
+                }
+            }
             "--report" => {
                 if let Some(v) = args.get(i + 1) {
                     report = Some(resolve_locator(v));
@@ -177,7 +188,7 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
             // `-` (a stdin/stdout stand-in some tools use) stays a positional.
             other if other.starts_with('-') && other.len() > 1 => {
                 eprintln!(
-                    "candor-query: unknown flag `{other}`{}\n  known flags: --report, --policy, --json, --text, --strict, --include-unknown, --stats",
+                    "candor-query: unknown flag `{other}`{}\n  known flags: --report, --policy, --json, --text, --strict, --include-unknown, --stats, --class",
                     did_you_mean_flag(other)
                 );
                 std::process::exit(2);
@@ -223,7 +234,7 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
         report = Some(resolve_locator(&positional.remove(0)));
     }
 
-    Query { report, positional, want_json, policy, strict, include_unknown, stats }
+    Query { report, positional, want_json, policy, strict, include_unknown, stats, class }
 }
 
 /// Resolve the report prefix for a verb: the parsed `--report`/old-positional if present, else discovery.

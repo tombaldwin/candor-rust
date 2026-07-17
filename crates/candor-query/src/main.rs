@@ -160,7 +160,7 @@ fn print_help() {
         ("reachable [--report <loc>] [--json]", "the effects the program actually performs at runtime"),
         ("path     <fn-substring> <Effect> [--report <loc>] [--json]", "the call chain by which a fn comes to perform an effect"),
         ("impact   <fn-substring> [--report <loc>] [--json]", "the blast radius of a fn: effectful callers + entry points"),
-        ("blindspots [--report <loc>] [--json] [--stats]", "the Unknown sources ranked by blast radius; --stats: the reason-class distribution"),
+        ("blindspots [--report <loc>] [--json] [--stats] [--class <c,…>]", "the Unknown sources ranked by blast radius; --stats: reason-class distribution; --class: drill down"),
         ("tour     [<N>] [--report <loc>] [--json]", "the N most surprising transitive reaches (default 10)"),
         ("whatif   <fn> <Effect> [--report <loc>] [--policy <f>] [--json]", "pre-edit verdict: blast radius + policy violations"),
         ("fix      <fn> <Effect> [--report <loc>] [--policy <f>] [--json]", "the boundary fix: where the effect belongs + the hoist refactor"),

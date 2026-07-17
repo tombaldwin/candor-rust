@@ -2,6 +2,35 @@
 
 use crate::*;
 
+/// Parse a `--class <c,…>` filter into reason classes (SPEC §3.1 ⟨0.20⟩): the six tokens, `dynamic` (every
+/// genuine class), or `*` (all six). An unknown token warns + is skipped; all-unknown ⇒ an empty set that
+/// matches nothing. Shared shape with the java `Query.parseClassFilter`.
+fn parse_class_filter(spec: &str) -> std::collections::HashSet<candor_classify::policy::ReasonClass> {
+    use candor_classify::policy::ReasonClass;
+    const ALL: [ReasonClass; 6] = [
+        ReasonClass::Reflect, ReasonClass::Dispatch, ReasonClass::Indirect,
+        ReasonClass::Native, ReasonClass::Unresolved, ReasonClass::Setup,
+    ];
+    let mut out = std::collections::HashSet::new();
+    for t in spec.split(',') {
+        let t = t.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t == "*" {
+            return ALL.into_iter().collect();
+        }
+        if t == "dynamic" {
+            out.extend(ReasonClass::dynamic_set());
+        } else if let Some(rc) = ReasonClass::from_token(t) {
+            out.insert(rc);
+        } else {
+            eprintln!("candor-query: --class ignores unknown reason-class `{t}` (known: reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)");
+        }
+    }
+    out
+}
+
 // ── containment ───────────────────────────────────────────────────────────────────────────────────
 
 /// BOUNDARY effects SHOULD live in a dedicated layer — their dispersion is the architecture signal (NOT
@@ -47,6 +76,17 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
         }
     }
     let total_unknown = entries.iter().filter(|e| e.inferred.iter().any(|x| x == "Unknown")).count();
+    // `--class <c,…>` (SPEC §3.1 ⟨0.20⟩): keep only Unknown SOURCES whose reason classes intersect the
+    // filter — the drill-down companion to `--stats`. None ⇒ no filter (`*`/dynamic expand to the classes).
+    let class_filter: Option<std::collections::HashSet<candor_classify::policy::ReasonClass>> =
+        g.class.as_deref().map(parse_class_filter);
+    let matches = |e: &candor_report::ReportEntry| -> bool {
+        use candor_classify::policy::ReasonClass;
+        match &class_filter {
+            None => true,
+            Some(set) => e.unknown_why.iter().any(|w| set.contains(&ReasonClass::classify(w))),
+        }
+    };
     // `--stats` (SPEC §3.1 ⟨0.20⟩): the reason-class DISTRIBUTION over the Unknown SOURCES — how much
     // Unknown, by class {reflect,dispatch,indirect,native,unresolved,setup} — so a team can SIZE the
     // blind-spot cost (and separate genuine dynamism from `setup` mis-config) BEFORE `deny E Unknown`.
@@ -56,7 +96,7 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
         let mut by_class: HashMap<&str, usize> = ORDER.iter().map(|c| (*c, 0usize)).collect();
         let mut sources_n = 0usize;
         for e in &entries {
-            if e.unknown_why.is_empty() {
+            if e.unknown_why.is_empty() || !matches(e) {
                 continue;
             }
             sources_n += 1;
@@ -94,8 +134,8 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
     }
     let mut sources: Vec<Source> = Vec::new();
     for e in &entries {
-        if e.unknown_why.is_empty() {
-            continue; // a SOURCE carries its own unknownWhy; a purely-transitive Unknown does not
+        if e.unknown_why.is_empty() || !matches(e) {
+            continue; // a SOURCE (carries its own unknownWhy) of a matching reason class
         }
         let mut seen: HashSet<&str> = HashSet::new();
         let mut q: VecDeque<&str> = VecDeque::new();

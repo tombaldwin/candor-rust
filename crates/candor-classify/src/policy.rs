@@ -21,7 +21,7 @@ pub const UNKNOWN: &str = "Unknown";
 /// class set is CLOSED (six members); a raw reason matching no pinned prefix maps to `Unresolved` —
 /// conservative: it stays in scope of any `Unknown[*]` / `Unknown[dynamic]` policy, never silently
 /// tolerated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReasonClass {
     /// reflection / metaprogramming
     Reflect,
