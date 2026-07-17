@@ -25,7 +25,7 @@ command -v cargo-candor && echo "cargo candor available"
 silently scan with it — surface it to the user first:
 
 1. Run `candor-scan --version` (offline) and **tell the user, plainly, which version this project is
-   on** — e.g. "This project is on candor-scan 0.18.0 (spec 0.18)." On a build too old for the two-line
+   on** — e.g. "This project is on candor-scan 0.18.0 (spec 0.19)." On a build too old for the two-line
    `--version`, read `candor.version` / `candor.spec` from an existing `.candor/report*.json` and
    report those instead.
 2. Then do the §1a currency check (candor can't phone home; *you* have network) and, if it's behind,

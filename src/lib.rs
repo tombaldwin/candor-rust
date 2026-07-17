@@ -445,6 +445,7 @@ impl Candor {
             func: func.to_string(),
             effects: effects.iter().map(|s| s.to_string()).collect(),
             detail: detail.to_string(),
+            ..Default::default()   // ⟨0.19⟩ reasonClass is populated by the stable gate; the lint has no reason map
         };
         let Ok(line) = serde_json::to_string(&rec) else { return };
         let parts = format!("{gate}.parts");
