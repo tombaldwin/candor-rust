@@ -72,11 +72,19 @@ pub(crate) fn policy_violations(
                 }
             }
             if !hits.is_empty() {
+                // §6.2: when Unknown is denied, report ALL reason classes on the fn (transitive), so the
+                // consumer sees every reason the strict gate bit — not just the class the rule matched.
+                let reason_class = if hits.contains(&"Unknown") {
+                    reasonclassacc.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 out.push(GateViolation {
                     rule: "AS-EFF-006".into(),
                     func: q.clone(),
                     effects: hits.iter().map(|s| s.to_string()).collect(),
                     detail: format!("`{q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
+                    reason_class,
                 });
             }
         }
@@ -115,6 +123,7 @@ pub(crate) fn policy_violations(
                             func: q.clone(),
                             effects: vec![r.effect.to_string()],
                             detail: format!("`{q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw),
+                            ..Default::default()
                         });
                     }
                 }
@@ -123,6 +132,7 @@ pub(crate) fn policy_violations(
                     func: q.clone(),
                     effects: vec![r.effect.to_string()],
                     detail: format!("`{q}` performs {} with no visible literal — the surface cannot be certified: `{}`", r.effect, r.raw),
+                    ..Default::default()
                 }),
             }
         }
@@ -152,6 +162,7 @@ pub(crate) fn policy_violations(
                     func: q.clone(),
                     effects: Vec::new(), // a layer-flow has no single effect
                     detail: format!("`{q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw),
+                    ..Default::default()
                 });
             }
         }
@@ -397,6 +408,7 @@ pub(crate) fn check_baseline(
                  started performing a new effect",
                 real.join(", ")
             ),
+            ..Default::default()
         });
     }
     if !unknown_only.is_empty() {

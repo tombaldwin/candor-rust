@@ -1062,6 +1062,10 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
         let v = policy_violations("deny Net Unknown[native]\n", &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, &rc_acc);
         assert_eq!(v.len(), 2, "Unknown[native] must fire on BOTH the native callee and the caller inheriting its Unknown");
+        // §6.2 ⟨0.19⟩: the verdict carries reasonClass on the Unknown denial — on the caller too (transitive).
+        for gv in &v {
+            assert_eq!(gv.reason_class, vec!["native".to_string()], "reasonClass rides the Unknown verdict for `{}`", gv.func);
+        }
     }
 
     #[test]
