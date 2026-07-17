@@ -149,7 +149,7 @@ pub fn parse_unknown_aliases(config_text: &str) -> std::collections::BTreeMap<St
     out
 }
 
-/// ⟨0.21⟩ Parse `net-partner <host>` lines from `.candor/config` (NET-DESTINATION-CLASS-DESIGN.md): the
+/// ⟨0.20⟩ Parse `net-partner <host>` lines from `.candor/config` (NET-DESTINATION-CLASS-DESIGN.md): the
 /// per-project set of business-partner hosts the `Net` destination-class classifier treats as
 /// `known-partner`. Multi-value (repeatable key); the value is host-normalized (`:port` stripped,
 /// lowercased) like `MODEL_HOSTS`. Case-insensitive key match, mirroring `parse_unknown_aliases` + the
