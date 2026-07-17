@@ -161,6 +161,13 @@ pub struct ReportEntry {
     /// primary surface.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incomplete: Vec<String>,
+    /// ⟨0.21⟩ Net DESTINATION classes present in this function's (transitive) `Net` surface —
+    /// `known-telemetry` / `known-partner` / `unknown-host` (NET-DESTINATION-CLASS-DESIGN.md). An exact
+    /// host-literal match for the visible hosts, plus the fail-closed `unknown-host` when the Net surface is
+    /// masked (`incomplete` has `Net`) OR carries no visible host (a runtime endpoint). The class travels the
+    /// call graph like the effect. Omitted when the function has no `Net`; never a claim a host is SAFE.
+    #[serde(default, rename = "netClass", skip_serializing_if = "Vec::is_empty")]
+    pub net_class: Vec<String>,
 }
 
 /// The candor-spec contract version this build implements (the report SCHEMA + AS-EFF codes), distinct
@@ -370,6 +377,11 @@ pub struct GateViolation {
     /// gate bit, not just the matched one. Empty/omitted otherwise (SPEC §6.2).
     #[serde(rename = "reasonClass", default, skip_serializing_if = "Vec::is_empty")]
     pub reason_class: Vec<String>,
+    /// Net destination-class ⟨0.21⟩: on an AS-EFF-006 violation whose `effects` include `Net`, ALL the
+    /// destination classes present (transitively) on the function — so a consumer sees which class the
+    /// security gate bit. Empty/omitted otherwise (SPEC §6.2, NET-DESTINATION-CLASS-DESIGN.md).
+    #[serde(rename = "netClass", default, skip_serializing_if = "Vec::is_empty")]
+    pub net_class: Vec<String>,
 }
 
 /// Serialize the §3.3 gate verdict `{ spec, ok, violations }` — the machine analog of the `AS-EFF`

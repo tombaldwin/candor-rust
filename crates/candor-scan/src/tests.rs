@@ -997,7 +997,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
         let v = policy_violations(
             "deny Net api\nallow Net in api good.example.com\nforbid ui -> db\n",
-            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(),
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new(),
         );
         assert_eq!(v.len(), 3, "{}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
         // 006 names the denied effect in `effects` (the denied SET, not just the message text).
@@ -1006,15 +1006,15 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // 009 is a layer-flow — no single effect, so `effects` is empty.
         assert!(v.iter().any(|g| g.rule == "AS-EFF-009" && g.func == "ui::draw" && g.effects.is_empty()));
         // clean policy -> no violations; `pure` flags ANY effect incl. the Db fn.
-        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new()).is_empty());
-        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new()).len(), 1);
+        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).is_empty());
+        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).len(), 1);
         // the Db table allowlist: db::run reaches audit.log — outside `ledger.*` -> violation;
         // covered by `audit.*` -> clean. ui::draw INHERITS Db but the literal propagation is the
         // caller's tablesacc, supplied here only for db::run, so only db::run flags.
-        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new());
+        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new());
         assert_eq!(bad.len(), 1, "{}", bad.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
         assert!(bad[0].detail.contains("audit.log"));
-        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new()).is_empty());
+        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).is_empty());
     }
 
     #[test]
@@ -1029,7 +1029,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut rc: HashMap<String, BTreeSet<String>> = HashMap::new();
         rc.insert("dom::svc".into(), ["native".to_string()].into_iter().collect());
         let gate = |pol: &str, rc: &HashMap<String, BTreeSet<String>>| {
-            policy_violations(pol, &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, rc, &std::collections::BTreeMap::new())
+            policy_violations(pol, &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, rc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new())
         };
         // matching class → fires
         assert_eq!(gate("deny Net Unknown[native]\n", &rc).len(), 1, "Unknown[native] must fire on a native-class Unknown");
@@ -1060,12 +1060,67 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let rc_acc = crate::propagate::propagate_str(&rc_direct, &calls, &all);
         let empty: HashMap<String, BTreeSet<String>> = HashMap::new();
         let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
-        let v = policy_violations("deny Net Unknown[native]\n", &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, &rc_acc, &std::collections::BTreeMap::new());
+        let v = policy_violations("deny Net Unknown[native]\n", &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, &rc_acc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new());
         assert_eq!(v.len(), 2, "Unknown[native] must fire on BOTH the native callee and the caller inheriting its Unknown");
         // §6.2 ⟨0.19⟩: the verdict carries reasonClass on the Unknown denial — on the caller too (transitive).
         for gv in &v {
             assert_eq!(gv.reason_class, vec!["native".to_string()], "reasonClass rides the Unknown verdict for `{}`", gv.func);
         }
+    }
+
+    #[test]
+    fn net_destination_class_gate_fires_on_unknown_host_tolerates_asserted_safe() {
+        // The security gate (NET-DESTINATION-CLASS-DESIGN.md): `deny Net[unknown-host]` denies Net to a host
+        // candor can't identify as telemetry/partner, tolerating the asserted-safe classes. Fail-closed on a
+        // masked surface / a Net with no visible host. The destination class travels the call graph.
+        let all = vec![
+            "d::tel".to_string(),
+            "d::exfil".to_string(),
+            "d::runtime".to_string(),
+            "d::caller".to_string(),
+        ];
+        let mut inferred: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        for f in &all {
+            inferred.insert(f.clone(), ["Net"].into_iter().collect());
+        }
+        let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+        calls.insert("d::caller".into(), ["d::exfil".to_string()].into_iter().collect()); // caller reaches exfil
+        let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
+        hosts.insert("d::tel".into(), ["sentry.io".to_string()].into_iter().collect());
+        hosts.insert("d::exfil".into(), ["evil.example.com".to_string()].into_iter().collect());
+        // d::runtime has Net but NO visible host (a runtime-computed endpoint) → fail closed to unknown-host.
+        let hostsacc = crate::propagate::propagate_str(&hosts, &calls, &all);
+        let empty: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+        let empty_rc: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let partners: BTreeSet<String> = ["api.stripe.com".to_string()].into_iter().collect();
+        let v = policy_violations(
+            "deny Net[unknown-host]\n", &all, &inferred, &calls, &hostsacc, &empty, &empty, &empty,
+            &empty_inc, &empty_rc, &std::collections::BTreeMap::new(), &partners,
+        );
+        let flagged: BTreeSet<&str> = v.iter().map(|g| g.func.as_str()).collect();
+        // exfil + runtime + the caller reaching exfil fire; the telemetry host is tolerated.
+        assert_eq!(flagged, ["d::exfil", "d::runtime", "d::caller"].into_iter().collect());
+        // the verdict carries the fn's destination classes.
+        let exfil = v.iter().find(|g| g.func == "d::exfil").unwrap();
+        assert_eq!(exfil.net_class, vec!["unknown-host".to_string()]);
+        // a config-declared partner is tolerated; bare `deny Net` still denies ALL destinations.
+        let mut phosts = hosts.clone();
+        phosts.insert("d::partner".into(), ["api.stripe.com".to_string()].into_iter().collect());
+        let pall: Vec<String> = all.iter().cloned().chain(["d::partner".to_string()]).collect();
+        let mut pinf = inferred.clone();
+        pinf.insert("d::partner".into(), ["Net"].into_iter().collect());
+        let pacc = crate::propagate::propagate_str(&phosts, &calls, &pall);
+        let pv = policy_violations(
+            "deny Net[unknown-host]\n", &pall, &pinf, &calls, &pacc, &empty, &empty, &empty,
+            &empty_inc, &empty_rc, &std::collections::BTreeMap::new(), &partners,
+        );
+        assert!(!pv.iter().any(|g| g.func == "d::partner"), "a config net-partner is tolerated");
+        let bare = policy_violations(
+            "deny Net\n", &pall, &pinf, &calls, &pacc, &empty, &empty, &empty,
+            &empty_inc, &empty_rc, &std::collections::BTreeMap::new(), &partners,
+        );
+        assert_eq!(bare.len(), pall.len(), "bare deny Net denies every Net fn (backward-compat)");
     }
 
     #[test]
@@ -1087,7 +1142,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         inc.insert("a::mask".into(), ["Net"].into_iter().collect()); // mask also has an invisible reach
         let v = policy_violations(
             "allow Net api.stripe.com\n",
-            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &inc, &empty, &std::collections::BTreeMap::new(),
+            &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new(),
         );
         assert!(v.iter().any(|g| g.func == "a::mask" && g.detail.contains("cannot be certified")), "{:?}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
         assert!(!v.iter().any(|g| g.func == "a::clean"), "clean must certify: {:?}", v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
