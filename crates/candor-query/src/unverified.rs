@@ -46,10 +46,21 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         func: &'a ReportEntry,
         rule: &'a PolicyRule,
     }
+    // `--class <c,…>` (SPEC §3.1 ⟨0.20⟩): keep only holes whose Unknown is of a matching reason class.
+    let class_filter = g.class.as_deref().map(crate::containment::parse_class_filter);
+    let class_matches = |e: &ReportEntry| -> bool {
+        use candor_classify::policy::ReasonClass;
+        match &class_filter {
+            None => true,
+            Some(set) => e.unknown_why.iter().any(|w| set.contains(&ReasonClass::classify(w))),
+        }
+    };
     let holes: Vec<Hole> = entries
         .iter()
         .filter_map(|e| {
-            unverified_hole_rule(&e.func, &e.inferred, &rules).map(|rule| Hole { func: e, rule })
+            unverified_hole_rule(&e.func, &e.inferred, &rules)
+                .filter(|_| class_matches(e))
+                .map(|rule| Hole { func: e, rule })
         })
         .collect();
 

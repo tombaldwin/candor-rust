@@ -5,7 +5,7 @@ use crate::*;
 /// Parse a `--class <c,…>` filter into reason classes (SPEC §3.1 ⟨0.20⟩): the six tokens, `dynamic` (every
 /// genuine class), or `*` (all six). An unknown token warns + is skipped; all-unknown ⇒ an empty set that
 /// matches nothing. Shared shape with the java `Query.parseClassFilter`.
-fn parse_class_filter(spec: &str) -> std::collections::HashSet<candor_classify::policy::ReasonClass> {
+pub(crate) fn parse_class_filter(spec: &str) -> std::collections::HashSet<candor_classify::policy::ReasonClass> {
     use candor_classify::policy::ReasonClass;
     const ALL: [ReasonClass; 6] = [
         ReasonClass::Reflect, ReasonClass::Dispatch, ReasonClass::Indirect,
