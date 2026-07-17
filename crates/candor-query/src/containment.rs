@@ -47,6 +47,43 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
         }
     }
     let total_unknown = entries.iter().filter(|e| e.inferred.iter().any(|x| x == "Unknown")).count();
+    // `--stats` (SPEC §3.1 ⟨0.20⟩): the reason-class DISTRIBUTION over the Unknown SOURCES — how much
+    // Unknown, by class {reflect,dispatch,indirect,native,unresolved,setup} — so a team can SIZE the
+    // blind-spot cost (and separate genuine dynamism from `setup` mis-config) BEFORE `deny E Unknown`.
+    if g.stats {
+        use candor_classify::policy::ReasonClass;
+        const ORDER: [&str; 6] = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"];
+        let mut by_class: HashMap<&str, usize> = ORDER.iter().map(|c| (*c, 0usize)).collect();
+        let mut sources_n = 0usize;
+        for e in &entries {
+            if e.unknown_why.is_empty() {
+                continue;
+            }
+            sources_n += 1;
+            let classes: HashSet<&str> = e.unknown_why.iter().map(|w| ReasonClass::classify(w).token()).collect();
+            for c in &classes {
+                *by_class.get_mut(c).unwrap() += 1;
+            }
+        }
+        if want_json {
+            let bc: serde_json::Map<String, serde_json::Value> =
+                ORDER.iter().map(|k| (k.to_string(), serde_json::json!(by_class[k]))).collect();
+            println!("{}", serde_json::json!({ "byClass": bc, "sources": sources_n, "totalUnknown": total_unknown }));
+            return 0;
+        }
+        if sources_n == 0 {
+            println!("  no Unknown sources — nothing to classify (no direct-Unknown in this report).");
+            return 0;
+        }
+        println!("  {sources_n} Unknown source(s) by reason class (of {total_unknown} Unknown function(s)) — size the blind-spot cost before `deny E Unknown[…]`:");
+        let mut rows: Vec<(&str, usize)> = ORDER.iter().map(|k| (*k, by_class[k])).filter(|(_, v)| *v > 0).collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1)); // most-common class first
+        for (k, v) in rows {
+            let hint = if k == "setup" { "   ← fixable: the scan isn't configured, not a real blind spot" } else { "" };
+            println!("  {k:<12} {v:>4}{hint}");
+        }
+        return 0;
+    }
     #[derive(Serialize)]
     struct Source {
         #[serde(rename = "fn")]

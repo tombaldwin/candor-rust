@@ -984,6 +984,37 @@ fn blindspots_ranks_sources_by_unknown_blast_radius() {
 }
 
 #[test]
+fn blindspots_stats_reason_class_distribution() {
+    // ⟨0.20⟩ `--stats`: the reason-class distribution over the Unknown SOURCES. src_a is callback:→indirect,
+    // src_b is native:→native; mid/top are transitive-only (no direct reason) → not sources.
+    let f = Fixture::new("blindspots-stats");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.19" },
+  "package": "bs",
+  "functions": [
+    { "fn": "src_a", "inferred": ["Unknown"], "unknownWhy": ["callback:unresolved call"] },
+    { "fn": "mid", "inferred": ["Unknown"], "calls": ["src_a"] },
+    { "fn": "src_b", "inferred": ["Unknown"], "unknownWhy": ["native:extern fn"] }
+  ]
+}"#;
+    std::fs::write(f.report_path().replace(".rpt.", ".bs."), report).unwrap();
+    let out = Command::new(bin())
+        .arg("blindspots").arg(&f.prefix).arg("--stats").arg("--json")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    // all six classes present (0 when absent) + the two sources classified
+    for c in ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"] {
+        assert!(v["byClass"].get(c).is_some(), "byClass must carry every class: {v}");
+    }
+    assert_eq!(v["byClass"]["indirect"], 1, "callback → indirect: {v}");
+    assert_eq!(v["byClass"]["native"], 1, "native → native: {v}");
+    assert_eq!(v["sources"], 2);
+    assert_eq!(v["totalUnknown"], 3);
+}
+
+#[test]
 fn blindspots_clean_report_says_so_exit_0() {
     // A report with no unknownWhy sources is the honest all-resolved answer, not an error.
     let f = Fixture::new("blindspots-clean");
