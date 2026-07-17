@@ -4,7 +4,18 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## spec 0.18 — the trust-trio (2026-07-16) — current floor
+## spec 0.19 — reason-scoped Unknown (2026-07-17) — current floor
+
+Reason-scoped `Unknown` policies (SPEC §6.2): `deny E Unknown[reflect,dispatch,indirect,native,unresolved,setup]`
+narrows the `Unknown` part of a deny to a fixed reason-class vocabulary projecting the §4 `unknownWhy` reasons,
+with the built-in `dynamic`/`*` aliases and config-defined `.candor/config` `unknown-alias <name> = <class…>`
+names. Bare `deny E Unknown` is unchanged (`Unknown[*]`, fires on any); an unrecognized reason maps to
+`unresolved` (conservative); the reason class propagates **transitively** along the call graph like the effect.
+An AS-EFF-006 `--gate-json` verdict whose `effects` include `Unknown` now carries a **`reasonClass`** array (all
+classes on the fn). Report bytes unchanged. Conformance PART 4 (parse + `unknownClasses` + config alias) and
+PART 12 (`reasonClass` invariant) pin it four-way.
+
+## spec 0.18 — the trust-trio (2026-07-16)
 
 candor-scan and candor-query now declare **spec `0.18`** (both at crate **0.18.0**). A pinned-tool-surface
 rung — no report-schema or verdict change — closing three ways the tool could quietly mislead, each pinned
