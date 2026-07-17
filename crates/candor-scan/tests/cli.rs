@@ -840,6 +840,38 @@ fn baseline_guard_pure_to_unknown_only_gain_is_advisory_not_a_regression_exit_0(
 }
 
 #[test]
+fn baseline_unknown_ratchet_flips_a_new_unknown_gain_to_a_failure_end_to_end() {
+    // ⟨unknown-ratchet⟩ OPT-IN through the REAL binary + env var (config `unknown-ratchet` /
+    // CANDOR_UNKNOWN_RATCHET; candor-java Policy.checkBaseline is the model). Default OFF an Unknown-only
+    // gain stays advisory (exit 0); ON it becomes an AS-EFF-005 FAILURE (exit 1) — making `deny Unknown`
+    // adoptable on legacy code by freezing today's report and ratcheting the Unknown surface DOWN.
+    let d = make_crate("blratchetnew", "pub fn helper()->usize{ 0 }\npub fn fmt(s:&str)->usize{ s.len() }\n");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    // fmt was pure; now it calls a fn pointer → gains ONLY Unknown (a NEW blind spot vs the baseline).
+    std::fs::write(d.join("src/lib.rs"),
+        "pub fn helper()->usize{ 0 }\npub fn fmt(s:&str)->usize{ let g: fn()->usize = helper; g() }\n").unwrap();
+    // ratchet OFF (default): advisory, exit 0 — byte-identical to the ⟨0.16⟩ posture.
+    let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &[]);
+    let off = format!("{stdout}{stderr}");
+    assert_eq!(rc, Some(0), "ratchet OFF: an Unknown-only gain is advisory: {off}");
+    assert!(!off.contains("[AS-EFF-005]"), "ratchet OFF raises no violation: {off}");
+    // ratchet ON via CANDOR_UNKNOWN_RATCHET: the new Unknown FAILS (AS-EFF-005, exit 1).
+    let mut cmd = Command::new(bin());
+    cmd.arg(d.to_string_lossy().as_ref())
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .env("CANDOR_BASELINE", pre.to_string_lossy().as_ref())
+        .env("CANDOR_UNKNOWN_RATCHET", "1");
+    let out = cmd.output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let on = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "ratchet ON: a newly-introduced Unknown fails: {on}");
+    assert!(on.contains("[AS-EFF-005]") && on.contains("unknown-ratchet"),
+        "the ratchet violation is the AS-EFF-005 unknown-ratchet finding: {on}");
+}
+
+#[test]
 fn baseline_guard_config_key_resolves_against_the_config_home_and_env_wins() {
     // The `.candor/config` `baseline` key drives the guard with a RELATIVE value anchored to the
     // config's HOME dir (spec §3.4) — never the process CWD — and the CANDOR_BASELINE env overrides it.

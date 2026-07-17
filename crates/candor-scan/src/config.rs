@@ -5,12 +5,14 @@
 /// must not silently drop the gate), a known-but-unimplemented key (this engine reads `policy` +
 /// `baseline` + `deps`) is inert. Values: first token = key (ASCII-lowercased), rest of line =
 /// value; `#` comments; blanks.
-pub(crate) const CONFIG_KEYS: [&str; 8] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias"];
+pub(crate) const CONFIG_KEYS: [&str; 9] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "unknown-ratchet"];
 
 /// The subset of [`CONFIG_KEYS`] this engine actually wires to a mode. The rest are spec-inert here —
 /// but a checked-in enforcement key that silently does nothing is a DECLARED-GATE-SILENTLY-OFF (the
 /// reader believes the gate is on), so an inert recognized key warns loudly instead of staying mute.
-pub(crate) const CONFIG_KEYS_IMPLEMENTED: [&str; 3] = ["policy", "baseline", "deps"];
+/// `unknown-ratchet` is a boolean opt-in on the AS-EFF-005 baseline guard (a NEWLY-introduced Unknown
+/// vs the baseline FAILS instead of staying advisory); its value threads through `flag`, not `cfg`.
+pub(crate) const CONFIG_KEYS_IMPLEMENTED: [&str; 4] = ["policy", "baseline", "deps", "unknown-ratchet"];
 
 /// Locate + parse `.candor/config` for the scan of `dir` (candor-spec §config): $CANDOR_CONFIG if set
 /// (its path MUST be usable — exit 2 otherwise), else the nearest `.candor/config` walking UP from the
@@ -111,4 +113,21 @@ pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String,
         *d = d.split(':').map(&resolve).collect::<Vec<_>>().join(":");
     }
     cfg
+}
+
+/// A boolean opt-in with env-override, mirroring candor-java's `Config.flag`: the env var's PRESENCE
+/// means ON (an env var can't express OFF), else the config file's truthy value (`true`/`1`/`yes`, or a
+/// bare key with no value). Default OFF when neither is set. Used for `unknown-ratchet` /
+/// `CANDOR_UNKNOWN_RATCHET` — the AS-EFF-005 baseline-guard knob.
+pub(crate) fn flag(cfg: &std::collections::HashMap<String, String>, key: &str, env_var: &str) -> bool {
+    if std::env::var_os(env_var).is_some() {
+        return true;
+    }
+    match cfg.get(key) {
+        None => false,
+        Some(v) => {
+            let v = v.trim();
+            v.is_empty() || v.eq_ignore_ascii_case("true") || v == "1" || v.eq_ignore_ascii_case("yes")
+        }
+    }
 }

@@ -157,6 +157,11 @@ pub(crate) fn scan_main() {
     // over the config `baseline` key (already home-anchored by load_candor_config). Dependency scans
     // under --deps run guard-free — a dep's internals are not this repo's ratchet.
     let baseline = std::env::var("CANDOR_BASELINE").ok().or_else(|| cfg.get("baseline").cloned());
+    // ⟨unknown-ratchet⟩ OPT-IN on the AS-EFF-005 guard (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET,
+    // default OFF): when ON, a NEWLY-introduced Unknown vs the baseline FAILS instead of staying advisory —
+    // making `deny Unknown` adoptable on legacy code. Resolved once here (env presence wins, else the config
+    // truthy value) and read by every check_baseline via the UNKNOWN_RATCHET global — see check_baseline.
+    let _ = crate::gate::UNKNOWN_RATCHET.set(crate::config::flag(&cfg, "unknown-ratchet", "CANDOR_UNKNOWN_RATCHET"));
     // The --gate-json target rides a global (like INCREMENTAL below) so it threads no ScanOpts. Members
     // RECORD violations (record_gate_violations); the verdict is written ONCE here after the whole scan —
     // per-member writes let a clean last member overwrite an earlier violator's verdict (ok:true vs exit 1).
@@ -1271,7 +1276,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             eprintln!("candor-scan: baseline guard NOT evaluated — source failed to parse (see above); the guard cannot compare unanalyzed code");
             return (2, json_body);
         }
-        match check_baseline(bv, dir, &crate_name, &all, &inferred) {
+        match check_baseline(bv, dir, &crate_name, &all, &inferred, crate::gate::unknown_ratchet()) {
             BaselineOutcome::Inactive => {} // absent file: noted, exit unchanged
             BaselineOutcome::Invalid => return (2, json_body), // diagnostic already printed
             BaselineOutcome::Checked(v) => {
