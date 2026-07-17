@@ -21,7 +21,13 @@ pub(crate) fn cmd_parsepolicy(args: &[String]) -> i32 {
         eprintln!("candor: cannot read policy {path}");
         return 2;
     };
-    let p = candor_classify::policy::parse_policy(&text);
+    // ⟨0.19⟩ config-aware: discover `.candor/config` (or CANDOR_CONFIG) anchored to the policy file so an
+    // `Unknown[<alias>]` resolves via a checked-in `unknown-alias` — the dump reflects real gate resolution,
+    // and the four-way parsepolicy differential pins the expansion.
+    let aliases = candor_classify::policy::discover_config_text(std::path::Path::new(path))
+        .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
+        .unwrap_or_default();
+    let p = candor_classify::policy::parse_policy_with_aliases(&text, &aliases);
     let mut deny: Vec<serde_json::Value> = p
         .rules
         .iter()
