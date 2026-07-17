@@ -387,7 +387,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&covered);
         std::fs::write(
             covered.join("r.demo.scan.json"),
-            r#"{"candor":{"version":"v","toolchain":"t","spec": "0.20"},
+            r#"{"candor":{"version":"v","toolchain":"t","spec": "0.21"},
                 "coverage":{"uncovered":[{"name":"somedep","calls":3},{"name":"anotherdep","calls":1}]},
                 "functions":[]}"#,
         )
@@ -396,7 +396,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&full);
         std::fs::write(
             full.join("r.demo.scan.json"),
-            r#"{"candor":{"version":"v","toolchain":"t","spec": "0.20"},"functions":[]}"#,
+            r#"{"candor":{"version":"v","toolchain":"t","spec": "0.21"},"functions":[]}"#,
         )
         .unwrap();
         let (plain, with_cov, fully) = (dir.join("v0.json"), dir.join("v1.json"), dir.join("v2.json"));
