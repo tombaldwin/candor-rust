@@ -221,6 +221,35 @@ pub struct UnanalyzedUnit {
     pub reason: String,
 }
 
+/// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed-universe summary. `count` = the functions candor
+/// formed an effect judgment for (effectful + pure) = the §2.2 callgraph node set — so a consumer reading
+/// the bare envelope computes `count − |functions|` = the pure count and tells analyzed-pure from
+/// never-seen without loading the sidecar. `digest` = an opaque within-engine-stable fingerprint of the
+/// sorted analyzed-qual set (FNV-1a-64 hex — see [`fnv1a_hex`]); a same-input re-scan agrees, compare
+/// same-engine only.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Analyzed {
+    pub count: usize,
+    pub digest: String,
+}
+
+/// ⟨0.21⟩ An opaque, within-engine-stable fingerprint of a SORTED qual set — FNV-1a 64-bit over the
+/// newline-joined UTF-8 quals, lowercase hex (16 chars). Dependency-free + deterministic: it changes iff
+/// the set changes. Byte-for-byte the java reference's `ReportWriter.fnv1aHex` so the SPEC describes ONE
+/// algorithm. NOT cryptographic and NOT cross-engine comparable (qualifiers differ `::` vs `.`).
+pub fn fnv1a_hex(sorted_quals: &[String]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    for q in sorted_quals {
+        for b in q.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3); // FNV prime
+        }
+        h ^= b'\n' as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
 /// The v0.2 self-describing report: a provenance header plus the function entries.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Report {
@@ -311,7 +340,7 @@ pub fn to_packaged_report_json_with_coverage(
     functions: &[ReportEntry],
     coverage: Option<&Coverage>,
 ) -> serde_json::Result<String> {
-    to_packaged_report_json_full(candor, package, functions, coverage, &[])
+    to_packaged_report_json_full(candor, package, functions, coverage, &[], None)
 }
 
 /// ⟨proposed — Gap 2⟩ Like [`to_packaged_report_json_with_coverage`], additionally carrying the
@@ -323,6 +352,7 @@ pub fn to_packaged_report_json_full(
     functions: &[ReportEntry],
     coverage: Option<&Coverage>,
     unanalyzed: &[UnanalyzedUnit],
+    analyzed: Option<&Analyzed>,
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
@@ -331,12 +361,16 @@ pub fn to_packaged_report_json_full(
         package: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         coverage: Option<&'a Coverage>,
-        // Keys sort by serde field order in the struct; `unanalyzed` after `coverage`, before `functions`.
+        // ⟨0.21⟩ the completeness-manifest summary (Gap 1) — always present when the engine can enumerate its
+        // analyzed set. Field order: coverage, analyzed, unanalyzed, functions (matches the java reference).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        analyzed: Option<&'a Analyzed>,
+        // Keys sort by serde field order in the struct; `unanalyzed` after `analyzed`, before `functions`.
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         unanalyzed: &'a [UnanalyzedUnit],
         functions: &'a [ReportEntry],
     }
-    serde_json::to_string_pretty(&Out { candor, package, coverage, unanalyzed, functions })
+    serde_json::to_string_pretty(&Out { candor, package, coverage, analyzed, unanalyzed, functions })
 }
 
 /// ⟨proposed — Gap 2⟩ Parse a report's `unanalyzed` field. Empty when absent (a complete scan or any
@@ -430,6 +464,47 @@ pub fn gate_verdict_json_with_coverage(
     })
 }
 
+/// ⟨0.21⟩ COMPLETENESS MANIFEST verdict: like [`gate_verdict_json_with_coverage`], plus the `analyzed`
+/// count (Gap 1, always present) and — when the scan was INCOMPLETE (`unanalyzed` non-empty) — `incomplete:
+/// true` + the `unanalyzed` list (Gap 2). `ok` requires BOTH no violation AND a complete analysis, so a
+/// machine/agent reading the verdict can't see `ok:true` over code candor never analyzed. Field order
+/// matches the java reference: spec, ok, analyzed, violations, coverage?, incomplete?, unanalyzed?.
+pub fn gate_verdict_json_full(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+) -> serde_json::Result<String> {
+    violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
+    #[derive(Serialize)]
+    struct Count {
+        count: usize,
+    }
+    #[derive(Serialize)]
+    struct Verdict<'a> {
+        spec: &'static str,
+        ok: bool,
+        analyzed: Count,
+        violations: &'a [GateViolation],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        coverage: Option<&'a GateCoverage>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        incomplete: bool,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        unanalyzed: &'a [UnanalyzedUnit],
+    }
+    let incomplete = !unanalyzed.is_empty();
+    serde_json::to_string_pretty(&Verdict {
+        spec: SPEC_VERSION,
+        ok: violations.is_empty() && !incomplete,
+        analyzed: Count { count: analyzed_count },
+        violations,
+        coverage,
+        incomplete,
+        unanalyzed,
+    })
+}
+
 /// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy
 /// v0.1 bare array (no header).
 /// Does the report carry a v0.2 `{ candor: {...}, functions }` ENVELOPE (vs a legacy v0.1 bare array)?
@@ -464,15 +539,46 @@ mod tests {
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         // present: a parse failure travels
         let units = vec![UnanalyzedUnit { path: "src/broken.rs".into(), reason: "source failed to read/parse".into() }];
-        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units).unwrap();
+        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None).unwrap();
         assert!(json.contains("\"unanalyzed\""), "unanalyzed must serialize when non-empty");
         let parsed = report_unanalyzed(&json);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].path, "src/broken.rs");
         // empty: omitted entirely (a complete scan is byte-identical to a pre-rung report)
-        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[]).unwrap();
+        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None).unwrap();
         assert!(!clean.contains("unanalyzed"), "an empty unanalyzed must be omitted");
         assert!(report_unanalyzed(&clean).is_empty());
+    }
+
+    #[test]
+    fn analyzed_digest_is_deterministic_and_stable() {
+        // Gap 1: the FNV-1a digest is 16 lowercase hex, changes iff the sorted qual set changes, and is
+        // stable across a re-hash of the same input (a same-engine re-scan agrees).
+        let a = fnv1a_hex(&["a::f".to_string(), "a::g".to_string()]);
+        let b = fnv1a_hex(&["a::f".to_string(), "a::g".to_string()]);
+        assert_eq!(a, b, "same set ⇒ same digest");
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a, fnv1a_hex(&["a::f".to_string()]), "a different set ⇒ a different digest");
+    }
+
+    #[test]
+    fn incomplete_verdict_is_fail_closed_and_machine_legible() {
+        // Gap 2: an incomplete gate verdict carries ok:false + incomplete:true + the unanalyzed list + the
+        // analyzed count, so a machine learns WHY the gate can't certify (never a fabricated ok:true).
+        let units = vec![UnanalyzedUnit { path: "src/bad.rs".into(), reason: "source failed to read/parse".into() }];
+        let json = gate_verdict_json_full(&mut [], None, 7, &units).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["ok"], false, "an incomplete gate is never ok");
+        assert_eq!(v["incomplete"], true);
+        assert_eq!(v["analyzed"]["count"], 7);
+        assert_eq!(v["unanalyzed"][0]["path"], "src/bad.rs");
+        // a COMPLETE verdict carries analyzed:{count} but omits incomplete/unanalyzed (byte-compat).
+        let clean = gate_verdict_json_full(&mut [], None, 7, &[]).unwrap();
+        let cv: serde_json::Value = serde_json::from_str(&clean).unwrap();
+        assert_eq!(cv["ok"], true);
+        assert!(cv.get("incomplete").is_none() && cv.get("unanalyzed").is_none());
+        assert_eq!(cv["analyzed"]["count"], 7);
     }
 
     #[test]

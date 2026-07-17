@@ -513,6 +513,28 @@ pub(crate) fn record_gate_coverage(ledger: &[(String, usize)]) {
     acc.lock().unwrap().extend(ledger.iter().map(|(cr, _)| cr.clone()));
 }
 
+/// ⟨0.21⟩ COMPLETENESS MANIFEST: the analyzed-fn count (summed across workspace members) + the units that
+/// could NOT be analyzed, ACCUMULATED toward the `--gate-json` verdict's `analyzed:{count}` (Gap 1, always)
+/// and — when non-empty — the fail-closed `incomplete:true`/`unanalyzed` disclosure (Gap 2). A no-op unless
+/// `--gate-json` was given, mirroring `record_gate_coverage`.
+pub(crate) static GATE_ANALYZED: std::sync::OnceLock<std::sync::Mutex<usize>> = std::sync::OnceLock::new();
+pub(crate) static GATE_UNANALYZED: std::sync::OnceLock<std::sync::Mutex<Vec<candor_report::UnanalyzedUnit>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn record_gate_analyzed(count: usize, unanalyzed: &[candor_report::UnanalyzedUnit]) {
+    if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    *GATE_ANALYZED.get_or_init(|| std::sync::Mutex::new(0)).lock().unwrap() += count;
+    if !unanalyzed.is_empty() {
+        GATE_UNANALYZED
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .extend(unanalyzed.iter().cloned());
+    }
+}
+
 /// Write the structured gate verdict `{ spec, ok, violations }` (candor-spec §3.3 ⟨0.8⟩) — the machine
 /// analog of the AS-EFF console lines, accumulated from the SAME `policy_violations` that set the exit
 /// code, so it can never disagree with the gate. Called ONCE, by `scan_main`, after the whole scan (every
@@ -521,8 +543,33 @@ pub(crate) fn record_gate_coverage(ledger: &[(String, usize)]) {
 /// `--gate-json` was given.
 pub(crate) fn write_gate_json(exit_code: i32) {
     let Some(Some(path)) = GATE_JSON_PATH.get() else { return };
+    // ⟨0.21⟩ COMPLETENESS MANIFEST: the accumulated analyzed count + the units that couldn't be analyzed.
+    let analyzed_count = *GATE_ANALYZED.get_or_init(|| std::sync::Mutex::new(0)).lock().unwrap();
+    let unanalyzed: Vec<candor_report::UnanalyzedUnit> = GATE_UNANALYZED
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .clone();
     if exit_code == 2 {
-        eprintln!("candor-scan: --gate-json not written — the scan/gate did not complete (exit 2)");
+        // Two distinct exit-2 causes: (a) INCOMPLETE ANALYSIS (a source parse failure) → emit a structured
+        // incomplete verdict (Tom's call 2026-07-17, refining §3.3.1 to "no ok:true GUESS": ok:false +
+        // incomplete:true + the `unanalyzed` list is honest, never a fabricated pass — a machine learns WHY
+        // the gate couldn't certify); (b) a broken gate CONFIG (unreadable policy) → no faithful verdict, so
+        // still write none. The presence of `unanalyzed` distinguishes them.
+        if !unanalyzed.is_empty() {
+            let mut none: Vec<GateViolation> = Vec::new();
+            match candor_report::gate_verdict_json_full(&mut none, None, analyzed_count, &unanalyzed) {
+                Ok(json) if path == "-" => println!("{json}"),
+                Ok(json) => {
+                    if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {
+                        eprintln!("candor-scan: could not write --gate-json {path}: {e}");
+                    }
+                }
+                Err(e) => eprintln!("candor-scan: could not serialize gate verdict: {e}"),
+            }
+        } else {
+            eprintln!("candor-scan: --gate-json not written — the gate config did not load (exit 2)");
+        }
         return;
     }
     let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
@@ -542,7 +589,9 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .collect();
     let coverage =
         (!packages.is_empty()).then_some(candor_report::GateCoverage { uncovered: packages.len(), packages });
-    match candor_report::gate_verdict_json_with_coverage(&mut violations, coverage.as_ref()) {
+    // ⟨0.21⟩ the full verdict carries `analyzed:{count}` (Gap 1); `unanalyzed` is empty on a completed gate
+    // (exit 0/1), so `incomplete`/`unanalyzed` are omitted — byte-compatible with a pre-rung verdict + coverage.
+    match candor_report::gate_verdict_json_full(&mut violations, coverage.as_ref(), analyzed_count, &[]) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
             if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {
