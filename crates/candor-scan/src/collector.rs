@@ -497,6 +497,17 @@ impl<'a> CallCollector<'a> {
     /// `trait_vars`) or a trait-typed field (`self.store` where `store: Box<dyn Store>`, via
     /// `trait_fields`). Empty when the receiver has a concrete type (`resolve_recv_type` owns it)
     /// or can't be resolved at all.
+    /// Does local trait `tr` declare `leaf`, or INHERIT it from a (transitive, local) supertrait?
+    /// (`trait Sub: Super` — a `Super` method is callable on a `Sub` receiver.) Bounded depth guards a
+    /// cyclic/deep hierarchy; an external supertrait resolves to nothing (documented miss).
+    fn trait_declares_method(&self, tr: &str, leaf: &str, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let Some(lt) = self.local_traits.get(tr) else { return false };
+        lt.methods.contains(leaf)
+            || lt.supertraits.iter().any(|s| self.trait_declares_method(s, leaf, depth + 1))
+    }
     fn resolve_recv_traits(&self, expr: &syn::Expr) -> Vec<String> {
         // Hot-path guard: with no dispatch-typed vars or fields in scope AND no dispatch-object-returning
         // factory recorded (the overwhelmingly common case), every lookup below is a guaranteed miss —
@@ -794,8 +805,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             //    every local implementor; otherwise (or with no impl visible) honest `Unknown`.
             for tr in self.resolve_recv_traits(&node.receiver) {
                 let Some(lt) = self.local_traits.get(&tr) else { continue }; // external: documented miss
-                if !lt.methods.contains(&leaf) {
-                    continue; // supertrait/blanket call — not this trait's dispatch
+                // The leaf must be a method the trait declares OR INHERITS from a (local) SUPERTRAIT — a
+                // `Super` method is callable on a `Sub`-bound/`dyn Sub` receiver, and the sub's impls (which
+                // provide the super method) resolve it via the `trait_impls[tr]` CHA below. Without the
+                // supertrait walk `t.base()` (base ∈ Super, `t: T: Sub`) read silent-pure.
+                if !self.trait_declares_method(&tr, &leaf, 0) {
+                    continue; // blanket/unrelated call — not this trait's dispatch
                 }
                 if lt.count > 1 {
                     self.unresolved = true; // ambiguous local leaf — never guess between traits

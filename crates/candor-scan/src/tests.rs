@@ -610,6 +610,52 @@ impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PUR
     }
 
     #[test]
+    fn supertrait_method_dispatches_via_sub_bound() {
+        // `t.base()` where `base ∈ Super`, `t: T: Sub` (or `&dyn Sub`), `trait Sub: Super` — a supertrait
+        // method is callable on a Sub receiver and the sub's impls provide it, so it must dispatch (was
+        // silent-pure: the `lt.methods.contains(leaf)` gate rejected an inherited method). A sub's OWN pure
+        // method stays pure; an unrelated same-named trait must not hijack.
+        let run = |src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-st-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"st\"\n").unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let v = run(r#"
+use std::fs;
+pub trait Super { fn base(&self); }
+pub trait Sub: Super { fn extra(&self); }
+pub struct Impl;
+impl Super for Impl { fn base(&self) { let _ = fs::write("/x","y"); } }   // Fs
+impl Sub for Impl { fn extra(&self) {} }
+pub fn via_generic<T: Sub>(t: &T) { t.base(); }
+pub fn via_dyn(d: &dyn Sub) { d.base(); }
+pub fn via_own<T: Sub>(t: &T) { t.extra(); }
+pub trait Other { fn base(&self); }
+struct O; impl Other for O { fn base(&self) { let _ = fs::write("/z","!"); } }
+"#);
+        assert!(eff(&v, "via_generic").contains(&"Fs".to_string()), "supertrait method via a generic Sub bound lost the dispatch:\n{v}");
+        assert!(eff(&v, "via_dyn").contains(&"Fs".to_string()), "supertrait method via &dyn Sub lost the dispatch:\n{v}");
+        assert!(eff(&v, "via_own").is_empty(), "the sub's OWN pure method must stay pure:\n{v}");
+    }
+
+    #[test]
     fn method_factory_returning_trait_object_dispatches() {
         // `self.handler().go()` where `handler(&self) -> &dyn Doer` / `-> Box<dyn Doer>` — a METHOD factory
         // returning a dispatch object. `resolve_recv_type` used to walk THROUGH the chain to the base
@@ -1061,8 +1107,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut ti = TraitImplIndex::new();
         ti.insert("Store".into(), vec!["PgStore".into(), "MemStore".into()]);
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
-        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect() });
-        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect() }); // no impl in sight
+        td.insert("Store".into(), LocalTrait { count: 1, methods: ["save".to_string()].into_iter().collect(), supertraits: vec![] });
+        td.insert("Sink".into(), LocalTrait { count: 1, methods: ["flush".to_string()].into_iter().collect(), supertraits: vec![] }); // no impl in sight
         let mut tf = TraitFieldIndex::new();
         // struct App { store: Box<dyn Store> }
         tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
