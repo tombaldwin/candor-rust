@@ -47,6 +47,7 @@ pub(crate) fn scan_items(
     elems: ElemIndexes,
     lazy_statics: &std::collections::HashSet<String>,
     const_strings: &HashMap<String, String>,
+    local_macros: &HashMap<String, String>,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -67,7 +68,7 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings));
+                out.push(fninfo(&n, &qual(&n), &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -85,7 +86,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings));
+                        out.push(fninfo(&n, &q, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
                     }
                 }
             }
@@ -96,7 +97,7 @@ pub(crate) fn scan_items(
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
                     let mut subuses = uses.clone();
-                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, &mut subuses, out);
+                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, &mut subuses, out);
                 }
             }
             // A trait's PROVIDED (default) methods have bodies that can perform effects directly
@@ -120,7 +121,7 @@ pub(crate) fn scan_items(
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), &loc, &m.sig, block,
-                            Some(&tname), uses, fields, returns, traits, elems, lazy_statics, const_strings));
+                            Some(&tname), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
                     }
                 }
             }
@@ -140,7 +141,7 @@ pub(crate) fn scan_items(
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
                 let q = format!("{LAZY_UNIT_PREFIX}::{name}");
-                out.push(fninfo(&name, &q, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings));
+                out.push(fninfo(&name, &q, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
             }
         }
     }
@@ -356,6 +357,7 @@ pub(crate) fn fninfo(
     elems: ElemIndexes,
     lazy_statics: &std::collections::HashSet<String>,
     const_strings: &HashMap<String, String>,
+    local_macros: &HashMap<String, String>,
 ) -> FnInfo {
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
@@ -429,6 +431,8 @@ pub(crate) fn fninfo(
         err_ret_leaf: result_err_leaf(&sig.output, uses),
         const_strings,
         str_locals: std::collections::HashMap::new(),
+        local_macros,
+        macro_expanding: std::collections::HashSet::new(),
     };
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
@@ -557,6 +561,7 @@ pub(crate) fn collect_decls(
     deref_target: &mut HashMap<String, String>,
     lazy_statics: &mut std::collections::HashSet<String>,
     const_strings: &mut HashMap<String, String>,
+    local_macros: &mut HashMap<String, String>,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
@@ -591,6 +596,20 @@ pub(crate) fn collect_decls(
             syn::Item::Static(s) if include_tests || !is_cfg_test(&s.attrs) => {
                 if let Some(v) = const_str_value(&s.expr) {
                     const_strings.insert(s.ident.to_string(), v);
+                }
+            }
+            // LOCAL `macro_rules! NAME { (..) => { TEMPLATE }; .. }` — record NAME → the arm TOKENS (as a
+            // string, cacheable) so a bare `NAME!(..)` can INLINE-EXPAND the template and see any I/O / local
+            // call hidden in it. Without this a metavar-free effectful macro (`macro_rules! do_io { () => {
+            // fs::write(..) } }`) read silent-pure (R48). Only a `macro_rules!` DEFINITION (which carries an
+            // `ident`); an item-position macro INVOCATION (`foo!();`) has `ident: None` and is skipped.
+            syn::Item::Macro(m)
+                if (include_tests || !is_cfg_test(&m.attrs))
+                    && m.ident.is_some()
+                    && m.mac.path.is_ident("macro_rules") =>
+            {
+                if let Some(name) = &m.ident {
+                    local_macros.insert(name.to_string(), m.mac.tokens.to_string());
                 }
             }
             _ => {}
@@ -807,7 +826,7 @@ pub(crate) fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros);
                 }
             }
             _ => {}

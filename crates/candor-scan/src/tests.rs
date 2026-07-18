@@ -223,7 +223,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -271,7 +271,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -1071,6 +1071,57 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn local_macro_template_is_expanded_so_its_effects_are_seen() {
+        // §4 honesty (R48): a bare `NAME!(..)` to a LOCAL `macro_rules!` whose TEMPLATE does I/O (or wraps a
+        // logging crate, or calls a local fn) read silent-pure — syn leaves the macro body opaque. Expanding
+        // the recorded template charges its calls. Covers the pervasive local-logging-wrapper pattern
+        // (`macro_rules! trace { ($($a:tt)*) => { tracing::trace!($($a)*) } }` — a silent Log miss). CONTROLS:
+        // a PURE template adds nothing; a `$var`-metavar receiver resolves to no local effect (no fabrication).
+        let d = std::env::temp_dir().join(format!("candor-macro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"macroprobe\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use std::fs;
+            macro_rules! do_io { () => { let _ = fs::write("/x", "y"); } }          // template does Fs
+            macro_rules! log_file { ($m:expr) => { let _ = fs::write("/l", $m); } }  // metavar template
+            macro_rules! call_sink { () => { sink(); } }                            // template calls a local fn
+            macro_rules! logw { ($($a:tt)*) => { tracing::trace!($($a)*); } }        // logging-wrapper (multi-tt)
+            macro_rules! pure_mac { () => { let _x = 1 + 1; } }                      // pure template
+            fn sink() { let _ = fs::write("/s", "z"); }
+            pub fn a() { do_io!(); }                       // Fs
+            pub fn b() { log_file!("hi"); }                // Fs (metavar $-stripped)
+            pub fn c() { call_sink!(); }                   // Fs (via sink)
+            pub fn e() { let _x = 1; logw!("frame {}", 1); } // Log (tracing wrapper)
+            pub fn p() { pure_mac!(); }                    // pure
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let eff = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        for f in ["a", "b", "c"] {
+            assert!(eff(f).contains(&"Fs".to_string()), "local macro template's Fs must reach `{f}`:\n{body}");
+        }
+        assert!(eff("e").contains(&"Log".to_string()), "a local logging-wrapper macro's Log must reach `e`:\n{body}");
+        assert!(eff("p").is_empty(), "a pure macro template must add no effect:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn ufcs_trait_method_resolves_the_impl_but_not_associated_fns() {
         // §4 honesty (R53): a UFCS trait-method call `<T as Trait>::m(&t)` / `Trait::m(&t)` dispatches to
         // `T`'s impl — resolve it precisely from the STATICALLY-KNOWN receiver (the qself type, or the first
@@ -1311,7 +1362,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
+                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -1350,7 +1401,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -1373,7 +1424,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -1418,7 +1469,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -1452,7 +1503,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
+                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -1958,7 +2009,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -2356,7 +2407,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -2378,7 +2429,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -2389,7 +2440,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
         fns.into_iter()
             .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
             .collect()
@@ -2409,7 +2460,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -2420,7 +2471,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.unresolved)).collect()
     }
 
@@ -2438,7 +2489,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -2449,7 +2500,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.loc)).collect()
     }
 
@@ -2688,7 +2739,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
@@ -3586,6 +3637,7 @@ trait G {
             deref_target: _,
             lazy_statics: _,
             const_strings: _,
+            local_macros: _,
             root_reexports: _,
         } = MergedDecls::default();
 
@@ -3607,6 +3659,7 @@ trait G {
             ("drop_types", |m| { m.drop_types.insert("Guard".into()); }),
             ("lazy_statics", |m| { m.lazy_statics.insert("CONFIG".into()); }),
             ("const_strings", |m| { m.const_strings.insert("API_BASE".into(), "https://api.openai.com".into()); }),
+            ("local_macros", |m| { m.local_macros.insert("do_io".into(), "() => { fs::write(\"/x\", b\"y\"); }".into()); }),
             ("root_reexports", |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); }),
         ];
         for (name, mutate) in mutators {
