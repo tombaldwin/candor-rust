@@ -180,6 +180,10 @@ impl<'a> CallCollector<'a> {
             // (`Expr::Paren`/`Expr::Group` transparent wrappers are unwrapped by the arms above, so a
             // parenthesised `for _ in (S {..})` reaches this Struct arm through them.)
             syn::Expr::Struct(_) => ctor_type(expr, self.uses, self.returns),
+            // Explicit DEREFERENCE receiver `(*b).method()` — transparent: candor already collapses a
+            // smart-pointer/reference binding to its POINTEE (`let b = Box::new(W)` types `b` as `W`, a
+            // `&W` param types as `W`), so `*b` has the same resolved type as `b`. Recurse into the operand.
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => self.resolve_recv_type(&u.expr),
             // `xs[i].method()` / `self.senders[0].method()` — the receiver is the indexed BASE's
             // element type. Composes through the recursion: a nested `grid[i][j]` resolves the inner
             // index to its element collection, then this index to ITS element.
