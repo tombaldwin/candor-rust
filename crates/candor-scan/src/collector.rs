@@ -99,6 +99,15 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Try(t) => self.resolve_recv_type(&t.expr),
             syn::Expr::Await(a) => self.resolve_recv_type(&a.base),
             syn::Expr::MethodCall(m) => {
+                // A method whose return is a DISPATCH trait object (`self.handler() -> &dyn Doer` /
+                // `-> Box<dyn Doer>`) has NO concrete type — return None so the dispatch path
+                // (`resolve_recv_traits`, which decodes the `<dyn>` sentinel by method leaf) resolves
+                // `self.handler().go()`, instead of walking THROUGH the chain to the base receiver's type
+                // (`Reg`) and shadowing the dispatch silent-pure. Safe: None only DECLINES concrete typing
+                // (never fabricates), gated on an unambiguous `<dyn>` return recorded upstream.
+                if self.returns.get(&m.method.to_string()).and_then(|t| ret_dyn_leaves(t)).is_some() {
+                    return None;
+                }
                 // A method that returns a DIFFERENT (std) type — an iterator / slice / string / view
                 // producer — breaks the builder-chain assumption that the chain stays one crate's type.
                 // After `.iter()`/`.get_argv()`/`.as_slice()` the value is a std iterator/slice, so
@@ -517,6 +526,14 @@ impl<'a> CallCollector<'a> {
                 let leaf = full.rsplit("::").next().unwrap_or(&full);
                 self.returns.get(leaf).and_then(|t| ret_dyn_leaves(t)).unwrap_or_default()
             }
+            // A METHOD factory returning a dispatch trait object (`self.handler().go()` where
+            // `handler(&self) -> &dyn Doer`): decode the recorded `<dyn>` sentinel by the method leaf,
+            // exactly like the free/static-fn Call arm above (an ambiguous leaf was dropped upstream).
+            syn::Expr::MethodCall(m) => self
+                .returns
+                .get(&m.method.to_string())
+                .and_then(|t| ret_dyn_leaves(t))
+                .unwrap_or_default(),
             syn::Expr::Field(f) => {
                 let Some(base) = self.resolve_recv_type(&f.base) else { return Vec::new() };
                 let key = match &f.member {
