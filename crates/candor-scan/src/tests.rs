@@ -579,6 +579,8 @@ impl Doer for Impl { fn go(&self) { let _ = fs::write("/x", "y"); } }   // Fs
 pub fn via_for(items: Vec<Box<dyn Doer>>) { for it in &items { it.go(); } }
 pub fn via_slice(items: &[Box<dyn Doer>]) { for it in items { it.go(); } }
 pub fn via_foreach(items: Vec<Box<dyn Doer>>) { items.iter().for_each(|it| it.go()); }
+pub fn via_generic<T: Doer>(items: Vec<T>) { for it in &items { it.go(); } }   // generic-bound element
+pub fn via_generic_where<T>(items: Vec<T>) where T: Doer { items.iter().for_each(|it| it.go()); }
 pub struct Plain;
 impl Plain { pub fn go(&self) {} }
 pub fn via_concrete(xs: Vec<Plain>) { for x in &xs { x.go(); } }        // PURE (no over-fire)
@@ -587,6 +589,8 @@ pub fn via_concrete(xs: Vec<Plain>) { for x in &xs { x.go(); } }        // PURE 
         assert!(eff(&v, "via_for").contains(&"Fs".to_string()), "for-loop over Vec<Box<dyn>> lost the dispatch:\n{v}");
         assert!(eff(&v, "via_slice").contains(&"Fs".to_string()), "for-loop over &[Box<dyn>] lost the dispatch:\n{v}");
         assert!(eff(&v, "via_foreach").contains(&"Fs".to_string()), "iter().for_each closure over Vec<Box<dyn>> lost it:\n{v}");
+        assert!(eff(&v, "via_generic").contains(&"Fs".to_string()), "for-loop over a generic Vec<T: Doer> lost the dispatch:\n{v}");
+        assert!(eff(&v, "via_generic_where").contains(&"Fs".to_string()), "where-clause generic Vec<T> for_each lost it:\n{v}");
         assert!(eff(&v, "via_concrete").is_empty(), "a concrete-element Vec with a pure method must stay pure:\n{v}");
     }
 

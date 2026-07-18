@@ -830,7 +830,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // `Vec<Box<dyn Doer>>`): the closure param is a trait object → type it into `trait_vars` for
         // bounded-CHA dispatch, the closure-param twin of the for-loop's `elem_trait_of` route. Only when
         // there's no concrete element type (a concrete-element adapter keeps the `vars` route).
-        let elem_leaves = if elem_adapter && elem_ty.is_none() {
+        let elem_leaves = if elem_adapter {
             self.resolve_elem_trait_leaves(&node.receiver)
         } else {
             Vec::new()
@@ -880,7 +880,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // the loop var into `trait_vars` for dispatch (`it.go()` → bounded CHA over Doer's impls),
             // which `elem_of`/`vars` can't express (a `dyn` element has no nominal type). Only when there's
             // no concrete element type (a concrete-element collection takes the `vars` route above).
-            let leaves = if elem.is_none() { self.resolve_elem_trait_leaves(&node.expr) } else { Vec::new() };
+            // Prefer the trait-object route whenever the element is a dispatch type — `elem_trait_of` is
+            // populated ONLY for a `dyn`/`impl`/generic-bound element, and for a `Vec<T: Doer>` element
+            // `elem_type` returns the bogus generic-param name "T" (not None), so gating on `elem.is_none()`
+            // would wrongly take the (dead) concrete route. A concrete-element collection has empty leaves.
+            let leaves = self.resolve_elem_trait_leaves(&node.expr);
             if !leaves.is_empty() {
                 let prior = self.trait_vars.remove(&name);
                 let prior_var = self.vars.remove(&name); // dispatch-typed shadows any stale concrete binding
