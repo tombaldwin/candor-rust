@@ -1471,24 +1471,32 @@ fn local_trait_method_by_did<'tcx>(
     did.is_local().then_some(did)
 }
 
-/// WRITER-side fmt hole: `write!`/`writeln!` lower to `w.write_fmt(args)`, whose default `fmt::Write` /
-/// `io::Write` impl drives the writer's REQUIRED method (`write_str` / `write`). candor sees only the
-/// non-local default `write_fmt`, so a LOCAL effectful writer reached only via `write!` was silent-pure
-/// (the writer side, distinct from HOLE 2's ARGUMENT-side `Display`). Recover the edge to the receiver's
-/// local required method. A std writer (`String`/`Vec`/`Stdout`) resolves non-local → None (pure).
-fn fmt_write_local_edge<'tcx>(
+/// PROVIDED-io-method hole: a std-provided `fmt::Write` / `io::Write` / `io::Read` method whose default
+/// body drives the trait's REQUIRED method on the receiver. `write!`/`writeln!` lower to `w.write_fmt`,
+/// but the SAME callback happens for the direct method-call forms — `w.write_all(..)`/`w.write_fmt(..)`
+/// drive `io::Write::write`, `w.write_char(..)` drives `fmt::Write::write_str`, and
+/// `r.read_to_end(..)`/`read_to_string`/`read_exact` drive `io::Read::read`. candor sees only the
+/// non-local provided method, so a LOCAL effectful writer/reader reached only this way was silent-pure
+/// (the writer/reader side, distinct from HOLE 2's ARGUMENT-side `Display`). Recover the edge to the
+/// receiver's local required method. A std writer/reader (`String`/`Vec`/`Stdout`/`File`) resolves
+/// non-local → None (pure). The driven method is chosen by (trait, provided-method) so an io method
+/// never resolves against `fmt::Write` and vice-versa.
+fn io_provided_local_edge<'tcx>(
     cx: &LateContext<'tcx>,
     expr: &Expr<'tcx>,
     callee_did: DefId,
 ) -> Option<DefId> {
-    if callee_did.is_local() || cx.tcx.item_name(callee_did).as_str() != "write_fmt" {
+    if callee_did.is_local() {
         return None;
     }
     let trait_did = cx.tcx.trait_of_assoc(callee_did)?;
-    // The required method the default `write_fmt` drives, per which Write trait this is.
-    let driven = match cx.tcx.def_path_str(trait_did).as_str() {
-        "core::fmt::Write" | "std::fmt::Write" => "write_str",
-        "std::io::Write" => "write",
+    let method = cx.tcx.item_name(callee_did);
+    // The required method each provided method drives, per which trait it belongs to. `write_fmt` exists
+    // on BOTH Write traits (→ `write_str` on fmt, `write` on io); the trait path disambiguates.
+    let driven = match (cx.tcx.def_path_str(trait_did).as_str(), method.as_str()) {
+        ("core::fmt::Write" | "std::fmt::Write", "write_fmt" | "write_char") => "write_str",
+        ("std::io::Write", "write_fmt" | "write_all" | "write_all_vectored") => "write",
+        ("std::io::Read", "read_to_end" | "read_to_string" | "read_exact") => "read",
         _ => return None,
     };
     let ExprKind::MethodCall(_, receiver, _, _) = expr.kind else {
@@ -3314,10 +3322,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             add_edge(self, e);
         }
 
-        // HOLE 2c — the WRITER side of `write!`/`writeln!`: `w.write_fmt(..)`'s default impl drives a
-        // LOCAL effectful `fmt::Write::write_str` / `io::Write::write` on the receiver. Recover that edge
-        // (the arg-Display side is HOLE 2 above). Teeth: ui/write_trait.rs.
-        if let Some(e) = fmt_write_local_edge(cx, expr, def_id) {
+        // HOLE 2c — a PROVIDED io/fmt Write/Read method driving a LOCAL effectful required method on the
+        // receiver: `write!`/`writeln!` (→ `w.write_fmt`) AND the direct forms `w.write_all(..)` /
+        // `w.write_char(..)` / `r.read_to_end(..)` etc. candor sees only the non-local provided method, so
+        // the local `io::Write::write` / `fmt::Write::write_str` / `io::Read::read` is reached silently.
+        // Recover the edge (the arg-Display side is HOLE 2 above). Teeth: ui/write_trait.rs.
+        if let Some(e) = io_provided_local_edge(cx, expr, def_id) {
             add_edge(self, e);
         }
 

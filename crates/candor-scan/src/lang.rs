@@ -1122,6 +1122,28 @@ pub(crate) fn is_iter_consumer(leaf: &str) -> bool {
     )
 }
 
+/// A PROVIDED `io::Write`/`fmt::Write` method: one whose std body is driven by the required `write`
+/// (io) / `write_str` (fmt) method. Calling one on a concrete local `impl Write` reaches that required
+/// method's (possibly effectful) body — but the driving happens INSIDE std, invisible to the scan, so
+/// the call read silent-pure. Charged to `Type::write`/`Type::write_str` like the iterator-`next` /
+/// Display-`fmt` coercions (`charge_write_provided`). The EAGER subset that actually performs the write:
+/// `write`/`write_str` themselves are ABSENT — they resolve as ordinary method calls to the local def.
+pub(crate) fn is_write_provided(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        "write_all" | "write_fmt" | "write_all_vectored" | "write_char"
+    )
+}
+
+/// A PROVIDED `io::Read` method driven by the required `read` (`read_to_end`/`read_to_string`/
+/// `read_exact`). Its std body loops on `self.read`, so on a concrete local `impl Read` whose `read` is
+/// effectful the call read silent-pure. Charged to `Type::read`. The LAZY adaptors (`bytes`/`chars`/
+/// `take`/`by_ref`/`chain`) are ABSENT — they return a wrapper and do not drive `read` at the call site
+/// (charging them would over-approximate a never-driven chain, mirroring the iterator-adaptor exclusion).
+pub(crate) fn is_read_provided(leaf: &str) -> bool {
+    matches!(leaf, "read_to_end" | "read_to_string" | "read_exact")
+}
+
 /// A FORMATTING macro: one whose `{}`/`{:?}` args are run through `Display::fmt`/`Debug::fmt` (#2). The
 /// std family `format!`/`format_args!`/`print!`/`println!`/`eprint!`/`eprintln!`/`write!`/`writeln!` plus
 /// the very common `panic!`/`assert!` family and `.to_string()` (handled at the method site, not here).

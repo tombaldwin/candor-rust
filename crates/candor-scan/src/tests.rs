@@ -479,6 +479,70 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
     }
 
     #[test]
+    fn provided_io_methods_reach_local_impl_required_method() {
+        // A std-PROVIDED `io::Write`/`io::Read` method (`write_all`/`read_to_end`/…) drives the trait's
+        // REQUIRED method (`write`/`read`) INSIDE std — invisible to the scan. A call to one on a CONCRETE
+        // LOCAL `impl Write`/`impl Read` whose `write`/`read` is effectful read silent-pure (the
+        // provided→required callback the write! MACRO edge already recovered, but the direct METHOD-CALL
+        // form did not). Recover it — while a PURE local impl and a std receiver (`Vec`/`String`) stay pure.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-iowr-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.contains(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::io::{Read, Write};
+// effectful local io::Write, PURE ctor
+struct FileSink;
+impl Write for FileSink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { std::fs::write("/x", b)?; Ok(b.len()) }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+// effectful local io::Read
+struct NetReader;
+impl Read for NetReader {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { std::process::Command::new("ls").status()?; Ok(b.len()) }
+}
+// PURE local Write impl — the over-fire control
+struct NullSink;
+impl Write for NullSink {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { Ok(b.len()) }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+pub fn drive_write() { let mut s = FileSink; let _ = s.write_all(b"x"); }   // Fs, via write_all -> FileSink::write
+pub fn drive_read() { let mut r = NetReader; let mut buf = Vec::new(); let _ = r.read_to_end(&mut buf); } // Exec, via read_to_end -> NetReader::read
+pub fn pure_drive() { let mut s = NullSink; let _ = s.write_all(b"x"); }    // PURE (impl is pure)
+pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); } // PURE (std Vec, not local)
+"#;
+        let v = run("iowr", src);
+        assert!(eff(&v, "drive_write").contains(&"Fs".to_string()),
+                "write_all on a concrete local impl Write lost the Fs (provided->required callback):\n{v}");
+        assert!(eff(&v, "drive_read").contains(&"Exec".to_string()),
+                "read_to_end on a concrete local impl Read lost the effect:\n{v}");
+        assert!(eff(&v, "pure_drive").is_empty(),
+                "write_all on a PURE local impl was over-reported:\n{v}");
+        assert!(eff(&v, "std_recv").is_empty(),
+                "write_all on a std Vec receiver fabricated an effect (no local impl):\n{v}");
+    }
+
+    #[test]
     fn custom_deref_resolves_pointee_method() {
         // A custom `impl Deref for W { type Target = Inner }` makes `w.method()` auto-deref to Inner's
         // method — it must reach the pointee's effect, not silently drop (the user-Deref analog of the

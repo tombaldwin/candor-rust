@@ -655,6 +655,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if leaf == "to_string" && node.args.is_empty() {
             self.charge_coercion(&node.receiver, "Display", "fmt");
         }
+        // IMPLICIT io::Write / io::Read PROVIDED-METHOD forcing (#w): `w.write_all(..)`/`w.write_fmt(..)`
+        // and `r.read_to_end(..)`/`r.read_to_string(..)`/`r.read_exact(..)` are driven by the required
+        // `write`/`read` INSIDE std, so a call on a CONCRETE LOCAL `impl Write`/`impl Read` whose
+        // `write`/`read` is effectful read silent-pure (the provided→required callback is invisible —
+        // even on a concrete receiver, distinct from the `write!` MACRO writer side already charged in
+        // `visit_macro`). Charge the required method like the iterator-`next` / `to_string`-`fmt`
+        // coercions — resolve-or-skip on the concrete local type: a std `File`/`Vec`/`Stdout` receiver is
+        // absent from `trait_impls` (LOCAL impls only) → no edge; a generic/`dyn` receiver yields no
+        // concrete type → the documented external-dispatch miss, unchanged. Both `Write` required-method
+        // leaves are tried (io `write`, fmt `write_str`); only the one the local type defines resolves.
+        if is_write_provided(&leaf) {
+            self.charge_coercion(&node.receiver, "Write", "write");
+            self.charge_coercion(&node.receiver, "Write", "write_str");
+        }
+        if is_read_provided(&leaf) {
+            self.charge_coercion(&node.receiver, "Read", "read");
+        }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
         self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false });
         // Typed call: if the receiver's type resolves, form `Type::method` so the existing per-crate
