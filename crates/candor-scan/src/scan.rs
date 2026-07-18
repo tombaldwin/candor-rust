@@ -780,6 +780,41 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                                 calls.entry(f.qual.clone()).or_default().insert(hits[0].clone());
                             }
                         }
+                        // TRAIT-REQUIREMENT dispatch from a trait DEFAULT body: inside `Store::save_all`,
+                        // `self` types as the TRAIT `Store` (decls.rs types Self as the trait), so
+                        // `self.persist()` is `Store::persist` — a REQUIREMENT with no default body, hence no
+                        // `Store::persist` unit for `resolve_target` to find, and `type_to_traits` keys on IMPL
+                        // types not the trait. CHA `persist` over Store's IMPLS and edge to each impl's method:
+                        // the bounded-CHA analog of the swift protocol-extension→conformer-witness dispatch (R32's
+                        // rust sibling — the effectful `impl Store for Db { fn persist }` was reachable ONLY
+                        // through the default and read silent-pure). Gated to a LOCAL TRAIT that declares `leaf`
+                        // (a struct-named receiver never hijacks) and bounded ≤12 impls (a wider open-world
+                        // fan-out is an honest miss, never a guess). Only fires when nothing resolved locally.
+                        if !resolved_local
+                            && trait_decls.get(&t_type).is_some_and(|lt| lt.methods.contains(&c.leaf))
+                        {
+                            if let Some(impls) = trait_impls.get(&t_type) {
+                                let mut hits: Vec<String> = Vec::new();
+                                for imp in impls {
+                                    let imp_leaf = imp.rsplit("::").next().unwrap_or(imp);
+                                    if let Some(ts) = by_tail2.get(&format!("{imp_leaf}::{}", c.leaf)) {
+                                        for t in ts {
+                                            if !hits.contains(t) {
+                                                hits.push(t.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                                if !hits.is_empty() && hits.len() <= 12 {
+                                    resolved_local = true;
+                                    for t in &hits {
+                                        if t != &f.qual {
+                                            calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // AUTO-DEREF fallback (last, after inherent + trait-default — Rust's resolution
                         // order): a custom `impl Deref for t_type { type Target = U }` makes `recv.leaf()`
                         // dispatch to `U::leaf`. Chase the Deref chain (bounded) and edge to the first

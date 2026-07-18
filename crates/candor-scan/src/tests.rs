@@ -543,6 +543,59 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
     }
 
     #[test]
+    fn trait_default_dispatches_required_to_impl_witness() {
+        // A LOCAL trait DEFAULT method calling a REQUIRED method (`fn save_all(&self){ self.persist() }`)
+        // dispatches to the conforming impls' witnesses. Inside the default `self` types as the TRAIT, so
+        // `self.persist()` is `Trait::persist` — a bodiless requirement (no unit), and type_to_traits keys
+        // on impl types not the trait, so it read silent-pure (the rust sibling of the swift R32 protocol-
+        // extension→conformer dispatch). Bounded CHA over the trait's impls; a PURE impl stays pure.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-traitdef-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::fs;
+pub trait Store { fn persist(&self); fn save_all(&self) { self.persist(); } }
+pub struct Db;
+impl Store for Db { fn persist(&self) { let _ = fs::write("/x", "y"); } }   // Fs
+pub fn via_concrete(d: &Db) { d.save_all(); }
+pub fn via_generic<T: Store>(t: &T) { t.save_all(); }
+// PURE control — a trait default over a pure impl must stay pure
+pub trait Pt { fn r(&self); fn d(&self) { self.r(); } }
+pub struct Pure;
+impl Pt for Pure { fn r(&self) {} }
+pub fn via_pure(p: &Pure) { p.d(); }
+"#;
+        let v = run("traitdef", src);
+        assert!(eff(&v, "via_concrete").contains(&"Fs".to_string()),
+                "a trait default's self.persist() must dispatch to the impl witness (Fs):\n{v}");
+        assert!(eff(&v, "via_generic").contains(&"Fs".to_string()),
+                "the generic caller of a trait default must also carry:\n{v}");
+        assert!(eff(&v, "Store::save_all").contains(&"Fs".to_string()),
+                "the trait default unit itself carries the CHA'd witness effect:\n{v}");
+        assert!(eff(&v, "via_pure").is_empty(),
+                "a trait default over a PURE impl must stay pure (no over-fire):\n{v}");
+    }
+
+    #[test]
     fn custom_deref_resolves_pointee_method() {
         // A custom `impl Deref for W { type Target = Inner }` makes `w.method()` auto-deref to Inner's
         // method — it must reach the pointee's effect, not silently drop (the user-Deref analog of the
