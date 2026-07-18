@@ -277,15 +277,25 @@ pub(crate) fn seed_elem_of(
     sig: &syn::Signature,
     vars: &mut HashMap<String, String>,
     uses: &HashMap<String, String>,
-) -> (HashMap<String, String>, TupleElemIndex) {
+) -> (HashMap<String, String>, TupleElemIndex, HashMap<String, Vec<String>>) {
     let mut elem_of = HashMap::new();
     let mut tuple_of: TupleElemIndex = HashMap::new();
+    // Element DISPATCH leaves for a param that is a COLLECTION of trait objects (`items: Vec<Box<dyn
+    // Doer>>`) — `for it in items { it.go() }` dispatches via bounded CHA. Empty generic bounds: this
+    // resolves the CONCRETE-dyn element (`Box<dyn Doer>` → ["Doer"]); a generic `Vec<T: Doer>` element is
+    // a separate (rarer) shape left to the honest miss.
+    let mut elem_trait_of: HashMap<String, Vec<String>> = HashMap::new();
+    let no_bounds: HashMap<String, Vec<String>> = HashMap::new();
     for arg in &sig.inputs {
         let syn::FnArg::Typed(pt) = arg else { continue };
         match &*pt.pat {
             syn::Pat::Ident(id) => {
                 if let Some(e) = elem_type(&pt.ty, uses) {
                     elem_of.insert(id.ident.to_string(), e);
+                }
+                let leaves = elem_trait_leaves(&pt.ty, &no_bounds);
+                if !leaves.is_empty() {
+                    elem_trait_of.insert(id.ident.to_string(), leaves);
                 }
                 // `fn f(pair: (Sender, usize))` — record positions for a later `let (s, _) = pair`.
                 if let Some(t) = tuple_types(&pt.ty, uses) {
@@ -310,7 +320,7 @@ pub(crate) fn seed_elem_of(
             _ => {}
         }
     }
-    (elem_of, tuple_of)
+    (elem_of, tuple_of, elem_trait_of)
 }
 
 /// The dispatch-typed counterpart of `seed_vars`: params whose type is a trait bound rather than a
@@ -390,7 +400,7 @@ pub(crate) fn fninfo(
     }
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
-    let (elem_of, tuple_of) = seed_elem_of(sig, &mut vars, uses);
+    let (elem_of, tuple_of, elem_trait_of) = seed_elem_of(sig, &mut vars, uses);
     let mut c = CallCollector {
         uses,
         vars,
@@ -406,6 +416,7 @@ pub(crate) fn fninfo(
         field_elem: elems.field_elem,
         enum_variants: elems.enum_variants,
         elem_of,
+        elem_trait_of,
         tuple_of,
         calls: Vec::new(),
         closure_vars: std::collections::HashSet::new(),
