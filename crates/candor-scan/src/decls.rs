@@ -280,12 +280,12 @@ pub(crate) fn seed_elem_of(
 ) -> (HashMap<String, String>, TupleElemIndex, HashMap<String, Vec<String>>) {
     let mut elem_of = HashMap::new();
     let mut tuple_of: TupleElemIndex = HashMap::new();
-    // Element DISPATCH leaves for a param that is a COLLECTION of trait objects (`items: Vec<Box<dyn
-    // Doer>>`) — `for it in items { it.go() }` dispatches via bounded CHA. Empty generic bounds: this
-    // resolves the CONCRETE-dyn element (`Box<dyn Doer>` → ["Doer"]); a generic `Vec<T: Doer>` element is
-    // a separate (rarer) shape left to the honest miss.
+    // Element DISPATCH leaves for a param that is a COLLECTION of trait objects — `for it in items {
+    // it.go() }` dispatches via bounded CHA. Covers a CONCRETE-dyn element (`items: Vec<Box<dyn Doer>>` →
+    // ["Doer"]) AND a GENERIC element bound by a trait (`fn f<T: Doer>(items: Vec<T>)` → ["Doer"], via the
+    // fn's generic bounds — `trait_leaves` resolves the bare `T` through them).
     let mut elem_trait_of: HashMap<String, Vec<String>> = HashMap::new();
-    let no_bounds: HashMap<String, Vec<String>> = HashMap::new();
+    let gbounds = generic_bounds_of(sig);
     for arg in &sig.inputs {
         let syn::FnArg::Typed(pt) = arg else { continue };
         match &*pt.pat {
@@ -293,7 +293,7 @@ pub(crate) fn seed_elem_of(
                 if let Some(e) = elem_type(&pt.ty, uses) {
                     elem_of.insert(id.ident.to_string(), e);
                 }
-                let leaves = elem_trait_leaves(&pt.ty, &no_bounds);
+                let leaves = elem_trait_leaves(&pt.ty, &gbounds);
                 if !leaves.is_empty() {
                     elem_trait_of.insert(id.ident.to_string(), leaves);
                 }
