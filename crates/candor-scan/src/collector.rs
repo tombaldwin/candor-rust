@@ -732,6 +732,48 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // Inline literal, else const-string propagation (`reqwest::get(API_BASE)` /
                         // `Client::post(format!("{}/x", API_BASE))`) — SPEC §1 static-host, same refinement.
                         let str_arg = first_str_lit(&node.args).or_else(|| self.resolve_host_arg(&node.args));
+                        // UFCS trait-method dispatch (R53): `path` is `Trait::method`; the bare `Trait::method`
+                        // edge won't resolve (the impl body is `T::method`), so record an ADDITIONAL PRECISE
+                        // typed `T::method` edge. `T` comes from the STATICALLY-KNOWN receiver — the qself of
+                        // `<T as Trait>::method` (explicit impl type; correct even for an associated fn) or the
+                        // first argument's type of `Trait::method(&t)` (the receiver of a `&self` trait method).
+                        // NEVER CHA-over-all-impls: `T` is known, so charging the trait's OTHER impls would
+                        // fabricate. Gated so an associated fn (`Trait::new()`) is never mis-read as a receiver
+                        // call — `methods` holds only `&self` trait methods, and the qself form names its impl.
+                        if p.qself.is_none() || path.contains("::") {
+                            if let Some((trait_head, m)) = path.rsplit_once("::") {
+                                let trait_leaf = trait_head.rsplit("::").next().unwrap_or(trait_head);
+                                let qself_ty = p
+                                    .qself
+                                    .as_ref()
+                                    .filter(|_| path.contains("::"))
+                                    .and_then(|q| type_path(&q.ty, self.uses));
+                                let recv_ty = qself_ty.or_else(|| {
+                                    if self
+                                        .local_traits
+                                        .get(trait_leaf)
+                                        .is_some_and(|lt| lt.methods.contains(m))
+                                    {
+                                        node.args.first().and_then(|a| self.resolve_recv_type(a))
+                                    } else {
+                                        None
+                                    }
+                                });
+                                if let Some(t) = recv_ty {
+                                    let t_leaf = t.rsplit("::").next().unwrap_or(&t);
+                                    if t_leaf != trait_leaf {
+                                        self.calls.push(Call {
+                                            path: format!("{t_leaf}::{m}"),
+                                            leaf: m.to_string(),
+                                            str_arg: None,
+                                            typed: true,
+                                            method: true,
+                                            is_macro: false,
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         self.calls.push(Call { path, leaf, str_arg, typed: false, method, is_macro: false });
                     }
                 }

@@ -719,7 +719,13 @@ pub(crate) fn collect_decls(
                 e.count += 1;
                 for ti in &t.items {
                     if let syn::TraitItem::Fn(m) = ti {
-                        e.methods.insert(m.sig.ident.to_string());
+                        // `methods` holds only `&self`/`self` DISPATCH methods (its two uses — CHA on
+                        // `t.method()` and the R36 trait-default fallback — are both receiver calls). An
+                        // ASSOCIATED fn (`fn new()`, no receiver) is excluded, so the UFCS resolver (R53)
+                        // never mis-reads `Trait::assoc(&x)` as a receiver call on `x`.
+                        if matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
+                            e.methods.insert(m.sig.ident.to_string());
+                        }
                     }
                 }
                 // Supertrait bounds (`trait Sub: Super`) — a Super method is callable on a Sub receiver.
