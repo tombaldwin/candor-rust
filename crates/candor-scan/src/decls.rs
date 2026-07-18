@@ -414,6 +414,7 @@ pub(crate) fn fninfo(
         // `resolve_recv_traits` hot-path guard closed on the overwhelming majority of crates.
         has_dyn_return: returns.values().any(|t| ret_dyn_leaves(t).is_some()),
         field_elem: elems.field_elem,
+        field_elem_trait: elems.field_elem_trait,
         enum_variants: elems.enum_variants,
         elem_of,
         elem_trait_of,
@@ -524,6 +525,7 @@ pub(crate) fn collect_decls(
     uses: &mut HashMap<String, String>,
     fields: &mut FieldIndex,
     field_elem: &mut FieldElemIndex,
+    field_elem_trait: &mut FieldElemTraitIndex,
     rets: &mut HashMap<String, Option<String>>,
     enum_tmp: &mut HashMap<String, Option<String>>,
     trait_impls: &mut TraitImplIndex,
@@ -609,6 +611,17 @@ pub(crate) fn collect_decls(
                                         .or_default()
                                         .insert(name.to_string(), e);
                                 }
+                                // A COLLECTION-OF-TRAIT-OBJECTS field (`handlers: Vec<Box<dyn Handler>>`, or
+                                // `Vec<T>` on `struct Registry<T: Handler>`) records its element DISPATCH
+                                // leaves so `self.handlers.iter().for_each(|h| h.handle())` dispatches (R37
+                                // field form). Uses the struct's own generic bounds for a bounded element.
+                                let leaves = elem_trait_leaves(&f.ty, &struct_bounds);
+                                if !leaves.is_empty() {
+                                    field_elem_trait
+                                        .entry(s.ident.to_string())
+                                        .or_default()
+                                        .insert(name.to_string(), leaves);
+                                }
                             }
                         }
                     }
@@ -629,6 +642,13 @@ pub(crate) fn collect_decls(
                                     .entry(s.ident.to_string())
                                     .or_default()
                                     .insert(i.to_string(), e);
+                            }
+                            let leaves = elem_trait_leaves(&f.ty, &struct_bounds);
+                            if !leaves.is_empty() {
+                                field_elem_trait
+                                    .entry(s.ident.to_string())
+                                    .or_default()
+                                    .insert(i.to_string(), leaves);
                             }
                         }
                     }
@@ -755,7 +775,7 @@ pub(crate) fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings);
                 }
             }
             _ => {}

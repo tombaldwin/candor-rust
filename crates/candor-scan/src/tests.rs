@@ -201,6 +201,7 @@
         let returns = ReturnIndex::new();
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let fet = FieldElemTraitIndex::new();
         let mut c = CallCollector {
             uses: &uses,
             vars: HashMap::new(),
@@ -211,7 +212,7 @@
             local_traits: &td,
             returns: &returns,
             has_dyn_return: false,
-            field_elem: &fe,
+            field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev,
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
@@ -246,6 +247,7 @@
         let returns = ReturnIndex::new();
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let fet = FieldElemTraitIndex::new();
         let block: syn::Block =
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
         let mut c = CallCollector {
@@ -258,7 +260,7 @@
             local_traits: &td,
             returns: &returns,
             has_dyn_return: false,
-            field_elem: &fe,
+            field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev,
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
@@ -581,11 +583,24 @@ pub fn via_slice(items: &[Box<dyn Doer>]) { for it in items { it.go(); } }
 pub fn via_foreach(items: Vec<Box<dyn Doer>>) { items.iter().for_each(|it| it.go()); }
 pub fn via_generic<T: Doer>(items: Vec<T>) { for it in &items { it.go(); } }   // generic-bound element
 pub fn via_generic_where<T>(items: Vec<T>) where T: Doer { items.iter().for_each(|it| it.go()); }
+pub struct Registry { handlers: Vec<Box<dyn Doer>> }
+impl Registry {
+    pub fn field_for(&self) { for h in &self.handlers { h.go(); } }                 // Fs — FIELD form
+    pub fn field_foreach(&self) { self.handlers.iter().for_each(|h| h.go()); }       // Fs
+}
+pub struct GReg<T: Doer> { items: Vec<T> }
+impl<T: Doer> GReg<T> { pub fn field_generic(&self) { for it in &self.items { it.go(); } } }  // Fs — generic FIELD
 pub struct Plain;
 impl Plain { pub fn go(&self) {} }
 pub fn via_concrete(xs: Vec<Plain>) { for x in &xs { x.go(); } }        // PURE (no over-fire)
+pub struct PReg { xs: Vec<Plain> }
+impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PURE (concrete field)
 "#;
         let v = run("dynvec", src);
+        assert!(eff(&v, "field_for").contains(&"Fs".to_string()), "for-loop over a Vec<Box<dyn>> FIELD lost the dispatch:\n{v}");
+        assert!(eff(&v, "field_foreach").contains(&"Fs".to_string()), "for_each over a Vec<Box<dyn>> FIELD lost it:\n{v}");
+        assert!(eff(&v, "field_generic").contains(&"Fs".to_string()), "for-loop over a generic Vec<T: Doer> FIELD lost it:\n{v}");
+        assert!(eff(&v, "field_pure").is_empty(), "a concrete-element Vec FIELD with a pure method must stay pure:\n{v}");
         assert!(eff(&v, "via_for").contains(&"Fs".to_string()), "for-loop over Vec<Box<dyn>> lost the dispatch:\n{v}");
         assert!(eff(&v, "via_slice").contains(&"Fs".to_string()), "for-loop over &[Box<dyn>] lost the dispatch:\n{v}");
         assert!(eff(&v, "via_foreach").contains(&"Fs".to_string()), "iter().for_each closure over Vec<Box<dyn>> lost it:\n{v}");
@@ -951,6 +966,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // struct App { store: Box<dyn Store> }
         tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
         let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let fet = FieldElemTraitIndex::new();
         let run = |src: &str, sig: &str| {
             let sig: syn::Signature = syn::parse_str(sig).unwrap();
             let blk: syn::Block = syn::parse_str(src).unwrap();
@@ -970,7 +986,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 local_traits: &td,
                 returns: &returns,
                 has_dyn_return: false,
-                field_elem: &fe,
+                field_elem: &fe, field_elem_trait: &fet,
                 enum_variants: &ev,
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
@@ -1018,7 +1034,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut c = CallCollector {
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                returns: &returns, has_dyn_return: false, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
             };
@@ -1041,7 +1057,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let mut c = CallCollector {
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                    returns: &returns, has_dyn_return: false, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
                 };
@@ -1064,6 +1080,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         returns.insert("create_pool".to_string(), "sqlx::PgPool".to_string());
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let fet = FieldElemTraitIndex::new();
         let block: syn::Block =
             syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
         let mut c = CallCollector {
@@ -1076,7 +1093,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             local_traits: &td,
             returns: &returns,
             has_dyn_return: false,
-            field_elem: &fe,
+            field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev,
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
@@ -1110,7 +1127,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 local_traits: &td,
                 returns: &returns,
                 has_dyn_return: false,
-                field_elem: &fe,
+                field_elem: &fe, field_elem_trait: &fet,
                 enum_variants: &ev,
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
@@ -1626,7 +1643,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
+        let mut fet = FieldElemTraitIndex::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -2023,7 +2041,8 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
+        let mut fet = FieldElemTraitIndex::new();
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -2037,19 +2056,20 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut uses = HashMap::new();
         let mut fields = FieldIndex::new();
         let mut field_elem = FieldElemIndex::new();
+        let mut field_elem_trait = FieldElemTraitIndex::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
         let mut ti = TraitImplIndex::new();
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
                       &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -2067,19 +2087,20 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut uses = HashMap::new();
         let mut fields = FieldIndex::new();
         let mut field_elem = FieldElemIndex::new();
+        let mut field_elem_trait = FieldElemTraitIndex::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
         let mut ti = TraitImplIndex::new();
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
                       &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -2095,19 +2116,20 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut uses = HashMap::new();
         let mut fields = FieldIndex::new();
         let mut field_elem = FieldElemIndex::new();
+        let mut field_elem_trait = FieldElemTraitIndex::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
         let mut ti = TraitImplIndex::new();
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
                       &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, enum_variants: &enum_variants };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -2346,10 +2368,11 @@ trait G {
         let mut uses = HashMap::new();
         let mut fields = FieldIndex::new();
         let mut field_elem = FieldElemIndex::new();
+        let mut field_elem_trait = FieldElemTraitIndex::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut rets,
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
                       &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -3237,6 +3260,7 @@ trait G {
         let MergedDecls {
             fields: _,
             field_elem: _,
+            field_elem_trait: _,
             rets: _,
             enum_tmp: _,
             trait_impls: _,
@@ -3258,6 +3282,7 @@ trait G {
         let mutators: Vec<(&str, Mutator)> = vec![
             ("fields", |m| { m.fields.entry("S".into()).or_default().insert("f".into(), "T".into()); }),
             ("field_elem", |m| { m.field_elem.entry("S".into()).or_default().insert("f".into(), "E".into()); }),
+            ("field_elem_trait", |m| { m.field_elem_trait.entry("S".into()).or_default().insert("f".into(), vec!["Tr".into()]); }),
             ("rets", |m| { m.rets.insert("f".into(), Some("T".into())); }),
             ("enum_tmp", |m| { m.enum_tmp.insert("v".into(), Some("E".into())); }),
             ("trait_impls", |m| { m.trait_impls.entry("Tr".into()).or_default().push("Ty".into()); }),
