@@ -702,6 +702,12 @@ pub(crate) fn collect_decls(
                         e.methods.insert(m.sig.ident.to_string());
                     }
                 }
+                // Supertrait bounds (`trait Sub: Super`) — a Super method is callable on a Sub receiver.
+                for s in bound_leaves(&t.supertraits) {
+                    if !e.supertraits.contains(&s) {
+                        e.supertraits.push(s);
+                    }
+                }
             }
             // A foreign (`extern "C" { fn system(..); }`) function declaration: the body lives in
             // another language and is the canonical unknowable boundary. Record every declared name so a

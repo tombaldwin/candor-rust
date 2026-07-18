@@ -76,7 +76,7 @@ pub(crate) struct FileDecls {
     pub(crate) enum_tmp: HashMap<String, Option<String>>,
     pub(crate) trait_impls: TraitImplIndex,
     /// `trait leaf -> (decl count in this file, declared method names)` — `LocalTrait` flattened for serde.
-    pub(crate) trait_decls: HashMap<String, (usize, Vec<String>)>,
+    pub(crate) trait_decls: HashMap<String, (usize, Vec<String>, Vec<String>)>,
     pub(crate) trait_fields: TraitFieldIndex,
     /// names aliased to a non-nominal type (`type Inner = [u8; N]`) — resolution skips local `Inner::assoc`.
     pub(crate) prim_aliases: Vec<String>,
@@ -137,7 +137,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
         trait_impls,
         trait_decls: trait_decls
             .into_iter()
-            .map(|(k, v)| (k, (v.count, v.methods.into_iter().collect())))
+            .map(|(k, v)| (k, (v.count, v.methods.into_iter().collect(), v.supertraits)))
             .collect(),
         trait_fields,
         prim_aliases: prim_aliases.into_iter().collect(),
@@ -228,11 +228,16 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for (tr, tys) in &fd.trait_impls {
         acc.trait_impls.entry(tr.clone()).or_default().extend(tys.iter().cloned());
     }
-    for (tr, (count, methods)) in &fd.trait_decls {
+    for (tr, (count, methods, supers)) in &fd.trait_decls {
         let e = acc.trait_decls.entry(tr.clone()).or_default();
         e.count += count;
         for m in methods {
             e.methods.insert(m.clone());
+        }
+        for s in supers {
+            if !e.supertraits.contains(s) {
+                e.supertraits.push(s.clone());
+            }
         }
     }
     for (s, fmap) in &fd.trait_fields {
@@ -354,6 +359,12 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         for mname in ms {
             s.push(';');
             s.push_str(mname);
+        }
+        let mut sup: Vec<&String> = lt.supertraits.iter().collect();
+        sup.sort();
+        for sname in sup {
+            s.push('^');
+            s.push_str(sname);
         }
     }
     s.push('\n');

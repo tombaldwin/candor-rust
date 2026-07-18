@@ -139,6 +139,11 @@ pub(crate) type TraitFieldIndex = HashMap<String, HashMap<String, Vec<String>>>;
 pub(crate) struct LocalTrait {
     pub(crate) count: usize,
     pub(crate) methods: std::collections::HashSet<String>,
+    /// The trait's SUPERTRAIT leaves (`trait Sub: Super + Other` → `["Super", "Other"]`). A method of a
+    /// supertrait is callable on a `Sub`-bound/`dyn Sub` receiver, so dispatch checks a leaf against this
+    /// trait's methods AND (transitively) its supertraits' — else `t.base()` (a Super method via a `T: Sub`
+    /// bound) read silent-pure. External supertraits are recorded but resolve to nothing (documented miss).
+    pub(crate) supertraits: Vec<String>,
 }
 
 /// The trait indexes Pass A builds (impl universe, local declarations, dispatch-typed fields),
