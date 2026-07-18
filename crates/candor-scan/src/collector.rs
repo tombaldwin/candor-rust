@@ -242,7 +242,12 @@ impl<'a> CallCollector<'a> {
             syn::Expr::MethodCall(m) => {
                 let adapter = matches!(
                     m.method.to_string().as_str(),
+                    // element-preserving collection adapters + map value views…
                     "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice" | "values" | "values_mut"
+                    // …and the interior-mutability / smart-pointer GUARD chain that peels back to the
+                    // wrapped collection: `reg.lock().unwrap().iter()` / `cell.borrow().iter()` /
+                    // `rw.read().unwrap().iter()` over an `Arc<Mutex<Vec<Box<dyn>>>>` etc.
+                    | "lock" | "unwrap" | "expect" | "borrow" | "borrow_mut" | "read" | "write" | "as_ref" | "as_mut"
                 );
                 if adapter {
                     self.resolve_elem_trait_leaves(&m.receiver)
@@ -881,6 +886,69 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
     }
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        // `if let Some(d) = <opt> { d.go() }` / `if let Ok(d) = <res>` where the scrutinee is an
+        // Option/Result OF A TRAIT OBJECT (`Option<Box<dyn Doer>>`, a `Some`-of-dyn field) — type the
+        // unwrapped binding `d` into `trait_vars` (bounded-CHA dispatch) for the THEN branch, else `d.go()`
+        // read silent-pure. Scoped to the then-branch (trait_vars is fn-wide) so it can't leak; the
+        // scrutinee + else are visited normally. A concrete/non-dyn payload yields no leaves → default walk.
+        if let syn::Expr::Let(el) = &*node.cond {
+            if let Some(binding) = some_ok_binding(&el.pat) {
+                let leaves = self.resolve_elem_trait_leaves(&el.expr);
+                if !leaves.is_empty() {
+                    self.visit_expr(&el.expr);
+                    let prior = self.trait_vars.remove(&binding);
+                    let prior_var = self.vars.remove(&binding);
+                    self.trait_vars.insert(binding.clone(), leaves);
+                    self.visit_block(&node.then_branch);
+                    self.trait_vars.remove(&binding);
+                    if let Some(p) = prior {
+                        self.trait_vars.insert(binding.clone(), p);
+                    }
+                    if let Some(p) = prior_var {
+                        self.vars.insert(binding.clone(), p);
+                    }
+                    if let Some((_, else_b)) = &node.else_branch {
+                        self.visit_expr(else_b);
+                    }
+                    return;
+                }
+            }
+        }
+        syn::visit::visit_expr_if(self, node);
+    }
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        // `match <opt> { Some(d) => d.go(), None => {} }` — when the scrutinee is an Option/Result OF A
+        // TRAIT OBJECT, type each `Some(d)`/`Ok(d)` arm's payload into `trait_vars` for that arm's body
+        // (bounded-CHA dispatch), else silent-pure. Non-Some/Ok arms keep the normal `visit_arm` route (a
+        // LOCAL enum payload); an empty-leaves scrutinee falls through to the default walk.
+        let leaves = self.resolve_elem_trait_leaves(&node.expr);
+        if !leaves.is_empty() {
+            self.visit_expr(&node.expr);
+            for arm in &node.arms {
+                if let Some(binding) = some_ok_binding(&arm.pat) {
+                    let prior = self.trait_vars.remove(&binding);
+                    let prior_var = self.vars.remove(&binding);
+                    self.trait_vars.insert(binding.clone(), leaves.clone());
+                    if let Some((_, guard)) = &arm.guard {
+                        self.visit_expr(guard);
+                    }
+                    self.visit_expr(&arm.body);
+                    self.trait_vars.remove(&binding);
+                    if let Some(p) = prior {
+                        self.trait_vars.insert(binding.clone(), p);
+                    }
+                    if let Some(p) = prior_var {
+                        self.vars.insert(binding.clone(), p);
+                    }
+                } else {
+                    self.visit_arm(arm);
+                }
+            }
+            return;
+        }
+        syn::visit::visit_expr_match(self, node);
+    }
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
         // `for c in xs { c.send() }` / `for c in xs.iter()` / `for c in &self.senders` — type the
         // loop variable from the iterated collection's element type so the body's `c.method()` calls
@@ -993,6 +1061,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
     }
     fn visit_local(&mut self, node: &'ast syn::Local) {
+        // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
+        // TRAIT OBJECT is valid for the REST of the fn (let-else binds fn-wide), so type `d` into
+        // `trait_vars` (fn-wide, like any top-level let) → `d.go()` dispatches. Only a `Some`/`Ok` pattern
+        // reaches `some_ok_binding` (a refutable `let` without `else` won't compile); a concrete payload
+        // yields no leaves. The init/else are walked by the trailing `syn::visit::visit_local` below.
+        if let Some(binding) = some_ok_binding(&node.pat) {
+            if let Some(init) = &node.init {
+                let leaves = self.resolve_elem_trait_leaves(&init.expr);
+                if !leaves.is_empty() {
+                    self.vars.remove(&binding);
+                    self.trait_vars.insert(binding, leaves);
+                }
+            }
+        }
         // Record `let x: T = ..` (annotated) and `let x = T::new(..)` (constructor) so later method
         // calls on `x` resolve. Visited in source order, before any use of `x` (Rust requires it).
         if let syn::Pat::Type(pt) = &node.pat {
