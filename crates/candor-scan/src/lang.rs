@@ -223,21 +223,27 @@ pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String,
                 _ => None,
             });
             let Some(first_ty) = type_args().next() else { return Vec::new() };
+            // Peel one dispatch layer: a `dyn`/`Box<dyn>`/bound leaf (`trait_leaves`) OR a further container
+            // (`elem_trait_leaves`), so ARBITRARY nesting composes — `Vec<Option<Box<dyn>>>`,
+            // `Option<Vec<Box<dyn>>>`, `HashMap<K, Option<Box<dyn>>>` all surface the element's trait (R46).
+            let dispatch = |t: &syn::Type| {
+                let d = trait_leaves(t, generic_bounds);
+                if d.is_empty() { elem_trait_leaves(t, generic_bounds) } else { d }
+            };
             match name.as_str() {
                 "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
-                | "LinkedList" => trait_leaves(first_ty, generic_bounds),
+                | "LinkedList" => dispatch(first_ty),
                 // Option<Box<dyn T>> / Result<Box<dyn T>, E> — the payload (Ok/Some) is a trait object; its
                 // leaves let `o.map(|d| d.go())` / `for d in o` / `o.iter().for_each(..)` dispatch. (if-let /
                 // `.unwrap()` are separate binding sites handled at their pattern.)
-                "Option" | "Result" => trait_leaves(first_ty, generic_bounds),
+                "Option" | "Result" => dispatch(first_ty),
                 // A MAP's VALUE (2nd type arg) — a `.values()`/`for v in m.values()` iteration of
                 // trait-object values (`HashMap<String, Box<dyn Handler>>`, the keyed-registry shape).
                 "HashMap" | "BTreeMap" | "IndexMap" | "DashMap" | "FxHashMap" | "AHashMap" =>
-                    type_args().nth(1).map(|v| trait_leaves(v, generic_bounds)).unwrap_or_default(),
+                    type_args().nth(1).map(dispatch).unwrap_or_default(),
                 // Smart-pointer / interior-mutability wrappers around a COLLECTION: peel one layer and
                 // recurse so a `Arc<Mutex<Vec<Box<dyn>>>>` / `Rc<RefCell<Vec<Box<dyn>>>>` surfaces the element.
-                "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell" | "Cell" =>
-                    elem_trait_leaves(first_ty, generic_bounds),
+                "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell" | "Cell" => dispatch(first_ty),
                 _ => Vec::new(),
             }
         }

@@ -798,16 +798,23 @@ pub fn opt_match(o: Option<Box<dyn Doer>>) { match o { Some(d) => d.go(), None =
 pub fn opt_letelse(o: Option<Box<dyn Doer>>) { let Some(d) = o else { return; }; d.go(); }
 pub fn opt_map(o: Option<Box<dyn Doer>>) { o.map(|d| d.go()); }
 pub fn res_iflet(r: Result<Box<dyn Doer>, ()>) { if let Ok(d) = r { d.go(); } }
+// NESTED dispatch containers (R46): the peel composes in any order via `elem_trait_leaves` +
+// the `trait_vars` carry through the next unwrap.
+pub fn nested_vec_opt(xs: Vec<Option<Box<dyn Doer>>>) { for x in xs { if let Some(d) = x { d.go(); } } }
+pub fn nested_opt_vec(xs: Option<Vec<Box<dyn Doer>>>) { if let Some(v) = xs { for d in v { d.go(); } } }
 pub struct Plain; impl Plain { pub fn go(&self) {} }
 pub fn map_concrete(m: HashMap<String, Plain>) { for v in m.values() { v.go(); } }   // PURE
 pub fn opt_concrete(o: Option<Plain>) { if let Some(d) = o { d.go(); } }             // PURE
+pub fn nested_concrete(xs: Vec<Option<Plain>>) { for x in xs { if let Some(d) = x { d.go(); } } } // PURE
 "#;
         let v = run("cv", src);
-        for f in ["map_values", "arc_mutex", "opt_iflet", "opt_match", "opt_letelse", "opt_map", "res_iflet"] {
+        for f in ["map_values", "arc_mutex", "opt_iflet", "opt_match", "opt_letelse", "opt_map", "res_iflet",
+                  "nested_vec_opt", "nested_opt_vec"] {
             assert!(eff(&v, f).contains(&"Fs".to_string()), "{f} lost the container/option dispatch:\n{v}");
         }
         assert!(eff(&v, "map_concrete").is_empty(), "a concrete-value HashMap must stay pure:\n{v}");
         assert!(eff(&v, "opt_concrete").is_empty(), "a concrete Option payload must stay pure:\n{v}");
+        assert!(eff(&v, "nested_concrete").is_empty(), "a nested concrete-payload container must stay pure:\n{v}");
     }
 
     #[test]
