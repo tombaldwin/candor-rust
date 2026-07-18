@@ -97,6 +97,10 @@ pub(crate) struct FileDecls {
     /// static-host propagation). Literal-valued only.
     #[serde(default)]
     pub(crate) const_strings: HashMap<String, String>,
+    /// LOCAL `macro_rules!` NAME → the arm TOKENS (as a string). A bare `NAME!(..)` invocation inline-expands
+    /// the template so an effectful macro body isn't silent-pure (R48). String-valued (re-parsed at use).
+    #[serde(default)]
+    pub(crate) local_macros: HashMap<String, String>,
     /// The crate-ROOT re-exports, populated ONLY for the root file (`lib.rs`/`main.rs`, module path "").
     /// `name -> resolved path` plus the `GLOB_KEY` sentinel for a `pub use x::prelude::*`. Seeded into every
     /// file's `use` map under `crate::<name>` so a submodule's `use crate::net` / `crate::net::foo` resolves
@@ -125,9 +129,10 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
     let mut deref_target = HashMap::new();
     let mut lazy_statics = std::collections::HashSet::new();
     let mut const_strings = HashMap::new();
+    let mut local_macros = HashMap::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings);
+                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros);
     FileDecls {
         fields,
         field_elem,
@@ -146,6 +151,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
         deref_target,
         lazy_statics: lazy_statics.into_iter().collect(),
         const_strings,
+        local_macros,
         // Crate-root re-exports are a ROOT-file fact only; a submodule's `use crate::X` seeds against them.
         root_reexports: if modpath.is_empty() { collect_root_reexports(items) } else { HashMap::new() },
     }
@@ -170,6 +176,7 @@ pub(crate) struct MergedDecls {
     pub(crate) deref_target: HashMap<String, String>,
     pub(crate) lazy_statics: std::collections::HashSet<String>,
     pub(crate) const_strings: HashMap<String, String>,
+    pub(crate) local_macros: HashMap<String, String>,
     /// The crate-ROOT re-exports (`name -> path`, plus the `GLOB_KEY` sentinel), contributed by the root
     /// file. Seeded — under `crate::<name>` keys — into every file's `use` map at Pass B so a `use crate::X`
     /// / `crate::X::foo` in ANY file resolves through the crate-root re-export (`root_reexports`).
@@ -263,6 +270,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for (k, v) in &fd.const_strings {
         acc.const_strings.insert(k.clone(), v.clone()); // leaf → literal; last-writer-wins on a rare collision
+    }
+    for (k, v) in &fd.local_macros {
+        acc.local_macros.insert(k.clone(), v.clone()); // macro NAME → arm tokens; last-writer-wins on a rare collision
     }
     for (k, v) in &fd.root_reexports {
         // Only the ROOT file populates this, so there is at most one contributor — a plain insert.
@@ -416,6 +426,18 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(k);
         s.push('=');
         s.push_str(&m.const_strings[k]);
+    }
+    s.push('\n');
+    // local_macros — sorted NAME=arm-tokens pairs. A bare `NAME!(..)` inline-expands the template, so a
+    // change to a macro body changes the effects of its invokers → must invalidate their cached FnInfos.
+    s.push_str("local_macros");
+    let mut lmk: Vec<&String> = m.local_macros.keys().collect();
+    lmk.sort();
+    for k in lmk {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(&m.local_macros[k]);
     }
     s.push('\n');
     // root_reexports — sorted NAME=path pairs. Seeded into every file's `use` map, so a change re-resolves

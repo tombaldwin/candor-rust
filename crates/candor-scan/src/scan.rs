@@ -454,6 +454,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
+    let local_macros = &merged.local_macros;
 
     // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
     // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
@@ -516,7 +517,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // looks up a `crate::…` key, so a genuine external-crate call is never hijacked (see `expand`).
         let mut uses = seed_root_reexports(&merged.root_reexports);
         let mut file_fns: Vec<FnInfo> = Vec::new();
-        scan_items(&file.items, &modpath, locs, &mut loc_idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, &mut uses, &mut file_fns);
+        scan_items(&file.items, &modpath, locs, &mut loc_idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &mut uses, &mut file_fns);
         fns.extend(file_fns.iter().cloned());
         fresh_fninfos.insert(rel.clone(), file_fns);
     }

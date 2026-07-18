@@ -77,6 +77,14 @@ pub(crate) struct CallCollector<'a> {
     /// API_BASE))` — so the SPEC §1 static-host refinement (Llm / Db jdbc / Net-allowlist) fires just as
     /// it does on an inline literal (parity with candor-java's inlined `static final String`).
     pub(crate) const_strings: &'a std::collections::HashMap<String, String>,
+    /// LOCAL `macro_rules!` NAME → its arm TOKENS (as a string). A bare `NAME!(..)` invocation inline-expands
+    /// the template so an effectful macro body (`macro_rules! do_io { () => { fs::write(..) } }`) isn't
+    /// silent-pure (R48). Metavars are `$`-stripped and the template parse-or-skipped as a block — only ever
+    /// ADDS visibility (an unparseable/`$(..)*`-repetition template is skipped), never fabricates.
+    pub(crate) local_macros: &'a std::collections::HashMap<String, String>,
+    /// Local macros currently being inline-expanded on this path — a recursion guard so a macro whose
+    /// template invokes itself (or a mutually-recursive macro) can't loop forever.
+    pub(crate) macro_expanding: std::collections::HashSet<String>,
     /// LOCAL string bindings we can resolve to a literal host — `let url = format!("{}/x", API_BASE)` /
     /// `let url = "https://…"` / `let url = API_BASE` — so a later `post(url)` recovers the host (ONE level
     /// of local `let` following; a rebind to a non-resolvable value clears the entry). Grown in source
@@ -1387,6 +1395,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 return;
             }
         }
+        // LOCAL `macro_rules!` EXPANSION (R48): a bare `NAME!(..)` whose TEMPLATE does I/O or calls a local
+        // fn read silent-pure — syn leaves the macro body opaque, and the arg-walk below only sees the
+        // INVOCATION args, never the definition template. Inline-expand the recorded template so its own
+        // calls are charged to this fn (the macro really does expand here). Metavars are `$`-stripped and
+        // each arm parse-or-skipped as a block, so this only ever ADDS visibility — a `$(..)*` repetition or
+        // otherwise-unparseable template is skipped, never fabricated. Recursion-guarded per macro name.
+        if !mpath.contains("::")
+            && !self.macro_expanding.contains(&mleaf)
+            && self.local_macros.contains_key(&mleaf)
+        {
+            if let Some(body) = self.local_macros.get(&mleaf).cloned() {
+                self.macro_expanding.insert(mleaf.clone());
+                for block in macro_template_blocks(&body) {
+                    self.visit_block(&block);
+                }
+                self.macro_expanding.remove(&mleaf);
+            }
+        }
         if mpath.contains("::") {
             self.calls.push(Call { path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true });
         }
@@ -1491,6 +1517,67 @@ pub(crate) fn resolve_target<'a>(
 /// all `#[cfg(unix)]`/`#[cfg(windows)]`/… branches regardless. Parsing is strict — any token that isn't
 /// this exact `if #[cfg(..)] { } [else if #[cfg(..)] { }]* [else { }]?` shape makes the parse fail, so the
 /// caller falls back to treating the macro as opaque rather than mis-reading a novel `cfg_if` extension.
+/// Parse a `macro_rules!` body (`(matcher) => { template }; …`) into the parseable arm TEMPLATE blocks.
+/// Metavars are `$`-stripped (a `$msg` metavar → the ident `msg` — an untyped local that resolves to no
+/// effect, never a fabrication) and each template is parse-or-skipped as a block: an arm using repetition
+/// (`$(..)*`) or non-block syntax simply yields nothing. Only ADDS visibility to an effectful template.
+fn macro_template_blocks(body: &str) -> Vec<syn::Block> {
+    use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
+    let ts: TokenStream = match body.parse() {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut it = ts.into_iter().peekable();
+    while let Some(tok) = it.next() {
+        // arm matcher — a delimited group `(..)`/`[..]`/`{..}`
+        if !matches!(tok, TokenTree::Group(_)) {
+            continue;
+        }
+        // the fat arrow `=>` (two joined puncts)
+        match it.next() {
+            Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+            _ => continue,
+        }
+        match it.next() {
+            Some(TokenTree::Punct(p)) if p.as_char() == '>' => {}
+            _ => continue,
+        }
+        // the template group
+        let tmpl = match it.next() {
+            Some(TokenTree::Group(g)) => g.stream(),
+            _ => continue,
+        };
+        let braced = TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, strip_dollars(tmpl))));
+        if let Ok(block) = syn::parse2::<syn::Block>(braced) {
+            out.push(block);
+        }
+        // optional `;` separator between arms
+        if let Some(TokenTree::Punct(p)) = it.peek() {
+            if p.as_char() == ';' {
+                it.next();
+            }
+        }
+    }
+    out
+}
+
+/// Drop `$` punct tokens (recursing into groups) so a `macro_rules!` template's metavars (`$msg`, `$crate`)
+/// become plain idents/paths and the template parses as ordinary Rust. `$(..)*` repetition survives as
+/// `(..)*` which won't parse as a statement — the caller's parse-or-skip drops that arm.
+fn strip_dollars(ts: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, TokenTree};
+    ts.into_iter()
+        .filter_map(|tt| match tt {
+            TokenTree::Punct(p) if p.as_char() == '$' => None,
+            TokenTree::Group(g) => {
+                Some(TokenTree::Group(Group::new(g.delimiter(), strip_dollars(g.stream()))))
+            }
+            other => Some(other),
+        })
+        .collect()
+}
+
 struct CfgIfArms(Vec<syn::Block>);
 
 impl syn::parse::Parse for CfgIfArms {
