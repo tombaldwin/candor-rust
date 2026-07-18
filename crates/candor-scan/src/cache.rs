@@ -68,6 +68,9 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> String {
 pub(crate) struct FileDecls {
     pub(crate) fields: FieldIndex,
     pub(crate) field_elem: FieldElemIndex,
+    /// `Type -> { field -> element dispatch leaves }` for a COLLECTION-OF-TRAIT-OBJECTS field (R37 field form).
+    #[serde(default)]
+    pub(crate) field_elem_trait: FieldElemTraitIndex,
     /// `leaf -> Some(ty)` or `None` (this file alone already saw conflicting return types for the leaf).
     pub(crate) rets: HashMap<String, Option<String>>,
     pub(crate) enum_tmp: HashMap<String, Option<String>>,
@@ -110,6 +113,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
     let mut uses = HashMap::new();
     let mut fields = HashMap::new();
     let mut field_elem = HashMap::new();
+    let mut field_elem_trait = HashMap::new();
     let mut rets = HashMap::new();
     let mut enum_tmp = HashMap::new();
     let mut trait_impls = HashMap::new();
@@ -121,12 +125,13 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
     let mut deref_target = HashMap::new();
     let mut lazy_statics = std::collections::HashSet::new();
     let mut const_strings = HashMap::new();
-    collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut rets,
+    collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
                   &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings);
     FileDecls {
         fields,
         field_elem,
+        field_elem_trait,
         rets,
         enum_tmp,
         trait_impls,
@@ -153,6 +158,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
 pub(crate) struct MergedDecls {
     pub(crate) fields: FieldIndex,
     pub(crate) field_elem: FieldElemIndex,
+    pub(crate) field_elem_trait: FieldElemTraitIndex,
     pub(crate) rets: HashMap<String, Option<String>>,
     pub(crate) enum_tmp: HashMap<String, Option<String>>,
     pub(crate) trait_impls: TraitImplIndex,
@@ -188,6 +194,12 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for (s, fmap) in &fd.field_elem {
         let e = acc.field_elem.entry(s.clone()).or_default();
+        for (k, v) in fmap {
+            e.insert(k.clone(), v.clone());
+        }
+    }
+    for (s, fmap) in &fd.field_elem_trait {
+        let e = acc.field_elem_trait.entry(s.clone()).or_default();
         for (k, v) in fmap {
             e.insert(k.clone(), v.clone());
         }
@@ -282,6 +294,24 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     };
     nested(&mut s, "fields", &m.fields);
     nested(&mut s, "field_elem", &m.field_elem);
+    // field_elem_trait — nested map whose leaf is a Vec<String> (the element dispatch leaves).
+    s.push_str("field_elem_trait");
+    let mut fetk: Vec<&String> = m.field_elem_trait.keys().collect();
+    fetk.sort();
+    for k in fetk {
+        s.push('|');
+        s.push_str(k);
+        let inner = &m.field_elem_trait[k];
+        let mut ik: Vec<&String> = inner.keys().collect();
+        ik.sort();
+        for f in ik {
+            s.push(';');
+            s.push_str(f);
+            s.push('=');
+            s.push_str(&inner[f].join(","));
+        }
+    }
+    s.push('\n');
     let amb = |s: &mut String, tag: &str, map: &HashMap<String, Option<String>>| {
         s.push_str(tag);
         let mut keys: Vec<&String> = map.keys().collect();

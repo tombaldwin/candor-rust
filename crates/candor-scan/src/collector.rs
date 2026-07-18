@@ -30,6 +30,10 @@ pub(crate) struct CallCollector<'a> {
     /// as collection-typed `let`s/params are seen. Lets `for c in xs`, `xs[0]`, `xs.iter().for_each`
     /// resolve the element's type. Scoped bindings (loop var, closure param) live in `vars`, not here.
     pub(crate) elem_of: HashMap<String, String>,
+    /// `Type -> { field -> element dispatch leaves }` for a COLLECTION-OF-TRAIT-OBJECTS FIELD
+    /// (`self.handlers: Vec<Box<dyn Handler>>`) — the field counterpart of `elem_trait_of`, the way
+    /// `field_elem` is to `elem_of`. Lets `self.handlers.iter().for_each(|h| h.handle())` dispatch.
+    pub(crate) field_elem_trait: &'a FieldElemTraitIndex,
     /// local var / param -> the DISPATCH-trait leaves of a COLLECTION of trait objects it holds
     /// (`items: Vec<Box<dyn Doer>>` -> `["Doer"]`). The trait-object counterpart of `elem_of`: a
     /// `for it in items { it.go() }` types the loop var into `trait_vars` (bounded-CHA dispatch) instead
@@ -220,6 +224,21 @@ impl<'a> CallCollector<'a> {
                 .and_then(|id| self.elem_trait_of.get(&id.to_string()))
                 .cloned()
                 .unwrap_or_default(),
+            // `self.handlers` / `reg.handlers` — a COLLECTION-OF-TRAIT-OBJECTS FIELD: resolve the receiver's
+            // type and look up its element dispatch leaves (mirrors `resolve_elem_type`'s field arm).
+            syn::Expr::Field(f) => {
+                let Some(base) = self.resolve_recv_type(&f.base) else { return Vec::new() };
+                let key = match &f.member {
+                    syn::Member::Named(field) => field.to_string(),
+                    syn::Member::Unnamed(idx) => idx.index.to_string(),
+                };
+                let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                self.field_elem_trait
+                    .get(base_leaf)
+                    .and_then(|m| m.get(&key))
+                    .cloned()
+                    .unwrap_or_default()
+            }
             syn::Expr::MethodCall(m) => {
                 let adapter = matches!(
                     m.method.to_string().as_str(),

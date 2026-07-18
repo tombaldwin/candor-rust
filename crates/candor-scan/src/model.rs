@@ -70,6 +70,13 @@ pub(crate) type FieldIndex = HashMap<String, HashMap<String, String>>;
 /// element's method calls classify, instead of silently dropping to pure (a §4 under-report).
 pub(crate) type FieldElemIndex = HashMap<String, HashMap<String, String>>;
 
+/// `Type -> { field -> element DISPATCH leaves }` — the trait-object counterpart of `FieldElemIndex`:
+/// a COLLECTION field of trait objects (`handlers: Vec<Box<dyn Handler>>`, or a generic `Vec<T: Handler>`
+/// on a `struct Registry<T: Handler>`). Lets a loop/`for_each` over such a FIELD (`self.handlers.iter()
+/// .for_each(|h| h.handle())`) dispatch the element's method via bounded CHA, which `FieldElemIndex`
+/// can't express (a `dyn` element has no nominal type). Registries/observers-as-fields are the common shape.
+pub(crate) type FieldElemTraitIndex = HashMap<String, HashMap<String, Vec<String>>>;
+
 /// `var-name -> per-position element types of a tuple binding` (`None` = position not type-resolved),
 /// e.g. a `let (s, _) = pair` over a `(Sender, usize)` param records `pair -> [Some(Sender), None]`.
 pub(crate) type TupleElemIndex = HashMap<String, Vec<Option<String>>>;
@@ -148,6 +155,7 @@ pub(crate) struct TraitIndexes<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct ElemIndexes<'a> {
     pub(crate) field_elem: &'a FieldElemIndex,
+    pub(crate) field_elem_trait: &'a FieldElemTraitIndex,
     pub(crate) enum_variants: &'a EnumVariantIndex,
 }
 

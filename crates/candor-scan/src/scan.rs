@@ -446,11 +446,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         merged.enum_tmp.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
     let fields = &merged.fields;
     let field_elem = &merged.field_elem;
+    let field_elem_trait = &merged.field_elem_trait;
     let trait_impls = &merged.trait_impls;
     let trait_decls = &merged.trait_decls;
     let trait_fields = &merged.trait_fields;
     let traits = TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields };
-    let elems = ElemIndexes { field_elem, enum_variants: &enum_variants };
+    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
 
