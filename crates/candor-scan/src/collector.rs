@@ -1272,6 +1272,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     is_macro: false,
                                 });
                             }
+                        } else if let syn::Expr::MethodCall(m) = &*init.expr {
+                            // A `.clone()` REBIND is type-preserving — `Clone::clone(&self) -> Self`, so the
+                            // binding has the receiver's type: `let b = a.clone(); b.run()` must resolve
+                            // `b.run()` through `a`'s type (ctor_type misses this — it doesn't consult `vars`
+                            // for the clone receiver, so `b` typed to nothing and dropped SILENT-PURE, R52).
+                            // Carrying the type NEVER fabricates (clone cannot change the type, and the clone
+                            // CALL itself stays uncharged — the anti-fabrication clone guard is untouched);
+                            // scan.rs's `local_types` gate still confines any resulting `Type::method` edge.
+                            if m.method == "clone" {
+                                if let Some(t) = self.resolve_recv_type(&m.receiver) {
+                                    self.vars.insert(id.ident.to_string(), t);
+                                }
+                            }
                         }
                         // `let g = eff;` where the init is a bare PATH (not a call) — `g` aliases a free fn,
                         // so a later `g()` resolves to it (sweep [6]). `g()` only compiles if the path is
