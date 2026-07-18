@@ -121,6 +121,23 @@ pub(crate) fn ret_dyn_leaves(s: &str) -> Option<Vec<String>> {
         .map(|rest| rest.split('+').filter(|p| !p.is_empty()).map(str::to_string).collect())
 }
 
+/// Sentinel prefix for a fn returning a COLLECTION of trait objects (`-> Vec<Box<dyn Task>>` /
+/// `-> Option<Box<dyn Task>>`): the ELEMENT's trait bound leaves ride after it. Distinct from
+/// `RET_DYN_PREFIX` (which means the value ITSELF is a dyn, decoded by `resolve_recv_traits`) — this is
+/// decoded by `resolve_elem_trait_leaves` so a `for d in factory() { d.run() }` dispatches the element.
+pub(crate) const RET_ELEM_DYN_PREFIX: &str = "<elemdyn>";
+
+/// Encode a collection-of-trait-objects return's ELEMENT bound leaves into the sentinel string.
+pub(crate) fn ret_elem_dyn_encode(leaves: &[String]) -> String {
+    format!("{RET_ELEM_DYN_PREFIX}{}", leaves.join("+"))
+}
+
+/// Decode a `RET_ELEM_DYN_PREFIX` sentinel back to its element bound leaves, or `None` if not one.
+pub(crate) fn ret_elem_dyn_leaves(s: &str) -> Option<Vec<String>> {
+    s.strip_prefix(RET_ELEM_DYN_PREFIX)
+        .map(|rest| rest.split('+').filter(|p| !p.is_empty()).map(str::to_string).collect())
+}
+
 /// `trait leaf -> the local types that `impl Trait for Type` it` — the syntactic CHA universe for
 /// dispatch-typed receivers (the JVM engine's bounded-CHA move, done on syntax). Keyed by leaf like
 /// the other name indexes; includes impls of EXTERNAL traits for local types (the JVM resolves
