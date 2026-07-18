@@ -437,12 +437,58 @@ pub(crate) fn fninfo(
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
     }
+    let ret_idents = match &sig.output {
+        syn::ReturnType::Type(_, ty) => {
+            let mut v = Vec::new();
+            collect_type_idents(ty, &mut v);
+            // A constructor commonly returns `Self` (`fn make(..) -> Self`, `fn new() -> Self`) — resolve it
+            // to the impl's own type so the drop-glue ESCAPE GATE sees that a `Self`-returning `Stream::make`
+            // returns the very Stream it built (else the FFI-Drop is fabricated onto the constructor, R49).
+            if let Some(t) = self_ty {
+                for id in &mut v {
+                    if id == "Self" {
+                        *id = t.rsplit("::").next().unwrap_or(t).to_string();
+                    }
+                }
+            }
+            v
+        }
+        syn::ReturnType::Default => Vec::new(),
+    };
     FnInfo {
         qual: qual.to_string(),
         leaf: leaf.to_string(),
         loc: loc.to_string(),
         calls: c.calls,
         unresolved: c.unresolved,
+        ret_idents,
+    }
+}
+
+/// Collect the nominal-type IDENTS of a `syn::Type` (`Result<Compress, E>` → `[Result, Compress, E]`),
+/// peeling references / tuples / slices / arrays / generic args. Used by the drop-glue escape gate to see
+/// which drop-types a fn's RETURN type owns (and thus which escape the scope).
+pub(crate) fn collect_type_idents(ty: &syn::Type, out: &mut Vec<String>) {
+    match ty {
+        syn::Type::Path(p) => {
+            for seg in &p.path.segments {
+                out.push(seg.ident.to_string());
+                if let syn::PathArguments::AngleBracketed(a) = &seg.arguments {
+                    for arg in &a.args {
+                        if let syn::GenericArgument::Type(t) = arg {
+                            collect_type_idents(t, out);
+                        }
+                    }
+                }
+            }
+        }
+        syn::Type::Reference(r) => collect_type_idents(&r.elem, out),
+        syn::Type::Paren(p) => collect_type_idents(&p.elem, out),
+        syn::Type::Group(g) => collect_type_idents(&g.elem, out),
+        syn::Type::Tuple(t) => t.elems.iter().for_each(|e| collect_type_idents(e, out)),
+        syn::Type::Slice(s) => collect_type_idents(&s.elem, out),
+        syn::Type::Array(a) => collect_type_idents(&a.elem, out),
+        _ => {}
     }
 }
 

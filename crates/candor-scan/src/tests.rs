@@ -2270,6 +2270,67 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn drop_glue_through_an_owned_field_charges_unless_the_owner_escapes() {
+        // §4 honesty (R49, field edition): constructing a struct that OWNS a local effectful-Drop guard as a
+        // field runs that guard's Drop at the owner's scope exit — the transitive drop-owner closure charges
+        // the constructing fn (directly `_g: Guard`, a `Vec<Guard>` element, or a nested owner). ESCAPE GATE:
+        // when the fn RETURNS a local aggregate (or a drop-type), a value built here may be moved into it and
+        // drop in the CALLER — so a constructor is NOT charged (never fabricate a returned owner's Drop, the
+        // flate2 miss). The gate is a conservative membership check (sound under leaf-name collisions), so a
+        // `-> ()` local-use fn charges while any owner-returning fn skips.
+        let d = std::env::temp_dir().join(format!("candor-dropfield-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"dropfield\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use std::fs;
+            pub struct Guard;
+            impl Drop for Guard { fn drop(&mut self) { let _ = fs::remove_file("/g"); } }  // Fs
+            pub struct Session { _g: Guard }
+            impl Session { pub fn new() -> Session { Session { _g: Guard } } }
+            pub struct Outer { _s: Session }
+            pub struct Pool { _v: Vec<Guard> }
+            pub struct Plain { _n: i32 }
+            // LOCAL-USE (returns unit) → the owned Guard drops here → charged
+            pub fn owns_field() { let _s = Session { _g: Guard }; let _ = 1; }
+            pub fn owns_via_ctor() { let _s = Session::new(); let _ = 1; }
+            pub fn owns_nested() { let _o = Outer { _s: Session::new() }; }
+            pub fn owns_vec() { let _p = Pool { _v: vec![Guard] }; }
+            // ESCAPE (returns the owner) → the Guard drops in the CALLER → NOT charged (no fabrication)
+            pub fn make_session() -> Session { Session::new() }
+            pub fn make_outer() -> Outer { Outer { _s: Session::new() } }
+            pub fn make_via_let() -> Outer { let o = Outer { _s: Session::new() }; o }
+            // CONTROL: pure-field owner → nothing
+            pub fn owns_plain() { let _p = Plain { _n: 1 }; }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let has_fs = |needle: &str| -> bool {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str()))
+                .any(|e| e == "Fs")
+        };
+        for f in ["owns_field", "owns_via_ctor", "owns_nested", "owns_vec"] {
+            assert!(has_fs(f), "a field-owned local guard's Drop must propagate to `{f}`:\n{body}");
+        }
+        for f in ["make_session", "make_outer", "make_via_let", "owns_plain"] {
+            assert!(!has_fs(f), "an ESCAPING (returned) owner's Drop must not be charged at `{f}`:\n{body}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn drop_glue_never_fabricates_for_an_external_type() {
         // CONTROL (b) for #3, isolated: a fn that binds an EXTERNAL type (whose Drop we cannot see) must
         // NOT get a fabricated drop effect — we model ONLY local `impl Drop`. A `std::fs::File` is dropped

@@ -661,6 +661,67 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // per-trait tag: a callback we can't see through, an FFI/extern boundary, or a genuinely-unresolvable
     // bare call. Tracked so the disclosure names WHY, not just that an Unknown exists.
     let mut unknown_why: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+    // TRANSITIVE DROP-OWNER closure (#3, FIELD edition — R49): constructing a struct `T` also runs the drop
+    // glue of any LOCAL drop-type `T` OWNS through a field — directly (`_g: Guard`), via a collection element
+    // (`_v: Vec<Guard>`, carried by `field_elem`), or transitively (`_s: Session` where `Session` owns a
+    // Guard). The per-call drop detection charges only a local OF the drop-type itself; a guard held as a
+    // FIELD dropped silent-pure. `owned_drops[T]` = the local drop-types edged when a `T` is constructed.
+    // Gated to LOCAL drop-types reached through LOCAL field types, so an external field's invisible Drop is
+    // never fabricated. Computed to a fixpoint (monotone; a struct owning itself via `Box` terminates).
+    let owned_drops: HashMap<String, BTreeSet<String>> = if merged.drop_types.is_empty() {
+        HashMap::new()
+    } else {
+        // A field type's LEAF (`type_path` may qualify it — `inner: ffi::Deflate` — but `owned_drops`,
+        // `drop_types`, and the struct keys are all LEAF-keyed, so compare by leaf or the transitive
+        // owner chain breaks across modules).
+        let candidates = |t: &str| -> Vec<String> {
+            let leaf = |ty: &String| ty.rsplit("::").next().unwrap_or(ty).to_string();
+            let mut v: Vec<String> = Vec::new();
+            if let Some(m) = fields.get(t) {
+                v.extend(m.values().map(&leaf));
+            }
+            if let Some(m) = field_elem.get(t) {
+                v.extend(m.values().map(&leaf));
+            }
+            v
+        };
+        let all_types: BTreeSet<String> = fields.keys().chain(field_elem.keys()).cloned().collect();
+        let mut owned: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for t in &all_types {
+            let s: BTreeSet<String> = candidates(t)
+                .into_iter()
+                .filter(|c| merged.drop_types.contains(c))
+                .collect();
+            if !s.is_empty() {
+                owned.insert(t.clone(), s);
+            }
+        }
+        loop {
+            let mut changed = false;
+            for t in &all_types {
+                let mut add: BTreeSet<String> = BTreeSet::new();
+                for c in candidates(t) {
+                    if &c != t {
+                        if let Some(inner) = owned.get(&c) {
+                            add.extend(inner.iter().cloned());
+                        }
+                    }
+                }
+                if !add.is_empty() {
+                    let e = owned.entry(t.clone()).or_default();
+                    for d in add {
+                        if e.insert(d) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        owned
+    };
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
@@ -677,6 +738,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // direction (a constructed value is assumed to drop in this scope); gated to LOCAL drop types only,
         // so an external type's invisible Drop is never fabricated.
         let mut drops_here: BTreeSet<String> = BTreeSet::new();
+        // ESCAPE GATE (R49): a drop-type built here whose value can ESCAPE via the return must NOT be charged
+        // — its `Drop` runs in the CALLER's scope (a constructor `Compress::new -> Compress` that builds an
+        // owned `Stream` and returns the `Compress` otherwise FABRICATES the Stream's FFI-Drop; the flate2
+        // miss that A/B-reverted the naive field fix). CONSERVATIVE test: the fn RETURNS a local aggregate (a
+        // struct in `fields`) or a drop-type — so a value built here may be moved into what's returned. A
+        // membership check (not ownership traversal), so it stays SOUND under the leaf-name COLLISIONS that
+        // flate2's parallel read/write/bufread modules create (three `GzEncoder`s etc.) — precise ownership
+        // can't be trusted there. It over-skips (a fn returning an aggregate won't get drop-glue even for a
+        // genuinely-local guard), the SOUND direction — never a fabrication. A `-> ()`/`Result`/primitive fn
+        // (the local-use case: `let _g = Guard{..}; …`) is NOT an escape, so it still charges.
+        let returns_escapable = f
+            .ret_idents
+            .iter()
+            .any(|r| fields.contains_key(r) || merged.drop_types.contains(r));
         for c in &f.calls {
             let cr = c.path.split("::").next().unwrap_or("");
             // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface (candor_classify::MODEL_SDK_CRATES): a qualified call
@@ -695,8 +770,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // Excludes `T::drop` itself.
             if !merged.drop_types.is_empty() && !c.method && c.path.contains("::") && c.leaf != "drop" {
                 if let Some(ty) = tail2(&c.path).and_then(|t2| t2.split("::").next().map(str::to_string)) {
+                    // Direct: a local of the drop-type itself (UNCHANGED — the shipped behavior).
                     if merged.drop_types.contains(&ty) {
-                        drops_here.insert(ty);
+                        drops_here.insert(ty.clone());
+                    }
+                    // FIELD edition (R49): constructing `ty` also runs the drop glue of any local drop-type
+                    // it transitively OWNS through a field — ADDITIVE, and charged only when the value can't
+                    // escape via the return (the conservative gate above), so it never fabricates.
+                    if !returns_escapable {
+                        if let Some(owned) = owned_drops.get(&ty) {
+                            drops_here.extend(owned.iter().cloned());
+                        }
                     }
                 }
             }
