@@ -101,6 +101,10 @@ pub(crate) struct FileDecls {
     /// the template so an effectful macro body isn't silent-pure (R48). String-valued (re-parsed at use).
     #[serde(default)]
     pub(crate) local_macros: HashMap<String, String>,
+    /// BLANKET-impl method leaf -> the blanket self-param name (`ext` -> `T` for `impl<T> Ext for T`); "" if
+    /// ambiguous. Lets an unresolved `x.ext()` edge to the blanket body `T::ext` (R45).
+    #[serde(default)]
+    pub(crate) blanket_methods: HashMap<String, String>,
     /// The crate-ROOT re-exports, populated ONLY for the root file (`lib.rs`/`main.rs`, module path "").
     /// `name -> resolved path` plus the `GLOB_KEY` sentinel for a `pub use x::prelude::*`. Seeded into every
     /// file's `use` map under `crate::<name>` so a submodule's `use crate::net` / `crate::net::foo` resolves
@@ -130,9 +134,10 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
     let mut lazy_statics = std::collections::HashSet::new();
     let mut const_strings = HashMap::new();
     let mut local_macros = HashMap::new();
+    let mut blanket_methods = HashMap::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros);
+                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut blanket_methods);
     FileDecls {
         fields,
         field_elem,
@@ -152,6 +157,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
         lazy_statics: lazy_statics.into_iter().collect(),
         const_strings,
         local_macros,
+        blanket_methods,
         // Crate-root re-exports are a ROOT-file fact only; a submodule's `use crate::X` seeds against them.
         root_reexports: if modpath.is_empty() { collect_root_reexports(items) } else { HashMap::new() },
     }
@@ -177,6 +183,7 @@ pub(crate) struct MergedDecls {
     pub(crate) lazy_statics: std::collections::HashSet<String>,
     pub(crate) const_strings: HashMap<String, String>,
     pub(crate) local_macros: HashMap<String, String>,
+    pub(crate) blanket_methods: HashMap<String, String>,
     /// The crate-ROOT re-exports (`name -> path`, plus the `GLOB_KEY` sentinel), contributed by the root
     /// file. Seeded — under `crate::<name>` keys — into every file's `use` map at Pass B so a `use crate::X`
     /// / `crate::X::foo` in ANY file resolves through the crate-root re-export (`root_reexports`).
@@ -273,6 +280,14 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     }
     for (k, v) in &fd.local_macros {
         acc.local_macros.insert(k.clone(), v.clone()); // macro NAME → arm tokens; last-writer-wins on a rare collision
+    }
+    for (k, v) in &fd.blanket_methods {
+        // blanket method leaf → self-param; a cross-file collision on DIFFERENT params is ambiguous ("").
+        match acc.blanket_methods.get(k) {
+            Some(prev) if prev != v || v.is_empty() => { acc.blanket_methods.insert(k.clone(), String::new()); }
+            Some(_) => {}
+            None => { acc.blanket_methods.insert(k.clone(), v.clone()); }
+        }
     }
     for (k, v) in &fd.root_reexports {
         // Only the ROOT file populates this, so there is at most one contributor — a plain insert.
@@ -438,6 +453,17 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(k);
         s.push('=');
         s.push_str(&m.local_macros[k]);
+    }
+    s.push('\n');
+    // blanket_methods — a change to which method leaves resolve to a blanket body changes callers' effects.
+    s.push_str("blanket_methods");
+    let mut bmk: Vec<&String> = m.blanket_methods.keys().collect();
+    bmk.sort();
+    for k in bmk {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(&m.blanket_methods[k]);
     }
     s.push('\n');
     // root_reexports — sorted NAME=path pairs. Seeded into every file's `use` map, so a change re-resolves

@@ -608,6 +608,7 @@ pub(crate) fn collect_decls(
     lazy_statics: &mut std::collections::HashSet<String>,
     const_strings: &mut HashMap<String, String>,
     local_macros: &mut HashMap<String, String>,
+    blanket_methods: &mut HashMap<String, String>,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
@@ -815,6 +816,31 @@ pub(crate) fn collect_decls(
             }
             syn::Item::Impl(im) => {
                 let self_ty = impl_type_name(&im.self_ty);
+                // BLANKET impl (`impl<T> Trait for T` / `impl<T: Bound> Trait for T`): the self type IS one of
+                // the impl's own generic type params, so the impl provides `Trait`'s methods for EVERY type
+                // (bounded → every type meeting the bound). A `x.method()` that resolves to no CONCRETE
+                // `X::method` is then this blanket body — but its qual is `<param>::method` (`T::method`), so
+                // a keyed lookup on the receiver's type missed it silent-pure (R45). Record `method-leaf ->
+                // the blanket self-param name` so scan.rs can edge an unresolved call to the blanket body via
+                // `by_tail2["<param>::method"]`. Ambiguous (two blankets share a leaf) → "" sentinel, dropped.
+                if let (Some((None, _, _)), Some(sty)) = (&im.trait_, &self_ty) {
+                    let is_blanket = matches!(&*im.self_ty, syn::Type::Path(p)
+                        if p.qself.is_none()
+                            && p.path.get_ident().is_some_and(|id| im.generics.params.iter().any(|g|
+                                matches!(g, syn::GenericParam::Type(t) if &t.ident == id))));
+                    if is_blanket {
+                        for ii in &im.items {
+                            if let syn::ImplItem::Fn(m) = ii {
+                                let leaf = m.sig.ident.to_string();
+                                match blanket_methods.get(&leaf) {
+                                    Some(prev) if prev != sty => { blanket_methods.insert(leaf, String::new()); }
+                                    Some(_) => {}
+                                    None => { blanket_methods.insert(leaf, sty.clone()); }
+                                }
+                            }
+                        }
+                    }
+                }
                 // `impl Trait for Type` — a CHA edge from the trait leaf to the implementing type.
                 if let (Some((_, tr, _)), Some(ty)) = (&im.trait_, &self_ty) {
                     if let Some(leaf) = tr.segments.last() {
@@ -872,7 +898,7 @@ pub(crate) fn collect_decls(
                 }
                 if let Some((_, inner)) = &m.content {
                     let mut subuses = uses.clone();
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods);
                 }
             }
             _ => {}
