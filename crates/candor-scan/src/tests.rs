@@ -610,6 +610,54 @@ impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PUR
     }
 
     #[test]
+    fn method_factory_returning_trait_object_dispatches() {
+        // `self.handler().go()` where `handler(&self) -> &dyn Doer` / `-> Box<dyn Doer>` — a METHOD factory
+        // returning a dispatch object. `resolve_recv_type` used to walk THROUGH the chain to the base
+        // receiver's type (`Reg`) and shadow the dispatch silent-pure; only a free/static `Reg::make()`
+        // (an Expr::Call) resolved. A concrete-return method must stay pure (no over-fire).
+        let run = |src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-mf-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"mf\"\n").unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let v = run(r#"
+use std::fs;
+pub trait Doer { fn go(&self); }
+pub struct Impl; impl Doer for Impl { fn go(&self) { let _ = fs::write("/x","y"); } }
+pub struct Reg { h: Box<dyn Doer> }
+impl Reg {
+    pub fn handler(&self) -> &dyn Doer { &*self.h }
+    pub fn via_ref(&self) { self.handler().go(); }
+    pub fn boxed(&self) -> Box<dyn Doer> { Box::new(Impl) }
+    pub fn via_boxed(&self) { self.boxed().go(); }
+    pub fn plain(&self) -> Plain { Plain }
+    pub fn via_plain(&self) { self.plain().go(); }
+}
+pub struct Plain; impl Plain { pub fn go(&self) {} }
+"#);
+        assert!(eff(&v, "via_ref").contains(&"Fs".to_string()), "method returning &dyn lost the dispatch:\n{v}");
+        assert!(eff(&v, "via_boxed").contains(&"Fs".to_string()), "method returning Box<dyn> lost the dispatch:\n{v}");
+        assert!(eff(&v, "via_plain").is_empty(), "method returning a concrete type with a pure method must stay pure:\n{v}");
+    }
+
+    #[test]
     fn container_and_option_trait_object_dispatch_variants() {
         // The collection-of-trait-objects vein beyond a plain Vec param/field: HashMap VALUES, a smart-
         // pointer / interior-mutability GUARD chain (`Arc<Mutex<Vec<Box<dyn>>>>`), and Option/Result unwrap
