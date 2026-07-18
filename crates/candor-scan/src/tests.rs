@@ -1015,6 +1015,57 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn smart_pointer_ctor_types_the_pointee_for_method_dispatch() {
+        // §4 honesty: a `let x = Arc::new(Local); x.method()` (and Box/Rc) auto-derefs to the POINTEE for
+        // dispatch, but `ctor_type` typed the ctor as the impl-less wrapper ("Arc") and dropped the arg, so
+        // the method call read silent-pure. `type_path` already peels a `Arc<Local>` FIELD/param; this
+        // closes the local-binding form. CONTROLS: a PURE pointee method stays pure; Mutex/RefCell are NOT
+        // peeled (their `.lock()`/`.borrow()` live on the wrapper), so a bare Mutex ctor stays the wrapper.
+        let d = std::env::temp_dir().join(format!("candor-smartptr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"smartptr\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use std::sync::Arc;
+            use std::fs;
+            pub struct Db { p: String }
+            impl Db {
+                pub fn new(p: &str) -> Db { Db { p: p.to_string() } }
+                pub fn migrate(&self) { let _ = fs::write(&self.p, "s"); }   // Fs
+                pub fn touch(&self) { let _n = self.p.len(); }               // pure
+            }
+            pub fn via_arc() { let db = Arc::new(Db::new("/d")); db.migrate(); }        // Fs
+            pub fn via_box() { let db = Box::new(Db::new("/d")); db.migrate(); }        // Fs
+            pub fn via_rc()  { let db = std::rc::Rc::new(Db::new("/d")); db.migrate(); }// Fs
+            pub fn inline_arc() { Arc::new(Db::new("/d")).migrate(); }                  // Fs (no let)
+            pub fn pure_arc() { let db = Arc::new(Db::new("/d")); db.touch(); }         // pure pointee method
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let has_fs = |needle: &str| -> bool {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str()))
+                .any(|e| e == "Fs")
+        };
+        for f in ["via_arc", "via_box", "via_rc", "inline_arc"] {
+            assert!(has_fs(f), "smart-pointer ctor pointee method must propagate to `{f}`:\n{body}");
+        }
+        assert!(!has_fs("pure_arc"), "a PURE pointee method must not fabricate an effect:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn implicit_coercion_edges_charge_local_effectful_impls_but_never_std() {
         // The implicit-conversion / coercion edges (cardinal sin = a fn read PURE when an effect is
         // reachable through an IMPLICIT trait-method invocation): `format!`/`.to_string()`→Display::fmt,

@@ -315,6 +315,18 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                 // Client but `serde_json::from_str` (module path) does NOT infer the module as a type.
                 let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
                 let type_like = ty_leaf.chars().next().is_some_and(|c| c.is_uppercase());
+                // A TRANSPARENT owned smart-pointer constructor (`Box::new(x)`/`Rc::new(x)`/`Arc::new(x)`)
+                // yields a value that AUTO-DEREFS to its POINTEE for method dispatch — type it as the
+                // pointee (the ctor arg's type) so `let w = Arc::new(Worker); w.run()` resolves
+                // `Worker::run` rather than the impl-less "Arc" (a §4 under-report — `type_path` already
+                // peels a `Arc<Worker>` FIELD/param, but `Arc::new` dropped the arg here). NOT Mutex/
+                // RefCell/RwLock/Cell — their methods (`.lock()`/`.borrow()`) live on the wrapper, so the
+                // wrapper layer must survive (`Arc::new(Mutex::new(x))` → "Mutex", not the inner type).
+                if last == "new" && matches!(ty_leaf, "Box" | "Rc" | "Arc") {
+                    if let Some(inner) = c.args.first().and_then(|a| ctor_type(a, uses, returns)) {
+                        return Some(inner);
+                    }
+                }
                 if is_ctor(last) && type_like {
                     return Some(expand(ty, uses));
                 }
