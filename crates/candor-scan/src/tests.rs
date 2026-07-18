@@ -610,6 +610,59 @@ impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PUR
     }
 
     #[test]
+    fn container_and_option_trait_object_dispatch_variants() {
+        // The collection-of-trait-objects vein beyond a plain Vec param/field: HashMap VALUES, a smart-
+        // pointer / interior-mutability GUARD chain (`Arc<Mutex<Vec<Box<dyn>>>>`), and Option/Result unwrap
+        // in ALL its forms (if-let, match, let-else, `.map`, `for`). Each dispatches the element/payload's
+        // method via bounded CHA; a concrete-element container / pure-arm stays pure (no over-fire).
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-cv-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::fs;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+pub trait Doer { fn go(&self); }
+pub struct Impl; impl Doer for Impl { fn go(&self) { let _ = fs::write("/x", "y"); } }   // Fs
+pub fn map_values(m: HashMap<String, Box<dyn Doer>>) { for v in m.values() { v.go(); } }
+pub fn arc_mutex(r: Arc<Mutex<Vec<Box<dyn Doer>>>>) { for h in r.lock().unwrap().iter() { h.go(); } }
+pub fn opt_iflet(o: Option<Box<dyn Doer>>) { if let Some(d) = o { d.go(); } }
+pub fn opt_match(o: Option<Box<dyn Doer>>) { match o { Some(d) => d.go(), None => {} } }
+pub fn opt_letelse(o: Option<Box<dyn Doer>>) { let Some(d) = o else { return; }; d.go(); }
+pub fn opt_map(o: Option<Box<dyn Doer>>) { o.map(|d| d.go()); }
+pub fn res_iflet(r: Result<Box<dyn Doer>, ()>) { if let Ok(d) = r { d.go(); } }
+pub struct Plain; impl Plain { pub fn go(&self) {} }
+pub fn map_concrete(m: HashMap<String, Plain>) { for v in m.values() { v.go(); } }   // PURE
+pub fn opt_concrete(o: Option<Plain>) { if let Some(d) = o { d.go(); } }             // PURE
+"#;
+        let v = run("cv", src);
+        for f in ["map_values", "arc_mutex", "opt_iflet", "opt_match", "opt_letelse", "opt_map", "res_iflet"] {
+            assert!(eff(&v, f).contains(&"Fs".to_string()), "{f} lost the container/option dispatch:\n{v}");
+        }
+        assert!(eff(&v, "map_concrete").is_empty(), "a concrete-value HashMap must stay pure:\n{v}");
+        assert!(eff(&v, "opt_concrete").is_empty(), "a concrete Option payload must stay pure:\n{v}");
+    }
+
+    #[test]
     fn trait_default_dispatches_required_to_impl_witness() {
         // A LOCAL trait DEFAULT method calling a REQUIRED method (`fn save_all(&self){ self.persist() }`)
         // dispatches to the conforming impls' witnesses. Inside the default `self` types as the TRAIT, so

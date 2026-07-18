@@ -218,15 +218,26 @@ pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String,
             let Some(seg) = p.path.segments.last() else { return Vec::new() };
             let name = seg.ident.to_string();
             let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return Vec::new() };
-            let first_ty = args.args.iter().find_map(|a| match a {
+            let type_args = || args.args.iter().filter_map(|a| match a {
                 syn::GenericArgument::Type(t) => Some(t),
                 _ => None,
             });
-            let Some(first_ty) = first_ty else { return Vec::new() };
+            let Some(first_ty) = type_args().next() else { return Vec::new() };
             match name.as_str() {
                 "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
                 | "LinkedList" => trait_leaves(first_ty, generic_bounds),
-                "Box" | "Arc" | "Rc" => elem_trait_leaves(first_ty, generic_bounds),
+                // Option<Box<dyn T>> / Result<Box<dyn T>, E> — the payload (Ok/Some) is a trait object; its
+                // leaves let `o.map(|d| d.go())` / `for d in o` / `o.iter().for_each(..)` dispatch. (if-let /
+                // `.unwrap()` are separate binding sites handled at their pattern.)
+                "Option" | "Result" => trait_leaves(first_ty, generic_bounds),
+                // A MAP's VALUE (2nd type arg) — a `.values()`/`for v in m.values()` iteration of
+                // trait-object values (`HashMap<String, Box<dyn Handler>>`, the keyed-registry shape).
+                "HashMap" | "BTreeMap" | "IndexMap" | "DashMap" | "FxHashMap" | "AHashMap" =>
+                    type_args().nth(1).map(|v| trait_leaves(v, generic_bounds)).unwrap_or_default(),
+                // Smart-pointer / interior-mutability wrappers around a COLLECTION: peel one layer and
+                // recurse so a `Arc<Mutex<Vec<Box<dyn>>>>` / `Rc<RefCell<Vec<Box<dyn>>>>` surfaces the element.
+                "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell" | "Cell" =>
+                    elem_trait_leaves(first_ty, generic_bounds),
                 _ => Vec::new(),
             }
         }
@@ -646,6 +657,26 @@ pub(crate) fn arm_payload_binding(pat: &syn::Pat, enum_variants: &EnumVariantInd
     let variant_leaf = ts.path.segments.last()?.ident.to_string();
     let ty = enum_variants.get(&variant_leaf).cloned();
     Some((name, ty))
+}
+
+/// The single-ident binding of a `Some(x)` / `Ok(x)` pattern (the payload of an `if let`/`let-else`
+/// unwrap of an `Option`/`Result`) — so `if let Some(d) = o { d.go() }` over an `Option<Box<dyn T>>`
+/// types `d` for dispatch. `None` for any other pattern (a `None`/`Err` arm, a multi-field or
+/// non-single-ident payload — an honest under-report). Peels reference/paren wrappers.
+pub(crate) fn some_ok_binding(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Reference(r) => some_ok_binding(&r.pat),
+        syn::Pat::Paren(p) => some_ok_binding(&p.pat),
+        syn::Pat::TupleStruct(ts) if ts.elems.len() == 1 => {
+            let variant = ts.path.segments.last()?.ident.to_string();
+            if variant == "Some" || variant == "Ok" {
+                single_pat_ident(ts.elems.first()?)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// True if the item carries any `#[cfg(...)]` attribute (conditionally compiled).
