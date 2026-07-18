@@ -191,6 +191,59 @@ fn trait_default_method_via_empty_impl_charges_the_default_body() {
 }
 
 #[test]
+fn concrete_receiver_and_fn_returned_trait_object_method_calls_are_never_silent_pure() {
+    // SILENT-PURE cardinal-sin fix (2026-07-18): a trait method called on a CONCRETE receiver via
+    // method syntax (`T0.run()`), and a dispatch through a FUNCTION-RETURNED boxed trait object
+    // (`get().run()` where `get() -> Box<dyn Task>`), were both reported PURE — not even `Unknown` —
+    // though they reach an effectful impl at runtime. The trait-OBJECT-via-CHA control cases already
+    // worked; the concrete-receiver and fn-return-typed paths did not.
+    //   - Case C root cause: `resolve_recv_type`'s Path arm only consulted `vars`; a bare unit-struct
+    //     VALUE literal (`T0`) is a type, not a binding, so it typed to nothing and dropped pure.
+    //     Fix: an Upper-initial value path with no underscore types as itself (gated downstream by
+    //     `local_types`, so a non-local name never mis-links).
+    //   - Case D root cause: a `-> Box<dyn Task>` return has no nominal type (`type_path` drops the
+    //     trait object), so the factory-call receiver typed to nothing and `resolve_recv_traits` had
+    //     no `Expr::Call` arm. Fix: record the return's trait bounds under a `<dyn>` sentinel and run
+    //     the SAME bounded-CHA the direct trait-object receiver does — resolving to every local
+    //     implementor, or `Unknown` when none is visible (never silent-pure).
+    let src = "
+        trait Task { fn run(&self); }
+        struct T0;
+        impl Task for T0 { fn run(&self) { let _ = std::fs::read(\"x\"); } }   // Fs
+        pub fn case_c() { T0.run(); }                                          // concrete receiver → Fs
+        fn get() -> Box<dyn Task> { Box::new(T0) }
+        pub fn case_d() { get().run(); }                                       // fn-returned dyn → Fs (CHA)
+        pub fn ctrl_boxed() { let t: Box<dyn Task> = Box::new(T0); t.run(); }  // control: Fs
+        pub fn ctrl_ref() { let t: &dyn Task = &T0; t.run(); }                 // control: Fs
+        trait Void { fn run(&self); }                                         // declared, NO local impl
+        fn make() -> Box<dyn Void> { unimplemented!() }
+        pub fn case_d_unknown() { make().run(); }                             // unresolvable → Unknown
+    ";
+    let d = make_crate("silentpure", src);
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json").output().expect("run");
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    let eff = |name: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter()
+            .find(|f| f["fn"].as_str().map(|s| s == name || s.ends_with(&format!("::{name}"))).unwrap_or(false))
+            .and_then(|f| f["inferred"].as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    assert!(eff("case_c").contains(&"Fs".to_string()),
+            "Case C: a trait method on a concrete receiver must resolve to its impl (was silent-pure): {:?}", eff("case_c"));
+    assert!(eff("case_d").contains(&"Fs".to_string()),
+            "Case D: a fn-returned boxed trait object must dispatch via CHA (was silent-pure): {:?}", eff("case_d"));
+    assert!(eff("ctrl_boxed").contains(&"Fs".to_string()),
+            "control: a direct Box<dyn Task> receiver must still resolve to Fs: {:?}", eff("ctrl_boxed"));
+    assert!(eff("ctrl_ref").contains(&"Fs".to_string()),
+            "control: a direct &dyn Task receiver must still resolve to Fs: {:?}", eff("ctrl_ref"));
+    let unk = eff("case_d_unknown");
+    assert!(unk.contains(&"Unknown".to_string()) && !unk.is_empty(),
+            "Case D unresolvable: a fn-returned dyn with no visible impl must disclose Unknown, never silent-pure: {:?}", unk);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn json_prints_to_stdout_and_writes_no_files_exit_0() {
     // `--json` prints ONE JSON document to stdout and writes NOTHING to disk (no .candor/ dir).
     let d = make_crate("jsononly", "pub fn go() {}");

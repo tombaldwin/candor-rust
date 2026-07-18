@@ -277,7 +277,13 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
             }
             // a local factory function call — its recorded (unambiguous) return type. The fn-typed
             // sentinel is NOT a nominal type (it types no var / receiver) — `expr_is_fn_typed` owns it.
-            returns.get(leaf).filter(|t| *t != RET_FN_TYPED).cloned()
+            // Neither sentinel is a NOMINAL type: `RET_FN_TYPED` types no var (a callback), and the
+            // `RET_DYN_PREFIX` dispatch-object return is resolved by TRAIT (via `resolve_recv_traits`'s
+            // Call arm), never as a concrete `Type::method`. Filter both out of concrete var-typing.
+            returns
+                .get(leaf)
+                .filter(|t| *t != RET_FN_TYPED && ret_dyn_leaves(t).is_none())
+                .cloned()
         }
         // `let s = S {..};` — a struct literal names its type directly.
         syn::Expr::Struct(s) => type_from_value_path(&path_to_string(&s.path), uses),

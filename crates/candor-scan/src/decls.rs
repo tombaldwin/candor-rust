@@ -400,6 +400,9 @@ pub(crate) fn fninfo(
         trait_impls: traits.impls,
         local_traits: traits.decls,
         returns,
+        // Crate-wide: does any factory return a `<dyn>` dispatch object? Cheap `any` — keeps the
+        // `resolve_recv_traits` hot-path guard closed on the overwhelming majority of crates.
+        has_dyn_return: returns.values().any(|t| ret_dyn_leaves(t).is_some()),
         field_elem: elems.field_elem,
         enum_variants: elems.enum_variants,
         elem_of,
@@ -449,6 +452,27 @@ pub(crate) fn record_return(
         match rets.get(&leaf) {
             None => { rets.insert(leaf, Some(RET_FN_TYPED.to_string())); }
             Some(Some(prev)) if prev != RET_FN_TYPED => { rets.insert(leaf, None); }
+            _ => {}
+        }
+        return;
+    }
+    // A DISPATCH trait-object return (`-> Box<dyn Task>` / `-> impl Task` / `-> &dyn Task`): `type_path`
+    // drops it (no nominal type), so `get().run()` on the factory typed to nothing and dropped SILENT-
+    // PURE. Record the trait bound leaves under a `<dyn>` sentinel so the call-site runs the same
+    // bounded-CHA the direct trait-object receiver does — edging to every local implementor, or Unknown.
+    // Rides the SAME ambiguity rule as a nominal type (a leaf recorded with two different shapes → None).
+    // `trait_leaves` peels the Box/Rc/Arc/&/impl/dyn wrapper; empty = not a dispatch object (fall through).
+    let dyn_leaves = trait_leaves(unwrap_result_option(ty), &generic_bounds_of(sig));
+    if !dyn_leaves.is_empty() {
+        let sentinel = ret_dyn_encode(&dyn_leaves);
+        let leaf = sig.ident.to_string();
+        match rets.get(&leaf) {
+            None => {
+                rets.insert(leaf, Some(sentinel));
+            }
+            Some(Some(prev)) if *prev != sentinel => {
+                rets.insert(leaf, None);
+            }
             _ => {}
         }
         return;
