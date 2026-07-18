@@ -609,6 +609,12 @@ iterator-forcing, masked-literal fail-closed, implicit conversion, 20-crate cove
 then **spec 0.7** (2026-06-19: engine versions aligned to the spec — candor-scan/candor-query
 0.7.0, candor-report 0.5.6) and the 0.7.x review fixes. Detail: `git log` around those dates.
 
+## [0.22.0] — 2026-07-18 (crates: candor-report / candor-classify / candor-scan / candor-query, lockstep at the spec floor)
+
+Spec floor → **0.22** (the `verify` oracle rung, shipped on the java/ts arms). candor-scan / candor-query declare
+`0.22`; the report and verdict schema are unchanged from 0.21, so this engine's output is byte-identical across
+the bump. No functional change to the Rust engine.
+
 ## [0.3.7] — 2026-06-12 (crates: candor-report / candor-classify / candor-scan, lockstep)
 
 ### Changed — spec 0.4 (conformance-breaking upgrade, wire-compatible)
