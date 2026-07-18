@@ -57,6 +57,13 @@ pub(crate) struct FnInfo {
     /// soundness fallback) rather than silently reported clean.
     #[serde(rename = "u", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) unresolved: bool,
+    /// The nominal type IDENTS of this fn's RETURN type (`-> Result<Compress, E>` → `["Result","Compress",
+    /// "E"]`; `-> ()` → empty). Used only by the drop-glue ESCAPE GATE: a drop-type OWNED by the return type
+    /// leaves via the returned value, so its `Drop` doesn't run in THIS scope — don't charge it (else a
+    /// constructor like `Compress::new` that builds an owned `Stream` and returns the `Compress` fabricates
+    /// the Stream's Drop, R49). Not serialized to the report (analysis-only).
+    #[serde(rename = "r", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ret_idents: Vec<String>,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.
