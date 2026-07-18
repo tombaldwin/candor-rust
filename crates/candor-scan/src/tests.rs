@@ -213,7 +213,7 @@
             has_dyn_return: false,
             field_elem: &fe,
             enum_variants: &ev,
-            elem_of: HashMap::new(), tuple_of: HashMap::new(),
+            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
@@ -260,7 +260,7 @@
             has_dyn_return: false,
             field_elem: &fe,
             enum_variants: &ev,
-            elem_of: HashMap::new(), tuple_of: HashMap::new(),
+            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
@@ -540,6 +540,54 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
                 "write_all on a PURE local impl was over-reported:\n{v}");
         assert!(eff(&v, "std_recv").is_empty(),
                 "write_all on a std Vec receiver fabricated an effect (no local impl):\n{v}");
+    }
+
+    #[test]
+    fn collection_of_trait_objects_iteration_dispatches() {
+        // Iterating a COLLECTION OF TRAIT OBJECTS (`for it in &items` / `.iter().for_each(|it| ..)` over a
+        // `Vec<Box<dyn Doer>>`) dispatches the element's method to the impls via bounded CHA. The `dyn`
+        // element has no nominal type, so `elem_of` couldn't hold it and the loop/closure var dropped to
+        // pure — the `elem_trait_of` route types it into `trait_vars`. A CONCRETE-element collection with a
+        // pure method stays pure (no over-fire).
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-dynvec-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::fs;
+pub trait Doer { fn go(&self); }
+pub struct Impl;
+impl Doer for Impl { fn go(&self) { let _ = fs::write("/x", "y"); } }   // Fs
+pub fn via_for(items: Vec<Box<dyn Doer>>) { for it in &items { it.go(); } }
+pub fn via_slice(items: &[Box<dyn Doer>]) { for it in items { it.go(); } }
+pub fn via_foreach(items: Vec<Box<dyn Doer>>) { items.iter().for_each(|it| it.go()); }
+pub struct Plain;
+impl Plain { pub fn go(&self) {} }
+pub fn via_concrete(xs: Vec<Plain>) { for x in &xs { x.go(); } }        // PURE (no over-fire)
+"#;
+        let v = run("dynvec", src);
+        assert!(eff(&v, "via_for").contains(&"Fs".to_string()), "for-loop over Vec<Box<dyn>> lost the dispatch:\n{v}");
+        assert!(eff(&v, "via_slice").contains(&"Fs".to_string()), "for-loop over &[Box<dyn>] lost the dispatch:\n{v}");
+        assert!(eff(&v, "via_foreach").contains(&"Fs".to_string()), "iter().for_each closure over Vec<Box<dyn>> lost it:\n{v}");
+        assert!(eff(&v, "via_concrete").is_empty(), "a concrete-element Vec with a pure method must stay pure:\n{v}");
     }
 
     #[test]
@@ -920,7 +968,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 has_dyn_return: false,
                 field_elem: &fe,
                 enum_variants: &ev,
-                elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(),
@@ -966,7 +1014,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut c = CallCollector {
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                returns: &returns, has_dyn_return: false, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                returns: &returns, has_dyn_return: false, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
             };
@@ -989,7 +1037,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let mut c = CallCollector {
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                    returns: &returns, has_dyn_return: false, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                    returns: &returns, has_dyn_return: false, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
                 };
@@ -1026,7 +1074,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             has_dyn_return: false,
             field_elem: &fe,
             enum_variants: &ev,
-            elem_of: HashMap::new(), tuple_of: HashMap::new(),
+            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
@@ -1060,7 +1108,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 has_dyn_return: false,
                 field_elem: &fe,
                 enum_variants: &ev,
-                elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(),

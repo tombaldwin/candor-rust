@@ -201,6 +201,39 @@ pub(crate) fn elem_type(ty: &syn::Type, uses: &HashMap<String, String>) -> Optio
     }
 }
 
+/// The DISPATCH leaves of a COLLECTION's element type — the trait-object counterpart of `elem_type`.
+/// `Vec<Box<dyn Doer>>` / `[&dyn Doer]` / `Arc<[Box<dyn Doer>]>` → the element's `trait_leaves`
+/// (`["Doer"]`), so a `for it in items { it.go() }` over a collection of trait objects dispatches via
+/// bounded CHA instead of dropping to pure (`elem_type` returns None for a `dyn`/`impl` element — it has
+/// no nominal path, so the loop var was untyped). Empty for a concrete-element collection (`elem_type`
+/// owns those) and for a non-collection type.
+pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<String>>) -> Vec<String> {
+    match ty {
+        syn::Type::Reference(r) => elem_trait_leaves(&r.elem, generic_bounds),
+        syn::Type::Paren(p) => elem_trait_leaves(&p.elem, generic_bounds),
+        syn::Type::Group(g) => elem_trait_leaves(&g.elem, generic_bounds),
+        syn::Type::Slice(s) => trait_leaves(&s.elem, generic_bounds),
+        syn::Type::Array(a) => trait_leaves(&a.elem, generic_bounds),
+        syn::Type::Path(p) => {
+            let Some(seg) = p.path.segments.last() else { return Vec::new() };
+            let name = seg.ident.to_string();
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return Vec::new() };
+            let first_ty = args.args.iter().find_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            });
+            let Some(first_ty) = first_ty else { return Vec::new() };
+            match name.as_str() {
+                "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
+                | "LinkedList" => trait_leaves(first_ty, generic_bounds),
+                "Box" | "Arc" | "Rc" => elem_trait_leaves(first_ty, generic_bounds),
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The per-position type paths of a TUPLE `syn::Type` (`(Sender, usize)` -> `[Some("Sender"),
 /// Some("usize")]`), peeling references/parens/groups. `None` for a non-tuple type — its elements
 /// are tracked so a later `let (s, _) = pair` (where `pair: (Sender, usize)`) types each binding.

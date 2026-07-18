@@ -30,6 +30,11 @@ pub(crate) struct CallCollector<'a> {
     /// as collection-typed `let`s/params are seen. Lets `for c in xs`, `xs[0]`, `xs.iter().for_each`
     /// resolve the element's type. Scoped bindings (loop var, closure param) live in `vars`, not here.
     pub(crate) elem_of: HashMap<String, String>,
+    /// local var / param -> the DISPATCH-trait leaves of a COLLECTION of trait objects it holds
+    /// (`items: Vec<Box<dyn Doer>>` -> `["Doer"]`). The trait-object counterpart of `elem_of`: a
+    /// `for it in items { it.go() }` types the loop var into `trait_vars` (bounded-CHA dispatch) instead
+    /// of dropping to pure (`elem_of` can't hold a `dyn` element — it has no nominal type path).
+    pub(crate) elem_trait_of: HashMap<String, Vec<String>>,
     /// local var / param -> the per-position types of a TUPLE it holds (`pair: (Sender, usize)` ->
     /// `[Some("Sender"), Some("usize")]`). Lets a later `let (s, _) = pair;` type each binding from the
     /// matching position. A `None` at a position = that element's type is unknown (binds nothing).
@@ -196,6 +201,37 @@ impl<'a> CallCollector<'a> {
             // `grid[i]` is itself a collection (a row): its element type is the indexed base's element.
             syn::Expr::Index(idx) => self.resolve_elem_type(&idx.expr),
             _ => None,
+        }
+    }
+
+    /// The DISPATCH-trait leaves of an expression evaluating to a COLLECTION OF TRAIT OBJECTS — the
+    /// `resolve_elem_type` counterpart backed by `elem_trait_of`. Lets `for it in items { it.go() }` over
+    /// an `items: Vec<Box<dyn Doer>>` type the loop var into `trait_vars` (bounded-CHA dispatch) instead
+    /// of dropping silent-pure. Peels references + the element-preserving iterator adapters, exactly like
+    /// `resolve_elem_type`. Empty when the collection's element isn't a trait object (no guess).
+    fn resolve_elem_trait_leaves(&self, expr: &syn::Expr) -> Vec<String> {
+        match expr {
+            syn::Expr::Reference(r) => self.resolve_elem_trait_leaves(&r.expr),
+            syn::Expr::Paren(p) => self.resolve_elem_trait_leaves(&p.expr),
+            syn::Expr::Group(g) => self.resolve_elem_trait_leaves(&g.expr),
+            syn::Expr::Path(p) => p
+                .path
+                .get_ident()
+                .and_then(|id| self.elem_trait_of.get(&id.to_string()))
+                .cloned()
+                .unwrap_or_default(),
+            syn::Expr::MethodCall(m) => {
+                let adapter = matches!(
+                    m.method.to_string().as_str(),
+                    "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice" | "values" | "values_mut"
+                );
+                if adapter {
+                    self.resolve_elem_trait_leaves(&m.receiver)
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -790,12 +826,31 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         // Visit the receiver and args. The receiver and non-closure args carry no element binding; the
         // closure arg (if any) is visited under the scoped element binding so its body resolves `c`.
+        // A COLLECTION-OF-TRAIT-OBJECTS receiver (`items.iter().for_each(|it| it.go())` over a
+        // `Vec<Box<dyn Doer>>`): the closure param is a trait object → type it into `trait_vars` for
+        // bounded-CHA dispatch, the closure-param twin of the for-loop's `elem_trait_of` route. Only when
+        // there's no concrete element type (a concrete-element adapter keeps the `vars` route).
+        let elem_leaves = if elem_adapter && elem_ty.is_none() {
+            self.resolve_elem_trait_leaves(&node.receiver)
+        } else {
+            Vec::new()
+        };
         self.visit_expr(&node.receiver);
         if let Some(name) = closure_param {
             for a in &node.args {
                 if let syn::Expr::Closure(cl) = a {
                     if cl.inputs.len() == 1 && single_pat_ident(cl.inputs.first().unwrap()).as_deref() == Some(name.as_str()) {
-                        self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
+                        if !elem_leaves.is_empty() {
+                            let prior = self.trait_vars.remove(&name);
+                            let prior_var = self.vars.remove(&name);
+                            self.trait_vars.insert(name.clone(), elem_leaves.clone());
+                            self.visit_expr(&cl.body);
+                            self.trait_vars.remove(&name);
+                            if let Some(p) = prior { self.trait_vars.insert(name.clone(), p); }
+                            if let Some(p) = prior_var { self.vars.insert(name.clone(), p); }
+                        } else {
+                            self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
+                        }
                         continue;
                     }
                 }
@@ -821,7 +876,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.charge_iter_next(&node.expr);
         if let Some(name) = single_pat_ident(&node.pat) {
             let elem = self.resolve_elem_type(&node.expr);
-            self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
+            // A `for it in items` over a COLLECTION OF TRAIT OBJECTS (`items: Vec<Box<dyn Doer>>`) types
+            // the loop var into `trait_vars` for dispatch (`it.go()` → bounded CHA over Doer's impls),
+            // which `elem_of`/`vars` can't express (a `dyn` element has no nominal type). Only when there's
+            // no concrete element type (a concrete-element collection takes the `vars` route above).
+            let leaves = if elem.is_none() { self.resolve_elem_trait_leaves(&node.expr) } else { Vec::new() };
+            if !leaves.is_empty() {
+                let prior = self.trait_vars.remove(&name);
+                let prior_var = self.vars.remove(&name); // dispatch-typed shadows any stale concrete binding
+                self.trait_vars.insert(name.clone(), leaves);
+                self.visit_block(&node.body);
+                self.trait_vars.remove(&name);
+                if let Some(p) = prior {
+                    self.trait_vars.insert(name.clone(), p);
+                }
+                if let Some(p) = prior_var {
+                    self.vars.insert(name.clone(), p);
+                }
+            } else {
+                self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
+            }
         } else {
             // A destructuring loop pattern (`for (k, v) in ..`, `for [a, b] in ..`) — no single name
             // to type; just walk the body. (Tuple-pair value typing is left to the under-report.)
