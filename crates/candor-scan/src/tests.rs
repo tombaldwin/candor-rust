@@ -1071,6 +1071,57 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     }
 
     #[test]
+    fn ufcs_trait_method_resolves_the_impl_but_not_associated_fns() {
+        // §4 honesty (R53): a UFCS trait-method call `<T as Trait>::m(&t)` / `Trait::m(&t)` dispatches to
+        // `T`'s impl — resolve it precisely from the STATICALLY-KNOWN receiver (the qself type, or the first
+        // arg's type of a `&self` method), never CHA-over-all-impls (which would fabricate a multi-impl
+        // trait's other impls onto a known receiver). CONTROLS: an ASSOCIATED fn (`Trait::assoc(&x)`, no
+        // self) is NOT a receiver call — `x` is data, so a same-named method on `x`'s type must not be
+        // charged; a non-local `T` (`<Vec<u8> as Default>::default()`) resolves to nothing (no fabrication).
+        let d = std::env::temp_dir().join(format!("candor-ufcs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"ufcs\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use std::fs;
+            pub trait Run { fn go(&self); }
+            pub struct T;
+            impl Run for T { fn go(&self) { let _ = fs::write("/t", "x"); } }   // Fs
+            pub fn trait_name() { let t = T; Run::go(&t); }                     // Fs
+            pub fn qualified()  { let t = T; <T as Run>::go(&t); }              // Fs
+            // CONTROL: an ASSOCIATED fn whose first arg is DATA, not a receiver
+            pub trait Maker { fn build(cfg: &Cfg) -> Self; }
+            pub struct Cfg;
+            impl Cfg { pub fn build(&self) { let _ = fs::write("/c", "x"); } }  // Cfg has an effectful build METHOD
+            pub struct W;
+            impl Maker for W { fn build(_c: &Cfg) -> W { W } }                  // pure assoc build
+            pub fn assoc_control() -> W { let cfg = Cfg; Maker::build(&cfg) }   // must NOT be charged Cfg::build
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let has_fs = |needle: &str| -> bool {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str()))
+                .any(|e| e == "Fs")
+        };
+        assert!(has_fs("trait_name"), "`Trait::go(&t)` must resolve the impl's Fs:\n{body}");
+        assert!(has_fs("qualified"), "`<T as Trait>::go(&t)` must resolve the impl's Fs:\n{body}");
+        assert!(!has_fs("assoc_control"), "an associated fn's data arg must not be charged its type's method:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn implicit_coercion_edges_charge_local_effectful_impls_but_never_std() {
         // The implicit-conversion / coercion edges (cardinal sin = a fn read PURE when an effect is
         // reachable through an IMPLICIT trait-method invocation): `format!`/`.to_string()`→Display::fmt,
