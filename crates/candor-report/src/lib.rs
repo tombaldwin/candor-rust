@@ -174,7 +174,7 @@ pub struct ReportEntry {
 /// from the engine build id (`ReportMeta::version`) and from the crate release version. Bumped only when
 /// the spec contract changes; emitted as the envelope's `spec` so a consumer can see which contract a
 /// report conforms to. Both backends and the JVM port declare the SAME value — see candor-spec §2.1.
-pub const SPEC_VERSION: &str = "0.21";
+pub const SPEC_VERSION: &str = "0.22";
 
 /// The envelope header: which engine produced the report (`version` = build id, `toolchain`), and which
 /// candor-spec contract it implements (`spec`).
@@ -221,7 +221,7 @@ pub struct UnanalyzedUnit {
     pub reason: String,
 }
 
-/// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed-universe summary. `count` = the functions candor
+/// ⟨0.22⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed-universe summary. `count` = the functions candor
 /// formed an effect judgment for (effectful + pure) = the §2.2 callgraph node set — so a consumer reading
 /// the bare envelope computes `count − |functions|` = the pure count and tells analyzed-pure from
 /// never-seen without loading the sidecar. `digest` = an opaque within-engine-stable fingerprint of the
@@ -233,7 +233,7 @@ pub struct Analyzed {
     pub digest: String,
 }
 
-/// ⟨0.21⟩ An opaque, within-engine-stable fingerprint of a SORTED qual set — FNV-1a 64-bit over the
+/// ⟨0.22⟩ An opaque, within-engine-stable fingerprint of a SORTED qual set — FNV-1a 64-bit over the
 /// newline-joined UTF-8 quals, lowercase hex (16 chars). Dependency-free + deterministic: it changes iff
 /// the set changes. Byte-for-byte the java reference's `ReportWriter.fnv1aHex` so the SPEC describes ONE
 /// algorithm. NOT cryptographic and NOT cross-engine comparable (qualifiers differ `::` vs `.`).
@@ -361,7 +361,7 @@ pub fn to_packaged_report_json_full(
         package: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         coverage: Option<&'a Coverage>,
-        // ⟨0.21⟩ the completeness-manifest summary (Gap 1) — always present when the engine can enumerate its
+        // ⟨0.22⟩ the completeness-manifest summary (Gap 1) — always present when the engine can enumerate its
         // analyzed set. Field order: coverage, analyzed, unanalyzed, functions (matches the java reference).
         #[serde(skip_serializing_if = "Option::is_none")]
         analyzed: Option<&'a Analyzed>,
@@ -464,7 +464,7 @@ pub fn gate_verdict_json_with_coverage(
     })
 }
 
-/// ⟨0.21⟩ COMPLETENESS MANIFEST verdict: like [`gate_verdict_json_with_coverage`], plus the `analyzed`
+/// ⟨0.22⟩ COMPLETENESS MANIFEST verdict: like [`gate_verdict_json_with_coverage`], plus the `analyzed`
 /// count (Gap 1, always present) and — when the scan was INCOMPLETE (`unanalyzed` non-empty) — `incomplete:
 /// true` + the `unanalyzed` list (Gap 2). `ok` requires BOTH no violation AND a complete analysis, so a
 /// machine/agent reading the verdict can't see `ok:true` over code candor never analyzed. Field order
@@ -647,8 +647,8 @@ mod tests {
         assert!(!empty.contains("unknownWhy"), "empty unknownWhy must be omitted: {empty}");
         assert!(!empty.contains("entryPoint"), "false entryPoint must be omitted: {empty}");
         // the spec contract version (§2.1) is emitted in the envelope header.
-        assert!(s.contains("\"spec\":\"0.21\""), "envelope must carry the spec version: {s}");
-        assert_eq!(SPEC_VERSION, "0.21");
+        assert!(s.contains("\"spec\":\"0.22\""), "envelope must carry the spec version: {s}");
+        assert_eq!(SPEC_VERSION, "0.22");
     }
 
     #[test]
