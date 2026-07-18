@@ -928,6 +928,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     }
                 }
             }
+            // BLANKET-impl fallback (R45): a `x.leaf()` that resolved to NO concrete / trait-default / deref
+            // target may be a blanket-impl method (`impl<T> Ext for T { fn ext }`), whose body qual is
+            // `<param>::leaf` (`T::ext`) — a keyed lookup on the receiver's type can't find it. If `leaf` is a
+            // UNIQUE blanket method (not the "" ambiguity sentinel), edge to the blanket body. SOUND: the
+            // blanket provides `leaf` for EVERY type (a bounded blanket only for conforming types — and a
+            // call that COMPILES meets the bound), and it fires only when nothing concrete resolved. Gated to
+            // a TYPED receiver (a known LOCAL type): the type's OWN `leaf` (a local FnInfo) would resolve
+            // first, so the blanket never overrides an inherent method — no fabrication. A bare/untyped
+            // receiver is left an honest under-report (candor can't confirm the blanket applies vs a shadow).
+            if !resolved_local && c.method && c.typed && !c.is_macro {
+                if let Some(bty) = merged.blanket_methods.get(&c.leaf) {
+                    if !bty.is_empty() {
+                        if let Some(ts) = by_tail2.get(&format!("{bty}::{}", c.leaf)) {
+                            if ts.len() == 1 && ts[0] != f.qual {
+                                resolved_local = true;
+                                calls.entry(f.qual.clone()).or_default().insert(ts[0].clone());
+                            }
+                        }
+                    }
+                }
+            }
             // A BARE-LEAF method call (`self.fastrand()` → path == leaf, no `::`) carries no crate
             // qualifier, so its `classify` consults the bare leaf against the calibrated crate/verb rules
             // (`fastrand` → Rand, `now` → Clock, …). When that leaf names a LOCAL method definition

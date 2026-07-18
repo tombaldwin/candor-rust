@@ -545,6 +545,62 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
     }
 
     #[test]
+    fn blanket_impl_method_resolves_to_the_blanket_body_but_inherent_wins() {
+        // §4 honesty (R45): a `x.ext()` where `ext` comes from a BLANKET impl (`impl<T> Ext for T { fn ext }`
+        // — or bounded `impl<T: Bound> Ext for T`) read silent-pure: the blanket body's qual is `T::ext` (the
+        // generic self param), so a keyed lookup on `x`'s concrete type missed it. Resolve an unresolved
+        // TYPED call to the blanket body. CONTROLS: a PURE blanket adds nothing; an INHERENT `ext` on the
+        // receiver's type WINS (resolves first → the blanket never overrides it, no fabrication/double-charge).
+        let d = std::env::temp_dir().join(format!("candor-blanket-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"blanket\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use std::fs;
+            pub trait Ext { fn ext(&self); }
+            impl<T> Ext for T { fn ext(&self) { let _ = fs::write("/e", "x"); } }   // Fs blanket
+            pub trait Bound {}
+            pub trait Ext2 { fn ext2(&self); }
+            impl<T: Bound> Ext2 for T { fn ext2(&self) { let _ = fs::write("/e2", "x"); } } // Fs bounded blanket
+            pub trait PureE { fn pe(&self); }
+            impl<T> PureE for T { fn pe(&self) {} }                                 // pure blanket
+            pub struct A;
+            pub struct B; impl Bound for B {}
+            pub fn calls_blanket() { let a = A; a.ext(); }                          // Fs
+            pub fn calls_bounded() { let b = B; b.ext2(); }                         // Fs
+            pub fn calls_pure() { let a = A; a.pe(); }                              // pure
+            pub struct C;
+            impl C { pub fn ext(&self) { let _ = std::net::TcpStream::connect("h:1"); } }  // inherent → Net
+            pub fn calls_inherent() { let c = C; c.ext(); }                         // Net (inherent wins, NOT Fs)
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        assert!(effs("calls_blanket").contains(&"Fs".to_string()), "a blanket method's effect must reach the caller:\n{body}");
+        assert!(effs("calls_bounded").contains(&"Fs".to_string()), "a bounded-blanket method's effect must reach the caller:\n{body}");
+        assert!(effs("calls_pure").is_empty(), "a pure blanket must add no effect:\n{body}");
+        // inherent WINS: Net (its own), never Fs (the blanket) — no fabrication/double-charge
+        assert!(effs("calls_inherent").contains(&"Net".to_string()) && !effs("calls_inherent").contains(&"Fs".to_string()),
+                "an inherent method must win over the blanket (Net, not Fs):\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn collection_of_trait_objects_iteration_dispatches() {
         // Iterating a COLLECTION OF TRAIT OBJECTS (`for it in &items` / `.iter().for_each(|it| ..)` over a
         // `Vec<Box<dyn Doer>>`) dispatches the element's method to the impls via bounded CHA. The `dyn`
@@ -2016,7 +2072,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -2475,7 +2531,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -2497,7 +2553,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -2528,7 +2584,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -2557,7 +2613,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -2807,7 +2863,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
@@ -3706,6 +3762,7 @@ trait G {
             lazy_statics: _,
             const_strings: _,
             local_macros: _,
+            blanket_methods: _,
             root_reexports: _,
         } = MergedDecls::default();
 
@@ -3728,6 +3785,7 @@ trait G {
             ("lazy_statics", |m| { m.lazy_statics.insert("CONFIG".into()); }),
             ("const_strings", |m| { m.const_strings.insert("API_BASE".into(), "https://api.openai.com".into()); }),
             ("local_macros", |m| { m.local_macros.insert("do_io".into(), "() => { fs::write(\"/x\", b\"y\"); }".into()); }),
+            ("blanket_methods", |m| { m.blanket_methods.insert("ext".into(), "T".into()); }),
             ("root_reexports", |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); }),
         ];
         for (name, mutate) in mutators {
