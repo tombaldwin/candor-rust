@@ -17,6 +17,10 @@ pub(crate) struct CallCollector<'a> {
     /// leaf -> the local trait declaration(s) sharing it: ambiguity count + declared method names.
     pub(crate) local_traits: &'a HashMap<String, LocalTrait>,
     pub(crate) returns: &'a ReturnIndex,
+    /// Whether ANY recorded factory return is a `<dyn>` dispatch-object sentinel — the hot-path guard in
+    /// `resolve_recv_traits` keeps the factory-call arm live only when this holds (crate-wide, computed
+    /// once), so a `get().run()` on a `-> Box<dyn Trait>` factory resolves rather than dropping pure.
+    pub(crate) has_dyn_return: bool,
     /// `Type-leaf -> field -> element-type` for COLLECTION fields (`self.senders[0]`, `for c in
     /// &self.senders`). The field counterpart of `elem_of`, the way `fields` is to `vars`.
     pub(crate) field_elem: &'a FieldElemIndex,
@@ -111,7 +115,21 @@ impl<'a> CallCollector<'a> {
             }
             syn::Expr::Path(p) => {
                 let name = p.path.get_ident()?.to_string();
-                self.vars.get(&name).cloned()
+                // A local binding/param/`self` wins. Failing that, a bare UPPER-INITIAL path used AS A
+                // VALUE is a UNIT-STRUCT (or unit enum variant) LITERAL receiver — `T0.run()` where
+                // `struct T0;`: its type IS the path itself. Without this a direct `T0.run()` typed to
+                // nothing (not in `vars`, not a dispatch var) and dropped SILENT-PURE, while the
+                // `let x = T0; x.run()` form resolved (via `vars` seeded from `ctor_type`). We accept any
+                // Upper-initial ident WITHOUT an underscore — this admits `T0`/`DB` that the
+                // lowercase-requiring `type_from_value_path` (which must also gate `let`-typing) rejects,
+                // while still excluding a SCREAMING_SNAKE const (`MAX_SIZE`). Fabrication-safe: the
+                // downstream `local_types` gate in scan.rs confines the resulting `Type::method` link to
+                // genuinely-LOCAL types, so a non-local Upper-initial value never mis-links.
+                let upper_no_underscore = name.chars().next().is_some_and(|c| c.is_uppercase())
+                    && !name.contains('_');
+                self.vars.get(&name).cloned().or_else(|| {
+                    upper_no_underscore.then(|| expand(&name, self.uses))
+                })
             }
             syn::Expr::Field(f) => {
                 let base = self.resolve_recv_type(&f.base)?;
@@ -411,9 +429,11 @@ impl<'a> CallCollector<'a> {
     /// `trait_fields`). Empty when the receiver has a concrete type (`resolve_recv_type` owns it)
     /// or can't be resolved at all.
     fn resolve_recv_traits(&self, expr: &syn::Expr) -> Vec<String> {
-        // Hot-path guard: with no dispatch-typed vars or fields in scope (the overwhelmingly
-        // common case), every lookup below is a guaranteed miss — skip the recursive walk.
-        if self.trait_vars.is_empty() && self.trait_fields.is_empty() {
+        // Hot-path guard: with no dispatch-typed vars or fields in scope AND no dispatch-object-returning
+        // factory recorded (the overwhelmingly common case), every lookup below is a guaranteed miss —
+        // skip the recursive walk. The Call arm depends on `returns`, not on the vars/fields, so it is
+        // kept live whenever any factory return is a `<dyn>` sentinel.
+        if self.trait_vars.is_empty() && self.trait_fields.is_empty() && !self.has_dyn_return {
             return Vec::new();
         }
         match expr {
@@ -427,6 +447,16 @@ impl<'a> CallCollector<'a> {
                 .get_ident()
                 .and_then(|id| self.trait_vars.get(&id.to_string()).cloned())
                 .unwrap_or_default(),
+            // A FACTORY call returning a DISPATCH trait object (`get().run()` where `get() -> Box<dyn
+            // Task>`): the recorded return is the `<dyn>` sentinel, whose decoded bound leaves feed the
+            // SAME bounded-CHA the direct-`Box<dyn Task>` control uses. Only a LOCAL fn's UNAMBIGUOUS
+            // return is in `returns` (ambiguous leaves are dropped upstream), so this never guesses.
+            syn::Expr::Call(c) => {
+                let syn::Expr::Path(p) = &*c.func else { return Vec::new() };
+                let full = path_to_string(&p.path);
+                let leaf = full.rsplit("::").next().unwrap_or(&full);
+                self.returns.get(leaf).and_then(|t| ret_dyn_leaves(t)).unwrap_or_default()
+            }
             syn::Expr::Field(f) => {
                 let Some(base) = self.resolve_recv_type(&f.base) else { return Vec::new() };
                 let key = match &f.member {

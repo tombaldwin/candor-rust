@@ -93,6 +93,27 @@ pub(crate) type ReturnIndex = HashMap<String, String>;
 /// The angle brackets cannot collide with a real Rust type path.
 pub(crate) const RET_FN_TYPED: &str = "<fn>";
 
+/// Sentinel prefix for a fn whose return is a DISPATCH trait object (`-> Box<dyn Trait>` / `-> impl
+/// Trait` / `-> &dyn Trait`). The trait bound leaves are joined after it (`"<dyn>Task"` /
+/// `"<dyn>Read+Seek"`), so `get().run()` on such a factory resolves the receiver's TRAIT bounds and
+/// runs the SAME bounded-CHA the direct trait-object control cases use — resolving to every local
+/// implementor, or disclosing `Unknown` (>12 / none visible). Without this a `-> Box<dyn Trait>`
+/// return had NO recordable nominal type (`type_path` drops the trait object) so the factory-call
+/// receiver typed to nothing and the method dropped SILENT-PURE. The angle brackets can't collide
+/// with a real Rust type path. Encoded/decoded via `ret_dyn_encode` / `ret_dyn_leaves`.
+pub(crate) const RET_DYN_PREFIX: &str = "<dyn>";
+
+/// Encode a dispatch-trait-object return's bound leaves into the `RET_DYN_PREFIX` sentinel string.
+pub(crate) fn ret_dyn_encode(leaves: &[String]) -> String {
+    format!("{RET_DYN_PREFIX}{}", leaves.join("+"))
+}
+
+/// Decode a `RET_DYN_PREFIX` sentinel back to its trait bound leaves, or `None` if not one.
+pub(crate) fn ret_dyn_leaves(s: &str) -> Option<Vec<String>> {
+    s.strip_prefix(RET_DYN_PREFIX)
+        .map(|rest| rest.split('+').filter(|p| !p.is_empty()).map(str::to_string).collect())
+}
+
 /// `trait leaf -> the local types that `impl Trait for Type` it` — the syntactic CHA universe for
 /// dispatch-typed receivers (the JVM engine's bounded-CHA move, done on syntax). Keyed by leaf like
 /// the other name indexes; includes impls of EXTERNAL traits for local types (the JVM resolves

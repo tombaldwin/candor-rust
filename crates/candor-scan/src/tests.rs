@@ -210,6 +210,7 @@
             trait_impls: &ti,
             local_traits: &td,
             returns: &returns,
+            has_dyn_return: false,
             field_elem: &fe,
             enum_variants: &ev,
             elem_of: HashMap::new(), tuple_of: HashMap::new(),
@@ -256,6 +257,7 @@
             trait_impls: &ti,
             local_traits: &td,
             returns: &returns,
+            has_dyn_return: false,
             field_elem: &fe,
             enum_variants: &ev,
             elem_of: HashMap::new(), tuple_of: HashMap::new(),
@@ -798,6 +800,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 trait_impls: &ti,
                 local_traits: &td,
                 returns: &returns,
+                has_dyn_return: false,
                 field_elem: &fe,
                 enum_variants: &ev,
                 elem_of: HashMap::new(), tuple_of: HashMap::new(),
@@ -846,7 +849,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut c = CallCollector {
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                returns: &returns, has_dyn_return: false, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
             };
@@ -869,7 +872,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let mut c = CallCollector {
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                    returns: &returns, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
+                    returns: &returns, has_dyn_return: false, field_elem: &fe, enum_variants: &ev, elem_of: HashMap::new(), tuple_of: HashMap::new(),
                     calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), str_locals: std::collections::HashMap::new(),
                 };
@@ -903,6 +906,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             trait_impls: &ti,
             local_traits: &td,
             returns: &returns,
+            has_dyn_return: false,
             field_elem: &fe,
             enum_variants: &ev,
             elem_of: HashMap::new(), tuple_of: HashMap::new(),
@@ -936,6 +940,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 trait_impls: &ti,
                 local_traits: &td,
                 returns: &returns,
+                has_dyn_return: false,
                 field_elem: &fe,
                 enum_variants: &ev,
                 elem_of: HashMap::new(), tuple_of: HashMap::new(),
