@@ -954,6 +954,10 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             pub fn explicit(p: &str) { let mut t = tail(p); let _ = t.next(); }
             fn build() -> LogTail { LogTail { n: 1 } }
             pub fn built_consumer() -> usize { build().count() }
+            // INLINE struct-literal receiver: a value constructed inline and immediately forced (a `for`
+            // head requires the literal parenthesised) — the receiver types via `ctor_type` now.
+            pub fn inline_for() { for _ in (LogTail { n: 1 }) {} }
+            pub fn inline_collect() -> usize { (LogTail { n: 1 }).count() }
 
             struct PureIter { n: usize }
             impl Iterator for PureIter {
@@ -963,6 +967,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             fn pure_src() -> PureIter { PureIter { n: 1 } }
             pub fn pure_collect() -> Vec<u8> { pure_src().collect() }
             pub fn pure_for() { for _ in pure_src() {} }
+            pub fn pure_inline_for() { for _ in (PureIter { n: 1 }) {} }
 
             struct RowIter { n: usize }
             impl Iterator for RowIter {
@@ -989,12 +994,13 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         "#;
         let v = run("iternext", src);
         // Effectful custom iterator: implicit force at every consumer carries Fs.
-        for f in ["count_lines", "all_lines", "process", "folded", "explicit", "built_consumer"] {
+        for f in ["count_lines", "all_lines", "process", "folded", "explicit", "built_consumer",
+                  "inline_for", "inline_collect"] {
             assert!(eff(&v, f).contains(&"Fs".to_string()),
                     "implicit iterator force under-reported: {f} should be Fs but is {:?}\n{v}", eff(&v, f));
         }
         // Control 1: a PURE custom iterator stays pure (no fabrication from forcing).
-        for f in ["pure_collect", "pure_for"] {
+        for f in ["pure_collect", "pure_for", "pure_inline_for"] {
             assert!(eff(&v, f).is_empty(), "pure custom iterator fabricated an effect at {f}: {:?}", eff(&v, f));
         }
         // Control 2 (RowIter guard): a generic/opaque iterator param must NOT inherit a concrete

@@ -162,6 +162,16 @@ impl<'a> CallCollector<'a> {
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
             syn::Expr::Call(_) => ctor_type(expr, self.uses, self.returns),
+            // `S {..}.method()` / `for _ in (S {..})` — an inline struct literal names its type directly
+            // (the same type a `let x = S{..}` binding already resolves via `ctor_type`). Without this a
+            // value CONSTRUCTED INLINE and immediately consumed typed to nothing, so the iterator-forcing
+            // edge (`charge_iter_next`) and method resolution dropped it silent-pure (a local effectful
+            // `Iterator` built inline: `for _ in (RowIter::new())` read pure). `type_from_value_path`
+            // (inside `ctor_type`) gates to a real type name, and scan.rs's `local_types` gate confines any
+            // resulting `Type::method` link to LOCAL types, so this never fabricates onto a non-local value.
+            // (`Expr::Paren`/`Expr::Group` transparent wrappers are unwrapped by the arms above, so a
+            // parenthesised `for _ in (S {..})` reaches this Struct arm through them.)
+            syn::Expr::Struct(_) => ctor_type(expr, self.uses, self.returns),
             // `xs[i].method()` / `self.senders[0].method()` — the receiver is the indexed BASE's
             // element type. Composes through the recursion: a nested `grid[i][j]` resolves the inner
             // index to its element collection, then this index to ITS element.
