@@ -261,8 +261,23 @@ impl<'a> CallCollector<'a> {
                 if adapter {
                     self.resolve_elem_trait_leaves(&m.receiver)
                 } else {
-                    Vec::new()
+                    // A METHOD factory returning a COLLECTION of trait objects (`for d in r.all()`,
+                    // `all() -> Vec<Box<dyn>>` → `<elemdyn>`) OR an Option/Result of one (`if let Some(d) =
+                    // self.opt()`, `opt() -> Option<Box<dyn>>` → recorded scalar `<dyn>` via
+                    // unwrap_result_option). Decode either — this arm is only reached in a collection/option
+                    // context, which a plain scalar-`dyn` return can't be, so the `<dyn>` fallback is safe.
+                    self.returns.get(&m.method.to_string())
+                        .and_then(|t| ret_elem_dyn_leaves(t).or_else(|| ret_dyn_leaves(t)))
+                        .unwrap_or_default()
                 }
+            }
+            // A FREE/STATIC factory returning a collection (or Option/Result) of trait objects.
+            syn::Expr::Call(c) => {
+                let syn::Expr::Path(p) = &*c.func else { return Vec::new() };
+                let leaf = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                self.returns.get(&leaf)
+                    .and_then(|t| ret_elem_dyn_leaves(t).or_else(|| ret_dyn_leaves(t)))
+                    .unwrap_or_default()
             }
             _ => Vec::new(),
         }

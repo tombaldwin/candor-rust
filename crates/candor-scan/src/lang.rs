@@ -326,7 +326,7 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
             // Call arm), never as a concrete `Type::method`. Filter both out of concrete var-typing.
             returns
                 .get(leaf)
-                .filter(|t| *t != RET_FN_TYPED && ret_dyn_leaves(t).is_none())
+                .filter(|t| *t != RET_FN_TYPED && ret_dyn_leaves(t).is_none() && ret_elem_dyn_leaves(t).is_none())
                 .cloned()
         }
         // `let s = S {..};` — a struct literal names its type directly.

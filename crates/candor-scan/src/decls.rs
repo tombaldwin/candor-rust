@@ -489,6 +489,26 @@ pub(crate) fn record_return(
         }
         return;
     }
+    // A COLLECTION-OF-TRAIT-OBJECTS return (`fn all() -> Vec<Box<dyn Task>>`): `type_path` records it as
+    // the useless "Vec", so `for d in all() { d.run() }` dropped the element dispatch. Record the ELEMENT
+    // bound leaves under the distinct `<elemdyn>` sentinel (decoded by `resolve_elem_trait_leaves`); the
+    // scalar-`<dyn>` check above already claimed a direct `-> Box<dyn>` return, so this only sees genuine
+    // collections. Rides the same ambiguity rule (two shapes for a leaf → None).
+    let elem_dyn = elem_trait_leaves(unwrap_result_option(ty), &generic_bounds_of(sig));
+    if !elem_dyn.is_empty() {
+        let sentinel = ret_elem_dyn_encode(&elem_dyn);
+        let leaf = sig.ident.to_string();
+        match rets.get(&leaf) {
+            None => {
+                rets.insert(leaf, Some(sentinel));
+            }
+            Some(Some(prev)) if *prev != sentinel => {
+                rets.insert(leaf, None);
+            }
+            _ => {}
+        }
+        return;
+    }
     let Some(mut tp) = type_path(unwrap_result_option(ty), uses) else { return };
     // An impl method returning `Self` (`fn new_with_defaults() -> Self`) must index its IMPL type,
     // not the literal "Self": vars typed "Self" form `Self::method` calls that resolve to no local

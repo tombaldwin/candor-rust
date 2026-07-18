@@ -610,6 +610,60 @@ impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PUR
     }
 
     #[test]
+    fn method_returning_collection_of_trait_objects_dispatches() {
+        // `for d in r.all()` / `self.all().iter().for_each(..)` where `all() -> Vec<Box<dyn Doer>>`, and
+        // `if let Some(d) = self.opt()` where `opt() -> Option<Box<dyn Doer>>` — a method/factory returning
+        // a COLLECTION (or Option) of trait objects, iterated/unwrapped. `type_path` recorded the Vec return
+        // as "Vec" (useless), so the element dispatch dropped silent-pure; a new `<elemdyn>` return sentinel
+        // (+ the scalar `<dyn>` for the Option form) is decoded by `resolve_elem_trait_leaves`. A concrete-
+        // element collection stays pure.
+        let run = |src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-mv-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"mv\"\n").unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let v = run(r#"
+use std::fs;
+pub trait Doer { fn go(&self); }
+pub struct Impl; impl Doer for Impl { fn go(&self) { let _ = fs::write("/x","y"); } }
+pub struct Reg;
+impl Reg {
+    pub fn all(&self) -> Vec<Box<dyn Doer>> { vec![] }
+    pub fn via_vec(&self) { for d in self.all() { d.go(); } }
+    pub fn via_foreach(&self) { self.all().iter().for_each(|d| d.go()); }
+    pub fn opt(&self) -> Option<Box<dyn Doer>> { None }
+    pub fn via_opt(&self) { if let Some(d) = self.opt() { d.go(); } }
+    pub fn plains(&self) -> Vec<Plain> { vec![] }
+    pub fn via_plain(&self) { for p in self.plains() { p.go(); } }
+}
+pub fn free_all() -> Vec<Box<dyn Doer>> { vec![] }
+pub fn via_free(){ for d in free_all() { d.go(); } }
+pub struct Plain; impl Plain { pub fn go(&self) {} }
+"#);
+        for f in ["via_vec", "via_foreach", "via_opt", "via_free"] {
+            assert!(eff(&v, f).contains(&"Fs".to_string()), "{f} lost the returned-collection dispatch:\n{v}");
+        }
+        assert!(eff(&v, "via_plain").is_empty(), "a method returning Vec of a concrete pure type must stay pure:\n{v}");
+    }
+
+    #[test]
     fn supertrait_method_dispatches_via_sub_bound() {
         // `t.base()` where `base ∈ Super`, `t: T: Sub` (or `&dyn Sub`), `trait Sub: Super` — a supertrait
         // method is callable on a Sub receiver and the sub's impls provide it, so it must dispatch (was
