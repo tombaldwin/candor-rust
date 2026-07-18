@@ -145,6 +145,26 @@ pub(crate) fn ret_elem_dyn_leaves(s: &str) -> Option<Vec<String>> {
         .map(|rest| rest.split('+').filter(|p| !p.is_empty()).map(str::to_string).collect())
 }
 
+/// A factory returning a TUPLE with trait-object position(s) (`fn make() -> (Box<dyn Doer>, u32)`) —
+/// `let (d, _) = make()` must dispatch `d.go()`. Encodes per-position bound leaves (positions `;`-joined,
+/// a position's leaves `+`-joined; a concrete position is empty) so the destructure binds each dyn
+/// position into `trait_vars`. Like `<dyn>`/`<elemdyn>`, filtered out of concrete var-typing (R46 tuple).
+pub(crate) const RET_TUPLE_DYN_PREFIX: &str = "<tupledyn>";
+
+pub(crate) fn ret_tuple_dyn_encode(positions: &[Vec<String>]) -> String {
+    let joined = positions.iter().map(|p| p.join("+")).collect::<Vec<_>>().join(";");
+    format!("{RET_TUPLE_DYN_PREFIX}{joined}")
+}
+
+/// Decode a `RET_TUPLE_DYN_PREFIX` sentinel back to its per-position bound leaves, or `None` if not one.
+pub(crate) fn ret_tuple_dyn_leaves(s: &str) -> Option<Vec<Vec<String>>> {
+    s.strip_prefix(RET_TUPLE_DYN_PREFIX).map(|rest| {
+        rest.split(';')
+            .map(|p| p.split('+').filter(|x| !x.is_empty()).map(str::to_string).collect())
+            .collect()
+    })
+}
+
 /// `trait leaf -> the local types that `impl Trait for Type` it` — the syntactic CHA universe for
 /// dispatch-typed receivers (the JVM engine's bounded-CHA move, done on syntax). Keyed by leaf like
 /// the other name indexes; includes impls of EXTERNAL traits for local types (the JVM resolves

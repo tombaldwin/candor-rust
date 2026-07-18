@@ -214,7 +214,7 @@
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev,
-            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
@@ -262,7 +262,7 @@
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev,
-            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
@@ -858,6 +858,11 @@ pub fn res_iflet(r: Result<Box<dyn Doer>, ()>) { if let Ok(d) = r { d.go(); } }
 // the `trait_vars` carry through the next unwrap.
 pub fn nested_vec_opt(xs: Vec<Option<Box<dyn Doer>>>) { for x in xs { if let Some(d) = x { d.go(); } } }
 pub fn nested_opt_vec(xs: Option<Vec<Box<dyn Doer>>>) { if let Some(v) = xs { for d in v { d.go(); } } }
+// TUPLE-of-dyn (R46 tuple): a param, an inline cast tuple, and a factory-return tuple, all destructured
+pub fn tuple_param(pair: (Box<dyn Doer>, u32)) { let (d, _n) = pair; d.go(); }
+pub fn tuple_direct() { let (d, _n) = (Box::new(Impl) as Box<dyn Doer>, 1u32); d.go(); }
+fn make_pair() -> (Box<dyn Doer>, u32) { (Box::new(Impl), 1) }
+pub fn tuple_factory() { let (d, _n) = make_pair(); d.go(); }
 pub struct Plain; impl Plain { pub fn go(&self) {} }
 pub fn map_concrete(m: HashMap<String, Plain>) { for v in m.values() { v.go(); } }   // PURE
 pub fn opt_concrete(o: Option<Plain>) { if let Some(d) = o { d.go(); } }             // PURE
@@ -865,7 +870,7 @@ pub fn nested_concrete(xs: Vec<Option<Plain>>) { for x in xs { if let Some(d) = 
 "#;
         let v = run("cv", src);
         for f in ["map_values", "arc_mutex", "opt_iflet", "opt_match", "opt_letelse", "opt_map", "res_iflet",
-                  "nested_vec_opt", "nested_opt_vec"] {
+                  "nested_vec_opt", "nested_opt_vec", "tuple_param", "tuple_direct", "tuple_factory"] {
             assert!(eff(&v, f).contains(&"Fs".to_string()), "{f} lost the container/option dispatch:\n{v}");
         }
         assert!(eff(&v, "map_concrete").is_empty(), "a concrete-value HashMap must stay pure:\n{v}");
@@ -1418,7 +1423,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
                 enum_variants: &ev,
-                elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+                elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(),
@@ -1464,7 +1469,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let mut c = CallCollector {
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
             };
@@ -1487,7 +1492,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let mut c = CallCollector {
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
                 };
@@ -1525,7 +1530,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
             enum_variants: &ev,
-            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+            elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
             fn_typed_vars: std::collections::HashSet::new(),
@@ -1559,7 +1564,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
                 enum_variants: &ev,
-                elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(),
+                elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
                 fn_typed_vars: std::collections::HashSet::new(),

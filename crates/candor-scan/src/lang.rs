@@ -266,6 +266,26 @@ pub(crate) fn tuple_types(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
     }
 }
 
+/// The per-position DISPATCH-trait leaves of a TUPLE type whose elements include a trait object /
+/// bound param (`(Box<dyn Doer>, u32)` -> `[["Doer"], []]`). `Some` only when at least one position is a
+/// dispatch element (else `tuple_types`' concrete route owns it), so a `let (d, _) = pair` binds `d` into
+/// `trait_vars` for bounded-CHA dispatch (`type_path` yields nothing for a `dyn` element — R46 tuple).
+pub(crate) fn tuple_trait_leaves(
+    ty: &syn::Type,
+    generic_bounds: &HashMap<String, Vec<String>>,
+) -> Option<Vec<Vec<String>>> {
+    match ty {
+        syn::Type::Reference(r) => tuple_trait_leaves(&r.elem, generic_bounds),
+        syn::Type::Paren(p) => tuple_trait_leaves(&p.elem, generic_bounds),
+        syn::Type::Group(g) => tuple_trait_leaves(&g.elem, generic_bounds),
+        syn::Type::Tuple(t) if t.elems.len() >= 2 => {
+            let v: Vec<Vec<String>> = t.elems.iter().map(|e| trait_leaves(e, generic_bounds)).collect();
+            v.iter().any(|l| !l.is_empty()).then_some(v)
+        }
+        _ => None,
+    }
+}
+
 /// Constructor-style associated function names: `let x = Foo::new(..)` (or `::connect().await?`) means
 /// `x: Foo`. Conservative set of names that return `Self` (or `Result<Self>`), so the inferred type is
 /// reliable. A non-constructor assoc call (`Foo::parse`) is NOT treated as producing a `Foo`.
@@ -344,7 +364,8 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
             // Call arm), never as a concrete `Type::method`. Filter both out of concrete var-typing.
             returns
                 .get(leaf)
-                .filter(|t| *t != RET_FN_TYPED && ret_dyn_leaves(t).is_none() && ret_elem_dyn_leaves(t).is_none())
+                .filter(|t| *t != RET_FN_TYPED && ret_dyn_leaves(t).is_none()
+                    && ret_elem_dyn_leaves(t).is_none() && ret_tuple_dyn_leaves(t).is_none())
                 .cloned()
         }
         // `let s = S {..};` — a struct literal names its type directly.

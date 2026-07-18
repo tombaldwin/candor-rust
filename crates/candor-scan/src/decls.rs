@@ -278,9 +278,10 @@ pub(crate) fn seed_elem_of(
     sig: &syn::Signature,
     vars: &mut HashMap<String, String>,
     uses: &HashMap<String, String>,
-) -> (HashMap<String, String>, TupleElemIndex, HashMap<String, Vec<String>>) {
+) -> (HashMap<String, String>, TupleElemIndex, HashMap<String, Vec<String>>, HashMap<String, Vec<Vec<String>>>) {
     let mut elem_of = HashMap::new();
     let mut tuple_of: TupleElemIndex = HashMap::new();
+    let mut tuple_trait_of: HashMap<String, Vec<Vec<String>>> = HashMap::new();
     // Element DISPATCH leaves for a param that is a COLLECTION of trait objects — `for it in items {
     // it.go() }` dispatches via bounded CHA. Covers a CONCRETE-dyn element (`items: Vec<Box<dyn Doer>>` →
     // ["Doer"]) AND a GENERIC element bound by a trait (`fn f<T: Doer>(items: Vec<T>)` → ["Doer"], via the
@@ -302,6 +303,12 @@ pub(crate) fn seed_elem_of(
                 if let Some(t) = tuple_types(&pt.ty, uses) {
                     tuple_of.insert(id.ident.to_string(), t);
                 }
+                // `fn f(pair: (Box<dyn Doer>, u32))` — a TRAIT-OBJECT tuple position, so a later
+                // `let (d, _) = pair; d.go()` dispatches (R46 tuple; `tuple_types`/`type_path` can't hold a
+                // `dyn` element).
+                if let Some(t) = tuple_trait_leaves(&pt.ty, &gbounds) {
+                    tuple_trait_of.insert(id.ident.to_string(), t);
+                }
             }
             // `fn f((s, n): (Sender, usize))` — a tuple-destructured param.
             syn::Pat::Tuple(tup) => {
@@ -321,7 +328,7 @@ pub(crate) fn seed_elem_of(
             _ => {}
         }
     }
-    (elem_of, tuple_of, elem_trait_of)
+    (elem_of, tuple_of, elem_trait_of, tuple_trait_of)
 }
 
 /// The dispatch-typed counterpart of `seed_vars`: params whose type is a trait bound rather than a
@@ -402,7 +409,7 @@ pub(crate) fn fninfo(
     }
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
-    let (elem_of, tuple_of, elem_trait_of) = seed_elem_of(sig, &mut vars, uses);
+    let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, uses);
     let mut c = CallCollector {
         uses,
         vars,
@@ -421,6 +428,7 @@ pub(crate) fn fninfo(
         elem_of,
         elem_trait_of,
         tuple_of,
+        tuple_trait_of,
         calls: Vec::new(),
         closure_vars: std::collections::HashSet::new(),
         fn_typed_vars,
@@ -547,6 +555,24 @@ pub(crate) fn record_return(
     let elem_dyn = elem_trait_leaves(unwrap_result_option(ty), &generic_bounds_of(sig));
     if !elem_dyn.is_empty() {
         let sentinel = ret_elem_dyn_encode(&elem_dyn);
+        let leaf = sig.ident.to_string();
+        match rets.get(&leaf) {
+            None => {
+                rets.insert(leaf, Some(sentinel));
+            }
+            Some(Some(prev)) if *prev != sentinel => {
+                rets.insert(leaf, None);
+            }
+            _ => {}
+        }
+        return;
+    }
+    // A TUPLE-WITH-TRAIT-OBJECT return (`fn make() -> (Box<dyn Doer>, u32)`): `type_path` drops it (a tuple
+    // has no nominal path), so `let (d, _) = make(); d.go()` dropped SILENT-PURE. Record the per-position
+    // bound leaves under a `<tupledyn>` sentinel so the destructure binds each dyn position into
+    // `trait_vars` (R46 tuple). Rides the same ambiguity rule (two shapes for a leaf → None).
+    if let Some(positions) = tuple_trait_leaves(unwrap_result_option(ty), &generic_bounds_of(sig)) {
+        let sentinel = ret_tuple_dyn_encode(&positions);
         let leaf = sig.ident.to_string();
         match rets.get(&leaf) {
             None => {

@@ -43,6 +43,11 @@ pub(crate) struct CallCollector<'a> {
     /// `[Some("Sender"), Some("usize")]`). Lets a later `let (s, _) = pair;` type each binding from the
     /// matching position. A `None` at a position = that element's type is unknown (binds nothing).
     pub(crate) tuple_of: HashMap<String, Vec<Option<String>>>,
+    /// local var / param -> per-position DISPATCH-trait leaves of a TUPLE with a trait-object element
+    /// (`pair: (Box<dyn Doer>, u32)` -> `[["Doer"], []]`). The trait-object counterpart of `tuple_of`, so a
+    /// `let (d, _) = pair; d.go()` binds `d` into `trait_vars` (bounded CHA) — `tuple_of` can't hold a `dyn`
+    /// element (it has no nominal path). Grown as tuple-of-dyn params / var rebinds are seen (R46 tuple).
+    pub(crate) tuple_trait_of: HashMap<String, Vec<Vec<String>>>,
     pub(crate) calls: Vec<Call>,
     /// locals bound to a closure (`let f = |..| ..`), so a later `f()` is recognised as a closure
     /// invocation the scan can't see through — not a call to a free fn named `f`.
@@ -1263,11 +1268,33 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     .cloned(),
                 _ => None,
             };
+            // A TUPLE-OF-DYN source's per-position dispatch leaves — from a source VAR's `tuple_trait_of`
+            // (`let (d, _) = pair` where `pair: (Box<dyn Doer>, u32)`), or a FACTORY CALL's `<tupledyn>`
+            // return sentinel (`let (d, _) = make()` where `make() -> (Box<dyn Doer>, u32)`) — so `d.go()`
+            // dispatches (R46 tuple).
+            let src_trait_tuple = match init {
+                Some(syn::Expr::Path(p)) => p
+                    .path
+                    .get_ident()
+                    .and_then(|id| self.tuple_trait_of.get(&id.to_string()))
+                    .cloned(),
+                Some(syn::Expr::Call(c)) => {
+                    if let syn::Expr::Path(p) = &*c.func {
+                        let full = path_to_string(&p.path);
+                        let leaf = full.rsplit("::").next().unwrap_or(&full);
+                        self.returns.get(leaf).and_then(|t| ret_tuple_dyn_leaves(t))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
             for (i, pat_el) in tup.elems.iter().enumerate() {
                 let Some(name) = single_pat_ident(pat_el) else { continue };
                 self.vars.remove(&name);
                 self.elem_of.remove(&name);
                 self.tuple_of.remove(&name);
+                self.trait_vars.remove(&name);
                 let ty = src_tuple
                     .as_ref()
                     .and_then(|t| t.get(i).cloned().flatten())
@@ -1278,7 +1305,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         _ => None,
                     });
                 if let Some(ty) = ty {
-                    self.vars.insert(name, ty);
+                    self.vars.insert(name.clone(), ty);
+                }
+                // Bind a DISPATCH position into `trait_vars`: from the source var's `tuple_trait_of`, or an
+                // inline tuple literal's cast element (`(x as Box<dyn Doer>, 1)` → position 0's leaves).
+                let leaves = src_trait_tuple
+                    .as_ref()
+                    .and_then(|t| t.get(i).cloned())
+                    .filter(|l| !l.is_empty())
+                    .or_else(|| match init {
+                        Some(syn::Expr::Tuple(it)) => it.elems.iter().nth(i).and_then(|e| {
+                            let inner = match e {
+                                syn::Expr::Cast(c) => trait_leaves(&c.ty, &std::collections::HashMap::new()),
+                                _ => Vec::new(),
+                            };
+                            (!inner.is_empty()).then_some(inner)
+                        }),
+                        _ => None,
+                    });
+                if let Some(l) = leaves {
+                    self.trait_vars.insert(name, l);
                 }
             }
         } else if let syn::Pat::Ident(id) = &node.pat {
