@@ -248,7 +248,16 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Path(p) => p
                 .path
                 .get_ident()
-                .and_then(|id| self.elem_trait_of.get(&id.to_string()))
+                .and_then(|id| {
+                    let n = id.to_string();
+                    // A collection-of-dyn var (`elem_trait_of`), OR — for a NESTED dispatch container
+                    // (`Vec<Option<Box<dyn>>>` / `Option<Vec<Box<dyn>>>`) whose OUTER layer already bound this
+                    // var into `trait_vars` (the leaves collapsed by `elem_trait_leaves`) — the same leaves,
+                    // so the INNER unwrap (`for d in v` / `if let Some(d) = x`) still dispatches (R46). Sound:
+                    // it over-approximates only on non-compiling paths (a truly-single dispatch var is never
+                    // iterated or re-unwrapped), and the bounded-CHA / local-trait gates never fabricate.
+                    self.elem_trait_of.get(&n).or_else(|| self.trait_vars.get(&n))
+                })
                 .cloned()
                 .unwrap_or_default(),
             // `self.handlers` / `reg.handlers` — a COLLECTION-OF-TRAIT-OBJECTS FIELD: resolve the receiver's
