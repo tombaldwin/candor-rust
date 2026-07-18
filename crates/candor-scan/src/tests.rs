@@ -1041,6 +1041,9 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             pub fn via_rc()  { let db = std::rc::Rc::new(Db::new("/d")); db.migrate(); }// Fs
             pub fn inline_arc() { Arc::new(Db::new("/d")).migrate(); }                  // Fs (no let)
             pub fn pure_arc() { let db = Arc::new(Db::new("/d")); db.touch(); }         // pure pointee method
+            // CLONE-REBIND (R52): a `.clone()` is type-preserving, so the rebound var keeps the pointee type
+            pub fn via_clone() { let db = Arc::new(Db::new("/d")); let d2 = db.clone(); d2.migrate(); } // Fs
+            pub fn clone_pure() { let db = Arc::new(Db::new("/d")); let d2 = db.clone(); d2.touch(); }   // pure
             "#,
         )
         .unwrap();
@@ -1058,10 +1061,12 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str()))
                 .any(|e| e == "Fs")
         };
-        for f in ["via_arc", "via_box", "via_rc", "inline_arc"] {
+        for f in ["via_arc", "via_box", "via_rc", "inline_arc", "via_clone"] {
             assert!(has_fs(f), "smart-pointer ctor pointee method must propagate to `{f}`:\n{body}");
         }
-        assert!(!has_fs("pure_arc"), "a PURE pointee method must not fabricate an effect:\n{body}");
+        for f in ["pure_arc", "clone_pure"] {
+            assert!(!has_fs(f), "a PURE pointee method must not fabricate an effect at `{f}`:\n{body}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
