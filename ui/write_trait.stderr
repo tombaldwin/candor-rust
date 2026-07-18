@@ -1,5 +1,5 @@
 warning: `<LoudFmt as std::fmt::Write>::write_str` effects: { Fs* }   (* = via callee)
-  --> $DIR/write_trait.rs:16:5
+  --> $DIR/write_trait.rs:17:5
    |
 LL |     fn write_str(&mut self, _s: &str) -> std::fmt::Result {
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -7,28 +7,46 @@ LL |     fn write_str(&mut self, _s: &str) -> std::fmt::Result {
    = note: `#[warn(candor)]` on by default
 
 warning: `<LoudIo as std::io::Write>::write` effects: { Fs* }   (* = via callee)
-  --> $DIR/write_trait.rs:28:5
+  --> $DIR/write_trait.rs:29:5
    |
 LL |     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+warning: `<LoudRead as std::io::Read>::read` effects: { Fs* }   (* = via callee)
+  --> $DIR/write_trait.rs:54:5
+   |
+LL |     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 warning: `sink` effects: { Fs }   (* = via callee)
-  --> $DIR/write_trait.rs:9:1
+  --> $DIR/write_trait.rs:10:1
    |
 LL | fn sink() {
    | ^^^^^^^^^
 
+warning: `via_read_to_end` effects: { Fs*, Unknown }   (* = via callee)
+  --> $DIR/write_trait.rs:59:1
+   |
+LL | fn via_read_to_end(r: &mut LoudRead) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_write_all` effects: { Fs*, Unknown }   (* = via callee)
+  --> $DIR/write_trait.rs:48:1
+   |
+LL | fn via_write_all(w: &mut LoudIo) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 warning: `via_write_fmt` effects: { Fs* }   (* = via callee)
-  --> $DIR/write_trait.rs:21:1
+  --> $DIR/write_trait.rs:22:1
    |
 LL | fn via_write_fmt(w: &mut LoudFmt) {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `via_write_io` effects: { Fs*, Unknown }   (* = via callee)
-  --> $DIR/write_trait.rs:36:1
+  --> $DIR/write_trait.rs:37:1
    |
 LL | fn via_write_io(w: &mut LoudIo) {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-warning: 5 warnings emitted
+warning: 8 warnings emitted
 

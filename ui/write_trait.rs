@@ -4,6 +4,7 @@
 // a std writer (String, Vec) stays pure.
 #![allow(unused)]
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::io::Write as _;
 
 fn sink() {
@@ -40,6 +41,24 @@ fn via_write_io(w: &mut LoudIo) {
 // pure control: write! to a std String (non-local fmt::Write)
 fn pure_write_string(s: &mut String) {
     let _ = write!(s, "hi {}", 1); // pure
+}
+
+// DIRECT METHOD-CALL forms of the provided io::Write/io::Read methods (not the write! macro): the
+// std-provided `write_all`/`read_to_end` bodies drive `LoudIo::write` / `LoudRead::read` inside std.
+fn via_write_all(w: &mut LoudIo) {
+    let _ = w.write_all(b"hi"); // Fs (write_all -> io::Write::write -> LoudIo::write)
+}
+
+struct LoudRead;
+impl std::io::Read for LoudRead {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        sink();
+        Ok(b.len())
+    }
+}
+fn via_read_to_end(r: &mut LoudRead) {
+    let mut buf = Vec::new();
+    let _ = r.read_to_end(&mut buf); // Fs (read_to_end -> io::Read::read -> LoudRead::read)
 }
 
 fn main() {}
