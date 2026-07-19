@@ -1292,7 +1292,59 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             } else {
                 Vec::new()
             },
+            interface_union: false,
         });
+    }
+    // ⟨workspace-chain, gated⟩ TRAIT-CHA union entries — the candor-ts/swift `interfaceUnion` analog. A
+    // cross-crate consumer calling a trait method on a `&dyn Trait` whose Trait is imported from HERE keys
+    // the chain lookup on `crate#Trait::method` (tail2), which has no body → no entry → the call reads pure.
+    // Emit a synthetic entry = the UNION over local impls of that method's effects (inferred + invisible),
+    // reusing `trait_impls`/`trait_decls` (the CHA universe in-crate dispatch already uses). Sound
+    // over-approximation; a `Trait::method` a consumer never resolves is harmless. GATED so a default scan
+    // stays byte-identical (four-way conformance unaffected until the rung is pinned).
+    if std::env::var_os("CANDOR_WORKSPACE_CHAIN").is_some() {
+        let existing: std::collections::HashSet<String> = entries.iter().map(|e| e.hash.clone()).collect();
+        for (trait_leaf, lt) in merged.trait_decls.iter() {
+            let impls = match merged.trait_impls.get(trait_leaf) {
+                Some(v) => v,
+                None => continue,
+            };
+            for method in &lt.methods {
+                let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+                let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                for ty in impls {
+                    let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
+                    for cand in [format!("{ty}::{method}"), format!("{ty_leaf}::{method}")] {
+                        if let Some(s) = inferred.get(&cand) {
+                            for e in s {
+                                inf_u.insert(e);
+                            }
+                        }
+                        if let Some(s) = blind_acc.get(&cand) {
+                            for c in s.iter().filter(|c| global_blind.contains(*c)) {
+                                blind_u.insert(c.clone());
+                            }
+                        }
+                    }
+                }
+                if inf_u.is_empty() && blind_u.is_empty() {
+                    continue; // pure across all impls — silence = purity
+                }
+                let hash = format!("{crate_name}#{trait_leaf}::{method}");
+                if existing.contains(&hash) {
+                    continue; // a real entry already claims this hash
+                }
+                entries.push(ReportEntry {
+                    func: format!("{trait_leaf}::{method}"),
+                    inferred: inf_u.iter().map(|s| s.to_string()).collect(),
+                    unresolved: inf_u.contains("Unknown"),
+                    hash,
+                    invisible: blind_u.into_iter().collect(),
+                    interface_union: true,
+                    ..Default::default()
+                });
+            }
+        }
     }
     entries.sort_by(|a, b| a.func.cmp(&b.func));
 

@@ -168,6 +168,12 @@ pub struct ReportEntry {
     /// call graph like the effect. Omitted when the function has no `Net`; never a claim a host is SAFE.
     #[serde(default, rename = "netClass", skip_serializing_if = "Vec::is_empty")]
     pub net_class: Vec<String>,
+    /// ⟨workspace-chain⟩ True on a synthetic TRAIT-CHA union entry — `crate#Trait::method` whose effects are
+    /// the UNION over local impls, emitted (gated behind CANDOR_WORKSPACE_CHAIN) so a cross-crate consumer's
+    /// trait-dispatch call resolves via chaining instead of reading pure. NOT an analyzed unit; omitted when
+    /// false. See WORKSPACE-CHAINING-DESIGN.md.
+    #[serde(default, rename = "interfaceUnion", skip_serializing_if = "std::ops::Not::not")]
+    pub interface_union: bool,
 }
 
 /// The candor-spec contract version this build implements (the report SCHEMA + AS-EFF codes), distinct
