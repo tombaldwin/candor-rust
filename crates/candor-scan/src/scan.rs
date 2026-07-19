@@ -1305,6 +1305,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     if std::env::var_os("CANDOR_WORKSPACE_CHAIN").is_some() {
         let existing: std::collections::HashSet<String> = entries.iter().map(|e| e.hash.clone()).collect();
         for (trait_leaf, lt) in merged.trait_decls.iter() {
+            // AMBIGUOUS same-leaf traits (`mod a { trait T } mod b { trait T }`): `trait_decls`/`trait_impls`
+            // are keyed by LEAF, so `lt` merges both traits' methods and `impls` merges both traits' impls —
+            // a union entry over them could carry an UNRELATED trait's impl effect (a cross-crate fabrication).
+            // The in-crate dispatch bails to Unknown here (collector.rs `lt.count > 1`); the emission must too:
+            // skip the ambiguous leaf (an honest under-report, never a guess between traits).
+            if lt.count > 1 {
+                continue;
+            }
             let impls = match merged.trait_impls.get(trait_leaf) {
                 Some(v) => v,
                 None => continue,
