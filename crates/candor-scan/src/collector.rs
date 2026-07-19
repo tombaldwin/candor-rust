@@ -926,6 +926,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 | "all" | "position" | "inspect" | "take_while" | "skip_while" | "map_while"
                 | "partition" | "fold" | "try_for_each" | "retain" | "sort_by" | "sort_by_key"
                 | "min_by_key" | "max_by_key" | "count"
+                // Option/Result synchronous callback-invokers: the combinator calls the callback on the
+                // unwrapped value in-line (single element param, like the iterator adapters). Adding them
+                // lets an OPAQUE callable passed directly (`o.and_then(cb)`, `o.map_or(d, cb)`) disclose
+                // Unknown via the opaque-arg guard above, while an inline closure keeps its analyzed body.
+                | "and_then" | "map_or" | "map_or_else" | "unwrap_or_else" | "get_or_insert_with"
         );
         // The single-ident closure param of the FIRST closure arg (`|c| ..` or `|c, ..| ..`). We
         // only type the FIRST element param — `fold`'s accumulator is its first param so it is NOT a
@@ -946,6 +951,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // sink never fabricates; a bare LOCAL (a value/closure, not a free-fn path) is skipped.
         if elem_adapter {
             for a in &node.args {
+                // An OPAQUE callable passed BY VALUE to a synchronous callback-invoker (`xs.iter()
+                // .for_each(cb)`, `opt.map(cb)`) — where `cb` is a generic/`impl`/`dyn` `Fn` param or an
+                // otherwise-unresolvable fn-typed local — is invoked by the adapter on a body the scan
+                // can't see: honest `Unknown`, exactly as the DIRECT-call form `cb()` (line ~721) and the
+                // CLOSURE-WRAPPED form `for_each(|x| cb(x))` already are. The direct-pass form was silently
+                // dropped as pure — a §4 under-report (the Rust arm of the four-way sync-callback parity
+                // fix; candor-java c755acd). `expr_is_fn_typed` peels `&`/paren/group so `for_each(&cb)`
+                // and `let g = cb; for_each(g)` are covered too. Checked BEFORE the named-fn edge below so an
+                // opaque local never falls through to a phantom free-fn resolution.
+                if self.expr_is_fn_typed(a) {
+                    self.unresolved = true;
+                    continue;
+                }
                 if let syn::Expr::Path(p) = a {
                     let is_local = p.path.get_ident().is_some_and(|i| {
                         let n = i.to_string();
