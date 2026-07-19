@@ -666,6 +666,82 @@ impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PUR
     }
 
     #[test]
+    fn opaque_callable_passed_directly_to_a_sync_invoker_is_unknown() {
+        // An OPAQUE callable (a generic `F: Fn`/`impl Fn` param) passed BY VALUE to a synchronous
+        // callback-invoker — `xs.iter().for_each(cb)`, `o.map(cb)`, `o.and_then(cb)` — is invoked on a
+        // body the syntactic scan can't see, so the enclosing fn must read Unknown. The DIRECT-pass form
+        // was silently dropped as pure while the CLOSURE-WRAPPED form `for_each(|x| cb(x))` and the
+        // direct-call form `cb()` were already Unknown — the asymmetry was the under-report. This is the
+        // Rust arm of the four-way sync-callback parity fix (candor-java c755acd). Inline closures keep
+        // their analyzed body effect (no regression); resolvable named fns keep their resolved effect.
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-syncb-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let v = run("syncb", r#"
+use std::fs;
+// THE BUG: an opaque callable passed DIRECTLY to for_each leaked pure.
+pub fn opaque_passed<F: Fn(&i32)>(items: &[i32], cb: F) { items.iter().for_each(cb); }
+// The closure-wrapped twin was already Unknown — must STAY Unknown (control).
+pub fn opaque_direct<F: Fn(i32)>(items: &[i32], cb: F) { items.iter().for_each(|&x| cb(x)); }
+// Through a `&` and a fn-typed rebind — the fn-typed predicate peels both.
+pub fn opaque_ref<F: Fn(&i32)>(items: &[i32], cb: F) { items.iter().for_each(&cb); }
+pub fn opaque_rebind<F: Fn(&i32)>(items: &[i32], cb: F) { let g = cb; items.iter().for_each(g); }
+// Option/Result synchronous combinators.
+pub fn opt_map<F: Fn(i32)->i32>(o: Option<i32>, cb: F) -> Option<i32> { o.map(cb) }
+pub fn opt_and_then<F: Fn(i32)->Option<i32>>(o: Option<i32>, cb: F) -> Option<i32> { o.and_then(cb) }
+pub fn res_map<F: Fn(i32)->i32>(r: Result<i32,()>, cb: F) -> Result<i32,()> { r.map(cb) }
+// NO-REGRESSION: an inline closure with a real effect must still report it.
+pub fn inline_eff(items: &[i32]) { items.iter().for_each(|_| { let _ = fs::write("/tmp/z", "w"); }); }
+// NO-REGRESSION: a pure inline closure must stay pure (no over-disclosure).
+pub fn inline_pure(items: &[i32]) { items.iter().for_each(|x| { let _ = x + 1; }); }
+// NO-REGRESSION: a resolvable named fn keeps its RESOLVED effect (pure here → stays pure).
+fn helper_pure(_x: &i32) {}
+pub fn named_pure(items: &[i32]) { items.iter().for_each(helper_pure); }
+// NO-REGRESSION: a resolvable named EFFECTFUL fn is still charged (not blanket-Unknown).
+fn helper_eff(_x: &i32) { let _ = fs::write("/tmp/n", "e"); }
+pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
+"#);
+        // The bug + the parity forms: opaque callable passed directly → Unknown.
+        for f in ["opaque_passed", "opaque_ref", "opaque_rebind", "opt_map", "opt_and_then", "res_map"] {
+            assert!(eff(&v, f).contains(&"Unknown".to_string()),
+                "opaque callable passed directly to a sync invoker must be Unknown: {f} = {:?}\n{v}", eff(&v, f));
+        }
+        // Control: the already-working closure-wrapped form must not regress.
+        assert!(eff(&v, "opaque_direct").contains(&"Unknown".to_string()),
+            "closure-wrapped opaque call must stay Unknown:\n{v}");
+        // No regression: inline closure with a real effect still reports it.
+        assert!(eff(&v, "inline_eff").contains(&"Fs".to_string()),
+            "inline-closure for_each with a real effect must keep it:\n{v}");
+        // No over-disclosure: pure inline closure + pure named fn stay pure.
+        assert!(eff(&v, "inline_pure").is_empty(),
+            "a pure inline for_each must stay pure (no over-disclosure): {:?}", eff(&v, "inline_pure"));
+        assert!(eff(&v, "named_pure").is_empty(),
+            "a resolvable pure named fn must stay pure (no blanket-Unknown): {:?}", eff(&v, "named_pure"));
+        // Resolvable effectful named fn is still charged precisely.
+        assert!(eff(&v, "named_eff").contains(&"Fs".to_string()),
+            "a resolvable effectful named fn must keep its resolved effect:\n{v}");
+    }
+
+    #[test]
     fn method_returning_collection_of_trait_objects_dispatches() {
         // `for d in r.all()` / `self.all().iter().for_each(..)` where `all() -> Vec<Box<dyn Doer>>`, and
         // `if let Some(d) = self.opt()` where `opt() -> Option<Box<dyn Doer>>` — a method/factory returning
