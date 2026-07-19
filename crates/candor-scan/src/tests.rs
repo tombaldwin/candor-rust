@@ -369,11 +369,11 @@
         let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
         // deliberately NOT the `….<crate>.scan.json` filename shape — only the envelope names it.
         std::fs::write(d.join("purity-claim.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.22"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
             "package": "dep-c",
             "functions": []}}"#)).unwrap();
         std::fs::write(d.join("multi.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.22"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
             "packages": ["alpha", "beta"],
             "functions": []}}"#)).unwrap();
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
@@ -3277,8 +3277,8 @@ trait G {
             "README must not claim reference-implementation status (family ruling: candor-java is the reference)");
         assert!(!agents.to_lowercase().contains("the reference implementation of"),
             "AGENTS must not claim reference-implementation status");
-        assert!(readme.contains("spec 0.22"), "README must state the spec 0.22 floor");
-        assert!(agents.contains("spec 0.22"), "AGENTS must state the spec 0.22 floor");
+        assert!(readme.contains("spec 0.23"), "README must state the spec 0.23 floor");
+        assert!(agents.contains("spec 0.23"), "AGENTS must state the spec 0.23 floor");
     }
 
     #[test]
@@ -3296,7 +3296,7 @@ trait G {
         inferred.insert("b".into(), ["Net"].into_iter().collect()); // covered by the UNIONed duplicate
         inferred.insert("newfn".into(), ["Db"].into_iter().collect()); // absent from baseline — exempt
         let report = |ver: &str| format!(
-            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec": "0.22"}},
+            r#"{{"candor":{{"version":"{ver}","toolchain":"stable","spec": "0.23"}},
                 "functions":[{{"fn":"a","inferred":["Fs"]}},
                              {{"fn":"b","inferred":[]}},
                              {{"fn":"b","inferred":["Net"]}}]}}"#
@@ -3347,7 +3347,7 @@ trait G {
         // Y must be an EXISTING function (present in the baseline report) so its new Unknown reads as a gain,
         // not as exempt new code — record it as a pure entry (empty inferred). X carries Unknown already.
         let report = format!(
-            r#"{{"candor":{{"version":"{this_build}","toolchain":"stable","spec": "0.22"}},
+            r#"{{"candor":{{"version":"{this_build}","toolchain":"stable","spec": "0.23"}},
                 "functions":[{{"fn":"x","inferred":["Unknown"]}},
                              {{"fn":"y","inferred":[]}}]}}"#
         );
