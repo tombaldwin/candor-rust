@@ -864,7 +864,27 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             //  - the dispatch must be narrow (≤12 impls, the cross-engine bound) → edges to
             //    every local implementor; otherwise (or with no impl visible) honest `Unknown`.
             for tr in self.resolve_recv_traits(&node.receiver) {
-                let Some(lt) = self.local_traits.get(&tr) else { continue }; // external: documented miss
+                let Some(lt) = self.local_traits.get(&tr) else {
+                    // EXTERNAL trait dispatch (`x.publish()`, `x: &dyn dep::OutboundChannel`). Formerly a
+                    // documented miss (dropped → pure). If the trait resolves via `use` to a DEPENDENCY-
+                    // qualified path (not std/core/alloc), emit a crate-qualified Call so a CANDOR_DEPS chain
+                    // resolves it against the trait-CHA `interfaceUnion` entry the dep exposes (WORKSPACE-
+                    // CHAINING-DESIGN.md). Precise path (the actual trait method) → no fabrication; unresolved
+                    // to pure/invisible exactly as before when the dep isn't chained.
+                    let full = crate::lang::expand(&tr, self.uses);
+                    let root = full.split("::").next().unwrap_or("");
+                    if full.contains("::") && !matches!(root, "std" | "core" | "alloc" | "") {
+                        self.calls.push(Call {
+                            path: format!("{full}::{leaf}"),
+                            leaf: leaf.clone(),
+                            str_arg: str_arg.clone(),
+                            typed: true,
+                            method: true,
+                            is_macro: false,
+                        });
+                    }
+                    continue;
+                };
                 // The leaf must be a method the trait declares OR INHERITS from a (local) SUPERTRAIT — a
                 // `Super` method is callable on a `Sub`-bound/`dyn Sub` receiver, and the sub's impls (which
                 // provide the super method) resolve it via the `trait_impls[tr]` CHA below. Without the
