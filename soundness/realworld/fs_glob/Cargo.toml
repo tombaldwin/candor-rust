@@ -1,0 +1,10 @@
+[package]
+name = "fs_glob"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "fs_glob"
+path = "src/main.rs"
+[dependencies]
+glob = "0.3"

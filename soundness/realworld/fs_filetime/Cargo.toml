@@ -1,0 +1,10 @@
+[package]
+name = "fs_filetime"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "fs_filetime"
+path = "src/main.rs"
+[dependencies]
+filetime = "0.2"
