@@ -758,48 +758,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // Inline literal, else const-string propagation (`reqwest::get(API_BASE)` /
                         // `Client::post(format!("{}/x", API_BASE))`) — SPEC §1 static-host, same refinement.
                         let str_arg = first_str_lit(&node.args).or_else(|| self.resolve_host_arg(&node.args));
-                        // UFCS trait-method dispatch (R53): `path` is `Trait::method`; the bare `Trait::method`
-                        // edge won't resolve (the impl body is `T::method`), so record an ADDITIONAL PRECISE
-                        // typed `T::method` edge. `T` comes from the STATICALLY-KNOWN receiver — the qself of
-                        // `<T as Trait>::method` (explicit impl type; correct even for an associated fn) or the
-                        // first argument's type of `Trait::method(&t)` (the receiver of a `&self` trait method).
-                        // NEVER CHA-over-all-impls: `T` is known, so charging the trait's OTHER impls would
-                        // fabricate. Gated so an associated fn (`Trait::new()`) is never mis-read as a receiver
-                        // call — `methods` holds only `&self` trait methods, and the qself form names its impl.
-                        if p.qself.is_none() || path.contains("::") {
-                            if let Some((trait_head, m)) = path.rsplit_once("::") {
-                                let trait_leaf = trait_head.rsplit("::").next().unwrap_or(trait_head);
-                                let qself_ty = p
-                                    .qself
-                                    .as_ref()
-                                    .filter(|_| path.contains("::"))
-                                    .and_then(|q| type_path(&q.ty, self.uses));
-                                let recv_ty = qself_ty.or_else(|| {
-                                    if self
-                                        .local_traits
-                                        .get(trait_leaf)
-                                        .is_some_and(|lt| lt.methods.contains(m))
-                                    {
-                                        node.args.first().and_then(|a| self.resolve_recv_type(a))
-                                    } else {
-                                        None
-                                    }
-                                });
-                                if let Some(t) = recv_ty {
-                                    let t_leaf = t.rsplit("::").next().unwrap_or(&t);
-                                    if t_leaf != trait_leaf {
-                                        self.calls.push(Call {
-                                            path: format!("{t_leaf}::{m}"),
-                                            leaf: m.to_string(),
-                                            str_arg: None,
-                                            typed: true,
-                                            method: true,
-                                            is_macro: false,
-                                        });
-                                    }
-                                }
-                            }
-                        }
+                        // (R53 UFCS-dispatch edge REVERTED after code review: pushing a typed `T::method` edge
+                        // from a UFCS `Trait::method(&t)` / `<T as Trait>::method` could resolve to T's
+                        // *inherent* `method` when the call actually runs the trait method — candor keys both
+                        // an inherent `impl T { fn m }` and a trait `impl Trait for T { fn m }` as `T::m`, so
+                        // for a T that uses the trait's DEFAULT and *also* has an inherent `m`, the edge
+                        // FABRICATED the inherent's effect. The default case is already handled by the bare
+                        // `Trait::method` edge below resolving to the default body; the override case is left
+                        // an honest under-report. The `&self`-only filter on `LocalTrait.methods` is kept — it
+                        // is independently sound and sharpens the R36 trait-default CHA.)
                         self.calls.push(Call { path, leaf, str_arg, typed: false, method, is_macro: false });
                     }
                 }
@@ -1458,18 +1425,39 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // fn read silent-pure — syn leaves the macro body opaque, and the arg-walk below only sees the
         // INVOCATION args, never the definition template. Inline-expand the recorded template so its own
         // calls are charged to this fn (the macro really does expand here). Metavars are `$`-stripped and
-        // each arm parse-or-skipped as a block, so this only ever ADDS visibility — a `$(..)*` repetition or
+        // the arm parse-or-skipped as a block, so this only ever ADDS visibility — a `$(..)*` repetition or
         // otherwise-unparseable template is skipped, never fabricated. Recursion-guarded per macro name.
+        // CRUCIAL — expand ONLY a SINGLE-ARM macro: a multi-arm `macro_rules!` invocation matches EXACTLY ONE
+        // arm, but a syntactic (unexpanded) scan can't tell which, so walking every arm would charge a
+        // NON-matching arm's effect onto a call that only expands a different arm — a FABRICATION (found in
+        // code review: `emit!(log x)` on `macro_rules! emit { (log $m)=>{..}; (save $m)=>{fs::write(..)} }`
+        // wrongly read Fs). A multi-arm macro is left an honest under-report; anti-fabrication wins over
+        // recall. (Single-arm covers the dominant effectful-macro shape — logging wrappers like `trace!`.)
         if !mpath.contains("::")
             && !self.macro_expanding.contains(&mleaf)
             && self.local_macros.contains_key(&mleaf)
         {
             if let Some(body) = self.local_macros.get(&mleaf).cloned() {
-                self.macro_expanding.insert(mleaf.clone());
-                for block in macro_template_blocks(&body) {
-                    self.visit_block(&block);
+                let (arm_count, blocks) = macro_template_blocks(&body);
+                // Only a genuinely SINGLE-arm macro (one arm total, and it parsed) — multi-arm is skipped to
+                // avoid charging a non-matching arm's effect (the review-caught fabrication).
+                if arm_count == 1 && blocks.len() == 1 {
+                    self.macro_expanding.insert(mleaf.clone());
+                    let before = self.calls.len();
+                    self.visit_block(&blocks[0]);
+                    // Mark every call the template contributed as macro-origin (`is_macro`): a `$`-stripped
+                    // metavar in CALLEE/RECEIVER position (`$f()` → `f()`, `$x.m()` → `x.m()`) becomes a bare
+                    // ident that must NOT resolve to a same-named local fn/method — that is a FABRICATION
+                    // (review [7]: `run!(cb)` on `macro_rules! run { ($x:expr) => { $x() } }` wrongly edged to
+                    // a local `fn f`). `is_macro` suppresses LOCAL resolution (scan.rs gates `resolvable` on
+                    // it) while KEEPING classification of `::`-qualified std/crate calls (`fs::write`→Fs) and
+                    // the nested `::`-macro effects (`tracing::trace!`→Log) — the genuine recoveries survive,
+                    // and a template that only calls a bare local fn is now an honest under-report.
+                    for c in self.calls[before..].iter_mut() {
+                        c.is_macro = true;
+                    }
+                    self.macro_expanding.remove(&mleaf);
                 }
-                self.macro_expanding.remove(&mleaf);
             }
         }
         if mpath.contains("::") {
@@ -1580,12 +1568,18 @@ pub(crate) fn resolve_target<'a>(
 /// Metavars are `$`-stripped (a `$msg` metavar → the ident `msg` — an untyped local that resolves to no
 /// effect, never a fabrication) and each template is parse-or-skipped as a block: an arm using repetition
 /// (`$(..)*`) or non-block syntax simply yields nothing. Only ADDS visibility to an effectful template.
-fn macro_template_blocks(body: &str) -> Vec<syn::Block> {
+/// Returns `(total_arm_count, parseable_arm_templates)`. The caller expands ONLY when `total_arm_count == 1`
+/// (a single-arm macro is unambiguous — every invocation expands it): a multi-arm macro's invocation matches
+/// exactly ONE arm and a syntactic scan can't tell which, so walking all arms would fabricate a non-matching
+/// arm's effect. `total_arm_count` counts EVERY `(..) => {..}` arm — including one whose template fails to
+/// parse (so a 2-arm macro with one `$(..)*`-repetition arm is correctly seen as multi-arm, not single).
+fn macro_template_blocks(body: &str) -> (usize, Vec<syn::Block>) {
     use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
     let ts: TokenStream = match body.parse() {
         Ok(t) => t,
-        Err(_) => return Vec::new(),
+        Err(_) => return (0, Vec::new()),
     };
+    let mut arm_count = 0usize;
     let mut out = Vec::new();
     let mut it = ts.into_iter().peekable();
     while let Some(tok) = it.next() {
@@ -1607,6 +1601,7 @@ fn macro_template_blocks(body: &str) -> Vec<syn::Block> {
             Some(TokenTree::Group(g)) => g.stream(),
             _ => continue,
         };
+        arm_count += 1; // a well-formed arm, whether or not its template parses below
         let braced = TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, strip_dollars(tmpl))));
         if let Ok(block) = syn::parse2::<syn::Block>(braced) {
             out.push(block);
@@ -1618,7 +1613,7 @@ fn macro_template_blocks(body: &str) -> Vec<syn::Block> {
             }
         }
     }
-    out
+    (arm_count, out)
 }
 
 /// Drop `$` punct tokens (recursing into groups) so a `macro_rules!` template's metavars (`$msg`, `$crate`)
