@@ -937,13 +937,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // a TYPED receiver (a known LOCAL type): the type's OWN `leaf` (a local FnInfo) would resolve
             // first, so the blanket never overrides an inherent method — no fabrication. A bare/untyped
             // receiver is left an honest under-report (candor can't confirm the blanket applies vs a shadow).
+            // CRUCIAL — also suppress the blanket when the receiver TYPE declares `leaf` AMBIGUOUSLY: if
+            // `by_tail2["{recv}::{leaf}"]` exists but has >1 target, `resolve_target` returned None (its
+            // uniqueness filter) and `resolved_local` is false, yet the type DOES have an inherent `leaf`
+            // that shadows the blanket — edging to the blanket would FABRICATE its effect onto a call that
+            // runs the (unresolvably-ambiguous) inherent method (review [2]). Fire only when the receiver
+            // type has NO local `leaf` at all.
             if !resolved_local && c.method && c.typed && !c.is_macro {
-                if let Some(bty) = merged.blanket_methods.get(&c.leaf) {
-                    if !bty.is_empty() {
-                        if let Some(ts) = by_tail2.get(&format!("{bty}::{}", c.leaf)) {
-                            if ts.len() == 1 && ts[0] != f.qual {
-                                resolved_local = true;
-                                calls.entry(f.qual.clone()).or_default().insert(ts[0].clone());
+                let recv_has_inherent = tail2(&c.path)
+                    .and_then(|t2| t2.split("::").next().map(str::to_string))
+                    .is_some_and(|ty| by_tail2.contains_key(&format!("{ty}::{}", c.leaf)));
+                if !recv_has_inherent {
+                    if let Some(bty) = merged.blanket_methods.get(&c.leaf) {
+                        if !bty.is_empty() {
+                            if let Some(ts) = by_tail2.get(&format!("{bty}::{}", c.leaf)) {
+                                if ts.len() == 1 && ts[0] != f.qual {
+                                    resolved_local = true;
+                                    calls.entry(f.qual.clone()).or_default().insert(ts[0].clone());
+                                }
                             }
                         }
                     }
