@@ -6,4 +6,4 @@
 [workspace]
 resolver = "2"
 members = ["net_std", "net_minreq", "net_ureq", "exec_duct", "exec_xshell", "exec_std", "exec_subprocess",
-           "fs_fserr", "fs_std", "fs_walkdir", "fs_tempfile", "fs_fsextra", "fs_writefmt", "pure_ctrl"]
+           "fs_fserr", "fs_std", "fs_walkdir", "fs_tempfile", "fs_fsextra", "fs_writefmt", "pure_ctrl", "net_socket2", "fs_glob", "fs_memmap2", "fs_filetime", "fs_zip", "ffi_libc"]

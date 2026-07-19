@@ -56,6 +56,12 @@ CASES=(
   "fs_tempfile|Fs|candor-oracle-temp"
   "fs_fsextra|Fs|/tmp/candor-oracle-fsextra"
   "pure_ctrl||__no_marker__"
+  "net_socket2|Net|203.0.113.10"
+  "fs_glob|Fs|candor-mk-glob"
+  "fs_memmap2|Fs|candor-mk-mmap"
+  "fs_filetime|Fs|candor-mk-ft"
+  "fs_zip|Fs|candor-mk-zip"
+  "ffi_libc|Fs|candor-mk-ffi"
 )
 
 pass=0; under=0; known=0; skip=0; fab=0; failed=""

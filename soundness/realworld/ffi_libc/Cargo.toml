@@ -1,0 +1,10 @@
+[package]
+name = "ffi_libc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[[bin]]
+name = "ffi_libc"
+path = "src/main.rs"
+[dependencies]
+libc = "0.2"
