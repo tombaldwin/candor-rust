@@ -3694,6 +3694,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     } else {
                         Vec::new()
                     },
+                    // ⟨0.23⟩ cross-package interface-dispatch signal. The nightly engine does not yet
+                    // compute the cross-package interface-union (it lags the stable backend on this rung,
+                    // like net-class/reason-scoped above), so it emits `false` — claim no signal rather
+                    // than a misleading partial. The stable candor-scan backend carries it.
+                    interface_union: false,
                 });
                 continue;
             }
