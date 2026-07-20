@@ -3,9 +3,11 @@ name: nightly-bump
 # Automates the rustc-nightly migration that CONTRIBUTING.md describes by hand. candor pins a specific
 # nightly (rust-toolchain) because it builds against rustc_private; every so often that nightly should
 # move forward. This bot tries the next nightly, runs the full build/test/bless/re-baseline, and — if
-# green — opens a PR with the result for review. If the new nightly breaks rustc_private, the run fails
-# loudly (a human handles the API fixups). Vendoring clippy_utils removed the old "pick a matching
-# clippy_utils rev" step, so a bump is now just "pick a nightly, fix any rustc_private breakage".
+# green — opens a PR with the result for review. If the new nightly breaks rustc_private (usually because
+# dylint_linting has not released for it yet — dylint lags rustc by weeks, and it gates the deep engine),
+# the run stays GREEN with a "candidate not ready" notice and keeps the current pin; a human migrates by
+# hand once dylint catches up. This avoids a recurring red-X on a proactive weekly probe that is, by design,
+# a few days ahead of dylint. Vendoring clippy_utils removed the old "pick a matching clippy_utils rev" step.
 #
 # The PR still needs human review: a bump can compile yet shift diagnostics (re-blessed here) or candor's
 # own effect surface (re-baselined here) — a reviewer confirms those deltas are benign.
@@ -61,17 +63,28 @@ jobs:
         run: cargo +stable install cargo-dylint dylint-link
 
       - name: Build (this fetches the candidate nightly + rustc-dev)
+        id: build
         if: steps.pick.outputs.already != '1'
+        continue-on-error: true   # a candidate that breaks rustc_private is EXPECTED lag, not a repo failure
         run: cargo build --workspace
 
+      # The candidate is typically a few days ahead of what dylint_linting has released for (dylint lags
+      # rustc by weeks). When the deep engine can't build on it, that is upstream lag — report it as a
+      # green NOTICE and keep the current pin, rather than a recurring red-X on a proactive weekly probe.
+      # A SUCCESSFUL build still runs the full suite + opens the bump PR below.
+      - name: Candidate not ready — keep the pin, stay green (expected upstream lag)
+        if: steps.pick.outputs.already != '1' && steps.build.outcome == 'failure'
+        run: |
+          echo "::notice title=nightly ${{ steps.pick.outputs.candidate }} not ready::the deep engine does not build on this candidate (rustc_private churn — typically dylint_linting has not released for it yet). Keeping pin ${{ steps.pick.outputs.current }}; re-run when cargo-dylint/dylint_linting catch up."
+
       - name: Test (unit + ui)
-        if: steps.pick.outputs.already != '1'
+        if: steps.pick.outputs.already != '1' && steps.build.outcome == 'success'
         run: cargo test --workspace
 
       # A bump can legitimately shift diagnostic rendering — re-bless the ui fixtures from the
       # framework-saved actual output (compiletest has no --bless), exactly as CONTRIBUTING describes.
       - name: Re-bless ui fixtures (if diagnostics shifted)
-        if: steps.pick.outputs.already != '1'
+        if: steps.pick.outputs.already != '1' && steps.build.outcome == 'success'
         run: |
           if ! cargo test --lib ui >/dev/null 2>&1; then
             out="$(cargo test --lib ui 2>&1 || true)"
@@ -87,7 +100,7 @@ jobs:
 
       # Re-baseline the self-guard: a richer/changed engine can reclassify candor's own effect surface.
       - name: Re-baseline self-guard
-        if: steps.pick.outputs.already != '1'
+        if: steps.pick.outputs.already != '1' && steps.build.outcome == 'success'
         run: |
           LIB="$(ls "$PWD"/target/debug/libcandor@*.so | head -1)"
           CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true
@@ -95,11 +108,11 @@ jobs:
             && { echo "::error::self-guard still trips after re-baseline — investigate"; exit 1; } || true
 
       - name: Integration + receipt tests
-        if: steps.pick.outputs.already != '1'
+        if: steps.pick.outputs.already != '1' && steps.build.outcome == 'success'
         run: bash tests/integration.sh && bash integrations/claude-code/test-receipt.sh
 
       - name: Open a PR with the green bump
-        if: steps.pick.outputs.already != '1'
+        if: steps.pick.outputs.already != '1' && steps.build.outcome == 'success'
         uses: peter-evans/create-pull-request@v7
         with:
           # A PR created with the default GITHUB_TOKEN does NOT trigger CI (GitHub's loop-prevention),
