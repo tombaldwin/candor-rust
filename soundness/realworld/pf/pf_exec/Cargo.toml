@@ -1,0 +1,9 @@
+[package]
+name = "pf_exec"
+version = "0.0.0"
+edition = "2021"
+[[bin]]
+name = "pf_exec"
+path = "src/main.rs"
+
+[workspace]

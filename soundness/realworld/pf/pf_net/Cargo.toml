@@ -1,0 +1,11 @@
+[package]
+name = "pf_net"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+ureq = "2.10"
+[[bin]]
+name = "pf_net"
+path = "src/main.rs"
+
+[workspace]
