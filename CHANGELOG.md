@@ -4,7 +4,7 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
-## Unreleased
+## 0.23.1 (spec 0.23) — 2026-07-20
 
 ### performance — O(V²) propagation fixpoint replaced with a worklist (no output change)
 
