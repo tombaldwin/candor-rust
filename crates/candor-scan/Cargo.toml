@@ -1,6 +1,6 @@
 [package]
 name = "candor-scan"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2021"
 description = "candor's STABLE-Rust effect scanner — syntactic call-graph + effect report, no nightly."
 license = "MIT OR Apache-2.0"
@@ -12,8 +12,8 @@ keywords = ["effects", "capabilities", "static-analysis", "audit", "security"]
 categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-candor-report = { path = "../candor-report", version = "0.22.0" }
-candor-classify = { path = "../candor-classify", version = "0.22.0" }
+candor-report = { path = "../candor-report", version = "0.23.0" }
+candor-classify = { path = "../candor-classify", version = "0.23.0" }
 # `default-features = false` drops syn's (default-on) `proc-macro` feature, which would otherwise pull
 # `proc-macro2/proc-macro` and bake the non-`Send` real `proc_macro::Span` into `syn::File` — making the
 # parsed files un-sendable across rayon's worker threads. candor-scan is a standalone BINARY, never a

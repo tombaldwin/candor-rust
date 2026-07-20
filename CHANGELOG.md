@@ -609,6 +609,17 @@ iterator-forcing, masked-literal fail-closed, implicit conversion, 20-crate cove
 then **spec 0.7** (2026-06-19: engine versions aligned to the spec — candor-scan/candor-query
 0.7.0, candor-report 0.5.6) and the 0.7.x review fixes. Detail: `git log` around those dates.
 
+## [0.23.0] — 2026-07-20 (crates: candor-report / candor-classify / candor-scan / candor-query, lockstep at the spec floor)
+
+Spec floor → **0.23**. Soundness-increasing, report-shape-neutral:
+- **cross-package interface dispatch** (interfaceUnion, the 0.23 rung): a chained consumer's trait-object
+  dispatch resolves to the impl's effect (gated behind `CANDOR_WORKSPACE_CHAIN`; a default report is
+  byte-identical). PART 18 conformance.
+- **⚠ opaque callable → synchronous invoker** (`Iterator::for_each(cb)` direct-pass, Option/Result
+  combinators) discloses `Unknown` — the four-way sync-callback rung (PART 1 `sync_callback_opaque`).
+- trait-union emission guarded against same-leaf-trait name collision (never fabricate an unrelated impl's
+  effect on a colliding trait tail).
+
 ## [0.22.0] — 2026-07-18 (crates: candor-report / candor-classify / candor-scan / candor-query, lockstep at the spec floor)
 
 Spec floor → **0.22** (the `verify` oracle rung, shipped on the java/ts arms). candor-scan / candor-query declare
