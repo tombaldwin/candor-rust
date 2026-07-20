@@ -4,6 +4,19 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## Unreleased
+
+### performance — O(V²) propagation fixpoint replaced with a worklist (no output change)
+
+The transitive effect-propagation fixpoint (`propagate`/`propagate_str`) used a naive
+`while changed { for f in all }` sweep whose pass count equals the longest back-to-front call chain — up to
+V for a single deep `f0→f1→…→fN` chain, so **O(V²)** on pathological long chains (real crates converge in
+2–4 passes, so it never bit realistic code — `wide-4000` is unchanged). Replaced with a worklist over a
+callee→callers reverse index: a function is reprocessed only when a callee actually gained an effect. Same
+monotone set-union least fixed point → order-independent → **output byte-for-byte identical** (verified via
+`--json` + full stdout/stderr across synthetic + real crates; `cargo test --workspace` 334 green, clippy
+clean). ~3× on deep-chain corpora; realistic corpora unchanged.
+
 ## spec 0.19 — reason-scoped Unknown (2026-07-17) — current floor
 
 Reason-scoped `Unknown` policies (SPEC §6.2): `deny E Unknown[reflect,dispatch,indirect,native,unresolved,setup]`
