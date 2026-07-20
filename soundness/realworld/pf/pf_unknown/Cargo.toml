@@ -1,0 +1,11 @@
+[package]
+name = "pf_unknown"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+minreq = "2.11"
+[[bin]]
+name = "pf_unknown"
+path = "src/main.rs"
+
+[workspace]
