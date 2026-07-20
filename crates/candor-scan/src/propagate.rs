@@ -15,11 +15,19 @@
 
 use crate::*;
 
-/// callee → its callers (reverse of `calls`), restricted to keys present in `all` (mirrors the
-/// naive sweep, which only ever writes `acc` entries for `f ∈ all`). Built once per propagation.
-fn caller_index(calls: &HashMap<String, BTreeSet<String>>) -> HashMap<&str, Vec<&str>> {
+/// callee → its callers (reverse of `calls`), restricted to callers present in `all`. The naive sweep
+/// only ever relaxes `f ∈ all`, so a caller outside `all` must NOT be re-enqueued — else the worklist
+/// would grow an `acc` entry the sweep never created, diverging from the reference output. Enforced here
+/// (a filter), not merely assumed. Built once per propagation.
+fn caller_index<'a>(
+    calls: &'a HashMap<String, BTreeSet<String>>,
+    in_all: &HashSet<&str>,
+) -> HashMap<&'a str, Vec<&'a str>> {
     let mut rev: HashMap<&str, Vec<&str>> = HashMap::new();
     for (f, cs) in calls {
+        if !in_all.contains(f.as_str()) {
+            continue; // the naive `for f in all` sweep never relaxes this caller
+        }
         for c in cs {
             rev.entry(c.as_str()).or_default().push(f.as_str());
         }
@@ -36,7 +44,8 @@ pub(crate) fn propagate(
     for f in all {
         acc.entry(f.clone()).or_default();
     }
-    let rev = caller_index(calls);
+    let in_all: HashSet<&str> = all.iter().map(String::as_str).collect();
+    let rev = caller_index(calls, &in_all);
 
     // Seed the worklist with every function: each must absorb its callees' current effects at
     // least once. Order doesn't affect the fixpoint; declaration order keeps behaviour familiar.
@@ -72,7 +81,8 @@ pub(crate) fn propagate_str(
     all: &[String],
 ) -> HashMap<String, BTreeSet<String>> {
     let mut acc = direct.clone();
-    let rev = caller_index(calls);
+    let in_all: HashSet<&str> = all.iter().map(String::as_str).collect();
+    let rev = caller_index(calls, &in_all);
 
     let mut queue: VecDeque<String> = all.iter().cloned().collect();
     let mut queued: HashSet<String> = all.iter().cloned().collect();
