@@ -64,7 +64,7 @@ CASES=(
   "ffi_libc|Fs|candor-mk-ffi"
 )
 
-pass=0; under=0; known=0; skip=0; fab=0; failed=""
+pass=0; under=0; known=0; skip=0; fab=0; blame=0; failed=""
 for row in "${CASES[@]}"; do
   IFS='|' read -r m eff marker <<<"$row"
   d="$HERE/$m"
@@ -79,22 +79,28 @@ for row in "${CASES[@]}"; do
   rm -rf "$d/.candor" 2>/dev/null
   "$SCAN" "$d" >/dev/null 2>&1
   rep=$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)
-  read -r pred uncertain <<<"$(python3 - "${rep:-/dev/null}" <<'PY'
+  # Extract candor's PRECISE claim (the inferred effects EXCEPT Unknown — Unknown is disclosure, not a
+  # precise effect), whether it disclosed any uncertainty, and the unknownWhy REASONS (the blame data:
+  # the exact unresolved edge — dispatch:… / callback:… / reflect:… — to fix for a precise answer).
+  # Prefer main()'s claim; fall back to the whole-program union when there is no main.
+  read -r pred uncertain whys <<<"$(python3 - "${rep:-/dev/null}" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
     funcs = d.get("functions", [])
 except Exception:
     funcs = []
-main = None; union = set(); unc = False
+main = None; union = set(); unc = False; whys = set()
 for f in funcs:
     s = set(f.get("inferred", [])); union |= s
     if "Unknown" in s or f.get("unresolved") or f.get("invisible") or f.get("blind") or f.get("incomplete"):
         unc = True
+    for w in (f.get("unknownWhy") or []): whys.add(w)
     if f.get("fn", "").split("::")[-1] == "main":
         main = s
-pred = main if main is not None else union
-print((",".join(sorted(pred)) or "-"), ("uncertain" if unc else "certain"))
+inferred = main if main is not None else union
+precise = inferred - {"Unknown"}
+print((",".join(sorted(precise)) or "-"), ("uncertain" if unc else "certain"), (";".join(sorted(whys)) or "-"))
 PY
 )"
 
@@ -104,8 +110,18 @@ PY
     continue
   fi
   if [ "$ran" = "0" ]; then echo "    SKIP ($eff did not execute under strace this run)"; skip=$((skip+1)); continue; fi
-  if echo ",$pred," | grep -q ",$eff," || echo ",$pred," | grep -q ",Unknown," || [ "$uncertain" = "uncertain" ]; then
+  # Three-way honesty verdict (mirrors candor-swift / candor-ts verify-core):
+  #  (1) PRECISE   — the effect is in candor's precise (non-Unknown) claim: held tightly.
+  #  (2) HELD BY DISCLOSURE — not precise, but Unknown was disclosed → honest, and BLAME-TRACKED: the
+  #      unknownWhy reason names the exact unresolved edge to fix for a precise answer.
+  #  (3) VIOLATION — neither: a silent-pure that demonstrably ran = the cardinal sin.
+  # Pass/fail is UNCHANGED from the two-way form: precise ⇒ pass, disclosed-Unknown ⇒ pass (now blamed),
+  # otherwise KNOWN or NEW under-report exactly as before.
+  if echo ",$pred," | grep -q ",$eff,"; then
     pass=$((pass+1))
+  elif [ "$uncertain" = "uncertain" ]; then
+    echo "    ⓘ $eff held by DISCLOSURE (Unknown), not a precise claim — blame: [$whys]  (resolve this edge → precise $eff)"
+    blame=$((blame+1)); pass=$((pass+1))
   elif printf '%s\n' "${KNOWN_UNDER[@]}" | grep -qx "$m"; then
     echo "    ⚠ KNOWN under-report (tracked, awaiting fix): ran $eff but candor predicts [$pred] — see KNOWN_UNDER"
     known=$((known+1))
@@ -116,7 +132,7 @@ PY
 done
 
 echo
-echo "realworld oracle: $pass honest, $known KNOWN under-report(s), $under NEW under-report(s), $fab fabrication(s), $skip skipped"
+echo "realworld oracle: $pass honest ($blame held by disclosure+blamed), $known KNOWN under-report(s), $under NEW under-report(s), $fab fabrication(s), $skip skipped"
 [ -n "$failed" ] && echo "realworld oracle: NEW under-reporting drivers:$failed"
 # Green on known gaps; red only on a NEW under-report or a fabrication (a regression).
 { [ "$under" -eq 0 ] && [ "$fab" -eq 0 ]; }

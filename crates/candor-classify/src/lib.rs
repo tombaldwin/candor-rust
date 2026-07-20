@@ -2094,9 +2094,19 @@ mod tests {
         assert_eq!(classify("reqwest", "reqwest::RequestBuilder::header"), None);
         assert_eq!(classify("reqwest", "reqwest::RequestBuilder::json"), None);
         assert_eq!(classify("reqwest", "reqwest::ClientBuilder::build"), None);
+        // RAW POSIX SOCKETS — the lowest network tier, pinned as a regression guard (four-way close:
+        // swift got a raw-socket regression this week from a bare-identifier collision; rust never had
+        // the gap because it classifies path-QUALIFIED via the syscall-leaf table, but pin it so the
+        // `socket`/`connect` Net rows can't silently drop). `libc::connect`/`libc::socket` are the direct
+        // FFI syscalls; `nix::sys::socket::connect` is the safe wrapper; both bottom out in the NET table.
+        assert_eq!(classify("libc", "libc::connect"), Some("Net"));
+        assert_eq!(classify("libc", "libc::socket"), Some("Net"));
+        assert_eq!(classify("libc", "libc::bind"), Some("Net"));
+        assert_eq!(classify("libc", "libc::accept"), Some("Net"));
         // nix routes through the libc syscall table (same leaves): I/O classified, generic fd ops skipped.
         assert_eq!(classify("nix", "nix::fcntl::open"), Some("Fs"));
         assert_eq!(classify("nix", "nix::sys::socket::connect"), Some("Net"));
+        assert_eq!(classify("nix", "nix::sys::socket::socket"), Some("Net"));
         assert_eq!(classify("nix", "nix::unistd::execvp"), Some("Exec"));
         assert_eq!(classify("nix", "nix::unistd::write"), None); // generic fd op — deliberately unclassified
         assert_eq!(classify("nix", "nix::unistd::getpid"), None); // not I/O
