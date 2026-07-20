@@ -37,7 +37,7 @@
 //!   the report describes what the CRATE does, not what its harness does (`--include-tests` keeps them).
 //!   See eval/calibration for accuracy on 35 real crates.
 
-pub(crate) use std::collections::{BTreeMap, BTreeSet, HashMap};
+pub(crate) use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 pub(crate) use std::path::Path;
 pub(crate) use candor_report::ReportEntry;
 pub(crate) use syn::visit::Visit;
