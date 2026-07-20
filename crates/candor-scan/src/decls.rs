@@ -274,6 +274,7 @@ pub(crate) fn seed_vars(sig: &syn::Signature, self_ty: Option<&str>, uses: &Hash
 /// `seed_vars` (Ident-only) misses. Also records the per-position types of a TUPLE-typed param into
 /// `tuple_of` (`fn f(pair: (Sender, usize))` → a later `let (s, _) = pair`). Returns
 /// `(elem_of, tuple_of)`; tuple-DESTRUCTURED param bindings are merged into `vars`.
+#[allow(clippy::type_complexity)] // an internal multi-index return — the four maps are each meaningful and named in the doc above; a tuple-of-aliases would obscure more than it clarifies
 pub(crate) fn seed_elem_of(
     sig: &syn::Signature,
     vars: &mut HashMap<String, String>,
