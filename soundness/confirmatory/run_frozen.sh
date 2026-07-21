@@ -61,7 +61,7 @@ for l in sys.stdin:
   for tb in "${TESTBINS[@]}"; do
     [ -x "$tb" ] || continue
     # -f follow forks; +openat2 (modern glibc uses openat2 for opens); strace stderr -> a diag file, not /dev/null.
-    strace -f -e trace=openat,openat2,open,connect,socket,execve,unlink,unlinkat -o "$d/trace.one" "$tb" >/dev/null 2>"$d/strace.err" || true
+    timeout -s KILL 240 strace -f -e trace=openat,openat2,open,connect,socket,execve,unlink,unlinkat -o "$d/trace.one" "$tb" >/dev/null 2>"$d/strace.err" || true
     cat "$d/trace.one" >> "$d/trace.log" 2>/dev/null; rm -f "$d/trace.one"
   done
   echo "  DIAG trace lines=$(wc -l < "$d/trace.log" 2>/dev/null) strace.err='$(tail -1 "$d/strace.err" 2>/dev/null)'"
