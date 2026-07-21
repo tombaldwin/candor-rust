@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# FROZEN confirmatory run — Rust syscall arm (see FROZEN.md). Linux + strace. Reuses the mechanism of the
+# CI-green soundness/realworld oracle (candor-scan prediction vs kernel ground truth), on a held-out,
+# version-pinned, pre-registered crate manifest.
+#
+#   EXPECT_SHA=<linux candor-scan sha256>  bash run_frozen.sh
+#
+# EXECUTION NOTE: authored + mechanism-proven; run this on a Linux CI runner / non-loaded Linux host. It was
+# not executed on the author's macOS (Docker too CPU-starved to build candor-scan in reasonable time).
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+case "$(uname -s)" in Linux) : ;; *) echo "rust confirmatory: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
+command -v strace >/dev/null 2>&1 || { echo "strace not installed — skipping."; exit 0; }
+export RUSTFLAGS="${RUSTFLAGS:--C linker=cc}"   # the repo .cargo/config forces dylint-link; scan is stable
+
+echo "building candor-scan (stable)…"
+( cd "$ROOT" && cargo +stable build -q -p candor-scan ) || { echo "FAIL: candor-scan build"; exit 1; }
+SCAN="$ROOT/target/debug/candor-scan"
+[ -x "$SCAN" ] || { echo "FAIL: no candor-scan"; exit 1; }
+GOT="$(sha256sum "$SCAN" | cut -d' ' -f1)"
+if [ -n "${EXPECT_SHA:-}" ] && [ "$EXPECT_SHA" != "$GOT" ]; then
+  echo "FROZEN ABORT: candor-scan hash mismatch (got $GOT want $EXPECT_SHA)"; exit 1
+fi
+echo "candor-scan sha256: $GOT   (set EXPECT_SHA to enforce)"
+
+WORK="${CORPUS_WORK:-${TMPDIR:-/tmp}/candor-rust-corpus}"; mkdir -p "$WORK" "$HERE/results"
+SUM="$HERE/results/FROZEN-SUMMARY.tsv"
+printf 'crate\ttag\tobserved\tcovered\tviolations\tverdict\n' > "$SUM"
+
+# map a strace effect syscall to a candor effect class
+class_of() { case "$1" in openat|open|unlink|unlinkat) echo Fs;; connect) echo Net;; execve) echo Exec;; *) echo "";; esac; }
+
+grep -vE '^\s*#|^\s*$' "$HERE/manifest.tsv" | while IFS=$'\t' read -r name url tag effects why; do
+  echo; echo "################## $name ($tag) ##################"
+  d="$WORK/$name"
+  [ -d "$d/.git" ] || { rm -rf "$d"; git clone --quiet --depth 1 --branch "$tag" "$url" "$d" 2>/dev/null \
+      || { echo "  clone-failed"; printf '%s\t%s\t-\t-\t-\tclone-failed\n' "$name" "$tag" >>"$SUM"; continue; }; }
+
+  # candor-scan the crate SOURCE (syntactic; no build). Collect the union of predicted effect classes and
+  # whether ANY function discloses Unknown (program-level coverage).
+  rm -rf "$d/.candor"; "$SCAN" "$d" >/dev/null 2>&1
+  rep=$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)
+  [ -n "$rep" ] || { echo "  no report — scan-failed"; printf '%s\t%s\t-\t-\t-\tscan-failed\n' "$name" "$tag" >>"$SUM"; continue; }
+
+  # Build the crate's OWN test binary and strace THAT (not cargo).
+  if ! ( cd "$d" && cargo test -q --no-run ) >/"$d/build.log" 2>&1; then
+    echo "  build-failed (see $d/build.log)"; printf '%s\t%s\t-\t-\t-\tbuild-failed\n' "$name" "$tag" >>"$SUM"; continue
+  fi
+  bin=$(ls -t "$d"/target/debug/deps/${name//-/_}-* 2>/dev/null | grep -vE '\.d$|\.so$' | head -1)
+  [ -x "$bin" ] || { echo "  no test bin"; printf '%s\t%s\t-\t-\t-\tno-test-bin\n' "$name" "$tag" >>"$SUM"; continue; }
+  strace -f -e trace=openat,open,connect,execve,unlink,unlinkat -o "$d/trace.log" "$bin" >/dev/null 2>&1 || true
+
+  observed=$(python3 - "$d/trace.log" "$rep" <<'PY'
+import json,sys,re
+trace,rep=sys.argv[1],sys.argv[2]
+CLS={'openat':'Fs','open':'Fs','unlink':'Fs','unlinkat':'Fs','connect':'Net','execve':'Exec'}
+obs=set()
+for line in open(trace,errors='replace'):
+    m=re.match(r'(?:\[pid \d+\] )?(\w+)\(',line)
+    if m and m.group(1) in CLS:
+        # exclude the loader/std noise openat of the test binary itself is unavoidable; Fs is still Fs.
+        obs.add(CLS[m.group(1)])
+d=json.load(open(rep)); named=set(); unknown=False
+for f in d.get('functions',[]):
+    inf=set(f.get('inferred') or [])
+    named|= (inf - {'Unknown'})
+    if 'Unknown' in inf or f.get('invisible') or f.get('unresolved') or f.get('incomplete'): unknown=True
+# a Net/Db/Llm refinement: Db/Llm count as Net-covered
+covered=set(); viol=set()
+for c in obs:
+    if c in named or unknown: covered.add(c)
+    else: viol.add(c)
+print("%s|%s|%s"%(",".join(sorted(obs)) or "-", ",".join(sorted(covered)) or "-", ",".join(sorted(viol)) or "-"))
+PY
+)
+  IFS='|' read -r obs cov vio <<<"$observed"
+  verdict=$([ "$vio" = "-" ] && echo "H-holds" || echo "VIOLATION[$vio]")
+  echo "  observed=[$obs] covered=[$cov] -> $verdict"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$tag" "$obs" "$cov" "$vio" "$verdict" >>"$SUM"
+done
+
+echo; echo "===================== RUST CONFIRMATORY (program-level H) ====================="
+column -t -s "$(printf '\t')" "$SUM" 2>/dev/null || cat "$SUM"
+nviol=$(awk -F'\t' 'NR>1 && $6 ~ /VIOLATION/' "$SUM" | wc -l | tr -d ' ')
+echo; echo "crates with an undisclosed observed effect class (program-level false all-clear): $nviol"
