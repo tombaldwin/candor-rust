@@ -71,11 +71,12 @@ import json,sys,re
 trace,rep=sys.argv[1],sys.argv[2]
 CLS={'openat':'Fs','openat2':'Fs','open':'Fs','unlink':'Fs','unlinkat':'Fs','connect':'Net','socket':'Net','execve':'Exec'}
 obs=set()
+# strace -f prefixes lines as "PID  syscall(...)" (pid, spaces, syscall) — not "[pid N] syscall(". Match the
+# effect syscall name wherever it sits, tolerant of the pid prefix, resumed/unfinished lines, and no-prefix.
+RX=re.compile(r'(?:^|\s)(openat2|openat|open|connect|socket|execve|unlink|unlinkat)\(')
 for line in open(trace,errors='replace'):
-    m=re.match(r'(?:\[pid \d+\] )?(\w+)\(',line)
-    if m and m.group(1) in CLS:
-        # exclude the loader/std noise openat of the test binary itself is unavoidable; Fs is still Fs.
-        obs.add(CLS[m.group(1)])
+    m=RX.search(line)
+    if m and m.group(1) in CLS: obs.add(CLS[m.group(1)])
 d=json.load(open(rep)); named=set(); unknown=False
 for f in d.get('functions',[]):
     inf=set(f.get('inferred') or [])
