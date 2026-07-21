@@ -31,3 +31,21 @@ pre-registered** discipline on a **held-out** crate corpus.
   function names or discloses).
 - **Acceptance:** zero *undisclosed* observed-effect classes (a program-level silent under-report is the
   cardinal sin); disclosed `Unknown` is a pass.
+
+## Result (GitHub CI, ubuntu-latest, 2026-07-21)
+
+5/5 held-out crates: every observed effect class (Fs/Net/Exec, kernel-witnessed) is **covered** by
+candor-scan (named or `Unknown`-disclosed). **0 program-level false all-clears; H holds on all.**
+
+| crate | tag | observed | covered | violations |
+|---|---|---|---|---|
+| sysinfo | v0.31.4 | Fs,Net,Exec | Fs,Net,Exec | 0 |
+| tar | 0.4.46 | Fs,Net,Exec | Fs,Net,Exec | 0 |
+| notify | notify-6.1.1 | Fs,Exec | Fs,Exec | 0 |
+| os_pipe | 1.2.1 | Fs,Net,Exec | Fs,Net,Exec | 0 |
+| tiny_http | 0.12.0 | Fs,Net,Exec | Fs,Net,Exec | 0 |
+
+Honest caveat: **program-level** (not per-function like the JVM arm), and the `libtest` harness inflates
+`observed` (it opens files, sockets for the runner, and spawns for parallelism) — over-observation is the
+*safe* direction (it can only make a class easier to cover, never hide a real miss). The mechanism-
+independent kernel oracle is the strength; the coarseness is stated.
