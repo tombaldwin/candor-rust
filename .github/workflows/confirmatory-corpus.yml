@@ -1,0 +1,34 @@
+# FROZEN confirmatory corpus — Rust syscall arm, run on GitHub's Linux runners (where strace is fast and
+# isolated, unlike a CPU-starved local Docker). Manual + weekly: it clones + test-builds a held-out,
+# version-pinned crate corpus (soundness/confirmatory/manifest.tsv) and checks candor-scan's per-function
+# prediction against the kernel. A violation is a REPORTED confirmatory datapoint (per FROZEN.md's
+# report-not-fix discipline), uploaded as an artifact — not a red CI gate. The "frozen" binary is
+# candor-scan built from THIS commit's source (the source pin is the freeze).
+name: confirmatory-corpus
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * 1'   # weekly (Mon 05:23 UTC); heavy, so not on every push
+
+concurrency:
+  group: confirmatory-corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  confirmatory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install strace
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - name: Frozen confirmatory run (held-out crates; candor-scan vs kernel)
+        run: bash soundness/confirmatory/run_frozen.sh
+      - name: Upload frozen per-crate disposition
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-confirmatory-summary
+          path: soundness/confirmatory/results/FROZEN-SUMMARY.tsv
+          if-no-files-found: warn
