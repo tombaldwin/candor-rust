@@ -60,14 +60,16 @@ for l in sys.stdin:
   : > "$d/trace.log"
   for tb in "${TESTBINS[@]}"; do
     [ -x "$tb" ] || continue
-    strace -f -e trace=openat,open,connect,execve,unlink,unlinkat -o "$d/trace.one" "$tb" >/dev/null 2>&1 || true
+    # -f follow forks; +openat2 (modern glibc uses openat2 for opens); strace stderr -> a diag file, not /dev/null.
+    strace -f -e trace=openat,openat2,open,connect,socket,execve,unlink,unlinkat -o "$d/trace.one" "$tb" >/dev/null 2>"$d/strace.err" || true
     cat "$d/trace.one" >> "$d/trace.log" 2>/dev/null; rm -f "$d/trace.one"
   done
+  echo "  DIAG trace lines=$(wc -l < "$d/trace.log" 2>/dev/null) strace.err='$(tail -1 "$d/strace.err" 2>/dev/null)'"
 
   observed=$(python3 - "$d/trace.log" "$rep" <<'PY'
 import json,sys,re
 trace,rep=sys.argv[1],sys.argv[2]
-CLS={'openat':'Fs','open':'Fs','unlink':'Fs','unlinkat':'Fs','connect':'Net','execve':'Exec'}
+CLS={'openat':'Fs','openat2':'Fs','open':'Fs','unlink':'Fs','unlinkat':'Fs','connect':'Net','socket':'Net','execve':'Exec'}
 obs=set()
 for line in open(trace,errors='replace'):
     m=re.match(r'(?:\[pid \d+\] )?(\w+)\(',line)
