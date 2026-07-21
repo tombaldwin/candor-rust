@@ -43,13 +43,26 @@ grep -vE '^\s*#|^\s*$' "$HERE/manifest.tsv" | while IFS=$'\t' read -r name url t
   rep=$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)
   [ -n "$rep" ] || { echo "  no report — scan-failed"; printf '%s\t%s\t-\t-\t-\tscan-failed\n' "$name" "$tag" >>"$SUM"; continue; }
 
-  # Build the crate's OWN test binary and strace THAT (not cargo).
-  if ! ( cd "$d" && cargo test -q --no-run ) >/"$d/build.log" 2>&1; then
+  # Build ALL the crate's test binaries (lib unit tests AND integration tests — the latter usually hold the
+  # real I/O) and strace EACH (never cargo, whose own syscalls would pollute). cargo --message-format=json
+  # reports every test executable's path.
+  if ! ( cd "$d" && cargo test -q --no-run ) >"$d/build.log" 2>&1; then
     echo "  build-failed (see $d/build.log)"; printf '%s\t%s\t-\t-\t-\tbuild-failed\n' "$name" "$tag" >>"$SUM"; continue
   fi
-  bin=$(ls -t "$d"/target/debug/deps/${name//-/_}-* 2>/dev/null | grep -vE '\.d$|\.so$' | head -1)
-  [ -x "$bin" ] || { echo "  no test bin"; printf '%s\t%s\t-\t-\t-\tno-test-bin\n' "$name" "$tag" >>"$SUM"; continue; }
-  strace -f -e trace=openat,open,connect,execve,unlink,unlinkat -o "$d/trace.log" "$bin" >/dev/null 2>&1 || true
+  mapfile -t TESTBINS < <( cd "$d" && cargo test --no-run --message-format=json 2>/dev/null \
+    | python3 -c "import json,sys
+for l in sys.stdin:
+    try: m=json.loads(l)
+    except: continue
+    if isinstance(m,dict) and m.get('profile',{}).get('test') and m.get('executable'): print(m['executable'])" )
+  [ "${#TESTBINS[@]}" -gt 0 ] || { echo "  no test bins"; printf '%s\t%s\t-\t-\t-\tno-test-bin\n' "$name" "$tag" >>"$SUM"; continue; }
+  echo "  ${#TESTBINS[@]} test binaries -> strace each"
+  : > "$d/trace.log"
+  for tb in "${TESTBINS[@]}"; do
+    [ -x "$tb" ] || continue
+    strace -f -e trace=openat,open,connect,execve,unlink,unlinkat -o "$d/trace.one" "$tb" >/dev/null 2>&1 || true
+    cat "$d/trace.one" >> "$d/trace.log" 2>/dev/null; rm -f "$d/trace.one"
+  done
 
   observed=$(python3 - "$d/trace.log" "$rep" <<'PY'
 import json,sys,re
