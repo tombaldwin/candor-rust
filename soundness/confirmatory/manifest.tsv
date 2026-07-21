@@ -1,0 +1,10 @@
+# Pre-registered confirmatory corpus — Rust syscall arm. Held-out, version-pinned. (See FROZEN.md.)
+# Columns: name<TAB>git_url<TAB>tag<TAB>effect_classes<TAB>why (real-syscall tests, held-out)
+# EXCLUDED (dev-calibrated / A/B'd): std ureq minreq socket2 duct xshell subprocess fs-err fs-extra tempfile
+#   walkdir glob memmap2 filetime zip libc syn tokio hyper serde_json clap reqwest h2 flate2.
+which	https://github.com/harryfei/which.rs	6.0.3	Fs	PATH resolution stats/accesses real files — its own tests hit the filesystem
+sysinfo	https://github.com/GuillaumeGomez/sysinfo	v0.31.4	Fs	reads /proc, /sys — guaranteed real openat in its tests
+tar	https://github.com/alexcrichton/tar-rs	0.4.42	Fs	archive build/extract to real files in its integration tests
+notify	https://github.com/notify-rs/notify	notify-6.1.1	Fs	inotify/kqueue file watching — real watch syscalls in tests
+os_pipe	https://github.com/oconnor663/os_pipe.rs	1.2.1	Ipc	real pipe(2) + fd plumbing; a Net/Ipc-adjacent held-out control
+tiny_http	https://github.com/tiny-http/tiny-http	0.12.0	Net	binds a real TCP socket in its tests — Net via std::net in its own code
