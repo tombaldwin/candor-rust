@@ -3,6 +3,20 @@
 
 use crate::*;
 
+/// Total CALLS into κ-uncovered dependencies at or above which the scan is assumed to be MISSING AN
+/// INPUT — pointed at the crate's own code with nothing standing in for what it depends on — and so
+/// earns the scan-completeness nudge under the κ ledger (see the emission site in `scan_one`).
+///
+/// VOLUME, not dependency COUNT, and that choice is load-bearing: count is the wrong metric in BOTH
+/// directions. candor-java's own `build/classes` makes 519 uncovered calls into just 4 packages — the
+/// textbook "you pointed it at the classes, not the deployed artifact" scan — which any count-based
+/// threshold misses entirely, while a small crate touching 5 tiny util deps would be nudged for
+/// nothing. A scan whose dependencies ARE supplied (`--deps` / CANDOR_DEPS chaining) sits at or near
+/// zero. Held at candor-java's 50 so both engines nudge on the same evidence.
+///
+/// ADVISORY ONLY: one stderr line. It never touches the report, the gate verdict, or the exit code.
+const UNCOVERED_CALLS_NUDGE_MIN: usize = 50;
+
 pub(crate) fn scan_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = ".".to_string();
@@ -1457,6 +1471,33 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             shown.join(", "),
             more
         );
+        // SCAN-COMPLETENESS NUDGE. A high VOLUME of calls into uncovered dependencies is the signature
+        // of a scan that is missing an INPUT rather than one whose classifier is imprecise: the code
+        // leans hard on crates nothing in this run can see into, so what those crates do is simply
+        // absent. Measured on a real 18.7k-fn webapp (the JVM engine, same threshold): scanned app-only
+        // it could PROVE Net on 465 functions; re-scanned as the deployed artifact — the app AND its
+        // 222 dependency jars — the same gate proved Net on 5,865. The reaches did not become more
+        // precise, they became VISIBLE. Here the equivalent move is `--deps` (or chaining sibling
+        // reports through CANDOR_DEPS), which is why the remedy names it.
+        //
+        // The nudge deliberately promises VISIBILITY ONLY — never dispatch resolution. On that same
+        // webapp 23 of 26 unresolved dispatches were over the app's OWN broad hierarchies, which no
+        // amount of extra dependency code can fix; promising otherwise would be a claim we can't keep.
+        //
+        // Keyed on the ledger's own per-dep call counts, so this line and the ledger above can never
+        // disagree about the evidence. Rides inside the ledger's `!quiet` block: a dependency scan
+        // under --deps is not the surface being reported on, and the user is already doing the thing.
+        let uncovered_calls: usize = coverage_ledger.iter().map(|(_, n)| n).sum();
+        if uncovered_calls >= UNCOVERED_CALLS_NUDGE_MIN {
+            eprintln!(
+                "candor-scan: hint — {} call{} go into {} dependenc{} that {} not scanned, so their effects are invisible here. If you scanned only your own crate, scan what it depends on too (`--deps` walks the Cargo.lock tree once and chains the reports; CANDOR_DEPS chains ones you already have): those reaches then resolve to DETERMINED effects instead of being absent.",
+                uncovered_calls,
+                if uncovered_calls == 1 { "" } else { "s" },
+                coverage_ledger.len(),
+                if coverage_ledger.len() == 1 { "y" } else { "ies" },
+                if coverage_ledger.len() == 1 { "is" } else { "are" }
+            );
+        }
     }
 
     // The cold-repo hook: after the effect summary + κ ledger, surface the SINGLE most surprising
