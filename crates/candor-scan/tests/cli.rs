@@ -608,6 +608,80 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
         "the call into the all-pure dep reads pure (omitted from the report): {v}");
 }
 
+/// A crate whose whole body is `calls` qualified calls spread over two DECLARED-but-unvendored
+/// dependencies — the κ ledger's raw material, at an exact call VOLUME. Split over two deps so the
+/// fixture also proves the trigger is the SUM, not the dependency count (2 either side of the line).
+fn make_uncovered_caller(name: &str, calls: usize) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"),
+        format!("[package]\nname = \"{name}\"\n\n[dependencies]\ndepa = \"1\"\ndepb = \"1\"\n")).unwrap();
+    let mut body = String::from("pub fn go() {\n");
+    for i in 0..calls {
+        // Distinct leaf names: the count must come from CALL SITES, not from distinct paths happening
+        // to coincide — a fixture that leaned on repetition could pass for the wrong reason.
+        body.push_str(&format!("    {}::hit{i}();\n", if i % 2 == 0 { "depa" } else { "depb" }));
+    }
+    body.push_str("}\n");
+    std::fs::write(d.join("src/lib.rs"), body).unwrap();
+    d
+}
+
+#[test]
+fn scan_completeness_nudge_keys_on_call_volume_at_an_exact_threshold() {
+    // The scan-completeness nudge (candor-java parity, UNCOVERED_CALLS_NUDGE_MIN = 50): heavy CALL
+    // VOLUME into κ-uncovered dependencies means the scan is missing an INPUT, not that the classifier
+    // was imprecise — so say so, and name `--deps` as the remedy. ADVISORY ONLY.
+    //
+    // The boundary is pinned with LITERAL call counts, deliberately not derived from the constant: a
+    // fixture built as "threshold" / "threshold - 1" would keep passing if the constant silently
+    // drifted, which is exactly the regression this guards. If the constant moves, this test must be
+    // edited on purpose.
+
+    // JUST BELOW (49 calls over 2 deps): the ledger still discloses the blind spot, the nudge stays
+    // silent. Volume, not COUNT — 2 uncovered deps is not itself evidence of a dependency-less scan.
+    let d = make_uncovered_caller("nudgeunder", 49);
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("classifier doesn't cover") && stderr.contains("depa (25 calls)"),
+        "fixture precondition: 49 uncovered calls over 2 deps must reach the ledger: {stderr}");
+    assert!(!stderr.contains("hint —"),
+        "one call below the threshold the nudge must stay silent: {stderr}");
+
+    // AT the threshold (50): the nudge fires, once, after the ledger line.
+    let d = make_uncovered_caller("nudgeat", 50);
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run candor-scan");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(stderr.matches("hint —").count(), 1, "exactly one nudge line: {stderr}");
+    assert!(stderr.contains("50 calls go into 2 dependencies that are not scanned"),
+        "the nudge reports the SUM of the ledger's call counts: {stderr}");
+    assert!(stderr.find("classifier doesn't cover").unwrap() < stderr.find("hint —").unwrap(),
+        "the nudge follows the ledger it is keyed on: {stderr}");
+    // It promises VISIBILITY, never dispatch resolution — more dependency code cannot resolve a
+    // dispatch over the crate's OWN broad trait hierarchy, so the wording must not imply it can.
+    // Asserted on the NUDGE LINE alone, so neighbouring receipts can't satisfy or break it.
+    let nudge = stderr.lines().find(|l| l.contains("hint —")).unwrap();
+    assert!(nudge.contains("invisible here") && nudge.contains("--deps"),
+        "the nudge names what is lost (visibility) and the remedy: {nudge}");
+    assert!(!nudge.contains("dispatch") && !nudge.contains("Unknown"),
+        "the nudge must not promise dispatch resolution: {nudge}");
+    // ADVISORY: an ungated scan of pure-looking code still exits 0.
+    assert_eq!(out.status.code(), Some(0), "the nudge must not move the exit code");
+
+    // ...and it CANNOT contaminate a JSON stdout stream (`--json` — stdout stays one pure document).
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("hint —"), "the nudge still prints under --json: {stderr}");
+    assert!(!stdout.contains("hint —"), "the advisory must never reach the JSON stream:\n{stdout}");
+    serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("stdout is one pure JSON document");
+    assert_eq!(out.status.code(), Some(0), "the nudge must not move the exit code under --json");
+}
+
 #[test]
 fn candor_config_relative_path_resolves_against_the_config_home_not_the_cwd() {
     // SPEC §3.4: a RELATIVE path value anchors to the config's HOME directory — the directory
