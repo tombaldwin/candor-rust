@@ -5,7 +5,7 @@
 /// must not silently drop the gate), a known-but-unimplemented key (this engine reads `policy` +
 /// `baseline` + `deps`) is inert. Values: first token = key (ASCII-lowercased), rest of line =
 /// value; `#` comments; blanks.
-pub(crate) const CONFIG_KEYS: [&str; 9] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "unknown-ratchet"];
+pub(crate) const CONFIG_KEYS: [&str; 10] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet"];
 
 /// The subset of [`CONFIG_KEYS`] this engine actually wires to a mode. The rest are spec-inert here —
 /// but a checked-in enforcement key that silently does nothing is a DECLARED-GATE-SILENTLY-OFF (the
@@ -66,9 +66,14 @@ pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String,
             eprintln!("candor-scan: ignoring unknown config key '{key}' in {}", file.display());
             continue;
         }
-        if key == "unknown-alias" {
-            // ⟨0.19⟩ MULTI-VALUE reason-class alias — extracted separately via
-            // candor_classify::policy::parse_unknown_aliases (a single-value map can't hold many names).
+        if key == "unknown-alias" || key == "net-partner" {
+            // MULTI-VALUE keys, both extracted from the config TEXT rather than this single-value map
+            // (which cannot hold many names): ⟨0.19⟩ `unknown-alias` via parse_unknown_aliases, ⟨0.20⟩
+            // `net-partner` via parse_net_partners. `net-partner` was missing from CONFIG_KEYS entirely,
+            // so a config that set it drew "ignoring unknown config key 'net-partner'" while the value
+            // WAS in fact honoured — a FALSE disclosure, worse than a missing one in a tool whose whole
+            // contract is that its statements about itself are true. Recognized here, and skipped before
+            // the implemented-check below so it is not then mislabelled inert either.
             continue;
         }
         if !CONFIG_KEYS_IMPLEMENTED.contains(&key.as_str()) {
