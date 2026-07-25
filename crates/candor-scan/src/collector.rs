@@ -394,17 +394,135 @@ impl<'a> CallCollector<'a> {
     ///
     /// GOVERNING DISCIPLINE (critical — these constructs are PERVASIVE): a PURE local impl contributes
     /// nothing (its `Type::method` FnInfo carries no effect — the edge resolves to a pure body); an
-    /// UNRESOLVABLE operand (a std/external value like `String`/`i32`, a generic/`impl Trait` param in
-    /// `trait_vars`, an opaque return) yields None → NO edge, NOT a disclosed Unknown — a blanket Unknown
-    /// here would FLOOD every `format!`/`+`/`concat` in real code. We never fabricate; only a real LOCAL
-    /// effectful impl lights up. An impl whose method body isn't a UNIQUE local def is an honest miss
-    /// (`resolve_target`'s uniqueness filter), e.g. a type impl'ing both Display and Debug (two `T::fmt`).
+    /// UNRESOLVABLE operand (a std/external value like `String`/`i32`, an opaque return) yields None →
+    /// NO edge, NOT a disclosed Unknown — a blanket Unknown here would FLOOD every `format!`/`+`/`concat`
+    /// in real code. We never fabricate; only a real LOCAL effectful impl lights up. An impl whose method
+    /// body isn't a UNIQUE local def is an honest miss (`resolve_target`'s uniqueness filter), e.g. a
+    /// type impl'ing both Display and Debug (two `T::fmt`).
+    ///
+    /// A DISPATCH-TYPED operand (a generic/`impl Trait`/`dyn` param in `trait_vars`) has no concrete type
+    /// here — for the STRINGIFY family only it falls through to `charge_stringify_dispatch` (bounded CHA
+    /// over the bound); every other coercion keeps the old resolve-or-skip behaviour unchanged.
     fn charge_coercion(&mut self, operand: &syn::Expr, trait_leaf: &str, method: &str) {
-        let Some(ty) = self.resolve_recv_type(operand) else { return };
-        let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty);
+        let Some(ty) = self.resolve_recv_type(operand) else {
+            self.charge_stringify_dispatch(operand, trait_leaf, method);
+            return;
+        };
+        self.charge_coercion_ty(&ty, trait_leaf, method);
+    }
+
+    /// The concrete half of `charge_coercion`, split out so a NAMED/inline-captured format hole
+    /// (`format!("{val}")`) — which names a binding rather than an operand expression — can reuse it.
+    fn charge_coercion_ty(&mut self, ty: &str, trait_leaf: &str, method: &str) {
+        let ty_leaf = ty.rsplit("::").next().unwrap_or(ty);
         if let Some(impls) = self.trait_impls.get(trait_leaf) {
             if impls.iter().any(|t| t == ty_leaf) {
                 self.push_coercion_edge(ty_leaf, method);
+            }
+        }
+    }
+
+    /// IMPLICIT STRINGIFICATION through a DISPATCH-TYPED value — the four-way silent under-report
+    /// recorded in `candor-spec/SOUNDNESS-VEIN-implicit-stringify.md` (found on HikariCP by the RQ1
+    /// runtime oracle, reproduced in all four engines). `format!("{}", e)` / `println!` / `write!` /
+    /// `panic!` / `e.to_string()` where `e: T` under `T: Display` runs `<T as Display>::fmt`. candor
+    /// analyses that impl correctly — it just never edged to it from the formatting site, so an
+    /// effectful local formatter (a lazily-resolved hostname, a metrics counter, a clock read) was
+    /// absorbed SILENTLY at every format site in the crate.
+    ///
+    /// Resolution is the engine's EXISTING bounded CHA (the `visit_expr_method_call` dispatch route),
+    /// applied to the BOUND instead of a concrete receiver — the same shape candor-java resolves for
+    /// `LOGGER.warn("{}", bagEntry)` with `T extends IConcurrentBagEntry`: CHA the contract method over
+    /// the argument's declared type, edge to the LOCAL overrides, contribute nothing when there are none.
+    ///
+    /// THREE GATES, so this widens the stringify vein and nothing else:
+    ///  - ONLY the formatter family takes this route (`Display`/`Debug`, plus `ToString` as Display's
+    ///    blanket alias). The operator / `Deref` / `Index` / `Write`-writer coercions that share
+    ///    `charge_coercion` are unchanged — a `T: Add` param still resolves to nothing.
+    ///  - The bound must actually LICENSE stringification: the formatter trait itself (`T: Display`,
+    ///    `impl Display`, `&dyn Display`) or a LOCAL trait that inherits it as a supertrait
+    ///    (`trait Entry: Display` + `T: Entry` — the narrow, precise case). An unrelated bound
+    ///    (`T: Store`) resolves to nothing.
+    ///  - A bound with NO local implementor contributes NOTHING — no edge and no `Unknown`. A crate that
+    ///    formats only std types lights nothing, exactly as the concrete route does for a `String`/`i32`.
+    ///
+    /// DENYLIST-over-allowlist: the local implementor set is taken WHOLE — we never enumerate which
+    /// formatters are "effectful". A pure `impl Display` is edged too and propagates nothing, so what we
+    /// forget over-discloses (safe) rather than silently missing (the cardinal sin).
+    fn charge_stringify_dispatch(&mut self, operand: &syn::Expr, trait_leaf: &str, method: &str) {
+        if !matches!(trait_leaf, "Display" | "Debug") {
+            return;
+        }
+        for bound in self.resolve_recv_traits(operand) {
+            self.charge_stringify_bound(&bound, trait_leaf, method);
+        }
+    }
+
+    /// One bound leaf of a stringified dispatch-typed value → its bounded-CHA edges. See
+    /// `charge_stringify_dispatch` for the gates; this is the per-bound resolution.
+    fn charge_stringify_bound(&mut self, bound: &str, trait_leaf: &str, method: &str) {
+        // Which trait's LOCAL implementors this bound licenses CHA over, and which method on each
+        // implementor actually runs. `T: ToString` admits both routes: the blanket `impl<T: Display>
+        // ToString` (→ the type's `fmt`) and a hand-written `impl ToString` (→ its own `to_string`).
+        let mut sources: Vec<(&str, &str)> = Vec::new();
+        if bound == trait_leaf {
+            sources.push((bound, method));
+        } else if trait_leaf == "Display" && bound == "ToString" {
+            sources.push(("Display", "fmt"));
+            sources.push(("ToString", "to_string"));
+        } else if self.trait_inherits(bound, trait_leaf, 0)
+            || (trait_leaf == "Display" && self.trait_inherits(bound, "ToString", 0))
+        {
+            // A LOCAL trait that INHERITS the formatter — CHA over ITS implementors, which is strictly
+            // narrower (and more precise) than the formatter trait's whole local universe.
+            sources.push((bound, method));
+        }
+        // Copy the shared index handle out of `self` so the `&mut self` edge pushes below don't
+        // conflict with holding a borrow into it.
+        let trait_impls = self.trait_impls;
+        for (cha, target_method) in sources {
+            match trait_impls.get(cha) {
+                // Narrow dispatch → edge to every local implementor's formatter. The 12-impl bound is
+                // the same cross-engine one `visit_expr_method_call` uses.
+                Some(impls) if impls.len() <= 12 => {
+                    for ty in impls {
+                        self.push_coercion_edge(ty, target_method);
+                    }
+                }
+                // Too wide to enumerate: honest indeterminacy, exactly as the local-trait CHA route
+                // reports it. (NO local impl at all is the `None` arm — nothing, not Unknown: that is
+                // the no-flood default for the overwhelmingly common std-only-formatting crate.)
+                Some(_) => self.unresolved = true,
+                None => {}
+            }
+        }
+    }
+
+    /// Does local trait `tr` have `target` among its (transitive, local) SUPERTRAITS? Lets a
+    /// `trait Entry: Display` bound resolve stringification over `Entry`'s implementors. Depth-bounded
+    /// like `trait_declares_method`; an external supertrait chain resolves to nothing.
+    fn trait_inherits(&self, tr: &str, target: &str, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let Some(lt) = self.local_traits.get(tr) else { return false };
+        lt.supertraits.iter().any(|s| s == target || self.trait_inherits(s, target, depth + 1))
+    }
+
+    /// A NAMED (`format!("{v}", v = x)`) or INLINE-CAPTURED (`format!("{val}")`) format hole stringifies
+    /// a BINDING rather than a positional value arg. Resolve the binding the same two ways the operand
+    /// route does — concrete type via `vars`, dispatch bound via `trait_vars` — and charge the same
+    /// coercion. (Rust only permits a bare identifier as an inline capture, so `vars`/`trait_vars` is
+    /// the complete lookup.) Previously such a hole was skipped outright, which made the now-dominant
+    /// `format!("{val}")` spelling a silent miss even for a CONCRETE local `impl Display`.
+    fn charge_capture(&mut self, name: &str, trait_leaf: &str, method: &str) {
+        if let Some(ty) = self.vars.get(name).cloned() {
+            self.charge_coercion_ty(&ty, trait_leaf, method);
+            return;
+        }
+        if let Some(bounds) = self.trait_vars.get(name).cloned() {
+            for b in bounds {
+                self.charge_stringify_bound(&b, trait_leaf, method);
             }
         }
     }
@@ -515,6 +633,7 @@ impl<'a> CallCollector<'a> {
         // consumes no positional slot (we can't resolve the captured ident's type here → skip it).
         let mut next_positional = 0usize;
         for hole in parse_format_holes(&fmt) {
+            let (tr, m) = if hole.debug { ("Debug", "fmt") } else { ("Display", "fmt") };
             let idx = match hole.arg {
                 FmtArg::Implicit => {
                     let i = next_positional;
@@ -522,12 +641,19 @@ impl<'a> CallCollector<'a> {
                     i
                 }
                 FmtArg::Index(i) => i,
-                // a named/inline-captured hole consumes no positional value arg
-                FmtArg::Named => continue,
+                // A NAMED / INLINE-CAPTURED hole consumes no positional value arg — but it still
+                // stringifies a value: the `name = expr` named arg if the macro supplies one, else the
+                // same-named binding it captures (`format!("{val}")`, the dominant modern spelling).
+                FmtArg::Named(name) => {
+                    match exprs[fmt_pos + 1..].iter().find_map(|e| named_arg_value(e, &name)) {
+                        Some(v) => self.charge_coercion(v, tr, m),
+                        None => self.charge_capture(&name, tr, m),
+                    }
+                    continue;
+                }
             };
             let Some(arg) = pos_args.get(idx) else { continue };
-            let trait_method = if hole.debug { ("Debug", "fmt") } else { ("Display", "fmt") };
-            self.charge_coercion(arg, trait_method.0, trait_method.1);
+            self.charge_coercion(arg, tr, m);
         }
         // WRITER side of `write!`/`writeln!`: the arg BEFORE the format string is the writer, whose
         // effectful `fmt::Write::write_str` / `io::Write::write` (driven by the default `write_fmt`) was

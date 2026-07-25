@@ -4,6 +4,40 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## Unreleased
+
+### soundness — the IMPLICIT-STRINGIFICATION vein closed in BOTH backends (cardinal sin)
+
+A formatting site runs the formatted value's `Display`/`Debug` impl. candor analysed those impls
+correctly but never edged to them **when the value's type was not a concrete local ADT** — so
+`fn describe<T: Display>(e: T) -> String { format!("{e}") }` read **silent-pure** even though it runs
+`<T as Display>::fmt`, and in the deep engine even a fully concrete caller (`describe(Loud)`) was a
+**false all-clear**. This is the four-way common-mode vein recorded in
+`candor-spec/SOUNDNESS-VEIN-implicit-stringify.md` (found on HikariCP by the RQ1 runtime oracle).
+
+Closed on both backends by extending the existing implicit-coercion machinery — no parallel mechanism:
+
+- **candor-scan**: `charge_coercion` now falls through to bounded CHA over the BOUND, for the stringify
+  family only (`Display`/`Debug`, plus `ToString` as Display's blanket alias) — a `T: Display` /
+  `impl Display` / `&dyn Display` operand, or a LOCAL trait that inherits the formatter as a supertrait
+  (`trait Entry: Display`, the narrow precise case). ≤12 local implementors → edges to each `Ty::fmt`;
+  wider → honest `Unknown`; **no local implementor → nothing** (no edge, no flood). Every other
+  coercion (operators, `Deref`, `Index`, the `write!` writer side) is untouched.
+- **candor-scan**: NAMED and INLINE-CAPTURED format holes (`format!("{val}")`, `format!("{v}", v = x)`)
+  were skipped outright — they now charge the same coercion. This alone recovered a genuine miss on
+  third-party code: `cargo-llvm-cov`'s `ProcessBuilder::run`/`read`/`run_with_output` reported `[Exec]`
+  while `format!("… {self}")` runs a `Display` impl that reads the environment → now `[Env, Exec]`.
+- **deep engine**: `fmt_argument_local_edge` resolved only a local ADT; a `Param`/`dyn` formatted value
+  now takes the same bounded CHA (`fmt_trait_local_cha`), and the generic `.to_string()` spelling is
+  covered by `generic_to_string_edge`. Beyond the bound it discloses `Unknown` under a `dispatch:`
+  reason class (spec 0.19).
+
+**A/B, zero fabrication.** candor-scan over the whole local registry — **962 crates / 470,971 analyzed
+functions**: **0 functions gained a concrete effect** other than the 4 genuine `cargo-llvm-cov`
+recoveries, **0 functions lost anything**, 93 gained an honest `Unknown` (0.020%, all at real generic
+format sites in formatting-heavy crates: tracing-subscriber, chrono, color-eyre, clap, tokio, winnow,
+rustls…). Deep engine over 6 real crates: 0 concrete gains, 0 losses, 6 `Unknown` (all chrono).
+
 ## 0.23.1 (spec 0.23) — 2026-07-20
 
 ### performance — O(V²) propagation fixpoint replaced with a worklist (no output change)

@@ -1616,6 +1616,17 @@ fn fmt_argument_local_edge<'tcx>(
     let typeck = cx.maybe_typeck_results()?;
     let arg = args.first()?; // `Argument::new_<kind>(&value)` — one arg, a reference to the value.
     let val_ty = typeck.expr_ty(arg).peel_refs();
+    // A GENERIC formatted value (`fn describe<T: Display>(e: T) { format!("{e}") }`, `impl Display`,
+    // `&dyn Display`) is a `Param`/dynamic type, not an ADT — nothing to resolve standalone, so the
+    // formatter it runs was reached SILENTLY. That is the four-way implicit-stringification vein
+    // (candor-spec/SOUNDNESS-VEIN-implicit-stringify.md), and it was silent here even at a fully
+    // CONCRETE call site (`use_it() { describe(Loud) }` read pure). Fall back to bounded CHA over the
+    // fmt trait's LOCAL implementors — the same move `visit_expr_method_call` makes for a dispatch
+    // receiver, and the same one candor-scan now makes for a `T: Display` bound. It cannot fabricate:
+    // a crate with no local impl of this fmt trait contributes nothing.
+    if matches!(val_ty.kind(), rustc_middle::ty::TyKind::Param(..) | rustc_middle::ty::TyKind::Dynamic(..)) {
+        return fmt_trait_local_cha(cx, trait_did);
+    }
     // Only a LOCAL ADT can carry a LOCAL fmt impl; a std type's fmt is non-local (pure, no edge).
     if !matches!(val_ty.kind(), rustc_middle::ty::TyKind::Adt(adt, _) if adt.did().is_local()) {
         return None;
@@ -1627,6 +1638,70 @@ fn fmt_argument_local_edge<'tcx>(
         // Unknown here: that would flood every `format!` of a local type with a derived Debug.
         None => None,
     }
+}
+
+/// `x.to_string()` where `x` is GENERIC (`fn f<T: Display>(x: T) { x.to_string() }`) or `dyn Display` —
+/// the `.to_string()` spelling of the implicit-stringification vein. `ToString` is blanket-impl'd over
+/// `Display`, so the body that runs is the value's `Display::fmt`. The CONCRETE-receiver form is already
+/// covered by HOLE 2b (`std_driver_local_edges`); this is its dispatch case, resolved by the same bounded
+/// CHA as the `format!` one. Scoped to `to_string` alone — the `Clone`/`Ord`/`Hash` element drivers in
+/// HOLE 2b are deliberately untouched.
+fn generic_to_string_edge<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &Expr<'tcx>,
+    callee_did: DefId,
+) -> Option<CallbackEdges> {
+    if callee_did.is_local()
+        || !matches!(cx.tcx.crate_name(callee_did.krate).as_str(), "core" | "std" | "alloc")
+        || cx.tcx.item_name(callee_did).as_str() != "to_string"
+    {
+        return None;
+    }
+    let ExprKind::MethodCall(_, receiver, _, _) = expr.kind else { return None };
+    let typeck = cx.maybe_typeck_results()?;
+    let recv_ty = typeck.expr_ty_adjusted(receiver).peel_refs();
+    if !matches!(recv_ty.kind(), rustc_middle::ty::TyKind::Param(..) | rustc_middle::ty::TyKind::Dynamic(..)) {
+        return None;
+    }
+    fmt_trait_local_cha(cx, cx.tcx.get_diagnostic_item(rustc_span::sym::Display)?)
+}
+
+/// BOUNDED CHA over a fmt trait's LOCAL implementors, for a formatted value whose type is GENERIC
+/// (`T: Display`) or `dyn` — the implicit-stringification vein's dispatch case. Every LOCAL `impl
+/// <FmtTrait> for X` is a possible target, so we edge to each `X::fmt`; beyond the 12-impl bound (the
+/// cross-engine one the `Iterator`/trait-object dispatch already uses) we decline to enumerate and
+/// disclose an honest `Unknown` instead — never silent-pure, which is the cardinal sin this closes.
+///
+/// NO FABRICATION, NO FLOOD: a crate with no local impl of this fmt trait yields `None` (a generic
+/// format of std values lights nothing), and every edge lands on a real local formatter body — a PURE
+/// one propagates nothing. DENYLIST-over-allowlist: the implementor set is taken whole rather than
+/// filtered to "formatters that look effectful", so a formatter we did not anticipate over-discloses
+/// rather than silently disappearing.
+fn fmt_trait_local_cha(cx: &LateContext<'_>, trait_did: DefId) -> Option<CallbackEdges> {
+    let mut edges: Vec<DefId> = Vec::new();
+    for impl_did in cx.tcx.all_impls(trait_did) {
+        if !impl_did.is_local() {
+            continue;
+        }
+        if let Some(m) = cx
+            .tcx
+            .associated_items(impl_did)
+            .in_definition_order()
+            .find(|a| a.is_fn() && a.name().as_str() == "fmt")
+        {
+            edges.push(m.def_id);
+        }
+    }
+    if edges.is_empty() {
+        return None;
+    }
+    if edges.len() > 12 {
+        // `dispatch:` prefix so `ReasonClass::classify` files it under `dispatch` (spec 0.19
+        // reason-scoped Unknown) — this IS a dispatch indeterminacy, not a callback or a bare unresolved.
+        let t = cx.tcx.item_name(trait_did);
+        return Some(CallbackEdges::Unknown(format!("dispatch:stringify:{t}")));
+    }
+    Some(CallbackEdges::Local(edges))
 }
 
 /// The fmt trait a `core::fmt::rt::Argument::new_<kind>` constructor formats through — the single trait
@@ -3309,10 +3384,25 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // the real `fmt(&value, f)` happens inside std's fmt machinery, invisible — so a local effectful
         // `impl Display for T` is reached silently. Recover the edge to that local `fmt`. A std `Display`
         // (`i32`/`String`) resolves non-local → no edge → pure.
-        if let Some(CallbackEdges::Local(edges)) = fmt_argument_local_edge(cx, expr, def_id) {
-            for e in edges {
-                add_edge(self, e);
+        // A GENERIC/`dyn` formatted value resolves by bounded CHA over the fmt trait's local impls; past
+        // the fan-out bound it is an honest `Unknown` (the implicit-stringification vein), never pure.
+        match fmt_argument_local_edge(cx, expr, def_id)
+            .or_else(|| generic_to_string_edge(cx, expr, def_id))
+        {
+            Some(CallbackEdges::Local(edges)) => {
+                for e in edges {
+                    add_edge(self, e);
+                }
             }
+            Some(CallbackEdges::Unknown(why)) => {
+                self.direct.entry(caller).or_default().insert(UNKNOWN);
+                self.unknown_why.entry(caller).or_default().insert(why.clone());
+                if self.explain.is_some() {
+                    let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                    self.sites.entry(caller).or_default().push(EffectSite { eff: UNKNOWN, via: why, loc });
+                }
+            }
+            None => {}
         }
 
         // HOLE 2b — a non-local std DRIVER method (`to_string`/`contains`/`clone`/`sort`/set-`insert`)

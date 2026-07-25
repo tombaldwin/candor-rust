@@ -54,11 +54,41 @@ warning: `via_drop_binding` effects: { Fs* }   (* = via callee)
 LL | fn via_drop_binding() {
    | ^^^^^^^^^^^^^^^^^^^^^
 
+warning: `via_dyn` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:147:1
+   |
+LL | fn via_dyn(e: &dyn fmt::Display) -> String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 warning: `via_format` effects: { Fs* }   (* = via callee)
   --> $DIR/implicit_conversion.rs:24:1
    |
 LL | fn via_format(l: &Loud) -> String {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_generic_bound` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:141:1
+   |
+LL | fn via_generic_bound<T: fmt::Display>(e: T) -> String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_generic_caller` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:153:1
+   |
+LL | fn via_generic_caller() -> String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_generic_to_string` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:150:1
+   |
+LL | fn via_generic_to_string<T: fmt::Display>(e: T) -> String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_impl_trait` effects: { Fs* }   (* = via callee)
+  --> $DIR/implicit_conversion.rs:144:1
+   |
+LL | fn via_impl_trait(e: impl fmt::Display) -> String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `via_into` effects: { Fs* }   (* = via callee)
   --> $DIR/implicit_conversion.rs:49:1
@@ -78,5 +108,5 @@ warning: `via_to_string` effects: { Fs* }   (* = via callee)
 LL | fn via_to_string(l: &Loud) -> String {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-warning: 13 warnings emitted
+warning: 18 warnings emitted
 

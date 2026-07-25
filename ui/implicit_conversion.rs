@@ -133,4 +133,25 @@ fn pure_deref_local(w: &PureW) -> usize {
     w.len() // pure (auto-deref through a pure PureW::deref)
 }
 
+// ---- (7) IMPLICIT STRINGIFICATION through a GENERIC BOUND / `dyn` ----
+// candor-spec/SOUNDNESS-VEIN-implicit-stringify.md — the four-way silent under-report. The formatted
+// value's type is a `Param`/`dyn`, so there is no ADT to resolve; the engine now CHAs the fmt trait's
+// LOCAL implementors instead. `Loud` is among them, so each of these really can run `Loud::fmt` — and
+// the caller that monomorphizes it (`via_generic_caller`) was a FALSE ALL-CLEAR before, the worst form.
+fn via_generic_bound<T: fmt::Display>(e: T) -> String {
+    format!("entry: {}", e) // Fs (bounded CHA reaches Loud::fmt)
+}
+fn via_impl_trait(e: impl fmt::Display) -> String {
+    format!("{e}") // Fs (inline capture, same route)
+}
+fn via_dyn(e: &dyn fmt::Display) -> String {
+    format!("{}", e) // Fs
+}
+fn via_generic_to_string<T: fmt::Display>(e: T) -> String {
+    e.to_string() // Fs (ToString's blanket impl runs Display::fmt)
+}
+fn via_generic_caller() -> String {
+    via_generic_bound(Loud) // Fs — a fully CONCRETE chain that read pure before
+}
+
 fn main() {}

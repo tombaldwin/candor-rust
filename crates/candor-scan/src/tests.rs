@@ -1468,6 +1468,139 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         }
     }
 
+    /// Build a throwaway crate from `src`, scan it, and return the JSON report. Shared by the
+    /// implicit-stringification tests below, which each need their OWN crate (the CHA fan-out is
+    /// crate-wide, so an effectful `impl Display` anywhere in the fixture would contaminate the
+    /// all-pure control).
+    #[cfg(test)]
+    fn scan_fixture(name: &str, src: &str) -> serde_json::Value {
+        let d = std::env::temp_dir().join(format!("candor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let idx = load_dep_reports(None);
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        v
+    }
+
+    #[cfg(test)]
+    fn fixture_effects(v: &serde_json::Value, name: &str) -> Vec<String> {
+        v["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["fn"].as_str() == Some(name))
+            .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+            .collect()
+    }
+
+    #[test]
+    fn implicit_stringification_through_a_bound_reaches_the_local_formatter() {
+        // THE IMPLICIT-STRINGIFICATION VEIN (candor-spec/SOUNDNESS-VEIN-implicit-stringify.md) — a
+        // silent under-report common to all four engines, found on HikariCP by the RQ1 runtime oracle.
+        // A formatting site runs the value's `Display`/`Debug` impl; candor analysed that impl fine but
+        // never edged to it from the format site, so an EFFECTFUL formatter reached through a GENERIC
+        // BOUND (`T: Display`), an `impl Trait`/`dyn` param, or an INLINE CAPTURE (`{val}`) was absorbed
+        // silently — the cardinal sin. Every fn below really runs `Loud::fmt` at runtime.
+        let src = r#"
+            use std::fmt;
+            pub struct Loud;
+            impl fmt::Display for Loud {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    std::fs::write("/t", b"x").unwrap(); write!(f, "l")
+                }
+            }
+            pub struct LoudDbg;
+            impl fmt::Debug for LoudDbg {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    std::fs::write("/t", b"x").unwrap(); write!(f, "l")
+                }
+            }
+            // the vein's own fixture: a generic bounded by Display, formatted with `{}`
+            pub fn generic_bound<T: fmt::Display>(e: T) -> String { format!("entry: {}", e) }
+            pub fn where_bound<T>(e: T) -> String where T: fmt::Display { format!("entry: {}", e) }
+            pub fn impl_trait(e: impl fmt::Display) -> String { format!("entry: {}", e) }
+            pub fn dyn_ref(e: &dyn fmt::Display) -> String { format!("entry: {}", e) }
+            pub fn debug_bound<T: fmt::Debug>(e: T) -> String { format!("{:?}", e) }
+            pub fn println_bound<T: fmt::Display>(e: T) { println!("{}", e); }
+            pub fn panic_bound<T: fmt::Display>(e: T) { panic!("bad: {}", e); }
+            pub fn to_string_bound<T: fmt::Display>(e: T) -> String { e.to_string() }
+            pub fn to_string_trait_bound<T: ToString>(e: T) -> String { e.to_string() }
+            // a LOCAL trait that INHERITS Display — CHA over ITS implementors (the narrow, precise case,
+            // and the shape candor-java resolves for `LOGGER.warn("{}", bagEntry)`).
+            pub trait Entry: fmt::Display {}
+            impl Entry for Loud {}
+            pub fn supertrait_bound<T: Entry>(e: T) -> String { format!("{}", e) }
+            // INLINE CAPTURE / NAMED ARG on a CONCRETE local type — the now-dominant spelling, and the
+            // form that recovered a genuine `Env` miss on cargo-llvm-cov's `ProcessBuilder::run`.
+            pub fn inline_capture(val: Loud) -> String { format!("v={val}") }
+            pub fn inline_capture_debug(val: LoudDbg) -> String { format!("v={val:?}") }
+            pub fn named_arg(x: Loud) -> String { format!("v={v}", v = x) }
+            pub fn inline_capture_bound<T: fmt::Display>(val: T) -> String { format!("v={val}") }
+        "#;
+        let v = scan_fixture("stringify", src);
+        for f in [
+            "generic_bound", "where_bound", "impl_trait", "dyn_ref", "debug_bound", "println_bound",
+            "panic_bound", "to_string_bound", "to_string_trait_bound", "supertrait_bound",
+            "inline_capture", "inline_capture_debug", "named_arg", "inline_capture_bound",
+        ] {
+            assert!(fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "implicit stringification under-reported (cardinal sin): {f} should be Fs but is {:?}",
+                    fixture_effects(&v, f));
+        }
+    }
+
+    #[test]
+    fn implicit_stringification_never_fabricates_on_pure_or_std_operands() {
+        // The anti-fabrication half. In a crate whose ONLY `Display` impl is PURE, no formatting site —
+        // concrete, generic, or captured — may gain an effect; and a `format!` of a STRING LITERAL or a
+        // primitive must resolve to nothing at all (a std operand has no LOCAL impl, so bounded CHA
+        // contributes NOTHING — no edge and, deliberately, no `Unknown` flood either).
+        let src = r#"
+            use std::fmt;
+            pub struct Quiet;
+            impl fmt::Display for Quiet {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "q") }
+            }
+            pub fn pure_concrete(e: Quiet) -> String { format!("{}", e) }
+            pub fn pure_bound<T: fmt::Display>(e: T) -> String { format!("{}", e) }
+            pub fn pure_capture(val: Quiet) -> String { format!("v={val}") }
+            pub fn literal_only() -> String { format!("{}", "a string literal") }
+            pub fn primitive_only() -> String { let n = 3i32; format!("{} {:?}", n, n) }
+            // a bound with NOTHING to do with formatting must not pick up the stringify route
+            pub trait Store { fn save(&self); }
+            pub fn unrelated_bound<T: Store>(s: T) { s.save(); }
+        "#;
+        let v = scan_fixture("stringifypure", src);
+        for f in ["pure_concrete", "pure_bound", "pure_capture", "literal_only", "primitive_only"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "implicit stringification fabricated an effect at {f}: {:?}", fixture_effects(&v, f));
+        }
+    }
+
+    #[test]
+    fn implicit_stringification_discloses_unknown_when_the_fan_out_is_too_wide() {
+        // Beyond the 12-impl bound the engine declines to enumerate — but it must say so. A generic
+        // format site in a formatting-heavy crate reads honest `Unknown`, never silent-pure. (13 local
+        // `Display` impls: one over the cross-engine bound.)
+        let mut src = String::from("use std::fmt;\n");
+        for i in 0..13 {
+            src.push_str(&format!(
+                "pub struct D{i};\nimpl fmt::Display for D{i} {{ fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {{ write!(f, \"{i}\") }} }}\n"
+            ));
+        }
+        src.push_str("pub fn wide<T: fmt::Display>(e: T) -> String { format!(\"{}\", e) }\n");
+        let v = scan_fixture("stringifywide", &src);
+        assert!(fixture_effects(&v, "wide").contains(&"Unknown".to_string()),
+                "a too-wide stringify dispatch must disclose Unknown, not read pure: {:?}",
+                fixture_effects(&v, "wide"));
+    }
+
     #[test]
     fn dispatch_typed_receivers_resolve_via_local_impls_or_read_unknown() {
         // The trait-object hole, closed: `t.save()` on a `&dyn Store` either edges to the LOCAL
