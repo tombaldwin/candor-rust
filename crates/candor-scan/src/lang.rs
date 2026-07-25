@@ -1317,8 +1317,19 @@ pub(crate) enum FmtArg {
     Implicit,
     /// an explicit positional index `{0}` / `{1:?}`
     Index(usize),
-    /// a named or inline-captured hole (`{name}`, `{x:?}`) — references a binding, not a value arg
-    Named,
+    /// a named or inline-captured hole (`{name}`, `{x:?}`) — references a `name = expr` named arg or,
+    /// failing that, the same-named binding in scope (the inline capture). Carries the NAME so the
+    /// formatting coercion can resolve it; it consumes no POSITIONAL slot either way.
+    Named(String),
+}
+
+/// The VALUE of a `name = expr` format named-arg, when `e` is exactly that assignment for `name`
+/// (`format!("{v}", v = x)` → `x`). `None` for a positional arg or a different name. Used so a NAMED
+/// format hole charges the same stringification coercion a positional one does.
+pub(crate) fn named_arg_value<'e>(e: &'e syn::Expr, name: &str) -> Option<&'e syn::Expr> {
+    let syn::Expr::Assign(a) = e else { return None };
+    let syn::Expr::Path(p) = &*a.left else { return None };
+    (p.path.get_ident()? == name).then_some(&*a.right)
 }
 
 /// One parsed `{…}` hole of a format string: which arg it draws, and whether it requests `Debug` (`{:?}`/
@@ -1369,7 +1380,7 @@ pub(crate) fn parse_format_holes(fmt: &str) -> Vec<FmtHole> {
                 } else if let Ok(idx) = name_part.parse::<usize>() {
                     FmtArg::Index(idx)
                 } else {
-                    FmtArg::Named
+                    FmtArg::Named(name_part.to_string())
                 };
                 holes.push(FmtHole { arg, debug });
                 i = j + 1;
