@@ -421,7 +421,26 @@ impl<'a> CallCollector<'a> {
         if let Some(impls) = self.trait_impls.get(trait_leaf) {
             if impls.iter().any(|t| t == ty_leaf) {
                 self.push_coercion_edge(ty_leaf, method);
+                return;
             }
+        }
+        // NO LOCAL IMPL — the type may belong to a DEPENDENCY, whose `Display for Entry` is in its own
+        // chained report under `deplib#Entry::fmt`. `trait_impls` is local-only, so the site emitted nothing
+        // at all and an effectful dependency formatter was absorbed silently at every format hole. This is
+        // the implicit-stringification vein (SOUNDNESS-VEIN-implicit-stringify.md) on the far side of the
+        // scan boundary — closed inside the scan in all four engines, still open across it
+        // (SOUNDNESS-VEIN-crossing-the-scan-boundary.md).
+        //
+        // Emit the call the cross-crate join already understands: a crate-qualified `cr::Type::method`,
+        // whose tail2 is exactly the dep report's key. If no chained report covers the crate it resolves to
+        // nothing, as today.
+        let segs: Vec<&str> = ty.split("::").collect();
+        if segs.len() >= 2 && !matches!(segs[0], "crate" | "self" | "super" | "") {
+            self.calls.push(Call {
+                path: format!("{}::{}::{}", segs[0], ty_leaf, method),
+                leaf: method.to_string(), str_arg: None,
+                typed: false, method: false, is_macro: false,
+            });
         }
     }
 
