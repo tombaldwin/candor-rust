@@ -1758,6 +1758,18 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
     let _ = std::fs::create_dir_all(&deps_dir);
     let (mut scanned, mut cached, mut missing) = (0usize, 0usize, Vec::new());
     let no_deps = DepIndex::default();
+    // Emit the interfaceUnion entries in the DEP scans. Those entries are what lets a consumer resolve a
+    // call on a value typed by the dependency's trait — and the emission is gated on
+    // CANDOR_WORKSPACE_CHAIN, which `--deps` never set, so the mechanism was shipped-but-off in exactly the
+    // flow the help text tells people to use: a `&dyn DepTrait` dispatch read silent-pure
+    // (SOUNDNESS-VEIN-crossing-the-scan-boundary.md, cause 3). candor-swift already sets it on its child
+    // scans, which is the sole reason its equivalent case is recovered and rust's was not.
+    // Scoped to this loop and restored afterwards: the child scans run sequentially on this thread, and the
+    // ROOT scan's own emission must stay off so a default scan remains byte-identical.
+    let prior_chain = std::env::var_os("CANDOR_WORKSPACE_CHAIN");
+    if prior_chain.is_none() {
+        std::env::set_var("CANDOR_WORKSPACE_CHAIN", "1");
+    }
     for (n, v) in &pkgs {
         let Some(src) = registry_roots.iter().map(|r| r.join(format!("{n}-{v}"))).find(|p| p.is_dir()) else {
             missing.push(format!("{n}-{v}"));
@@ -1792,6 +1804,9 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
             deps_idx: &no_deps,
         });
         scanned += 1;
+    }
+    if prior_chain.is_none() {
+        std::env::remove_var("CANDOR_WORKSPACE_CHAIN");
     }
     eprintln!(
         "candor-scan: --deps scanned {scanned} of {} registry dependencies into {deps_dir}{}{} \
