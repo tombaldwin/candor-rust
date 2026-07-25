@@ -768,6 +768,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             .any(|r| fields.contains_key(r) || merged.drop_types.contains(r));
         for c in &f.calls {
             let cr = c.path.split("::").next().unwrap_or("");
+            // A DEP-LAZY MARKER (`<crate>::<lazy>::NAME`, emitted for a qualified mention of what may be a
+            // dependency's lazy static) is consumed by the cross-crate join BELOW and by nothing else: it
+            // is a speculative name, so letting it reach local resolution or the classifier would invent
+            // edges for every qualified path in the file. Join it directly and move on; a crate the deps
+            // index does not cover, or a dep with no such unit, resolves to nothing and costs nothing.
+            if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{LAZY_UNIT_PREFIX}::")) {
+                let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
+                if deps_idx.crates.contains(cr_real) {
+                    if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{LAZY_UNIT_PREFIX}::{rest}")) {
+                        for e in &de.effects { direct.entry(f.qual.clone()).or_default().insert(e); }
+                        hosts.entry(f.qual.clone()).or_default().extend(de.hosts.iter().cloned());
+                        cmds.entry(f.qual.clone()).or_default().extend(de.cmds.iter().cloned());
+                        paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
+                        tables.entry(f.qual.clone()).or_default().extend(de.tables.iter().cloned());
+                    }
+                }
+                continue;
+            }
             // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface (candor_classify::MODEL_SDK_CRATES): a qualified call
             // into a curated model-provider client → `Llm` + `Net` (Net is never dropped — a model call IS
             // network I/O). No method gating (single-purpose clients), the analog of java's isModelSdkOwner.
