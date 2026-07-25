@@ -203,6 +203,7 @@
         let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
         let fet = FieldElemTraitIndex::new();
         let mut c = CallCollector {
+            modpath: String::new(),
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
@@ -251,6 +252,7 @@
         let block: syn::Block =
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
         let mut c = CallCollector {
+            modpath: String::new(),
             uses: &uses,
             vars,
             trait_vars: HashMap::new(),
@@ -1629,6 +1631,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             }
             vars.insert("self".to_string(), "App".to_string());
             let mut c = CallCollector {
+            modpath: String::new(),
                 uses: &uses,
                 vars,
                 trait_vars,
@@ -1684,6 +1687,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let sig: syn::Signature = syn::parse_str("fn f(it: impl Iterator)").unwrap();
             let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
             let mut c = CallCollector {
+            modpath: String::new(),
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -1707,6 +1711,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let sig: syn::Signature = syn::parse_str(sig).unwrap();
                 let blk: syn::Block = syn::parse_str(src).unwrap();
                 let mut c = CallCollector {
+            modpath: String::new(),
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -1736,6 +1741,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let block: syn::Block =
             syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
         let mut c = CallCollector {
+            modpath: String::new(),
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
@@ -1770,6 +1776,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mk = |src: &str| {
             let blk: syn::Block = syn::parse_str(src).unwrap();
             let mut cc = CallCollector {
+            modpath: String::new(),
                 uses: &uses,
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
@@ -2651,6 +2658,55 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             .collect();
         assert!(effs.is_empty(),
                 "binding an EXTERNAL type must not fabricate a drop effect (only local Drop is modeled):\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn lazy_unit_qual_is_module_scoped_so_same_named_statics_do_not_merge() {
+        // Two modules each declaring `static CFG` produced ONE unit named `<lazy>::CFG` carrying the union
+        // of both initializers' effects — and, because `resolve_target` resolves a `::` path by tail2 and
+        // requires a unique hit, the now-ambiguous lookup dropped every forcing edge, so both readers read
+        // SOUND-COMPLETE PURE. A silent under-report caused purely by a naming collision
+        // (candor-spec SOUNDNESS-VEIN-global-unit-identity.md). The module path goes INSIDE the prefix so
+        // tail2 (`<mod>::<NAME>`) still discriminates; appending it after the name would not.
+        let d = std::env::temp_dir().join(format!("candor-scan-lazyqual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.0.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::write(d.join("src/main.rs"), r#"
+            mod core_m { pub static CFG: std::sync::LazyLock<String> =
+                std::sync::LazyLock::new(|| std::fs::read_to_string("/etc/core").unwrap_or_default()); }
+            mod util_m { pub static CFG: std::sync::LazyLock<String> =
+                std::sync::LazyLock::new(|| std::env::var("U").unwrap_or_default());
+                pub fn util_uses() -> usize { CFG.len() } }
+            fn main() { println!("{}", util_m::util_uses()); }
+            "#).unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let eff = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // the two statics stay SEPARATE units, each carrying only its own effect
+        assert_eq!(eff("<lazy>::core_m::CFG"), vec!["Fs"], "core's lazy keeps only its own Fs:\n{body}");
+        assert_eq!(eff("<lazy>::util_m::CFG"), vec!["Env"], "util's lazy keeps only its own Env:\n{body}");
+        // the forcing edges resolve again — this is the half that was the cardinal sin
+        assert_eq!(eff("util_m::util_uses"), vec!["Env"],
+                   "a reader of util's CFG carries Env (it read silent-pure while the names merged):\n{body}");
+        assert_eq!(eff("main"), vec!["Env"], "and transitively through main:\n{body}");
+        // the fabrication mirror: a reader must not pick up the OTHER module's effect
+        assert!(!eff("util_m::util_uses").contains(&"Fs".to_string()),
+                "a reader must not inherit the other module's Fs:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

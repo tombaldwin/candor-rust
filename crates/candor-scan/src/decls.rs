@@ -68,7 +68,7 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
+                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -86,7 +86,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
+                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
                     }
                 }
             }
@@ -120,7 +120,7 @@ pub(crate) fn scan_items(
                         let loc = next_loc(locs, loc_idx);
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
-                        out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), &loc, &m.sig, block,
+                        out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
                             Some(&tname), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
                     }
                 }
@@ -140,8 +140,8 @@ pub(crate) fn scan_items(
                 let block = syn::Block { brace_token: Default::default(), stmts: body };
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
-                let q = format!("{LAZY_UNIT_PREFIX}::{name}");
-                out.push(fninfo(&name, &q, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
+                let q = lazy_qual(modpath, &name);
+                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
             }
         }
     }
@@ -354,6 +354,9 @@ pub(crate) fn seed_trait_vars(sig: &syn::Signature) -> HashMap<String, Vec<Strin
 pub(crate) fn fninfo(
     leaf: &str,
     qual: &str,
+    // The enclosing MODULE path (not the type path): a bare static reference in this body names this
+    // module's static, so the forcing edge is built from it.
+    modpath: &str,
     loc: &str,
     sig: &syn::Signature,
     block: &syn::Block,
@@ -412,6 +415,7 @@ pub(crate) fn fninfo(
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
     let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, uses);
     let mut c = CallCollector {
+        modpath: modpath.to_string(),
         uses,
         vars,
         trait_vars,
