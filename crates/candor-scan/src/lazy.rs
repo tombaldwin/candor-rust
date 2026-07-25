@@ -14,6 +14,12 @@ use crate::*;
 /// forcing sites stay pure — only a genuinely-effectful init lights its accessors up.
 pub(crate) const LAZY_UNIT_PREFIX: &str = "<lazy>";
 
+/// Marker segment for a speculative cross-crate DROP-GLUE edge (`cr::<drop>::Type`). Like the lazy marker
+/// it is consumed ONLY by the cross-crate join and skipped everywhere else, so it can never reach local
+/// resolution, the classifier, or the κ ledger — an earlier attempt used a plain `cr::Type::drop` path and
+/// inflated the coverage ledger's call counts, which the envelope test caught.
+pub(crate) const DROP_MARKER: &str = "<drop>";
+
 /// The qual of a lazy-init unit, MODULE-QUALIFIED. Two modules may each declare a `static CFG`, and the
 /// unqualified `<lazy>::CFG` made them one unit carrying the union of both initializers' effects — while
 /// `resolve_target`'s tail2 lookup, now ambiguous, dropped the forcing edge and every reader read
