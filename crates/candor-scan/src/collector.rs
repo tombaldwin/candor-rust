@@ -4,6 +4,9 @@
 use crate::*;
 
 pub(crate) struct CallCollector<'a> {
+    /// The module path of the function being walked. A bare `CFG` reference names the ENCLOSING module's
+    /// static, so the forcing edge must be built with this path — see `lazy_qual`.
+    pub(crate) modpath: String,
     pub(crate) uses: &'a HashMap<String, String>,
     /// local variable / param / `self` -> expanded type path, grown as `let`s are visited in order.
     pub(crate) vars: HashMap<String, String>,
@@ -1286,9 +1289,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     && self.lazy_statics.contains(&name)
                     && self.forced_lazies.insert(name.clone())
                 {
-                    let qual = format!("{LAZY_UNIT_PREFIX}::{name}");
-                    // path has `::` (the `<lazy>::` prefix) so it resolves via the tail2 route in
-                    // `resolve_target`, edging to the unique synthetic unit. Not a macro/typed/method.
+                    let qual = lazy_qual(&self.modpath, &name);
+                    // path has `::` so it resolves via the tail2 route in `resolve_target`. The module
+                    // path sits INSIDE the prefix precisely so tail2 (`<mod>::<NAME>`) discriminates: with
+                    // the old bare `<lazy>::NAME`, two modules each declaring `CFG` produced two units with
+                    // the same tail2, `resolve_target`'s uniqueness filter rejected both, and every forcing
+                    // site went SILENT-PURE (candor-spec SOUNDNESS-VEIN-global-unit-identity.md).
+                    // Not a macro/typed/method.
                     self.calls.push(Call { path: qual, leaf: name, str_arg: None, typed: false, method: false, is_macro: false });
                 }
             }

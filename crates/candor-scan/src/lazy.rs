@@ -14,6 +14,20 @@ use crate::*;
 /// forcing sites stay pure — only a genuinely-effectful init lights its accessors up.
 pub(crate) const LAZY_UNIT_PREFIX: &str = "<lazy>";
 
+/// The qual of a lazy-init unit, MODULE-QUALIFIED. Two modules may each declare a `static CFG`, and the
+/// unqualified `<lazy>::CFG` made them one unit carrying the union of both initializers' effects — while
+/// `resolve_target`'s tail2 lookup, now ambiguous, dropped the forcing edge and every reader read
+/// sound-complete pure. The module path goes INSIDE the prefix so that tail2 stays discriminating
+/// (`<mod>::<NAME>`); appending it after the name would leave tail2 identical and fix nothing.
+/// java and ts already qualify their module-scope units this way.
+pub(crate) fn lazy_qual(modpath: &str, name: &str) -> String {
+    if modpath.is_empty() {
+        format!("{LAZY_UNIT_PREFIX}::{name}")
+    } else {
+        format!("{LAZY_UNIT_PREFIX}::{modpath}::{name}")
+    }
+}
+
 /// Recognize the LAZY/deferred CONTAINER constructors whose argument is an init thunk run on first use.
 /// A `Container::new(|| body)` defers the `body` to first use. Matched on the TYPE leaf of a `Type::new`
 /// associated call so a
