@@ -1285,6 +1285,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     || self.fn_alias.contains_key(&name)
                     || self.elem_of.contains_key(&name)
                     || self.trait_vars.contains_key(&name);
+                // A DEPENDENCY's lazy static, mentioned qualified (`deplib::CFG`). Forcing it runs the
+                // dep's initializer, which a chained report records as `<lazy>::…NAME` — but only LOCAL
+                // statics are in `lazy_statics`, so nothing was emitted and the consumer read pure even
+                // with the dep chained (candor-spec SOUNDNESS-VEIN-initializer-edge.md — rust's side of
+                // the boundary java and ts needed). The marker path is consumed ONLY by the cross-crate
+                // join in scan.rs, which skips it everywhere else, so it can never become a local edge:
+                // an earlier prototype without that guard added a spurious callgraph node because it fired
+                // on every qualified path expression.
+                if !locally_bound && !self.lazy_statics.contains(&name) && node.path.segments.len() >= 2 {
+                    let cr = node.path.segments[0].ident.to_string();
+                    if self.forced_lazies.insert(format!("{cr}\u{0}{name}")) {
+                        self.calls.push(Call {
+                            path: format!("{cr}::{LAZY_UNIT_PREFIX}::{name}"),
+                            leaf: name.clone(), str_arg: None,
+                            typed: false, method: false, is_macro: false,
+                        });
+                    }
+                }
                 if !locally_bound
                     && self.lazy_statics.contains(&name)
                     && self.forced_lazies.insert(name.clone())
