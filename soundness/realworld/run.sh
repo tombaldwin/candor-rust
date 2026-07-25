@@ -18,6 +18,10 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 
 case "$(uname -s)" in Linux) : ;; *) echo "realworld oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
 command -v strace >/dev/null 2>&1 || { echo "realworld oracle: strace not installed — skipping."; exit 0; }
+# The verdict is computed by an inline python3 reader. Without it every prediction reads EMPTY and the
+# harness reports a violation on every effectful driver — a missing interpreter would masquerade as a wall
+# of findings. Fail fast and say so, rather than report a violation on every driver at once.
+command -v python3 >/dev/null 2>&1 || { echo "realworld oracle: python3 not found — cannot read candor's report; skipping."; exit 0; }
 
 # The repo's .cargo/config forces `-C linker=dylint-link` (for the nightly lint). This oracle uses only
 # candor-scan (stable, no dylint), so override RUSTFLAGS to the normal linker — avoids needing dylint-link
@@ -79,6 +83,13 @@ for row in "${CASES[@]}"; do
   rm -rf "$d/.candor" 2>/dev/null
   "$SCAN" "$d" >/dev/null 2>&1
   rep=$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)
+  # DISCLOSURE-RECALL calibration hook — UNSET in every normal run. When set, candor's signature is
+  # falsified here (downstream of the analyzer, upstream of the verdict) so a known cardinal sin is
+  # injected and this oracle MUST turn red. That is what makes a green run evidence rather than silence.
+  # See recall/README.md; driven by recall/disclosure_recall.sh.
+  if [ -n "${CANDOR_ORACLE_MUTATE:-}" ] && [ -n "$rep" ]; then
+    python3 "$HERE/recall/mutate_report.py" "$CANDOR_ORACLE_MUTATE" "$rep" || true
+  fi
   # Extract candor's PRECISE claim (the inferred effects EXCEPT Unknown — Unknown is disclosure, not a
   # precise effect), whether it disclosed any uncertainty, and the unknownWhy REASONS (the blame data:
   # the exact unresolved edge — dispatch:… / callback:… / reflect:… — to fix for a precise answer).

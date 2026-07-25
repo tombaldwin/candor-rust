@@ -16,6 +16,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 case "$(uname -s)" in Linux) : ;; *) echo "pf-realcrate: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
 command -v strace >/dev/null 2>&1 || { echo "pf-realcrate: strace not installed — skipping."; exit 0; }
+# The verdict is computed by an inline python3 reader. Without it every prediction reads EMPTY and the
+# harness reports a violation on every effectful driver — a missing interpreter would masquerade as a wall
+# of findings. Fail fast and say so, rather than report a violation on every driver at once.
+command -v python3 >/dev/null 2>&1 || { echo "pf-realcrate: python3 not found — cannot read candor's report; skipping."; exit 0; }
 
 # The repo .cargo/config forces -C linker=dylint-link (nightly lint); candor-scan + drivers are stable,
 # so override to the normal linker (supersedes the config rustflags entirely), as run.sh does.
@@ -42,6 +46,10 @@ for d in "$HERE"/pf_*/; do
   rm -rf "$d/.candor"; "$SCAN" "$d" >/dev/null 2>&1
   rep=$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)
   [ -n "$rep" ] || { echo "  $name: no candor report — SKIP"; skip=$((skip+1)); continue; }
+  # DISCLOSURE-RECALL calibration hook — UNSET in every normal run. See ../recall/README.md.
+  if [ -n "${CANDOR_ORACLE_MUTATE:-}" ]; then
+    python3 "$HERE/../recall/mutate_report.py" "$CANDOR_ORACLE_MUTATE" "$rep" || true
+  fi
 
   res=$(python3 - "$d/trace.log" "$rep" "$eff" "$marker" <<'PY'
 import json,re,sys
