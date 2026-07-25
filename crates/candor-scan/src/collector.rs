@@ -1320,6 +1320,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             leaf: name.clone(), str_arg: None,
                             typed: false, method: false, is_macro: false,
                         });
+                        // DROP GLUE across the boundary. Naming a dependency's type as a value (`let _g =
+                        // deplib::Guard;`) binds it here, so its `Drop::drop` runs at scope exit — an
+                        // implicit edge the syntactic call graph never sees. `drop_types` is built from
+                        // LOCAL `impl Drop` blocks only, so the dependency case emitted nothing and the
+                        // scope read pure while the same code in one crate reads `Fs`
+                        // (SOUNDNESS-VEIN-crossing-the-scan-boundary.md). Emit the shape the cross-crate
+                        // join already understands — `cr::Type::drop`, whose tail2 is exactly the dep
+                        // report's key. Speculative but self-limiting: a dep report only carries
+                        // `Type::drop` when that drop is EFFECTFUL (pure units are omitted), so a type with
+                        // no Drop, or no chained report, resolves to nothing.
+                        self.calls.push(Call {
+                            path: format!("{cr}::{DROP_MARKER}::{name}"),
+                            leaf: "drop".to_string(), str_arg: None,
+                            typed: false, method: false, is_macro: false,
+                        });
                     }
                 }
                 if !locally_bound

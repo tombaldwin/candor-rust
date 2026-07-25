@@ -773,6 +773,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // is a speculative name, so letting it reach local resolution or the classifier would invent
             // edges for every qualified path in the file. Join it directly and move on; a crate the deps
             // index does not cover, or a dep with no such unit, resolves to nothing and costs nothing.
+            // Cross-crate DROP GLUE: `cr::<drop>::Type` — binding a dependency's value runs its `Drop` at
+            // scope exit. Joined here and nowhere else, for the same reason as the lazy marker below.
+            if let Some(ty) = c.path.strip_prefix(&format!("{cr}::{DROP_MARKER}::")) {
+                let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
+                if deps_idx.crates.contains(cr_real) {
+                    if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{ty}::drop")) {
+                        for e in &de.effects { direct.entry(f.qual.clone()).or_default().insert(e); }
+                        paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
+                    }
+                }
+                continue;
+            }
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{LAZY_UNIT_PREFIX}::")) {
                 let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
                 if deps_idx.crates.contains(cr_real) {
