@@ -23,6 +23,7 @@ PF_SKIP = re.compile(r"^\s{2}(pf_\S+): SKIP (.*)$")
 PF_FAILED = re.compile(r"per-function under-report on:(.*)$")
 MULTI = re.compile(r"^\s{2}(\S+): \(multi-effect\)")
 MULTI_EFF = re.compile(r"^\s{4}\[(\w+)\] (?:✓|ⓘ)")
+MULTI_SKIP = re.compile(r"^\s{4}\[(\w+)\] SKIP \((.*)\)")
 FAILED = re.compile(r"NEW under-reporting drivers:(.*)$")
 FAB = re.compile(r"(\d+) fabrication\(s\)")
 
@@ -80,6 +81,14 @@ def parse_control(text):
             m = MULTI_EFF.match(ln)
             if m:
                 falsifiable.add(f"{cur_multi}:{m.group(1)}")
+                continue
+            # A multi-effect driver whose marker did not fire is uncalibrated for THAT effect. Dropping it
+            # from both counts would be the silent truncation this checker exists to prevent: recall would
+            # read 1.0 over a quietly smaller denominator.
+            m = MULTI_SKIP.match(ln)
+            if m:
+                skipped[f"{cur_multi}:{m.group(1)}"] = m.group(2)
+                continue
         if ": no source — SKIP" in ln or "failed — SKIP" in ln or ": no binary — SKIP" in ln:
             skipped[ln.strip().split(":")[0]] = "did not build"
     return falsifiable, skipped
