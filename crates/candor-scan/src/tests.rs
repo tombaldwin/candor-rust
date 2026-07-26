@@ -219,7 +219,7 @@
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -269,7 +269,7 @@
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -431,6 +431,81 @@
         let genuine = run("projgen", "pub fn calls_dep() { depb::effectful_fn(); }");
         assert!(eff(&genuine, "calls_dep").contains(&"Net".to_string()),
                 "a genuine dep call must still inherit the dep report's Net:\n{genuine}");
+        let _ = std::fs::remove_dir_all(&dep);
+    }
+
+    /// COULD-NOT-FORM-A-KEY vs KEYED-AND-MISSED (candor-spec/DEP-RECEIVER-TYPING-DESIGN.md, half 1).
+    ///
+    /// `let c = deplib::build(); c.fetch()` — a pure factory is OMITTED from the dep's report, so no
+    /// return type travels, so `c` is never typed and NO KEY IS EVER FORMED. The report's silence is only
+    /// an answer to a question that was asked; here none was, and dropping the call made `go` a confident
+    /// purity claim about a function that performs Fs. It must disclose instead.
+    ///
+    /// The two controls are the point: this must NOT fire when a key WAS formed (a genuine purity claim,
+    /// §2 rule 3), and must NOT fire for an UNCHAINED crate (the κ ledger already discloses `invisible`
+    /// there, so a second disclosure is pure false uncertainty).
+    #[test]
+    fn an_untyped_receiver_from_a_chained_crate_discloses_instead_of_reading_pure() {
+        let dep = std::env::temp_dir().join(format!("candor-untyped-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // The dep's report holds `Client::fetch` — the ANSWER is present. `build` (pure) is absent, which
+        // is exactly why the consumer cannot type `c`.
+        std::fs::write(dep.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [{{"fn": "Client::fetch", "inferred": ["Fs"], "hash": "deplib#Client::fetch"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        assert!(idx.crates.contains("deplib"));
+        let run = |name: &str, deps_idx: &DepIndex, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-untyped-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d); // never read a stale report back as this arm's result
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\ndeplib = \"1\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+                quiet: true, deps_idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        const SRC: &str = "pub fn go() -> String { let c = deplib::build(); c.fetch() }";
+
+        // 1. CHAINED + untyped receiver -> must disclose, with the reason naming the cause.
+        let v = run("upa", &idx, SRC);
+        let go = fn_entry(&v, "go");
+        assert!(effs(go).contains(&"Unknown".to_string()),
+                "an untyped receiver from a CHAINED crate must not read pure — no key was ever formed, so \
+                 the dep report's silence licenses nothing:\n{v:#}");
+        assert!(go["unknownWhy"].as_array().into_iter().flatten()
+                    .any(|r| r.as_str() == Some("dispatch:untyped cross-package receiver")),
+                "the disclosure must name WHY (spec §2 unknownWhy, `dispatch:` class):\n{v:#}");
+
+        // 2. CONTROL — a key WAS formed. `deplib::build()` called directly is a real lookup: the dep's
+        //    report omits it because it is pure, and THAT absence is a genuine purity claim. No Unknown.
+        //    (`go2` is ABSENT from the report — which for a keyed lookup IS the purity claim, so the
+        //    check is that it is absent-or-Unknown-free, not that it is present.)
+        let keyed = run("upb", &idx, "pub fn go2() { deplib::build(); }");
+        let go2 = keyed["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some("go2")).cloned();
+        assert!(go2.as_ref().is_none_or(|f| !effs(f).contains(&"Unknown".to_string())),
+                "keyed-and-missed is a genuine purity claim and must stay silent:\n{keyed:#}");
+
+        // 3. CONTROL — the SAME source with NOTHING chained must be unchanged. The κ ledger already
+        //    discloses `invisible: [deplib]` there; a second disclosure would be false uncertainty.
+        //    (Measured: without this conjunct the rung fired on `let v = dep::f(); v.first()`, a std Vec
+        //    method on a dep-returned value.)
+        let unchained = run("upc", &DepIndex::default(), SRC);
+        assert!(!effs(fn_entry(&unchained, "go")).contains(&"Unknown".to_string()),
+                "an UNCHAINED crate is already disclosed by the κ ledger — do not double-disclose:\n{unchained:#}");
+        assert_eq!(fn_entry(&unchained, "go")["invisible"], serde_json::json!(["deplib"]),
+                "…and that ledger disclosure is what covers it:\n{unchained:#}");
         let _ = std::fs::remove_dir_all(&dep);
     }
 
@@ -1830,7 +1905,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
-                fn_typed_vars: std::collections::HashSet::new(),
+                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -1876,7 +1951,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -1900,7 +1975,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -1941,7 +2016,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
-            fn_typed_vars: std::collections::HashSet::new(),
+            fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),
@@ -1977,7 +2052,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
-                fn_typed_vars: std::collections::HashSet::new(),
+                fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(),
             fn_alias: std::collections::HashMap::new(),
             lazy_statics: empty_lazy(),
             forced_lazies: std::collections::HashSet::new(),

@@ -20,6 +20,13 @@ pub(crate) const LAZY_UNIT_PREFIX: &str = "<lazy>";
 /// inflated the coverage ledger's call counts, which the envelope test caught.
 pub(crate) const DROP_MARKER: &str = "<drop>";
 
+/// `cr::<untyped>::method` — a method call on a local bound from a call into `cr` whose return type we
+/// could not determine (`let c = deplib::build(); c.fetch()`). Same containment rules as `DROP_MARKER`:
+/// consumed by the call loop and skipped everywhere else. UNLIKE the other markers this one resolves to
+/// nothing — it exists so the engine DISCLOSES that it never formed a key, rather than to carry an
+/// effect across. See candor-spec/DEP-RECEIVER-TYPING-DESIGN.md (half 1).
+pub(crate) const UNTYPED_RECV_MARKER: &str = "<untyped>";
+
 /// The qual of a lazy-init unit, MODULE-QUALIFIED. Two modules may each declare a `static CFG`, and the
 /// unqualified `<lazy>::CFG` made them one unit carrying the union of both initializers' effects — while
 /// `resolve_target`'s tail2 lookup, now ambiguous, dropped the forcing edge and every reader read

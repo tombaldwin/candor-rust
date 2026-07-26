@@ -1,6 +1,6 @@
 {
   "candor": {
-    "version": "scan-0.23.0",
+    "version": "scan-0.23.1",
     "toolchain": "stable",
     "spec": "0.23"
   },

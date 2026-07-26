@@ -67,6 +67,14 @@ pub(crate) struct CallCollector<'a> {
     /// params/locals of a fn-pointer / `impl`/`dyn Fn` / generic-`Fn`-bound type. Invoking one (`cb()`)
     /// calls an opaque body → honest `Unknown`, not a silently-dropped phantom call to a free fn `cb`.
     pub(crate) fn_typed_vars: std::collections::HashSet<String>,
+    /// locals bound from a call into a CROSS-CRATE path whose return type we could not determine —
+    /// `let c = deplib::build();`. The value's PROVENANCE is known (the crate root) even though its TYPE
+    /// is not, and that conjunction is exactly the "could-not-form-a-key" case: a later `c.fetch()` asks
+    /// no question of the chained report, so its silence licenses nothing. See
+    /// candor-spec/DEP-RECEIVER-TYPING-DESIGN.md — this is half 1, the disclosure half, which needs no
+    /// format change. Deliberately NOT "untyped receiver" (pervasive, and hedging on it is the 8-25%
+    /// false-uncertainty flood measured in COVERAGE-GRANULARITY-FINDING.md) — only the conjunction.
+    pub(crate) dep_bound_vars: HashMap<String, String>,
     /// locals aliased to a free-FUNCTION path (`let g = eff;` where `eff` is a visible fn): a later `g()`
     /// resolves to the aliased path, so its effect (and whole transitive chain) is not silently dropped
     /// (sweep [6]). Keyed by the local name → the expanded callee path.
@@ -1000,6 +1008,34 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
         self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false });
+        // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver is a local bound from
+        // a cross-crate call whose return type we never learned — `let c = deplib::build(); c.fetch()`.
+        // No key is formed, so no question is asked of the chained report, so its silence licenses
+        // nothing; dropping here is a CONFIDENT purity claim about a call we never looked up. Emit a
+        // marker so the call loop can disclose `Unknown` instead. Requires the CONJUNCTION — untyped AND
+        // dep-provenance — and is skipped the moment either the concrete type or a trait bound resolves,
+        // because then a real key exists and this would only add noise beside it.
+        if let syn::Expr::Path(rp) = &*node.receiver {
+            if let Some(name) = rp.path.get_ident().map(|i| i.to_string()) {
+                if let Some(root) = self.dep_bound_vars.get(&name) {
+                    if self.resolve_recv_type(&node.receiver).is_none()
+                        && self.resolve_recv_traits(&node.receiver).is_empty()
+                    {
+                        // Angle-bracket marker segment: cannot collide with a real path (the same device
+                        // as `<drop>`/`<construct>`), so it can never reach local resolution or the
+                        // classifier. Bounded at consumption in scan.rs: join, disclose, `continue`.
+                        self.calls.push(Call {
+                            path: format!("{root}::<untyped>::{leaf}"),
+                            leaf: leaf.clone(),
+                            str_arg: None,
+                            typed: false,
+                            method: false,
+                            is_macro: false,
+                        });
+                    }
+                }
+            }
+        }
         // Typed call: if the receiver's type resolves, form `Type::method` so the existing per-crate
         // method rules (reqwest/sqlx/redis/…) — unreachable from a bare method name — can fire. This is
         // the method-dispatch frontier: light, local type inference, no compiler.
@@ -1649,8 +1685,27 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.vars.remove(&id.ident.to_string());
                     } else {
                         self.fn_typed_vars.remove(&id.ident.to_string());
+                        // PROVENANCE without a type: `let c = deplib::build();` where `build`'s return
+                        // type does not travel in the report (a pure factory is omitted from it
+                        // entirely). Record the crate root so a later `c.fetch()` can DISCLOSE rather
+                        // than silently drop — half 1 of DEP-RECEIVER-TYPING-DESIGN.md. Cleared on any
+                        // rebind, and immediately overwritten below if the init DOES type.
+                        self.dep_bound_vars.remove(&id.ident.to_string());
+                        if let syn::Expr::Call(c) = &*init.expr {
+                            if let syn::Expr::Path(p) = &*c.func {
+                                let full = expand(&path_to_string(&p.path), self.uses);
+                                // A multi-segment path whose head is a plausible crate root. The head is
+                                // checked against the manifest's declared deps at CONSUMPTION in scan.rs,
+                                // so a local module sharing the shape emits an inert marker.
+                                if let Some(head) = full.split("::").next().filter(|h| full.contains("::") && !h.is_empty()) {
+                                    self.dep_bound_vars.insert(id.ident.to_string(), head.to_string());
+                                }
+                            }
+                        }
                         if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
                             self.vars.insert(id.ident.to_string(), ty.clone());
+                            // It typed after all — the provenance marker is redundant and must not fire.
+                            self.dep_bound_vars.remove(&id.ident.to_string());
                             // DROP-GLUE via STRUCT-LITERAL / UNIT construction (#6). The existing drop-glue
                             // catches only `let g = T::new()` constructor CALLS — a `let g = Guard { .. };`
                             // or bare `let g = UnitGuard;` builds a `T` value just the same (its `impl Drop`
