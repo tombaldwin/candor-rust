@@ -143,7 +143,19 @@ fn quals_from_bounds(
             continue; // crate-LOCAL spelling — see the doc comment above
         }
         let Some(leaf) = t.path.segments.last().map(|s| s.ident.to_string()) else { continue };
-        out.insert(leaf, path_to_string(&t.path));
+        let full = path_to_string(&t.path);
+        // NEVER GUESS WHICH CRATE. This map is keyed by LEAF, and one signature may bind the same leaf to
+        // two different crates — `fn handle(a: &dyn alpha::Handler, b: &dyn beta::Handler)`. Last-wins
+        // made `a.go()` form `beta::Handler::go` and inherit BETA's reported effects onto a function that
+        // only touches alpha: a fabrication, and the mirror of the sin this rung exists to close. A
+        // colliding leaf is TOMBSTONED (empty value) and consumers treat it as absent, falling back to
+        // the file's `use` map — the same "two candidates are dropped, never picked from" rule the
+        // cross-package join already applies.
+        match out.get(&leaf) {
+            Some(prev) if *prev != full => { out.insert(leaf, String::new()); }
+            Some(_) => {}
+            None => { out.insert(leaf, full); }
+        }
     }
 }
 
