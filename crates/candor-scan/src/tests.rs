@@ -5192,4 +5192,46 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             !effs(fn_entry(&b, "chan")).is_empty(),
             "the classified call's own fn keeps its effect:\n{b:#}"
         );
+    
+    }
+    #[test]
+    fn a_file_whose_walk_ABORTS_is_contained_and_disclosed_not_dropped() {
+        // A panic in one file used to take the WHOLE run down — and with `--deps` that meant the whole
+        // dependency TREE, so a chained consumer proceeded with fewer dep reports than it asked for and
+        // never learned it. proc-macro2 aborts deterministically on `getrandom` 0.3.4/0.4.2
+        // (`unreachable!("Invalid span with no related FileInfo!")`), on input candor does not control.
+        //
+        // Contained per FILE and disclosed through the ⟨0.21⟩ `unanalyzed` channel, which already carries
+        // "this file failed to parse" and already makes a configured gate refuse to go green. The fault is
+        // INJECTED because the real trigger needs a whole crate's parse state: a containment that cannot be
+        // fired is a containment nobody has checked.
+        let d = std::env::temp_dir().join(format!("candor-abort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"aborter\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub mod good;\npub mod bad;\n").unwrap();
+        std::fs::write(d.join("src/good.rs"),
+            "pub fn reads() { let _ = std::fs::read_to_string(\"/etc/x\"); }").unwrap();
+        std::fs::write(d.join("src/bad.rs"),
+            "pub fn also_reads() { let _ = std::fs::read_to_string(\"/etc/y\"); }").unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        std::env::set_var("CANDOR_PANIC_ON_FILE", "src/bad.rs");
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true,
+            deps_idx: &DepIndex::default(),
+        });
+        std::env::remove_var("CANDOR_PANIC_ON_FILE");
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0, "the run must survive one file aborting:\n{v}");
+        // 1. the REST of the crate still analysed — containment, not abandonment
+        let quals: Vec<String> = v["functions"].as_array().into_iter().flatten()
+            .filter_map(|f| f["fn"].as_str().map(String::from)).collect();
+        assert!(quals.iter().any(|q| q.contains("reads")),
+                "the surviving file's effects were lost — this contained too much:\n{v}");
+        // 2. and the lost file is NAMED, not silently missing. Absence from `functions` is a purity claim
+        //    under ⟨0.21⟩, so a dropped file with no disclosure is the cardinal sin wearing a crash.
+        let un = v["unanalyzed"].as_array().cloned().unwrap_or_default();
+        assert!(un.iter().any(|u| u["path"].as_str() == Some("src/bad.rs")),
+                "the aborted file was dropped WITHOUT disclosure:\n{v}");
     }

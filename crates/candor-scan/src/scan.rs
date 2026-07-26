@@ -494,11 +494,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // Remember whether ANY in-scope source failed to parse: the policy gate below must FAIL non-zero
     // when a policy is configured AND analysis was incomplete — a gateless-green over unanalyzed code
     // is a missed-effect = false-pure hole. (`unparsed` borrows `per_file`, consumed below; keep a flag.)
-    let had_parse_failure = !unparsed.is_empty();
+    // `mut` because a file can also fail LATER, in the pass-B walk: a parser abort is contained per file
+    // (see the `catch_unwind` below) and must reach this flag, or a configured gate would evaluate over a
+    // file whose effects are simply absent and call it clean — the false-pure this flag exists to prevent.
+    let mut had_parse_failure = !unparsed.is_empty();
     // ⟨Gap 2⟩ Also carry the unparsed set into the REPORT (owned, so it survives `per_file`'s consumption):
     // the stderr warning above is invisible to a machine reading `--json`, so a bare report looked complete.
     // The gated path still exits 2 with no verdict (SPEC §3.3.1); this is the bare-report disclosure.
-    let unanalyzed_units: Vec<candor_report::UnanalyzedUnit> = unparsed
+    let mut unanalyzed_units: Vec<candor_report::UnanalyzedUnit> = unparsed
         .iter()
         .map(|p| candor_report::UnanalyzedUnit { path: p.to_string(), reason: "source failed to read/parse".into() })
         .collect();
@@ -618,7 +621,44 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // looks up a `crate::…` key, so a genuine external-crate call is never hijacked (see `expand`).
         let mut uses = seed_root_reexports(&merged.root_reexports);
         let mut file_fns: Vec<FnInfo> = Vec::new();
-        scan_items(&file.items, &modpath, locs, &mut loc_idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &mut uses, &mut file_fns);
+        // A PANIC IN ONE FILE MUST NOT TAKE THE RUN DOWN, and must not vanish either. `syn`/`proc-macro2`
+        // can abort on input candor does not control — `getrandom` 0.3.4/0.4.2 hit proc-macro2's
+        // `unreachable!("Invalid span with no related FileInfo!")` deterministically — and an unwind here
+        // killed the WHOLE `--deps` tree, not the one crate. A chained consumer then proceeded with fewer
+        // dependency reports than it asked for, which is exactly the blind spot the κ ledger exists to
+        // name. So: contain it at the FILE, and DISCLOSE that file as unanalyzed — the ⟨0.21⟩ channel that
+        // already carries "this file failed to parse", and that already makes a configured gate refuse to
+        // go green over it. The panic message still reaches stderr through the default hook.
+        let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // FAULT INJECTION, so the containment has a deterministic test. The real trigger needs a whole
+            // crate's parse state and does not reduce to a fixture, and a containment nobody can fire is a
+            // containment nobody has checked — the same reason the syscall oracle is calibrated with a
+            // seeded violation rather than trusted because it reported none.
+            if std::env::var("CANDOR_PANIC_ON_FILE").is_ok_and(|v| v == *rel) {
+                panic!("CANDOR_PANIC_ON_FILE: injected fault while walking {rel}");
+            }
+            let mut out: Vec<FnInfo> = Vec::new();
+            let mut idx = loc_idx;
+            let mut u = uses.clone();
+            scan_items(&file.items, &modpath, locs, &mut idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &mut u, &mut out);
+            (out, idx, u)
+        }));
+        match walked {
+            Ok((out, idx, u)) => {
+                file_fns = out;
+                loc_idx = idx;
+                uses = u;
+            }
+            Err(_) => {
+                eprintln!("candor-scan: {rel} could not be analyzed (the parser aborted); disclosed as unanalyzed");
+                had_parse_failure = true;   // a configured gate must not certify a scan with a hole in it
+                unanalyzed_units.push(candor_report::UnanalyzedUnit {
+                    path: rel.clone(),
+                    reason: "the parser aborted while walking this file".into(),
+                });
+            }
+        }
+        let _ = loc_idx;
         fns.extend(file_fns.iter().cloned());
         fresh_fninfos.insert(rel.clone(), file_fns);
     }
