@@ -1017,7 +1017,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // because then a real key exists and this would only add noise beside it.
         if let syn::Expr::Path(rp) = &*node.receiver {
             if let Some(name) = rp.path.get_ident().map(|i| i.to_string()) {
-                if let Some(root) = self.dep_bound_vars.get(&name) {
+                if let Some(callee_path) = self.dep_bound_vars.get(&name) {
+                    let root = callee_path.split("::").next().unwrap_or("");
+                    let callee = callee_path.rsplit("::").next().unwrap_or("");
                     if self.resolve_recv_type(&node.receiver).is_none()
                         && self.resolve_recv_traits(&node.receiver).is_empty()
                     {
@@ -1025,7 +1027,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // as `<drop>`/`<construct>`), so it can never reach local resolution or the
                         // classifier. Bounded at consumption in scan.rs: join, disclose, `continue`.
                         self.calls.push(Call {
-                            path: format!("{root}::<untyped>::{leaf}"),
+                            // `cr::<untyped>::CALLEE::method` — the callee name rides along so the
+                            // consumer can consult the dep's typeSurface before falling back to Unknown.
+                            path: format!("{root}::<untyped>::{callee}::{leaf}"),
                             leaf: leaf.clone(),
                             str_arg: None,
                             typed: false,
@@ -1697,8 +1701,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 // A multi-segment path whose head is a plausible crate root. The head is
                                 // checked against the manifest's declared deps at CONSUMPTION in scan.rs,
                                 // so a local module sharing the shape emits an inert marker.
-                                if let Some(head) = full.split("::").next().filter(|h| full.contains("::") && !h.is_empty()) {
-                                    self.dep_bound_vars.insert(id.ident.to_string(), head.to_string());
+                                // Store the FULL expanded callee path. The crate root drives the
+                                // disclosure (half 1); the LEAF is what half 2 looks up in the dep's
+                                // published `typeSurface.returns` to recover the receiver's type.
+                                if full.contains("::") && !full.starts_with("::") {
+                                    self.dep_bound_vars.insert(id.ident.to_string(), full.clone());
                                 }
                             }
                         }
