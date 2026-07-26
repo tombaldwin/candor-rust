@@ -826,6 +826,10 @@ impl<'a> CallCollector<'a> {
         //     for client in local_items() { client.process(); }   // NOT the dep's client
         // Saved and restored alongside `vars`, which is the invariant this helper exists to maintain.
         let prior_prov = self.dep_bound_vars.remove(name);
+        // A block/closure-scoped shadow must not permanently overwrite the PARAMETER's crate
+        // qualification: a trait-typed local written into this map was never restored at scope exit, so
+        // the rest of the function resolved the parameter's receiver through the shadow's crate.
+        let prior_q = self.trait_quals_by_param.remove(name);
         if let Some(t) = ty {
             self.vars.insert(name.to_string(), t);
         }
@@ -841,6 +845,10 @@ impl<'a> CallCollector<'a> {
         match prior_prov {
             Some(p) => { self.dep_bound_vars.insert(name.to_string(), p); }
             None => { self.dep_bound_vars.remove(name); }
+        }
+        match prior_q {
+            Some(p) => { self.trait_quals_by_param.insert(name.to_string(), p); }
+            None => { self.trait_quals_by_param.remove(name); }
         }
         r
     }
@@ -888,16 +896,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
         let outer_q = std::mem::take(&mut self.trait_quals);
+        // …and the PER-PARAM map, which is now the FIRST source consulted. Scoping the two leaf-keyed maps
+        // but not this one left a nested item reading the outer signature's crate for a same-named
+        // receiver — the collision arriving by nesting, which is what scoping the others was meant to stop.
+        let outer_p = std::mem::take(&mut self.trait_quals_by_param);
         syn::visit::visit_item_fn(self, node);
         self.dyn_sig_traits = outer;
         self.trait_quals = outer_q;
+        self.trait_quals_by_param = outer_p;
     }
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
         let outer_q = std::mem::take(&mut self.trait_quals);
+        let outer_p = std::mem::take(&mut self.trait_quals_by_param);
         syn::visit::visit_item_impl(self, node);
         self.dyn_sig_traits = outer;
         self.trait_quals = outer_q;
+        self.trait_quals_by_param = outer_p;
+    }
+    /// A BLOCK scopes the per-param crate-qualification map. `visit_local` writes a trait-typed local's
+    /// own qualification under the binding NAME so it correctly shadows a parameter — but a shadow inside
+    /// a nested block was never undone, so the parameter's crate stayed overwritten for the rest of the
+    /// function and its later calls resolved through the wrong dependency (measured: `a.go()` after a
+    /// block-scoped `let a: &dyn alpha::Handler` lost beta's Net entirely).
+    ///
+    /// Only this map is scoped here. `vars` deliberately keeps its existing flow-insensitive behaviour —
+    /// changing that is a much larger question and not one this fix should smuggle in.
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let saved = self.trait_quals_by_param.clone();
+        syn::visit::visit_block(self, node);
+        self.trait_quals_by_param = saved;
     }
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
         // A `#[cfg(feature="X")]`-gated statement/block that is compiled OUT under the active feature set
@@ -1134,7 +1162,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         .as_ref()
                         .and_then(|n| self.trait_quals_by_param.get(n))
                         .and_then(|m| m.get(&tr))
-                        .map(|q| q.as_str());
+                        .map(|q| q.as_str())
+                        .filter(|q| !q.is_empty());   // a tombstone is "unknown", never a path
                     let written = per_param.or_else(|| {
                         self.trait_quals.get(&tr).map(|q| q.as_str()).filter(|q| !q.is_empty())
                     }).unwrap_or(tr.as_str());
