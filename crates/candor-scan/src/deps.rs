@@ -67,6 +67,11 @@ pub(crate) struct DepFn {
 pub(crate) struct DepIndex {
     pub(crate) by_key: HashMap<String, DepFn>,
     pub(crate) crates: std::collections::HashSet<String>,
+    /// ⟨proposed: typeSurface⟩ fn hash -> returned TYPE hash, merged across every loaded report
+    /// (`deplib#build` -> `deplib#Client`). Lets a consumer type a receiver bound from a dependency
+    /// FACTORY, which is otherwise impossible: a pure factory is absent from the report entirely, so
+    /// there is no entry on which a return type could have been carried.
+    pub(crate) returns: HashMap<String, String>,
 }
 
 pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
@@ -115,6 +120,19 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         let version = v.pointer("/candor/version").and_then(|x| x.as_str()).unwrap_or("");
         let stale = version != my_version;
         let Some(fns) = v.get("functions").and_then(|x| x.as_array()).or_else(|| v.as_array()) else { continue };
+        // ⟨proposed: typeSurface⟩ merge this report's return types. A COLLISION on the same fn hash with
+        // a DIFFERENT type is dropped, not picked between — the same never-guess rule the entry join uses
+        // (two candidates are dropped, never chosen). A wrong receiver type would fabricate.
+        if let Some(ts) = v.pointer("/typeSurface/returns").and_then(|x| x.as_object()) {
+            for (k, val) in ts {
+                let Some(t) = val.as_str() else { continue };
+                match idx.returns.get(k) {
+                    Some(prev) if prev != t => { idx.returns.insert(k.clone(), String::new()); }
+                    Some(_) => {}
+                    None => { idx.returns.insert(k.clone(), t.to_string()); }
+                }
+            }
+        }
         // The crate(s) a report COVERS, for the §7.14 ledger exemption (§2 chaining rule 3): the
         // AUTHORITATIVE claim is the envelope's `package` (or the JVM-shape `packages`) field — an
         // EMPTY report ({functions: []}) is an all-pure purity claim for that package, covered and

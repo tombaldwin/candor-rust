@@ -509,6 +509,61 @@
         let _ = std::fs::remove_dir_all(&dep);
     }
 
+    /// ⟨proposed: typeSurface⟩ half 2. The PRODUCER publishes what a factory returns; the CONSUMER uses it
+    /// to form the key it could not form, and recovers the EFFECT rather than merely disclosing a hedge.
+    ///
+    /// This is the half that needs the wire format, and the reason is measurable: `build` is PURE, so it is
+    /// absent from the dependency's report entirely — there is no entry on which a return type could have
+    /// been carried, which is why a `returns` field on a function entry could never have worked.
+    #[test]
+    fn type_surface_recovers_a_factory_bound_receivers_effect_across_the_boundary() {
+        let dep = std::env::temp_dir().join(format!("candor-ts2-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dep.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "typeSurface": {{"returns": {{"deplib#build": "deplib#Client"}}}},
+            "functions": [{{"fn": "Client::fetch", "inferred": ["Fs"], "hash": "deplib#Client::fetch"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        assert_eq!(idx.returns.get("deplib#build").map(String::as_str), Some("deplib#Client"),
+                   "the consumer must LOAD the published return type");
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-ts2-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\ndeplib = \"1\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+                quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // The EFFECT is recovered — not a hedge. Half 1 would have given Unknown here; half 2 gives Fs.
+        let v = run("tsa", "pub fn go() -> String { let c = deplib::build(); c.fetch() }");
+        assert!(effs(fn_entry(&v, "go")).contains(&"Fs".to_string()),
+                "the published return type must let the real key form and carry the dep's effect:\n{v:#}");
+        assert!(!effs(fn_entry(&v, "go")).contains(&"Unknown".to_string()),
+                "and it must not ALSO hedge — the question was asked and answered:\n{v:#}");
+
+        // CONTROL — the type is known and the dep's report has no entry for that member. THAT is a
+        // genuine keyed-and-missed (§2 rule 3), so it must stay silent rather than disclose. Half 2's
+        // whole value is that this case is now distinguishable from an unanswerable one.
+        let q = run("tsb", "pub fn go2() { let c = deplib::build(); c.quiet(); }");
+        let e2 = q["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some("go2")).cloned();
+        assert!(e2.as_ref().is_none_or(|f| !effs(f).contains(&"Unknown".to_string())),
+                "a KEYED miss on a known type is the dep's honest purity claim — do not hedge it:\n{q:#}");
+        let _ = std::fs::remove_dir_all(&dep);
+    }
+
     #[test]
     fn smart_pointer_receiver_resolves_pointee_method_but_not_clone() {
         // A method call on an `Arc<T>`/`Rc<T>`/`Box<T>` receiver auto-derefs to T's method, so it must
