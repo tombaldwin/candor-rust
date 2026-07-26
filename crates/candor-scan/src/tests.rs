@@ -564,6 +564,38 @@
         let _ = std::fs::remove_dir_all(&dep);
     }
 
+    /// The owning TYPE in a report hash is the LAST-BUT-ONE segment, not the first. Real hashes are
+    /// module-qualified (`cr#conn::Pool::acquire`); the original extraction split on the FIRST `::` and
+    /// so collected MODULE names, making the "types with a non-pure member" bound reject essentially
+    /// everything on any modular crate. It passed the flat fixture (`deplib#Client::fetch`) either way,
+    /// which is exactly why this pins the module-qualified shape.
+    #[test]
+    fn type_surface_publishes_a_module_qualified_types_factory() {
+        let d = std::env::temp_dir().join(format!("candor-tsmod-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"tsmod\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "\
+pub mod conn {
+    pub struct Pool;
+    impl Pool { pub fn acquire(&self) -> String { std::fs::read_to_string(\"/x\").unwrap_or_default() } }
+    pub fn open() -> Pool { Pool }
+}
+").unwrap();
+        let idx = DepIndex::default();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+            include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let ts = &v["typeSurface"]["returns"];
+        assert_eq!(ts["tsmod#open"].as_str(), Some("tsmod#Pool"),
+                   "a factory returning a MODULE-QUALIFIED type whose method is effectful must be \
+                    published — the type is the last-but-one hash segment, not the first:\n{v:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn smart_pointer_receiver_resolves_pointee_method_but_not_clone() {
         // A method call on an `Arc<T>`/`Rc<T>`/`Box<T>` receiver auto-derefs to T's method, so it must
