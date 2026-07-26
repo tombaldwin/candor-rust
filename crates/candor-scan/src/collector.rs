@@ -815,6 +815,13 @@ impl<'a> CallCollector<'a> {
     /// leak in either.
     fn scoped_var<R>(&mut self, name: &str, ty: Option<String>, body: impl FnOnce(&mut Self) -> R) -> R {
         let prior = self.vars.remove(name);
+        // DEPENDENCY PROVENANCE IS SCOPED TOO. `dep_bound_vars` is keyed by bare name like `vars`, so a
+        // shadowing binding — a loop variable, a closure parameter — inherited the OUTER binding's
+        // provenance and its member calls were attributed to a dependency they have nothing to do with:
+        //     let client = deplib::build();      // provenance recorded for `client`
+        //     for client in local_items() { client.process(); }   // NOT the dep's client
+        // Saved and restored alongside `vars`, which is the invariant this helper exists to maintain.
+        let prior_prov = self.dep_bound_vars.remove(name);
         if let Some(t) = ty {
             self.vars.insert(name.to_string(), t);
         }
@@ -826,6 +833,10 @@ impl<'a> CallCollector<'a> {
             None => {
                 self.vars.remove(name);
             }
+        }
+        match prior_prov {
+            Some(p) => { self.dep_bound_vars.insert(name.to_string(), p); }
+            None => { self.dep_bound_vars.remove(name); }
         }
         r
     }
@@ -866,15 +877,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// the imported-trait CHA (R4) fired on it and put 17 fresh `Unknown`s on value-bag through
     /// `ValueBag::serialize`. Clearing the set for the nested walk is exactly the erasure carve-out doing
     /// what it says. Only this rung reads the set, so nothing else changes.
+    /// `trait_quals` is scoped with it, for the same reason and one step further along: it maps a trait
+    /// LEAF to the crate-qualified path THIS signature wrote. A nested item's same-named receiver would
+    /// otherwise inherit the OUTER signature's crate and form a dep key naming the wrong dependency —
+    /// the leaf-collision fabrication, arriving by nesting instead of by two params.
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
+        let outer_q = std::mem::take(&mut self.trait_quals);
         syn::visit::visit_item_fn(self, node);
         self.dyn_sig_traits = outer;
+        self.trait_quals = outer_q;
     }
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
+        let outer_q = std::mem::take(&mut self.trait_quals);
         syn::visit::visit_item_impl(self, node);
         self.dyn_sig_traits = outer;
+        self.trait_quals = outer_q;
     }
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
         // A `#[cfg(feature="X")]`-gated statement/block that is compiled OUT under the active feature set
@@ -1093,7 +1112,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // so both spellings form the same key. Still run it through `expand`: the head segment
                     // can itself be a `use` alias (`use foo::bar as deplib`). `crate`/`self`/`super`
                     // spellings are never recorded (see `sig_trait_quals`) — those are ours.
-                    let written = self.trait_quals.get(&tr).map(|q| q.as_str()).unwrap_or(tr.as_str());
+                    // An EMPTY value is the tombstone for a leaf this signature bound to two different
+                    // crates (see `quals_from_bounds`): treat it as absent and fall back to the file's
+                    // `use` map, which the language guarantees cannot bind one leaf to two crates.
+                    let written = self.trait_quals.get(&tr)
+                        .map(|q| q.as_str()).filter(|q| !q.is_empty()).unwrap_or(tr.as_str());
                     let full = crate::lang::expand(written, self.uses);
                     let root = full.split("::").next().unwrap_or("");
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
@@ -1536,6 +1559,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // `g()` calls an opaque body, so track it for the call-site `fn_typed_vars` check (else it
                 // resolves as a phantom free-fn `g` and is silently dropped — the max review's local-rebind
                 // find). Annotation wins over a stale binding from any source.
+                // Any REBIND of the name drops stale dependency provenance, exactly as it drops a stale
+                // concrete type. Without this an annotated rebind kept the old binding's provenance.
+                self.dep_bound_vars.remove(&id.ident.to_string());
                 if is_callable_type(&pt.ty, &HashMap::new()) {
                     self.fn_typed_vars.insert(id.ident.to_string());
                     self.vars.remove(&id.ident.to_string());
@@ -1619,6 +1645,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             for (i, pat_el) in tup.elems.iter().enumerate() {
                 let Some(name) = single_pat_ident(pat_el) else { continue };
                 self.vars.remove(&name);
+                self.dep_bound_vars.remove(&name);   // a destructured rebind drops stale provenance too
                 self.elem_of.remove(&name);
                 self.tuple_of.remove(&name);
                 self.trait_vars.remove(&name);

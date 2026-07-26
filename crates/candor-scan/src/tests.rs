@@ -509,6 +509,45 @@
         let _ = std::fs::remove_dir_all(&dep);
     }
 
+    /// One signature may bind the same trait LEAF to two different crates. `trait_quals` is keyed by leaf,
+    /// and last-wins made `a.go()` on an `alpha::Handler` form `beta::Handler::go` and inherit BETA's
+    /// reported effects — a fabrication on a function that never touches beta.
+    #[test]
+    fn a_trait_leaf_bound_to_two_crates_must_not_pick_one() {
+        let dep = std::env::temp_dir().join(format!("candor-quals-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dep.join("report.alpha.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "alpha", "functions": []}}"#)).unwrap();
+        std::fs::write(dep.join("report.beta.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "beta",
+            "functions": [{{"fn": "Handler::go", "inferred": ["Net"], "hash": "beta#Handler::go"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        let d = std::env::temp_dir().join(format!("candor-qualsapp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n[dependencies]\nalpha = \"1\"\nbeta = \"1\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"),
+            "pub fn handle(a: &dyn alpha::Handler, _b: &dyn beta::Handler) { a.go(); }\n").unwrap();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+            include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let handle = v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some("handle")).cloned();
+        assert!(handle.as_ref().is_none_or(|f| !effs(f).contains(&"Net".to_string())),
+                "a call on ALPHA's Handler must not inherit BETA's effects because both leaves are \
+                 spelled `Handler`:\n{v:#}");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&dep);
+    }
+
     #[test]
     fn smart_pointer_receiver_resolves_pointee_method_but_not_clone() {
         // A method call on an `Arc<T>`/`Rc<T>`/`Box<T>` receiver auto-derefs to T's method, so it must
