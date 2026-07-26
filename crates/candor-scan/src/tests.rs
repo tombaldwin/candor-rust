@@ -207,7 +207,7 @@
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -257,7 +257,7 @@
             uses: &uses,
             vars,
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -2257,7 +2257,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 uses: &uses,
                 vars,
                 trait_vars,
-                dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,
@@ -2311,7 +2311,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -2335,7 +2335,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let blk: syn::Block = syn::parse_str(src).unwrap();
                 let mut c = CallCollector {
             modpath: String::new(),
-                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -2368,7 +2368,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -2404,7 +2404,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 uses: &uses,
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
-                dyn_sig_traits: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
+                dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,
@@ -5384,4 +5384,175 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         .join()
         .expect("cfg evaluation must survive an AST parsed on another thread");
         assert!(saw, "the `test` predicate must still be seen");
+    }
+
+    /// A LOCAL `let`'s type annotation can NAME A GENERIC (`let d: T = pick();` under `fn f<T: Doer>`),
+    /// and Pass B is the only place that annotation is read — but the collector had no copy of the
+    /// signature's bound map, so `trait_leaves` was called with an EMPTY one and the bound arm could
+    /// never fire. Inert, and therefore "correct by accident": nothing was wrong with the resolution
+    /// rule, the question was simply never asked. The PARAMETER form of every row below already
+    /// resolved, which is what makes this a gap rather than a policy.
+    ///
+    /// Each row carries its own control, because a row failing for a DIFFERENT reason would look the
+    /// same: the `dyn` spelling of the same position (measured to resolve before this change), and a
+    /// PURE-only trait that must NOT gain an effect.
+    #[test]
+    fn a_let_annotation_naming_a_generic_asks_the_signature_for_its_bound() {
+        let v = scan_src_to_json("letbound", concat!(
+            "use std::collections::HashMap;\n",
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fsy;\n",
+            "impl Doer for Fsy { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            // A trait whose every local impl is PURE — the anti-fabrication direction. Widening the
+            // annotation must not invent an effect where the CHA finds none.
+            "pub trait Quiet { fn q(&self); }\n",
+            "pub struct Q1;\n",
+            "impl Quiet for Q1 { fn q(&self) {} }\n",
+            // The rows this change closes.
+            "pub fn let_scalar<T: Doer>(x: T) { let d: T = x; d.go() }\n",
+            "pub fn let_vec<T: Doer>(xs: Vec<T>) { let v: Vec<T> = xs; for d in v { d.go() } }\n",
+            "pub fn let_map<T: Doer>(m: HashMap<String, T>) { let q: HashMap<String, T> = m; for d in q.values() { d.go() } }\n",
+            // The controls: the same POSITION with a `dyn` spelling, which resolved before the change.
+            "pub fn ctl_scalar_dyn(x: Box<dyn Doer>) { let d: Box<dyn Doer> = x; d.go() }\n",
+            "pub fn ctl_param_scalar<T: Doer>(d: T) { d.go() }\n",
+            // The anti-fabrication row.
+            "pub fn let_pure_bound<T: Quiet>(x: T) { let d: T = x; d.q() }\n",
+        ));
+        for f in ["let_scalar", "let_vec", "let_map", "ctl_scalar_dyn", "ctl_param_scalar"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()), "{f} must reach Fs:\n{v:#}");
+        }
+        assert!(
+            v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "let_pure_bound"),
+            "a bound whose local impls are all pure must gain nothing — this is the fabrication \
+             direction, and the row above cannot see it:\n{v:#}"
+        );
+    }
+
+    /// The tuple half, and it needed a second fix that only surfaced once the first one worked.
+    /// `tuple_types` yields a position's SPELLING (`"T"`) while `tuple_trait_leaves` yields its BOUND,
+    /// and the destructure wrote BOTH — `vars` and `trait_vars` — with `vars` winning at the call site.
+    /// So `d` resolved to a type named `T`, which is nothing, and read silent-pure; the `dyn` spelling
+    /// escaped only because `tuple_types` yields `None` for it. That is standing-bar 0b exactly: the
+    /// annotation gap was hiding a PARAMETER-position gap underneath it (`ctl_param_tuple` below fails
+    /// too, with no annotation involved).
+    #[test]
+    fn a_tuple_position_with_dispatch_leaves_is_not_shadowed_by_its_spelling() {
+        let v = scan_src_to_json("lettuple", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fsy;\n",
+            "impl Doer for Fsy { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            "pub struct Conc;\n",
+            "impl Conc { pub fn c(&self) { let _ = std::net::TcpStream::connect(\"h:1\"); } }\n",
+            "pub fn let_tuple_bound<T: Doer>(t: (T, u32)) { let p: (T, u32) = t; let (d, _n) = p; d.go() }\n",
+            "pub fn ctl_param_tuple<T: Doer>(t: (T, u32)) { let (d, _n) = t; d.go() }\n",
+            "pub fn ctl_tuple_dyn(t: (Box<dyn Doer>, u32)) { let (d, _n) = t; d.go() }\n",
+            // THE OTHER DIRECTION for the shadow fix: a CONCRETE tuple position has no dispatch leaves,
+            // so it must still take the `vars` route and resolve its own type's method.
+            "pub fn ctl_concrete_tuple(t: (Conc, u32)) { let (c, _n) = t; c.c() }\n",
+        ));
+        for f in ["let_tuple_bound", "ctl_param_tuple", "ctl_tuple_dyn"] {
+            assert!(effs(fn_entry(&v, f)).contains(&"Fs".to_string()), "{f} must reach Fs:\n{v:#}");
+        }
+        assert!(
+            effs(fn_entry(&v, "ctl_concrete_tuple")).contains(&"Net".to_string()),
+            "the concrete tuple position must keep resolving through `vars`:\n{v:#}"
+        );
+    }
+
+    /// The gain this rung produces on real code is a DISCLOSURE, not an effect, and it is the CHA
+    /// fan-out bound (≤12 local impls, else honest `Unknown`) reaching a receiver it could not see
+    /// before — not new behaviour. The parameter form is the control: it reads `Unknown` in both arms.
+    /// (Traced on ebman `lint::default_rules`, 19 `impl Rule`, absent-from-report → `Unknown`.)
+    #[test]
+    fn a_wide_local_trait_reached_through_a_let_annotation_discloses_unknown() {
+        let mut src = String::from("pub trait Wide { fn w(&self); }\n");
+        for i in 0..13 {
+            src.push_str(&format!("pub struct W{i};\nimpl Wide for W{i} {{ fn w(&self) {{}} }}\n"));
+        }
+        src.push_str("pub fn param_wide(xs: Vec<Box<dyn Wide>>) { for x in xs { x.w() } }\n");
+        src.push_str("pub fn let_wide(xs: Vec<Box<dyn Wide>>) { let v: Vec<Box<dyn Wide>> = xs; for x in v { x.w() } }\n");
+        let v = scan_src_to_json("letwide", &src);
+        for f in ["param_wide", "let_wide"] {
+            assert!(
+                effs(fn_entry(&v, f)).contains(&"Unknown".to_string()),
+                "{f} must DISCLOSE rather than read pure — 13 impls exceeds the 12-impl CHA bound:\n{v:#}"
+            );
+        }
+    }
+
+    /// The RESIDUALS, pinned so they cannot be mistaken for closed. Each was measured with its `dyn`
+    /// control, and in every case the control is silent too — so these are POSITION-level gaps (the
+    /// position resolves nothing at all) rather than the "never asks for the bound" gap this rung
+    /// closed. Recording them as a test rather than a comment because a comment claiming a
+    /// justification is an assertion; if one of these starts resolving, this test says so.
+    #[test]
+    fn the_dispatch_positions_still_silent_are_silent_for_dyn_too() {
+        let v = scan_src_to_json("letresid", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fsy;\n",
+            "impl Doer for Fsy { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            // (a) tuple INDEX access — `tuple_trait_of` is only consumed by a destructure pattern.
+            "pub fn idx_bound<T: Doer>(t: (T, u32)) { t.0.go() }\n",
+            "pub fn idx_dyn(t: (Box<dyn Doer>, u32)) { t.0.go() }\n",
+            // (b) an UNANNOTATED rebind drops the source's dispatch leaves.
+            "pub fn rebind_bound<T: Doer>(xs: Vec<T>) { let v = xs; for d in v { d.go() } }\n",
+            "pub fn rebind_dyn(xs: Vec<Box<dyn Doer>>) { let v = xs; for d in v { d.go() } }\n",
+            // (c) a FACTORY return bound into a local.
+            "pub fn make_dyn() -> Box<dyn Doer> { Box::new(Fsy) }\n",
+            "pub fn use_ret_dyn() { let d = make_dyn(); d.go() }\n",
+        ));
+        let present: Vec<&str> = v["functions"].as_array().unwrap().iter()
+            .filter_map(|f| f["fn"].as_str()).collect();
+        for f in ["idx_bound", "idx_dyn", "rebind_bound", "rebind_dyn", "use_ret_dyn"] {
+            assert!(
+                !present.contains(&f),
+                "{f} now resolves — good news, but this residual note is stale: re-measure the \
+                 position's `dyn` control and move the row into the closed set:\n{v:#}"
+            );
+        }
+    }
+
+    /// The bound map must be SCOPED across a nested `fn`/`impl`, for the same reason `dyn_sig_traits`
+    /// is (R4 / value-bag): a nested item's calls are attributed to the ENCLOSING unit, so a nested
+    /// `let d: T` would otherwise read the OUTER signature's `T` and charge the outer bound's
+    /// implementors to a function that never touches them. Distinguishing fixture — the two `T`s are
+    /// bound to different traits with the same method name, and only the outer one is effectful.
+    #[test]
+    fn the_bound_map_does_not_follow_the_walk_into_a_nested_item() {
+        let v = scan_src_to_json("letnested", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fsy;\n",
+            "impl Doer for Fsy { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            "pub trait Quiet { fn go(&self); }\n",
+            "pub struct Q1;\n",
+            "impl Quiet for Q1 { fn go(&self) {} }\n",
+            "pub fn holder<T: Doer>(_x: T) {\n",
+            "    fn nested<T: Quiet>(y: T) { let d: T = y; d.go(); }\n",
+            "    nested(Q1);\n",
+            "}\n",
+        ));
+        assert!(
+            !effs(&v["functions"].as_array().unwrap().iter()
+                .find(|f| f["fn"] == "holder").cloned().unwrap_or(serde_json::json!({"inferred": []})))
+                .contains(&"Fs".to_string()),
+            "the nested item's `T` inherited the ENCLOSING signature's bound — the R4 shadowing \
+             hazard, arriving through the annotation instead of the parameter:\n{v:#}"
+        );
+    }
+
+    /// The same "never asks" defect on the CALLABLE arm of the annotation: `let g: F = f;` under
+    /// `<F: Fn()>` left `g` un-flagged, so invoking it read silent-pure while the identical PARAMETER
+    /// position already disclosed `Unknown`. Honest beats silent, and the parameter row is the control.
+    #[test]
+    fn a_let_annotation_naming_a_callable_generic_still_discloses_unknown() {
+        let v = scan_src_to_json("letcallable", concat!(
+            "pub fn param_fn<F: Fn()>(f: F) { f() }\n",
+            "pub fn let_fn<F: Fn()>(f: F) { let g: F = f; g() }\n",
+        ));
+        for f in ["param_fn", "let_fn"] {
+            assert!(
+                effs(fn_entry(&v, f)).contains(&"Unknown".to_string()),
+                "{f} invokes an opaque callable and must disclose it:\n{v:#}"
+            );
+        }
     }

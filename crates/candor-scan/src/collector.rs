@@ -18,6 +18,13 @@ pub(crate) struct CallCollector<'a> {
     /// monomorphizes. The IMPORTED-trait CHA (R4) fires only on these; see `lang::dyn_sig_trait_leaves`
     /// for why, and for the serde_json measurement that forced the distinction.
     pub(crate) dyn_sig_traits: std::collections::HashSet<String>,
+    /// This signature's generic parameter -> its trait bounds (`<T: Doer>` → `T -> ["Doer"]`), i.e.
+    /// `lang::generic_bounds_of(sig)`. Pass A already threads exactly this into every PARAMETER, FIELD
+    /// and RETURN position; the collector needs its own copy because a LOCAL `let` can name a generic
+    /// too (`let d: T = pick();`) and Pass B is the only place that type annotation is read. Scoped
+    /// across a nested `fn`/`impl` beside `dyn_sig_traits`, for the same reason — a nested item's `T`
+    /// is its own, not the enclosing signature's.
+    pub(crate) generic_bounds: HashMap<String, Vec<String>>,
     /// Trait leaf -> the multi-segment path this signature WROTE the bound with (`&dyn deplib::Handler`).
     /// `bound_leaves` keeps only the leaf, so a FULLY-QUALIFIED receiver otherwise loses its crate
     /// identity entirely and never forms the crate-qualified key — R6. See `lang::sig_trait_quals`.
@@ -895,6 +902,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// the leaf-collision fabrication, arriving by nesting instead of by two params.
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
+        // …and the bound map, which a nested item's `let d: T` would otherwise read off the ENCLOSING
+        // signature — the same shadowing hazard `dyn_sig_traits` is scoped for, one map along.
+        let outer_g = std::mem::take(&mut self.generic_bounds);
         let outer_q = std::mem::take(&mut self.trait_quals);
         // …and the PER-PARAM map, which is now the FIRST source consulted. Scoping the two leaf-keyed maps
         // but not this one left a nested item reading the outer signature's crate for a same-named
@@ -902,15 +912,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let outer_p = std::mem::take(&mut self.trait_quals_by_param);
         syn::visit::visit_item_fn(self, node);
         self.dyn_sig_traits = outer;
+        self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
     }
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
+        let outer_g = std::mem::take(&mut self.generic_bounds);
         let outer_q = std::mem::take(&mut self.trait_quals);
         let outer_p = std::mem::take(&mut self.trait_quals_by_param);
         syn::visit::visit_item_impl(self, node);
         self.dyn_sig_traits = outer;
+        self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
     }
@@ -1637,13 +1650,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.trait_quals_by_param.insert(id.ident.to_string(), per);
                     }
                 }
-                if is_callable_type(&pt.ty, &HashMap::new()) {
+                // `self.generic_bounds` for the same reason as the `trait_leaves` call below: an
+                // annotation can name a generic (`let g: F = f;` under `<F: Fn()>`). The PARAMETER
+                // position already discloses `Unknown` for that callable; the annotation read pure.
+                if is_callable_type(&pt.ty, &self.generic_bounds) {
                     self.fn_typed_vars.insert(id.ident.to_string());
                     self.vars.remove(&id.ident.to_string());
                 } else {
                     self.fn_typed_vars.remove(&id.ident.to_string()); // a non-callable annotation clears it
                 }
-                let leaves = trait_leaves(&pt.ty, &HashMap::new());
+                // `self.generic_bounds`, not an empty map: an annotation can NAME a generic parameter
+                // (`let d: T = pick();` under `fn f<T: Doer>`), and with no bounds to consult that read
+                // silent-pure while the identical PARAMETER position (`fn f<T: Doer>(d: T)`) resolved.
+                // Measured with a `dyn` control — `let d: Box<dyn Doer> = x` already resolved here — so
+                // the position was live and only the bound question was never asked.
+                let leaves = trait_leaves(&pt.ty, &self.generic_bounds);
                 if !leaves.is_empty() {
                     self.vars.remove(&id.ident.to_string()); // a stale concrete binding must not shadow the rebind
                     self.trait_vars.insert(id.ident.to_string(), leaves);
@@ -1655,11 +1676,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if let Some(e) = elem_type(&pt.ty, self.uses) {
                     self.elem_of.insert(id.ident.to_string(), e);
                 }
+                // …and the DISPATCH counterpart, which this site never asked for at all: a
+                // `let v: Vec<Box<dyn Doer>> = ..` / `let m: HashMap<K, Box<dyn Doer>> = ..` /
+                // `let v: Vec<T> = ..` under `<T: Doer>` left the later `for d in v { d.go() }` untyped
+                // and silent-pure, though the same shapes in PARAMETER (`seed_elem_of`) and FIELD
+                // (`field_elem_trait`) position have resolved since R37/R40. Same helper, same
+                // arguments — this is the annotation catching up with the other two positions, not a
+                // new resolution path. Cleared first, so an annotation that is NOT a dispatch container
+                // cannot leave a previous binding's leaves standing (the stale-rebind defect of `71c2495`).
+                self.elem_trait_of.remove(&id.ident.to_string());
+                let elem_leaves = elem_trait_leaves(&pt.ty, &self.generic_bounds);
+                if !elem_leaves.is_empty() {
+                    self.elem_trait_of.insert(id.ident.to_string(), elem_leaves);
+                }
                 // A TUPLE-typed let (`let pair: (Sender, usize) = ..`) — record its per-position types
                 // so a later `let (s, _) = pair;` types `s`.
                 self.tuple_of.remove(&id.ident.to_string());
                 if let Some(t) = tuple_types(&pt.ty, self.uses) {
                     self.tuple_of.insert(id.ident.to_string(), t);
+                }
+                // …and the tuple's per-position DISPATCH leaves, the `tuple_trait_of` twin of the above.
+                self.tuple_trait_of.remove(&id.ident.to_string());
+                if let Some(t) = tuple_trait_leaves(&pt.ty, &self.generic_bounds) {
+                    self.tuple_trait_of.insert(id.ident.to_string(), t);
                 }
                 // IMPLICIT `.into()` → `From::from` (#5), TARGET resolved from the annotation. `let d:
                 // Dst = src.into();` desugars to `Dst::from(src)` via a local `impl From<Src> for Dst`;
@@ -1733,9 +1772,6 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }
                         _ => None,
                     });
-                if let Some(ty) = ty {
-                    self.vars.insert(name.clone(), ty);
-                }
                 // Bind a DISPATCH position into `trait_vars`: from the source var's `tuple_trait_of`, or an
                 // inline tuple literal's cast element (`(x as Box<dyn Doer>, 1)` → position 0's leaves).
                 let leaves = src_trait_tuple
@@ -1752,6 +1788,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }),
                         _ => None,
                     });
+                // A position with dispatch leaves takes the `trait_vars` route and must NOT also land in
+                // `vars` — the two collide on exactly one shape, a bare generic parameter, where
+                // `tuple_types` yields the SPELLING (`"T"`) while `tuple_trait_leaves` yields the BOUND.
+                // `vars` wins at the call site, so `let p: (T, u32) = t; let (d, _) = p; d.go()` resolved
+                // `d` to a type named `T` — which is nothing — and read silent-pure, while the same
+                // destructure of a `(Box<dyn Doer>, u32)` (where `tuple_types` yields `None`) resolved.
+                // The spelling is never a real type here, so this loses nothing and closes the shadow.
+                if let Some(ty) = ty.filter(|_| leaves.is_none()) {
+                    self.vars.insert(name.clone(), ty);
+                }
                 if let Some(l) = leaves {
                     self.trait_vars.insert(name, l);
                 }
