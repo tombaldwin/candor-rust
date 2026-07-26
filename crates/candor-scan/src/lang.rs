@@ -92,6 +92,90 @@ pub(crate) fn dyn_sig_trait_leaves(sig: &syn::Signature) -> std::collections::Ha
     out
 }
 
+/// Trait leaf -> the multi-segment path the bound was WRITTEN with, for a signature that spells its
+/// bounds in full: `&dyn deplib::Handler`, `impl deplib::Handler`, `T: deplib::Handler`. R6.
+///
+/// `bound_leaves` keeps only `segments.last()`, because every downstream index (`trait_impls`,
+/// `local_traits`, `trait_fields`) is keyed by leaf. That is fine for the IMPORTED spelling — the file's
+/// `use deplib::Handler` lets `expand` put the crate back on — but a FULLY-QUALIFIED receiver has no
+/// `use` to recover it from, so the crate identity was simply LOST and the consumer never formed the
+/// crate-qualified key. That is the whole of R6: the same receiver reads pure written one way and
+/// resolves written the other.
+///
+/// `crate`/`self`/`super`-rooted spellings are deliberately NOT recorded. They are crate-LOCAL, so if
+/// the trait were ours it would already be in `local_traits` and never reach this path; recording them
+/// would hand `expand` a path whose root it STRIPS, turning `crate::deplib::Handler` into a
+/// dependency-looking `deplib::Handler` — the value-bag fabrication class arriving by another door.
+pub(crate) fn sig_trait_quals(sig: &syn::Signature) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for arg in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            collect_trait_quals(&pt.ty, &mut out);
+        }
+    }
+    // `fn f<T: deplib::Handler>(t: T)` — the bound lives on the generics, not on the param type.
+    for p in &sig.generics.params {
+        if let syn::GenericParam::Type(tp) = p {
+            quals_from_bounds(&tp.bounds, &mut out);
+        }
+    }
+    if let Some(w) = &sig.generics.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                quals_from_bounds(&pt.bounds, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn quals_from_bounds(
+    bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
+    out: &mut HashMap<String, String>,
+) {
+    for b in bounds {
+        let syn::TypeParamBound::Trait(t) = b else { continue };
+        if t.path.segments.len() < 2 {
+            continue; // a bare leaf carries no crate identity — `expand` + the file's `use` owns it
+        }
+        let head = t.path.segments[0].ident.to_string();
+        if matches!(head.as_str(), "crate" | "self" | "super") {
+            continue; // crate-LOCAL spelling — see the doc comment above
+        }
+        let Some(leaf) = t.path.segments.last().map(|s| s.ident.to_string()) else { continue };
+        out.insert(leaf, path_to_string(&t.path));
+    }
+}
+
+/// Walk a type for qualified trait bounds — mirrors `collect_dyn_trait_leaves`, but INCLUDES
+/// `impl Trait`: a qualified bound is worth recording wherever it is spelled, and whether the receiver
+/// may DISPATCH is the erasure carve-out's separate decision.
+fn collect_trait_quals(ty: &syn::Type, out: &mut HashMap<String, String>) {
+    match ty {
+        syn::Type::TraitObject(t) => quals_from_bounds(&t.bounds, out),
+        syn::Type::ImplTrait(t) => quals_from_bounds(&t.bounds, out),
+        syn::Type::Reference(r) => collect_trait_quals(&r.elem, out),
+        syn::Type::Paren(p) => collect_trait_quals(&p.elem, out),
+        syn::Type::Group(g) => collect_trait_quals(&g.elem, out),
+        syn::Type::Slice(s) => collect_trait_quals(&s.elem, out),
+        syn::Type::Array(a) => collect_trait_quals(&a.elem, out),
+        syn::Type::Ptr(p) => collect_trait_quals(&p.elem, out),
+        syn::Type::Tuple(t) => t.elems.iter().for_each(|e| collect_trait_quals(e, out)),
+        syn::Type::Path(p) => {
+            for seg in &p.path.segments {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    for a in &args.args {
+                        if let syn::GenericArgument::Type(t) = a {
+                            collect_trait_quals(t, out);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The trait leaves of a type-param-bound list (`T: Store + Send` -> ["Store", "Send"]). Marker
 /// bounds need no filtering here: a leaf only ever matters if it later matches a local trait or a
 /// local impl, and nobody locally declares `trait Send`.

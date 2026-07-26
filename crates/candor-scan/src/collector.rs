@@ -18,6 +18,10 @@ pub(crate) struct CallCollector<'a> {
     /// monomorphizes. The IMPORTED-trait CHA (R4) fires only on these; see `lang::dyn_sig_trait_leaves`
     /// for why, and for the serde_json measurement that forced the distinction.
     pub(crate) dyn_sig_traits: std::collections::HashSet<String>,
+    /// Trait leaf -> the multi-segment path this signature WROTE the bound with (`&dyn deplib::Handler`).
+    /// `bound_leaves` keeps only the leaf, so a FULLY-QUALIFIED receiver otherwise loses its crate
+    /// identity entirely and never forms the crate-qualified key — R6. See `lang::sig_trait_quals`.
+    pub(crate) trait_quals: HashMap<String, String>,
     pub(crate) fields: &'a FieldIndex,
     pub(crate) trait_fields: &'a TraitFieldIndex,
     /// trait leaf -> local impl types (None entries never exist; absent = no local impl).
@@ -1045,7 +1049,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // resolves it against the trait-CHA `interfaceUnion` entry the dep exposes (WORKSPACE-
                     // CHAINING-DESIGN.md). Precise path (the actual trait method) → no fabrication; unresolved
                     // to pure/invisible exactly as before when the dep isn't chained.
-                    let full = crate::lang::expand(&tr, self.uses);
+                    // R6 — a FULLY-QUALIFIED receiver (`fn f(h: &dyn deplib::Handler)`) has no `use` to
+                    // expand through, and `bound_leaves` already threw the qualifier away, so `expand`
+                    // handed back the bare leaf, the `contains("::")` test failed and the site emitted
+                    // NOTHING: no dep key, no CHA, silent-pure — while the IMPORTED spelling of the very
+                    // same receiver resolves. `trait_quals` keeps the path the signature actually wrote,
+                    // so both spellings form the same key. Still run it through `expand`: the head segment
+                    // can itself be a `use` alias (`use foo::bar as deplib`). `crate`/`self`/`super`
+                    // spellings are never recorded (see `sig_trait_quals`) — those are ours.
+                    let written = self.trait_quals.get(&tr).map(|q| q.as_str()).unwrap_or(tr.as_str());
+                    let full = crate::lang::expand(written, self.uses);
                     let root = full.split("::").next().unwrap_or("");
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
                         self.calls.push(Call {

@@ -207,7 +207,7 @@
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(),
+            dyn_sig_traits: Default::default(), trait_quals: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -257,7 +257,7 @@
             uses: &uses,
             vars,
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(),
+            dyn_sig_traits: Default::default(), trait_quals: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -704,6 +704,84 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
                 "CARVE-OUT 3 (crate-local): a `self::`-rooted re-export is NOT a dependency (the value-bag flood):\n{body}");
         assert!(effs("nested").is_empty(),
                 "CARVE-OUT 4 (nested item): an inner fn's own generic must not inherit the outer signature's `dyn`-ness:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn fully_qualified_dependency_trait_forms_the_crate_key_r6() {
+        // R6, the scan-boundary vein: `fn f(h: &dyn deplib::Handler)` — the SAME receiver as R4, written
+        // FULLY QUALIFIED instead of imported — read silent-pure. `bound_leaves` keeps only
+        // `segments.last()` (every downstream index is leaf-keyed), and with no `use` to expand through,
+        // `expand` handed back a bare `Handler`: no `::`, so NO dependency key was emitted and no CHA ran.
+        // The same code spelled `use deplib::Handler` resolved. `sig_trait_quals` keeps the path the
+        // signature actually wrote, so both spellings form the same crate-qualified key.
+        //
+        // Measured on the real corpus: this is what makes tracing's
+        // `__tracing_log(logger: &'static dyn log::Log, …) { logger.log(…) }` read `Log` instead of pure.
+        let d = std::env::temp_dir().join(format!("candor-r6-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r6\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            // NOTE: no `use deplib::Handler` anywhere — every mention is spelled in full.
+            pub struct MyH;
+            impl deplib::Handler for MyH { fn go(&self) { let _ = std::fs::read_to_string("/etc/hosts"); } }
+
+            // POSITIVE: a fully-qualified `dyn` receiver dispatches to the local impl.
+            pub fn run_qualified(h: &dyn deplib::Handler) { h.go(); }
+            pub fn run_qualified_box(h: Box<dyn deplib::Handler>) { h.go(); }
+
+            // POSITIVE (the classifier half): with the crate-qualified key formed, a call the CLASSIFIER
+            // knows reaches its effect even with no local impl at all. This is tracing's
+            // `__tracing_log(logger: &'static dyn log::Log, …) { logger.log(…) }` verbatim — pure before.
+            pub fn logs(l: &dyn deplib::Logger) { l.log("x"); }
+
+            // RESIDUAL, asserted so it can't drift silently: the erasure carve-out still applies to the
+            // qualified spelling — a caller-monomorphized bound / `impl Trait` does NOT CHA local impls.
+            pub fn run_qualified_bound<T: deplib::Handler>(t: T) { t.go(); }
+            pub fn run_qualified_impl(h: impl deplib::Handler) { h.go(); }
+
+            // CONTROL: a `crate::`-rooted qualified spelling is CRATE-LOCAL, not a dependency. `expand`
+            // strips the root, so recording it would turn `crate::inner::Marker` into a dependency-looking
+            // `inner::Marker` and CHA `Loud`'s Net onto it.
+            pub mod inner { pub use std::io::Write; }
+            pub struct Loud;
+            impl std::io::Write for Loud {
+                fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { let _ = std::net::TcpStream::connect("h:1"); Ok(b.len()) }
+                fn flush(&mut self) -> std::io::Result<()> { let _ = std::net::TcpStream::connect("h:1"); Ok(()) }
+            }
+            pub fn writes_crate_rooted(w: &mut dyn crate::inner::Write) { let _ = w.flush(); }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let fun = |needle: &str| -> Option<&serde_json::Value> {
+            v["functions"].as_array().into_iter().flatten().find(|f| f["fn"].as_str() == Some(needle))
+        };
+        let effs = |needle: &str| -> Vec<String> {
+            fun(needle).into_iter()
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        assert!(effs("run_qualified").contains(&"Fs".to_string()),
+                "R6: a FULLY-QUALIFIED `&dyn deplib::Handler` must dispatch like the imported spelling:\n{body}");
+        assert!(effs("run_qualified_box").contains(&"Fs".to_string()),
+                "R6: `Box<dyn deplib::Handler>` takes the same route:\n{body}");
+        assert!(effs("logs").contains(&"Log".to_string()),
+                "R6: the crate-qualified key must reach the CLASSIFIER too (the tracing `dyn log::Log` shape):\n{body}");
+        assert!(effs("run_qualified_bound").is_empty() && effs("run_qualified_impl").is_empty(),
+                "RESIDUAL: the erasure carve-out still applies to the qualified spelling:\n{body}");
+        assert!(effs("writes_crate_rooted").is_empty(),
+                "CONTROL: a `crate::`-rooted spelling is crate-LOCAL and must not be treated as a dependency:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1740,7 +1818,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 uses: &uses,
                 vars,
                 trait_vars,
-                dyn_sig_traits: dyn_sig_trait_leaves(&sig),
+                dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig),
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,
@@ -1794,7 +1872,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig),
+                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -1818,7 +1896,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let blk: syn::Block = syn::parse_str(src).unwrap();
                 let mut c = CallCollector {
             modpath: String::new(),
-                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig),
+                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -1851,7 +1929,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(),
+            dyn_sig_traits: Default::default(), trait_quals: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -1887,7 +1965,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 uses: &uses,
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
-                dyn_sig_traits: Default::default(),
+                dyn_sig_traits: Default::default(), trait_quals: Default::default(),
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,
