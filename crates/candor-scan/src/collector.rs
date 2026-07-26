@@ -1068,15 +1068,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // because then a real key exists and this would only add noise beside it.
         if let syn::Expr::Path(rp) = &*node.receiver {
             if let Some(name) = rp.path.get_ident().map(|i| i.to_string()) {
-                if let Some(root) = self.dep_bound_vars.get(&name) {
+                if let Some(callee_path) = self.dep_bound_vars.get(&name) {
                     if self.resolve_recv_type(&node.receiver).is_none()
                         && self.resolve_recv_traits(&node.receiver).is_empty()
                     {
                         // Angle-bracket marker segment: cannot collide with a real path (the same device
                         // as `<drop>`/`<construct>`), so it can never reach local resolution or the
                         // classifier. Bounded at consumption in scan.rs: join, disclose, `continue`.
+                        //
+                        // `<crate>::<untyped>::<the rest of the callee path>::<method>`. The crate root
+                        // alone drives half 1's disclosure; the WHOLE callee path is what half 2 looks up
+                        // in the dep's published `typeSurface.returns`, and it has to be the whole path
+                        // because that map is keyed by the dependency's MODULE-QUALIFIED fn qual. The
+                        // consumer splits it back off with `rsplit_once` — a method leaf is one segment,
+                        // a callee path is not, so splitting from the FRONT (as the reverted attempt did)
+                        // truncates every non-root factory to its first module segment.
+                        let (root, rest) = callee_path.split_once("::").unwrap_or((callee_path, ""));
                         self.calls.push(Call {
-                            path: format!("{root}::<untyped>::{leaf}"),
+                            path: format!("{root}::<untyped>::{rest}::{leaf}"),
                             leaf: leaf.clone(),
                             str_arg: None,
                             typed: false,
@@ -1790,8 +1799,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 // A multi-segment path whose head is a plausible crate root. The head is
                                 // checked against the manifest's declared deps at CONSUMPTION in scan.rs,
                                 // so a local module sharing the shape emits an inert marker.
-                                if let Some(head) = full.split("::").next().filter(|h| full.contains("::") && !h.is_empty()) {
-                                    self.dep_bound_vars.insert(id.ident.to_string(), head.to_string());
+                                //
+                                // The WHOLE expanded callee path is stored, not just the head. The head
+                                // is what half 1's disclosure needs; the full path is the key half 2
+                                // looks up in the dependency's published `typeSurface.returns`, which is
+                                // keyed by the dependency's MODULE-QUALIFIED fn qual.
+                                if full.contains("::") && !full.starts_with("::") {
+                                    self.dep_bound_vars.insert(id.ident.to_string(), full.clone());
                                 }
                             }
                         }

@@ -268,7 +268,35 @@ pub struct Report {
     /// scan — wire-compatible with a pre-rung report. `default` so older reports still deserialize.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unanalyzed: Vec<UnanalyzedUnit>,
+    /// ⟨proposed: typeSurface⟩ The minimum TYPE information a consumer needs to form a key it otherwise
+    /// cannot. Omitted when empty, so a report with nothing to say is byte-identical to a pre-rung one
+    /// and a consumer that ignores the block behaves exactly as today (tier-1 additive — the rule that
+    /// let `interfaceUnion` ride gated).
+    #[serde(rename = "typeSurface", default, skip_serializing_if = "Option::is_none")]
+    pub type_surface: Option<TypeSurface>,
     pub functions: Vec<ReportEntry>,
+}
+
+/// ⟨proposed⟩ candor-spec/DEP-RECEIVER-TYPING-DESIGN.md, half 2.
+///
+/// A PURE FACTORY IS ABSENT FROM THE REPORT ENTIRELY — reports omit pure functions — so no field added
+/// to a function *entry* could carry this; there is no entry to put it on. That is why the type surface
+/// is a separate envelope block, and it is the reason the item stalled as long as it did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TypeSurface {
+    /// `<fn id>` -> `<type id>`, BOTH FULLY QUALIFIED: `deplib#sync::build` -> `deplib#sync::Client`.
+    ///
+    /// THE QUALIFICATION IS THE MECHANISM, not a naming detail. The reverted attempt published
+    /// `{crate}#{leaf}` on both ends, so `sync::Client` and `mock::Client` in one dependency were the
+    /// same string and a PURE `mock_client()` factory let `sync::Client::send`'s `Net` be charged to a
+    /// caller that cannot reach it. The type id is a PREFIX of that type's real entry hashes, so the
+    /// consumer forms `<type id>::<method>` and asks the dep index for exactly that.
+    ///
+    /// BOUNDED to types with at least one non-pure member in the same report: if the returned type has
+    /// no effectful and no `Unknown`-carrying member, typing the receiver changes no answer — the lookup
+    /// it enables succeeds and yields pure, which is what silence already yields.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub returns: std::collections::BTreeMap<String, String>,
 }
 
 /// Parse a report's function entries, accepting BOTH the v0.2 envelope `{ candor, functions }` and
@@ -377,6 +405,46 @@ pub fn to_packaged_report_json_full(
         functions: &'a [ReportEntry],
     }
     serde_json::to_string_pretty(&Out { candor, package, coverage, analyzed, unanalyzed, functions })
+}
+
+/// ⟨proposed: typeSurface⟩ As [`to_packaged_report_json_full`], additionally carrying the type surface.
+/// An empty/`None` surface omits the field entirely, so a report from a crate with nothing to publish is
+/// byte-identical to one produced before the rung existed.
+#[allow(clippy::too_many_arguments)]
+pub fn to_packaged_report_json_typed(
+    candor: &ReportMeta,
+    package: &str,
+    functions: &[ReportEntry],
+    coverage: Option<&Coverage>,
+    unanalyzed: &[UnanalyzedUnit],
+    analyzed: Option<&Analyzed>,
+    type_surface: Option<&TypeSurface>,
+) -> serde_json::Result<String> {
+    #[derive(Serialize)]
+    struct Out<'a> {
+        candor: &'a ReportMeta,
+        #[serde(skip_serializing_if = "str::is_empty")]
+        package: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        coverage: Option<&'a Coverage>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        analyzed: Option<&'a Analyzed>,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        unanalyzed: &'a [UnanalyzedUnit],
+        #[serde(rename = "typeSurface", skip_serializing_if = "Option::is_none")]
+        type_surface: Option<&'a TypeSurface>,
+        functions: &'a [ReportEntry],
+    }
+    let ts = type_surface.filter(|t| !t.returns.is_empty());
+    serde_json::to_string_pretty(&Out {
+        candor, package, coverage, analyzed, unanalyzed, type_surface: ts, functions,
+    })
+}
+
+/// ⟨proposed: typeSurface⟩ Parse a report's `typeSurface`. Absent = nothing travelled, never an error.
+pub fn report_type_surface(text: &str) -> Option<TypeSurface> {
+    let val: serde_json::Value = serde_json::from_str(text).ok()?;
+    serde_json::from_value(val.get("typeSurface")?.clone()).ok()
 }
 
 /// ⟨proposed — Gap 2⟩ Parse a report's `unanalyzed` field. Empty when absent (a complete scan or any
@@ -629,6 +697,7 @@ mod tests {
             candor: ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() },
             coverage: None,
             unanalyzed: vec![],
+            type_surface: None,
             functions: vec![ReportEntry {
                 func: "f".into(),
                 inferred: vec!["Db".into(), "Unknown".into()],
@@ -669,6 +738,27 @@ mod tests {
         assert_eq!(report_entries(env).unwrap().len(), 1);
         // genuinely-broken JSON still yields None (not a panic).
         assert!(report_entries("{not json").is_none());
+    }
+
+    #[test]
+    fn type_surface_is_omitted_when_empty_and_round_trips_when_not() {
+        // ⟨typeSurface⟩ WIRE COMPATIBILITY is the whole reason this is a separate envelope block: a
+        // crate with nothing to publish must produce the SAME BYTES as the pre-rung writer, so a
+        // consumer that ignores the field is unaffected (tier-1 additive).
+        let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
+        let e = [ReportEntry { func: "f".into(), inferred: vec!["Net".into()], ..Default::default() }];
+        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None).unwrap();
+        let empty = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
+                                                  Some(&TypeSurface::default())).unwrap();
+        assert_eq!(old, empty, "an empty type surface must not change one byte of the report");
+        assert!(report_type_surface(&old).is_none(), "absence must parse as nothing, never an error");
+        let mut returns = std::collections::BTreeMap::new();
+        returns.insert("dep#sync::build".to_string(), "dep#sync::Client".to_string());
+        let full = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
+                                                 Some(&TypeSurface { returns })).unwrap();
+        let back = report_type_surface(&full).expect("typeSurface must round-trip");
+        assert_eq!(back.returns.get("dep#sync::build").map(String::as_str), Some("dep#sync::Client"),
+                   "both ids stay FULLY QUALIFIED on the wire — the leaf form is the reverted defect");
     }
 
     #[test]

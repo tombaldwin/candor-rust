@@ -221,6 +221,93 @@ pub(crate) struct ScanOpts<'a> {
     pub(crate) deps_idx: &'a DepIndex,
 }
 
+/// ⟨typeSurface.returns⟩ THE PRODUCER. `{crate}#{fn qual}` -> `{crate}#{type qual}`, both FULLY
+/// QUALIFIED, for the factory functions whose returned type has at least one non-pure member here.
+///
+/// Three things this has to get right, each one a confirmed defect of the reverted attempt:
+///
+/// 1. **The type id is FULLY QUALIFIED, and the report's own hashes are the authority for it.** The
+///    attempt published `{crate}#{leaf}`, so `sync::Client` and `mock::Client` were one string and a
+///    PURE `mock_client()` factory let `sync::Client::send`'s Net be charged to a caller that cannot
+///    reach it. Here the id is the entry hash's PREFIX (`cr#conn::Pool::acquire` -> `cr#conn::Pool`),
+///    which is exactly the shape the consumer appends `::<method>` to and asks `by_key` for.
+/// 2. **The MODULE is not the type.** An earlier bug took the segment right after `#`, which on any
+///    modular crate is the module — invisible on a flat fixture, and it made the rung near-inert. The
+///    owning type is the segment BEFORE the method; a lowercase one is a MODULE holding a free fn
+///    (`cr#util::helper`), never a type, and is skipped.
+/// 3. **A leaf resolving to more than one non-pure type is REFUSED, not picked.** That is defect 1's
+///    exact shape and the only place a wrong answer here could fabricate.
+///
+/// BOUNDED to types with a non-pure member: if the returned type has no effectful and no
+/// `Unknown`-carrying member in this report, typing the receiver changes no answer — the lookup it
+/// enables succeeds and yields pure, which is what the consumer's silence already yields.
+fn build_type_surface(
+    crate_name: &str,
+    fns: &[FnInfo],
+    entries: &[ReportEntry],
+) -> candor_report::TypeSurface {
+    // The FULL quals of types carrying a non-pure member, straight off the report's own hashes.
+    let mut nonpure: BTreeSet<&str> = BTreeSet::new();
+    for e in entries {
+        if e.inferred.is_empty() {
+            continue;
+        }
+        let Some((_, rest)) = e.hash.split_once('#') else { continue };
+        let Some((ty_qual, _method)) = rest.rsplit_once("::") else { continue };
+        let leaf = ty_qual.rsplit("::").next().unwrap_or(ty_qual);
+        // A TYPE, not a module. `cr#util::helper` is a free fn in module `util`; taking `util` as the
+        // owning type is the keying mismatch that made the whole rung inert once before, one layer up.
+        if !leaf.chars().next().is_some_and(char::is_uppercase) {
+            continue;
+        }
+        nonpure.insert(ty_qual);
+    }
+    let mut map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut near_misses = 0usize;
+    let mut collided: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in fns {
+        let Some(tp) = &f.ret_bound_type else { continue };
+        // EXACT match on the full qual, and that is the whole disambiguation. Both sides are now
+        // module-qualified in this crate's own namespace — `ret_bound_type` resolves a bare name
+        // against its DECLARING module — so `mock::Client` and `sync::Client` are different strings
+        // and neither can stand in for the other. A suffix/leaf match here is defect 1.
+        if !nonpure.contains(tp.as_str()) {
+            if nonpure.iter().any(|q| q.rsplit("::").next() == tp.rsplit("::").next()) {
+                near_misses += 1; // same type LEAF, different module — the case that MUST not resolve
+            }
+            continue;
+        }
+        let key = format!("{crate_name}#{}", f.qual);
+        let val = format!("{crate_name}#{tp}");
+        // Two FnInfos under one qual (a `#[cfg]`-duplicated impl) publishing DIFFERENT types: drop the
+        // key rather than let walk order decide, the same never-guess rule `by_key` applies.
+        if collided.contains(&key) {
+            continue;
+        }
+        match map.get(&key) {
+            Some(prev) if *prev != val => {
+                map.remove(&key);
+                collided.insert(key);
+            }
+            Some(_) => {}
+            None => {
+                map.insert(key, val);
+            }
+        }
+    }
+    // The COUNTS are the diagnostic, not the output — a bound that admits nothing on a real modular
+    // crate is a keying bug, and it is invisible in a diff (standing bar item 8).
+    if std::env::var("CANDOR_TYPESURFACE_DEBUG").is_ok() {
+        let bound: usize = fns.iter().filter(|f| f.ret_bound_type.is_some()).count();
+        eprintln!(
+            "TYPESURFACE {crate_name}: fns={} bound_returns={bound} nonpure_type_quals={} \
+             published={} leaf_near_misses={near_misses}",
+            fns.len(), nonpure.len(), map.len()
+        );
+    }
+    candor_report::TypeSurface { returns: map }
+}
+
 /// One crate scan, end to end (parse -> passes -> report -> receipt -> policy gate). Returns the
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
@@ -800,7 +887,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // sibling report, which is exactly this case — so `invisible` would be filtered away and the
             // disclosure lost. That filtering is right for keyed-and-missed and wrong here; the two need
             // different spellings. See DEP-RECEIVER-TYPING-DESIGN.md.
-            if c.path.starts_with(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
+            if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
                 let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
                 // THIRD conjunct, and it is what makes this precise rather than noisy: the dep must be
                 // CHAINED. For an UNCHAINED dep the κ ledger already discloses `invisible: [cr]`, so the
@@ -810,6 +897,44 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 // ledger fall silent (covered, correctly, per §2 rule 3) — and that silence is the
                 // confident purity claim this exists to prevent.
                 if deps_idx.crates.contains(cr_real) {
+                    // ⟨typeSurface.returns⟩ DETERMINATION BEFORE DISCLOSURE (half 2). `rest` is
+                    // `<callee path>::<method>`; the method leaf is one segment and the callee path is
+                    // not, so it splits from the RIGHT. If the dependency PUBLISHED what that factory
+                    // returns, the receiver's type is recoverable and the real key can be formed after
+                    // all — a FULL qual on both ends, answered by the full-qual key the dep index now
+                    // carries.
+                    let split = rest.rsplit_once("::");
+                    let hit = split.and_then(|(callee, method)| {
+                        let ty = deps_idx.returns.get(&format!("{cr_real}#{callee}"))?;
+                        deps_idx.by_key.get(&format!("{ty}::{method}"))
+                    });
+                    // Instrument the PRECONDITION, not just the output: a diff cannot show that a
+                    // mechanism never fired or fired on the wrong thing (standing bar item 8).
+                    if std::env::var("CANDOR_TYPESURFACE_DEBUG").is_ok() {
+                        let (callee, method) = split.unwrap_or((rest, ""));
+                        let ty = deps_idx.returns.get(&format!("{cr_real}#{callee}"));
+                        eprintln!(
+                            "TYPESURFACE-{} {} :: {cr_real}#{callee} -> {} :: .{method}()",
+                            if hit.is_some() { "HIT " } else { "MISS" },
+                            f.qual,
+                            ty.map(String::as_str).unwrap_or("<no returns entry>")
+                        );
+                    }
+                    if let Some(de) = hit {
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                        });
+                        continue;
+                    }
+                    // A MISS — on `returns` or on `by_key` — FALLS THROUGH TO THE DISCLOSURE, never to
+                    // silence. This is defect 3 of the reverted attempt, which read a `by_key` miss after
+                    // a `returns` hit as a keyed-and-missed and stayed quiet. `by_key` deliberately DROPS
+                    // ambiguous keys ("never guess"), so a miss cannot distinguish "no such method" from
+                    // "I withdrew an entry" — and that is not hypothetical: measured over three crates'
+                    // dep trees, adding the full-qual key alone withdrew 1865 keys on pgman as
+                    // full-qual-vs-full-qual collisions. A refusal to answer is not a purity claim.
                     direct.entry(f.qual.clone()).or_default().insert("Unknown");
                     // A COARSE token, like the `callback:` one above — the reason set is `&'static str`,
                     // and interpolating the crate/method here would mean leaking a string per call site.
@@ -1457,8 +1582,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         candor_report::Analyzed { count: sorted.len(), digest: candor_report::fnv1a_hex(&sorted) }
     };
     crate::gate::record_gate_analyzed(analyzed.count, &unanalyzed_units);
-    let body = candor_report::to_packaged_report_json_full(
-        &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed))
+    // ⟨typeSurface.returns⟩ THE PRODUCER (DEP-RECEIVER-TYPING-DESIGN.md half 2). A consumer cannot type
+    // `let c = deplib::build()` because `build` is PURE and therefore absent from this report entirely —
+    // publishing its return type is the only way that key can ever be formed.
+    let type_surface = build_type_surface(&crate_name, &fns, &entries);
+    let body = candor_report::to_packaged_report_json_typed(
+        &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
+        Some(&type_surface))
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave

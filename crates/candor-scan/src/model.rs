@@ -64,6 +64,13 @@ pub(crate) struct FnInfo {
     /// the Stream's Drop, R49). Not serialized to the report (analysis-only).
     #[serde(rename = "r", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ret_idents: Vec<String>,
+    /// ⟨typeSurface.returns⟩ The type a caller's BINDING holds for `let x = f()` — see
+    /// `bound_return_type`. Distinct from `ret_idents` (the raw ident list, wrapper included) and from
+    /// the crate-wide `ReturnIndex` (keyed by fn LEAF, and it UNWRAPS `Result`/`Option`, so it cannot
+    /// answer "what does the binding hold"). It lives on FnInfo because the producer needs the
+    /// MODULE-QUALIFIED fn qual beside it, which a leaf-keyed index does not have.
+    #[serde(rename = "b", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ret_bound_type: Option<String>,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.

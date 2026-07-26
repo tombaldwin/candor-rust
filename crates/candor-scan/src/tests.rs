@@ -511,6 +511,161 @@ pub fn by_ordinary_call() { deplib::io::fetch(); }
         }
     }
 
+    /// Scan `src` as crate `name`, chained over `idx`, and return the report.
+    fn scan_crate_chained(tag: &str, name: &str, manifest_extra: &str, src: &str, idx: &DepIndex) -> serde_json::Value {
+        // `tag` keeps two tests' temp trees APART. Without it both wrote `candor-ts-deplib-<pid>` and,
+        // running in parallel in one process, each read the other's crate — standing-bar item 7 in
+        // miniature (a stale/foreign output read back as this measurement's result).
+        let d = std::env::temp_dir().join(format!("candor-ts-{tag}-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n{manifest_extra}")).unwrap();
+        std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: idx,
+        });
+        assert_eq!(rc, 0);
+        let v = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        v
+    }
+
+    /// Write `report` where `load_dep_reports` will find it, and load the index.
+    fn chain(tag: &str, krate: &str, report: &serde_json::Value) -> (DepIndex, std::path::PathBuf) {
+        let d = std::env::temp_dir().join(format!("candor-tsdep-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(format!("report.{krate}.scan.json")), report.to_string()).unwrap();
+        (load_dep_reports(Some(d.to_str().unwrap())), d)
+    }
+
+    fn ts_entry<'a>(v: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+        v["functions"].as_array()?.iter().find(|f| f["fn"].as_str() == Some(name))
+    }
+    fn effects_of(v: &serde_json::Value, name: &str) -> Vec<String> {
+        ts_entry(v, name)
+            .and_then(|e| e["inferred"].as_array().cloned())
+            .unwrap_or_default()
+            .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+    }
+
+    #[test]
+    fn type_surface_returns_is_fully_qualified_and_refuses_a_same_leaf_sibling() {
+        // ⟨typeSurface.returns⟩ — DEP-RECEIVER-TYPING-DESIGN.md half 2, requirement (a), and the
+        // SECOND FIXTURE is the whole reason this test exists (standing bar item 0).
+        //
+        // The reverted attempt published `{crate}#{leaf}` on both ends, so `sync::Client` and
+        // `mock::Client` were one string and a PURE `mock_client()` factory let `sync::Client`'s effect
+        // be charged to a caller that cannot reach it. THIS FIXTURE REPRODUCED THAT AGAIN during
+        // implementation, by a different door — a BARE `-> Client` written inside `mod mock` is
+        // module-RELATIVE, and `expand` leaves it bare, so a suffix match happily picked `sync::Client`.
+        // Both halves are asserted: the sibling must NOT resolve, and the real one must.
+        let dep_src = "\
+pub mod sync {
+    pub struct Client;
+    impl Client {
+        pub fn send(&self) -> String { std::fs::read_to_string(\"/etc/secret\").unwrap_or_default() }
+    }
+    pub fn client() -> Client { Client }
+}
+pub mod mock {
+    pub struct Client;
+    impl Client { pub fn send(&self) -> String { String::new() } }
+    pub fn client() -> Client { Client }
+}
+pub fn mock_client() -> mock::Client { mock::Client }
+pub fn real_client() -> sync::Client { sync::Client }
+";
+        let dep = scan_crate_chained("qual", "deplib", "", dep_src, &DepIndex::default());
+        // PRODUCER. The published id is a full qual, and the two same-leaf types are distinguishable.
+        let ts = &dep["typeSurface"]["returns"];
+        assert_eq!(ts["deplib#sync::client"].as_str(), Some("deplib#sync::Client"),
+                   "the effectful module's factory must publish its FULL type qual:\n{dep}");
+        assert_eq!(ts["deplib#real_client"].as_str(), Some("deplib#sync::Client"), "{dep}");
+        // `mock::Client` has no non-pure member, so nothing about it may be published — and crucially
+        // it must not inherit `sync::Client`'s id off a shared leaf.
+        assert!(ts.get("deplib#mock::client").is_none(),
+                "a bare `-> Client` inside `mod mock` resolved to ANOTHER module's type — defect 1:\n{dep}");
+        assert!(ts.get("deplib#mock_client").is_none(),
+                "an explicitly `-> mock::Client` factory published a `sync::Client` id:\n{dep}");
+        // CONSUMER, both directions.
+        let (idx, dir) = chain("qual", "deplib", &dep);
+        let app = scan_crate_chained("qual", "app", "\n[dependencies]\ndeplib = \"1\"\n", "\
+pub fn uses_real() -> String { let c = deplib::real_client(); c.send() }
+pub fn uses_mod_real() -> String { let c = deplib::sync::client(); c.send() }
+pub fn uses_mock() -> String { let c = deplib::mock_client(); c.send() }
+pub fn uses_mod_mock() -> String { let c = deplib::mock::client(); c.send() }
+", &idx);
+        let _ = std::fs::remove_dir_all(&dir);
+        for real in ["uses_real", "uses_mod_real"] {
+            assert!(effects_of(&app, real).contains(&"Fs".to_string()),
+                    "{real}: the genuine reach was NOT recovered — a narrowing that closed the real case \
+                     too is the other half of item 0:\n{app}");
+            // requirement (d): every surface the main join carries, not just the effect.
+            let paths = ts_entry(&app, real).and_then(|e| e["paths"].as_array().cloned()).unwrap_or_default();
+            assert!(paths.iter().any(|p| p.as_str() == Some("/etc/secret")),
+                    "{real}: the dep's literal path surface was dropped by the typeSurface join:\n{app}");
+        }
+        for mock in ["uses_mock", "uses_mod_mock"] {
+            let eff = effects_of(&app, mock);
+            assert!(!eff.contains(&"Fs".to_string()),
+                    "{mock}: FABRICATED the sibling type's Fs onto a caller that cannot reach it:\n{app}");
+            assert!(eff.contains(&"Unknown".to_string()),
+                    "{mock}: not resolvable and not disclosed — silence is the cardinal sin:\n{app}");
+        }
+    }
+
+    #[test]
+    fn type_surface_refuses_to_key_through_a_wrapper_and_never_falls_silent_on_a_miss() {
+        // ⟨typeSurface.returns⟩ requirements (b) and (c), both confirmed defects of the reverted attempt.
+        //
+        // (b) `record_return` UNWRAPS `Result`/`Option`, so `fn connect() -> Result<Conn,E>` recorded
+        //     `Conn`. Published across the boundary that is a lie about what the BINDING holds: a
+        //     `let c = dep::connect();` holds a `Result`, and keying `c.is_ok()` against `Conn` charged
+        //     `Conn`'s effects to a caller that never runs them. Nothing wrapped may be published.
+        // (c) A `by_key` MISS after a `returns` HIT must fall back to half 1's disclosure. `by_key`
+        //     DROPS ambiguous keys, so a miss cannot distinguish "no such method" from "I withdrew an
+        //     entry"; the attempt read that refusal as a purity claim and `continue`d in silence.
+        let dep = scan_crate_chained("wrap", "deplib", "", "\
+pub struct Conn;
+impl Conn {
+    pub fn fetch(&self) -> String { std::fs::read_to_string(\"/etc/x\").unwrap_or_default() }
+    pub fn pure_ping(&self) -> u8 { 1 }
+}
+pub fn build() -> Conn { Conn }
+pub fn connect() -> Result<Conn, String> { Ok(Conn) }
+pub fn maybe() -> Option<Conn> { Some(Conn) }
+", &DepIndex::default());
+        let ts = &dep["typeSurface"]["returns"];
+        assert_eq!(ts["deplib#build"].as_str(), Some("deplib#Conn"), "the unwrapped factory must publish:\n{dep}");
+        assert!(ts.get("deplib#connect").is_none(),
+                "a `-> Result<Conn,E>` published its PAYLOAD as if it were the bound type:\n{dep}");
+        assert!(ts.get("deplib#maybe").is_none(),
+                "a `-> Option<Conn>` published its PAYLOAD as if it were the bound type:\n{dep}");
+        let (idx, dir) = chain("wrap", "deplib", &dep);
+        let app = scan_crate_chained("wrap", "app", "\n[dependencies]\ndeplib = \"1\"\n", "\
+pub fn direct() -> String { let c = deplib::build(); c.fetch() }
+pub fn via_result() -> bool { let c = deplib::connect(); c.is_ok() }
+pub fn via_option() -> bool { let c = deplib::maybe(); c.is_some() }
+pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
+", &idx);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(effects_of(&app, "direct").contains(&"Fs".to_string()),
+                "the case that must STILL resolve stopped resolving:\n{app}");
+        for wrapped in ["via_result", "via_option"] {
+            let eff = effects_of(&app, wrapped);
+            assert!(!eff.contains(&"Fs".to_string()),
+                    "{wrapped}: keyed a Result/Option binding through the PAYLOAD's methods:\n{app}");
+            assert!(eff.contains(&"Unknown".to_string()), "{wrapped}: fell silent instead:\n{app}");
+        }
+        // (c): `Conn` IS known and `pure_ping` is absent from the dep's report. Absence under an exact
+        // key still cannot distinguish "no such method" from "the index withdrew an ambiguous entry",
+        // so this discloses.
+        assert!(effects_of(&app, "unknown_method").contains(&"Unknown".to_string()),
+                "a by_key miss after a returns HIT read as a purity claim — defect 3:\n{app}");
+    }
+
     #[test]
     fn dep_join_does_not_fabricate_onto_a_local_shadow() {
         // The CANDOR_DEPS cross-crate join must NOT override a LOCAL definition: a project module/fn named

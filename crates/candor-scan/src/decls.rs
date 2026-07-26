@@ -476,6 +476,13 @@ pub(crate) fn fninfo(
         }
         syn::ReturnType::Default => Vec::new(),
     };
+    // ⟨typeSurface.returns⟩ What a caller's `let x = f()` binding would HOLD. Not `ret_idents` (which
+    // keeps the wrapper's idents beside the payload's) and not `rets`/`ReturnIndex` (leaf-keyed, and it
+    // UNWRAPS `Result`/`Option` — exactly the lie the reverted attempt published across the boundary).
+    let ret_bound_type = match &sig.output {
+        syn::ReturnType::Type(_, ty) => bound_return_type(ty, uses, self_ty, modpath),
+        syn::ReturnType::Default => None,
+    };
     FnInfo {
         qual: qual.to_string(),
         leaf: leaf.to_string(),
@@ -483,6 +490,7 @@ pub(crate) fn fninfo(
         calls: c.calls,
         unresolved: c.unresolved,
         ret_idents,
+        ret_bound_type,
     }
 }
 
