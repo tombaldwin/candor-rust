@@ -797,34 +797,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // sibling report, which is exactly this case — so `invisible` would be filtered away and the
             // disclosure lost. That filtering is right for keyed-and-missed and wrong here; the two need
             // different spellings. See DEP-RECEIVER-TYPING-DESIGN.md.
-            if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
+            if c.path.starts_with(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
                 let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
-                // ⟨proposed: typeSurface⟩ half 2 — DETERMINATION before disclosure. `rest` is
-                // `CALLEE::method`; if the dependency PUBLISHED what its factory returns, the receiver's
-                // type is recoverable and the real key can be formed after all. An empty published value
-                // means the merge saw two different types for that fn and dropped it rather than choosing
-                // (never guess a receiver type — a wrong one fabricates), so it correctly falls through to
-                // the disclosure below.
-                if let Some((callee, method)) = rest.split_once("::") {
-                    if let Some(ty) = deps_idx.returns.get(&format!("{cr_real}#{callee}")).filter(|t| !t.is_empty()) {
-                        if let Some(de) = deps_idx.by_key.get(&format!("{ty}::{method}")) {
-                            for e in &de.effects { direct.entry(f.qual.clone()).or_default().insert(e); }
-                            hosts.entry(f.qual.clone()).or_default().extend(de.hosts.iter().cloned());
-                            cmds.entry(f.qual.clone()).or_default().extend(de.cmds.iter().cloned());
-                            paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
-                            tables.entry(f.qual.clone()).or_default().extend(de.tables.iter().cloned());
-                            if !de.invisible.is_empty() {
-                                blind_direct.entry(f.qual.clone()).or_default().extend(de.invisible.iter().cloned());
-                            }
-                            continue;
-                        }
-                        // The type IS known and the dep's report has no entry under that key: this is now
-                        // a genuine KEYED-AND-MISSED, i.e. the dependency's honest purity claim (§2 rule
-                        // 3). Stay silent — disclosing here would be the false uncertainty half 1 exists
-                        // to avoid, and the whole point of half 2 is that the question can now be asked.
-                        continue;
-                    }
-                }
                 // THIRD conjunct, and it is what makes this precise rather than noisy: the dep must be
                 // CHAINED. For an UNCHAINED dep the κ ledger already discloses `invisible: [cr]`, so the
                 // reader is warned and a second disclosure buys nothing but false uncertainty — measured,
@@ -1492,44 +1466,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         candor_report::Analyzed { count: sorted.len(), digest: candor_report::fnv1a_hex(&sorted) }
     };
     crate::gate::record_gate_analyzed(analyzed.count, &unanalyzed_units);
-    // ⟨proposed: typeSurface⟩ half 2 of DEP-RECEIVER-TYPING-DESIGN.md — the PRODUCER side. A consumer
-    // cannot type `let c = deplib::build()` because `build` is PURE and therefore absent from this report
-    // entirely; publishing its return type is the only way the key can ever be formed.
-    //
-    // BOUNDED to types with at least one non-pure member here. If `Client` has no effectful and no
-    // Unknown-carrying method in this report, telling a consumer that `build` returns a `Client` changes
-    // no answer — the lookup it enables would succeed and yield pure, which is exactly what the
-    // consumer's silence already yields. Same precise-or-nothing discipline as `interfaceUnion`.
-    let type_surface = {
-        let mut nonpure_types: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for e in &entries {
-            if e.inferred.is_empty() { continue; }
-            // The owning TYPE is the segment BEFORE the method, which is the LAST-BUT-ONE segment — NOT
-            // the first. A hash is module-qualified on any real crate (`cr#conn::Pool::acquire`), so
-            // splitting on the FIRST `::` yielded the MODULE name. Measured: pgman had 356 factory returns
-            // and 16 non-pure types with ZERO intersection — not sparsity, a keying mismatch, and it
-            // showed up only because the fixture happened to be flat (`deplib#Client::fetch`).
-            // A free function (`cr#build`) has no second segment and names no type.
-            if let Some(rest) = e.hash.split_once('#').map(|(_, r)| r) {
-                if let Some(ty) = rest.rsplit("::").nth(1) { nonpure_types.insert(ty); }
-            }
-        }
-        let mut map = std::collections::BTreeMap::new();
-        for (fname, ret) in returns.iter() {
-            let leaf = ret.rsplit("::").next().unwrap_or(ret);
-            if nonpure_types.contains(leaf) {
-                map.insert(format!("{crate_name}#{fname}"), format!("{crate_name}#{leaf}"));
-            }
-        }
-        if std::env::var("CANDOR_TS_DEBUG").is_ok() {
-            eprintln!("TSDEBUG returns_index={} nonpure_types={} published={}",
-                      returns.len(), nonpure_types.len(), map.len());
-        }
-        candor_report::TypeSurface { returns: map }
-    };
-    let body = candor_report::to_packaged_report_json_typed(
-        &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
-        Some(&type_surface))
+    let body = candor_report::to_packaged_report_json_full(
+        &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed))
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave

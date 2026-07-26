@@ -1,6 +1,6 @@
 {
   "candor": {
-    "version": "scan-0.23.1",
+    "version": "scan-0.23.0",
     "toolchain": "stable",
     "spec": "0.23"
   },
@@ -9,18 +9,18 @@
     "uncovered": [
       {
         "name": "serde_json",
-        "calls": 20
+        "calls": 16
       }
     ]
   },
   "analyzed": {
-    "count": 18,
-    "digest": "74cf2434a73a4ae0"
+    "count": 16,
+    "digest": "89fc13ebf1b8d774"
   },
   "functions": [
     {
       "fn": "gate_verdict_json",
-      "loc": "src/lib.rs:488:1",
+      "loc": "src/lib.rs:427:1",
       "inferred": [],
       "hash": "candor_report#gate_verdict_json",
       "calls": [
@@ -32,7 +32,7 @@
     },
     {
       "fn": "gate_verdict_json_full",
-      "loc": "src/lib.rs:534:1",
+      "loc": "src/lib.rs:473:1",
       "inferred": [],
       "hash": "candor_report#gate_verdict_json_full",
       "invisible": [
@@ -41,7 +41,7 @@
     },
     {
       "fn": "gate_verdict_json_with_coverage",
-      "loc": "src/lib.rs:508:1",
+      "loc": "src/lib.rs:447:1",
       "inferred": [],
       "hash": "candor_report#gate_verdict_json_with_coverage",
       "invisible": [
@@ -50,7 +50,7 @@
     },
     {
       "fn": "report_coverage",
-      "loc": "src/lib.rs:453:1",
+      "loc": "src/lib.rs:392:1",
       "inferred": [],
       "hash": "candor_report#report_coverage",
       "invisible": [
@@ -59,7 +59,7 @@
     },
     {
       "fn": "report_entries",
-      "loc": "src/lib.rs:297:1",
+      "loc": "src/lib.rs:274:1",
       "inferred": [],
       "hash": "candor_report#report_entries",
       "calls": [
@@ -71,7 +71,7 @@
     },
     {
       "fn": "report_entries_counted",
-      "loc": "src/lib.rs:304:1",
+      "loc": "src/lib.rs:281:1",
       "inferred": [],
       "hash": "candor_report#report_entries_counted",
       "invisible": [
@@ -94,7 +94,7 @@
     },
     {
       "fn": "report_has_envelope",
-      "loc": "src/lib.rs:575:1",
+      "loc": "src/lib.rs:514:1",
       "inferred": [],
       "hash": "candor_report#report_has_envelope",
       "invisible": [
@@ -102,17 +102,8 @@
       ]
     },
     {
-      "fn": "report_type_surface",
-      "loc": "src/lib.rs:437:1",
-      "inferred": [],
-      "hash": "candor_report#report_type_surface",
-      "invisible": [
-        "serde_json"
-      ]
-    },
-    {
       "fn": "report_unanalyzed",
-      "loc": "src/lib.rs:443:1",
+      "loc": "src/lib.rs:382:1",
       "inferred": [],
       "hash": "candor_report#report_unanalyzed",
       "invisible": [
@@ -121,7 +112,7 @@
     },
     {
       "fn": "report_version",
-      "loc": "src/lib.rs:586:1",
+      "loc": "src/lib.rs:525:1",
       "inferred": [],
       "hash": "candor_report#report_version",
       "invisible": [
@@ -130,7 +121,7 @@
     },
     {
       "fn": "to_packaged_report_json",
-      "loc": "src/lib.rs:352:1",
+      "loc": "src/lib.rs:329:1",
       "inferred": [],
       "hash": "candor_report#to_packaged_report_json",
       "calls": [
@@ -142,7 +133,7 @@
     },
     {
       "fn": "to_packaged_report_json_full",
-      "loc": "src/lib.rs:375:1",
+      "loc": "src/lib.rs:352:1",
       "inferred": [],
       "hash": "candor_report#to_packaged_report_json_full",
       "invisible": [
@@ -150,17 +141,8 @@
       ]
     },
     {
-      "fn": "to_packaged_report_json_typed",
-      "loc": "src/lib.rs:405:1",
-      "inferred": [],
-      "hash": "candor_report#to_packaged_report_json_typed",
-      "invisible": [
-        "serde_json"
-      ]
-    },
-    {
       "fn": "to_packaged_report_json_with_coverage",
-      "loc": "src/lib.rs:363:1",
+      "loc": "src/lib.rs:340:1",
       "inferred": [],
       "hash": "candor_report#to_packaged_report_json_with_coverage",
       "calls": [
@@ -172,7 +154,7 @@
     },
     {
       "fn": "to_report_json",
-      "loc": "src/lib.rs:331:1",
+      "loc": "src/lib.rs:308:1",
       "inferred": [],
       "hash": "candor_report#to_report_json",
       "calls": [
@@ -184,7 +166,7 @@
     },
     {
       "fn": "write_atomic",
-      "loc": "src/lib.rs:337:1",
+      "loc": "src/lib.rs:314:1",
       "inferred": [
         "Fs"
       ],
