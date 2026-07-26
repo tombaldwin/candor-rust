@@ -578,11 +578,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // tier — is a named blind spot (invisible, not Unknown: the curated-κ caveat). Counted here,
     // disclosed in the receipt, so the caveat is per-scan evidence instead of a doc footnote.
     let (deps, dep_renames) = cargo_deps(dir);
-    let mut dep_seen: HashMap<String, usize> = HashMap::new(); // dep crate root -> call-site count
-    let mut dep_classified: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // dep crate root -> count of FLOORED call sites into it. Floored only: the tally has to mean the
+    // same thing as the crate name beside it — calls whose effects this scan could not see.
+    let mut dep_seen: HashMap<String, usize> = HashMap::new();
     // fn -> the dep crates it DIRECTLY calls into where the classifier floored the call. Post-filtered to
-    // the genuinely-blind crates (κ never classified them) + propagated transitively → the per-fn
-    // `invisible` honesty disclosure (the κ ledger, but attributed per function).
+    // the genuinely-blind crates (not calibrated, no sibling report) + propagated transitively → the
+    // per-fn `invisible` honesty disclosure (the κ ledger, but attributed per function).
     let mut blind_direct: HashMap<String, BTreeSet<String>> = HashMap::new();
     // Blind crates inherited from a dep fn's `invisible` (sweep [8]): genuinely blind (the dep confirmed
     // it), but a TRANSITIVE crate the consumer never saw directly, so it is absent from `dep_seen` and
@@ -831,11 +832,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // κ ledger: a qualified call into a declared dependency. (A bare leaf has no `::`, so it
             // can't name a crate; a local module sharing a dep's name is the rare accepted ambiguity.)
             if c.path.contains("::") && deps.contains(cr) {
-                *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
-                if classified.is_some() {
-                    dep_classified.insert(cr.to_string());
-                } else {
-                    // a FLOORED dep call: candidate per-fn blind spot (filtered to genuinely-blind below).
+                // A FLOORED dep call is a candidate per-fn blind spot (filtered to genuinely-blind
+                // below). A CLASSIFIED one is not — its effect is on the record — so it is counted in
+                // NEITHER the ledger nor the call tally. Coverage is a REVIEW claim, not a resolution
+                // outcome: κ matching `zip::ZipArchive::new` vouches for THAT call, never for the crate,
+                // so a single classified call must not clear the blind marker for every other call shape
+                // into it. The vouching mechanisms are the CALIBRATED_* lists and a chained sibling
+                // report — both of which someone reviewed.
+                if classified.is_none() {
+                    *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
                     blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
                 }
             }
@@ -1058,7 +1063,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     if !de.incomplete.is_empty() {
                         incomplete.entry(f.qual.clone()).or_default().extend(de.incomplete.iter().copied());
                     }
-                    dep_classified.insert(cr.to_string());
+                    // (No coverage marking here. A crate whose sibling report we joined is already
+                    // covered by the `deps_idx.crates` arm of the ledger filter below — that arm is the
+                    // reviewed claim, and it holds whether or not any single join happened to fire.)
                 }
             }
             if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
@@ -1246,11 +1253,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // line's long-standing order. (A crate with a loaded sibling report is COVERED even when no join
     // fired: the report omits pure functions, so join-less calls are its honest purity claim — the
     // opposite of invisible. A RENAMED dep is covered under its real package name.)
+    // This filter deliberately does NOT consult a "was ever classified" set. That was an UNVOUCHED
+    // proxy standing in front of the reviewed ones: one classified call cleared the blind marker for
+    // every other call shape into the same crate, so adding an unrelated call elsewhere in the program
+    // silently converted a disclosed blind spot into a purity claim. `blind_direct` already holds the
+    // per-call-site datum and it already propagates, so the per-fn truth was present all along.
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {
-            !dep_classified.contains(*cr)
-                && !deps_idx.crates.contains(dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str()))
+            !deps_idx.crates.contains(dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str()))
                 && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))

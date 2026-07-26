@@ -4699,3 +4699,58 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let v = run("covstd", "", "pub fn g() { let _ = std::fs::read(\"/x\"); }\n");
         assert!(v.get("coverage").is_none(), "a fully-covered scan must omit the field:\n{v:#}");
     }
+
+    /// Coverage is a REVIEW claim, not a resolution outcome. κ firing on ONE call into a crate vouches
+    /// for THAT call, never for the crate — so a classified call must not clear the blind marker for
+    /// every other call shape into it. `pnet_datalink` is the shape that reproduces this: `channel`
+    /// classifies, `interfaces` floors, and the crate sits in no calibrated tier.
+    ///
+    /// Before the fix, arm B's `list_ifaces` VANISHED from the report with `coverage: null` and no
+    /// stderr advisory — the observed function byte-identical to arm A's, its hedge deleted by an
+    /// unrelated call elsewhere in the same crate. Absence is not silence here: the ⟨0.21⟩ manifest
+    /// still counts the fn in `analyzed`, so the omission reads as a positive purity claim.
+    #[test]
+    fn a_classified_dep_call_must_not_clear_the_hedge_on_an_unrelated_call_into_the_same_crate() {
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-covarm-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d); // a stale report read back as this arm's result is the trap
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\npnet_datalink = \"0.35\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        const OBSERVED: &str = "pub fn list_ifaces() -> usize { pnet_datalink::interfaces().len() }\n";
+        let a = run("covarma", OBSERVED);
+        let b = run("covarmb", &format!(
+            "{OBSERVED}pub fn chan(i: &pnet_datalink::NetworkInterface) \
+             {{ let _ = pnet_datalink::channel(i, Default::default()); }}\n"));
+
+        for (arm, v) in [("A", &a), ("B", &b)] {
+            assert_eq!(
+                fn_entry(v, "list_ifaces")["invisible"], serde_json::json!(["pnet_datalink"]),
+                "arm {arm}: identical source must keep an identical hedge regardless of an unrelated \
+                 classified call into the same crate:\n{v:#}"
+            );
+            // The tally has to mean the same thing as the crate name beside it: calls this scan could
+            // not see. The classified call's effect is on the record, so counting it would overstate.
+            assert_eq!(
+                v["coverage"]["uncovered"], serde_json::json!([{ "name": "pnet_datalink", "calls": 1 }]),
+                "arm {arm}: only the FLOORED call is counted as invisible:\n{v:#}"
+            );
+        }
+        // …and the classified call keeps its own effect: this discloses more, it does not blur what was
+        // already resolved.
+        assert!(
+            !effs(fn_entry(&b, "chan")).is_empty(),
+            "the classified call's own fn keeps its effect:\n{b:#}"
+        );
+    }
