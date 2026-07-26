@@ -268,30 +268,7 @@ pub struct Report {
     /// scan — wire-compatible with a pre-rung report. `default` so older reports still deserialize.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unanalyzed: Vec<UnanalyzedUnit>,
-    /// ⟨proposed: typeSurface⟩ The minimum TYPE information a consumer needs to form a key it otherwise
-    /// cannot. Omitted when empty, so a default report stays byte-identical and a consumer that ignores
-    /// it behaves exactly as today (tier-1 additive, the rule that let `interfaceUnion` ride gated).
-    #[serde(rename = "typeSurface", default, skip_serializing_if = "Option::is_none")]
-    pub type_surface: Option<TypeSurface>,
     pub functions: Vec<ReportEntry>,
-}
-
-/// ⟨proposed⟩ See candor-spec/DEP-RECEIVER-TYPING-DESIGN.md, half 2.
-///
-/// A PURE FACTORY IS ABSENT FROM THE REPORT ENTIRELY — reports omit pure functions — so no field added to
-/// a function *entry* can carry this; there is no entry to put it on. That is why the type surface is a
-/// separate envelope block rather than a `returns` field, and it is the reason this item stalled for as
-/// long as it did.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TypeSurface {
-    /// fn hash -> the hash of the type it returns (`deplib#build` -> `deplib#Client`).
-    ///
-    /// BOUNDED to types with at least one non-pure member: if the returned type has no effectful and no
-    /// `Unknown`-carrying member anywhere in this report, typing the receiver changes no answer — the
-    /// lookup would succeed and yield pure, which is what silence already gives. Emitting it anyway would
-    /// grow every report to say nothing.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub returns: std::collections::BTreeMap<String, String>,
 }
 
 /// Parse a report's function entries, accepting BOTH the v0.2 envelope `{ candor, functions }` and
@@ -400,44 +377,6 @@ pub fn to_packaged_report_json_full(
         functions: &'a [ReportEntry],
     }
     serde_json::to_string_pretty(&Out { candor, package, coverage, analyzed, unanalyzed, functions })
-}
-
-/// ⟨proposed: typeSurface⟩ As [`to_packaged_report_json_full`], additionally carrying the type surface.
-/// `None`/empty omits the field entirely, so a report from an engine with nothing to say is byte-identical
-/// to one produced before the rung existed.
-#[allow(clippy::too_many_arguments)]
-pub fn to_packaged_report_json_typed(
-    candor: &ReportMeta,
-    package: &str,
-    functions: &[ReportEntry],
-    coverage: Option<&Coverage>,
-    unanalyzed: &[UnanalyzedUnit],
-    analyzed: Option<&Analyzed>,
-    type_surface: Option<&TypeSurface>,
-) -> serde_json::Result<String> {
-    #[derive(Serialize)]
-    struct Out<'a> {
-        candor: &'a ReportMeta,
-        #[serde(skip_serializing_if = "str::is_empty")]
-        package: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        coverage: Option<&'a Coverage>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        analyzed: Option<&'a Analyzed>,
-        #[serde(skip_serializing_if = "<[_]>::is_empty")]
-        unanalyzed: &'a [UnanalyzedUnit],
-        #[serde(rename = "typeSurface", skip_serializing_if = "Option::is_none")]
-        type_surface: Option<&'a TypeSurface>,
-        functions: &'a [ReportEntry],
-    }
-    let ts = type_surface.filter(|t| !t.returns.is_empty());
-    serde_json::to_string_pretty(&Out { candor, package, coverage, analyzed, unanalyzed, type_surface: ts, functions })
-}
-
-/// ⟨proposed⟩ Parse a report's `typeSurface`. Absent = nothing travelled, never an error.
-pub fn report_type_surface(text: &str) -> Option<TypeSurface> {
-    let val: serde_json::Value = serde_json::from_str(text).ok()?;
-    serde_json::from_value(val.get("typeSurface")?.clone()).ok()
 }
 
 /// ⟨proposed — Gap 2⟩ Parse a report's `unanalyzed` field. Empty when absent (a complete scan or any
@@ -690,7 +629,6 @@ mod tests {
             candor: ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() },
             coverage: None,
             unanalyzed: vec![],
-            type_surface: None,
             functions: vec![ReportEntry {
                 func: "f".into(),
                 inferred: vec!["Db".into(), "Unknown".into()],
