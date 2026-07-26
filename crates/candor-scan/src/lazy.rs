@@ -124,8 +124,11 @@ pub(crate) fn lazy_static_unit(it: &syn::Item) -> Option<(String, Vec<syn::Stmt>
 /// are the dominant form; a multi-static block parses the FIRST (a rare multi-static `lazy_static!` is
 /// under-approximated to its first entry — honest, never fabricated). Parsing failure → skip (only adds
 /// visibility, never breaks).
+///
+/// `respan_call_site`: same reason as `visit_macro`'s re-parse — these tokens came off a rayon parse
+/// worker and this runs on the collector thread, where their spans name no file.
 pub(crate) fn lazy_static_macro_body(tokens: &proc_macro2::TokenStream) -> Option<(String, Vec<syn::Stmt>)> {
-    syn::parse2::<LazyStaticDecl>(tokens.clone())
+    syn::parse2::<LazyStaticDecl>(respan_call_site(tokens.clone()))
         .ok()
         .map(|d| (d.name, vec![syn::Stmt::Expr(d.init, None)]))
 }
@@ -133,7 +136,7 @@ pub(crate) fn lazy_static_macro_body(tokens: &proc_macro2::TokenStream) -> Optio
 /// Parse a `thread_local! { static NAME: Ty = EXPR; }` body the same way — the per-thread init EXPR runs
 /// on first `.with(..)`, a deferred thunk. Returns `(NAME, [EXPR;])`.
 pub(crate) fn thread_local_macro_body(tokens: &proc_macro2::TokenStream) -> Option<(String, Vec<syn::Stmt>)> {
-    syn::parse2::<ThreadLocalDecl>(tokens.clone())
+    syn::parse2::<ThreadLocalDecl>(respan_call_site(tokens.clone()))
         .ok()
         .map(|d| (d.name, vec![syn::Stmt::Expr(d.init, None)]))
 }
