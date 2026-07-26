@@ -780,8 +780,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
                 if deps_idx.crates.contains(cr_real) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{ty}::drop")) {
-                        for e in &de.effects { direct.entry(f.qual.clone()).or_default().insert(e); }
-                        paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                        });
                     }
                 }
                 continue;
@@ -821,11 +824,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
                 if deps_idx.crates.contains(cr_real) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{LAZY_UNIT_PREFIX}::{rest}")) {
-                        for e in &de.effects { direct.entry(f.qual.clone()).or_default().insert(e); }
-                        hosts.entry(f.qual.clone()).or_default().extend(de.hosts.iter().cloned());
-                        cmds.entry(f.qual.clone()).or_default().extend(de.cmds.iter().cloned());
-                        paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
-                        tables.entry(f.qual.clone()).or_default().extend(de.tables.iter().cloned());
+                        apply_dep_fn(de, &f.qual, DepSink {
+                            direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                            tables: &mut tables, incomplete: &mut incomplete,
+                            blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                        });
                     }
                 }
                 continue;
@@ -1077,23 +1080,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 };
                 if let Some(de) = hit {
                     dep_join_hit = true;
-                    for e in &de.effects {
-                        direct.entry(f.qual.clone()).or_default().insert(e);
-                    }
-                    hosts.entry(f.qual.clone()).or_default().extend(de.hosts.iter().cloned());
-                    cmds.entry(f.qual.clone()).or_default().extend(de.cmds.iter().cloned());
-                    paths.entry(f.qual.clone()).or_default().extend(de.paths.iter().cloned());
-                    tables.entry(f.qual.clone()).or_default().extend(de.tables.iter().cloned());
-                    // sweep [8]: inherit the dep fn's blind-crate disclosure so a consumer's pure verdict
-                    // stays qualified across the chain boundary (else the dep's floored reach reads as plain
-                    // pure here). Propagated with the local blind spots below.
-                    blind_direct.entry(f.qual.clone()).or_default().extend(de.invisible.iter().cloned());
-                    dep_invisible.extend(de.invisible.iter().cloned());
-                    // sweep [30]: inherit the dep fn's masking-incompleteness so a benign literal here can't
-                    // certify the dep's invisible runtime endpoint (propagated with the local incomplete map).
-                    if !de.incomplete.is_empty() {
-                        incomplete.entry(f.qual.clone()).or_default().extend(de.incomplete.iter().copied());
-                    }
+                    apply_dep_fn(de, &f.qual, DepSink {
+                        direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
+                        tables: &mut tables, incomplete: &mut incomplete,
+                        blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                    });
                     // (No coverage marking here. A crate whose sibling report we joined is already
                     // covered by the `deps_idx.crates` arm of the ledger filter below — that arm is the
                     // reviewed claim, and it holds whether or not any single join happened to fire.)

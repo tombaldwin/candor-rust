@@ -431,6 +431,87 @@
     }
 
     #[test]
+    fn every_dep_join_site_carries_the_whole_surface_not_just_the_effect() {
+        // THREE places charged a chained dep entry to a caller and they had DRIFTED — the same shape
+        // that left candor-java's ⟨0.19⟩ reason class on the hand-off path and off the ordinary call
+        // path while a conformance-pinned gate read green (`6ab26e4`). Here the drift was in the
+        // DISCLOSURE surfaces: the cross-crate DROP-GLUE join carried only effects + paths, and the
+        // dep-LAZY join carried no `invisible` and no `incomplete`. A join that carries the effect and
+        // drops the `incomplete` beside it lets a benign literal in the consumer certify a surface the
+        // dependency already declared uncertifiable.
+        //
+        // An A/B cannot show this: none of the three corpora exercise the drop or lazy site, so all
+        // three arms agree. The fixture is the evidence (standing bar item 8).
+        let dep = std::env::temp_dir().join(format!("candor-depsurface-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // One entry per join site, each with a DISTINCT value in every surface, so a site that drops
+        // one is named by the assertion rather than masked by another site's contribution.
+        std::fs::write(dep.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [
+              {{"fn": "Guard::drop", "inferred": ["Net"], "hosts": ["drop.example"], "cmds": ["dropcmd"],
+                "paths": ["/drop/path"], "tables": ["drop_tab"], "invisible": ["dropblind"],
+                "incomplete": ["Net"], "hash": "deplib#Guard::drop"}},
+              {{"fn": "<lazy>::CFG", "inferred": ["Fs"], "hosts": ["lazy.example"], "cmds": ["lazycmd"],
+                "paths": ["/lazy/path"], "tables": ["lazy_tab"], "invisible": ["lazyblind"],
+                "incomplete": ["Fs"], "hash": "deplib#<lazy>::CFG"}},
+              {{"fn": "io::fetch", "inferred": ["Db"], "hosts": ["call.example"], "cmds": ["callcmd"],
+                "paths": ["/call/path"], "tables": ["call_tab"], "invisible": ["callblind"],
+                "incomplete": ["Db"], "hash": "deplib#io::fetch"}}
+            ]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        let d = std::env::temp_dir().join(format!("candor-depsurface-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"consumer\"\n\n[dependencies]\ndeplib = \"1\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "\
+pub fn by_drop_glue() { let _g = deplib::Guard; }
+pub fn by_lazy_force() { let _c = deplib::CFG; }
+pub fn by_ordinary_call() { deplib::io::fetch(); }
+").unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&dep);
+        let surfaces = |fname: &str, key: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(fname))
+                .and_then(|f| f[key].as_array().cloned())
+                .unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        for (site, eff, host, cmd, path, table, blind) in [
+            ("by_drop_glue",     "Net", "drop.example", "dropcmd", "/drop/path", "drop_tab", "dropblind"),
+            ("by_lazy_force",    "Fs",  "lazy.example", "lazycmd", "/lazy/path", "lazy_tab", "lazyblind"),
+            ("by_ordinary_call", "Db",  "call.example", "callcmd", "/call/path", "call_tab", "callblind"),
+        ] {
+            assert!(surfaces(site, "inferred").contains(&eff.to_string()),
+                    "{site}: effect not inherited\n{v}");
+            assert!(surfaces(site, "hosts").contains(&host.to_string()),
+                    "{site}: dep hosts dropped by this join site\n{v}");
+            assert!(surfaces(site, "cmds").contains(&cmd.to_string()),
+                    "{site}: dep cmds dropped by this join site\n{v}");
+            assert!(surfaces(site, "paths").contains(&path.to_string()),
+                    "{site}: dep paths dropped by this join site\n{v}");
+            assert!(surfaces(site, "tables").contains(&table.to_string()),
+                    "{site}: dep tables dropped by this join site\n{v}");
+            assert!(surfaces(site, "invisible").contains(&blind.to_string()),
+                    "{site}: dep `invisible` dropped — the consumer's pure-ish verdict lost its caveat\n{v}");
+            assert!(surfaces(site, "incomplete").contains(&eff.to_string()),
+                    "{site}: dep `incomplete` dropped — a benign literal here could now certify the \
+                     dep's invisible endpoint\n{v}");
+        }
+    }
+
+    #[test]
     fn dep_join_does_not_fabricate_onto_a_local_shadow() {
         // The CANDOR_DEPS cross-crate join must NOT override a LOCAL definition: a project module/fn named
         // like a covered dep crate, resolving to the project's OWN pure code, must not inherit the dep

@@ -59,6 +59,61 @@ pub(crate) struct DepFn {
     pub(crate) incomplete: Vec<&'static str>,
 }
 
+/// The mutable per-function surface maps a chained dep entry is folded into. Exists only so
+/// `apply_dep_fn` can be the ONE apply site without a ten-argument signature — every field is the
+/// caller's own map, borrowed for the length of one fold.
+pub(crate) struct DepSink<'a> {
+    pub(crate) direct: &'a mut HashMap<String, BTreeSet<&'static str>>,
+    pub(crate) hosts: &'a mut HashMap<String, BTreeSet<String>>,
+    pub(crate) cmds: &'a mut HashMap<String, BTreeSet<String>>,
+    pub(crate) paths: &'a mut HashMap<String, BTreeSet<String>>,
+    pub(crate) tables: &'a mut HashMap<String, BTreeSet<String>>,
+    pub(crate) incomplete: &'a mut HashMap<String, BTreeSet<&'static str>>,
+    pub(crate) blind_direct: &'a mut HashMap<String, BTreeSet<String>>,
+    pub(crate) dep_invisible: &'a mut BTreeSet<String>,
+}
+
+/// THE ONE PLACE a chained dep entry's surfaces are charged to a calling function.
+///
+/// It exists because there were THREE, and they had drifted. candor-java shipped this vein's sibling
+/// with `crossDepJoin` reproducing `inheritDepFn` line for line; the copies drifted until the ⟨0.19⟩
+/// reason class reached the hand-off sites and NOT the ordinary call path, so a shipped,
+/// conformance-pinned gate was silently inert (`6ab26e4`, fixed by deleting the copy). rust's three
+/// copies had drifted the same way, in the disclosure direction: the cross-crate DROP-GLUE join
+/// carried only `effects` + `paths`, and the dep-LAZY join carried no `invisible` and no `incomplete`.
+///
+/// Every surface belongs to the caller for the same reason the effects do. A dep's `Drop::drop` body
+/// and a dep's lazy initializer both RUN in the calling function's scope — so the hosts they contact,
+/// the tables they touch, the masking-incompleteness they leave (sweep [30]) and the blind crates they
+/// reach (sweep [8]) are all as much the caller's as the effect is. A join that carries the effect and
+/// drops the `incomplete` beside it lets a benign literal in the CONSUMER certify a surface the
+/// dependency already declared uncertifiable.
+pub(crate) fn apply_dep_fn(de: &DepFn, caller: &str, s: DepSink<'_>) {
+    let ext = |m: &mut HashMap<String, BTreeSet<String>>, v: &[String]| {
+        if !v.is_empty() {
+            m.entry(caller.to_string()).or_default().extend(v.iter().cloned());
+        }
+    };
+    for e in &de.effects {
+        s.direct.entry(caller.to_string()).or_default().insert(e);
+    }
+    ext(s.hosts, &de.hosts);
+    ext(s.cmds, &de.cmds);
+    ext(s.paths, &de.paths);
+    ext(s.tables, &de.tables);
+    // sweep [8]: inherit the dep fn's blind-crate disclosure so a consumer's pure verdict stays
+    // qualified across the chain boundary (else the dep's floored reach reads as plain pure here).
+    // `blind_direct` is per-fn; `dep_invisible` keeps the crate alive through the `global_blind`
+    // filter, which only knows crates this scan saw a call into directly.
+    ext(s.blind_direct, &de.invisible);
+    s.dep_invisible.extend(de.invisible.iter().cloned());
+    // sweep [30]: inherit masking-incompleteness so a benign literal here can't certify the dep's
+    // invisible runtime endpoint.
+    if !de.incomplete.is_empty() {
+        s.incomplete.entry(caller.to_string()).or_default().extend(de.incomplete.iter().copied());
+    }
+}
+
 /// The CANDOR_DEPS index: `crate#leaf`, `crate#tail2` and `crate#<full qual>` keys (UNAMBIGUOUS only
 /// — a key two dep functions share is dropped, the same under-report-don't-guess rule as
 /// `resolve_target`), plus
