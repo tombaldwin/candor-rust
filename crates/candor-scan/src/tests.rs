@@ -207,7 +207,7 @@
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), trait_quals: Default::default(),
+            dyn_sig_traits: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -257,7 +257,7 @@
             uses: &uses,
             vars,
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), trait_quals: Default::default(),
+            dyn_sig_traits: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -531,19 +531,30 @@
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("Cargo.toml"),
             "[package]\nname = \"app\"\n[dependencies]\nalpha = \"1\"\nbeta = \"1\"\n").unwrap();
+        // BOTH receivers are called. `a` is alpha's (pure), `b` is beta's (Net). The precise answer is
+        // exactly ['Net'] — and BOTH failure modes are wrong: last-wins fabricated beta's Net onto `a`,
+        // while tombstoning the collision lost `b`'s genuine reach, which is the cardinal sin.
         std::fs::write(d.join("src/lib.rs"),
-            "pub fn handle(a: &dyn alpha::Handler, _b: &dyn beta::Handler) { a.go(); }\n").unwrap();
+            "pub fn handle(a: &dyn alpha::Handler, b: &dyn beta::Handler) { a.go(); b.go(); }\n\
+             pub fn only_alpha(a: &dyn alpha::Handler, _b: &dyn beta::Handler) { a.go(); }\n").unwrap();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
             include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
-        let handle = v["functions"].as_array().into_iter().flatten()
-            .find(|f| f["fn"].as_str() == Some("handle")).cloned();
-        assert!(handle.as_ref().is_none_or(|f| !effs(f).contains(&"Net".to_string())),
+        let find = |n: &str| v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some(n)).cloned();
+        // NO FABRICATION: a call on ALPHA's Handler alone must not inherit BETA's effects.
+        let only_alpha = find("only_alpha");
+        assert!(only_alpha.as_ref().is_none_or(|f| !effs(f).contains(&"Net".to_string())),
                 "a call on ALPHA's Handler must not inherit BETA's effects because both leaves are \
                  spelled `Handler`:\n{v:#}");
+        // NO MISS, the other direction: `b.go()` IS a genuine reach into beta and must survive. Dropping
+        // the colliding leaf outright is safe against fabrication and silently loses this — worse.
+        assert!(find("handle").as_ref().is_some_and(|f| effs(f).contains(&"Net".to_string())),
+                "the genuine call on BETA's Handler must still resolve — a leaf collision must be \
+                 disambiguated per RECEIVER, not dropped for both:\n{v:#}");
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&dep);
     }
@@ -1932,7 +1943,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 uses: &uses,
                 vars,
                 trait_vars,
-                dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig),
+                dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,
@@ -1986,7 +1997,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig),
+                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -2010,7 +2021,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let blk: syn::Block = syn::parse_str(src).unwrap();
                 let mut c = CallCollector {
             modpath: String::new(),
-                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig),
+                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -2043,7 +2054,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), trait_quals: Default::default(),
+            dyn_sig_traits: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -2079,7 +2090,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 uses: &uses,
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
-                dyn_sig_traits: Default::default(), trait_quals: Default::default(),
+                dyn_sig_traits: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,

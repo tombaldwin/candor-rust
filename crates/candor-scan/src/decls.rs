@@ -424,6 +424,7 @@ pub(crate) fn fninfo(
         dyn_sig_traits: crate::lang::dyn_sig_trait_leaves(sig),
         // The crate-qualified spelling of any bound written in full (`&dyn deplib::Handler`) — R6.
         trait_quals: crate::lang::sig_trait_quals(sig),
+        trait_quals_by_param: crate::lang::sig_trait_quals_by_param(sig),
         fields,
         trait_fields: traits.fields,
         trait_impls: traits.impls,

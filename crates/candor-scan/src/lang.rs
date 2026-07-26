@@ -106,6 +106,44 @@ pub(crate) fn dyn_sig_trait_leaves(sig: &syn::Signature) -> std::collections::Ha
 /// the trait were ours it would already be in `local_traits` and never reach this path; recording them
 /// would hand `expand` a path whose root it STRIPS, turning `crate::deplib::Handler` into a
 /// dependency-looking `deplib::Handler` — the value-bag fabrication class arriving by another door.
+/// PER-PARAMETER qualified bounds: param name -> (trait leaf -> the crate-qualified path THAT parameter
+/// was declared with). `sig_trait_quals` is keyed by LEAF alone and therefore cannot represent
+/// `fn handle(a: &dyn alpha::Handler, b: &dyn beta::Handler)`; tombstoning the collision there is safe
+/// against fabrication but LOSES `b`'s genuine reach — a silent under-report, which is worse. The
+/// declaration already carries the answer per parameter; only the leaf-keyed map throws it away.
+pub(crate) fn sig_trait_quals_by_param(sig: &syn::Signature) -> HashMap<String, HashMap<String, String>> {
+    let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
+    // A generic bound (`fn f<T: dep::Handler>(t: T)`) belongs to the TYPE PARAM, not to one argument, so
+    // it is collected once and attached to every param whose type mentions it. Collision inside a single
+    // parameter is impossible — one param has one declared type.
+    let mut generic: HashMap<String, String> = HashMap::new();
+    for p in &sig.generics.params {
+        if let syn::GenericParam::Type(tp) = p {
+            quals_from_bounds(&tp.bounds, &mut generic);
+        }
+    }
+    if let Some(w) = &sig.generics.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                quals_from_bounds(&pt.bounds, &mut generic);
+            }
+        }
+    }
+    for arg in &sig.inputs {
+        let syn::FnArg::Typed(pt) = arg else { continue };
+        let syn::Pat::Ident(id) = &*pt.pat else { continue };
+        let mut per = HashMap::new();
+        collect_trait_quals(&pt.ty, &mut per);
+        for (k, v) in &generic {
+            per.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        if !per.is_empty() {
+            out.insert(id.ident.to_string(), per);
+        }
+    }
+    out
+}
+
 pub(crate) fn sig_trait_quals(sig: &syn::Signature) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for arg in &sig.inputs {
