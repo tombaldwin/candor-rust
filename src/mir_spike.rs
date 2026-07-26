@@ -136,10 +136,10 @@ fn local_drop_impls<'tcx>(
             if !seen.insert(adt.did()) {
                 return;
             }
-            if let Some(dtor) = adt.destructor(tcx) {
-                if let Some(l) = dtor.did.as_local() {
-                    out.insert(l);
-                }
+            if let Some(dtor) = adt.destructor(tcx)
+                && let Some(l) = dtor.did.as_local()
+            {
+                out.insert(l);
             }
             for field in adt.all_fields() {
                 local_drop_impls(tcx, field.ty(tcx, args).skip_normalization(), out, seen);

@@ -43,9 +43,9 @@ fn main() {
     // `ref: refs/heads/<branch>`) and the loose ref is gone — so without watching packed-refs the
     // version stamp goes stale exactly in the pull-without-rebuild case this exists to catch.
     println!("cargo:rerun-if-changed=.git/packed-refs");
-    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
-        if let Some(r) = head.strip_prefix("ref: ") {
-            println!("cargo:rerun-if-changed=.git/{}", r.trim());
-        }
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD")
+        && let Some(r) = head.strip_prefix("ref: ")
+    {
+        println!("cargo:rerun-if-changed=.git/{}", r.trim());
     }
 }
