@@ -1583,6 +1583,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // Any REBIND of the name drops stale dependency provenance, exactly as it drops a stale
                 // concrete type. Without this an annotated rebind kept the old binding's provenance.
                 self.dep_bound_vars.remove(&id.ident.to_string());
+                // A trait-typed LOCAL carries its own crate qualification — `let a: &dyn beta::Handler = b;`.
+                // Only SIGNATURES were ever recorded, so such a local had no crate identity of its own and,
+                // when it shadowed a param of the same name, inherited the PARAM's crate: the call keyed to
+                // the wrong dependency and its real reach was lost. (The pre-tombstone last-wins map
+                // happened to supply the right answer here by accident, which is why this surfaced only
+                // once the guessing stopped.) Recorded under the binding name, so the local correctly
+                // SHADOWS the parameter entry.
+                {
+                    let mut per = HashMap::new();
+                    crate::lang::collect_trait_quals_pub(&pt.ty, &mut per);
+                    if per.is_empty() {
+                        self.trait_quals_by_param.remove(&id.ident.to_string());
+                    } else {
+                        self.trait_quals_by_param.insert(id.ident.to_string(), per);
+                    }
+                }
                 if is_callable_type(&pt.ty, &HashMap::new()) {
                     self.fn_typed_vars.insert(id.ident.to_string());
                     self.vars.remove(&id.ident.to_string());

@@ -200,6 +200,12 @@ fn quals_from_bounds(
 /// Walk a type for qualified trait bounds — mirrors `collect_dyn_trait_leaves`, but INCLUDES
 /// `impl Trait`: a qualified bound is worth recording wherever it is spelled, and whether the receiver
 /// may DISPATCH is the erasure carve-out's separate decision.
+/// Public wrapper: a trait-typed LOCAL binding records its own qualified bounds, so it shadows the
+/// parameter of the same name instead of inheriting that parameter's crate.
+pub(crate) fn collect_trait_quals_pub(ty: &syn::Type, out: &mut HashMap<String, String>) {
+    collect_trait_quals(ty, out)
+}
+
 fn collect_trait_quals(ty: &syn::Type, out: &mut HashMap<String, String>) {
     match ty {
         syn::Type::TraitObject(t) => quals_from_bounds(&t.bounds, out),

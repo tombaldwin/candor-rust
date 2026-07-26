@@ -536,7 +536,9 @@
         // while tombstoning the collision lost `b`'s genuine reach, which is the cardinal sin.
         std::fs::write(d.join("src/lib.rs"),
             "pub fn handle(a: &dyn alpha::Handler, b: &dyn beta::Handler) { a.go(); b.go(); }\n\
-             pub fn only_alpha(a: &dyn alpha::Handler, _b: &dyn beta::Handler) { a.go(); }\n").unwrap();
+             pub fn only_alpha(a: &dyn alpha::Handler, _b: &dyn beta::Handler) { a.go(); }\n\
+             pub fn shadowed(a: &dyn alpha::Handler, b: &dyn beta::Handler) {\n\
+                 let a: &dyn beta::Handler = b; a.go(); }\n").unwrap();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
             include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
@@ -552,6 +554,12 @@
                  spelled `Handler`:\n{v:#}");
         // NO MISS, the other direction: `b.go()` IS a genuine reach into beta and must survive. Dropping
         // the colliding leaf outright is safe against fabrication and silently loses this — worse.
+        // A trait-typed LOCAL carries its OWN crate, shadowing the parameter of the same name. Only
+        // signatures were ever recorded, so this local inherited the param's crate and lost its reach —
+        // masked for years by the last-wins map happening to supply the right answer.
+        assert!(find("shadowed").as_ref().is_some_and(|f| effs(f).contains(&"Net".to_string())),
+                "a trait-typed LOCAL must use its own crate qualification, not the shadowed \
+                 parameter's:\n{v:#}");
         assert!(find("handle").as_ref().is_some_and(|f| effs(f).contains(&"Net".to_string())),
                 "the genuine call on BETA's Handler must still resolve — a leaf collision must be \
                  disambiguated per RECEIVER, not dropped for both:\n{v:#}");
