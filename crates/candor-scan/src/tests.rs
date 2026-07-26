@@ -207,6 +207,7 @@
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
+            dyn_sig_traits: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -256,6 +257,7 @@
             uses: &uses,
             vars,
             trait_vars: HashMap::new(),
+            dyn_sig_traits: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -599,6 +601,109 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         // inherent WINS: Net (its own), never Fs (the blanket) — no fabrication/double-charge
         assert!(effs("calls_inherent").contains(&"Net".to_string()) && !effs("calls_inherent").contains(&"Fs".to_string()),
                 "an inherent method must win over the blanket (Net, not Fs):\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn imported_dependency_trait_dispatches_over_local_impls_r4() {
+        // R4, the scan-boundary vein (candor-spec SOUNDNESS-VEIN-crossing-the-scan-boundary.md):
+        // `use deplib::Handler; fn run(h: &dyn Handler) { h.go() }` where the impl that RUNS is declared
+        // HERE. `local_traits` is built only from local `ItemTrait` nodes, so CHA never fired and `run`
+        // read SILENT-PURE — while the single-crate control (the trait in a local `mod`) resolves it, and
+        // a `deny Fs run` gate went exit 1 -> exit 0 on the split. Needs no dep report: the impl is ours.
+        //
+        // The four CONTROLS below are the carve-outs, and each one is a measured fabrication/flood that a
+        // looser version of this rung actually produced. They matter more than the positive case.
+        let d = std::env::temp_dir().join(format!("candor-r4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"r4\"\n").unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            r#"
+            use deplib::Handler;
+
+            pub struct MyH;
+            impl Handler for MyH { fn go(&self) { let _ = std::fs::read_to_string("/etc/hosts"); } }
+
+            // POSITIVE: an IMPORTED dependency trait, `dyn` receiver, local impl -> resolves.
+            pub fn run_imported(h: &dyn Handler) { h.go(); }
+            // POSITIVE: the same through a Box, and through a collection element.
+            pub fn run_boxed(h: Box<dyn Handler>) { h.go(); }
+
+            // CONTROL 1 — PROVENANCE/std: a std trait with a local impl must NOT resolve. This is the
+            // narrow form of the `impl Iterator for RowIter` fabrication the older test pins: `w.flush()`
+            // on ANY `&dyn Write` must not be charged with LoudWriter's Net.
+            pub mod stdw {
+                use std::io::Write;
+                pub struct LoudWriter;
+                impl Write for LoudWriter {
+                    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { let _ = std::net::TcpStream::connect("h:1"); Ok(b.len()) }
+                    fn flush(&mut self) -> std::io::Result<()> { let _ = std::net::TcpStream::connect("h:1"); Ok(()) }
+                }
+                pub fn writes(w: &mut dyn Write) { let _ = w.flush(); }
+            }
+
+            // CONTROL 2 — ERASURE: a DEPENDENCY trait reached through a caller-monomorphized GENERIC
+            // BOUND / `impl Trait` must NOT resolve. Unguarded, `serde::Serialize` put 32 fresh Unknowns
+            // on serde_json this way; here the same shape would charge `MyH`'s Fs onto a pure generic.
+            pub fn run_bound<T: Handler>(t: T) { t.go(); }
+            pub fn run_impl(h: impl Handler) { h.go(); }
+
+            // CONTROL 3 — CRATE-LOCAL re-export: a `use self::…` binding makes a std trait look
+            // dependency-qualified (`self::inner::Write`). It is ours, not a dependency, and treating it
+            // as one cost 17 fresh Unknowns on value-bag, whose `internal/error.rs` does exactly this.
+            pub mod reexp {
+                pub mod inner { pub use std::io::Write; }
+                use self::inner::Write;
+                pub struct LoudW2;
+                impl Write for LoudW2 {
+                    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { let _ = std::net::TcpStream::connect("h:2"); Ok(b.len()) }
+                    fn flush(&mut self) -> std::io::Result<()> { let _ = std::net::TcpStream::connect("h:2"); Ok(()) }
+                }
+                pub fn writes_reexported(w: &mut dyn Write) { let _ = w.flush(); }
+            }
+
+            // CONTROL 4 — NESTED ITEM: a `fn`/`impl` declared inside a body has its OWN signature, and its
+            // params SHADOW the outer ones under the same name, so the enclosing fn's `dyn`-ness must not
+            // leak in. This is the value-bag `internal_visit(v: &dyn Serialize)` shape verbatim: an inner
+            // `serialize_some<T: Serialize>(self, v: &T)` whose generic `v` inherited the outer `v`'s
+            // erasure and CHA'd through it.
+            pub fn nested(h: &dyn Handler) -> u8 {
+                struct Inner;
+                impl Inner { fn run<T: Handler>(&self, h: T) { h.go(); } }
+                let _ = h;
+                0
+            }
+            "#,
+        )
+        .unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let effs = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)))
+                .collect()
+        };
+        assert!(effs("run_imported").contains(&"Fs".to_string()),
+                "R4: a `dyn` receiver typed by an IMPORTED dependency trait must dispatch to the LOCAL impl:\n{body}");
+        assert!(effs("run_boxed").contains(&"Fs".to_string()),
+                "R4: the `Box<dyn …>` spelling takes the same route:\n{body}");
+        assert!(effs("stdw::writes").is_empty(),
+                "CARVE-OUT 1 (provenance/std): `&dyn std::io::Write` must NOT CHA a local `impl Write` (fabrication):\n{body}");
+        assert!(effs("run_bound").is_empty() && effs("run_impl").is_empty(),
+                "CARVE-OUT 2 (erasure): a caller-monomorphized bound / `impl Trait` must NOT CHA local impls (the serde_json flood):\n{body}");
+        assert!(effs("reexp::writes_reexported").is_empty(),
+                "CARVE-OUT 3 (crate-local): a `self::`-rooted re-export is NOT a dependency (the value-bag flood):\n{body}");
+        assert!(effs("nested").is_empty(),
+                "CARVE-OUT 4 (nested item): an inner fn's own generic must not inherit the outer signature's `dyn`-ness:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1635,6 +1740,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 uses: &uses,
                 vars,
                 trait_vars,
+                dyn_sig_traits: dyn_sig_trait_leaves(&sig),
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,
@@ -1688,7 +1794,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
+                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -1712,7 +1818,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let blk: syn::Block = syn::parse_str(src).unwrap();
                 let mut c = CallCollector {
             modpath: String::new(),
-                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig),
+                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -1745,6 +1851,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             uses: &uses,
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
+            dyn_sig_traits: Default::default(),
             fields: &fields,
             trait_fields: &tf,
             trait_impls: &ti,
@@ -1780,6 +1887,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 uses: &uses,
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
+                dyn_sig_traits: Default::default(),
                 fields: &fields,
                 trait_fields: &tf,
                 trait_impls: &ti,

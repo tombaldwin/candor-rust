@@ -7,6 +7,91 @@ pub(crate) fn path_to_string(p: &syn::Path) -> String {
     p.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
 }
 
+/// The crate roots whose traits are the LANGUAGE's, not a project dependency's — the explicit carve-out
+/// for the imported-trait CHA (R4, collector.rs) and the crate-qualified dispatch key it emits.
+///
+/// A local `impl` of a trait from one of these says nothing about who the receiver of a `dyn`/bound call
+/// actually is: essentially every crate in the ecosystem also implements them, so CHA-ing `Iterator` over
+/// a local `impl Iterator for RowIter` charges every `.next()` in the crate with RowIter's effects
+/// (execution-verified) — a fabrication, and its wide arm floods `Unknown` besides. A DEPENDENCY's trait
+/// is the opposite case: the impls in front of us are the ones the dependency was given.
+///
+/// The empty root is included because it is the unqualified spelling — a PRELUDE trait needs no `use`, so
+/// `expand` leaves it bare, and a bare leaf carries no provenance evidence at all. This is the rust
+/// analogue of candor-swift's `RAW_VALUE_BASE_TYPES` (`eae2de2`): an imported-supertype CHA is only safe
+/// with an explicit carve-out naming the types whose "conformance" means nothing.
+pub(crate) fn is_std_trait_root(root: &str) -> bool {
+    matches!(root, "std" | "core" | "alloc" | "")
+}
+
+/// Is `root` the crate root of a genuine PROJECT DEPENDENCY — the provenance carve-out on the
+/// imported-trait CHA (R4, collector.rs)? STRICTER than `!is_std_trait_root`: it also rejects the
+/// crate-LOCAL roots.
+///
+/// `self`/`crate`/`super` reach this predicate at all because a `use` binding is stored with the text it
+/// was written with, so `pub use self::error::Error;` puts `Error -> self::error::Error` in the file's
+/// map and `expand` hands the `self::` prefix straight through. Measured, not hypothetical: value-bag's
+/// `internal/error.rs` re-exports `Error` exactly that way, and treating `self::error::Error` as a
+/// dependency trait CHA'd `Error`/`OwnedError`/`Unsupported` onto its `&dyn Error` receivers and put
+/// **17 fresh `Unknown`s** on value-bag (`ValueBag::to_str`, every `try_from`, `internal_visit`). The
+/// trait there is std's `error::Error` wearing a local re-export — precisely what the std carve-out
+/// exists to exclude, sneaking past it under a different spelling.
+pub(crate) fn is_dependency_crate_root(root: &str) -> bool {
+    !is_std_trait_root(root) && !matches!(root, "self" | "crate" | "super")
+}
+
+/// Every trait leaf a type spells in a `dyn` (TYPE-ERASED) position, at any depth — `&dyn T`,
+/// `Box<dyn T>`, `Vec<Box<dyn T>>`, `Option<&dyn T>`, `(dyn T, u8)`. The SECOND carve-out on the
+/// imported-trait CHA (R4, collector.rs), and the one provenance alone does not give.
+///
+/// A `dyn` receiver is ERASED: the author chose runtime dispatch, and the crate's own impls of the trait
+/// are the candidate witnesses. A GENERIC BOUND (`fn to_string<T: Serialize>(v: &T)`) or an `impl Trait`
+/// param is MONOMORPHIZED BY THE CALLER, so the crate's own impls say nothing about what actually runs —
+/// they are a sample of one crate out of the whole ecosystem. That asymmetry is not academic: with
+/// provenance as the only gate, `serde::Serialize`/`serde::Serializer` (a project dependency, so it
+/// passes) CHA'd serde_json's own five `impl Serializer` types onto every generic serialization entry
+/// point and put **32 fresh `Unknown`s** on serde_json — `to_string`, `to_vec`, `to_writer` — inherited
+/// through edges to witnesses a caller's own `Serializer` would never run. serde_json spells
+/// `dyn Serializer` nowhere, so requiring erasure takes that to zero and leaves R4's `&dyn` shape intact.
+pub(crate) fn collect_dyn_trait_leaves(ty: &syn::Type, out: &mut std::collections::HashSet<String>) {
+    match ty {
+        syn::Type::TraitObject(t) => out.extend(bound_leaves(&t.bounds)),
+        syn::Type::Reference(r) => collect_dyn_trait_leaves(&r.elem, out),
+        syn::Type::Paren(p) => collect_dyn_trait_leaves(&p.elem, out),
+        syn::Type::Group(g) => collect_dyn_trait_leaves(&g.elem, out),
+        syn::Type::Slice(s) => collect_dyn_trait_leaves(&s.elem, out),
+        syn::Type::Array(a) => collect_dyn_trait_leaves(&a.elem, out),
+        syn::Type::Ptr(p) => collect_dyn_trait_leaves(&p.elem, out),
+        syn::Type::Tuple(t) => t.elems.iter().for_each(|e| collect_dyn_trait_leaves(e, out)),
+        // Any generic container, at any nesting: `Vec<Box<dyn T>>`, `Arc<Mutex<Box<dyn T>>>`,
+        // `HashMap<String, Box<dyn T>>`. `impl Trait` is deliberately NOT a case here.
+        syn::Type::Path(p) => {
+            for seg in &p.path.segments {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    for a in &args.args {
+                        if let syn::GenericArgument::Type(t) = a {
+                            collect_dyn_trait_leaves(t, out);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The `dyn`-spelled trait leaves of a signature's PARAMETERS — the erased receivers in scope for the
+/// body being walked. See `collect_dyn_trait_leaves`.
+pub(crate) fn dyn_sig_trait_leaves(sig: &syn::Signature) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for arg in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            collect_dyn_trait_leaves(&pt.ty, &mut out);
+        }
+    }
+    out
+}
+
 /// The trait leaves of a type-param-bound list (`T: Store + Send` -> ["Store", "Send"]). Marker
 /// bounds need no filtering here: a leaf only ever matters if it later matches a local trait or a
 /// local impl, and nobody locally declares `trait Send`.

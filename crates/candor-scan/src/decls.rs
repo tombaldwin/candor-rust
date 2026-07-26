@@ -419,6 +419,9 @@ pub(crate) fn fninfo(
         uses,
         vars,
         trait_vars,
+        // The `dyn`-spelled (type-ERASED) subset of the same bounds — the imported-trait CHA (R4) fires
+        // only on these, never on a caller-monomorphized generic bound / `impl Trait`.
+        dyn_sig_traits: crate::lang::dyn_sig_trait_leaves(sig),
         fields,
         trait_fields: traits.fields,
         trait_impls: traits.impls,

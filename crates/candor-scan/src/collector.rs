@@ -13,6 +13,11 @@ pub(crate) struct CallCollector<'a> {
     /// local variable / param -> trait bound leaves, for dispatch-typed receivers (`t: &dyn Store`,
     /// `s: impl Store`, `x: X` under `X: Store`). Disjoint from `vars` (no concrete type to put there).
     pub(crate) trait_vars: HashMap<String, Vec<String>>,
+    /// The subset of this signature's trait leaves spelled in a `dyn` (TYPE-ERASED) position — `&dyn T`,
+    /// `Box<dyn T>`, `Vec<Box<dyn T>>` — as opposed to a generic bound or `impl Trait`, which the CALLER
+    /// monomorphizes. The IMPORTED-trait CHA (R4) fires only on these; see `lang::dyn_sig_trait_leaves`
+    /// for why, and for the serde_json measurement that forced the distinction.
+    pub(crate) dyn_sig_traits: std::collections::HashSet<String>,
     pub(crate) fields: &'a FieldIndex,
     pub(crate) trait_fields: &'a TraitFieldIndex,
     /// trait leaf -> local impl types (None entries never exist; absent = no local impl).
@@ -838,6 +843,27 @@ impl<'a> CallCollector<'a> {
 }
 
 impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
+    /// A `fn`/`impl` NESTED INSIDE a body has its OWN signature, but its calls are still attributed to
+    /// the enclosing unit (`scan_items` only walks top-level items, so nobody else records them). Its
+    /// params therefore SHADOW the outer ones under the same names, and `dyn_sig_traits` — read off the
+    /// OUTER signature — must not follow the walk in.
+    ///
+    /// Measured, and the reason this exists: value-bag's `internal_visit(v: &dyn Serialize, …)` declares a
+    /// nested `impl Serializer` whose `serialize_some<T: Serialize>(self, v: &T)` calls `v.serialize(self)`.
+    /// That inner `v` is a caller-monomorphized GENERIC, but it inherited the outer `v`'s `dyn`-ness, so
+    /// the imported-trait CHA (R4) fired on it and put 17 fresh `Unknown`s on value-bag through
+    /// `ValueBag::serialize`. Clearing the set for the nested walk is exactly the erasure carve-out doing
+    /// what it says. Only this rung reads the set, so nothing else changes.
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let outer = std::mem::take(&mut self.dyn_sig_traits);
+        syn::visit::visit_item_fn(self, node);
+        self.dyn_sig_traits = outer;
+    }
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let outer = std::mem::take(&mut self.dyn_sig_traits);
+        syn::visit::visit_item_impl(self, node);
+        self.dyn_sig_traits = outer;
+    }
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
         // A `#[cfg(feature="X")]`-gated statement/block that is compiled OUT under the active feature set
         // contributes no effects to this fn — don't walk it (else its calls fabricate effects the default
@@ -1021,7 +1047,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // to pure/invisible exactly as before when the dep isn't chained.
                     let full = crate::lang::expand(&tr, self.uses);
                     let root = full.split("::").next().unwrap_or("");
-                    if full.contains("::") && !matches!(root, "std" | "core" | "alloc" | "") {
+                    if full.contains("::") && !crate::lang::is_std_trait_root(root) {
                         self.calls.push(Call {
                             path: format!("{full}::{leaf}"),
                             leaf: leaf.clone(),
@@ -1030,6 +1056,68 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             method: true,
                             is_macro: false,
                         });
+                        // R4 — the trait crossed the SCAN BOUNDARY but the impl that runs did NOT.
+                        // `use deplib::Handler; fn run(h: &dyn Handler) { h.go() }` with
+                        // `impl Handler for MyH` declared HERE recorded no dispatch at all: `local_traits`
+                        // is built only from local `ItemTrait` nodes, so CHA never fired and `run` read
+                        // silent-pure — while the witness that actually runs is a project unit candor
+                        // analysed correctly in the same report, and the SINGLE-CRATE control gets it right
+                        // (candor-spec SOUNDNESS-VEIN-crossing-the-scan-boundary.md; candor-swift's
+                        // imported-protocol CHA `eae2de2` is the sibling, and hit the identical trap).
+                        //
+                        // TWO CARVE-OUTS, and they are the whole reason this is safe. Both are measured,
+                        // not assumed; each is pinned by a test.
+                        //
+                        // (1) PROVENANCE (`is_dependency_crate_root`): only a trait resolving to a genuine
+                        //     PROJECT-DEPENDENCY crate root takes this route. std/core/alloc are out, and
+                        //     a PRELUDE trait (`Iterator` and friends) needs no `use` at all, so `expand`
+                        //     leaves it unqualified and the `contains("::")` gate keeps it out — which is
+                        //     what the "external-trait local impl must not resolve (fabrication)" guard in
+                        //     `dispatch_typed_receivers_resolve_via_local_impls_or_read_unknown` still
+                        //     pins, unchanged. A blanket version got this wrong: CHA-ing `Iterator` over a
+                        //     local `impl Iterator for RowIter` charges every `.next()` in the crate with
+                        //     RowIter's effects (execution-verified), and its >12-impl arm alone put 30
+                        //     fresh `Unknown`s on serde_json. `self`/`crate`/`super` are rejected HERE and
+                        //     not on the emission above, deliberately: a `pub use self::error::Error`
+                        //     re-export makes std's `Error` look dependency-qualified, and that alone cost
+                        //     17 fresh Unknowns on value-bag — see `is_dependency_crate_root`.
+                        //
+                        // (2) ERASURE (`dyn_sig_traits`): the receiver must be spelled `dyn`. Provenance
+                        //     alone is NOT enough, and the queue's resolution-1 as written would have
+                        //     shipped a flood: `serde::Serialize`/`serde::Serializer` ARE dependency
+                        //     traits, so they pass (1) — and CHA-ing serde_json's own five `impl
+                        //     Serializer` types onto its GENERIC entry points put 32 fresh `Unknown`s on
+                        //     `to_string`/`to_vec`/`to_writer`, inherited through edges to witnesses a
+                        //     caller's own `Serializer` never runs. A `dyn` receiver is erased and the
+                        //     local impls are its candidate witnesses; a `T: Trait` bound / `impl Trait`
+                        //     param is monomorphized BY THE CALLER, so they are not. Requiring erasure
+                        //     takes serde_json to ZERO fresh Unknowns. The bound/`impl Trait` forms of an
+                        //     IMPORTED trait therefore stay a documented residual, not a guess.
+                        //
+                        // ADDITIVE and PRECISE-OR-NOTHING, the swift template: edges only, and ONLY when
+                        // the local impl set is narrow (≤12, the cross-engine bound). `self.unresolved` is
+                        // deliberately NOT set on the wide/absent arms — the local impl set is a LOWER
+                        // bound on the true one (a third crate may implement the trait too), so a wide one
+                        // stays the documented miss it already was rather than flooding Unknown over every
+                        // externally-typed receiver. The call ALSO keeps its crate-qualified shape above,
+                        // so a chained dep report still contributes its own impls via `interfaceUnion`.
+                        if let Some(impls) = self.trait_impls.get(&tr).filter(|_| {
+                            crate::lang::is_dependency_crate_root(root)
+                                && self.dyn_sig_traits.contains(&tr)
+                        }) {
+                            if impls.len() <= 12 {
+                                for ty in impls {
+                                    self.calls.push(Call {
+                                        path: format!("{ty}::{leaf}"),
+                                        leaf: leaf.clone(),
+                                        str_arg: str_arg.clone(),
+                                        typed: true,
+                                        method: true,
+                                        is_macro: false,
+                                    });
+                                }
+                            }
+                        }
                     }
                     continue;
                 };
