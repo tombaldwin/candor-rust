@@ -786,6 +786,37 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 }
                 continue;
             }
+            // COULD-NOT-FORM-A-KEY: `cr::<untyped>::method`. The receiver came from `cr` but we never
+            // learned its type, so no lookup happened — and the dep report's silence is only an answer to
+            // a question that was asked. Disclose `Unknown` with the existing `dispatch:` reason class
+            // (SPEC §2: "a project abstraction with no visible impl"), which is what this is from the
+            // consumer's side. Gated on the crate being a DECLARED dependency, so the marker is inert for
+            // a local module that merely looks crate-qualified.
+            //
+            // Deliberately NOT `invisible`: the κ ledger correctly excludes a crate that HAS a chained
+            // sibling report, which is exactly this case — so `invisible` would be filtered away and the
+            // disclosure lost. That filtering is right for keyed-and-missed and wrong here; the two need
+            // different spellings. See DEP-RECEIVER-TYPING-DESIGN.md.
+            if c.path.starts_with(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
+                let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
+                // THIRD conjunct, and it is what makes this precise rather than noisy: the dep must be
+                // CHAINED. For an UNCHAINED dep the κ ledger already discloses `invisible: [cr]`, so the
+                // reader is warned and a second disclosure buys nothing but false uncertainty — measured,
+                // that arm fired on `let finds = dep::best_finds(); finds.first()`, where the value came
+                // from a dep but `.first()` is a std Vec method. Only when the dep IS chained does the
+                // ledger fall silent (covered, correctly, per §2 rule 3) — and that silence is the
+                // confident purity claim this exists to prevent.
+                if deps_idx.crates.contains(cr_real) {
+                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                    // A COARSE token, like the `callback:` one above — the reason set is `&'static str`,
+                    // and interpolating the crate/method here would mean leaking a string per call site.
+                    unknown_why
+                        .entry(f.qual.clone())
+                        .or_default()
+                        .insert("dispatch:untyped cross-package receiver");
+                }
+                continue;
+            }
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{LAZY_UNIT_PREFIX}::")) {
                 let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
                 if deps_idx.crates.contains(cr_real) {
