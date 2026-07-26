@@ -1900,7 +1900,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // fails and we fall through to the opaque-macro path below (never panic). Because a successful
         // expansion COVERS the reach, it is NOT recorded as an invisible macro call.
         if mleaf == "cfg_if" {
-            if let Ok(arms) = syn::parse2::<CfgIfArms>(node.tokens.clone()) {
+            // `respan_call_site`: these tokens were parsed on a rayon worker while this walk runs on the
+            // collector thread, so their spans index a source map this thread does not have. See that
+            // function for what syn does with them if they are handed over as-is.
+            if let Ok(arms) = syn::parse2::<CfgIfArms>(respan_call_site(node.tokens.clone())) {
                 for block in &arms.0 {
                     self.visit_block(block);
                 }
@@ -1955,8 +1958,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // token stream as comma-separated expressions and walk any that parse. If the body isn't
         // expression syntax (`quote!{}`, `matches!(x, Pat)`, macro_rules arms), parsing fails and we skip
         // — so this only ever ADDS visibility, never breaks. Owned exprs, so visit a local copy.
+        // `respan_call_site` is REQUIRED, not hygiene: these tokens were parsed on a rayon worker and
+        // this walk runs on the collector thread, so their spans index a source map this thread does not
+        // have — a `-1` anywhere in the body reaches syn's `parse_negative_lit`, which JOINS spans, and
+        // the join aborts the parser (getrandom's `debug_assert!`). See `respan_call_site`.
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-        if let Ok(exprs) = syn::parse::Parser::parse2(parser, node.tokens.clone()) {
+        if let Ok(exprs) = syn::parse::Parser::parse2(parser, respan_call_site(node.tokens.clone())) {
             // IMPLICIT FORMATTING (#2): a formatting macro (`format!`/`println!`/`write!`/…) runs each
             // `{}`/`{:?}` argument through `Display::fmt`/`Debug::fmt`. A LOCAL type with an effectful
             // `impl Display`/`impl Debug` (a custom formatter that touches the fs/net/etc.) is therefore

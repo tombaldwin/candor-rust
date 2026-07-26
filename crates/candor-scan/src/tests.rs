@@ -5235,3 +5235,153 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         assert!(un.iter().any(|u| u["path"].as_str() == Some("src/bad.rs")),
                 "the aborted file was dropped WITHOUT disclosure:\n{v}");
     }
+
+    /// A Pass-B walk of an AST parsed by ANOTHER THREAD must not panic.
+    ///
+    /// proc-macro2's fallback `Span` is a pair of byte offsets into a THREAD-LOCAL source map, and
+    /// candor parses files on rayon workers but walks them on the collector thread (see `SendFile`).
+    /// So every span inside a moved AST indexes a map the walking thread does not have. candor never
+    /// reads such a span itself — `loc` is resolved on the parse worker — but `visit_macro` hands the
+    /// macro's token stream straight back to syn, and syn's `parse_negative_lit` JOINS the `-` punct's
+    /// span with the literal's. `Span::join` looks the receiver up: past the end of this thread's map
+    /// that is `unreachable!("Invalid span with no related FileInfo!")`.
+    ///
+    /// `-1` inside a macro body is all it takes; getrandom 0.3.4 / 0.4.2 spell it
+    /// `debug_assert!({ match ret { 0 => true, -1 => …, _ => false } })` and took the whole scan down.
+    /// The walking thread is spawned FRESH so its map holds only proc-macro2's dummy file — which is
+    /// what makes this deterministic where the real crate was a lottery (the panic needs the worker's
+    /// span to fall PAST the collector thread's map; falling INSIDE it silently resolves to the wrong
+    /// file instead).
+    #[test]
+    fn a_macro_body_reparse_survives_the_ast_crossing_a_thread_boundary() {
+        const SRC: &str = "fn wait(ret: i32) {\n    debug_assert!({\n        match ret {\n            0 => true,\n            -1 => std::fs::read(\"/etc/x\").is_ok(),\n            _ => false,\n        }\n    });\n}\n";
+        // PARSE on its own thread: the spans below are offsets into THAT thread's source map.
+        let (parsed, locs) = std::thread::spawn(|| {
+            let f = syn::parse_file(SRC).unwrap();
+            let mut locs = Vec::new();
+            fn_locs(&f.items, "src/lib.rs", false, &mut locs);
+            (SendFile(f), locs)
+        })
+        .join()
+        .unwrap();
+        // WALK on a second, virgin thread.
+        let fns = std::thread::spawn(move || {
+            let (parsed, locs) = (parsed, locs);
+            let (fields, returns): (FieldIndex, ReturnIndex) = Default::default();
+            let (impls, tdecls, tfields): (TraitImplIndex, HashMap<String, LocalTrait>, TraitFieldIndex) =
+                Default::default();
+            let (fe, fet, ev): (FieldElemIndex, FieldElemTraitIndex, EnumVariantIndex) = Default::default();
+            let (consts, lmac): (HashMap<String, String>, HashMap<String, String>) = Default::default();
+            let mut uses = HashMap::new();
+            let mut out = Vec::new();
+            let mut li = 0usize;
+            scan_items(
+                &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
+                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev },
+                empty_lazy(), &consts, &lmac, &mut uses, &mut out,
+            );
+            out
+        })
+        .join()
+        .expect("Pass B must survive an AST parsed on another thread (span source map is thread-local)");
+        // …and the re-parse must still SEE THROUGH the macro. Without this half the test would pass just
+        // as well if the fix were "stop parsing macro bodies" — which is a silent under-report.
+        let wait = fns.iter().find(|f| f.leaf == "wait").expect("`wait` must be collected");
+        assert!(
+            wait.calls.iter().any(|c| c.path.contains("fs::read")),
+            "the macro body's `fs::read` was lost: {:?}",
+            wait.calls.iter().map(|c| c.path.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// `visit_macro`'s expression re-parse is not the only place candor hands a MOVED token stream back
+    /// to syn — `cfg_if!` and the `lazy_static!`/`thread_local!` bodies do too, and each is its own
+    /// `respan_call_site` call site. One test per site, so removing any one of the four is a named
+    /// failure rather than a silent regression. (Same construction as the macro-body test above:
+    /// parse on one thread, use on a second, virgin one.)
+    #[test]
+    fn every_moved_token_reparse_site_survives_the_thread_boundary() {
+        // Each source puts a `-1` where the site's own parser will read it: that is what reaches syn's
+        // `parse_negative_lit`, the one place syn JOINs spans during a parse.
+        const CFG_IF: &str = "fn f(k: i32) {\n    cfg_if::cfg_if! {\n        if #[cfg(unix)] {\n            let _ = match k { -1 => std::fs::read(\"/x\").is_ok(), _ => false };\n        } else {\n            let _ = k;\n        }\n    }\n}\n";
+        const LAZY: &str = "lazy_static! {\n    static ref A: bool = match k() { -1 => std::fs::read(\"/x\").is_ok(), _ => false };\n}\n";
+        const TLOCAL: &str = "thread_local! {\n    static B: bool = match k() { -1 => std::fs::read(\"/x\").is_ok(), _ => false };\n}\n";
+
+        // cfg_if: goes through the collector, so drive it the same way as the macro-body test.
+        let (parsed, locs) = std::thread::spawn(|| {
+            let f = syn::parse_file(CFG_IF).unwrap();
+            let mut locs = Vec::new();
+            fn_locs(&f.items, "src/lib.rs", false, &mut locs);
+            (SendFile(f), locs)
+        })
+        .join()
+        .unwrap();
+        let fns = std::thread::spawn(move || {
+            let (parsed, locs) = (parsed, locs);
+            let (fields, returns): (FieldIndex, ReturnIndex) = Default::default();
+            let (impls, tdecls, tfields): (TraitImplIndex, HashMap<String, LocalTrait>, TraitFieldIndex) =
+                Default::default();
+            let (fe, fet, ev): (FieldElemIndex, FieldElemTraitIndex, EnumVariantIndex) = Default::default();
+            let (consts, lmac): (HashMap<String, String>, HashMap<String, String>) = Default::default();
+            let (mut uses, mut out, mut li) = (HashMap::new(), Vec::new(), 0usize);
+            scan_items(
+                &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
+                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev },
+                empty_lazy(), &consts, &lmac, &mut uses, &mut out,
+            );
+            out
+        })
+        .join()
+        .expect("the cfg_if! arm walk must survive an AST parsed on another thread");
+        assert!(
+            fns.iter().any(|f| f.calls.iter().any(|c| c.path.contains("fs::read"))),
+            "the cfg_if arm's `fs::read` was lost: {:?}",
+            fns.iter().flat_map(|f| f.calls.iter().map(|c| c.path.as_str())).collect::<Vec<_>>()
+        );
+
+        // lazy_static! / thread_local!: the deferred-init parsers, driven directly on their tokens.
+        for (src, want) in [(LAZY, "A"), (TLOCAL, "B")] {
+            let parsed = std::thread::spawn(move || SendFile(syn::parse_file(src).unwrap()))
+                .join()
+                .unwrap();
+            let got = std::thread::spawn(move || {
+                let parsed = parsed;
+                let syn::Item::Macro(m) = &parsed.0.items[0] else { panic!("expected a macro item") };
+                let leaf = path_to_string(&m.mac.path);
+                // `syn::Stmt` is not `Send`, so summarise inside the thread rather than returning it.
+                if leaf.contains("lazy_static") {
+                    lazy_static_macro_body(&m.mac.tokens)
+                } else {
+                    thread_local_macro_body(&m.mac.tokens)
+                }
+                .map(|(n, stmts)| (n, stmts.len()))
+            })
+            .join()
+            .expect("the deferred-init body parse must survive an AST parsed on another thread");
+            let (name, n_stmts) = got.unwrap_or_else(|| panic!("{want}'s init must still parse"));
+            assert_eq!(name, want);
+            assert_eq!(n_stmts, 1, "the init expr must survive as one stmt");
+        }
+    }
+
+    /// The same thread-boundary question asked of the OTHER parser candor runs on moved tokens:
+    /// `cfg_eval`/`is_cfg_test` call `syn`'s `parse_nested_meta` on an attribute's tokens. A cfg
+    /// predicate has no position that admits a leading `-`, so `parse_negative_lit` should never be
+    /// reached — but that is an argument, and this is the fixture that settles it.
+    #[test]
+    fn a_cfg_attribute_reparse_survives_the_ast_crossing_a_thread_boundary() {
+        const SRC: &str = "#[cfg(all(test, feature = -1))]\nmod m {\n    pub fn f() { let _ = std::fs::read(\"/x\"); }\n}\n";
+        let parsed = std::thread::spawn(|| SendFile(syn::parse_file(SRC).unwrap())).join().unwrap();
+        let saw = std::thread::spawn(move || {
+            let parsed = parsed;
+            parsed.0.items.iter().any(|it| match it {
+                syn::Item::Mod(m) => is_cfg_test(&m.attrs),
+                _ => false,
+            })
+        })
+        .join()
+        .expect("cfg evaluation must survive an AST parsed on another thread");
+        assert!(saw, "the `test` predicate must still be seen");
+    }

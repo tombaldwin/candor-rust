@@ -230,6 +230,12 @@ pub(crate) struct ElemIndexes<'a> {
 /// thereafter accessed only single-threaded (the sequential Pass A / Pass B). No `Rc` clone is ever shared
 /// between threads, so no refcount is ever touched concurrently; a one-time move of a uniquely-owned value
 /// across a thread boundary races with nothing. This is exactly the case `unsafe impl Send` is sound for.
+///
+/// THE OTHER HALF OF THE CONTRACT, and it is not about `Send` at all: the spans inside a moved AST name
+/// files the WALKING thread's source map does not have. It is not enough that candor resolves `loc` on
+/// the parse worker — **syn's own parser reads spans too**, so handing a moved token stream back to
+/// `syn::parse2` reads them on the wrong thread. See `respan_call_site`, which every such re-parse must
+/// go through.
 pub(crate) struct SendFile(pub(crate) syn::File);
 
 // SAFETY: see the type doc — uniquely owned, moved once, then single-threaded. Sound for a parse result
@@ -240,3 +246,51 @@ unsafe impl Send for SendFile {}
 /// A parse worker's output for one file: the (Send-wrapped) parsed file plus its per-fn `file:line:col`s
 /// resolved on the worker (walk order; see `fn_locs`). Bundled so loc rides alongside the moved file.
 pub(crate) type ParsedFile = (SendFile, Vec<String>);
+
+/// Re-stamp every token of a MOVED token stream with `Span::call_site()`, so it can be handed back to
+/// `syn` on a thread that did not parse it.
+///
+/// WHY THIS IS NEEDED. proc-macro2's fallback `Span` is a pair of byte offsets into a THREAD-LOCAL
+/// source map (`SendFile` explains why we enable `span-locations`). candor parses files on rayon
+/// workers and walks them on the collector thread, so every span in a moved AST is an index into a map
+/// that thread does not have. candor never reads such a span itself — `loc` is resolved in the parse
+/// closure — but candor DOES hand macro bodies straight back to syn (`visit_macro`,
+/// `lazy_static_macro_body`, `thread_local_macro_body`), and **syn's parser reads spans**:
+/// `syn::lit::parsing::parse_negative_lit` JOINs the `-` punct's span with the literal's, and
+/// `Span::join` looks the receiver up in the map.
+///
+/// Both outcomes of that lookup are wrong, and the quiet one is worse:
+///   - past the end of the walking thread's map → `unreachable!("Invalid span with no related
+///     FileInfo!")`, i.e. the parser aborts. `getrandom` 0.3.4 / 0.4.2 spell exactly this,
+///     `debug_assert!({ match ret { 0 => true, -1 => …, _ => false } })`, and took the whole scan down.
+///   - INSIDE that map's range → it silently resolves against an unrelated file. No panic, no signal.
+///
+/// Which one you get depends on how much the two threads happened to have parsed, which is why the
+/// crash looked data-dependent and would not reproduce on the file in isolation.
+///
+/// `Span::call_site()` is `(0, 0)`, the dummy file proc-macro2 seeds EVERY thread's map with, so it
+/// resolves everywhere and joins to itself. Nothing is lost by dropping to it: the spans of a macro's
+/// INTERIOR tokens are never read by candor — only syn's own error paths use them, and every one of
+/// these parses is `.ok()`-discarded on failure.
+pub(crate) fn respan_call_site(ts: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, Span, TokenTree};
+    ts.into_iter()
+        .map(|tt| match tt {
+            // A group carries its own delimiter span AND its contents' — recurse, and let `Group::new`
+            // mint the fresh call-site delimiter span.
+            TokenTree::Group(g) => TokenTree::Group(Group::new(g.delimiter(), respan_call_site(g.stream()))),
+            TokenTree::Ident(mut t) => {
+                t.set_span(Span::call_site());
+                TokenTree::Ident(t)
+            }
+            TokenTree::Punct(mut t) => {
+                t.set_span(Span::call_site());
+                TokenTree::Punct(t)
+            }
+            TokenTree::Literal(mut t) => {
+                t.set_span(Span::call_site());
+                TokenTree::Literal(t)
+            }
+        })
+        .collect()
+}
