@@ -534,11 +534,22 @@
         // BOTH receivers are called. `a` is alpha's (pure), `b` is beta's (Net). The precise answer is
         // exactly ['Net'] — and BOTH failure modes are wrong: last-wins fabricated beta's Net onto `a`,
         // while tombstoning the collision lost `b`'s genuine reach, which is the cardinal sin.
+        // Every spelling of "one leaf, two crates", and for each the no-fabrication control beside it.
+        // The GENERIC and WHERE forms are here because the first per-receiver fix handled only the `dyn`
+        // spelling and silently reopened the miss for the other two — bounds were collected into ONE
+        // leaf-keyed map, which re-created the collision the fix existed to remove.
         std::fs::write(d.join("src/lib.rs"),
             "pub fn handle(a: &dyn alpha::Handler, b: &dyn beta::Handler) { a.go(); b.go(); }\n\
              pub fn only_alpha(a: &dyn alpha::Handler, _b: &dyn beta::Handler) { a.go(); }\n\
              pub fn shadowed(a: &dyn alpha::Handler, b: &dyn beta::Handler) {\n\
-                 let a: &dyn beta::Handler = b; a.go(); }\n").unwrap();
+                 let a: &dyn beta::Handler = b; a.go(); }\n\
+             pub fn generic_form<A: alpha::Handler, B: beta::Handler>(a: A, b: B) { a.go(); b.go(); }\n\
+             pub fn generic_only_alpha<A: alpha::Handler, B: beta::Handler>(a: A, _b: B) { a.go(); }\n\
+             pub fn where_form<A, B>(a: A, b: B) where A: alpha::Handler, B: beta::Handler { a.go(); b.go(); }\n\
+             pub fn block_shadow(a: &dyn beta::Handler, x: &dyn alpha::Handler) {\n\
+                 { let a: &dyn alpha::Handler = x; a.go(); } a.go(); }\n\
+             pub fn outer(h: &dyn beta::Handler) {\n\
+                 fn inner(h: &dyn alpha::Handler) { h.go(); } let _ = inner; h.go(); }\n").unwrap();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
             include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
@@ -560,6 +571,23 @@
         assert!(find("shadowed").as_ref().is_some_and(|f| effs(f).contains(&"Net".to_string())),
                 "a trait-typed LOCAL must use its own crate qualification, not the shadowed \
                  parameter's:\n{v:#}");
+        // The GENERIC and WHERE spellings must reach beta exactly as the `dyn` one does…
+        for n in ["generic_form", "where_form"] {
+            assert!(find(n).as_ref().is_some_and(|f| effs(f).contains(&"Net".to_string())),
+                    "{n}: a generic/where bound must resolve PER TYPE PARAM — collecting every bound into \
+                     one leaf-keyed map re-creates the collision:\n{v:#}");
+        }
+        // …and must not fabricate when only alpha is called.
+        assert!(find("generic_only_alpha").as_ref().is_none_or(|f| !effs(f).contains(&"Net".to_string())),
+                "generic_only_alpha must not inherit BETA's effects:\n{v:#}");
+        // A BLOCK-scoped shadow must not permanently rebind the parameter's crate for the rest of the fn.
+        assert!(find("block_shadow").as_ref().is_some_and(|f| effs(f).contains(&"Net".to_string())),
+                "a block-scoped shadow must be undone at scope exit:\n{v:#}");
+        // A NESTED item must not inherit the outer signature's crate for a same-named receiver.
+        assert!(find("outer").as_ref().is_some_and(|f| effs(f).contains(&"Net".to_string())),
+                "outer's own receiver is BETA's; the nested fn must not rebind it:\n{v:#}");
+        assert!(find("inner").as_ref().is_none_or(|f| !effs(f).contains(&"Net".to_string())),
+                "inner's receiver is ALPHA's and must stay pure:\n{v:#}");
         assert!(find("handle").as_ref().is_some_and(|f| effs(f).contains(&"Net".to_string())),
                 "the genuine call on BETA's Handler must still resolve — a leaf collision must be \
                  disambiguated per RECEIVER, not dropped for both:\n{v:#}");

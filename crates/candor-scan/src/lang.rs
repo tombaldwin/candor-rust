@@ -113,19 +113,24 @@ pub(crate) fn dyn_sig_trait_leaves(sig: &syn::Signature) -> std::collections::Ha
 /// declaration already carries the answer per parameter; only the leaf-keyed map throws it away.
 pub(crate) fn sig_trait_quals_by_param(sig: &syn::Signature) -> HashMap<String, HashMap<String, String>> {
     let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
-    // A generic bound (`fn f<T: dep::Handler>(t: T)`) belongs to the TYPE PARAM, not to one argument, so
-    // it is collected once and attached to every param whose type mentions it. Collision inside a single
-    // parameter is impossible — one param has one declared type.
-    let mut generic: HashMap<String, String> = HashMap::new();
+    // A generic bound belongs to ONE TYPE PARAM, and must be kept that way. Collecting every bound into a
+    // single leaf-keyed map re-created the very collision this function exists to avoid:
+    // `fn f<A: alpha::Handler, B: beta::Handler>(a: A, b: B)` tombstoned the shared `Handler` leaf and BOTH
+    // receivers lost their dep key — a silent under-report, and the same defect as the last-wins map in a
+    // different spelling. (The comment here previously said "collision inside a single parameter is
+    // impossible", which is true of a parameter's own declared type and irrelevant to a SHARED map.)
+    let mut by_tp: HashMap<String, HashMap<String, String>> = HashMap::new();
     for p in &sig.generics.params {
         if let syn::GenericParam::Type(tp) = p {
-            quals_from_bounds(&tp.bounds, &mut generic);
+            quals_from_bounds(&tp.bounds, by_tp.entry(tp.ident.to_string()).or_default());
         }
     }
     if let Some(w) = &sig.generics.where_clause {
         for pred in &w.predicates {
             if let syn::WherePredicate::Type(pt) = pred {
-                quals_from_bounds(&pt.bounds, &mut generic);
+                // `where A: alpha::Handler` — the bounded type is a plain ident for the shapes we model.
+                let Some(name) = plain_type_ident(&pt.bounded_ty) else { continue };
+                quals_from_bounds(&pt.bounds, by_tp.entry(name).or_default());
             }
         }
     }
@@ -134,14 +139,32 @@ pub(crate) fn sig_trait_quals_by_param(sig: &syn::Signature) -> HashMap<String, 
         let syn::Pat::Ident(id) = &*pt.pat else { continue };
         let mut per = HashMap::new();
         collect_trait_quals(&pt.ty, &mut per);
-        for (k, v) in &generic {
-            per.entry(k.clone()).or_insert_with(|| v.clone());
+        // Attach ONLY the bounds of the type param this argument is actually declared with, peeling
+        // references — `a: A` and `a: &A` both resolve to A's own bounds and to no other param's.
+        if let Some(tp) = plain_type_ident(&pt.ty) {
+            if let Some(g) = by_tp.get(&tp) {
+                for (k, v) in g {
+                    per.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
         }
         if !per.is_empty() {
             out.insert(id.ident.to_string(), per);
         }
     }
     out
+}
+
+/// The bare identifier of a type, peeling references/parens/groups: `A`, `&A`, `&mut A` -> `A`.
+/// Returns None for anything compound, which is exactly when a generic bound must not be attached.
+fn plain_type_ident(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Reference(r) => plain_type_ident(&r.elem),
+        syn::Type::Paren(p) => plain_type_ident(&p.elem),
+        syn::Type::Group(g) => plain_type_ident(&g.elem),
+        syn::Type::Path(p) if p.qself.is_none() => p.path.get_ident().map(|i| i.to_string()),
+        _ => None,
+    }
 }
 
 pub(crate) fn sig_trait_quals(sig: &syn::Signature) -> HashMap<String, String> {
