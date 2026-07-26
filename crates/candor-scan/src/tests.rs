@@ -363,6 +363,48 @@
     }
 
     #[test]
+    fn dep_index_carries_the_full_qual_as_a_third_key() {
+        // The index held only `crate#leaf` and `crate#tail2`, so a consumer that knows its target
+        // PRECISELY (`deplib#sync::Client::fetch`) had no key to ask on and had to settle for tail2 —
+        // where `sync::Client` and `mock::Client` are the same string. The full qual is the third key.
+        //
+        // The SECOND direction is the one that can go wrong (standing bar item 0): a 1- or 2-segment
+        // qual's "full qual" IS its leaf/tail2 string, so an undeduped push would self-collide and the
+        // never-guess rule would DROP a key that worked before — a silent under-report introduced by a
+        // purely additive change. Both are asserted here.
+        let d = std::env::temp_dir().join(format!("candor-fullqual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::create_dir_all(&d);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(d.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "functions": [
+              {{"fn": "sync::Client::fetch", "inferred": ["Net"], "hash": "deplib#sync::Client::fetch"}},
+              {{"fn": "mock::Client::fetch", "inferred": [], "hash": "deplib#mock::Client::fetch"}},
+              {{"fn": "Root::only", "inferred": ["Fs"], "hash": "deplib#Root::only"}},
+              {{"fn": "bare", "inferred": ["Exec"], "hash": "deplib#bare"}}
+            ]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        // 1. the NEW key: the full qual distinguishes what the leaf and the tail2 cannot.
+        assert_eq!(idx.by_key.get("deplib#sync::Client::fetch").map(|e| e.effects.clone()),
+                   Some(vec!["Net"]), "full-qual key missing for the effectful module's Client::fetch");
+        assert_eq!(idx.by_key.get("deplib#mock::Client::fetch").map(|e| e.effects.clone()),
+                   Some(Vec::new()), "full-qual key missing for the pure module's Client::fetch");
+        // and the imprecise shapes still refuse to guess between the two, as before.
+        assert!(!idx.by_key.contains_key("deplib#Client::fetch"), "a shared tail2 must stay dropped");
+        assert!(!idx.by_key.contains_key("deplib#fetch"), "a shared leaf must stay dropped");
+        // 2. the SECOND direction: a short qual whose full qual EQUALS its tail2 / leaf must keep the
+        //    key it already had — the dedup, not a self-collision that removes it.
+        assert_eq!(idx.by_key.get("deplib#Root::only").map(|e| e.effects.clone()), Some(vec!["Fs"]),
+                   "a 2-segment qual self-collided and dropped its own tail2 key");
+        assert_eq!(idx.by_key.get("deplib#only").map(|e| e.effects.clone()), Some(vec!["Fs"]),
+                   "a 2-segment qual's leaf key was dropped");
+        assert_eq!(idx.by_key.get("deplib#bare").map(|e| e.effects.clone()), Some(vec!["Exec"]),
+                   "a 1-segment qual self-collided and dropped its own leaf key");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn dep_report_package_field_registers_coverage_for_the_ledger_exemption() {
         // SPEC §2 chaining rule 3: the crates a loaded report COVERS come from its envelope
         // `package`/`packages` field — independent of the file's NAME and of any join firing. An

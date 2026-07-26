@@ -59,8 +59,9 @@ pub(crate) struct DepFn {
     pub(crate) incomplete: Vec<&'static str>,
 }
 
-/// The CANDOR_DEPS index: `crate#tail2` and `crate#leaf` keys (UNAMBIGUOUS only — a key two dep
-/// functions share is dropped, the same under-report-don't-guess rule as `resolve_target`), plus
+/// The CANDOR_DEPS index: `crate#leaf`, `crate#tail2` and `crate#<full qual>` keys (UNAMBIGUOUS only
+/// — a key two dep functions share is dropped, the same under-report-don't-guess rule as
+/// `resolve_target`), plus
 /// the covered crate set. A report whose producing version differs from this binary's is
 /// DOWNGRADED to `Unknown` rather than silently trusted (spec §2.1).
 #[derive(Default)]
@@ -185,10 +186,29 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                     }
                 }
             }
-            let mut keys = vec![format!("{krate}#{}", qual.rsplit("::").next().unwrap_or(qual))];
+            // THREE key shapes per entry: leaf, qualified tail2, and the FULL qual. The full qual is
+            // the precise one — `deplib#sync::Client::fetch` — and it exists so a join that already
+            // KNOWS its target exactly can ask for exactly that instead of settling for tail2, where
+            // `sync::Client` and `mock::Client` are the same key. Nothing published a qualified type id
+            // before because the index could not answer one (DEP-RECEIVER-TYPING-DESIGN.md
+            // "BLOCKING PREREQUISITE"); that is what this key is for.
+            //
+            // ADDITIVE, and the DEDUP is what makes it so: for a 1- or 2-segment qual the full qual IS
+            // the leaf/tail2 string, so pushing it again would collide with itself and the never-guess
+            // rule below would REMOVE the key that already worked — a silent under-report manufactured
+            // by an "additive" change. A ≥3-segment full qual can never collide with another entry's
+            // leaf (1 segment) or tail2 (2 segments), so no existing key is put at risk either.
+            let mut keys: Vec<String> = Vec::with_capacity(3);
+            let push_key = |k: String, keys: &mut Vec<String>| {
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            };
+            push_key(format!("{krate}#{}", qual.rsplit("::").next().unwrap_or(qual)), &mut keys);
             if let Some(t2) = tail2(qual) {
-                keys.push(format!("{krate}#{t2}"));
+                push_key(format!("{krate}#{t2}"), &mut keys);
             }
+            push_key(format!("{krate}#{qual}"), &mut keys);
             for k in keys {
                 if ambiguous.contains(&k) {
                     continue;
