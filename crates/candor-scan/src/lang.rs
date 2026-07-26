@@ -693,6 +693,88 @@ pub(crate) fn result_err_leaf(output: &syn::ReturnType, uses: &HashMap<String, S
     Some(expanded.rsplit("::").next().unwrap_or(&expanded).to_string())
 }
 
+/// ⟨typeSurface.returns⟩ The nominal type a caller's BINDING holds for `let x = f()` — the type of the
+/// VALUE, not the useful type hiding inside it. Expanded through `uses`; `Self` resolves to the impl
+/// type. `None` for anything that is not a plain generic-free nominal path.
+///
+/// THE REFUSAL IS THE POINT, and it is defect 2 of the reverted attempt. `record_return` (the LOCAL type
+/// index) applies `unwrap_result_option`, so `fn connect() -> Result<Conn, E>` records `Conn` — right for
+/// local inference, where the consuming site is a `connect()?`. Published across the boundary it is a lie
+/// about the binding: `let c = dep::connect();` holds a `Result`, whose `map`/`unwrap`/`is_ok` are the
+/// Result's, and keying those against `Conn` charged `Conn::map`'s effects to a caller that never runs
+/// them. The design note allows recording the wrapper OR refusing to key through it; this refuses.
+///
+/// Refusing costs nothing today, and the reason is worth writing down rather than assuming: the
+/// consumer's trigger (`dep_bound_vars`) only fires on a DIRECT `let x = dep::f();` — a
+/// `let x = dep::f()?;` is a `syn::Expr::Try` and records no provenance at all — so a wrapped return has
+/// no consumer to serve. Extending to `?` needs a consumer trigger AND a wrapper encoding, and adding
+/// either one alone is how the fabrication comes back.
+/// The returned path is MODULE-QUALIFIED in the producing crate's own namespace — the same namespace the
+/// report's entry hashes use — because a BARE type name is module-RELATIVE and treating it as "matches
+/// any module" is defect 1 by another door. Caught on the second fixture: `mod mock { fn client() ->
+/// Client }` published `deplib#sync::Client`, so a consumer's PURE `mock_client()` would have been
+/// charged `sync::Client::send`'s `Fs`. `expand` alone cannot fix it — it leaves a bare name bare.
+pub(crate) fn bound_return_type(
+    ty: &syn::Type,
+    uses: &HashMap<String, String>,
+    self_ty: Option<&str>,
+    modpath: &str,
+) -> Option<String> {
+    // Deliberately NOT peeling references / Box / Arc the way `type_path` does. That peel is right when
+    // resolving a method against a receiver we can SEE; here the type crosses a scan boundary, where the
+    // consumer's own peeling decides. Only a bare owned nominal path travels.
+    let syn::Type::Path(p) = ty else { return None };
+    if p.qself.is_some() {
+        return None; // `<T as Trait>::Assoc` — an associated type, not a nameable nominal
+    }
+    // ANY generic argument means a WRAPPER (`Result<_>`/`Option<_>`/`Vec<_>`/`Box<_>`) or a generic
+    // instantiation (`Wrapper<T>` — the design note's open question, deliberately left unanswered).
+    if p.path.segments.iter().any(|s| !matches!(s.arguments, syn::PathArguments::None)) {
+        return None;
+    }
+    if is_non_nominal_type(ty) {
+        return None; // a bare primitive names no type a dep report carries methods under
+    }
+    let written = path_to_string(&p.path);
+    // `Self` is the impl's own type, declared in THIS module.
+    let written = if written == "Self" { self_ty?.to_string() } else { written };
+    let mut segs: Vec<&str> = written.split("::").collect();
+    let (path, relative) = match segs.first().copied()? {
+        // `expand` STRIPS a `super::` root without walking up, so it would hand back a path rooted in
+        // the WRONG module. Refuse: an under-emission is the safe direction, a wrong type is not.
+        "super" => return None,
+        "crate" => {
+            segs.remove(0);
+            (segs.join("::"), false)
+        }
+        "self" => {
+            segs.remove(0);
+            (segs.join("::"), true)
+        }
+        head => match uses.get(head) {
+            // A `use` binding names an ABSOLUTE path — possibly `crate::`-rooted, possibly another
+            // crate's, in which case nothing in this report will match it and it simply drops.
+            Some(bound) => {
+                let rest = &segs[1..];
+                let joined = if rest.is_empty() { bound.clone() } else { format!("{bound}::{}", rest.join("::")) };
+                let stripped = joined
+                    .strip_prefix("crate::")
+                    .or_else(|| joined.strip_prefix("self::"))
+                    .unwrap_or(&joined)
+                    .to_string();
+                (stripped, false)
+            }
+            // No `use` binding: the name is MODULE-RELATIVE. `Client` inside `mod mock` is
+            // `mock::Client`, never some other module's `Client`.
+            None => (written.clone(), true),
+        },
+    };
+    if path.is_empty() {
+        return None;
+    }
+    Some(if relative && !modpath.is_empty() { format!("{modpath}::{path}") } else { path })
+}
+
 /// Expand a call path against this file's `use` map: if the first segment is the last segment of some
 /// `use a::b::Name`, replace it with the full `a::b::Name`. Turns `fs::read` → `std::fs::read`,
 /// `Command::new` → `std::process::Command::new`. `crate`/`self`/`super` prefixes are stripped (local).

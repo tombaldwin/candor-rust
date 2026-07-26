@@ -123,6 +123,13 @@ pub(crate) fn apply_dep_fn(de: &DepFn, caller: &str, s: DepSink<'_>) {
 pub(crate) struct DepIndex {
     pub(crate) by_key: HashMap<String, DepFn>,
     pub(crate) crates: std::collections::HashSet<String>,
+    /// ⟨typeSurface.returns⟩ `{crate}#{fn qual}` -> `{crate}#{type qual}`, merged across every loaded
+    /// report. Lets a consumer type a receiver bound from a dependency FACTORY, which is otherwise
+    /// impossible: a pure factory is absent from the report entirely, so there is no entry on which a
+    /// return type could have been carried. Same never-guess rule as `by_key` — two reports publishing
+    /// DIFFERENT types for one fn id drop the key rather than pick, because a wrong receiver type
+    /// FABRICATES where a missing one merely misses.
+    pub(crate) returns: HashMap<String, String>,
 }
 
 pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
@@ -158,6 +165,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     }
     let my_version = format!("scan-{}", env!("CARGO_PKG_VERSION"));
     let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ret_ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in &files {
         let Ok(text) = std::fs::read_to_string(f) else {
             eprintln!("candor-scan: CANDOR_DEPS report unreadable, skipped: {}", f.display());
@@ -171,6 +179,33 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         let version = v.pointer("/candor/version").and_then(|x| x.as_str()).unwrap_or("");
         let stale = version != my_version;
         let Some(fns) = v.get("functions").and_then(|x| x.as_array()).or_else(|| v.as_array()) else { continue };
+        // ⟨typeSurface.returns⟩ Merge this report's published return types. GATED ON `!stale` for the
+        // same reason the effects are: a report from a different producer version is not trusted, and a
+        // type surface read off one would silently key the consumer through a claim we just refused to
+        // believe. (The trap costs three false measurements a day when forgotten — dep reports must be
+        // regenerated with the binary under test.)
+        if !stale {
+            if let Some(ts) = v.pointer("/typeSurface/returns").and_then(|x| x.as_object()) {
+                for (k, val) in ts {
+                    let Some(t) = val.as_str() else { continue };
+                    if ret_ambiguous.contains(k) {
+                        continue;
+                    }
+                    match idx.returns.get(k) {
+                        // Two reports claim DIFFERENT types for one fn id — drop it. Never guess a
+                        // receiver type: a wrong one fabricates, a missing one falls back to half 1.
+                        Some(prev) if prev != t => {
+                            idx.returns.remove(k);
+                            ret_ambiguous.insert(k.clone());
+                        }
+                        Some(_) => {}
+                        None => {
+                            idx.returns.insert(k.clone(), t.to_string());
+                        }
+                    }
+                }
+            }
+        }
         // The crate(s) a report COVERS, for the §7.14 ledger exemption (§2 chaining rule 3): the
         // AUTHORITATIVE claim is the envelope's `package` (or the JVM-shape `packages`) field — an
         // EMPTY report ({functions: []}) is an all-pure purity claim for that package, covered and
