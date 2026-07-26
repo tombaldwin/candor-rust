@@ -1504,9 +1504,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         let mut nonpure_types: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for e in &entries {
             if e.inferred.is_empty() { continue; }
-            // `cr#Type::method` -> `Type`. A free function (`cr#build`) has no `::` and names no type.
+            // The owning TYPE is the segment BEFORE the method, which is the LAST-BUT-ONE segment — NOT
+            // the first. A hash is module-qualified on any real crate (`cr#conn::Pool::acquire`), so
+            // splitting on the FIRST `::` yielded the MODULE name. Measured: pgman had 356 factory returns
+            // and 16 non-pure types with ZERO intersection — not sparsity, a keying mismatch, and it
+            // showed up only because the fixture happened to be flat (`deplib#Client::fetch`).
+            // A free function (`cr#build`) has no second segment and names no type.
             if let Some(rest) = e.hash.split_once('#').map(|(_, r)| r) {
-                if let Some((ty, _)) = rest.split_once("::") { nonpure_types.insert(ty); }
+                if let Some(ty) = rest.rsplit("::").nth(1) { nonpure_types.insert(ty); }
             }
         }
         let mut map = std::collections::BTreeMap::new();
@@ -1515,6 +1520,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             if nonpure_types.contains(leaf) {
                 map.insert(format!("{crate_name}#{fname}"), format!("{crate_name}#{leaf}"));
             }
+        }
+        if std::env::var("CANDOR_TS_DEBUG").is_ok() {
+            eprintln!("TSDEBUG returns_index={} nonpure_types={} published={}",
+                      returns.len(), nonpure_types.len(), map.len());
         }
         candor_report::TypeSurface { returns: map }
     };
