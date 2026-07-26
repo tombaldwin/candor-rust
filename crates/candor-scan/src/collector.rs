@@ -21,6 +21,10 @@ pub(crate) struct CallCollector<'a> {
     /// Trait leaf -> the multi-segment path this signature WROTE the bound with (`&dyn deplib::Handler`).
     /// `bound_leaves` keeps only the leaf, so a FULLY-QUALIFIED receiver otherwise loses its crate
     /// identity entirely and never forms the crate-qualified key — R6. See `lang::sig_trait_quals`.
+    /// PER-PARAMETER qualified bounds — the precise form of `trait_quals`. Consulted FIRST when the
+    /// receiver is a plain parameter, so `fn handle(a: &dyn alpha::Handler, b: &dyn beta::Handler)`
+    /// resolves each receiver to its OWN crate instead of collapsing both onto one leaf.
+    pub(crate) trait_quals_by_param: HashMap<String, HashMap<String, String>>,
     pub(crate) trait_quals: HashMap<String, String>,
     pub(crate) fields: &'a FieldIndex,
     pub(crate) trait_fields: &'a TraitFieldIndex,
@@ -1115,8 +1119,25 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // An EMPTY value is the tombstone for a leaf this signature bound to two different
                     // crates (see `quals_from_bounds`): treat it as absent and fall back to the file's
                     // `use` map, which the language guarantees cannot bind one leaf to two crates.
-                    let written = self.trait_quals.get(&tr)
-                        .map(|q| q.as_str()).filter(|q| !q.is_empty()).unwrap_or(tr.as_str());
+                    // The RECEIVER's own declared bound wins. Only when the receiver is not a plain
+                    // parameter do we fall back to the leaf-keyed map, whose empty value is the tombstone
+                    // for a leaf this signature bound to two different crates.
+                    let recv_param = match &*node.receiver {
+                        syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                        syn::Expr::Reference(r) => match &*r.expr {
+                            syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let per_param = recv_param
+                        .as_ref()
+                        .and_then(|n| self.trait_quals_by_param.get(n))
+                        .and_then(|m| m.get(&tr))
+                        .map(|q| q.as_str());
+                    let written = per_param.or_else(|| {
+                        self.trait_quals.get(&tr).map(|q| q.as_str()).filter(|q| !q.is_empty())
+                    }).unwrap_or(tr.as_str());
                     let full = crate::lang::expand(written, self.uses);
                     let root = full.split("::").next().unwrap_or("");
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
