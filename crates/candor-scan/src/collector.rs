@@ -900,11 +900,30 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// LEAF to the crate-qualified path THIS signature wrote. A nested item's same-named receiver would
     /// otherwise inherit the OUTER signature's crate and form a dep key naming the wrong dependency —
     /// the leaf-collision fabrication, arriving by nesting instead of by two params.
+    /// **A SHADOW ALONE IS THE MIRROR SIN**, and that is what the bound map was: `std::mem::take` left it
+    /// EMPTY for the nested walk and never installed the NESTED signature's own bounds, so
+    /// `fn outer() { fn inner<T: Doer>(d: T) { let x: T = d; x.go() } }` resolved `T` to nothing and
+    /// `outer` was ABSENT from the report — a purity claim over a call that performs the effect. The
+    /// identical `let x: Box<dyn Doer>` inside the same nested `fn` resolves, which is what makes the
+    /// miss attributable to the emptied map and not to the position being dead. candor-swift's sibling
+    /// (`83cd607`) re-applies the nested signature's own opacity for exactly this reason; this is its
+    /// rust half, through the same `generic_bounds_of` the top-level construction uses rather than a
+    /// second copy of the rule.
+    ///
+    /// REPLACE, not merge — and the honest version of that claim is narrower than it first looked. The
+    /// two are indistinguishable on anything rustc ACCEPTS, because a nested item may not name the
+    /// enclosing fn's generics at all (E0401), so the only keys they disagree about are names no legal
+    /// nested body can mention; the merge mutant duly passes every other test in this suite. REPLACE is
+    /// chosen because candor-scan analyses crates WITHOUT building them and therefore walks bodies rustc
+    /// never accepted — `#[cfg]`-gated, macro-shaped, mid-edit — where an inherited bound DOES reach a
+    /// same-named local type and fabricates an effect on it. Pinned by
+    /// `an_outer_bound_does_not_reach_a_nested_item_that_never_declared_it`.
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
-        // …and the bound map, which a nested item's `let d: T` would otherwise read off the ENCLOSING
-        // signature — the same shadowing hazard `dyn_sig_traits` is scoped for, one map along.
-        let outer_g = std::mem::take(&mut self.generic_bounds);
+        let outer_g = std::mem::replace(
+            &mut self.generic_bounds,
+            crate::lang::generic_bounds_of(&node.sig),
+        );
         let outer_q = std::mem::take(&mut self.trait_quals);
         // …and the PER-PARAM map, which is now the FIRST source consulted. Scoping the two leaf-keyed maps
         // but not this one left a nested item reading the outer signature's crate for a same-named
@@ -916,9 +935,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
     }
+    /// The three ERASURE/PROVENANCE maps stay CLEARED for a nested item rather than re-installed from
+    /// its own signature, and this is measured, not an oversight: a nested item's PARAMETERS are never
+    /// typed at all — `fn outer() { fn inner(d: &dyn Doer) { d.go() } }` is silent in exactly the same
+    /// way its `<T: Doer>` twin is, so the position is dead for every spelling and those maps would have
+    /// nothing to bind to. Re-installing them would widen R4's and R6's fabrication surface for a gain
+    /// no fixture can show. The nested-parameter position is a POSITION-level gap of its own (pinned as
+    /// a residual test); when it is closed, this is the second half to close with it.
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
-        let outer_g = std::mem::take(&mut self.generic_bounds);
+        // The impl BLOCK's own generics (`impl<T: Doer> Wrap<T>`) are the outer scope for every method
+        // in it; `visit_impl_item_fn` layers each method's own on top.
+        let outer_g = std::mem::replace(
+            &mut self.generic_bounds,
+            crate::lang::generic_bounds_of_generics(&node.generics),
+        );
         let outer_q = std::mem::take(&mut self.trait_quals);
         let outer_p = std::mem::take(&mut self.trait_quals_by_param);
         syn::visit::visit_item_impl(self, node);
@@ -926,6 +957,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
+    }
+    /// A METHOD of a nested `impl` carries its own generics (`fn m<T: Doer>(&self, d: T)`), which the
+    /// impl block's `Generics` do not contain — so without this the impl form of the shadow above stays
+    /// silent even with `visit_item_impl` fixed. EXTEND rather than replace: unlike a nested `fn`, a
+    /// method genuinely may name its impl block's generics, and rust forbids a method from shadowing
+    /// one, so the two sets are disjoint and the union is exactly what is in scope.
+    ///
+    /// Only ever reached through a nested `impl` — this collector walks one unit's BODY, and a
+    /// top-level impl method gets its own collector with its own signature (see `collect_calls`).
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let mut inner = self.generic_bounds.clone();
+        inner.extend(crate::lang::generic_bounds_of(&node.sig));
+        let outer_g = std::mem::replace(&mut self.generic_bounds, inner);
+        syn::visit::visit_impl_item_fn(self, node);
+        self.generic_bounds = outer_g;
     }
     /// A BLOCK scopes the per-param crate-qualification map. `visit_local` writes a trait-typed local's
     /// own qualification under the binding NAME so it correctly shadows a parameter — but a shadow inside

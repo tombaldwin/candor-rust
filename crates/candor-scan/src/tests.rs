@@ -5714,6 +5714,124 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         );
     }
 
+    /// …AND THE SECOND FIXTURE, which is the one that was missing. Scoping the bound map across a
+    /// nested item (the test above) was written with `std::mem::take`, so the nested walk ran with an
+    /// EMPTY map and the NESTED signature's own bounds were never installed. A shadow alone is the
+    /// mirror sin: `fn inner<T: Doer>(d: T) { let x: T = d; x.go() }` inside any enclosing fn resolved
+    /// `T` to nothing and the ENCLOSING unit — which is where a nested item's calls are attributed —
+    /// was ABSENT from the report, i.e. a purity claim over a call that reads the filesystem.
+    ///
+    /// Every row carries its `dyn` CONTROL, resolving in BOTH arms, so a silent row that is silent for
+    /// a different reason cannot be mistaken for this one:
+    ///   - a nested `fn`'s own `<T: Doer>`;
+    ///   - a nested `impl`'s METHOD-level `<T: Doer>` (not in the impl block's `Generics` at all, so
+    ///     `visit_item_impl` alone leaves this row silent);
+    ///   - a nested `impl` BLOCK's `<T: Doer>` (not in the method's signature, the other way round).
+    ///
+    /// The fabrication direction is `the_bound_map_does_not_follow_the_walk_into_a_nested_item` above,
+    /// which must keep passing unchanged — together they say the map is SCOPED, not cleared.
+    #[test]
+    fn a_nested_items_own_generic_bound_resolves() {
+        let v = scan_src_to_json("nestedown", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fsy;\n",
+            "impl Doer for Fsy { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            // a nested `fn`'s own bound, + its `dyn` control
+            "pub fn nested_fn_bound() { fn inner<T: Doer>(d: T) { let x: T = d; x.go() } inner(Fsy); }\n",
+            "pub fn nested_fn_dyn() { fn inner(d: Box<dyn Doer>) { let x: Box<dyn Doer> = d; x.go() } inner(Box::new(Fsy)); }\n",
+            // a nested impl METHOD's own bound, + its `dyn` control
+            "pub fn nested_method_bound() { struct N; impl N { fn m<T: Doer>(&self, d: T) { let x: T = d; x.go() } } N.m(Fsy); }\n",
+            "pub fn nested_method_dyn() { struct M; impl M { fn m(&self, d: Box<dyn Doer>) { let x: Box<dyn Doer> = d; x.go() } } M.m(Box::new(Fsy)); }\n",
+            // a nested impl BLOCK's bound
+            "pub fn nested_block_bound() { struct W<T>(T); impl<T: Doer> W<T> { fn m(&self, d: T) { let x: T = d; x.go() } } W(Fsy).m(Fsy); }\n",
+        ));
+        for f in ["nested_fn_bound", "nested_method_bound", "nested_block_bound"] {
+            assert!(
+                effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                "{f}: the NESTED signature's own bound was never installed — the enclosing unit reads \
+                 silent-pure over a call that reads the filesystem:\n{v:#}"
+            );
+        }
+        for f in ["nested_fn_dyn", "nested_method_dyn"] {
+            assert!(
+                effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                "{f} is the CONTROL and must resolve in both arms — if it does not, the position is \
+                 dead and the rows above prove nothing:\n{v:#}"
+            );
+        }
+    }
+
+    /// REPLACE, not merge — and this test exists because the merge MUTANT passed the entire suite,
+    /// which made the "replace" comment an assertion nothing checked (standing-bar item 9).
+    ///
+    /// The reason no existing fixture could tell them apart is that rustc will not let one exist: a
+    /// nested item may not name the enclosing fn's generics (**E0401**, verified by compiling the source
+    /// below — `let d: T` is rejected, it does NOT fall back to the struct `T`), so the only keys the
+    /// two spellings disagree about are names no legal nested body can mention. Merging is therefore
+    /// safe *for code that compiles*, and that is exactly the dependency worth not having: candor-scan
+    /// analyses crates WITHOUT building them, so it routinely walks bodies rustc never accepted —
+    /// `#[cfg]`-gated branches, macro-shaped input, a file mid-edit. This fixture is deliberately such
+    /// a body, and under the merge mutant the outer `<T: Doer>` reaches the nested `let d: T` and
+    /// charges `holder` a filesystem read it does not perform.
+    #[test]
+    fn an_outer_bound_does_not_reach_a_nested_item_that_never_declared_it() {
+        let v = scan_src_to_json("nestedmerge", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fsy;\n",
+            "impl Doer for Fsy { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            // a CONCRETE type whose name collides with the enclosing signature's generic, and whose
+            // `go` is pure.
+            "pub struct T;\n",
+            "impl T { pub fn go(&self) {} }\n",
+            "pub fn holder<T: Doer>(_x: T) {\n",
+            "    fn nested() { let d: T = T; d.go(); }\n",
+            "    nested();\n",
+            "}\n",
+        ));
+        let present: Vec<&str> = v["functions"].as_array().unwrap().iter()
+            .filter_map(|f| f["fn"].as_str()).collect();
+        assert!(
+            !present.contains(&"holder"),
+            "the ENCLOSING signature's bound reached a nested item that never declared the name — a \
+             fabricated effect on a body whose `T` is a pure local type:\n{v:#}"
+        );
+    }
+
+    /// RESIDUAL, pinned so it cannot drift: a nested item's PARAMETERS are not typed at all. Both
+    /// spellings are silent — the `<T: Doer>` bound AND the `&dyn Doer` control — which is what makes
+    /// this a POSITION-level gap rather than the "never asks for the bound" defect above; the
+    /// collector's `vars`/`trait_vars` are seeded once from the enclosing signature and no visitor
+    /// binds a nested signature's parameters. It is also why the erasure/provenance maps are left
+    /// cleared for a nested item rather than re-installed (see `visit_item_impl`'s note): they have
+    /// nothing to bind to until this is closed. candor-swift records the mirror residual for its own
+    /// `vars`/`arrayElem` in `83cd607`.
+    #[test]
+    fn a_nested_items_parameters_are_still_untyped_in_every_spelling() {
+        let v = scan_src_to_json("nestedparam", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fsy;\n",
+            "impl Doer for Fsy { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            "pub fn param_bound() { fn inner<T: Doer>(d: T) { d.go() } inner(Fsy); }\n",
+            "pub fn param_dyn() { fn inner(d: &dyn Doer) { d.go() } inner(&Fsy); }\n",
+            "pub fn top_control<T: Doer>(d: T) { d.go() }\n",
+        ));
+        assert!(
+            effs(fn_entry(&v, "top_control")).contains(&"Fs".to_string()),
+            "the TOP-LEVEL parameter control stopped resolving — this residual note is measuring \
+             nothing:\n{v:#}"
+        );
+        let present: Vec<&str> = v["functions"].as_array().unwrap().iter()
+            .filter_map(|f| f["fn"].as_str()).collect();
+        for f in ["param_bound", "param_dyn"] {
+            assert!(
+                !present.contains(&f),
+                "{f} now resolves — good news, but this residual is stale: a nested item's parameters \
+                 are being typed now, so re-measure whether `visit_item_impl`'s cleared erasure and \
+                 provenance maps should be installed from the nested signature too:\n{v:#}"
+            );
+        }
+    }
+
     /// The same "never asks" defect on the CALLABLE arm of the annotation: `let g: F = f;` under
     /// `<F: Fn()>` left `g` un-flagged, so invoking it read silent-pure while the identical PARAMETER
     /// position already disclosed `Unknown`. Honest beats silent, and the parameter row is the control.
