@@ -5195,7 +5195,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     
     }
     #[test]
-    fn a_file_whose_walk_ABORTS_is_contained_and_disclosed_not_dropped() {
+    fn a_file_whose_walk_aborts_is_contained_and_disclosed_not_dropped() {
         // A panic in one file used to take the WHOLE run down — and with `--deps` that meant the whole
         // dependency TREE, so a chained consumer proceeded with fewer dep reports than it asked for and
         // never learned it. proc-macro2 aborts deterministically on `getrandom` 0.3.4/0.4.2

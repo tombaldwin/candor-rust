@@ -237,7 +237,7 @@ pub struct Candor {
     /// propagation hole (CRITIQUE §8). Keyed by `DefPathHash` because it's stable across crates
     /// (unlike `def_path_str`, which reexport-shortens external defs); the structured pair is a
     /// zero-alloc `Copy` key, vs. the old `format!("{:?}", …)` which allocated on every call.
-    cross: HashMap<(u64, u64), Vec<&'static str>>,
+    cross: HashMap<Dph, Vec<&'static str>>,
     /// Effects a function inherits via a cross-crate call. Kept separate from `direct` (so the
     /// report's `direct` stays "own body") and folded into the fixpoint in check_crate_post.
     via_cross: HashMap<LocalDefId, BTreeSet<&'static str>>,
@@ -245,16 +245,16 @@ pub struct Candor {
     /// detail from its report. Lets the host allowlist (AS-EFF-008) see an endpoint that lives across
     /// the crate boundary, so "billing may only reach Stripe" holds even when the actual `connect` is
     /// in a shared lib. Empty unless a cross report carried `hosts`.
-    cross_hosts: HashMap<(u64, u64), BTreeSet<String>>,
+    cross_hosts: HashMap<Dph, BTreeSet<String>>,
     /// Subprocess commands a sibling crate's function runs, keyed by `DefPathHash` (its report's `cmds`).
     /// Lets `allow Exec …` see a command that lives across the crate boundary. Empty unless carried.
-    cross_cmds: HashMap<(u64, u64), BTreeSet<String>>,
+    cross_cmds: HashMap<Dph, BTreeSet<String>>,
     /// Filesystem paths a sibling crate's function touches, keyed by `DefPathHash` (its report's
     /// `paths`). Lets `allow Fs …` see a path that lives across the crate boundary. Empty unless carried.
-    cross_paths: HashMap<(u64, u64), BTreeSet<String>>,
+    cross_paths: HashMap<Dph, BTreeSet<String>>,
     /// Database tables a sibling crate's function touches, keyed by `DefPathHash` (its report's
     /// `tables`). Lets `allow Db …` see a table that lives across the crate boundary. Empty unless carried.
-    cross_tables: HashMap<(u64, u64), BTreeSet<String>>,
+    cross_tables: HashMap<Dph, BTreeSet<String>>,
     /// CANDOR_EXPLAIN=<query>: when set, record where each effect enters (the call + location) so
     /// `cargo candor explain` can trace the path from a function to the source of each effect.
     explain: Option<String>,
@@ -272,13 +272,13 @@ pub struct Candor {
     /// recorded for layering (AS-EFF-009) when any `forbid` rule is present. The path lets us match a
     /// `to` scope (a direct dependency on another crate); the hash lets us chain to that callee's own
     /// `layerreach` summary (a dependency *laundered through* that crate). Empty without `forbid` rules.
-    cross_callees: HashMap<LocalDefId, Vec<((u64, u64), String)>>,
+    cross_callees: HashMap<LocalDefId, Vec<(Dph, String)>>,
     /// Per sibling-crate function (`DefPathHash`), the set of `forbid` *target* scopes it transitively
     /// reaches — loaded from that crate's `layerreach` sidecar (written during this same enforce pass,
     /// crates linted dependency-first). This is what makes layering follow a dependency through a THIRD
     /// crate: `app -> util -> infra` is caught because `util`'s sidecar records that `util::f` reaches
     /// `infra`. Empty unless layering sidecars are present (workspace enforce mode).
-    cross_layer_reach: HashMap<(u64, u64), BTreeSet<String>>,
+    cross_layer_reach: HashMap<Dph, BTreeSet<String>>,
     /// The report prefix (`CANDOR_REPORTS`/`CANDOR_JSON`/`CANDOR_BASELINE`) this run resolves siblings
     /// against — also where the `layerreach` sidecar is written, so dependent crates in the same enforce
     /// pass can read it. `None` when no prefix is set (single-crate run).
@@ -336,6 +336,12 @@ const CANDOR_TOOLCHAIN: &str = env!("CANDOR_TOOLCHAIN");
 ///   strings -a libcandor@*.dylib | grep candor-build-version=
 #[used]
 static CANDOR_BUILD_TAG: &str = concat!("candor-build-version=", env!("CANDOR_VERSION"));
+
+impl Default for Candor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Candor {
     pub fn new() -> Self {
@@ -506,13 +512,10 @@ fn parse_rules(text: &str) -> Vec<(&'static str, bool, String)> {
             continue;
         }
         let mut it = line.split_whitespace();
-        match (it.next(), it.next(), it.next()) {
-            (Some(eff), Some(kind), Some(prefix)) => {
-                if let Some(e) = cap_from_name(eff) {
-                    out.push((e, kind == "crate", prefix.to_string()));
-                }
-            }
-            _ => {}
+        if let (Some(eff), Some(kind), Some(prefix)) = (it.next(), it.next(), it.next())
+            && let Some(e) = cap_from_name(eff)
+        {
+            out.push((e, kind == "crate", prefix.to_string()));
         }
     }
     out
@@ -522,7 +525,13 @@ fn parse_rules(text: &str) -> Vec<(&'static str, bool, String)> {
 /// pair of `u64`s. This value is identical whether the def is viewed from its home crate (a
 /// `LocalDefId`) or from a dependent (an external `DefId`) — unlike `def_path_str`, which
 /// reexport-shortens external paths. `Copy`, so it's a zero-alloc map key on the hot path.
-fn dph(tcx: TyCtxt<'_>, did: DefId) -> (u64, u64) {
+///
+/// Spelled as an alias rather than the bare tuple because it is a map key at ~20 sites and one of
+/// them (`cross_callees`, a `HashMap<LocalDefId, Vec<(Dph, String)>>`) nests deeply enough that the
+/// bare form trips `clippy::type_complexity`.
+type Dph = (u64, u64);
+
+fn dph(tcx: TyCtxt<'_>, did: DefId) -> Dph {
     let h = tcx.def_path_hash(did);
     (h.stable_crate_id().as_u64(), h.local_hash().as_u64())
 }
@@ -535,7 +544,7 @@ fn dph_hex(tcx: TyCtxt<'_>, did: DefId) -> String {
 }
 
 /// Parse the 32-hex `hash` field back into the structured key. None for malformed/absent hashes.
-fn parse_dph(s: &str) -> Option<(u64, u64)> {
+fn parse_dph(s: &str) -> Option<Dph> {
     if s.len() != 32 {
         return None;
     }
@@ -563,19 +572,19 @@ fn parse_dph(s: &str) -> Option<(u64, u64)> {
 /// and the literal detail surfaces the allowlists need (Net hosts, Exec commands, Fs paths).
 #[derive(Default)]
 struct CrossData {
-    effects: HashMap<(u64, u64), Vec<&'static str>>,
-    hosts: HashMap<(u64, u64), BTreeSet<String>>,
-    cmds: HashMap<(u64, u64), BTreeSet<String>>,
-    paths: HashMap<(u64, u64), BTreeSet<String>>,
-    tables: HashMap<(u64, u64), BTreeSet<String>>,
+    effects: HashMap<Dph, Vec<&'static str>>,
+    hosts: HashMap<Dph, BTreeSet<String>>,
+    cmds: HashMap<Dph, BTreeSet<String>>,
+    paths: HashMap<Dph, BTreeSet<String>>,
+    tables: HashMap<Dph, BTreeSet<String>>,
 }
 
 fn load_cross_reports(prefix: &str, me: &str, me_kind: &str, trust_siblings: bool) -> CrossData {
-    let mut out: HashMap<(u64, u64), Vec<&'static str>> = HashMap::new();
-    let mut hosts: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
-    let mut cmds: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
-    let mut paths: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
-    let mut tables: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
+    let mut out: HashMap<Dph, Vec<&'static str>> = HashMap::new();
+    let mut hosts: HashMap<Dph, BTreeSet<String>> = HashMap::new();
+    let mut cmds: HashMap<Dph, BTreeSet<String>> = HashMap::new();
+    let mut paths: HashMap<Dph, BTreeSet<String>> = HashMap::new();
+    let mut tables: HashMap<Dph, BTreeSet<String>> = HashMap::new();
     for rf in report_files(prefix) {
         // Skip our OWN report (by crate name AND type); DefPathHash keys are globally unique so
         // all other crates merge into one map. (Own entries are local defs and the cross path is
@@ -670,8 +679,8 @@ fn write_layer_reach(path: &str, reach: &HashMap<String, Vec<String>>) {
 
 /// Load every `layerreach` sidecar under `prefix` into `DefPathHash -> reached target scopes`. These are
 /// written by sibling crates earlier in the same enforce pass; merged across all of them.
-fn load_layer_reach(prefix: &str) -> HashMap<(u64, u64), BTreeSet<String>> {
-    let mut out: HashMap<(u64, u64), BTreeSet<String>> = HashMap::new();
+fn load_layer_reach(prefix: &str) -> HashMap<Dph, BTreeSet<String>> {
+    let mut out: HashMap<Dph, BTreeSet<String>> = HashMap::new();
     let p = std::path::Path::new(prefix);
     let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
     let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return out };
@@ -1050,10 +1059,10 @@ fn from_residual_local_edge<'tcx>(
     let typeck = cx.maybe_typeck_results()?;
     // The error type of a `Result<_, E>` (diagnostic-item gated so a user `Result` alias can't spoof it).
     let err_of_result = |ty: rustc_middle::ty::Ty<'tcx>| -> Option<rustc_middle::ty::Ty<'tcx>> {
-        if let rustc_middle::ty::TyKind::Adt(def, substs) = ty.kind() {
-            if cx.tcx.is_diagnostic_item(rustc_span::sym::Result, def.did()) {
-                return Some(substs.type_at(1));
-            }
+        if let rustc_middle::ty::TyKind::Adt(def, substs) = ty.kind()
+            && cx.tcx.is_diagnostic_item(rustc_span::sym::Result, def.did())
+        {
+            return Some(substs.type_at(1));
         }
         None
     };
@@ -1103,10 +1112,10 @@ fn return_type_driver_local_edge<'tcx>(
     let method = cx.tcx.item_name(callee_did);
     // Unwrap `Result<T, _>` to its Ok type (diagnostic-item gated so a user `Result` alias can't spoof).
     let ok_of_result = |ty: rustc_middle::ty::Ty<'tcx>| -> Option<rustc_middle::ty::Ty<'tcx>> {
-        if let rustc_middle::ty::TyKind::Adt(def, substs) = ty.kind() {
-            if cx.tcx.is_diagnostic_item(rustc_span::sym::Result, def.did()) {
-                return Some(substs.type_at(0));
-            }
+        if let rustc_middle::ty::TyKind::Adt(def, substs) = ty.kind()
+            && cx.tcx.is_diagnostic_item(rustc_span::sym::Result, def.did())
+        {
+            return Some(substs.type_at(0));
         }
         None
     };
@@ -1631,13 +1640,11 @@ fn fmt_argument_local_edge<'tcx>(
     if !matches!(val_ty.kind(), rustc_middle::ty::TyKind::Adt(adt, _) if adt.did().is_local()) {
         return None;
     }
-    match fmt_impl_for(cx, val_ty, trait_did) {
-        Some(m) => Some(CallbackEdges::Local(vec![m])),
-        // A local type whose fmt we couldn't pin (a blanket/derived impl resolved non-local) is pure —
-        // a derived `Debug` is generated and effect-free, and a std blanket Display is non-local. No
-        // Unknown here: that would flood every `format!` of a local type with a derived Debug.
-        None => None,
-    }
+    // `None` here means a local type whose `fmt` we could not pin (a blanket/derived impl that
+    // resolved non-local), and that is deliberately treated as PURE rather than `Unknown`: a derived
+    // `Debug` is generated and effect-free, and a std blanket `Display` is non-local. Raising Unknown
+    // instead would flood every `format!` of a local type carrying a derived `Debug`.
+    fmt_impl_for(cx, val_ty, trait_did).map(|m| CallbackEdges::Local(vec![m]))
 }
 
 /// `x.to_string()` where `x` is GENERIC (`fn f<T: Display>(x: T) { x.to_string() }`) or `dyn Display` —
@@ -1882,13 +1889,13 @@ fn collect_generic_callee_edges<'tcx>(
         if args_still_generic(mono_args) {
             return;
         }
-        if let Some(inst) = resolve(method_did, mono_args) {
-            if !matches!(inst.def, rustc_middle::ty::InstanceKind::Virtual(..)) {
-                let did = inst.def_id();
-                if did.is_local() && did != method_did {
-                    out.push(did);
-                    return;
-                }
+        if let Some(inst) = resolve(method_did, mono_args)
+            && !matches!(inst.def, rustc_middle::ty::InstanceKind::Virtual(..))
+        {
+            let did = inst.def_id();
+            if did.is_local() && did != method_did {
+                out.push(did);
+                return;
             }
         }
         // Non-local resolution: only an iter-driver default hides a LOCAL `next` behind it. Peel the
@@ -1896,11 +1903,11 @@ fn collect_generic_callee_edges<'tcx>(
         // for a wholly-std receiver, no flood for `Clone`/`Display`).
         let tk = cx.tcx.crate_name(trait_did.krate);
         let ti = cx.tcx.item_name(trait_did);
-        if is_iter_driver_trait(tk.as_str(), ti.as_str()) {
-            if let Some(self_ty) = mono_args.types().next() {
-                for m in peel_iter_to_local_next(cx, self_ty) {
-                    out.push(m);
-                }
+        if is_iter_driver_trait(tk.as_str(), ti.as_str())
+            && let Some(self_ty) = mono_args.types().next()
+        {
+            for m in peel_iter_to_local_next(cx, self_ty) {
+                out.push(m);
             }
         }
     };
@@ -1953,10 +1960,10 @@ fn collect_generic_callee_edges<'tcx>(
             }
         }
         let on_free = |did: DefId, substs: rustc_middle::ty::GenericArgsRef<'tcx>| {
-            if let Some(local) = did.as_local() {
-                if cx.tcx.generics_of(did).requires_monomorphization(cx.tcx) {
-                    forward_targets.push((local, mono(substs)));
-                }
+            if let Some(local) = did.as_local()
+                && cx.tcx.generics_of(did).requires_monomorphization(cx.tcx)
+            {
+                forward_targets.push((local, mono(substs)));
             }
         };
         let body = cx.tcx.hir_body_owned_by(callee);
@@ -2064,13 +2071,12 @@ fn net_hosts_in_call(expr: &Expr<'_>) -> BTreeSet<String> {
     };
     let mut out = BTreeSet::new();
     for a in args {
-        if let ExprKind::Lit(lit) = &a.kind {
-            if let LitKind::Str(sym, _) = lit.node {
-                if let Some(host) = net_host_literal(sym.as_str()) {
-                    out.insert(host);
-                }
+        if let ExprKind::Lit(lit) = &a.kind
+            && let LitKind::Str(sym, _) = lit.node
+                && let Some(host) = net_host_literal(sym.as_str())
+            {
+                out.insert(host);
             }
-        }
     }
     out
 }
@@ -2096,12 +2102,12 @@ fn first_str_lit_arg(expr: &Expr<'_>) -> Option<String> {
         _ => return None,
     };
     for a in args {
-        if let ExprKind::Lit(lit) = &a.kind {
-            if let LitKind::Str(sym, _) = lit.node {
-                let s = sym.as_str().trim();
-                if !s.is_empty() {
-                    return Some(s.to_string());
-                }
+        if let ExprKind::Lit(lit) = &a.kind
+            && let LitKind::Str(sym, _) = lit.node
+        {
+            let s = sym.as_str().trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
             }
         }
     }
@@ -2276,13 +2282,12 @@ impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for FnRefCollector<'tcx> {
         self.tcx
     }
     fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) = e.kind {
-            if let rustc_hir::def::Res::Def(DefKind::Fn, did) = p.res {
-                if let Some(l) = did.as_local() {
-                    self.out.push(l);
-                }
+        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) = e.kind
+            && let rustc_hir::def::Res::Def(DefKind::Fn, did) = p.res
+                && let Some(l) = did.as_local()
+            {
+                self.out.push(l);
             }
-        }
         rustc_hir::intravisit::walk_expr(self, e);
     }
 }
@@ -2297,7 +2302,7 @@ fn local_key_init_fns(tcx: TyCtxt<'_>, tl_did: LocalDefId) -> Vec<LocalDefId> {
         return vec![];
     };
     let mut c = FnRefCollector { tcx, out: vec![] };
-    rustc_hir::intravisit::Visitor::visit_body(&mut c, &body);
+    rustc_hir::intravisit::Visitor::visit_body(&mut c, body);
     c.out
 }
 
@@ -2325,10 +2330,10 @@ fn invoked_param_index(tcx: TyCtxt<'_>, call: &Expr<'_>, caller: LocalDefId) -> 
     for (i, p) in body.params.iter().enumerate() {
         let mut found = false;
         p.pat.walk(|pat| {
-            if let rustc_hir::PatKind::Binding(_, hir_id, _, _) = pat.kind {
-                if hir_id == local {
-                    found = true;
-                }
+            if let rustc_hir::PatKind::Binding(_, hir_id, _, _) = pat.kind
+                && hir_id == local
+            {
+                found = true;
             }
             true
         });
@@ -2369,14 +2374,13 @@ fn expr_uses_local(e: &Expr<'_>, locals: &std::collections::HashSet<HirId>) -> b
             if self.found {
                 return;
             }
-            if let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = e.kind {
-                if let rustc_hir::def::Res::Local(id) = path.res {
-                    if self.locals.contains(&id) {
-                        self.found = true;
-                        return;
-                    }
+            if let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = e.kind
+                && let rustc_hir::def::Res::Local(id) = path.res
+                    && self.locals.contains(&id)
+                {
+                    self.found = true;
+                    return;
                 }
-            }
             rustc_hir::intravisit::walk_expr(self, e);
         }
     }
@@ -2417,10 +2421,10 @@ impl Candor {
         // `impl Fn` parameter whose concrete target needs interprocedural flow, kept honest `Unknown`.
         // The callee position of a normal call is also a `FnDef` path; re-adding that edge is a
         // harmless no-op on the `calls` set.)
-        if let ExprKind::Path(..) = expr.kind {
-            if let Some(typeck) = cx.maybe_typeck_results() {
-                if let rustc_middle::ty::TyKind::FnDef(did, _) = typeck.expr_ty(expr).kind() {
-                    if let (Some(local), Some(caller)) =
+        if let ExprKind::Path(..) = expr.kind
+            && let Some(typeck) = cx.maybe_typeck_results()
+                && let rustc_middle::ty::TyKind::FnDef(did, _) = typeck.expr_ty(expr).kind()
+                    && let (Some(local), Some(caller)) =
                         (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
                     {
                         // A `FnDef` path being CAST AWAY from callability (`fs_helper as usize`,
@@ -2449,9 +2453,6 @@ impl Candor {
                             self.calls.entry(caller).or_default().insert(local);
                         }
                     }
-                }
-            }
-        }
     }
 
     /// check_expr concern: naming a local `static` FORCES a deferred initializer — edge the
@@ -2469,15 +2470,13 @@ impl Candor {
         // closure (a plain `static X = const_expr;` is const-evaluated and cannot perform I/O), so no
         // edge to a pure static can ever fabricate. (Conservative on `&STATIC` without a deref — naming
         // forces, matching the scan engine; over-approximation in the safe direction.)
-        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = expr.kind {
-            if let rustc_hir::def::Res::Def(DefKind::Static { .. }, did) = path.res {
-                if let (Some(static_local), Some(caller)) =
+        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = expr.kind
+            && let rustc_hir::def::Res::Def(DefKind::Static { .. }, did) = path.res
+                && let (Some(static_local), Some(caller)) =
                     (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
                 {
                     self.calls.entry(caller).or_default().insert(static_local);
                 }
-            }
-        }
     }
 
     /// check_expr concern: a `LocalKey` accessor (`KEY.with(…)`) forces the `thread_local!`
@@ -2492,33 +2491,24 @@ impl Candor {
         // the LazyLock static-ref edge above; here the effect is NOT in the item's own initializer but
         // behind the accessor). Sound + non-fabricating: only edges to a LOCAL fn the item references, so a
         // pure-init thread_local (or a std/external LocalKey) contributes nothing. Teeth: ui/thread_local_effects.rs.
-        if let ExprKind::MethodCall(_, receiver, _, _) = expr.kind {
-            if let Some(typeck) = cx.maybe_typeck_results() {
-                if let rustc_middle::ty::TyKind::Adt(adt, _) =
+        if let ExprKind::MethodCall(_, receiver, _, _) = expr.kind
+            && let Some(typeck) = cx.maybe_typeck_results()
+                && let rustc_middle::ty::TyKind::Adt(adt, _) =
                     typeck.expr_ty(receiver).peel_refs().kind()
-                {
-                    if cx.tcx.item_name(adt.did()).as_str() == "LocalKey"
+                    && cx.tcx.item_name(adt.did()).as_str() == "LocalKey"
                         && cx.tcx.crate_name(adt.did().krate).as_str() == "std"
-                    {
-                        if let ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) = receiver.kind {
-                            if let rustc_hir::def::Res::Def(
+                        && let ExprKind::Path(rustc_hir::QPath::Resolved(_, p)) = receiver.kind
+                            && let rustc_hir::def::Res::Def(
                                 DefKind::Const { .. } | DefKind::Static { .. },
                                 tl_did,
                             ) = p.res
-                            {
-                                if let (Some(tl_local), Some(caller)) =
+                                && let (Some(tl_local), Some(caller)) =
                                     (tl_did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
                                 {
                                     for init in local_key_init_fns(cx.tcx, tl_local) {
                                         self.calls.entry(caller).or_default().insert(init);
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// check_expr concern: IMPLICIT overloaded `Deref`/`DerefMut` adjustment steps — edge each
@@ -2533,36 +2523,36 @@ impl Candor {
         // EXACTLY as the explicit `Unary(Deref)` arm does. This runs for EVERY expr (a field access /
         // coercion site is not a call, so the `resolve_callee` early-return below would skip it).
         let deref_steps = overloaded_deref_steps(cx, expr);
-        if !deref_steps.is_empty() {
-            if let Some(caller) = enclosing_named_fn(cx.tcx, expr.hir_id) {
-                for step in deref_steps {
-                    match step {
-                        // Local impl → real edge (its body's effects propagate). Non-local std deref
-                        // (`Box`/`Rc`/`Arc`/`Pin`) → drop it: matches the std-trait pure calibration, no
-                        // fabrication.
-                        DerefStep::Static(did) => {
-                            if let Some(local) = did.as_local() {
-                                if matches!(cx.tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn) {
-                                    self.calls.entry(caller).or_default().insert(local);
-                                }
-                            }
+        if !deref_steps.is_empty()
+            && let Some(caller) = enclosing_named_fn(cx.tcx, expr.hir_id)
+        {
+            for step in deref_steps {
+                match step {
+                    // Local impl → real edge (its body's effects propagate). Non-local std deref
+                    // (`Box`/`Rc`/`Arc`/`Pin`) → drop it: matches the std-trait pure calibration, no
+                    // fabrication.
+                    DerefStep::Static(did) => {
+                        if let Some(local) = did.as_local()
+                            && matches!(cx.tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn)
+                        {
+                            self.calls.entry(caller).or_default().insert(local);
                         }
-                        // An unresolvable/generic overloaded deref: honest `Unknown`, never silent-pure.
-                        DerefStep::Unresolved => {
-                            self.direct.entry(caller).or_default().insert(UNKNOWN);
-                            self.unknown_why
-                                .entry(caller)
-                                .or_default()
-                                .insert("deref:unresolvable overloaded auto-deref".to_string());
-                            if self.explain.is_some() {
-                                let loc =
-                                    cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
-                                self.sites.entry(caller).or_default().push(EffectSite {
-                                    eff: UNKNOWN,
-                                    via: "unresolvable overloaded auto-deref".to_string(),
-                                    loc,
-                                });
-                            }
+                    }
+                    // An unresolvable/generic overloaded deref: honest `Unknown`, never silent-pure.
+                    DerefStep::Unresolved => {
+                        self.direct.entry(caller).or_default().insert(UNKNOWN);
+                        self.unknown_why
+                            .entry(caller)
+                            .or_default()
+                            .insert("deref:unresolvable overloaded auto-deref".to_string());
+                        if self.explain.is_some() {
+                            let loc =
+                                cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                            self.sites.entry(caller).or_default().push(EffectSite {
+                                eff: UNKNOWN,
+                                via: "unresolvable overloaded auto-deref".to_string(),
+                                loc,
+                            });
                         }
                     }
                 }
@@ -2578,41 +2568,40 @@ impl Candor {
         // callback parameter that fn invokes can later be resolved to these concrete targets. A named
         // fn (`FnDef`) is a resolvable target; a closure / fn-pointer / generic value is unresolvable
         // (forces that position back to `Unknown`). Free fns only → arg index == param index.
-        if let ExprKind::Call(_, args) = expr.kind {
-            if matches!(cx.tcx.def_kind(def_id), DefKind::Fn) {
-                if let Some(typeck) = cx.maybe_typeck_results() {
-                    for (i, arg) in args.iter().enumerate() {
-                        // ONLY a LOCAL named fn is a resolvable callback target (we can edge to its
-                        // body). A non-local fn-item, a closure, a fn-pointer, or any opaque/`dyn`
-                        // callable (`impl Fn` return, `&dyn Fn`, `Box<dyn Fn>`) we can't enumerate —
-                        // record it as a PER-SITE unresolvable so this caller's deferred `Unknown`
-                        // STANDS instead of being silently dropped. (A non-callable value at a
-                        // non-callback position also lands here; harmless — that key is consulted only
-                        // for an invoked param, where the arg is necessarily a callable.) SOUNDNESS:
-                        // routing a *non-local* fn into the resolvable set would let the resolver see a
-                        // non-empty target set, filter it to an empty `locals`, and add neither an edge
-                        // nor the `Unknown` → a false `pure`; routing it to the unresolvable set is the
-                        // honest fallback. The flow is keyed by the CALLER (per call site) so a
-                        // callback's effects reach the specific fn that passed it, never every caller of
-                        // the HOF (the union fabrication — see `callback_sites`).
-                        match typeck.expr_ty(arg).kind() {
-                            rustc_middle::ty::TyKind::FnDef(t, _)
-                                if t.as_local().is_some()
-                                    && matches!(cx.tcx.def_kind(*t), DefKind::Fn | DefKind::AssocFn) =>
-                            {
-                                self.callback_sites
-                                    .entry((caller, def_id, i))
-                                    .or_default()
-                                    .insert(*t);
-                            }
-                            _ => {
-                                self.callback_site_unknown.insert((caller, def_id, i));
-                            }
+        if let ExprKind::Call(_, args) = expr.kind
+            && matches!(cx.tcx.def_kind(def_id), DefKind::Fn)
+                && let Some(typeck) = cx.maybe_typeck_results()
+            {
+                for (i, arg) in args.iter().enumerate() {
+                    // ONLY a LOCAL named fn is a resolvable callback target (we can edge to its
+                    // body). A non-local fn-item, a closure, a fn-pointer, or any opaque/`dyn`
+                    // callable (`impl Fn` return, `&dyn Fn`, `Box<dyn Fn>`) we can't enumerate —
+                    // record it as a PER-SITE unresolvable so this caller's deferred `Unknown`
+                    // STANDS instead of being silently dropped. (A non-callable value at a
+                    // non-callback position also lands here; harmless — that key is consulted only
+                    // for an invoked param, where the arg is necessarily a callable.) SOUNDNESS:
+                    // routing a *non-local* fn into the resolvable set would let the resolver see a
+                    // non-empty target set, filter it to an empty `locals`, and add neither an edge
+                    // nor the `Unknown` → a false `pure`; routing it to the unresolvable set is the
+                    // honest fallback. The flow is keyed by the CALLER (per call site) so a
+                    // callback's effects reach the specific fn that passed it, never every caller of
+                    // the HOF (the union fabrication — see `callback_sites`).
+                    match typeck.expr_ty(arg).kind() {
+                        rustc_middle::ty::TyKind::FnDef(t, _)
+                            if t.as_local().is_some()
+                                && matches!(cx.tcx.def_kind(*t), DefKind::Fn | DefKind::AssocFn) =>
+                        {
+                            self.callback_sites
+                                .entry((caller, def_id, i))
+                                .or_default()
+                                .insert(*t);
+                        }
+                        _ => {
+                            self.callback_site_unknown.insert((caller, def_id, i));
                         }
                     }
                 }
             }
-        }
     }
 
     /// check_expr concern: the honest-`Unknown` disclosure for genuinely-unresolvable trait
@@ -2945,7 +2934,7 @@ impl Candor {
             .iter()
             .filter(|(_, e)| !e.is_empty())
             .map(|(f, _)| *f)
-            .filter(|f| cx.tcx.def_path_str(f.to_def_id()).contains(&query))
+            .filter(|f| cx.tcx.def_path_str(f.to_def_id()).contains(query))
             .collect();
         targets.sort_by_cached_key(|f| cx.tcx.def_path_str(f.to_def_id()));
         if targets.is_empty() {
@@ -3033,7 +3022,7 @@ impl Candor {
                         sidecar.insert(dph_hex(cx.tcx, f.to_def_id()), scopes.iter().cloned().collect());
                     }
                 }
-                write_layer_reach(&layer_reach_path(prefix, &krate.to_string(), &kinds), &sidecar);
+                write_layer_reach(&layer_reach_path(prefix, krate, kinds), &sidecar);
             }
 
             // Flag: a function in scope `from` that reaches its rule's `to` scope.
@@ -3271,10 +3260,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
         // Record a local call edge for transitive propagation.
         let add_edge = |this: &mut Self, target: DefId| {
-            if let Some(local) = target.as_local() {
-                if matches!(cx.tcx.def_kind(target), DefKind::Fn | DefKind::AssocFn) {
-                    this.calls.entry(caller).or_default().insert(local);
-                }
+            if let Some(local) = target.as_local()
+                && matches!(cx.tcx.def_kind(target), DefKind::Fn | DefKind::AssocFn)
+            {
+                this.calls.entry(caller).or_default().insert(local);
             }
         };
         // Resolve trait dispatch up-front so the BASE edge can be suppressed when devirt PROVES the
@@ -3362,19 +3351,18 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                 None => {
                     let tk = cx.tcx.crate_name(td.krate);
                     let ti = cx.tcx.item_name(td);
-                    if is_iter_driver_trait(tk.as_str(), ti.as_str()) {
-                        if let ExprKind::MethodCall(_, receiver, _, _) = expr.kind {
-                            if let Some(typeck) = cx.maybe_typeck_results() {
-                                let recv_ty = typeck.expr_ty_adjusted(receiver);
-                                if iter_receiver_is_generic_param(recv_ty) {
-                                    let method = cx.tcx.item_name(def_id);
-                                    self.generic_iter_unknown
-                                        .entry(caller)
-                                        .or_insert_with(|| format!("generic-iter:{method}"));
-                                }
+                    if is_iter_driver_trait(tk.as_str(), ti.as_str())
+                        && let ExprKind::MethodCall(_, receiver, _, _) = expr.kind
+                            && let Some(typeck) = cx.maybe_typeck_results()
+                        {
+                            let recv_ty = typeck.expr_ty_adjusted(receiver);
+                            if iter_receiver_is_generic_param(recv_ty) {
+                                let method = cx.tcx.item_name(def_id);
+                                self.generic_iter_unknown
+                                    .entry(caller)
+                                    .or_insert_with(|| format!("generic-iter:{method}"));
                             }
                         }
-                    }
                 }
             }
         }
@@ -3889,18 +3877,18 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // AS-EFF-005 (CANDOR_BASELINE): a function gained an effect since the saved
             // report. New functions (absent from the baseline) are not flagged — they're
             // new code, reviewed normally; the guard is for *regressions* in existing fns.
-            if let Some(base) = &baseline {
-                if let Some(prior) = base.get(&name) {
-                    let gained = gained_effects(effs, prior);
-                    if !gained.is_empty() {
-                        let detail = format!(
-                            "`{name}` gained effect {{ {} }} not present in the baseline; \
-                             an existing function started performing a new effect",
-                            gained.join(", ")
-                        );
-                        self.record_violation("AS-EFF-005", &name, &gained, &detail);
-                        span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
-                    }
+            if let Some(base) = &baseline
+                && let Some(prior) = base.get(&name)
+            {
+                let gained = gained_effects(effs, prior);
+                if !gained.is_empty() {
+                    let detail = format!(
+                        "`{name}` gained effect {{ {} }} not present in the baseline; \
+                         an existing function started performing a new effect",
+                        gained.join(", ")
+                    );
+                    self.record_violation("AS-EFF-005", &name, &gained, &detail);
+                    span_lint(cx, CANDOR, span, format!("[AS-EFF-005] {detail}"));
                 }
             }
 
@@ -3908,10 +3896,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // boundary forbids. This is the architectural-invariant check — it catches an agent
             // putting I/O in a layer that's meant to be pure, which it can't see from a local edit.
             for rule in &self.policy {
-                if let Some(scope) = &rule.scope {
-                    if !scope_matches(&scope_name, scope) {
-                        continue;
-                    }
+                if let Some(scope) = &rule.scope
+                    && !scope_matches(&scope_name, scope)
+                {
+                    continue;
                 }
                 // SEMANTICS §6: AS-EFF-006 fires iff I(f) ∩ Forbidden(r) ≠ ∅ — a `deny <Effect>`
                 // flags only an effect PROVABLY in the transitive set. `Unknown` is NOT folded in:
@@ -3955,10 +3943,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             // through a deep or cross-crate callee — the "billing only talks to Stripe" / "this layer
             // only runs git" / "config only reads /etc/app" boundary a local edit can't verify.
             for rule in &self.allow_rules {
-                if let Some(scope) = &rule.scope {
-                    if !scope_matches(&scope_name, scope) {
-                        continue;
-                    }
+                if let Some(scope) = &rule.scope
+                    && !scope_matches(&scope_name, scope)
+                {
+                    continue;
                 }
                 if !effs.contains(rule.effect) {
                     continue; // the effect isn't performed ⇒ the allowlist is trivially satisfied
@@ -4036,20 +4024,20 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 
             // AS-EFF-007 (CANDOR_TAINT): performs an injection-class effect on a parameter-derived
             // argument — a heuristic review nudge (see the taint helpers for its honest limits).
-            if self.taint {
-                if let Some(t) = self.tainted.get(&f).filter(|t| !t.is_empty()) {
-                    span_lint(
-                        cx,
-                        CANDOR,
-                        span,
-                        format!(
-                            "[AS-EFF-007] `{name}` performs {{ {} }} on caller-derived input \
-                             (an injection surface — validate/sanitize it, or confirm the source is \
-                             trusted); heuristic, may over- or under-flag",
-                            t.iter().copied().collect::<Vec<_>>().join(", ")
-                        ),
-                    );
-                }
+            if self.taint
+                && let Some(t) = self.tainted.get(&f).filter(|t| !t.is_empty())
+            {
+                span_lint(
+                    cx,
+                    CANDOR,
+                    span,
+                    format!(
+                        "[AS-EFF-007] `{name}` performs {{ {} }} on caller-derived input \
+                         (an injection surface — validate/sanitize it, or confirm the source is \
+                         trusted); heuristic, may over- or under-flag",
+                        t.iter().copied().collect::<Vec<_>>().join(", ")
+                    ),
+                );
             }
         }
 

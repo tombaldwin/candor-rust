@@ -48,10 +48,17 @@ jobs:
       # NOT gated: this code is hand-aligned (annotated comment columns, intentional breaks) and a blind
       # reformat would churn thousands of cosmetic lines; clippy catches the anti-patterns that matter.
       - name: Clippy (stable, -D warnings)
-        # +stable: the repo's `rust-toolchain` pins a nightly (for the dylint lib) that carries no clippy
-        # component, so a bare `cargo clippy` resolves to it and errors. Pin clippy to stable, like the
-        # build/scanner steps above.
+        # +stable explicitly, so this leg keeps testing the toolchain an ADOPTER uses even now that the
+        # pinned nightly carries clippy too (the two clippy versions differ and catch different things).
         run: cargo +stable clippy -p candor-report -p candor-query -p candor-classify -p candor-scan --all-targets -- -D warnings
+
+      # The other half of the lint surface: the rustc_private dylint lib and the root `build.rs`, neither
+      # of which the stable leg can see (stable clippy can't compile rustc_private, and build.rs belongs
+      # to the root package the -p list excludes). Runs on the PINNED nightly, which now carries the
+      # clippy component (rust-toolchain) so the bare command resolves. A nightly bump that adds a lint
+      # surfaces here — that is the point of gating it rather than qualifying every "clippy clean" claim.
+      - name: Clippy (pinned nightly, whole workspace, -D warnings)
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test (unit + smoke)
         run: cargo test --workspace
