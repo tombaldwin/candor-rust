@@ -5194,8 +5194,182 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         );
     
     }
+    /// `CANDOR_PANIC_ON_FILE` is process-global and `INCREMENTAL` is a thread-local the tests set by
+    /// hand, so the abort tests take this lock rather than race each other's injection window.
+    fn abort_injection_lock() -> std::sync::MutexGuard<'static, ()> {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        L.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Build a two-file crate whose `src/bad.rs` is the injection target, and return its dir + the
+    /// path of a `deny Fs` policy. `src/good.rs` is deliberately PURE, so the ONLY thing a gate can
+    /// have an opinion about lives in the file that aborts — which is what lets exit 0 mean
+    /// "certified green over a hole" rather than "found nothing to say".
+    fn abort_fixture(tag: &str) -> (std::path::PathBuf, String) {
+        let d = std::env::temp_dir().join(format!("candor-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"aborter\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub mod good;\npub mod bad;\n").unwrap();
+        std::fs::write(d.join("src/good.rs"), "pub fn pure_one() -> u32 { 41 + 1 }\n").unwrap();
+        std::fs::write(d.join("src/bad.rs"),
+            "pub fn also_reads() { let _ = std::fs::read_to_string(\"/etc/y\"); }").unwrap();
+        let policy = d.join("candor.policy");
+        std::fs::write(&policy, "deny Fs\n").unwrap();
+        (d.clone(), policy.to_string_lossy().into_owned())
+    }
+
+    /// One `--incremental` scan of `dir`, with the fault optionally injected. Returns
+    /// `(exit code, report JSON)`.
+    fn incremental_scan(
+        dir: &std::path::Path, out: &str, policy: &str, inject: Option<&str>,
+    ) -> (i32, serde_json::Value) {
+        match inject {
+            Some(f) => std::env::set_var("CANDOR_PANIC_ON_FILE", f),
+            None => std::env::remove_var("CANDOR_PANIC_ON_FILE"),
+        }
+        INCREMENTAL.with(|c| c.set(true));
+        let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+            prefix: out.to_string(), want_json: true, include_tests: false,
+            policy: Some(policy.to_string()), baseline: None, quiet: true,
+            deps_idx: &DepIndex::default(),
+        });
+        INCREMENTAL.with(|c| c.set(false));
+        std::env::remove_var("CANDOR_PANIC_ON_FILE");
+        (rc, serde_json::from_str(&body.unwrap()).unwrap())
+    }
+
+    /// THE WARM RUN MUST SAY WHAT THE COLD RUN SAID. Containing the abort per file (the commit above)
+    /// left the cache write-back untouched, so the aborted file persisted as
+    /// `{ its REAL content hash, the CURRENT decl index, fninfos: [] }` — indistinguishable from a file
+    /// that genuinely has no functions. Run 2 over identical bytes reused it, `continue`d before the
+    /// `catch_unwind` ever ran, disclosed nothing, and a configured gate went **exit 0 GREEN** over a
+    /// file performing `Fs` under `deny Fs` — measured: cold 2, warm 0. That is strictly worse than the
+    /// crash it replaced, which at least failed closed, and worse still for being reproducible.
+    ///
+    /// Three arms, because each is satisfiable by a wrong fix:
+    ///   - COLD then WARM on the SAME bytes: same exit code, same `unanalyzed`, same `functions`.
+    ///   - the CONTROL, no injection anywhere: warm must NOT invent a disclosure, and must still reuse
+    ///     the cache (a fix that simply refuses to cache, or discloses on every warm run, passes arm 1
+    ///     and fails here).
+    ///   - the round-1 read/parse failure is untouched: it already re-disclosed every run, because it
+    ///     `continue`s BEFORE the write-back. That asymmetry is what located the defect.
+    #[test]
+    fn a_warm_incremental_run_replays_a_contained_abort() {
+        let _lock = abort_injection_lock();
+        let (d, policy) = abort_fixture("warmabort");
+        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+
+        let (cold_rc, cold) = incremental_scan(&d, &out("cold"), &policy, Some("src/bad.rs"));
+        let (warm_rc, warm) = incremental_scan(&d, &out("warm"), &policy, Some("src/bad.rs"));
+        // …and with the injection GONE, so the disclosure can only come from the cache itself.
+        let (warm2_rc, warm2) = incremental_scan(&d, &out("warm2"), &policy, None);
+
+        assert_eq!(cold_rc, 2, "a configured gate must not certify a scan with a hole in it:\n{cold:#}");
+        assert_eq!(
+            warm_rc, cold_rc,
+            "THE WARM RUN CERTIFIED A HOLE THE COLD RUN REFUSED TO: the cache persisted the aborted \
+             file as an empty-but-confident entry.\ncold:\n{cold:#}\nwarm:\n{warm:#}"
+        );
+        assert_eq!(warm2_rc, cold_rc, "the replay must not depend on the fault still being injected:\n{warm2:#}");
+        for (name, v) in [("warm", &warm), ("warm2", &warm2)] {
+            assert_eq!(
+                v["unanalyzed"], cold["unanalyzed"],
+                "{name}: the aborted file must be disclosed VERBATIM off the cache:\n{v:#}"
+            );
+            assert_eq!(v["functions"], cold["functions"], "{name}: the surviving files' effects moved:\n{v:#}");
+            assert_eq!(v["analyzed"], cold["analyzed"], "{name}: the coverage ledger moved:\n{v:#}");
+        }
+        assert!(
+            cold["unanalyzed"].as_array().is_some_and(|u| u.iter().any(|x| x["path"] == "src/bad.rs")),
+            "the fixture stopped exercising the abort at all:\n{cold:#}"
+        );
+
+        // CONTROL — the SAME crate, from a FRESH cache, with nothing injected. (It has to be a fresh
+        // dir: the cache above legitimately still holds the abort, and replaying it there is the
+        // behaviour under test, not a control.) A fix that discloses on every warm run, or that stops
+        // caching, satisfies the arms above and fails here.
+        let (dc, policy_c) = abort_fixture("warmabort-control");
+        let outc = |n: &str| dc.join(n).to_string_lossy().into_owned();
+        let (c1_rc, c1) = incremental_scan(&dc, &outc("c1"), &policy_c, None);
+        let (c2_rc, c2) = incremental_scan(&dc, &outc("c2"), &policy_c, None);
+        assert_eq!((c1_rc, c2_rc), (1, 1), "the control must FIND the violation, both runs:\n{c1:#}\n{c2:#}");
+        assert!(c1["unanalyzed"].as_array().is_none_or(|u| u.is_empty()),
+                "the control's cold run invented a disclosure:\n{c1:#}");
+        assert!(c2["unanalyzed"].as_array().is_none_or(|u| u.is_empty()),
+                "the control's WARM run invented a disclosure — this is the mirror sin, a gate that can \
+                 never go green:\n{c2:#}");
+        assert_eq!(c1["functions"], c2["functions"], "the warm control's reuse is not byte-equal:\n{c2:#}");
+        let _ = std::fs::remove_dir_all(&dc);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// …and the disclosure must CLEAR itself. A cached abort that survives a clean re-walk would be the
+    /// mirror of the defect: a permanently-incomplete verdict, exit 2 forever, on a file the engine can
+    /// now read perfectly well. The trigger is a decl-index move (the cache's other reuse gate), which
+    /// is what forces the file back through the walk on unchanged bytes.
+    #[test]
+    fn a_cached_abort_clears_once_the_file_walks_cleanly() {
+        let _lock = abort_injection_lock();
+        let (d, policy) = abort_fixture("clearabort");
+        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+
+        let (rc1, v1) = incremental_scan(&d, &out("a1"), &policy, Some("src/bad.rs"));
+        assert_eq!(rc1, 2, "the fixture must abort first:\n{v1:#}");
+
+        // Move the merged decl index WITHOUT touching src/bad.rs — a struct with a field lands in the
+        // digest, so every file's cached FnInfos go stale and bad.rs is re-walked on the same bytes.
+        std::fs::write(d.join("src/good.rs"),
+            "pub struct Moved { pub f: String }\npub fn pure_one() -> u32 { 41 + 1 }\n").unwrap();
+        let (rc2, v2) = incremental_scan(&d, &out("a2"), &policy, None);
+        let (rc3, v3) = incremental_scan(&d, &out("a3"), &policy, None);
+
+        assert_eq!(rc2, 1, "the re-walked file's Fs must be FOUND, not still disclosed as a hole:\n{v2:#}");
+        assert!(v2["unanalyzed"].as_array().is_none_or(|u| u.is_empty()),
+                "the cached abort outlived the clean re-walk:\n{v2:#}");
+        assert_eq!(rc3, 1, "…and the cleared state persists into the next warm run:\n{v3:#}");
+        assert_eq!(v3["functions"], v2["functions"], "the cleared entry did not cache what it derived:\n{v3:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A cache written by a PRE-`aborted` binary must be discarded, not read. `aborted` carries
+    /// `#[serde(default)]` (so the struct stays additive), which means an old entry deserializes as
+    /// `None` — i.e. "this file was analysed and has no functions", which is precisely the false
+    /// all-clear the field exists to stop, restored by a version skip. The `rev8` schema token is the
+    /// only thing standing between those two readings, so it is pinned here rather than trusted.
+    #[test]
+    fn a_pre_rev8_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        let _lock = abort_injection_lock();
+        let (d, policy) = abort_fixture("oldcache");
+        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+        let (rc1, v1) = incremental_scan(&d, &out("a1"), &policy, Some("src/bad.rs"));
+        assert_eq!(rc1, 2, "the fixture must abort first:\n{v1:#}");
+
+        // Doctor the cache into exactly what the previous binary would have left: the entry with no
+        // `aborted` key at all, under the previous schema token.
+        let p = d.join(".candor/cache/scan-cache.json");
+        let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        let old = c["schema"].as_str().unwrap().replace("/rev8/", "/rev7/");
+        assert!(old.contains("/rev7/"), "the schema rev token moved — update this test: {c}");
+        c["schema"] = serde_json::Value::String(old);
+        for (_, e) in c["files"].as_object_mut().unwrap() {
+            e.as_object_mut().unwrap().remove("aborted");
+        }
+        std::fs::write(&p, serde_json::to_vec(&c).unwrap()).unwrap();
+
+        let (rc2, v2) = incremental_scan(&d, &out("a2"), &policy, Some("src/bad.rs"));
+        assert_eq!(
+            rc2, 2,
+            "a pre-`aborted` cache entry was TRUSTED — its missing field read as an analysed, \
+             function-free file and the gate certified the hole:\n{v2:#}"
+        );
+        assert_eq!(v2["unanalyzed"], v1["unanalyzed"], "the discarded cache must re-derive the disclosure:\n{v2:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_file_whose_walk_aborts_is_contained_and_disclosed_not_dropped() {
+        let _lock = abort_injection_lock();
         // A panic in one file used to take the WHOLE run down — and with `--deps` that meant the whole
         // dependency TREE, so a chained consumer proceeded with fewer dep reports than it asked for and
         // never learned it. proc-macro2 aborts deterministically on `getrandom` 0.3.4/0.4.2
