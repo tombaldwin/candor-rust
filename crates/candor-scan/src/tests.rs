@@ -1183,6 +1183,64 @@ pub fn unlisted_whole() { wholelib::io::danger(); }
         assert_eq!(idx.by_key.get("oldbroke#io::go").map(|e| e.effects.clone()), Some(vec!["Unknown"]));
     }
 
+    /// `ambiguous:same-name local defs` IS OUTSIDE SPEC §4 ⟨0.7⟩'s CLOSED VOCABULARY, ON PURPOSE, AND THE
+    /// RENAME WAS REFUSED WITH A NUMBER. The full §4 argument lives at the emission site in `scan.rs`;
+    /// this pins the two facts a future edit would silently change — the KIND and the CLASS it projects to.
+    ///
+    /// The counterfactual, built and run rather than argued: with `ambiguous*` reclassified `indirect`
+    /// (one line in `ReasonClass::classify`, both binaries kept by content hash), `deny E Unknown[dispatch]`
+    /// goes from **58 of 200 crates.io crates to 0 of 200**, and exit 1 -> exit 0 on pgman, ebman and
+    /// candor-rust. It is not a narrowing, it is a deletion: every other `dispatch:` this engine emits (20
+    /// in a 1062-report census, all `dispatch:untyped cross-package receiver`) needs a chained dependency
+    /// to exist at all. candor-ts's `5ba301c` is a precedent that the SHAPE of reclassification can be
+    /// safe, not evidence that this one is — there, every reclassified reason named NOTHING.
+    ///
+    /// The kind's real-world weight, so nobody re-opens this thinking it is a corner: `ambiguous:` is
+    /// **8710 of 19607** `unknownWhy` entries over a 1062-report census (more than `callback:`'s 9421 is
+    /// away from it), across 220 packages — the cfg-gated-alternative-definitions shape, which a syntactic
+    /// scan cannot resolve because it does not evaluate `cfg`.
+    ///
+    /// TO CHANGE IT: a SPEC rung adding `ambiguous:` to §4's closed set (§6.2's class table already names
+    /// `ambiguous*` and rules it `dispatch`), not an engine edit — and conformance PART 10 tolerates and
+    /// WARNS on it in the meantime, over a purpose-built fixture, so it is visible rather than absent.
+    #[test]
+    fn the_ambiguous_reason_kind_and_its_class_are_pinned() {
+        let d = std::env::temp_dir().join(format!("candor-ambkind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"ambkind\"\n").unwrap();
+        // The shape that actually produces it on real code: cfg-gated alternative definitions of one free
+        // function. Rust picks by `cfg`; a syntactic scan cannot, and picking would fabricate one arm's
+        // effects onto the other — so it discloses.
+        std::fs::write(d.join("src/lib.rs"), "\
+#[cfg(unix)]
+pub fn helper() { std::fs::read(\"/etc/a\").ok(); }
+#[cfg(windows)]
+pub fn helper() { println!(\"pure\"); }
+pub fn go() { helper(); }
+").unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+            quiet: true, deps_idx: &DepIndex::default(),
+        });
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        let go = fn_entry(&v, "go");
+        assert!(effs(go).contains(&"Unknown".to_string()),
+                "an ambiguous bare call must DISCLOSE, not drop the edge silently:\n{v:#}");
+        assert_eq!(go["unknownWhy"], serde_json::json!(["ambiguous:same-name local defs"]),
+                   "the KIND is load-bearing — see the doc comment before renaming it:\n{v:#}");
+        // …and the class it projects to, which is what `deny E Unknown[dispatch]` resolves.
+        assert_eq!(
+            candor_classify::policy::ReasonClass::classify("ambiguous:same-name local defs"),
+            candor_classify::policy::ReasonClass::Dispatch,
+            "SPEC §6.2's table maps `ambiguous*` to `dispatch`; moving it to `indirect` takes \
+             `deny E Unknown[dispatch]` from 58/200 crates.io crates to 0/200"
+        );
+    }
+
     #[test]
     fn dep_index_carries_the_full_qual_as_a_third_key() {
         // The index held only `crate#leaf` and `crate#tail2`, so a consumer that knows its target
