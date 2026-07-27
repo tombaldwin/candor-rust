@@ -1570,6 +1570,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // The RESIDUAL that leaves is the format's: a report cannot say "Unknown, no reason" alongside a
     // reason it does have, so a SECOND-hop consumer chaining this report re-derives `dispatch` alone.
     // That needs a §4/§6.2 rung (see the work queue) and is not patchable with a string here.
+    //
+    // ⟨0.24⟩ THE RESIDUAL IS NOW MEASURED, AND IT IS A LIVE GATE-vs-DISCLOSURE SPLIT — the exact thing
+    // §6.2 forbids ("THE GATE AND THE DISCLOSURE MUST APPLY THE SAME RULE"). pgman over a 270-report dep
+    // tree, every report marked §2.1 stale: 36 functions reach this contribution and **12 of them also
+    // carry a reason of their own**, which grows to **18 of the 77** functions whose gate-side class set
+    // includes `unresolved`. Recomputing that set from the REPORT — which is what `unverified --class`
+    // and `blindspots --class` do — recovers only 59: the 18 come back classed `dispatch` alone, so the
+    // gate bites them and the disclosure standing beside it does not name them. With TRUSTED reports the
+    // split is 0, on both targets measured; it is reachable only through reports the build cannot verify.
+    //
+    // WHAT WOULD CLOSE IT is exactly what §4 ⟨0.24⟩ registered for the purpose — `dep-stale:<pkg>` (and
+    // `dep:<hash>`), permanent kinds now, attached per dependency ENTRY the way candor-swift attaches
+    // them, so the reason travels IN the report and the two recomputations cannot disagree. It is not
+    // taken here for one reason and it is not a spec one: the SHIPPED conformance PART 10 still holds a
+    // four-kind `CANON` plus two named migration kinds, and `dep-stale` is in neither, so emitting it
+    // scores a hard DIVERGE today. The rung landed in SPEC and not yet in the harness that checks it.
     for q in &unknown_via_dep {
         reason_class_direct
             .entry(q.clone())
