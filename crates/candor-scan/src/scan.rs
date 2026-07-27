@@ -1530,7 +1530,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // call graph the same way the Unknown EFFECT does, so `deny E Unknown[reflect]` at a caller inheriting
     // Unknown from a reflect-caused callee still fires. Classify each fn's DIRECT unknown_why tokens to
     // class tokens, then propagate transitively (mirrors the java gate's reasonClassAcc). Report unchanged.
-    let reason_class_direct: HashMap<String, BTreeSet<String>> = unknown_why
+    let mut reason_class_direct: HashMap<String, BTreeSet<String>> = unknown_why
         .iter()
         .map(|(f, whys)| {
             let classes = whys
@@ -1540,6 +1540,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             (f.clone(), classes)
         })
         .collect();
+    // …AND THE REASONLESS CHAINED `Unknown` CONTRIBUTES ITS CLASS HERE, rather than being inferred from
+    // the ABSENCE of one. `f2309a5` correctly stopped inventing a `callback:` reason for a dep that
+    // declared `Unknown` and recorded no reason — §6.2 already answers that case ("a function whose
+    // `Unknown` carries no recorded reason is treated as `unresolved`") and §4's closed kind vocabulary
+    // has no member that projects there. But it left `unknown_via_dep` feeding only the writer's
+    // `debug_assert`, so the class reached the gate ONLY through the fallback below, which is per
+    // FUNCTION and fires when the whole class set is absent or empty. **Any other reason on the same
+    // function swallowed it**: `both() { dep::murky(); dep::mute(); }` — one dep Unknown carrying
+    // `dispatch:` and one carrying nothing — classified `dispatch` alone, and
+    // `deny E Unknown[unresolved]` went from exit 1 to exit 0 as the SECOND call was added. So the
+    // by-absence fallback worked everywhere except where two reasons meet on one function, which is
+    // where a gate needs it. Adding a reason must never REMOVE a class.
+    //
+    // NO TOKEN IS INVENTED: this writes a §6.2 CLASS (`unresolved`, a member of that section's own
+    // closed set), never a §4 kind, and it is confined to this gate-side map — `unknown_why`, and with
+    // it the report, is untouched, so the ⟨0.7⟩ field still carries only reasons somebody observed.
+    // The RESIDUAL that leaves is the format's: a report cannot say "Unknown, no reason" alongside a
+    // reason it does have, so a SECOND-hop consumer chaining this report re-derives `dispatch` alone.
+    // That needs a §4/§6.2 rung (see the work queue) and is not patchable with a string here.
+    for q in &unknown_via_dep {
+        reason_class_direct
+            .entry(q.clone())
+            .or_default()
+            .insert(candor_classify::policy::ReasonClass::Unresolved.token().to_string());
+    }
     let reason_class_acc = propagate_str(&reason_class_direct, &calls, &all);
     // The genuinely-blind dep crates (the per-scan κ "unlisted" set): seen, never classified, not
     // dep-report-covered, not calibrated. A fn's `invisible` = its transitive blind reach ∩ this set.
