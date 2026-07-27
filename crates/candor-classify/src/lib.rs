@@ -11,6 +11,10 @@ pub mod policy;
 /// candor-query's `tour` verb can't drift. Generic over the effect element type.
 pub mod surface;
 
+/// The transitive least fixed point over a call graph — SHARED so the scanner's gate-side reason-class
+/// accumulator and candor-query's `unverified --class` filter resolve over the SAME reach.
+pub mod propagate;
+
 /// Project-supplied rules, consulted only when the built-in `classify` returns None.
 pub fn classify_extra(
     crate_name: &str,

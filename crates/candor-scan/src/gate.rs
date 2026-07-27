@@ -89,21 +89,21 @@ pub(crate) fn policy_violations(
             // (wrong reason-class). Concrete effects in `hits` are untouched — only Unknown is scoped.
             if hits.contains(&"Unknown") && !r.unknown_classes.is_empty() {
                 let want: BTreeSet<&str> = r.unknown_classes.iter().map(|c| c.token()).collect();
-                let fn_classes = reasonclassacc.get(q);
-                let matched = match fn_classes {
-                    // An Unknown with NO recorded reason is `unresolved` (conservative — stays in `[*]`/`[unresolved]`).
-                    // THIS IS A NET, NOT A ROUTE. It is per FUNCTION and keys on the ABSENCE of a class set, so
-                    // any other reason on the same function hides whatever it was covering — which is how a
-                    // reasonless chained-dep `Unknown` went ungated on every consumer that also had a reason of
-                    // its own. That case now CONTRIBUTES `unresolved` at `reason_class_direct` (scan.rs) instead
-                    // of arriving here by absence. What is left for this arm is the RELEASE-mode gap: the
-                    // writer's §4 invariant is a `debug_assert`, so a future path that puts `Unknown` into
-                    // `direct` with no reason fails closed here rather than escaping the gate. Not dead — it is
-                    // pinned by `reason_scoped_unknown_gate_fires_on_match_tolerates_mismatch`.
-                    None => want.contains("unresolved"),
-                    Some(cs) if cs.is_empty() => want.contains("unresolved"),
-                    Some(cs) => cs.iter().any(|t| want.contains(t.as_str())),
-                };
+                // An Unknown with NO recorded reason is `unresolved` (conservative — stays in
+                // `[*]`/`[unresolved]`). THIS IS A NET, NOT A ROUTE. It is per FUNCTION and keys on the
+                // ABSENCE of a class set, so any other reason on the same function hides whatever it was
+                // covering — which is how a reasonless chained-dep `Unknown` went ungated on every consumer
+                // that also had a reason of its own. That case now CONTRIBUTES `unresolved` at
+                // `reason_class_direct` (scan.rs) instead of arriving here by absence. What is left for the
+                // absence arm is the RELEASE-mode gap: the writer's §4 invariant is a `debug_assert`, so a
+                // future path that puts `Unknown` into `direct` with no reason fails closed here rather than
+                // escaping the gate. Not dead — it is pinned by
+                // `reason_scoped_unknown_gate_fires_on_match_tolerates_mismatch`.
+                //
+                // ⟨0.24⟩ The rule itself moved to candor-classify (`reason_class_matches`) because
+                // `unverified --class` must select over exactly the set this gate scopes over: a gate and
+                // the disclosure naming the holes that gate did not prove, disagreeing, is the defect.
+                let matched = candor_classify::policy::reason_class_matches(reasonclassacc.get(q), &want);
                 if !matched {
                     hits.retain(|e| *e != "Unknown");
                 }

@@ -309,3 +309,106 @@
         assert_eq!(prefix_base(prefix), "report");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ── `unverified --class` (SPEC §6.2 ⟨0.24⟩) ───────────────────────────────────────────────────
+    // Written as EXIT-CODE assertions through `cmd_unverified --strict` (1 = holes remain, 0 = none),
+    // so they exercise the shipped verb end to end — report load, `--class` parse, the transitive
+    // accumulator and the match rule — rather than a copy of the predicate that could drift from it.
+
+    /// Write a one-file report + policy under a fresh temp dir and return `(report_path, policy_path)`.
+    /// The dir is REMOVED first: a stale artifact from a previous run reads as a flattering result.
+    fn unv_fixture(name: &str, entries: serde_json::Value, policy: &str) -> (String, String) {
+        let dir = std::env::temp_dir().join(format!("candor-query-unverified-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rep = dir.join("rep.fixture.scan.json");
+        let pol = dir.join("candor.policy");
+        std::fs::write(&rep, serde_json::json!({ "candor": "0.24", "functions": entries }).to_string())
+            .unwrap();
+        std::fs::write(&pol, policy).unwrap();
+        (rep.to_str().unwrap().to_string(), pol.to_str().unwrap().to_string())
+    }
+
+    fn unv(rep: &str, pol: &str, class: Option<&str>) -> i32 {
+        let mut args: Vec<String> = vec![
+            "--report".into(), rep.into(), "--policy".into(), pol.into(), "--strict".into(),
+        ];
+        if let Some(c) = class {
+            args.push("--class".into());
+            args.push(c.into());
+        }
+        crate::unverified::cmd_unverified(&args)
+    }
+
+    #[test]
+    fn unverified_class_resolves_the_reason_transitively() {
+        // FAULT 2. `unknownWhy` is DIRECT-only by design (§4), so `domain::price` — whose `Unknown` is
+        // purely INHERITED from `infra::dial` — carries no reason of its own. It is the ONLY hole here
+        // (the policy is scoped to `domain`), so a filter reading the direct field drops the single
+        // thing the verb exists to name, and drops it MORE the more the user narrows.
+        let (rep, pol) = unv_fixture(
+            "transitive",
+            serde_json::json!([
+                { "fn": "infra::dial", "inferred": ["Unknown"], "direct": ["Unknown"],
+                  "unknownWhy": ["dispatch:Port"] },
+                { "fn": "domain::price", "inferred": ["Unknown"], "calls": ["infra::dial"] },
+            ]),
+            "deny Exec domain\n",
+        );
+        assert_eq!(unv(&rep, &pol, None), 1, "unfiltered: the inherited hole is a hole");
+        // `dynamic` names every genuine class, so it must exclude NOTHING — the cheap diagnostic.
+        assert_eq!(unv(&rep, &pol, Some("dynamic")), 1, "--class dynamic must exclude nothing");
+        assert_eq!(unv(&rep, &pol, Some("*")), 1, "--class * must exclude nothing");
+        // …resolved to the CALLEE's class. This is the assertion the direct-only read fails.
+        assert_eq!(unv(&rep, &pol, Some("dispatch")), 1, "inherited Unknown carries the callee's class");
+        // CONTROL — and the one a blanket "keep everything" would fail. The filter must still
+        // DISCRIMINATE: a class nothing in the reach carries selects nothing.
+        assert_eq!(unv(&rep, &pol, Some("native")), 0, "no native reason anywhere in the reach");
+        assert_eq!(unv(&rep, &pol, Some("reflect")), 0, "no reflect reason anywhere in the reach");
+        // CONTROL — the MIRROR FABRICATION. `domain::price` has no reason set of its own, but its
+        // `Unknown` is perfectly well classified at the callee; contributing `unresolved` to it because
+        // its own reasons are absent would trade the fail-open for a fabricated class.
+        assert_eq!(unv(&rep, &pol, Some("unresolved")), 0, "an inherited, CLASSIFIED hole is not `unresolved`");
+    }
+
+    #[test]
+    fn unverified_class_fails_closed_on_an_unnamed_direct_unknown() {
+        // FAULT 1, and the gate on it. `infra::mute` INTRODUCED its `Unknown` (`direct ∋ Unknown`) and
+        // named nothing — §6.2 says that contributes `unresolved`. It must contribute PER ENTRY, into
+        // the direct map, not by the absence of a class set at the caller: `domain::both` also calls a
+        // `dispatch:`-reasoned callee, and an absence-keyed rule is swallowed by that other reason.
+        let (rep, pol) = unv_fixture(
+            "failclosed",
+            serde_json::json!([
+                { "fn": "infra::mute", "inferred": ["Unknown"], "direct": ["Unknown"] },
+                { "fn": "infra::murky", "inferred": ["Unknown"], "direct": ["Unknown"],
+                  "unknownWhy": ["dispatch:Port"] },
+                { "fn": "domain::both", "inferred": ["Unknown"],
+                  "calls": ["infra::mute", "infra::murky"] },
+            ]),
+            "deny Exec domain\n",
+        );
+        assert_eq!(unv(&rep, &pol, None), 1);
+        assert_eq!(unv(&rep, &pol, Some("dynamic")), 1, "--class dynamic must exclude nothing");
+        // Both classes reach `domain::both`; naming EITHER keeps it. Adding a reason must never REMOVE
+        // a class — the failure mode is `unresolved` here going quiet because `dispatch` is also present.
+        assert_eq!(unv(&rep, &pol, Some("unresolved")), 1, "the unnamed direct Unknown contributes `unresolved`");
+        assert_eq!(unv(&rep, &pol, Some("dispatch")), 1, "the named callee still contributes `dispatch`");
+        assert_eq!(unv(&rep, &pol, Some("native")), 0, "still discriminates");
+    }
+
+    #[test]
+    fn reason_class_matches_keeps_the_unclassifiable() {
+        // The §6.2 fail-closed net, at the rule itself: an entry with NO class set is kept by a filter
+        // naming `unresolved` and by `*`/`dynamic` (which contain it) — never dropped by every filter.
+        use candor_classify::policy::reason_class_matches;
+        fn want<'a>(ts: &[&'a str]) -> BTreeSet<&'a str> {
+            ts.iter().copied().collect()
+        }
+        assert!(reason_class_matches(None, &want(&["unresolved"])));
+        assert!(!reason_class_matches(None, &want(&["dispatch"])));
+        assert!(reason_class_matches(Some(&BTreeSet::new()), &want(&["unresolved"])));
+        let cs: BTreeSet<String> = ["dispatch".to_string()].into_iter().collect();
+        assert!(reason_class_matches(Some(&cs), &want(&["dispatch", "native"])));
+        assert!(!reason_class_matches(Some(&cs), &want(&["unresolved"])));
+    }
