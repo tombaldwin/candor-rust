@@ -730,6 +730,96 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         let _ = std::fs::remove_dir_all(&dd);
     }
 
+    /// …AND IT MUST STILL GATE WHEN THE SAME FUNCTION CARRIES ANOTHER REASON. The test above passes on
+    /// the §6.2 fallback alone — "an `Unknown` with no recorded reason is `unresolved`" — which the gate
+    /// implements per FUNCTION, firing only when the whole class set is ABSENT or EMPTY. So any other
+    /// reason on the same function SWALLOWED the reasonless one: `both()` calling a dep fn that recorded
+    /// `dispatch:` and one that recorded nothing classified `dispatch` alone, and
+    /// `deny E Unknown[unresolved]` — the catch-all a conservative adopter keeps in every narrowed rule —
+    /// went from exit 1 to exit 0 **as the second call was added**. The fallback was doing the work
+    /// everywhere except where two reasons meet on one function, which is exactly where a gate needs it.
+    ///
+    /// THE ROWS ARE ORDERED CONTROL-FIRST, and they are what makes this a defect rather than a
+    /// preference: the two single-call functions bracket `both`, so the failure is stated as
+    /// MONOTONICITY — adding a reason to a function must never take a class away from it. The
+    /// `[dispatch]` rows are the second direction: the carried class must survive the fix (a fix that
+    /// stamped `unresolved` over the class set instead of into it would pass the first row and fail
+    /// here), and a function whose ONLY Unknown is a classified one must not read `unresolved`.
+    #[test]
+    fn a_reasonless_chained_unknown_still_reaches_the_gate_when_the_fn_has_another_reason() {
+        let dd = std::env::temp_dir().join(format!("candor-depwhyboth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dd);
+        std::fs::create_dir_all(&dd).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dd.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [
+              {{"fn": "io::murky", "inferred": ["Unknown"], "unresolved": true,
+                "unknownWhy": ["dispatch:lib.Store.save"], "hash": "deplib#io::murky"}},
+              {{"fn": "io::mute", "inferred": ["Unknown"], "unresolved": true,
+                "hash": "deplib#io::mute"}}
+            ]}}"#)).unwrap();
+        let idx = load_dep_reports(dd.to_str());
+
+        let d = std::env::temp_dir().join(format!("candor-depwhyboth-c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"consumer\"\n\n[dependencies]\ndeplib = \"1\"\n").unwrap();
+        let run = |src: &str, rule: &str| -> i32 {
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let p = d.join("candor.policy");
+            std::fs::write(&p, format!("{rule}\n")).unwrap();
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+                include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
+                baseline: None, quiet: true, deps_idx: &idx,
+            });
+            rc
+        };
+        // CONTROL A — the classified call ALONE. `unresolved` must not fire (nothing here is reasonless).
+        let named = "pub fn one() { deplib::io::murky(); }\n";
+        assert_eq!(run(named, "deny Unknown[dispatch]"), 1, "the carried class must reach the gate");
+        assert_eq!(run(named, "deny Unknown[unresolved]"), 0,
+                   "a CLASSIFIED Unknown must not also read `unresolved` — the fix must add the class \
+                    for the reasonless join only, never stamp it on every chained Unknown");
+        // CONTROL B — the reasonless call ALONE. §6.2's fallback answers this one, and it always did.
+        let silent = "pub fn one() { deplib::io::mute(); }\n";
+        assert_eq!(run(silent, "deny Unknown[unresolved]"), 1, "§6.2: no recorded reason ⇒ `unresolved`");
+        assert_eq!(run(silent, "deny Unknown[dispatch]"), 0, "…and it is not `dispatch`");
+        // THE DEFECT — both on one function. Bracketed by the two controls, so the only thing that
+        // changed is that a SECOND, differently-classed Unknown joined the first.
+        let both = "pub fn one() { deplib::io::murky(); deplib::io::mute(); }\n";
+        assert_eq!(run(both, "deny Unknown[unresolved]"), 1,
+                   "ADDING A REASON REMOVED A CLASS: the same reasonless chained Unknown that gates \
+                    `unresolved` on its own (control B) stopped gating once an unrelated `dispatch:` \
+                    reason landed on the same function. The §6.2 fallback is per-FUNCTION and fires only \
+                    on an ABSENT/EMPTY class set, so the reasonless join must CONTRIBUTE `unresolved` \
+                    rather than have it inferred from absence");
+        assert_eq!(run(both, "deny Unknown[dispatch]"), 1,
+                   "…and the dep's own recorded class must survive that — contributed INTO the set, \
+                    never over it");
+        assert_eq!(run(both, "deny Unknown"), 1, "the bare rule bites in every arm");
+        // SECOND DIRECTION, IN-SCAN: an Unknown this scan raised ITSELF, with its own reason and no
+        // chained dep in sight, must be untouched. `unresolved` is contributed by the JOIN, not by
+        // carrying an Unknown.
+        let local = "pub fn one(f: fn()) { f(); }\n";
+        assert_eq!(run(local, "deny Unknown[indirect]"), 1, "an in-scan callback is `indirect`");
+        assert_eq!(run(local, "deny Unknown[unresolved]"), 0,
+                   "an in-scan Unknown with its own reason must NOT gain `unresolved` — that would make \
+                    every narrowed rule fire on everything and delete the class distinction");
+        // …AND IT TRAVELS. The class propagates the call graph like the effect does, so a caller that
+        // has its own reason must see the callee's reasonless one too.
+        let up = "pub fn leaf() { deplib::io::mute(); }\n\
+                  pub fn up(f: fn()) { f(); leaf(); }\n";
+        assert_eq!(run(up, "deny Unknown[unresolved] up"), 1,
+                   "the contributed class must PROPAGATE — a caller with its own `indirect` reason \
+                    inheriting a reasonless chained Unknown is the same defect one edge up");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&dd);
+    }
+
     #[test]
     fn a_stale_reports_unknown_is_classed_unresolved_like_the_rest_of_the_family() {
         // The §2.1 staleness downgrade MANUFACTURES an `Unknown` that no call site is responsible for —
