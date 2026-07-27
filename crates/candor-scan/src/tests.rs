@@ -770,6 +770,93 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         );
     }
 
+    /// FRESH-VS-STALE FOR ONE PACKAGE: rust withholds coverage, and the other three engines do not.
+    /// Recorded, pinned and DELIBERATELY NOT ALIGNED — the argument is below and it is rust-specific.
+    ///
+    /// The divergence is real. Coverage in java is `if (!stale) depCoveredPkgs.addAll(...)`
+    /// (`Loader.java`), in ts `depCoveredPkgs.has(pkg)` with `staleDepPkgs` deleted down to it
+    /// (`scan.mjs:698`), in swift `coveredPkgs.contains` with `stalePkgs.subtract(coveredPkgs)`
+    /// (`Deps.swift:294`) — in all three, a stale report can never take back coverage a fresh one
+    /// granted. rust keeps an `untrusted` set that is never subtracted, so the same input answers the
+    /// other way. SPEC §2.1 is silent: it says only that a version mismatch downgrades the inherited
+    /// EFFECTS to `Unknown`, and says nothing about the ledger exemption when two reports disagree.
+    ///
+    /// WHY RUST IS RIGHT HERE, and it is not a matter of taste. Coverage is the claim that an ABSENT
+    /// entry is a purity claim (§2 rule 3). rust's index DROPS a key two dep functions share rather
+    /// than picking — the never-guess rule — so when a fresh and a stale report both carry a function,
+    /// the key is withdrawn and a consumer's call resolves to NOTHING. Grant that package coverage and
+    /// the call reads confidently PURE: a real effect, in the fresh report, silently gone. Withholding
+    /// coverage is the only thing standing between that collision and a false all-clear, which is why
+    /// this test asserts the effect is DISCLOSED and not merely that a flag is set.
+    ///
+    /// java and ts can afford fresh-wins because their entry-level conflict keeps an answer: java's
+    /// `crossDeps.put` is last-wins (one of the two survives) and ts merges into a Set (the fresh
+    /// effects AND the stale `Unknown`). Neither can reach "no answer at all". The divergence is
+    /// therefore downstream of a design choice the spec leaves open, not a defect in one engine.
+    /// **candor-swift drops the colliding key exactly as rust does (`Deps.swift` `insert`) AND resolves
+    /// coverage fresh-wins, so the shape above should be checked there** — not done here, since it is
+    /// another engine's repo and another engine's measurement.
+    ///
+    /// TO FLIP THIS, if a four-way ruling goes the other way: make `cover` in `deps.rs` subtract
+    /// `untrusted` from the fresh names at the end of the load (the ts/swift shape), and the first
+    /// assertion below inverts. Do not flip it without also fixing the colliding-key half, or this
+    /// fixture becomes a demonstration of a silent under-report rather than a guard against one.
+    #[test]
+    fn a_package_chained_both_fresh_and_stale_keeps_its_blind_spot_disclosure() {
+        let d = std::env::temp_dir().join(format!("candor-duallib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // Both reports name package `duallib`, and both carry `io::go` — the collision that makes this
+        // a soundness question rather than a bookkeeping one. (Two versions of one crate in a Cargo tree
+        // is routine: 7 of 167 dep reports in candor-rust's own tree, 30 of 378 in ebman's.)
+        std::fs::write(d.join("report.fresh.duallib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "duallib",
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "duallib#io::go"}}]}}"#)).unwrap();
+        std::fs::write(d.join("report.stale.duallib.scan.json"), r#"{
+            "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
+            "package": "duallib",
+            "functions": [{"fn": "io::go", "inferred": ["Exec"], "hash": "duallib#io::go"}]}"#).unwrap();
+        // …and a package with ONLY a fresh report, as the control: this must not become a blanket
+        // withdrawal of coverage the moment any report in the directory is stale.
+        std::fs::write(d.join("report.solo.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "solo",
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "solo#io::go"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert!(idx.untrusted.contains("duallib"),
+                "a package one of whose reports failed the §2.1 check lost its untrusted mark — see the \
+                 doc comment before aligning this with java/ts/swift");
+        assert!(!idx.untrusted.contains("solo"), "the control package must stay trusted");
+        // The premise, asserted rather than assumed: the shared key really is withdrawn, so the fresh
+        // report's `Exec` is NOT recoverable from the index.
+        assert!(!idx.by_key.contains_key("duallib#io::go"),
+                "the collision resolved to an answer — if this ever changes, the argument above changes \
+                 with it and fresh-wins may become safe");
+
+        let v = scan_crate_chained("duallib", "consumer",
+            "\n[dependencies]\nduallib = \"1\"\nsolo = \"1\"\n",
+            "pub fn hits_dual() { duallib::io::go(); }\npub fn hits_solo() { solo::io::go(); }\n", &idx);
+        let ent = |n: &str| v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some(n)).cloned().unwrap_or(serde_json::Value::Null);
+        let dual = ent("hits_dual");
+        assert!(dual != serde_json::Value::Null,
+                "A FALSE ALL-CLEAR: the fresh report says `duallib::io::go` runs `Exec`, the colliding \
+                 key withdrew the answer, and with the package counted as covered the call reads \
+                 confidently PURE — the absent entry IS a purity claim (§2 rule 3):\n{v:#}");
+        assert_eq!(dual["invisible"], serde_json::json!(["duallib"]),
+                   "the disclosure must NAME the package whose report could not be trusted:\n{v:#}");
+        // Control, other direction: the solo package's silence stays informative — its call resolves to
+        // the report's own answer and carries no blind-spot hedge.
+        let solo = ent("hits_solo");
+        assert_eq!(solo["inferred"], serde_json::json!(["Exec"]), "the trusted report's answer:\n{v:#}");
+        assert!(solo["invisible"].is_null(),
+                "a fresh report's package was hedged as blind — this is the mirror defect:\n{v:#}");
+    }
+
     #[test]
     fn an_untrusted_report_does_not_grant_the_ledger_coverage_exemption() {
         // §2.1 downgrades a STALE report's effects to `Unknown` — and the very same load ALSO
