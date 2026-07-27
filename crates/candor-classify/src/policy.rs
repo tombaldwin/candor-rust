@@ -98,6 +98,33 @@ impl ReasonClass {
     }
 }
 
+/// SPEC §6.2 ⟨0.24⟩ — does a function's TRANSITIVE reason-class set intersect `want` (class tokens)?
+///
+/// THE `None`/EMPTY ARM IS THE FAIL-CLOSED NET, and it is why this lives here rather than being
+/// open-coded twice. §6.2: "a function whose `Unknown` carries no recorded reason CONTRIBUTES
+/// `unresolved` to its class set — so a narrowed filter never *silently* tolerates a hole it failed to
+/// classify." Read the other way round, `!contains ⇒ exclude` over an empty set drops the entry from
+/// EVERY filter including one naming its own class: a silent under-report wearing a filter.
+///
+/// `classes` is the ACCUMULATED (post-`propagate_str`) set, never the direct `unknownWhy`: a reason
+/// names a site in the function's OWN body (§4), so a function whose `Unknown` is purely inherited
+/// carries none, and matching against the direct field answers a different question. SHARED by the
+/// `deny E Unknown[class]` gate (candor-scan) and `unverified --class` (candor-query) so a gate and the
+/// disclosure explaining it cannot disagree about which holes a class names.
+///
+/// The empty arm is a NET, not a route: it keys on the ABSENCE of a class set, so any other reason on
+/// the same function hides whatever it was covering. The reasonless case that CAN co-occur with a
+/// reason — a direct `Unknown` the unit did not name — must therefore contribute `unresolved` into the
+/// DIRECT map before propagation (candor-scan's `unknown_via_dep`, candor-query's `reason_class_acc`),
+/// not arrive here by absence.
+pub fn reason_class_matches(classes: Option<&BTreeSet<String>>, want: &BTreeSet<&str>) -> bool {
+    match classes {
+        None => want.contains(ReasonClass::Unresolved.token()),
+        Some(cs) if cs.is_empty() => want.contains(ReasonClass::Unresolved.token()),
+        Some(cs) => cs.iter().any(|t| want.contains(t.as_str())),
+    }
+}
+
 /// Parse `unknown-alias <name> = <class,…>` lines from `.candor/config` text (⟨0.19⟩, SPEC §6.2) into a
 /// name→classes map. A name that shadows a built-in (`*`/`dynamic`/a class token) is warned-and-skipped (a
 /// config alias may not redefine a built-in), as is a definition naming no valid class. Byte-shape with the

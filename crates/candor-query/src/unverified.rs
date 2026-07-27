@@ -11,6 +11,56 @@ use crate::grammar::{parse, report_or_discover, Shape};
 use crate::load::load_entries;
 use candor_classify::policy::{parse_policy, rule_and_upgrade, unverified_hole_rule, PolicyRule};
 use candor_report::ReportEntry;
+use std::collections::{BTreeSet, HashMap};
+
+/// The per-function TRANSITIVE reason-class set, rebuilt from a report — candor-scan's gate-side
+/// `reason_class_acc` (scan.rs), recomputed on this side of the report boundary and over the same
+/// `propagate_str` least fixpoint, so `unverified --class` selects over exactly the set a
+/// `deny E Unknown[class]` gate scopes over.
+///
+/// TWO FAULTS LIVE HERE, and only fixing BOTH is a fix.
+///
+/// (1) `unknownWhy` is DIRECT-ONLY by design — §4: a reason names an unresolvable site in the
+/// function's OWN body — so a function whose `Unknown` is purely INHERITED from a callee carries no
+/// reason of its own. Matching a filter against that field reads a field answering a different
+/// question, and the old predicate (`unknownWhy` ∩ filter ≠ ∅) therefore dropped every inherited hole
+/// from every filter, INCLUDING one naming the class the callee recorded. Measured on this engine
+/// before the fix: 6 of 7 `unverified` holes on candor-scan's own sources, 101 of 124 `Unknown`
+/// entries on ebman and 37 of 60 on pgman, carry no direct reason at all. Hence the fixpoint.
+///
+/// (2) The empty set must FAIL CLOSED, not open. §6.2: a function whose `Unknown` carries no recorded
+/// reason CONTRIBUTES `unresolved`. That is `reason_class_matches`'s absence arm — but that arm is a
+/// NET keyed on the WHOLE set being empty, so any other reason on the same function swallows it. The
+/// case that can co-occur with a reason is contributed HERE instead, per entry, into the DIRECT map so
+/// it propagates to callers like any other class.
+///
+/// THE GATE ON (2) IS THE POINT, and getting it wrong is the mirror fabrication. It is `direct ∋
+/// Unknown` with nothing named — the unit INTRODUCED the hole and did not say why — NOT "the reason set
+/// is absent", which is also exactly what a correctly-classified INHERITED `Unknown` looks like.
+/// Contributing `unresolved` to one of those would trade a fail-open for a fabricated class, and a fix
+/// that trades one sin for its mirror is not a fix. rust's report carries `direct` (§2), so the §4
+/// condition is checkable verbatim here rather than approximated.
+fn reason_class_acc(entries: &[ReportEntry]) -> HashMap<String, BTreeSet<String>> {
+    use candor_classify::policy::ReasonClass;
+    let mut direct: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut all: Vec<String> = Vec::with_capacity(entries.len());
+    for e in entries {
+        all.push(e.func.clone());
+        if !e.calls.is_empty() {
+            calls.insert(e.func.clone(), e.calls.iter().cloned().collect());
+        }
+        let mut cs: BTreeSet<String> =
+            e.unknown_why.iter().map(|w| ReasonClass::classify(w).token().to_string()).collect();
+        if cs.is_empty() && e.direct.iter().any(|d| d == "Unknown") {
+            cs.insert(ReasonClass::Unresolved.token().to_string());
+        }
+        if !cs.is_empty() {
+            direct.insert(e.func.clone(), cs);
+        }
+    }
+    candor_classify::propagate::propagate_str(&direct, &calls, &all)
+}
 
 pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true });
@@ -46,13 +96,19 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         func: &'a ReportEntry,
         rule: &'a PolicyRule,
     }
-    // `--class <c,…>` (SPEC §3.1 ⟨0.20⟩): keep only holes whose Unknown is of a matching reason class.
+    // `--class <c,…>` (SPEC §3.1 ⟨0.20⟩, semantics pinned normative at §6.2 ⟨0.24⟩): keep only holes
+    // whose Unknown is of a matching reason class — resolved TRANSITIVELY, over the same reach the
+    // `deny E Unknown[class]` gate resolves, and failing CLOSED on a hole nothing classified.
     let class_filter = g.class.as_deref().map(crate::containment::parse_class_filter);
+    let want: Option<std::collections::BTreeSet<&str>> = class_filter
+        .as_ref()
+        .map(|set| set.iter().map(|c| c.token()).collect());
+    // Computed once, and only when a filter was given (it is a fixpoint over the whole report).
+    let reason_acc = want.as_ref().map(|_| reason_class_acc(&entries));
     let class_matches = |e: &ReportEntry| -> bool {
-        use candor_classify::policy::ReasonClass;
-        match &class_filter {
-            None => true,
-            Some(set) => e.unknown_why.iter().any(|w| set.contains(&ReasonClass::classify(w))),
+        match (&want, &reason_acc) {
+            (Some(w), Some(acc)) => candor_classify::policy::reason_class_matches(acc.get(&e.func), w),
+            _ => true, // no --class ⇒ no filter
         }
     };
     let holes: Vec<Hole> = entries

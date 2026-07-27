@@ -75,39 +75,9 @@ pub(crate) fn propagate(
     acc
 }
 
-pub(crate) fn propagate_str(
-    direct: &HashMap<String, BTreeSet<String>>,
-    calls: &HashMap<String, BTreeSet<String>>,
-    all: &[String],
-) -> HashMap<String, BTreeSet<String>> {
-    let mut acc = direct.clone();
-    let in_all: HashSet<&str> = all.iter().map(String::as_str).collect();
-    let rev = caller_index(calls, &in_all);
-
-    let mut queue: VecDeque<String> = all.iter().cloned().collect();
-    let mut queued: HashSet<String> = all.iter().cloned().collect();
-
-    while let Some(f) = queue.pop_front() {
-        queued.remove(&f);
-        let add: BTreeSet<String> = calls
-            .get(&f)
-            .map(|cs| cs.iter().filter_map(|c| acc.get(c)).flatten().cloned().collect())
-            .unwrap_or_default();
-        if add.is_empty() {
-            continue;
-        }
-        let e = acc.entry(f.clone()).or_default();
-        let before = e.len();
-        e.extend(add);
-        if e.len() != before {
-            if let Some(callers) = rev.get(f.as_str()) {
-                for &caller in callers {
-                    if queued.insert(caller.to_string()) {
-                        queue.push_back(caller.to_string());
-                    }
-                }
-            }
-        }
-    }
-    acc
-}
+/// The string-fact propagation (hosts/cmds/paths/tables/blind crates/reason classes) MOVED to
+/// candor-classify so candor-query can run the identical fixpoint over a report's `calls` edges. The
+/// reason-class accumulator feeds a GATE here and a DISCLOSURE there (`unverified --class`); if the two
+/// resolved over different reaches, the disclosure would name a different set of holes than the gate
+/// scoped. Re-exported under the old path so every call site (and `tests.rs`) is unchanged.
+pub(crate) use candor_classify::propagate::propagate_str;

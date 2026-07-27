@@ -6,6 +6,68 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### soundness — `unverified --class` under-reported holes, and under-reported MORE the more you narrowed
+
+`unverified` names the functions a `pure` / `deny E` layer PASSES without proving anything — the verb
+whose whole job is "this gate is green but not provably so". Its `--class <c,…>` filter dropped holes it
+was built to surface. Two independent faults, both live, both fixed here (fixing either alone is worse
+than fixing neither — see below):
+
+1. **It read the DIRECT-only field.** `unknownWhy` is direct-only by design (SPEC §4: a reason names an
+   unresolvable site in the function's *own* body), so a function whose `Unknown` is purely INHERITED
+   from a callee carries no reason of its own. The predicate `unknownWhy ∩ filter ≠ ∅` therefore excluded
+   every inherited hole from *every* filter, including one naming the class the callee recorded. The
+   `deny E Unknown[class]` gate has always resolved this transitively (`reason_class_acc`); the
+   disclosure explaining that gate did not.
+2. **It failed OPEN under absence.** An entry with an empty reason set matched no filter at all — not
+   even `unresolved`. §6.2 says such a function CONTRIBUTES `unresolved`; it now does, per entry, into
+   the direct map so the class propagates to callers like any other.
+
+Measured with the §6.2 diagnostic — `--class dynamic` is an alias naming every genuine class, so it must
+exclude NOTHING; a filtered count below the unfiltered one is the defect and the gap is its size:
+
+| target | policy | before | after |
+|---|---|---|---|
+| candor-rust (chained `--deps`) | `deny Exec` | 54 → **26** (−52%) | 54 → 54 |
+| candor-rust (chained `--deps`) | self-gate `deny Net Db Exec Ipc` | 54 → **26** (−52%) | 54 → 54 |
+| candor-scan (own sources) | `deny Exec` | 7 → **1** (−86%) | 7 → 7 |
+| candor-scan (own sources) | `deny Net Db Exec Ipc` | 7 → **1** (−86%) | 7 → 7 |
+| ebman | `deny Exec` | 94 → **23** (−76%) | 94 → 94 |
+| ebman | `deny Net Db Exec Ipc` | 74 → **22** (−70%) | 74 → 74 |
+| pgman | `deny Exec` | 43 → **21** (−51%) | 43 → 43 |
+| pgman | `deny Net Db Exec Ipc` | 36 → **19** (−47%) | 36 → 36 |
+
+All eight target × policy rows converge exactly after the fix, matching the shape candor-swift measured
+(387 → 230 and 51 → 16 before; both exact after).
+
+Fault 1 was the bulk of it: 101 of 124 `Unknown`-bearing entries on ebman and 37 of 60 on pgman carry no
+direct reason at all.
+
+**The filter still DISCRIMINATES** — the control a blanket "keep everything" would fail. Post-fix on the
+same rows, `--class unresolved` selects 0, `--class native` 0, `--class reflect` 0, while
+`indirect`/`dispatch` partition the totals (ebman 64/37 of 94).
+
+**Fixing only fault 2 would have been worse than fixing neither.** Contributing `unresolved` on the
+absence of a reason set fabricates a class for an inherited `Unknown` that the callee classified
+perfectly well — a fail-open traded for its mirror. The contribution is therefore gated on `direct ∋
+Unknown` with nothing named (the unit INTRODUCED the hole and did not say why), which rust's reports
+carry verbatim (§2 `direct`). Both directions are pinned by mutation: dropping the gate turns exactly one
+control red ("an inherited, CLASSIFIED hole is not `unresolved`") and nothing else.
+
+`blindspots --class` is deliberately UNCHANGED. It is the *source* view (§3.1) and excludes a unit whose
+`Unknown` is purely inherited, so every entry it filters carries a direct reason by construction and the
+direct-only read is CORRECT there — resolving transitively would pull in exactly the units the verb is
+defined to exclude. Measured to confirm rather than assumed: unfiltered vs `--class dynamic` is 0→0,
+1→1, 23→23, 23→23, 26→26 across the five targets. A shared code path is not a shared defect. Checked
+too, since §4 forbids it: no rust report can put a reasonless entry into `sources` (the loop skips
+`unknownWhy`-empty entries outright), and across 17,306 entries in 173 dependency reports plus this
+repo's own five, **zero** entries carry a direct `Unknown` with no reason recorded beside it.
+
+The `propagate_str` fixpoint moved to `candor-classify` and the §6.2 match rule became
+`policy::reason_class_matches`, so the gate and the disclosure that explains it now resolve over one
+implementation of the reach — two fixpoints that can drift apart is its own defect. Dependency reports
+re-scan byte-identical.
+
 ### disclosure — the report glob claimed a SIDECAR, then reported its own mistake as data loss
 
 Every query run against a prefix with a `<prefix>.<pkg>.hierarchy.json` sidecar beside it printed:
