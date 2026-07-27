@@ -187,11 +187,49 @@ pub(crate) fn load_hierarchy(prefix: &str) -> BTreeMap<String, Vec<String>> {
         if !name.starts_with(&pfx) || !name.ends_with(".hierarchy.json") {
             continue;
         }
+        // PARSE PERMISSIVELY, SKIP LOUDLY. This deserialized straight into
+        // `BTreeMap<String, Vec<String>>`, so ONE value of another shape made the WHOLE file fail to parse
+        // and be discarded in silence — and candor-scan writes no hierarchy sidecar at all, so every file
+        // read here was produced by another engine and this reader had no way to notice.
+        //
+        // That is not hypothetical: candor-java added a `"@superclass"` metadata key whose value was an
+        // object, and this reader silently dropped every sidecar it met — 0 of 18 across seven real chained
+        // jar pairs — taking `candor-query callers` off the hierarchy and onto its simple-name fallback.
+        // java has since made the key an array and SPEC §2.2 now constrains the WRITER, which is the right
+        // place; this is the reader half, so a future producer's metadata cannot silently blind the query.
+        //
+        // Two rules, and the second is why the first is safe: `@`-prefixed keys are the reserved metadata
+        // namespace (never a type name), and any entry whose value is not an array of strings is SKIPPED
+        // rather than taken as an empty supertype list — a phantom type with no supers would count toward
+        // the emptiness gate in `callers.rs` and take it off its safe over-listing fallback, which is the
+        // narrowing direction. Skipping is disclosed on stderr for the same reason `load_entries_inner`
+        // discloses an unparsable report: a query that answers from less than it was given must say so.
         if let Ok(text) = std::fs::read_to_string(ent.path())
-            && let Ok(map) = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&text)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(obj) = v.as_object()
         {
-            for (k, v) in map {
-                out.entry(k).or_default().extend(v);
+            let mut skipped = 0usize;
+            for (k, val) in obj {
+                if k.starts_with('@') {
+                    continue; // reserved metadata namespace, not a type
+                }
+                let Some(arr) = val.as_array() else {
+                    skipped += 1;
+                    continue;
+                };
+                let supers: Vec<String> =
+                    arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+                if supers.len() != arr.len() {
+                    skipped += 1; // a non-string element: take the strings, but say the entry was partial
+                }
+                out.entry(k.clone()).or_default().extend(supers);
+            }
+            if skipped > 0 {
+                eprintln!(
+                    "candor-query: {} entr{} in {} had a value this reader could not use and were skipped \
+                     — the dispatch frontier is answered from less than the sidecar carries",
+                    skipped, if skipped == 1 { "y" } else { "ies" }, ent.path().display()
+                );
             }
         }
     }
@@ -432,5 +470,64 @@ mod tests {
         assert!(load_coverage(&plain.join("report").to_string_lossy()).is_none());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&plain);
+    }
+
+    /// A METADATA KEY MUST NOT BLIND THE WHOLE SIDECAR. This deserialized into a strict
+    /// `BTreeMap<String, Vec<String>>`, so ONE value of another shape made the entire file fail to parse
+    /// and be discarded in silence — and candor-scan writes no hierarchy sidecar, so every file this reads
+    /// came from another engine and this reader could not notice. candor-java shipped exactly that key
+    /// (`"@superclass"`, object-valued) and 0 of 18 sidecars across seven real chained jar pairs parsed.
+    ///
+    /// BOTH DIRECTIONS, deliberately: the real types must SURVIVE a key this reader cannot use, and an
+    /// unusable value must be SKIPPED rather than read as an empty supertype list — a phantom type with no
+    /// supers counts toward `callers.rs`'s emptiness gate and takes it off its safe over-listing fallback,
+    /// which is the narrowing direction.
+    #[test]
+    fn a_metadata_key_does_not_discard_the_whole_hierarchy() {
+        let dir = std::env::temp_dir().join(format!("candor-hier-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("report");
+        let mut f = std::fs::File::create(dir.join("report.hierarchy.json")).unwrap();
+        // an object-valued metadata key, and a non-array value, beside two real types
+        //  appears in BOTH shapes deliberately: the OBJECT candor-java 0.23.1 wrote (which
+        // the non-array skip catches) and the flat ARRAY it writes now (which ONLY the  skip catches —
+        // without it the marker becomes a phantom type whose "supertypes" are type names).
+        f.write_all(br#"{"app.Worker":["app.Task"],"@legacy":{"app.Worker":"app.Task"},
+                        "@superclass":["app.Worker","app.Task"],
+                        "app.Junk":"not-an-array","app.Other":["app.Base"]}"#).unwrap();
+        drop(f);
+        let h = load_hierarchy(prefix.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(h.get("app.Worker").map(Vec::as_slice), Some(&["app.Task".to_string()][..]),
+                   "a real type was lost because another entry had a shape this reader could not use");
+        assert_eq!(h.get("app.Other").map(Vec::as_slice), Some(&["app.Base".to_string()][..]),
+                   "a real type AFTER the unusable entry was lost — the whole file was discarded");
+        assert!(!h.contains_key("@superclass"),
+                "the reserved metadata namespace became a phantom TYPE in the hierarchy");
+        assert!(!h.contains_key("app.Junk"),
+                "a non-array value was read as an EMPTY supertype list — a phantom type that counts \
+                 toward the emptiness gate and narrows the frontier");
+    }
+
+    /// THE SECOND FIXTURE, and it is what stops the fix above from being a licence to invent: a sidecar
+    /// that is well-formed must be read EXACTLY as before, and one that is genuinely empty must stay empty
+    /// rather than gaining a key from the tolerance.
+    #[test]
+    fn a_well_formed_hierarchy_is_unchanged_and_an_empty_one_stays_empty() {
+        let dir = std::env::temp_dir().join(format!("candor-hier-plain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("report");
+        std::fs::write(dir.join("report.hierarchy.json"),
+                       br#"{"a.B":["a.C","a.D"],"a.E":["a.F"]}"#).unwrap();
+        let h = load_hierarchy(prefix.to_str().unwrap());
+        assert_eq!(h.len(), 2, "a well-formed sidecar must be read exactly as before");
+        assert_eq!(h.get("a.B").map(Vec::as_slice),
+                   Some(&["a.C".to_string(), "a.D".to_string()][..]));
+        std::fs::write(dir.join("report.hierarchy.json"), b"{}").unwrap();
+        let empty = load_hierarchy(prefix.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(empty.is_empty(), "an empty sidecar must stay empty — emptiness is what `callers.rs` gates on");
     }
 }
