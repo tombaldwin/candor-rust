@@ -43,25 +43,35 @@ pub(crate) fn scan_builder_entry_effect(_cr: &str, path: &str) -> Option<&'stati
 }
 
 /// A loaded sibling-report function: the effects + literal surfaces a consumer's call inherits.
+///
+/// EVERY FIELD IS A SET, AND THAT IS LOAD-BEARING RATHER THAN TIDY. `apply_dep_fn` folds all eight
+/// into `BTreeSet`s, so the join's result is invariant under the ORDER and the MULTIPLICITY of every
+/// one of them — the serialisation carries no information the consumer can use. The index's
+/// never-guess rule withdraws a key two entries DISAGREE under and exempts a restatement, and that
+/// exemption is decided by `PartialEq`: derived on a `Vec` it is order- and duplicate-sensitive, so
+/// two entries stating one claim in different orders read as a disagreement, the key is withdrawn,
+/// and under ⟨0.21⟩ the consumer's silence is a purity claim — the cardinal sin `6f2210c` closed,
+/// re-opened for any producer that happens to serialise a vector differently. Stating it in the TYPE
+/// rather than in the comparison is what stops a field added later from re-opening it silently.
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct DepFn {
-    pub(crate) effects: Vec<&'static str>,
-    pub(crate) hosts: Vec<String>,
-    pub(crate) cmds: Vec<String>,
-    pub(crate) paths: Vec<String>,
-    pub(crate) tables: Vec<String>,
+    pub(crate) effects: BTreeSet<&'static str>,
+    pub(crate) hosts: BTreeSet<String>,
+    pub(crate) cmds: BTreeSet<String>,
+    pub(crate) paths: BTreeSet<String>,
+    pub(crate) tables: BTreeSet<String>,
     /// Blind crates the dep fn (transitively) reaches — its report's `invisible`. Carried across the join
     /// so a consumer inherits the disclosure (sweep [8]): else a dep that floored an unmodeled crate read
     /// as plain pure at the chain boundary, dropping the per-fn honesty caveat.
-    pub(crate) invisible: Vec<String>,
+    pub(crate) invisible: BTreeSet<String>,
     /// Effects whose surface the dep fn left masking-incomplete — carried so a benign literal in the
     /// consumer can't mask the dep's invisible forbidden endpoint across the join (sweep [30]).
-    pub(crate) incomplete: Vec<&'static str>,
+    pub(crate) incomplete: BTreeSet<&'static str>,
     /// The dep fn's own `unknownWhy` — carried so its `Unknown` does not arrive at the consumer with the
     /// REASON CLASS stripped off. Verbatim, not re-derived: the strings are already the canonical §4 ⟨0.7⟩
     /// vocabulary (a conforming producer wrote them) and `dispatch:<owner>.<member>` carries a NORMATIVE
     /// detail that a consumer needs to resolve overrides — re-deriving would destroy exactly that.
-    pub(crate) unknown_why: Vec<String>,
+    pub(crate) unknown_why: BTreeSet<String>,
 }
 
 /// The mutable per-function surface maps a chained dep entry is folded into. Exists only so
@@ -100,7 +110,7 @@ pub(crate) struct DepSink<'a> {
 /// drops the `incomplete` beside it lets a benign literal in the CONSUMER certify a surface the
 /// dependency already declared uncertifiable.
 pub(crate) fn apply_dep_fn(de: &DepFn, caller: &str, s: DepSink<'_>) {
-    let ext = |m: &mut HashMap<String, BTreeSet<String>>, v: &[String]| {
+    let ext = |m: &mut HashMap<String, BTreeSet<String>>, v: &BTreeSet<String>| {
         if !v.is_empty() {
             m.entry(caller.to_string()).or_default().extend(v.iter().cloned());
         }
@@ -382,7 +392,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             cover(krate.clone(), &mut idx);
             let mut de = DepFn::default();
             if stale {
-                de.effects.push("Unknown"); // §2.1: a different producer version is not trusted
+                de.effects.insert("Unknown"); // §2.1: a different producer version is not trusted
                 // NO REASON, DELIBERATELY — §6.2 classes it `unresolved`, which is what java, ts and
                 // swift all land on and what the spec prescribes for an Unknown with no recorded reason.
                 // This carried `callback:chained report from a different producer version`, which classes
@@ -397,10 +407,10 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 for s in e.get("inferred").and_then(|x| x.as_array()).into_iter().flatten() {
                     if let Some(s) = s.as_str() {
                         // unknown vocabulary (a future spec's effect) is honestly Unknown
-                        de.effects.push(candor_classify::cap_from_name(s).unwrap_or("Unknown"));
+                        de.effects.insert(candor_classify::cap_from_name(s).unwrap_or("Unknown"));
                     }
                 }
-                let strs = |k: &str| -> Vec<String> {
+                let strs = |k: &str| -> BTreeSet<String> {
                     e.get(k)
                         .and_then(|x| x.as_array())
                         .into_iter()
@@ -418,7 +428,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 // sweep [30]: carry masking-incompleteness (mapped to the static effect alphabet).
                 for s in e.get("incomplete").and_then(|x| x.as_array()).into_iter().flatten() {
                     if let Some(eff) = s.as_str().and_then(candor_classify::cap_from_name) {
-                        de.incomplete.push(eff);
+                        de.incomplete.insert(eff);
                     }
                 }
             }
@@ -454,16 +464,6 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 // rewrite (insert-or-modify in place) can't express the remove-on-collision.
                 #[allow(clippy::map_entry)]
                 if let Some(prev) = idx.by_key.get(&k) {
-                    // THE NEVER-GUESS RULE IS ABOUT DISAGREEMENT, NOT REPETITION. Withdrawing a shared key
-                    // is right when two entries say DIFFERENT things — there is no way to choose and a wrong
-                    // choice fabricates. It is wrong when they say the SAME thing: nothing is ambiguous, and
-                    // withdrawing turns a resolved effect into an ABSENT one, which under ⟨0.21⟩ is a
-                    // positive purity claim. MEASURED before the fix: one report chained gives the consumer
-                    // `['Exec']`; the SAME report chained TWICE gives ABSENT with no coverage hedge — a
-                    // cardinal sin reachable by the most ordinary accident there is, a dep directory holding
-                    // two copies of one report. Found by candor-swift's fresh-vs-stale fixture, which hit it
-                    // and flagged it for rust and java; java is CLEAN (its entry conflict is last-wins, so it
-                    // keeps an answer), rust withdrew.
                     // THE NEVER-GUESS RULE IS ABOUT DISAGREEMENT, NOT REPETITION. Withdrawing a key two
                     // entries share is right when they say DIFFERENT things — there is no way to choose and a
                     // wrong choice fabricates. It is wrong when they are IDENTICAL: nothing is ambiguous, and
@@ -482,6 +482,15 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                     // the entries being recovered are ones the dependency itself could not resolve. That is a
                     // 12-20% disclosure increase and a design decision, not a tail on a bug fix; it is filed
                     // in the work queue with these numbers rather than taken here.
+                    //
+                    // AND "IDENTICAL" MEANS THE CLAIM, NOT ITS SERIALISATION — which is why every `DepFn`
+                    // field is a `BTreeSet` (see the type). Derived `PartialEq` on a `Vec` compares
+                    // element-wise and order-sensitively, so two entries stating one claim in different
+                    // orders, or one of them restating a host, read as a DISAGREEMENT here and the key is
+                    // withdrawn: the same cardinal sin this exemption exists to close, surviving for any
+                    // producer that happens to order a vector differently. `apply_dep_fn` folds every field
+                    // into a set, so set equality is not a relaxation of never-guess — two set-equal entries
+                    // are operationally indistinguishable and there is nothing to choose between.
                     if prev == &de {
                         continue; // the same claim restated — keep the entry, withdraw nothing
                     }
