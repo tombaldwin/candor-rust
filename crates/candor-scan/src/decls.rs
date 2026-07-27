@@ -248,6 +248,36 @@ pub(crate) fn fn_locs(items: &[syn::Item], file: &str, include_tests: bool, out:
     }
 }
 
+/// EVERY ident this signature and body BIND, whether or not their type could be recovered — parameters,
+/// `let`s, closure params, `for` patterns, match-arm bindings. `syn::Pat::Ident` is the one node all of
+/// those funnel through, so a single walk over the signature's patterns plus the body collects them all.
+///
+/// Its ONLY consumer is the shadow test on the lazy-static / dep-provenance forcing sites, which must
+/// answer "does this name refer to a LOCAL binding rather than the static?". The typed side-tables
+/// answer that only for bindings whose type resolved — `let C = "aa";` is invisible to all of them —
+/// so a `use`d static shadowed by an untypable `let` was charged to the local. Over-collecting here
+/// (a match arm's `Pat::Ident` that is really a unit-struct pattern, a nested item's params) costs a
+/// forcing edge; UNDER-collecting fabricates an effect on a provably-unrelated local, so the walk is
+/// deliberately liberal.
+pub(crate) fn bound_idents(sig: &syn::Signature, block: &syn::Block) -> std::collections::HashSet<String> {
+    struct V(std::collections::HashSet<String>);
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            self.0.insert(node.ident.to_string());
+            syn::visit::visit_pat_ident(self, node);
+        }
+    }
+    use syn::visit::Visit;
+    let mut v = V(std::collections::HashSet::new());
+    for arg in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            v.visit_pat(&pt.pat);
+        }
+    }
+    v.visit_block(block);
+    v.0
+}
+
 /// Seed a function's variable→type map from its parameters (`fn h(c: &reqwest::Client)`) and, for an
 /// impl method, `self` → the impl type. These are the most reliable type facts available syntactically.
 pub(crate) fn seed_vars(sig: &syn::Signature, self_ty: Option<&str>, uses: &HashMap<String, String>) -> HashMap<String, String> {
@@ -457,6 +487,9 @@ pub(crate) fn fninfo(
         str_locals: std::collections::HashMap::new(),
         local_macros,
         macro_expanding: std::collections::HashSet::new(),
+        // Empty at entry: filled as body-level `use` items are visited (`visit_item_use`).
+        local_uses: std::collections::HashMap::new(),
+        bound_names: bound_idents(sig, block),
     };
     for stmt in &block.stmts {
         c.visit_stmt(stmt);

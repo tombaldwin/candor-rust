@@ -6,6 +6,84 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### soundness — three silent under-reports, all three found by ONE SPELLING never being tried
+
+Found by conformance PART 24 (split-invariance) on its first run, then each re-derived from a
+hand-written fixture so none rests on the generator. The common shape: **the answer was already under
+the right key and the consumer's join had a branch that did not fire.** No report-format change was
+needed for any of the three — the third time in a row this vein has come out that way.
+
+1. **A chained dependency's lazy static was charged only through a PATH-QUALIFIED read.**
+   `deplib::CFG.len()` → `['Env']`; `use deplib::CFG; CFG.len()` → silent-pure. Deref vs method call made
+   no difference — the `use` did, because the import leaves a ONE-segment path behind and the branch
+   required two. Conformance PART 19's rust fixture uses the qualified spelling. Fixed by consulting the
+   file- **and body-level** `use` maps, and by asking for the dependency's own MODULE-qualified key
+   (`<lazy>::cfg::MODC`) as well as the crate-root one — a dep static declared inside a module was
+   unreachable under *either* spelling.
+2. **A chained dependency FACTORY call with no intermediate binding read silent-pure.**
+   `let c = deplib::build(); c.fetch()` resolved; `deplib::build().fetch()` was silent, because the
+   provenance that drives the disclosure is only ever written by a `let`. A hole in a shipped guard, not
+   an un-attempted precision gap: it broke that guard's own ruling that a key which could not be formed
+   must never read pure. The unbound receiver now takes the same route, including through `?`, `.await`
+   and `&` — and `visit_local` peels those too, so eliding the binding cannot change the answer either way.
+3. **A lazy static read from OUTSIDE its module was not charged at all — single tree, no boundary.**
+   `m::inside()` was charged; `fn outside() { let _ = *m::INNER; }` read pure.
+
+**(3) is a regression introduced by `5447eba`, and the measurement is unambiguous.** That commit moved
+the module path INSIDE the `<lazy>::` prefix so two same-named statics stop merging — which made the
+WRITER module-qualified while the READER still built `<lazy>::<its own module>::NAME`. Three-way on one
+fixture (a crate-root lazy static read from a submodule, the ordinary `use crate::ROOT_CFG;` shape):
+
+| | `root_read` (same module) | 4 cross-module spellings |
+|---|---|---|
+| before `5447eba` (`c0a142c`) | `Fs` | **`Fs`** |
+| at `5df4af1` | `Fs` | **PURE** |
+| after this change | `Fs` | `Fs` |
+
+A fabrication fix that introduced a cardinal sin, and much wider than the fixture that caught it: at
+`5df4af1` *any* crate-root lazy static read from *any* submodule read pure. The identity property
+`5447eba` bought is kept — its own test still passes, and the control that two modules' same-named
+`CFG`s do not cross still holds — because the reader now takes the module the SPELLING names and keeps
+its own-module key beside it, both filtered by `resolve_target`'s uniqueness rule.
+
+**The mirror control caught a live fabrication in the first cut of fix (1)**, which is the reason it was
+written: the five typed side-tables that answer "is this name shadowed by a local?" only hold bindings
+whose type was RECOVERABLE, so `use deplib::C; … let C = "aa"; C.len()` charged the dependency's `Env`
+to a local string. Harmless while only a qualified path could force (a shadow is spelled bare); live the
+moment the bare spelling was added. `bound_idents` now collects every ident in a binding position,
+typed or not. Mutation-verified in both directions, along with the module-discrimination control (pin
+the derived module and the reader of the pure `b::CFG` picks up `a::CFG`'s `Fs`), the local-module
+control (held independently by TWO guards — measured by removing each), and the per-static keying
+control (make the dependency's pure lazy static effectful and its reader lights up).
+
+**A/B, before/after, each binary producing its own dependency tree:**
+
+| target | fns | gains, `Unknown` only | gains, CONCRETE effect | losses |
+|---|---|---|---|---|
+| ebman `--deps` | 546 → 550 | 95 | **0** | **0** |
+| pgman `--deps` | 200 → 205 | 21 | **0** | **0** |
+| candor-rust workspace `--deps` (5 members) | 223 → 230 | 32 | **0** | **0** |
+| tb-tui-common | 9 → 9 | 0 | **0** | **0** |
+
+Every gain on real code is (2)'s disclosure, never a concrete effect: functions carrying a direct
+`dispatch:untyped cross-package receiver` go 18 → 52 on ebman, 2 → 18 on pgman, 0 → 31 on candor-rust.
+**That is a large number and it is stated as one** — 95 of 550 ebman functions newly carry `Unknown`,
+about 2.9× the shipped bound-spelling arm's own footprint, and the top shapes are std combinators on a
+value a dependency returned (`chrono::Utc::now().signed_duration_since(..)` ×16,
+`serde_yml::from_str(..).wrap_err(..)`). Whether that band is worth its precision cost is a decided
+question — the same trade the bound spelling already makes — and this change only stops the answer
+depending on whether someone wrote a `let`.
+
+The lazy halves gained nothing on real code, which the diff alone cannot distinguish from never firing,
+so the precondition was instrumented instead: the `use`-spelling dependency marker is emitted 28,938 /
+19,579 / 6,955 times across the three dependency trees, and the cross-module read fires 16 times on
+ebman's (aws-config's `DEFAULT_PARTITION_RESOLVER`, declared in `endpoint_lib` and read from
+`config::endpoint`) and once on pgman's (tracing-subscriber's `FILTERING`). Real shapes; those
+particular initializers are pure, which is per-static keying working rather than the fix not landing.
+
+Conformance PART 24's ratchet baseline is now EMPTY for rust (both entries deleted — a waiver that
+outlives its defect masks the defect's return), and PARTs 18–24 are green four-way.
+
 ### soundness — `unverified --class` under-reported holes, and under-reported MORE the more you narrowed
 
 `unverified` names the functions a `pure` / `deny E` layer PASSES without proving anything — the verb

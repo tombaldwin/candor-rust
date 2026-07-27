@@ -225,7 +225,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -275,7 +275,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -479,6 +479,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, macro_expanding: Default::default(),
             str_locals: Default::default(),
+            local_uses: Default::default(), bound_names: Default::default(),
         };
         // Every table gets an entry for the SAME name the binder is about to shadow.
         let n = "x";
@@ -3274,7 +3275,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -3314,7 +3315,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -3338,7 +3339,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -3385,7 +3386,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -3421,7 +3422,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(),
+                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -4332,6 +4333,244 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert!(!eff("util_m::util_uses").contains(&"Fs".to_string()),
                 "a reader must not inherit the other module's Fs:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// THE OTHER HALF OF `5447eba` (the commit the test above pins). Moving the module path INSIDE the
+    /// `<lazy>::` prefix made the WRITER module-qualified; the READER still built
+    /// `<lazy>::<its own module>::NAME`. So a lazy static read from ANY module other than the one that
+    /// declares it missed its unit's tail2 and read SILENT-PURE — while a read from inside the declaring
+    /// module was charged correctly, which is exactly why no fixture saw it.
+    ///
+    /// BOTH SPELLINGS, because picking one is how this class of defect survives: the module PATH
+    /// (`m::INNER`, `crate::m::INNER`) and the `use` (`use m::INNER; INNER`), file-level and body-level.
+    /// And the mirror control is the property `5447eba` bought: two modules each declaring `CFG`, one
+    /// effectful and one pure, where the reader of the PURE one must not inherit the other's `Fs`.
+    #[test]
+    fn a_lazy_static_read_from_outside_its_module_is_charged_like_one_read_inside_it() {
+        let d = std::env::temp_dir().join(format!("candor-scan-lazyread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.0.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), r#"
+            use std::sync::LazyLock;
+            pub mod m {
+                use std::sync::LazyLock;
+                pub static INNER: LazyLock<u8> = LazyLock::new(|| std::fs::read("/tmp/z").map(|v| v.len() as u8).unwrap_or(0));
+                pub fn inside() -> u8 { *INNER }
+            }
+            pub mod pure_m {
+                use std::sync::LazyLock;
+                pub static INNER2: LazyLock<u8> = LazyLock::new(|| 7);
+            }
+            pub static TOP: LazyLock<u8> = LazyLock::new(|| std::fs::read("/tmp/t").map(|v| v.len() as u8).unwrap_or(0));
+            pub fn top_read() -> u8 { *TOP }
+            pub fn outside_path() -> u8 { *m::INNER }
+            pub fn outside_crate_path() -> u8 { *crate::m::INNER }
+            pub fn outside_body_use() -> u8 { use m::INNER; *INNER }
+            pub mod reader {
+                use crate::m::INNER;
+                pub fn outside_file_use() -> u8 { *INNER }
+            }
+            // CONTROLS — must stay pure.
+            pub fn reads_pure_module_static() -> u8 { *pure_m::INNER2 }
+            pub fn shadowed_by_an_untypable_let() -> usize { let INNER = "aa"; INNER.len() }
+            "#).unwrap();
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let eff = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // the writer already knew — the unit is module-qualified
+        assert_eq!(eff("<lazy>::m::INNER"), vec!["Fs"], "the unit itself:\n{body}");
+        // the arm that always worked, kept as the oracle the others are compared to
+        assert_eq!(eff("m::inside"), vec!["Fs"], "a read from INSIDE the declaring module:\n{body}");
+        assert_eq!(eff("top_read"), vec!["Fs"], "a crate-root static read at crate root:\n{body}");
+        // every spelling of the read that was silent
+        for f in ["outside_path", "outside_crate_path", "outside_body_use", "reader::outside_file_use"] {
+            assert_eq!(eff(f), vec!["Fs"],
+                       "{f} reads a module-scoped lazy static from outside its module — it must be \
+                        charged exactly like `m::inside`, which is:\n{body}");
+        }
+        // MIRROR CONTROLS — the new reader-side key must not fire where it cannot reach
+        assert!(eff("reads_pure_module_static").is_empty(),
+                "a PURE module-scoped lazy static's reader stays pure (per-static keying):\n{body}");
+        assert!(eff("shadowed_by_an_untypable_let").is_empty(),
+                "a `let` whose initializer types to nothing STILL shadows the static — charging it here \
+                 would be the fabrication mirror of the fix:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A CHAINED DEP's lazy static, under the IMPORT spelling. `deplib::CFG` was handled; the idiomatic
+    /// `use deplib::CFG; CFG` leaves a ONE-segment path behind and matched no branch, so the identical
+    /// read was silent-pure. Conformance PART 19's rust fixture happens to use the qualified spelling.
+    ///
+    /// The dep's own MODULE path is part of the key it publishes (`<lazy>::cfg::MODC`), so both the
+    /// crate-root and the module-scoped shapes are asked, under both spellings.
+    #[test]
+    fn a_chained_deps_lazy_static_is_charged_under_the_use_spelling_too() {
+        let dep = std::env::temp_dir().join(format!("candor-uselazy-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        let _ = std::fs::create_dir_all(&dep);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // `C` at the dep's crate root, `cfg::MODC` inside one of its modules. `PURE_C` is DELIBERATELY
+        // absent: a pure init publishes no unit, which is what keeps its readers pure.
+        std::fs::write(dep.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [
+              {{"fn": "<lazy>::C",         "inferred": ["Env"], "hash": "deplib#<lazy>::C"}},
+              {{"fn": "<lazy>::cfg::MODC", "inferred": ["Fs"],  "hash": "deplib#<lazy>::cfg::MODC"}}
+            ]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        assert!(idx.crates.contains("deplib"));
+        let d = std::env::temp_dir().join(format!("candor-uselazy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d); // never read a stale report back as this arm's result
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n[dependencies]\ndeplib = \"1\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), r#"
+            use deplib::C;
+            use deplib::cfg::MODC;
+            use deplib::PURE_C;
+            pub fn qualified() -> usize { deplib::C.len() }
+            pub fn imported() -> usize { C.len() }
+            pub fn imported_deref() -> usize { (*C).len() }
+            pub fn body_use() -> usize { use deplib::C as D; D.len() }
+            pub fn mod_qualified() -> usize { deplib::cfg::MODC.len() }
+            pub fn mod_imported() -> usize { MODC.len() }
+            // CONTROLS
+            pub fn pure_dep_static() -> usize { PURE_C.len() }
+            pub fn shadowed_by_an_untypable_let() -> usize { let C = "aa"; C.len() }
+            "#).unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let body = body.expect("want_json returns the report body");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let eff = |needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        for f in ["qualified", "imported", "imported_deref", "body_use"] {
+            assert_eq!(eff(f), vec!["Env"],
+                       "{f} forces the chained dep's crate-root lazy static — the spelling must not \
+                        decide whether the initializer's Env is seen:\n{body}");
+        }
+        for f in ["mod_qualified", "mod_imported"] {
+            assert_eq!(eff(f), vec!["Fs"],
+                       "{f} forces a lazy static the dep declares inside a MODULE — its published key \
+                        carries that module (`<lazy>::cfg::MODC`), so the consumer must ask for it:\n{body}");
+        }
+        assert!(eff("pure_dep_static").is_empty(),
+                "a pure init publishes no unit; its reader stays pure (per-static keying):\n{body}");
+        assert!(eff("shadowed_by_an_untypable_let").is_empty(),
+                "an untypable `let` still shadows the import — the fabrication mirror:\n{body}");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&dep);
+    }
+
+    /// THE UNBOUND FACTORY. `let c = deplib::build(); c.fetch()` routes through `dep_bound_vars`, which
+    /// only a `let` ever writes — so `deplib::build().fetch()`, the same call with the binding elided,
+    /// matched no branch and read SILENT-PURE. Not an un-attempted precision gap: a hole in the shipped
+    /// guard, against its own ruling that a key which could not be formed must never read pure.
+    ///
+    /// Every assertion is an EQUALITY between the two spellings, not a fixed expectation — the bound arm
+    /// is the shipped oracle, and pinning "must be Unknown" would freeze whichever answer the join
+    /// currently gives rather than the property that the binding is irrelevant. Both are checked with the
+    /// dep's `typeSurface.returns` present (the pair RESOLVES) and absent (the pair DISCLOSES).
+    #[test]
+    fn an_unbound_dep_factory_receiver_answers_exactly_as_the_bound_one() {
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let write_dep = |tag: &str, surface: &str| -> DepIndex {
+            let dep = std::env::temp_dir().join(format!("candor-unbound-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dep);
+            let _ = std::fs::create_dir_all(&dep);
+            std::fs::write(dep.join("report.deplib.scan.json"), format!(r#"{{
+                "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+                "package": "deplib",{surface}
+                "functions": [{{"fn": "Client::fetch", "inferred": ["Fs"], "hash": "deplib#Client::fetch"}}]}}"#)).unwrap();
+            let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+            let _ = std::fs::remove_dir_all(&dep);
+            idx
+        };
+        const SRC: &str = r#"
+            pub fn bound() -> String { let c = deplib::build(); c.fetch() }
+            pub fn unbound() -> String { deplib::build().fetch() }
+            pub fn bound_try() -> Result<String, ()> { let c = deplib::try_build()?; Ok(c.fetch()) }
+            pub fn unbound_try() -> Result<String, ()> { Ok(deplib::try_build()?.fetch()) }
+            pub async fn bound_await() -> String { let c = deplib::async_build().await; c.fetch() }
+            pub async fn unbound_await() -> String { deplib::async_build().await.fetch() }
+            // CONTROL: a module-qualified LOCAL factory. The marker is emitted the same way, and the
+            // crate root is checked against the manifest's declared deps at consumption — so a local
+            // module that merely looks crate-qualified must stay pure.
+            pub mod localmod { pub struct L; impl L { pub fn calc(&self) -> u32 { 1 } } pub fn make() -> L { L } }
+            pub fn local_factory() -> u32 { localmod::make().calc() }
+        "#;
+        let run = |tag: &str, deps_idx: &DepIndex| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-unbound-app-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                "[package]\nname = \"app\"\n[dependencies]\ndeplib = \"1\"\n").unwrap();
+            std::fs::write(d.join("src/lib.rs"), SRC).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+                quiet: true, deps_idx,
+            });
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some(needle))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect()
+        };
+        // (a) NO type surface — the receiver's type never travels, so neither spelling can form a key.
+        let bare = run("bare", &write_dep("bare", ""));
+        for (b, u) in [("bound", "unbound"), ("bound_try", "unbound_try"), ("bound_await", "unbound_await")] {
+            assert_eq!(eff(&bare, b), eff(&bare, u),
+                       "{u} must answer exactly as {b} — eliding the binding changes nothing about \
+                        whether a key could be formed:\n{bare:#}");
+            assert!(eff(&bare, u).contains(&"Unknown".to_string()),
+                    "…and that answer is a DISCLOSURE, never silence:\n{bare:#}");
+        }
+        // (b) WITH the type surface — determination before disclosure: both spellings RESOLVE to Fs.
+        let surf = run("surf", &write_dep("surf", r#"
+                "typeSurface": {"returns": {"deplib#build": "deplib#Client",
+                                            "deplib#try_build": "deplib#Client",
+                                            "deplib#async_build": "deplib#Client"}},"#));
+        for (b, u) in [("bound", "unbound"), ("bound_try", "unbound_try"), ("bound_await", "unbound_await")] {
+            assert_eq!(eff(&surf, b), eff(&surf, u), "resolved arm must agree too:\n{surf:#}");
+            assert_eq!(eff(&surf, u), vec!["Fs"],
+                       "with the dep's return type published the key IS formable — {u} resolves:\n{surf:#}");
+        }
+        // MIRROR CONTROL — a local module's factory is not a dependency's.
+        for v in [&bare, &surf] {
+            assert!(eff(v, "local_factory").is_empty(),
+                    "a module-qualified LOCAL factory must not disclose — the marker is inert unless \
+                     its root is a declared dependency:\n{v:#}");
+        }
     }
 
     #[test]
