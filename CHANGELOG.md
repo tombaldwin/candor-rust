@@ -6,6 +6,32 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### soundness ⟨0.21⟩ — a chained report that says it never read some of its own source bought silence
+
+SPEC §2 chaining rule 3 turns a report's SILENCE into a purity claim, and registering its crate as
+COVERED is exactly what silences the κ ledger's `invisible` hedge so the silence can be read that
+way. A chained report carrying a non-empty ⟨0.21⟩ `unanalyzed` has just said it never read some of
+its own source — and candor-scan granted it full coverage anyway, so chaining it was strictly WORSE
+than not chaining it: the dependency's own gate refuses to certify itself over unanalyzed code
+(`--gate-json` exits 2 for precisely this) and the consumer certified one on its behalf.
+
+Live on crates.io code: `signal-hook-registry` 1.4.8's whole `src/lib.rs` fails to parse, so its
+report carries **2 functions and an `unanalyzed` manifest naming the library itself**. Chained,
+`signal-hook`'s `PendingSignals::add_signal` — which calls `signal_hook_registry::register_sigaction`,
+i.e. installs a signal handler — read as a confident purity claim about that crate. It now carries
+`invisible: ['signal_hook_registry']`, and the crate appears in the coverage ledger.
+
+**The treatment differs from staleness, and the difference is the whole point.** A stale report's
+entries are assertions from a build this engine will not repeat, so they are downgraded to `Unknown`.
+An incomplete report's entries were derived from source it DID read and are true, so they are kept
+exactly as they are — effects, literal surfaces, reason classes and all — and only COVERAGE is
+withheld. An answered key still answers; only an unanswered one falls back to the hedge. Absent or
+explicitly empty `unanalyzed` means COMPLETE (the writer omits the key when the manifest is empty);
+anything else, malformed included, fails closed. Announced on stderr, and in `--help`.
+
+Ported from candor-ts `21277eb` (java `d1d3045`, swift `74cd8f1`) — rust was the last engine gating
+coverage on staleness alone.
+
 ### soundness — the IMPLICIT-STRINGIFICATION vein closed in BOTH backends (cardinal sin)
 
 A formatting site runs the formatted value's `Display`/`Debug` impl. candor analysed those impls

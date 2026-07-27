@@ -919,6 +919,270 @@ pub fn unlisted_fresh() { freshlib::io::danger(); }
                    "the κ ledger must name the distrusted crate and only it\n{v:#}");
     }
 
+    /// ⟨0.21⟩ THE SECOND DIRECTION OF THE INCOMPLETENESS GATE, WRITTEN FIRST (standing bar item 0).
+    ///
+    /// The rung below withholds COVERAGE from a chained report whose ⟨0.21⟩ `unanalyzed` says it never
+    /// read some of its own source. The way that rung goes wrong is by taking the ENTRIES with it — an
+    /// incomplete report's entries were derived from source it DID read and are TRUE, so treating
+    /// incompleteness like staleness (which downgrades entries to `Unknown`) would trade a disclosure
+    /// gain for a precision loss on every function the report DOES answer. This fixture is the assertion
+    /// that it does not: it must pass BEFORE the rung lands and after.
+    ///
+    /// It also pins the two things that must keep buying coverage: an ABSENT `unanalyzed` (this engine's
+    /// writer omits the key when the manifest is empty, so absence is how a complete scan says "I read
+    /// everything" — reading it as incompleteness would hedge every report ever written) and an
+    /// explicitly EMPTY one.
+    #[test]
+    fn an_incomplete_reports_entries_are_applied_unchanged_and_a_complete_one_still_covers() {
+        let d = std::env::temp_dir().join(format!("candor-incomplete-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // A report that names source it could not analyze — and still carries a real answer.
+        std::fs::write(d.join("report.brokelib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "brokelib",
+            "unanalyzed": [{{"path": "src/broken.rs", "reason": "parse error"}}],
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "brokelib#io::go",
+                            "cmds": ["/bin/ls"]}}]}}"#)).unwrap();
+        // The complete control: no `unanalyzed` key at all, which is what this engine writes.
+        std::fs::write(d.join("report.wholelib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "wholelib",
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "wholelib#io::go"}}]}}"#)).unwrap();
+        // …and the explicitly-EMPTY manifest, the other shape that means "complete".
+        std::fs::write(d.join("report.emptylib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "emptylib",
+            "unanalyzed": [],
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "emptylib#io::go"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+
+        // 1. THE ENTRY IS KEPT, VERBATIM. Not downgraded to `Unknown` the way a stale one is, and its
+        //    literal surface travels with it.
+        let e = idx.by_key.get("brokelib#io::go").expect("the incomplete report's entry must survive");
+        assert_eq!(e.effects, vec!["Exec"],
+                   "an incomplete report's entries were derived from source it DID read — downgrading \
+                    them is the staleness treatment and it does not belong here");
+        assert_eq!(e.cmds, vec!["/bin/ls".to_string()], "the literal surface travels with the entry");
+        // 2. The join gate still sees the crate — coverage and chained-ness are different questions.
+        assert!(idx.crates.contains("brokelib"), "the join must still fire: {:?}", idx.crates);
+
+        // 3. END TO END: the answered key still answers, and the two COMPLETE shapes keep their
+        //    exemption — a report that read all of its own source is silent about its pure functions on
+        //    purpose (§2 rule 3), and hedging that silence would be a FALSE disclosure.
+        let src = "\
+pub fn listed_broke() { brokelib::io::go(); }
+pub fn unlisted_whole() { wholelib::io::danger(); }
+pub fn unlisted_empty() { emptylib::io::danger(); }
+";
+        let v = scan_crate_chained("incompletekeep", "consumer",
+            "\n[dependencies]\nbrokelib = \"1\"\nwholelib = \"1\"\nemptylib = \"1\"\n", src, &idx);
+        let ent = |n: &str| v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some(n)).cloned();
+        let listed = ent("listed_broke").unwrap_or(serde_json::Value::Null);
+        assert_eq!(listed["inferred"], serde_json::json!(["Exec"]),
+                   "the incomplete report's ANSWER must still reach the consumer:\n{v:#}");
+        assert_eq!(listed["cmds"], serde_json::json!(["/bin/ls"]),
+                   "…and so must its literal surface:\n{v:#}");
+        let inv = |n: &str| -> Vec<String> {
+            ent(n).and_then(|f| f["invisible"].as_array().cloned()).unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        assert!(!inv("unlisted_whole").contains(&"wholelib".to_string()),
+                "a COMPLETE report's silence is its purity claim — an absent `unanalyzed` must not be \
+                 read as incompleteness, or every report ever written gets hedged:\n{v:#}");
+        assert!(!inv("unlisted_empty").contains(&"emptylib".to_string()),
+                "an explicitly EMPTY `unanalyzed` is a completeness claim and must buy coverage:\n{v:#}");
+        let uncovered: Vec<String> = v["coverage"]["uncovered"].as_array().into_iter().flatten()
+            .filter_map(|c| c["name"].as_str().map(String::from)).collect();
+        assert!(!uncovered.contains(&"wholelib".to_string()) && !uncovered.contains(&"emptylib".to_string()),
+                "the κ ledger must not name a crate whose report read all of its own source: {uncovered:?}\n{v:#}");
+    }
+
+    /// ⟨0.21⟩ A CHAINED REPORT THAT SAYS IT NEVER READ SOME OF ITS OWN SOURCE STILL BOUGHT SILENCE.
+    ///
+    /// SPEC §2 chaining rule 3 turns a report's SILENCE into a purity claim, and registering its crate as
+    /// COVERED is exactly what silences the κ ledger's `invisible` hedge so the silence can be read that
+    /// way. A report carrying a non-empty ⟨0.21⟩ `unanalyzed` has just said it never read some of its own
+    /// source — so chaining it was strictly WORSE than not chaining it: the dependency's own gate refuses
+    /// to certify itself over unanalyzed code (exit 2) and the consumer certified one on its behalf.
+    ///
+    ///     dep:      src/broken.rs fails to parse; `io::danger` vanishes with it
+    ///               report: package "brokelib", unanalyzed:[src/broken.rs], no `brokelib#io::danger`
+    ///     consumer: unlisted_broke() { brokelib::io::danger() }
+    ///               unchained ->  invisible: ['brokelib']    the honest hedge
+    ///               CHAINED   ->  ABSENT FROM THE REPORT     a ⟨0.21⟩ purity claim
+    ///
+    /// BOTH DIRECTIONS: the second (an answered key still answers, a COMPLETE report still covers) is
+    /// `an_incomplete_reports_entries_are_applied_unchanged_and_a_complete_one_still_covers`, written
+    /// first because narrowing coverage is exactly where the mirror defect lands (standing bar item 0).
+    #[test]
+    fn a_report_declaring_itself_incomplete_grants_no_ledger_coverage_exemption() {
+        let d = std::env::temp_dir().join(format!("candor-incomplete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(d.join("report.brokelib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "brokelib",
+            "unanalyzed": [{{"path": "src/broken.rs", "reason": "parse error"}}],
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "brokelib#io::go"}}]}}"#)).unwrap();
+        std::fs::write(d.join("report.wholelib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "wholelib",
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "wholelib#io::go"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+
+        // The JOIN gate must still see the crate — coverage decides whether SILENCE is a claim, chaining
+        // decides whether a key is worth ASKING, and conflating them costs rule 2's answers.
+        assert!(idx.crates.contains("brokelib") && idx.crates.contains("wholelib"),
+                "the join gate must still cover both: {:?}", idx.crates);
+        assert!(idx.incomplete_pkgs.contains("brokelib"),
+                "a report naming source it could not analyze must lose its coverage claim");
+        assert!(!idx.incomplete_pkgs.contains("wholelib"), "the complete control must stay covered");
+        // …and it is NOT the staleness treatment: nothing is distrusted, nothing is downgraded.
+        assert!(idx.untrusted.is_empty(), "incompleteness is not staleness: {:?}", idx.untrusted);
+
+        let src = "\
+pub fn listed_broke() { brokelib::io::go(); }
+pub fn unlisted_broke() { brokelib::io::danger(); }
+pub fn unlisted_whole() { wholelib::io::danger(); }
+";
+        let v = scan_crate_chained("incomplete", "consumer",
+            "\n[dependencies]\nbrokelib = \"1\"\nwholelib = \"1\"\n", src, &idx);
+        let inv = |name: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(name))
+                .and_then(|f| f["invisible"].as_array().cloned()).unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        // 1. THE DEFECT: a function whose only reach is into the self-declared-incomplete crate read as a
+        //    confident purity claim, with no entry and no hedge.
+        assert!(inv("unlisted_broke").contains(&"brokelib".to_string()),
+                "a fn reaching only a crate whose report says it never read some of its own source must \
+                 disclose it blind — the absent entry IS a purity claim (§2 rule 3):\n{v:#}");
+        // 2. The disclosure is per-crate, not per-entry: the joined fn discloses too.
+        assert!(inv("listed_broke").contains(&"brokelib".to_string()),
+                "the hedge is a property of the crate, not of the key that missed:\n{v:#}");
+        // 3. THE MIRROR: the complete report keeps its exemption. A report that read all of its own
+        //    source is silent about its pure functions on purpose.
+        assert!(!inv("unlisted_whole").contains(&"wholelib".to_string()),
+                "a COMPLETE report's silence is its purity claim — re-disclosing it is the mirror \
+                 defect (a false disclosure, worse than a missing one):\n{v:#}");
+        // 4. The one ledger the stderr line, the gate advisory and the `coverage` field all share.
+        let uncovered: Vec<String> = v["coverage"]["uncovered"].as_array().into_iter().flatten()
+            .filter_map(|c| c["name"].as_str().map(String::from)).collect();
+        assert_eq!(uncovered, vec!["brokelib".to_string()],
+                   "the κ ledger must name the incomplete crate and only it\n{v:#}");
+    }
+
+    /// The MANIFEST SHAPES, as a denylist: only an ABSENT and an explicitly EMPTY `unanalyzed` buy
+    /// coverage. Everything else — including shapes no conforming producer emits — fails CLOSED, because
+    /// a completeness claim that cannot be read is not a claim. The two safe shapes are asserted in the
+    /// second-direction fixture above; this is the closed half.
+    #[test]
+    fn only_an_absent_or_empty_unanalyzed_is_a_completeness_claim() {
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let probe = |unanalyzed: &str| -> bool {
+            let field = if unanalyzed.is_empty() {
+                String::new()
+            } else {
+                format!("\"unanalyzed\": {unanalyzed},")
+            };
+            let text = format!(r#"{{
+                "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+                "package": "p", {field}
+                "functions": []}}"#);
+            let v: serde_json::Value = serde_json::from_str(&text).expect("fixture json");
+            crate::deps::declares_itself_incomplete(&v)
+        };
+        // COMPLETE — the two shapes a conforming producer actually writes.
+        assert!(!probe(""), "an ABSENT `unanalyzed` is how this engine's writer says `I read everything`");
+        assert!(!probe("[]"), "an explicitly EMPTY manifest is a completeness claim");
+        // INCOMPLETE — the real one, plus every unreadable shape.
+        assert!(probe(r#"[{"path": "a.rs", "reason": "parse error"}]"#), "the real shape");
+        assert!(probe("null"), "a null completeness claim cannot be read — fail closed");
+        assert!(probe(r#""some""#), "a string completeness claim cannot be read — fail closed");
+        assert!(probe("{}"), "an object completeness claim cannot be read — fail closed");
+        assert!(probe("3"), "a number completeness claim cannot be read — fail closed");
+    }
+
+    /// A CRATE CHAINED BOTH COMPLETE AND INCOMPLETE: rust does NOT let the complete report win, and the
+    /// refusal is the same one `63bbe87` measured for fresh-vs-stale. candor-swift subtracts
+    /// (`incompletePkgs.subtract(coveredPkgs)`) and java re-registers per report; rust keeps the
+    /// conservative answer, because rust's index DROPS a key two dep entries disagree under. Grant the
+    /// crate coverage on the complete report's authority and a disagreeing key resolves to NOTHING and
+    /// reads confidently PURE — a false all-clear manufactured by the reconciliation. Two versions of one
+    /// crate in a Cargo tree is routine (7 of 167 dep reports in candor-rust's own tree, 30 of 378 in
+    /// ebman's) and the crate NAME cannot tell them apart, so this is the shape that actually occurs.
+    ///
+    /// TO FLIP THIS, if a four-way ruling goes the other way: `idx.incomplete_pkgs.subtract(&idx.crates
+    /// covered by a complete report)` at the end of the load — and fix the colliding-key half first, or
+    /// this fixture becomes a demonstration of a silent under-report instead of a guard against one.
+    #[test]
+    fn a_crate_chained_both_complete_and_incomplete_keeps_its_blind_spot_disclosure() {
+        let d = std::env::temp_dir().join(format!("candor-dualcomplete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // Both name package `duolib` and both carry `io::go` — DISAGREEING, which is the collision that
+        // makes this a soundness question rather than a bookkeeping one.
+        std::fs::write(d.join("report.whole.duolib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "duolib",
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "duolib#io::go"}}]}}"#)).unwrap();
+        std::fs::write(d.join("report.broke.duolib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "duolib",
+            "unanalyzed": [{{"path": "src/broken.rs", "reason": "parse error"}}],
+            "functions": [{{"fn": "io::go", "inferred": [], "hash": "duolib#io::go"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(idx.incomplete_pkgs.contains("duolib"),
+                "a crate one of whose reports declares itself incomplete must keep the hedge — see the \
+                 doc comment before aligning this with java/swift");
+        // The premise, asserted rather than assumed: the shared key really is withdrawn.
+        assert!(!idx.by_key.contains_key("duolib#io::go"),
+                "the collision resolved to an answer — if this ever changes the argument above changes \
+                 with it and complete-wins may become safe");
+        let v = scan_crate_chained("dualcomplete", "consumer", "\n[dependencies]\nduolib = \"1\"\n",
+            "pub fn hits_duo() { duolib::io::go(); }\n", &idx);
+        let duo = v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some("hits_duo")).cloned().unwrap_or(serde_json::Value::Null);
+        assert!(duo != serde_json::Value::Null,
+                "A FALSE ALL-CLEAR: the complete report says `duolib::io::go` runs `Exec`, the colliding \
+                 key withdrew the answer, and with the crate counted as covered the call reads \
+                 confidently PURE:\n{v:#}");
+        assert_eq!(duo["invisible"], serde_json::json!(["duolib"]),
+                   "the disclosure must NAME the crate whose report could not certify its own silence:\n{v:#}");
+    }
+
+    /// STALENESS IS CHECKED FIRST. A report that fails the §2.1 version check has already lost its
+    /// coverage; asking whether it ALSO declares itself incomplete adds nothing but a second stderr line
+    /// naming the same crate. Pinned so the two sets stay disjoint.
+    #[test]
+    fn a_stale_report_is_not_also_counted_incomplete() {
+        let d = std::env::temp_dir().join(format!("candor-staleincomplete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("report.oldbroke.scan.json"), r#"{
+            "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
+            "package": "oldbroke",
+            "unanalyzed": [{"path": "src/broken.rs", "reason": "parse error"}],
+            "functions": [{"fn": "io::go", "inferred": ["Exec"], "hash": "oldbroke#io::go"}]}"#).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(idx.untrusted.contains("oldbroke"), "the §2.1 downgrade still applies");
+        assert!(!idx.incomplete_pkgs.contains("oldbroke"),
+                "a distrusted report's completeness claim buys it nothing — the two sets must stay \
+                 disjoint or the disclosures double up: {:?}", idx.incomplete_pkgs);
+        // …and the entries take the STALENESS treatment, not the incompleteness one.
+        assert_eq!(idx.by_key.get("oldbroke#io::go").map(|e| e.effects.clone()), Some(vec!["Unknown"]));
+    }
+
     #[test]
     fn dep_index_carries_the_full_qual_as_a_third_key() {
         // The index held only `crate#leaf` and `crate#tail2`, so a consumer that knows its target
@@ -1341,6 +1605,36 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
                 "an UNCHAINED crate is already disclosed by the κ ledger — do not double-disclose:\n{unchained:#}");
         assert_eq!(fn_entry(&unchained, "go")["invisible"], serde_json::json!(["deplib"]),
                 "…and that ledger disclosure is what covers it:\n{unchained:#}");
+
+        // 4. ⟨0.21⟩ THE TRADE candor-ts MEASURED GOING THE WRONG WAY, checked here as an assertion
+        //    rather than left as an argument. Withholding coverage from a self-declared-INCOMPLETE
+        //    report sends an unanswerable key to the κ-ledger arm — and in an engine whose half-1
+        //    disclosure is gated on COVERAGE, that arm REPLACES this `Unknown[dispatch]` with the
+        //    `invisible` hedge and `deny Fs Unknown[dispatch]` silently goes exit 1 -> exit 0: a gate
+        //    lost to a fix whose whole argument is that it only adds disclosure (candor-ts `21277eb`,
+        //    which hit it for real; java `d1d3045` and swift `74cd8f1` each had to name the reason it
+        //    could not happen there). rust's third conjunct reads `deps_idx.crates` — the CHAINED set,
+        //    which an incomplete report is still in — so both voices speak. Mutate that conjunct to
+        //    `crates && !incomplete_pkgs` and this row is the one that fails.
+        let inc = std::env::temp_dir().join(format!("candor-untyped-inc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&inc);
+        let _ = std::fs::create_dir_all(&inc);
+        std::fs::write(inc.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "unanalyzed": [{{"path": "src/broken.rs", "reason": "parse error"}}],
+            "functions": [{{"fn": "Client::fetch", "inferred": ["Fs"], "hash": "deplib#Client::fetch"}}]}}"#)).unwrap();
+        let idx_inc = load_dep_reports(Some(inc.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&inc);
+        assert!(idx_inc.incomplete_pkgs.contains("deplib"), "the arm's premise: coverage IS withheld");
+        let v_inc = run("upd", &idx_inc, SRC);
+        let go_inc = fn_entry(&v_inc, "go");
+        assert!(effs(go_inc).contains(&"Unknown".to_string()),
+                "half 1 went SILENT over an incomplete report — the coverage hedge REPLACED the \
+                 unanswerable-key disclosure instead of joining it:\n{v_inc:#}");
+        assert!(go_inc["unknownWhy"].as_array().into_iter().flatten()
+                    .any(|r| r.as_str() == Some("dispatch:untyped cross-package receiver")),
+                "…and it must keep its REASON CLASS, or `deny Unknown[dispatch]` stops biting:\n{v_inc:#}");
         let _ = std::fs::remove_dir_all(&dep);
     }
 
