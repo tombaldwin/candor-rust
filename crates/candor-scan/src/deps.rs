@@ -177,6 +177,31 @@ pub(crate) struct DepIndex {
     /// Conservative on conflict: if ANY report covering a crate is stale the crate is untrusted, since
     /// a fresh report for part of a crate cannot vouch for the part the stale one covered.
     pub(crate) untrusted: std::collections::HashSet<String>,
+    /// ⟨0.21⟩ Crates whose loaded report DECLARES ITSELF INCOMPLETE — a non-empty `unanalyzed`, i.e. the
+    /// producing scan named source it could not analyze. The same door as `untrusted`, one step earlier:
+    /// staleness asks whether to believe what a report SAYS, completeness asks whether its SILENCE means
+    /// anything. §2 chaining rule 3 turns silence into a purity claim, and a report that never read some of
+    /// its own source is not entitled to that — chaining it was strictly WORSE than not chaining it, since
+    /// the dependency's own gate refuses to certify itself over unanalyzed code (`--gate-json` exits 2 for
+    /// precisely this) and the consumer was certifying one on its behalf.
+    ///
+    /// **THE TREATMENT DIFFERS FROM STALENESS, and the difference is the whole point.** A stale report's
+    /// entries are assertions from a build this engine will not repeat, so they are DOWNGRADED to
+    /// `Unknown`. An incomplete report's entries were derived from source it DID read and are TRUE, so
+    /// they are kept exactly as they are — effects, literal surfaces, reason classes and all — and only
+    /// COVERAGE is withheld. Strictly additive: an answered key still answers, an unanswered one falls
+    /// back to the κ ledger's `invisible` hedge, and no effect is ever removed.
+    ///
+    /// Distinct from [`DepFn::incomplete`], which is the ⟨sweep 30⟩ MASKING-incompleteness of a single
+    /// entry's literal surface. This one is a property of the whole REPORT.
+    ///
+    /// Ported from candor-ts `21277eb` (java `d1d3045`, swift `74cd8f1`); rust was the last engine
+    /// gating coverage on staleness alone.
+    ///
+    /// CONSERVATIVE ON CONFLICT, and NOT subtracted the way swift's `incompletePkgs` is — for the same
+    /// rust-specific reason `63bbe87` refused to align the fresh-vs-stale rule. See the fixture
+    /// `a_crate_chained_both_complete_and_incomplete_keeps_its_blind_spot_disclosure`.
+    pub(crate) incomplete_pkgs: std::collections::HashSet<String>,
     /// ⟨typeSurface.returns⟩ `{crate}#{fn qual}` -> `{crate}#{type qual}`, merged across every loaded
     /// report. Lets a consumer type a receiver bound from a dependency FACTORY, which is otherwise
     /// impossible: a pure factory is absent from the report entirely, so there is no entry on which a
@@ -184,6 +209,28 @@ pub(crate) struct DepIndex {
     /// DIFFERENT types for one fn id drop the key rather than pick, because a wrong receiver type
     /// FABRICATES where a missing one merely misses.
     pub(crate) returns: HashMap<String, String>,
+}
+
+/// ⟨0.21⟩ Does this dep report DECLARE ITSELF INCOMPLETE — does its `unanalyzed` manifest name source the
+/// producing scan could not analyze? See [`DepIndex::incomplete_pkgs`] for why it costs coverage.
+///
+/// **ABSENT means COMPLETE, PRESENT-BUT-MALFORMED means INCOMPLETE.** `candor_report` omits the key
+/// entirely when the manifest is empty (`skip_serializing_if = "Vec::is_empty"`), so absence is this
+/// engine's own way of saying "I read everything" — reading it as incompleteness would hedge every report
+/// ever written, including every one in this repo's own fixtures. Anything else — a non-empty array, a
+/// `null`, a string, an object — is a completeness claim that cannot be read, and a claim that cannot be
+/// read is not a claim: it fails CLOSED. So the only two shapes that buy coverage are an absent key and an
+/// explicitly empty array: a denylist of proven-safe shapes, never an allowlist of rejected ones.
+///
+/// (candor-java `d1d3045` reads malformed the same way. candor-ts `scan.mjs:625` and candor-swift
+/// `Deps.swift` both fail OPEN on a non-array — `Array.isArray(d.unanalyzed) && …` and `as? [Any] ?? []`
+/// — which is a row for those repos, not a divergence any conformance PART can see, since no conforming
+/// producer emits the shape.)
+pub(crate) fn declares_itself_incomplete(v: &serde_json::Value) -> bool {
+    match v.get("unanalyzed") {
+        None => false,
+        Some(u) => !u.as_array().is_some_and(|a| a.is_empty()),
+    }
 }
 
 pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
@@ -232,6 +279,17 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // v0.2+ envelope or the v0.1 bare array; the producing version comes from the envelope.
         let version = v.pointer("/candor/version").and_then(|x| x.as_str()).unwrap_or("");
         let stale = version != my_version;
+        // ⟨0.21⟩ …and a report that names source it could not analyze grants no coverage either (see
+        // `DepIndex::incomplete_pkgs`). STALENESS OUTRANKS IT — a report this engine already refuses to
+        // believe cannot be trusted about its own completeness either, and it has lost its coverage
+        // anyway, so its `unanalyzed` buys it nothing beyond the downgrade it already has and the two
+        // stderr disclosures stay disjoint instead of both naming the same crate. That precedence lives
+        // in ONE place, `cover`'s branch order, and is pinned by
+        // `a_stale_report_is_not_also_counted_incomplete`. It was ALSO written here as `!stale && …` —
+        // and the mutation round showed that conjunct failing nothing, because the `else if` already
+        // decides it. A guard that cannot be detected needs a test; a guard that costs nothing needs
+        // deleting (standing bar item 8c), and this one was the second.
+        let incomplete = declares_itself_incomplete(&v);
         let Some(fns) = v.get("functions").and_then(|x| x.as_array()).or_else(|| v.as_array()) else { continue };
         // ⟨typeSurface.returns⟩ Merge this report's published return types. GATED ON `!stale` for the
         // same reason the effects are: a report from a different producer version is not trusted, and a
@@ -272,9 +330,19 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // A STALE report registers the crate here TOO — the join must still fire so its entries can be
         // charged `Unknown` — but every name it registers is ALSO recorded `untrusted`, so the ledger
         // exemption below does not treat the distrusted report's silence as a purity claim.
+        //
+        // ⟨0.21⟩ …AND SO DOES A REPORT THAT DECLARES ITSELF INCOMPLETE, into `incomplete_pkgs`. THE ONE
+        // registration closure is what makes that a fix rather than a no-op wearing a fix's clothes:
+        // candor-java found coverage anchored TWICE (a file-level envelope registration and an entry-hash
+        // fallback) and gating one of them failed NOTHING. rust has FOUR registration sites — the
+        // envelope `package`, the JVM-shape `packages[]`, the filename fallback and each entry's `hash`
+        // prefix — and all four go through here, so there is exactly one place to gate. Counted, not
+        // assumed: `cover(` is the only writer of `crates`/`untrusted`/`incomplete_pkgs` in this file.
         let cover = |name: String, idx: &mut DepIndex| {
             if stale {
                 idx.untrusted.insert(name.clone());
+            } else if incomplete {
+                idx.incomplete_pkgs.insert(name.clone());
             }
             idx.crates.insert(name);
         };
@@ -436,6 +504,21 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         eprintln!(
             "candor-scan: {} chained dependency report(s) were produced by a DIFFERENT engine build — \
              downgraded to Unknown and granted no coverage (§2.1): {}",
+            names.len(),
+            names.join(", ")
+        );
+    }
+    // ⟨0.21⟩ The completeness disclosure, on the same channel and for the same reason: the withheld
+    // coverage is visible in the report as an `invisible` hedge and a κ-ledger row, but nothing there
+    // says WHY a crate with a chained report is being hedged. `cargo test` and the four-way conformance
+    // suite read the report and the exit code, not this (standing-bar item 7g).
+    if !idx.incomplete_pkgs.is_empty() {
+        let mut names: Vec<&str> = idx.incomplete_pkgs.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        eprintln!(
+            "candor-scan: {} chained dependency report(s) declare source they could not analyze (⟨0.21⟩ \
+             `unanalyzed`) — their entries are KEPT unchanged, but they grant NO coverage, so a key they \
+             do not answer discloses instead of reading pure: {}",
             names.len(),
             names.join(", ")
         );

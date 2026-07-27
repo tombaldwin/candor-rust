@@ -134,7 +134,13 @@ pub(crate) fn scan_main() {
                 println!("  CANDOR_DEPS=<p:…>    chain sibling reports (files or directories of *.json): an");
                 println!("                       unclassified call into a crate a report covers inherits that");
                 println!("                       function's effects + literal surfaces. Scan the dep once, chain it");
-                println!("                       everywhere; the coverage ledger names what to scan next");
+                println!("                       everywhere; the coverage ledger names what to scan next.");
+                println!("                       TWO KINDS OF REPORT GRANT NO COVERAGE, so a key they do not");
+                println!("                       answer discloses instead of reading pure: one produced by a");
+                println!("                       DIFFERENT engine build (§2.1 — its entries are also downgraded");
+                println!("                       to Unknown) and one that declares itself INCOMPLETE (a non-empty");
+                println!("                       ⟨0.21⟩ `unanalyzed` — its entries are KEPT unchanged, since they");
+                println!("                       came from source it did read; only its silence hedges)");
                 println!();
                 println!("EXAMPLES");
                 println!("  candor-scan .");
@@ -1528,14 +1534,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // one) with the `invisible` disclosure dropped. The join still fires (it is keyed on `crates`, so
     // the entries that ARE there still charge `Unknown`); only the claim that the report's SILENCE is
     // informative is withdrawn. candor-ts `651c9f9` is the same defect one repo over.
+    //
+    // ⟨0.21⟩ NEITHER DOES A REPORT THAT DECLARES ITSELF INCOMPLETE — the same door with a different key,
+    // read one step earlier: staleness asks whether to believe what a report SAYS, completeness asks
+    // whether its SILENCE means anything, and a report naming source it could not analyze has answered
+    // that. Its ENTRIES are untouched (they came from source it did read), so the change is strictly
+    // additive: an answered key still answers, an unanswered one falls back to the hedge. See
+    // `DepIndex::incomplete_pkgs`. THIS IS THE ONLY PLACE COVERAGE IS CONSUMED — `untrusted` and
+    // `incomplete_pkgs` are read nowhere else in the engine, so one conjunct here is the whole gate.
+    // candor-java's sibling needed two, because coverage was anchored twice there and gating one was a
+    // no-op wearing a fix's clothes; the anchor count is a per-engine fact and this one is 1, checked.
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {
             let real = dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str());
-            // COVERED = a report exists for this crate AND the staleness gate did not refuse it.
-            // The second conjunct is the fix; spelled as a named local so clippy's boolean
-            // simplification can't rewrite the two claims into one unreadable disjunction.
-            let covered = deps_idx.crates.contains(real) && !deps_idx.untrusted.contains(real);
+            // COVERED = a report exists for this crate AND the staleness gate did not refuse it AND the
+            // report did not declare itself incomplete. The second and third conjuncts are the two
+            // fixes; spelled as a named local so clippy's boolean simplification can't rewrite the
+            // claims into one unreadable disjunction.
+            let covered = deps_idx.crates.contains(real)
+                && !deps_idx.untrusted.contains(real)
+                && !deps_idx.incomplete_pkgs.contains(real);
             !covered
                 && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
