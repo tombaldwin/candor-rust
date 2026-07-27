@@ -362,6 +362,174 @@
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The shared source for the binder-scoping pair below: a dispatch trait with ONE effectful impl,
+    /// so anything that wrongly resolves a shadowed name through `trait_vars` shows up as `Fs`.
+    #[cfg(test)]
+    const SHADOW_SRC: &str = "\
+pub trait Store { fn go(&self); }
+pub struct DbStore;
+impl Store for DbStore { fn go(&self) { let _ = std::fs::read_to_string(\"/effectful\"); } }
+pub fn helper<F: Fn()>(f: F) { f() }
+fn opaque() -> Vec<u8> { Vec::new() }
+
+pub fn control(s: &dyn Store) { s.go(); }
+
+// The shadow binds a name the scan CANNOT type, so nothing is written to `vars` to mask a stale
+// `trait_vars` entry. Three binder forms.
+pub fn shadow_for(s: &dyn Store) { let _ = s; for s in opaque() { s.go(); } }
+pub fn shadow_range(s: &dyn Store) { let _ = s; for s in 0..3 { s.go(); } }
+pub fn shadow_adapter(s: &dyn Store) { let _ = s; opaque().iter().for_each(|s| s.go()); }
+
+// The SECOND DIRECTION: the same positions with NO shadow. If these stop reading `Fs`, the fix
+// above bought its silence by killing a real reach — which is the whole hazard of a fabrication fix.
+pub fn live_adapter(s: &dyn Store) { opaque().iter().for_each(|_p| s.go()); }
+pub fn live_closure(s: &dyn Store) { helper(|| s.go()); }
+pub fn live_for(s: &dyn Store) { for _p in opaque() { s.go(); } }
+pub fn live_block(s: &dyn Store) { { s.go(); } }
+pub fn live_iflet(s: &dyn Store, o: Option<u8>) { if let Some(_x) = o { s.go(); } }
+pub fn live_whilelet(s: &dyn Store, mut o: Option<u8>) { while let Some(_x) = o { s.go(); o = None; } }
+pub fn live_letelse(s: &dyn Store, o: Option<u8>) { let Some(_x) = o else { return }; s.go(); }
+pub fn live_loop(s: &dyn Store) { 'l: loop { s.go(); break 'l; } }
+pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
+";
+
+    #[test]
+    fn a_shadow_the_scan_cannot_type_does_not_inherit_the_outer_dispatch_binding() {
+        // A NAME-KEYED SIDE TABLE THAT OUTLIVES ITS SCOPE — candor-swift's `71de627`/`83cd607`/`42093b6`,
+        // found here in `trait_vars`. `for s in 0..3 { s.go(); }` inside `fn f(s: &dyn Store)` charged `f`
+        // with the `Fs` of `impl Store for DbStore`, on a loop variable that is a `u8`.
+        //
+        // WHAT MADE IT INVISIBLE is worth more than the fix: `scoped_var` did clear `vars`, and `vars` is
+        // consulted BEFORE `trait_vars` — so every shadow that resolves to a concrete type is masked by a
+        // fresh binding and behaves perfectly. Only a shadow the scan cannot type leaves `trait_vars` as
+        // the one map still answering for the name. The guard was right for the wrong reason (standing
+        // bar item 0b), and a fixture using a typed shadow is structurally incapable of noticing.
+        let v = scan_src_to_json("shadowbind", SHADOW_SRC);
+        let eff = |n: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(n))
+                .and_then(|f| f["inferred"].as_array().cloned()).unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        assert!(eff("control").contains(&"Fs".to_string()),
+                "the positive control lost its dispatch — this fixture proves nothing\n{v:#}");
+        for shadow in ["shadow_for", "shadow_range", "shadow_adapter"] {
+            assert!(!eff(shadow).contains(&"Fs".to_string()),
+                    "`{shadow}` inherited the OUTER `&dyn Store` binding through a shadow the scan \
+                     cannot type, and fabricated an effect on a pure function\n{v:#}");
+        }
+    }
+
+    #[test]
+    fn scoping_the_binder_did_not_kill_the_dispatch_it_scopes() {
+        // THE SECOND FIXTURE, and per standing bar item 0 it is the one that matters: a fabrication fix
+        // narrows an over-approximation, and narrowing past the real reaches is how four of five fixes in
+        // this vein went wrong. `scoped_binding` now clears TEN name-keyed maps at every binder and the
+        // four dispatch binders route through it, so every position where a trait-typed receiver is used
+        // INSIDE a scope is exercised here with no shadow present. Each must still read `Fs`.
+        let v = scan_src_to_json("shadowlive", SHADOW_SRC);
+        let eff = |n: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(n))
+                .and_then(|f| f["inferred"].as_array().cloned()).unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        for live in ["control", "live_adapter", "live_closure", "live_for", "live_block", "live_iflet",
+                     "live_whilelet", "live_letelse", "live_loop", "live_nested_block"] {
+            assert!(eff(live).contains(&"Fs".to_string()),
+                    "`{live}` LOST its dispatch reach — the binder scoping narrowed past a real call\n{v:#}");
+        }
+    }
+
+    #[test]
+    fn every_name_keyed_table_is_scoped_by_the_one_binder() {
+        // The swift lesson, ported: stop enumerating scope forms at each call site and make the ONE binder
+        // responsible, then pin the enumeration so the next side table cannot be forgotten. `scoped_binding`
+        // is exercised directly here rather than through a fixture, because a fixture can only witness the
+        // tables some shape happens to reach — and the whole defect was a table no shape reached.
+        //
+        // The split is by ROLE and is asserted, not commented: a RESOLUTION table (answers "what does this
+        // name refer to") must be cleared inside the body, since a stale entry fabricates; a HEDGING set
+        // (`closure_vars`, `fn_typed_vars`, which only ever suppress a phantom call or raise `Unknown`)
+        // must be KEPT, since clearing it would let a shadowed `name()` resolve to a free fn of that name —
+        // the fabrication mirror of the bug being fixed.
+        let uses = HashMap::new();
+        let fields = FieldIndex::new();
+        let trait_fields = TraitFieldIndex::new();
+        let trait_impls = TraitImplIndex::new();
+        let local_traits = HashMap::new();
+        let returns = ReturnIndex::new();
+        let field_elem = FieldElemIndex::new();
+        let field_elem_trait = FieldElemTraitIndex::new();
+        let enum_variants = EnumVariantIndex::new();
+        let lazy = std::collections::HashSet::new();
+        let consts = std::collections::HashMap::new();
+        let macros = std::collections::HashMap::new();
+        let mut c = CallCollector {
+            modpath: String::new(), uses: &uses, vars: HashMap::new(), trait_vars: HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
+            trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
+            fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
+            local_traits: &local_traits, returns: &returns, has_dyn_return: false,
+            field_elem: &field_elem, enum_variants: &enum_variants, elem_of: HashMap::new(),
+            field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
+            tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
+            closure_vars: Default::default(), fn_typed_vars: Default::default(),
+            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), lazy_statics: &lazy,
+            forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
+            const_strings: &consts, local_macros: &macros, macro_expanding: Default::default(),
+            str_locals: Default::default(),
+        };
+        // Every table gets an entry for the SAME name the binder is about to shadow.
+        let n = "x";
+        c.vars.insert(n.into(), "Outer".into());
+        c.trait_vars.insert(n.into(), vec!["Store".into()]);
+        c.dep_bound_vars.insert(n.into(), "deplib::build".into());
+        c.trait_quals_by_param.insert(n.into(), HashMap::from([("Store".to_string(), "deplib::Store".to_string())]));
+        c.elem_of.insert(n.into(), "Elem".into());
+        c.elem_trait_of.insert(n.into(), vec!["Doer".into()]);
+        c.tuple_of.insert(n.into(), vec![Some("A".into())]);
+        c.tuple_trait_of.insert(n.into(), vec![vec!["Doer".into()]]);
+        c.fn_alias.insert(n.into(), "effectful".into());
+        c.str_locals.insert(n.into(), "https://outer.example".into());
+        c.closure_vars.insert(n.into());
+        c.fn_typed_vars.insert(n.into());
+
+        let cleared = c.scoped_binding(n, crate::collector::Bound::Unknown, |s| {
+            // RESOLUTION tables: nothing may answer for `x` inside the shadow.
+            let mut leaked: Vec<&str> = Vec::new();
+            if s.vars.contains_key(n) { leaked.push("vars"); }
+            if s.trait_vars.contains_key(n) { leaked.push("trait_vars"); }
+            if s.dep_bound_vars.contains_key(n) { leaked.push("dep_bound_vars"); }
+            if s.trait_quals_by_param.contains_key(n) { leaked.push("trait_quals_by_param"); }
+            if s.elem_of.contains_key(n) { leaked.push("elem_of"); }
+            if s.elem_trait_of.contains_key(n) { leaked.push("elem_trait_of"); }
+            if s.tuple_of.contains_key(n) { leaked.push("tuple_of"); }
+            if s.tuple_trait_of.contains_key(n) { leaked.push("tuple_trait_of"); }
+            if s.fn_alias.contains_key(n) { leaked.push("fn_alias"); }
+            if s.str_locals.contains_key(n) { leaked.push("str_locals"); }
+            // HEDGING sets: deliberately still present (see `scoped_binding`).
+            assert!(s.closure_vars.contains(n) && s.fn_typed_vars.contains(n),
+                    "a hedging set was cleared — a shadowed `x()` can now resolve to a free fn `x`, \
+                     which is the fabrication mirror of the leak this binder exists to stop");
+            leaked
+        });
+        assert!(cleared.is_empty(),
+                "these name-keyed tables OUTLIVED their scope and answer for the shadow: {cleared:?}. \
+                 A stale resolution entry fabricates the outer binding's effect on the inner name.");
+        // …and everything is put back, or the shadow silently deletes the outer binding instead.
+        assert_eq!(c.vars.get(n).map(String::as_str), Some("Outer"));
+        assert_eq!(c.trait_vars.get(n).cloned(), Some(vec!["Store".to_string()]));
+        assert_eq!(c.dep_bound_vars.get(n).map(String::as_str), Some("deplib::build"));
+        assert!(c.trait_quals_by_param.contains_key(n));
+        assert_eq!(c.elem_of.get(n).map(String::as_str), Some("Elem"));
+        assert_eq!(c.elem_trait_of.get(n).cloned(), Some(vec!["Doer".to_string()]));
+        assert_eq!(c.tuple_of.get(n).cloned(), Some(vec![Some("A".to_string())]));
+        assert_eq!(c.tuple_trait_of.get(n).cloned(), Some(vec![vec!["Doer".to_string()]]));
+        assert_eq!(c.fn_alias.get(n).map(String::as_str), Some("effectful"));
+        assert_eq!(c.str_locals.get(n).map(String::as_str), Some("https://outer.example"));
+    }
+
     #[test]
     fn a_scan_is_byte_identical_across_repeats_so_no_answer_rides_hash_order() {
         // A DETERMINISM DEFECT IS A SOUNDNESS DEFECT WHEN THE THING CHOSEN IS AN EFFECT OWNER.

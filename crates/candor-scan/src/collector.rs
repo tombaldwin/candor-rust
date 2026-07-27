@@ -3,6 +3,18 @@
 
 use crate::*;
 
+/// What a binder knows about the name it introduces — the argument to `scoped_binding`.
+/// `Unknown` is a real case, not a fallback: a loop variable over an untypable iterator still BINDS the
+/// name, and it is precisely that case where a stale side-table entry is not masked by a fresh one.
+pub(crate) enum Bound {
+    /// A concrete type path (`vars`).
+    Concrete(String),
+    /// Dispatch-trait leaves for a `dyn`/generic element (`trait_vars`).
+    Traits(Vec<String>),
+    /// The name is bound but its type is undetermined — clear, install nothing.
+    Unknown,
+}
+
 pub(crate) struct CallCollector<'a> {
     /// The module path of the function being walked. A bare `CFG` reference names the ENCLOSING module's
     /// static, so the forcing edge must be built with this path — see `lazy_qual`.
@@ -817,45 +829,107 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    /// Bind `name -> ty` in `vars` for the duration of `body`, then RESTORE the prior binding (or
-    /// remove it). ⚠️ `vars` is function-wide, NOT block-scoped — an unscoped binding leaks into a
-    /// later same-named, uninferable var and FABRICATES its effect (the candor-swift `vars`-leak bug).
-    /// Every binder that types a pattern (loop var, closure param, match payload, tuple element) MUST
-    /// route through here so the binding is torn down after its block. A `None` type still scopes: it
-    /// REMOVES any stale binding for the body and restores it after, so a prior effectful binding can't
-    /// leak in either.
+    /// Bind `name -> ty` in `vars` for the duration of `body`. Thin wrapper over `scoped_binding`.
     fn scoped_var<R>(&mut self, name: &str, ty: Option<String>, body: impl FnOnce(&mut Self) -> R) -> R {
-        let prior = self.vars.remove(name);
-        // DEPENDENCY PROVENANCE IS SCOPED TOO. `dep_bound_vars` is keyed by bare name like `vars`, so a
-        // shadowing binding — a loop variable, a closure parameter — inherited the OUTER binding's
-        // provenance and its member calls were attributed to a dependency they have nothing to do with:
-        //     let client = deplib::build();      // provenance recorded for `client`
-        //     for client in local_items() { client.process(); }   // NOT the dep's client
-        // Saved and restored alongside `vars`, which is the invariant this helper exists to maintain.
-        let prior_prov = self.dep_bound_vars.remove(name);
-        // A block/closure-scoped shadow must not permanently overwrite the PARAMETER's crate
-        // qualification: a trait-typed local written into this map was never restored at scope exit, so
-        // the rest of the function resolved the parameter's receiver through the shadow's crate.
-        let prior_q = self.trait_quals_by_param.remove(name);
-        if let Some(t) = ty {
-            self.vars.insert(name.to_string(), t);
+        self.scoped_binding(name, ty.map(Bound::Concrete).unwrap_or(Bound::Unknown), body)
+    }
+
+    /// THE ONE BINDER. Introduce `name` for the duration of `body`, then restore everything the outer
+    /// scope knew about that name. ⚠️ Every side table here is keyed by BARE NAME and is
+    /// function-wide, NOT block-scoped — an entry that survives a shadow answers for the shadow.
+    ///
+    /// This used to scope three maps (`vars`, `dep_bound_vars`, `trait_quals_by_param`) and the four
+    /// dispatch binders hand-rolled a fourth (`trait_vars`) inline. **It looked correct and it was not,
+    /// for the reason that makes this class hard to see: the common case is saved by PRECEDENCE rather
+    /// than by scoping.** A shadow that resolves to a concrete type writes `vars`, and `vars` is
+    /// consulted before `trait_vars`, so the stale dispatch binding is masked. A shadow that resolves to
+    /// NOTHING writes nothing — and then `trait_vars` still answers:
+    ///
+    ///     fn f(s: &dyn Store) { for s in 0..3 { s.go(); } }
+    ///
+    /// charged `f` with the `Fs` of `impl Store for DbStore`, on a loop variable that is a `u8`. A
+    /// FABRICATION on a genuinely pure function — the mirror of the cardinal sin — and the same shape as
+    /// candor-swift's `71de627`/`83cd607`/`42093b6`, where a name-keyed flag was not restored at some
+    /// scope form. Reproduced in three binder forms (for-loop, adapter closure, indeterminate iterator).
+    ///
+    /// So the enumeration stops here rather than being maintained at five call sites, and the split
+    /// between what is cleared and what is kept is by ROLE, not by a list of names:
+    ///
+    /// * **RESOLUTION tables are cleared.** Everything below answers "what does this name refer to",
+    ///   so a stale entry resolves the shadow to the outer binding's target and FABRICATES its effect.
+    ///   Clearing them cannot lose a real reach: inside the body the name IS the shadow, so no use of it
+    ///   ever meant the outer binding.
+    /// * **HEDGING sets are kept** — `closure_vars` and `fn_typed_vars`. Those two only ever suppress a
+    ///   phantom call or raise an honest `Unknown` at an invocation `name()`. Clearing them would let a
+    ///   shadowed `name()` be resolved as a call to a free fn of that name, which is the fabrication
+    ///   mirror of the bug being fixed — trading a cardinal sin for the other one (standing bar item 1).
+    ///   They cost at most a spurious `Unknown`, which is the honest direction.
+    ///
+    /// `every_name_keyed_table_is_scoped_by_the_one_binder` pins the split so a new side table cannot be
+    /// added without deciding which half it is in.
+    pub(crate) fn scoped_binding<R>(&mut self, name: &str, bound: Bound, body: impl FnOnce(&mut Self) -> R) -> R {
+        // Save + clear every RESOLUTION table for this name.
+        let p_vars = self.vars.remove(name);
+        let p_traits = self.trait_vars.remove(name);
+        // DEPENDENCY PROVENANCE. Keyed by bare name like `vars`, so a shadow inherited the OUTER
+        // binding's provenance and its member calls were attributed to a dependency they have nothing to
+        // do with:  `let client = deplib::build();` then `for client in local_items() { client.go() }`.
+        let p_prov = self.dep_bound_vars.remove(name);
+        // The PER-PARAM crate qualification: a shadow must not permanently overwrite the parameter's
+        // crate, or the rest of the function resolves its receiver through the shadow's dependency.
+        let p_qual = self.trait_quals_by_param.remove(name);
+        // Collection/tuple element types — a shadow inheriting these resolves `name[0]` / `for x in name`
+        // / `let (a, _) = name` to the OUTER collection's element.
+        let p_elem = self.elem_of.remove(name);
+        let p_elem_tr = self.elem_trait_of.remove(name);
+        let p_tuple = self.tuple_of.remove(name);
+        let p_tuple_tr = self.tuple_trait_of.remove(name);
+        // A free-fn alias: `name()` inside the body would call the OUTER alias's target and inherit its
+        // whole transitive effect chain.
+        let p_alias = self.fn_alias.remove(name);
+        // A resolved host literal: a shadow inheriting it attributes the outer binding's endpoint to
+        // this one's call, which lands in the gate's `hosts` surface.
+        let p_str = self.str_locals.remove(name);
+
+        match bound {
+            Bound::Concrete(t) => {
+                self.vars.insert(name.to_string(), t);
+            }
+            Bound::Traits(leaves) => {
+                self.trait_vars.insert(name.to_string(), leaves);
+            }
+            Bound::Unknown => {}
         }
         let r = body(self);
-        match prior {
-            Some(p) => {
-                self.vars.insert(name.to_string(), p);
-            }
-            None => {
-                self.vars.remove(name);
-            }
+
+        let restore = |m: &mut HashMap<String, String>, p: Option<String>| match p {
+            Some(v) => { m.insert(name.to_string(), v); }
+            None => { m.remove(name); }
+        };
+        restore(&mut self.vars, p_vars);
+        restore(&mut self.dep_bound_vars, p_prov);
+        restore(&mut self.fn_alias, p_alias);
+        restore(&mut self.str_locals, p_str);
+        restore(&mut self.elem_of, p_elem);
+        match p_traits {
+            Some(v) => { self.trait_vars.insert(name.to_string(), v); }
+            None => { self.trait_vars.remove(name); }
         }
-        match prior_prov {
-            Some(p) => { self.dep_bound_vars.insert(name.to_string(), p); }
-            None => { self.dep_bound_vars.remove(name); }
-        }
-        match prior_q {
-            Some(p) => { self.trait_quals_by_param.insert(name.to_string(), p); }
+        match p_qual {
+            Some(v) => { self.trait_quals_by_param.insert(name.to_string(), v); }
             None => { self.trait_quals_by_param.remove(name); }
+        }
+        match p_elem_tr {
+            Some(v) => { self.elem_trait_of.insert(name.to_string(), v); }
+            None => { self.elem_trait_of.remove(name); }
+        }
+        match p_tuple {
+            Some(v) => { self.tuple_of.insert(name.to_string(), v); }
+            None => { self.tuple_of.remove(name); }
+        }
+        match p_tuple_tr {
+            Some(v) => { self.tuple_trait_of.insert(name.to_string(), v); }
+            None => { self.tuple_trait_of.remove(name); }
         }
         r
     }
@@ -1421,13 +1495,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if let syn::Expr::Closure(cl) = a {
                     if cl.inputs.len() == 1 && single_pat_ident(cl.inputs.first().unwrap()).as_deref() == Some(name.as_str()) {
                         if !elem_leaves.is_empty() {
-                            let prior = self.trait_vars.remove(&name);
-                            let prior_var = self.vars.remove(&name);
-                            self.trait_vars.insert(name.clone(), elem_leaves.clone());
-                            self.visit_expr(&cl.body);
-                            self.trait_vars.remove(&name);
-                            if let Some(p) = prior { self.trait_vars.insert(name.clone(), p); }
-                            if let Some(p) = prior_var { self.vars.insert(name.clone(), p); }
+                            self.scoped_binding(&name, Bound::Traits(elem_leaves.clone()), |s| s.visit_expr(&cl.body));
                         } else {
                             self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
                         }
@@ -1453,17 +1521,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 let leaves = self.resolve_elem_trait_leaves(&el.expr);
                 if !leaves.is_empty() {
                     self.visit_expr(&el.expr);
-                    let prior = self.trait_vars.remove(&binding);
-                    let prior_var = self.vars.remove(&binding);
-                    self.trait_vars.insert(binding.clone(), leaves);
-                    self.visit_block(&node.then_branch);
-                    self.trait_vars.remove(&binding);
-                    if let Some(p) = prior {
-                        self.trait_vars.insert(binding.clone(), p);
-                    }
-                    if let Some(p) = prior_var {
-                        self.vars.insert(binding.clone(), p);
-                    }
+                    self.scoped_binding(&binding, Bound::Traits(leaves), |s| s.visit_block(&node.then_branch));
                     if let Some((_, else_b)) = &node.else_branch {
                         self.visit_expr(else_b);
                     }
@@ -1483,20 +1541,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.visit_expr(&node.expr);
             for arm in &node.arms {
                 if let Some(binding) = some_ok_binding(&arm.pat) {
-                    let prior = self.trait_vars.remove(&binding);
-                    let prior_var = self.vars.remove(&binding);
-                    self.trait_vars.insert(binding.clone(), leaves.clone());
-                    if let Some((_, guard)) = &arm.guard {
-                        self.visit_expr(guard);
-                    }
-                    self.visit_expr(&arm.body);
-                    self.trait_vars.remove(&binding);
-                    if let Some(p) = prior {
-                        self.trait_vars.insert(binding.clone(), p);
-                    }
-                    if let Some(p) = prior_var {
-                        self.vars.insert(binding.clone(), p);
-                    }
+                    self.scoped_binding(&binding, Bound::Traits(leaves.clone()), |s| {
+                        if let Some((_, guard)) = &arm.guard {
+                            s.visit_expr(guard);
+                        }
+                        s.visit_expr(&arm.body);
+                    });
                 } else {
                     self.visit_arm(arm);
                 }
@@ -1529,17 +1579,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // would wrongly take the (dead) concrete route. A concrete-element collection has empty leaves.
             let leaves = self.resolve_elem_trait_leaves(&node.expr);
             if !leaves.is_empty() {
-                let prior = self.trait_vars.remove(&name);
-                let prior_var = self.vars.remove(&name); // dispatch-typed shadows any stale concrete binding
-                self.trait_vars.insert(name.clone(), leaves);
-                self.visit_block(&node.body);
-                self.trait_vars.remove(&name);
-                if let Some(p) = prior {
-                    self.trait_vars.insert(name.clone(), p);
-                }
-                if let Some(p) = prior_var {
-                    self.vars.insert(name.clone(), p);
-                }
+                self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.body));
             } else {
                 self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
             }
