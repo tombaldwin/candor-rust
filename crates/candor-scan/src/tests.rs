@@ -6518,6 +6518,93 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         }
     }
 
+    /// THE QUIET HALF OF THE SPAN-CROSSING-A-THREAD DEFECT, asked of the ONLY span read that reaches
+    /// output. `4f7b704` closed the loud tail (the `unreachable!` panic); its quiet sibling resolves a
+    /// span against the WRONG FILE instead of aborting, and its precondition was measured at 72.4% of
+    /// 88 927 macro re-parses — so the question is not whether it happens but whether it can reach
+    /// anything a consumer keys on.
+    ///
+    /// IT CANNOT, AND THE REASON IS STRUCTURAL: `fn_locs` is the one span read whose result is
+    /// published (`loc`), and it runs INSIDE the parse closure, on the worker that owns the map its
+    /// spans index. Every other span read after the AST moves is either re-stamped to `call_site()`
+    /// — `(0,0)`, the dummy file every thread's map is seeded with — or feeds a parse whose errors are
+    /// discarded (`parse_nested_meta` in `cfg_eval`/`is_cfg_test`; the `macro_rules!` template parse
+    /// re-parses from a STRING, which registers a file on the current thread).
+    ///
+    /// A comment stating that is an assertion (standing bar item 9), so this is the fixture. It scans a
+    /// MULTI-FILE crate — enough files that rayon splits the parse across workers on any multi-core
+    /// machine — and checks each published `loc` against the source it names: the file must exist, be
+    /// long enough, and declare that function. A span resolved against a different file fails all three.
+    ///
+    /// MEASURED at corpus scale with the same oracle: **24 008 of 24 008** non-synthetic `loc` strings
+    /// over 200 crates.io crates name a file that exists, is long enough, and declares the function —
+    /// zero missing-file, zero short-file, zero wrong-line. The oracle was CALIBRATED rather than
+    /// trusted: permuting each loc onto a DIFFERENT file of its own crate makes it flag 20 001 of
+    /// 23 657 (84.5%, including 5 507 short-file), so it has real recall against exactly the shape it
+    /// exists to detect — its blind spot is a same-named function at a similar offset in the other file.
+    /// Separately, 200 crates scanned at four rayon thread counts (800 scans) are byte-identical, so no
+    /// published field varies with how much each worker happened to parse, which is the quiet form's
+    /// whole precondition. And the seeded control: moving `fn_locs` out of the parse closure — the
+    /// defect this fixture guards against — does not go quiet, it PANICS on 57 of 60 crates.
+    ///
+    /// The honest limit: on a single-core machine rayon may run every parse on the calling thread, and
+    /// then the property holds trivially. The test still pins the oracle; it loses its power, not its
+    /// correctness.
+    #[test]
+    fn every_published_loc_names_the_source_that_declares_it() {
+        use std::fmt::Write as _;
+        let d = std::env::temp_dir().join(format!("candor-locoracle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"locoracle\"\n").unwrap();
+        // 24 modules of DIFFERENT lengths, so a loc landing in the wrong file is very likely to land
+        // past its end or on an unrelated line rather than coincidentally on the right one.
+        let mut lib = String::new();
+        for i in 0..24u32 {
+            writeln!(lib, "pub mod m{i};").unwrap();
+            let mut body = String::new();
+            for pad in 0..(i * 7) {
+                writeln!(body, "// filler {pad}").unwrap();
+            }
+            // Each fn carries a doc comment, because the item SPAN starts at the doc comment and that
+            // is exactly what a naive oracle mistakes for a wrong line (it did, on the first run).
+            writeln!(body, "/// does a thing\npub fn work{i}() {{ std::fs::read(\"/tmp/x{i}\").ok(); }}").unwrap();
+            std::fs::write(d.join("src").join(format!("m{i}.rs")), body).unwrap();
+        }
+        std::fs::write(d.join("src/lib.rs"), lib).unwrap();
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None,
+            quiet: true, deps_idx: &DepIndex::default(),
+        });
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let entries = v["functions"].as_array().cloned().unwrap_or_default();
+        assert_eq!(entries.len(), 24, "the fixture must actually produce 24 entries:\n{v:#}");
+        let mut checked = 0;
+        for e in &entries {
+            let qual = e["fn"].as_str().expect("fn");
+            let loc = e["loc"].as_str().unwrap_or_else(|| panic!("{qual} has no loc:\n{v:#}"));
+            let (rel, rest) = loc.rsplit_once(':').and_then(|(a, _col)| a.rsplit_once(':').map(|(f, l)| (f.to_string(), l.to_string())))
+                .unwrap_or_else(|| panic!("malformed loc {loc:?}"));
+            let line: usize = rest.parse().unwrap_or_else(|_| panic!("malformed loc {loc:?}"));
+            let text = std::fs::read_to_string(d.join(&rel))
+                .unwrap_or_else(|_| panic!("{qual}'s loc names a file that does not exist: {loc} — a span \
+                                            resolved against ANOTHER file's map"));
+            let lines: Vec<&str> = text.lines().collect();
+            assert!(line <= lines.len(),
+                    "{qual}'s loc is past the end of the file it names ({loc}, {} lines) — a span \
+                     resolved against another file's map", lines.len());
+            let leaf = qual.rsplit("::").next().unwrap_or(qual);
+            let window = lines[line - 1..].iter().take(4).copied().collect::<Vec<_>>().join("\n");
+            assert!(window.contains(&format!("fn {leaf}")),
+                    "{qual}'s loc {loc} does not declare it — the line reads {:?}", lines[line - 1]);
+            checked += 1;
+        }
+        assert_eq!(checked, 24, "every entry must have been checked, not skipped");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The same thread-boundary question asked of the OTHER parser candor runs on moved tokens:
     /// `cfg_eval`/`is_cfg_test` call `syn`'s `parse_nested_meta` on an attribute's tokens. A cfg
     /// predicate has no position that admits a leading `-`, so `parse_negative_lit` should never be
