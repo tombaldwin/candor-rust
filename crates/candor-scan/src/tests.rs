@@ -363,6 +363,86 @@
     }
 
     #[test]
+    fn a_scan_is_byte_identical_across_repeats_so_no_answer_rides_hash_order() {
+        // A DETERMINISM DEFECT IS A SOUNDNESS DEFECT WHEN THE THING CHOSEN IS AN EFFECT OWNER.
+        // candor-java's `nearestConcreteSuper` walked a `HashSet` and took the first hit in HASH ORDER —
+        // not ordered wrongly, NOT ORDERED (`9f8e71c`, 11 193 of 11 277 changed answers). rust already
+        // has form here too: `0eca79c`/`fee73fe` fixed a last-wins leaf map that stored the right answer
+        // BY ACCIDENT. The engine's defence is the never-guess rule — `resolve_target` filters on
+        // `v.len() == 1` rather than picking, the dep index REMOVES a colliding key, the CHA fallbacks
+        // edge to ALL hits or to none, and every reported surface is a `BTreeSet`. Nothing pinned that.
+        //
+        // THIS IS THE PIN, and it is cheap because `RandomState::new()` reseeds per construction: two
+        // scans in ONE process build their maps with DIFFERENT hash states (verified — ten HashMaps in
+        // one process give ten distinct iteration orders), so a single `break`/`.next()`/last-wins
+        // insert on an unordered container shows up as a differing report here without needing a
+        // multi-process harness.
+        //
+        // The fixture is built to make an order-dependent pick VISIBLE rather than merely possible:
+        // same-leaf types and traits in sibling modules (the collision the never-guess rule exists for),
+        // one type impl'ing several traits with DEFAULT bodies of differing effects, several impls of
+        // one trait, and it is spread over three files so the per-file decl merge order participates.
+        let d = std::env::temp_dir().join(format!("candor-determinism-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"det\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
+        // Two modules whose TYPE leaves, TRAIT leaves and METHOD leaves all collide, with DIFFERENT
+        // effects on each side — so any resolution that picks a winner instead of refusing produces a
+        // different answer depending on which side the iteration reached first.
+        // `Multi` impls TWO traits that each carry a DEFAULT `emit` of a DIFFERENT effect. The
+        // trait-default fallback walks `type_to_traits["Multi"]`, whose Vec is pushed while iterating
+        // `merged.trait_impls` — a HashMap — so this is the ONE shape where a first-hit pick would read
+        // a genuinely hash-ordered container. Verified by mutation: relaxing that site's `hits.len() == 1`
+        // to `!hits.is_empty()` makes this test, and only this test, fail.
+        std::fs::write(d.join("src/a.rs"), "\
+pub trait Sink { fn emit(&self) { let _ = std::fs::read_to_string(\"/a/default\"); } }
+pub trait Drain { fn emit(&self) { let _ = std::process::Command::new(\"drain\").status(); } }
+pub struct Multi;
+impl Sink for Multi {}
+impl Drain for Multi {}
+pub fn multi(m: &Multi) { m.emit(); }
+pub struct Job;
+impl Sink for Job {}
+pub struct Other;
+impl Sink for Other { fn emit(&self) { let _ = std::process::Command::new(\"a\").status(); } }
+pub fn run(j: &Job) { j.emit(); }
+pub fn helper() { let _ = std::fs::read_to_string(\"/a/helper\"); }
+").unwrap();
+        std::fs::write(d.join("src/b.rs"), "\
+pub trait Sink { fn emit(&self) { let _ = std::net::TcpStream::connect(\"b.example:1\"); } }
+pub struct Job;
+impl Sink for Job {}
+pub struct Third;
+impl Sink for Third { fn emit(&self) { let _ = std::fs::read_to_string(\"/b/third\"); } }
+pub fn run(j: &Job) { j.emit(); }
+pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
+").unwrap();
+        let idx = DepIndex::default();
+        let mut outs: Vec<String> = Vec::new();
+        for _ in 0..6 {
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, quiet: true, deps_idx: &idx,
+            });
+            assert_eq!(rc, 0);
+            outs.push(body.unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        // NOT VACUOUS: the fixture must actually have produced entries to disagree about (a fixture that
+        // scans to nothing would pass this test forever — standing bar item 8).
+        let first: serde_json::Value = serde_json::from_str(&outs[0]).unwrap();
+        assert!(first["functions"].as_array().unwrap().len() >= 4,
+                "the determinism fixture analysed almost nothing — it cannot witness an ordering bug\n{first:#}");
+        for (i, o) in outs.iter().enumerate().skip(1) {
+            assert_eq!(&outs[0], o,
+                "scan {i} differs from scan 0 in the SAME process — an answer is riding hash iteration \
+                 order. Every map built by a scan is reseeded, so this is a genuine ordering dependence, \
+                 not flakiness: find the `break`/`.next()`/first-hit/last-wins over a HashMap or HashSet.");
+        }
+    }
+
+    #[test]
     fn an_untrusted_report_does_not_grant_the_ledger_coverage_exemption() {
         // §2.1 downgrades a STALE report's effects to `Unknown` — and the very same load ALSO
         // registered its package as COVERED, which is what exempts a crate from the κ blind-spot
