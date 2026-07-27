@@ -363,6 +363,68 @@
     }
 
     #[test]
+    fn an_untrusted_report_does_not_grant_the_ledger_coverage_exemption() {
+        // §2.1 downgrades a STALE report's effects to `Unknown` — and the very same load ALSO
+        // registered its package as COVERED, which is what exempts a crate from the κ blind-spot
+        // ledger. So every function the distrusted report did not mention read as a confident purity
+        // claim (§2 rule 3: an absent entry IS one), with `invisible` dropped, on the authority of a
+        // report the engine had just refused to believe. candor-ts `651c9f9` is the same defect.
+        //
+        // BOTH DIRECTIONS, because narrowing coverage is exactly where the mirror defect lands
+        // (standing bar item 0): the STALE crate must lose the exemption, and the FRESH crate must
+        // KEEP it — a report we do trust is silent about its pure functions on purpose.
+        let d = std::env::temp_dir().join(format!("candor-staletrust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::create_dir_all(&d);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(d.join("report.stalelib.scan.json"), r#"{
+            "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
+            "package": "stalelib",
+            "functions": [{"fn": "io::go", "inferred": ["Exec"], "hash": "stalelib#io::go"}]}"#).unwrap();
+        std::fs::write(d.join("report.freshlib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "freshlib",
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "freshlib#io::go"}}]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+        // The JOIN must still see both crates — a stale entry can only be downgraded to `Unknown` if
+        // the join fires at all, so the fix must not reach `crates`.
+        assert!(idx.crates.contains("stalelib") && idx.crates.contains("freshlib"),
+                "the join gate must still cover both, stale included: {:?}", idx.crates);
+        assert!(idx.untrusted.contains("stalelib"), "a stale report's package must be untrusted");
+        assert!(!idx.untrusted.contains("freshlib"), "a fresh report's package must stay trusted");
+        assert_eq!(idx.by_key.get("stalelib#io::go").map(|e| e.effects.clone()), Some(vec!["Unknown"]));
+
+        // End to end: the consumer's report is what a reader sees.
+        let src = "\
+pub fn listed_stale() { stalelib::io::go(); }
+pub fn unlisted_stale() { stalelib::io::danger(); }
+pub fn unlisted_fresh() { freshlib::io::danger(); }
+";
+        let v = scan_crate_chained("staletrust", "consumer",
+            "\n[dependencies]\nstalelib = \"1\"\nfreshlib = \"1\"\n", src, &idx);
+        let inv = |name: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(name))
+                .and_then(|f| f["invisible"].as_array().cloned()).unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        // 1. the defect: a function reaching ONLY the distrusted crate must not read plain pure.
+        assert!(inv("unlisted_stale").contains(&"stalelib".to_string()),
+                "a fn whose only reach is into a DISTRUSTED report's crate must disclose it blind\n{v:#}");
+        assert!(inv("listed_stale").contains(&"stalelib".to_string()),
+                "the disclosure is per-crate, not per-entry — the joined fn discloses it too\n{v:#}");
+        // 2. the mirror: the crate we DO trust keeps its exemption, so its silence still means pure.
+        assert!(!inv("unlisted_fresh").contains(&"freshlib".to_string()),
+                "a TRUSTED report's silence is its purity claim — do not re-disclose it as blind\n{v:#}");
+        // 3. and the ledger the stderr line / gate advisory / `coverage` field all share.
+        let uncovered: Vec<String> = v["coverage"]["uncovered"].as_array().into_iter().flatten()
+            .filter_map(|c| c["name"].as_str().map(String::from)).collect();
+        assert_eq!(uncovered, vec!["stalelib".to_string()],
+                   "the κ ledger must name the distrusted crate and only it\n{v:#}");
+    }
+
+    #[test]
     fn dep_index_carries_the_full_qual_as_a_third_key() {
         // The index held only `crate#leaf` and `crate#tail2`, so a consumer that knows its target
         // PRECISELY (`deplib#sync::Client::fetch`) had no key to ask on and had to settle for tail2 —

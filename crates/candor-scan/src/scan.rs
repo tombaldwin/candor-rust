@@ -1495,10 +1495,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // every other call shape into the same crate, so adding an unrelated call elsewhere in the program
     // silently converted a disclosed blind spot into a purity claim. `blind_direct` already holds the
     // per-call-site datum and it already propagates, so the per-fn truth was present all along.
+    // AN UNTRUSTED REPORT MUST NOT GRANT COVERAGE. §2.1 downgrades a stale report's EFFECTS to
+    // `Unknown` — and the exemption below would, on the authority of that same refused report, turn
+    // every function it does not mention into a confident purity claim (§2 rule 3 makes an absent entry
+    // one) with the `invisible` disclosure dropped. The join still fires (it is keyed on `crates`, so
+    // the entries that ARE there still charge `Unknown`); only the claim that the report's SILENCE is
+    // informative is withdrawn. candor-ts `651c9f9` is the same defect one repo over.
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {
-            !deps_idx.crates.contains(dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str()))
+            let real = dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str());
+            // COVERED = a report exists for this crate AND the staleness gate did not refuse it.
+            // The second conjunct is the fix; spelled as a named local so clippy's boolean
+            // simplification can't rewrite the two claims into one unreadable disjunction.
+            let covered = deps_idx.crates.contains(real) && !deps_idx.untrusted.contains(real);
+            !covered
                 && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))

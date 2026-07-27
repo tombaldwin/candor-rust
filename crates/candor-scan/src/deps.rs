@@ -123,6 +123,20 @@ pub(crate) fn apply_dep_fn(de: &DepFn, caller: &str, s: DepSink<'_>) {
 pub(crate) struct DepIndex {
     pub(crate) by_key: HashMap<String, DepFn>,
     pub(crate) crates: std::collections::HashSet<String>,
+    /// Crates whose loaded report(s) include at least one the §2.1 staleness gate REFUSED TO TRUST.
+    ///
+    /// `crates` answers "is there a report to join against" — a stale report still has entries, and
+    /// downgrading them to `Unknown` is only possible if the join still fires, so the join gate must
+    /// keep using `crates`. It must NOT also answer "is this crate COVERED for the κ ledger", because
+    /// coverage is a claim that the report's SILENCE is informative: §2 chaining rule 3 makes an absent
+    /// entry a purity claim, and the ledger exemption is what stops the blind-spot disclosure from
+    /// saying otherwise. Granting that to a report we just refused to believe means every function the
+    /// stale report does not mention reads as a confident purity claim, with no `invisible`, on the
+    /// authority of the distrusted report — the candor-ts `651c9f9` shape.
+    ///
+    /// Conservative on conflict: if ANY report covering a crate is stale the crate is untrusted, since
+    /// a fresh report for part of a crate cannot vouch for the part the stale one covered.
+    pub(crate) untrusted: std::collections::HashSet<String>,
     /// ⟨typeSurface.returns⟩ `{crate}#{fn qual}` -> `{crate}#{type qual}`, merged across every loaded
     /// report. Lets a consumer type a receiver bound from a dependency FACTORY, which is otherwise
     /// impossible: a pure factory is absent from the report entirely, so there is no entry on which a
@@ -214,14 +228,26 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // `….<crate>.scan.json` shape still drew a "classifier doesn't cover" line here while candor-java and
         // candor-ts correctly stayed quiet). A hyphenated package name also registers in Rust ident
         // form (`dep-c` → `dep_c`), the form call paths carry.
+        //
+        // A STALE report registers the crate here TOO — the join must still fire so its entries can be
+        // charged `Unknown` — but every name it registers is ALSO recorded `untrusted`, so the ledger
+        // exemption below does not treat the distrusted report's silence as a purity claim.
+        let cover = |name: String, idx: &mut DepIndex| {
+            if stale {
+                idx.untrusted.insert(name.clone());
+            }
+            idx.crates.insert(name);
+        };
         for pkg in v
             .get("package")
             .and_then(|x| x.as_str())
             .into_iter()
             .chain(v.get("packages").and_then(|x| x.as_array()).into_iter().flatten().filter_map(|x| x.as_str()))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
         {
-            idx.crates.insert(pkg.to_string());
-            idx.crates.insert(pkg.replace('-', "_"));
+            cover(pkg.replace('-', "_"), &mut idx);
+            cover(pkg, &mut idx);
         }
         // Filename fallback (`report.<crate>.scan.json`) for pre-`package` reports, and the default
         // crate attribution for entries carrying no `hash` prefix.
@@ -234,7 +260,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // Register the crate at FILE level too: an all-pure crate's report has zero entries, and that
         // emptiness is its honest claim — the crate is covered, not invisible.
         if let Some(c) = &file_crate {
-            idx.crates.insert(c.clone());
+            cover(c.clone(), &mut idx);
         }
         for e in fns {
             let Some(qual) = e.get("fn").and_then(|x| x.as_str()) else { continue };
@@ -245,7 +271,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 .map(|(c, _)| c.to_string())
                 .or_else(|| file_crate.clone());
             let Some(krate) = krate else { continue };
-            idx.crates.insert(krate.clone());
+            cover(krate.clone(), &mut idx);
             let mut de = DepFn::default();
             if stale {
                 de.effects.push("Unknown"); // §2.1: a different producer version is not trusted
