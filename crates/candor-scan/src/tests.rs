@@ -7054,6 +7054,59 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 "two entries claiming DIFFERENT effects under one key must still be withdrawn — never guess");
     }
 
+    /// THE ANCHOR COUNT IS A CLAIM ABOUT THE SOURCE, SO THE SOURCE IS WHAT ANSWERS IT.
+    ///
+    /// `dbab8be` gated coverage on a dependency report declaring itself incomplete, and argued the gate
+    /// was complete on the grounds that rust's four registration sites (the envelope `package`, the
+    /// JVM-shape `packages[]`, the filename fallback and each entry's `hash` prefix) all funnel through
+    /// ONE `cover` closure and that coverage is consumed in exactly one place. That is the load-bearing
+    /// claim of the whole rung — candor-java found coverage anchored TWICE, where gating one anchor is
+    /// a no-op wearing a fix's clothes and its mutant fails NOTHING — and it was written as a comment.
+    /// A comment is an assertion and it will be believed (standing bar item 9); this makes it FAIL.
+    ///
+    /// VERIFIED BY ENUMERATION when this test was written, and the comment was inexact in one place:
+    /// `untrusted` and `incomplete_pkgs` are also READ by the two stderr disclosures in `load_dep_reports`,
+    /// so "read nowhere else in the engine" was wrong — "CONSUMED nowhere else" is right, and the comment
+    /// now says that. The substance held: three writes, all inside `cover`, and one `covered` predicate.
+    #[test]
+    fn coverage_has_exactly_one_anchor_and_exactly_one_consumer() {
+        let deps = include_str!("deps.rs");
+        let scan = include_str!("scan.rs");
+        let count = |hay: &str, needle: &str| hay.matches(needle).count();
+        // ONE WRITER EACH, and it is `cover`. A fifth registration site added later — the java shape —
+        // fails here rather than silently splitting the gate in two.
+        for w in ["idx.crates.insert(", "idx.untrusted.insert(", "idx.incomplete_pkgs.insert("] {
+            assert_eq!(count(deps, w), 1,
+                       "`{w}` must appear EXACTLY once, inside the one `cover` closure — coverage \
+                        registered from a second place is a gate that only half exists (candor-java \
+                        `d1d3045`: two anchors, and the mutant gating one failed no test)");
+        }
+        // …and `cover` is what holds them: the three writes sit between `let cover =` and its `};`.
+        let start = deps.find("let cover = |name: String, idx: &mut DepIndex| {").expect("the `cover` closure");
+        let end = start + deps[start..].find("\n        };").expect("the closure's end");
+        let body = &deps[start..end];
+        for w in ["idx.crates.insert(", "idx.untrusted.insert(", "idx.incomplete_pkgs.insert("] {
+            assert!(body.contains(w), "`{w}` moved OUT of the `cover` closure — the single anchor is gone");
+        }
+        // ONE CONSUMER of the two refusals. Not one READ — the stderr disclosures read them too — but
+        // one place where a report's silence is turned into a purity claim.
+        for c in ["deps_idx.untrusted.contains(", "deps_idx.incomplete_pkgs.contains("] {
+            assert_eq!(count(scan, c), 1,
+                       "`{c}` must be consumed EXACTLY once (the κ-ledger `covered` predicate). A second \
+                        consumer means the two fixes have to be repeated there, and nothing would say so");
+        }
+        // VACUITY FLOOR: if a rename makes every pattern above unfindable, the assertions pass on nothing.
+        assert!(deps.contains("pub(crate) fn load_dep_reports") && scan.contains("let covered = deps_idx.crates.contains("),
+                "this test located neither the loader nor the `covered` predicate — it is asserting about \
+                 source it can no longer find, and would go green through any of the defects above");
+        // The JOIN gate is deliberately NOT coverage and reads `crates` in several places (a stale or
+        // incomplete report's entries must still charge). Asserted so the numbers above are not read as
+        // "the dep index is touched once".
+        assert!(count(scan, "deps_idx.crates.contains(") >= 4,
+                "the join gate reads the CHAINED set at each join site — that is by design (§2.1 \
+                 downgrades entries, it does not stop the join), and this test is about COVERAGE");
+    }
+
     /// THE SECOND DIRECTION AGAIN, one notch finer, and it is the one a set-equality relaxation can
     /// walk past: two entries that AGREE ON EFFECTS and differ in a literal SURFACE. That is the
     /// majority of real collisions (1536 of 2041 on pgman's dep tree, 2255 of 3276 on ebman's) and

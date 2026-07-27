@@ -1592,10 +1592,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // whether its SILENCE means anything, and a report naming source it could not analyze has answered
     // that. Its ENTRIES are untouched (they came from source it did read), so the change is strictly
     // additive: an answered key still answers, an unanswered one falls back to the hedge. See
-    // `DepIndex::incomplete_pkgs`. THIS IS THE ONLY PLACE COVERAGE IS CONSUMED — `untrusted` and
-    // `incomplete_pkgs` are read nowhere else in the engine, so one conjunct here is the whole gate.
-    // candor-java's sibling needed two, because coverage was anchored twice there and gating one was a
-    // no-op wearing a fix's clothes; the anchor count is a per-engine fact and this one is 1, checked.
+    // `DepIndex::incomplete_pkgs`. THIS IS THE ONLY PLACE COVERAGE IS CONSUMED, so one conjunct here is
+    // the whole gate. candor-java's sibling needed two, because coverage was anchored twice there and
+    // gating one was a no-op wearing a fix's clothes; the anchor count is a per-engine fact and this one
+    // is 1. NOT "read nowhere else" — `dbab8be` said that and it is wrong: `load_dep_reports` reads both
+    // sets again for its two stderr disclosures. CONSUMED nowhere else is the claim, and it is no longer
+    // just a claim: `coverage_has_exactly_one_anchor_and_exactly_one_consumer` enumerates the writes and
+    // the consumers out of the source and fails on a second of either (four mutants, four named rows).
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {
