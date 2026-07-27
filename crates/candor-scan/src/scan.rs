@@ -1471,8 +1471,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // case): `run()` with ≥2 free `run` defs, where the silent drop really is a lost local edge.
             //
             // ── WHY THE KIND IS `ambiguous:` AND STAYS THAT WAY (measured, 2026-07-27) ────────────────
-            // `ambiguous:` is OUTSIDE SPEC §4 ⟨0.7⟩'s closed four-kind vocabulary, and the reason it is
-            // still emitted is that NONE OF THE FOUR CAN EXPRESS THIS STATE:
+            // ⟨0.24⟩ `ambiguous:` IS NOW THE FIFTH KIND IN SPEC §4's closed vocabulary. It was outside it
+            // when this engine started emitting it, and the argument below is the one that got it in —
+            // kept, because it is the record of what the kind buys. NONE OF THE OTHER FOUR CAN EXPRESS
+            // THIS STATE:
             //   • NOT `dispatch:` — that kind is reserved for unresolved member dispatch WITH a resolvable
             //     owner type, and its detail is NORMATIVE `<owner>.<member>`. A bare free call has no owner,
             //     so the detail cannot be formed, and PART 10 rejects a dot-free `dispatch:` outright. It is
@@ -1482,9 +1484,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             //     named call. And `callback:` is not the residual bucket: §6.2 reaches the residual by the
             //     ABSENCE of a reason, and `f2309a5` is the record of what reaching for it costs.
             //   • NOT `native:` / `reflect:` — no foreign boundary, no metadata-driven invocation.
-            // SPEC §6.2's reason-class table ALREADY names `ambiguous*` and rules its class `dispatch`, so
-            // the spec blesses the prefix in one section and omits it from the closed set in another.
-            // Reconciling that is a SPEC rung, not an engine edit.
+            // SPEC §6.2's reason-class table had ALWAYS named `ambiguous*` and ruled its class `dispatch`,
+            // so the spec blessed the prefix in one section and omitted it from the closed set in another
+            // — an asymmetry that survives because a CONSUMER never complains about a token it can
+            // classify, only a PRODUCER is non-conforming. ⟨0.24⟩ closed it in §4's favour of the
+            // producer. THIS ENGINE HOLDS THE VOCABULARY ONCE: as the raw `kind:detail` string it emits,
+            // read back only through `ReasonClass::classify`'s prefix table. There is no second, typed
+            // kind enum here to drift out of step with that table — which is the failure the ⟨0.24⟩
+            // "AN ENGINE HOLDS THIS VOCABULARY TWICE" paragraph records against the JVM engine, where a
+            // correct string classifier concealed a typed `Kind` enum that lacked the kind entirely. If a
+            // typed kind ever lands in this engine, `ambiguous` goes in it at the same commit.
             //
             // AND THE RENAME IS NOT FREE — the counterfactual was BUILT and RUN, not argued. With
             // `ambiguous*` reclassified to `indirect` (one line in `ReasonClass::classify`, both binaries
@@ -1496,6 +1505,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // `dispatch:untyped cross-package receiver` — requires a chained dependency to exist at all.
             // Pinned by `the_ambiguous_reason_kind_and_its_class_are_pinned`; conformance PART 10 now
             // scans a purpose-built fixture so the kind is VISIBLE there instead of silently absent.
+            // That measurement is also what §4 ⟨0.24⟩ cites for admitting the kind rather than deleting
+            // it, so the number and the vocabulary now stand or fall together.
             if !c.is_macro && !c.method && classified.is_none() && !resolved_local && suppress_bare_leaf
                 && !c.path.contains("::")
                 && by_leaf.get(&c.leaf).is_some_and(|v| v.len() >= 2)

@@ -1050,6 +1050,71 @@ fn callers_without_the_flag_omits_the_frontier_key() {
     assert_eq!(v["direct"], serde_json::json!(["mod.Sub.handle"]));
 }
 
+/// ⟨0.24⟩ THE DISPATCH FRONTIER MUST KEY OFF THE **KIND**, NOT THE **CLASS**, AND THIS IS THE ONE
+/// FIXTURE WHERE THE TWO ANSWER DIFFERENTLY.
+///
+/// §6.2 projects `ambiguous:` to class `dispatch`, so a frontier that selected sources by class would
+/// admit every one of them. But `ambiguous:` means the analyser's own name resolution failed and NO
+/// OWNER WAS EVER FORMED — condition (3), "some confirmed reacher is an override of OWNER.member", has
+/// nothing to resolve against. The `strip_prefix("dispatch:")` in `callers.rs` excludes them for free.
+///
+/// This is not a corner on this engine: `ambiguous:` is **8710 of 19607** `unknownWhy` entries over a
+/// 1062-report census, so a class-keyed frontier would flood — and under the ⟨0.24⟩ dot-free rule it
+/// would flood LOUDLY (each admitted entry disclosed verbatim) rather than silently. Still wrong.
+///
+/// The same fixture carries the END-TO-END half of the §4 forward-compatibility control: a FABRICATED
+/// `banana:whatever` kind must round-trip verbatim through the binary and classify through the
+/// conservative catch-all. `blindspots --class` is the class-keyed selector, run side by side with the
+/// kind-keyed frontier over ONE report — so the test states the distinction rather than asserting it.
+#[test]
+fn callers_include_unknown_keys_off_the_kind_so_ambiguous_and_off_vocabulary_stay_out() {
+    let f = Fixture::new("frontier-kind-vs-class");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.23" },
+  "package": "app",
+  "functions": [
+    { "fn": "app.Target.work", "inferred": ["Fs"], "direct": ["Fs"] },
+    { "fn": "app.Sub.handle", "inferred": ["Fs"], "calls": ["app.Target.work"] },
+    { "fn": "app.Real.run", "inferred": ["Unknown"], "direct": ["Unknown"], "unknownWhy": ["dispatch:app.Base.handle"] },
+    { "fn": "app.Amb.run", "inferred": ["Unknown"], "direct": ["Unknown"], "unknownWhy": ["ambiguous:same-name local defs"] },
+    { "fn": "app.Banana.run", "inferred": ["Unknown"], "direct": ["Unknown"], "unknownWhy": ["banana:whatever"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.app.scan.json", f.prefix), report).unwrap();
+    std::fs::write(format!("{}.app.scan.callgraph.json", f.prefix),
+                   r#"{"app.Sub.handle":["app.Target.work"],"app.Target.work":[]}"#).unwrap();
+    std::fs::write(format!("{}.app.hierarchy.json", f.prefix), r#"{"app.Sub":["app.Base"]}"#).unwrap();
+
+    // (1) THE FRONTIER — kind-keyed. Only the genuine `dispatch:` source, which has an owner to resolve.
+    assert_eq!(frontier_of(&f.prefix), vec![("app.Real.run".to_string(), "handle".to_string())],
+               "`ambiguous:` (class `dispatch`, no owner) and an off-vocabulary kind must both stay OUT");
+
+    // (2) THE CLASS-KEYED SELECTOR over the SAME report — and it answers `dispatch` for the ambiguous
+    // one. That is the whole point: the projection is correct, and it is still not what the frontier
+    // may select on. Were `callers.rs` keyed on `ReasonClass::classify(w) == Dispatch`, (1) would list
+    // `app.Amb.run` too.
+    let out = Command::new(bin())
+        .arg("blindspots").arg(&f.prefix).arg("--class").arg("dispatch").arg("--json")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    let names: Vec<&str> = v["sources"].as_array().unwrap().iter().map(|s| s["fn"].as_str().unwrap()).collect();
+    assert_eq!(names, ["app.Amb.run", "app.Real.run"],
+               "§6.2 projects `ambiguous:*` to class `dispatch` — a class-keyed frontier WOULD admit it: {v}");
+
+    // (3) THE FABRICATED KIND, end to end (§4 ⟨0.24⟩'s SHOULD). It reaches the catch-all class…
+    let out = Command::new(bin())
+        .arg("blindspots").arg(&f.prefix).arg("--class").arg("unresolved").arg("--json")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    let names: Vec<&str> = v["sources"].as_array().unwrap().iter().map(|s| s["fn"].as_str().unwrap()).collect();
+    assert_eq!(names, ["app.Banana.run"], "an unrecognised kind classifies `unresolved`, never dropped: {v}");
+    // …and its raw text survives the whole binary byte for byte, never normalised toward a known kind.
+    assert_eq!(v["sources"][0]["why"], serde_json::json!(["banana:whatever"]),
+               "the fabricated kind must round-trip verbatim: {v}");
+}
+
 /// The frontier's `possibleViaUnknownDispatch` entries as `(fn, viaDispatchOn)`, for one arm.
 fn frontier_of(prefix: &str) -> Vec<(String, String)> {
     frontier_of_q(prefix, "work")

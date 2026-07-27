@@ -7,8 +7,22 @@ use crate::*;
 pub(crate) fn cmd_callers(args: &[String]) -> i32 {
     // --include-unknown ⟨0.7⟩: also disclose the unresolved-dispatch frontier (possibleViaUnknownDispatch).
     // candor-query is the query engine for candor-swift too (swift is analyze-only), so this serves swift
-    // reports (which emit `dispatch:owner.member` + a hierarchy sidecar) as well as rust reports (no
-    // `dispatch:` → empty frontier). Without the flag, the {of,direct,transitive} shape is unchanged.
+    // reports (which emit `dispatch:owner.member` + a hierarchy sidecar) as well as rust ones. Without the
+    // flag, the {of,direct,transitive} shape is unchanged.
+    //
+    // ⟨0.24⟩ THIS COMMENT USED TO READ "as well as rust reports (no `dispatch:` → empty frontier)", and
+    // that was false in both halves: candor-scan emits `dispatch:` for EVERY dispatch reason it raises
+    // (20 in a 1062-report census, all `dispatch:untyped cross-package receiver`), and the frontier over a
+    // rust report is therefore not empty — it is the DOT-FREE arm below. SPEC §3.1 carried the same
+    // sentence and §4 restated it; both were corrected in the same rung. A falsified assertion has as many
+    // homes as it has restatements, and fixing the one you found is not fixing it — this is the third.
+    //
+    // THE FRONTIER SELECTS BY KIND, NOT BY CLASS, and that is load-bearing rather than incidental. §6.2
+    // projects `ambiguous:` to class `dispatch`, but an `ambiguous:` entry never formed an owner at all,
+    // so there is nothing for condition (3) to resolve against. Keying off the `dispatch:` PREFIX below
+    // excludes them for free; keying off `ReasonClass::classify(w) == Dispatch` would admit all 8710 of
+    // them on this engine's census. Pinned by
+    // `callers_include_unknown_keys_off_the_kind_so_ambiguous_and_off_vocabulary_stay_out`.
     let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
     let include_unknown = g.include_unknown;
     let Some(q) = g.positional.first().map(String::as_str) else {

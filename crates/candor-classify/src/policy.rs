@@ -66,6 +66,20 @@ impl ReasonClass {
     /// Map a raw `unknown_why` reason to its normative class — prefix-based (raw reasons carry a
     /// `kind:detail` shape, e.g. `dispatch:foo::Bar`), unrecognized → `Unresolved`. Byte-identical
     /// intent to the java `ReasonClass.classify(String)`.
+    ///
+    /// ⟨0.24⟩ THIS IS THE ONLY PLACE THIS ENGINE HOLDS SPEC §4's KIND VOCABULARY. Every other reference
+    /// to a kind is either a raw string being emitted or the `dispatch:` prefix test in candor-query's
+    /// dispatch frontier; there is no typed kind enum here. §4's "AN ENGINE HOLDS THIS VOCABULARY TWICE,
+    /// AND THE HALVES DRIFT" paragraph records the JVM engine classifying `ambiguous` correctly HERE
+    /// while its typed `Kind` enum lacked the kind entirely — one token, two answers, inside one engine,
+    /// concealed precisely because this half was right. Holding it once is why that is not reachable in
+    /// this engine; a future typed representation must be added at the same commit as its control
+    /// (`off_vocabulary_kinds_round_trip_and_classify_through_the_catch_all`).
+    ///
+    /// The five §4 kinds are `reflect`/`native`/`dispatch`/`callback`/`ambiguous`. `ambiguous` maps to
+    /// `dispatch` and rust is its only PRODUCER; `indy`/`task-handoff` are candor-java's migration kinds
+    /// and `dep:`/`dep-stale:` are swift's registered per-dependency-ENTRY kinds, reaching `Unresolved`
+    /// through the catch-all, which is the class §6.2 prescribes for them.
     pub fn classify(why: &str) -> ReasonClass {
         let w = why.trim().to_ascii_lowercase();
         if w.starts_with("reflect") || w == "dynamicmemberlookup" {
@@ -724,6 +738,43 @@ mod tests {
         assert_eq!(ReasonClass::classify("ambiguous:same-name local defs"), Dispatch);
         assert_eq!(ReasonClass::classify("unresolved"), Unresolved);
         assert_eq!(ReasonClass::classify("whatever-new"), Unresolved); // conservative catch-all
+    }
+
+    /// THE CONTROL SPEC §4 ⟨0.24⟩ MAKES A SHOULD: a FABRICATED, off-vocabulary kind must still behave as
+    /// §2 forward-compatibility requires. Without it, "added a fifth kind" and "stopped checking the kind
+    /// set" are the same diff — the classifier is one `_ =>` arm away from either.
+    ///
+    /// This engine holds the §4 vocabulary ONCE (the raw `kind:detail` string, read back only through
+    /// `classify`), so there is no typed half here to drift from it. That is why the JVM engine's failure
+    /// — a string classifier correct on `ambiguous` since July while its typed `Kind` enum lacked the kind
+    /// entirely, one token classified two ways inside one engine — is not reproducible here. If a typed
+    /// kind representation is ever added, this test is where its half gets its control.
+    #[test]
+    fn off_vocabulary_kinds_round_trip_and_classify_through_the_catch_all() {
+        use ReasonClass::*;
+        // A kind no engine emits and no section names. §2: tolerated, and classified CONSERVATIVELY —
+        // `unresolved`, the catch-all, so a narrowed `Unknown[unresolved]`/`[dynamic]`/`[*]` still bites it.
+        assert_eq!(ReasonClass::classify("banana:whatever"), Unresolved);
+        assert_eq!(ReasonClass::classify("banana:dispatch of a banana"), Unresolved,
+                   "a canonical kind appearing in the DETAIL must not leak into the classification");
+        // …and it must not be swallowed into a narrower class. These are the four wrong answers.
+        for wrong in [Reflect, Dispatch, Indirect, Native] {
+            assert_ne!(ReasonClass::classify("banana:whatever"), wrong);
+        }
+        // The five §4 ⟨0.24⟩ kinds all classify, and `ambiguous` is the fifth — pinned beside the
+        // fabricated one deliberately: one arm chain answers both, so a change that stops distinguishing
+        // them fails here rather than in the field.
+        assert_eq!(ReasonClass::classify("reflect:x"), Reflect);
+        assert_eq!(ReasonClass::classify("native:x"), Native);
+        assert_eq!(ReasonClass::classify("dispatch:Owner.member"), Dispatch);
+        assert_eq!(ReasonClass::classify("callback:x"), Indirect);
+        assert_eq!(ReasonClass::classify("ambiguous:x"), Dispatch);
+        // ⟨0.24⟩ `dep:<hash>` / `dep-stale:<pkg>` are REGISTERED §4 kinds, not migration ones — swift
+        // emits them per dependency ENTRY, and this engine CONSUMES swift/ts reports through
+        // candor-query. §6.2 pins their class as `unresolved`, which is where the catch-all lands them;
+        // pinned so a future prefix arm cannot move them without saying so.
+        assert_eq!(ReasonClass::classify("dep:9f2c1a"), Unresolved);
+        assert_eq!(ReasonClass::classify("dep-stale:somepkg"), Unresolved);
     }
 
     #[test]
