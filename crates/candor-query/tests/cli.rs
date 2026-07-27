@@ -1498,3 +1498,187 @@ fn locate_finds_the_scan_binary_and_misses_cleanly() {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
 }
+
+// ── §6.2 ⟨0.24⟩ THE `--class` VALUE GRAMMAR ────────────────────────────────────────────────────────
+//
+// `--class <c>[,<c>…]` takes ONE comma-separated list; it is NOT repeatable, and an UNRECOGNISED token is
+// a usage error (exit 2) naming the token and listing the accepted set.
+//
+// WHY THIS IS NOT THE POLICY SIDE'S DROP-WITH-A-WARNING, since the asymmetry is deliberate and looks like
+// an inconsistency until you write it down: a token dropped out of `deny E Unknown[reflect,dyanmic]`
+// leaves the WIDER rule standing, so the mistake surfaces as a gate that over-fires and somebody comes to
+// look. The same token dropped out of `--class` leaves a NARROWER filter — `unverified --class dyanmic`
+// answers a question the user never asked, with a SMALLER number, and a smaller number out of the verb
+// whose whole job is "green, but not provably so" is indistinguishable from a real all-clear. Before this
+// change both engines exited 0 on the typo. A query flag that cannot be honoured is refused.
+//
+// THE MESSAGE IS ASSERTED, NOT JUST THE EXIT CODE. Every path through this parser can exit 2 for some
+// unrelated reason (an unknown flag, a report that does not resolve, a `--class` whose value was never
+// consumed and fell through to the deprecated leading-report peel), so a bare `code == 2` would pass
+// against a mutation that removed the rule entirely.
+
+/// The fixture both verbs share: two DIRECT Unknown sources of different classes, and one function that
+/// INHERITS from the `dispatch` one — enough for a filter to select a proper subset, so the regression
+/// control below can assert a COUNT rather than only an exit code.
+fn write_class_grammar_report(f: &Fixture) -> String {
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.23" },
+  "package": "of",
+  "functions": [
+    { "fn": "domain::src_dispatch", "loc": "src/d.rs:1:1", "inferred": ["Unknown"], "direct": ["Unknown"], "unknownWhy": ["dispatch:Base::run"], "hash": "of#sd", "paths": ["/x"] },
+    { "fn": "domain::inherits",     "loc": "src/d.rs:9:1", "inferred": ["Unknown"], "hash": "of#in", "paths": ["/x"], "calls": ["domain::src_dispatch"] },
+    { "fn": "domain::src_native",   "loc": "src/d.rs:17:1", "inferred": ["Unknown"], "direct": ["Unknown"], "unknownWhy": ["native:strlen"], "hash": "of#sn", "paths": ["/x"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.of.scan.json", f.prefix), report).unwrap();
+    write_policy(f, "p.policy", "deny Exec domain\n")
+}
+
+/// The names `unverified --json` selected, with the exit code, so a caller can assert both.
+fn unverified_names(prefix: &str, pol: &str, class: Option<&str>) -> (i32, Vec<String>) {
+    let mut args: Vec<String> =
+        vec!["unverified".into(), "--report".into(), prefix.into(), "--policy".into(), pol.into(), "--json".into()];
+    if let Some(c) = class {
+        args.push("--class".into());
+        args.push(c.into());
+    }
+    let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+    let code = out.status.code().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let names = serde_json::from_str::<serde_json::Value>(text.trim())
+        .map(|v| {
+            v["unverified"].as_array().cloned().unwrap_or_default().iter()
+                .map(|h| h["fn"].as_str().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (code, names)
+}
+
+#[test]
+fn class_grammar_accepts_a_token_a_list_and_both_aliases() {
+    let f = Fixture::new("class-grammar-ok");
+    let pol = write_class_grammar_report(&f);
+
+    // (6) THE REGRESSION CONTROL, first: a well-formed filter must still select exactly what it selected
+    // before the refusal was added. A COUNT and the NAMES, not an exit code — this change must alter no
+    // selection and no verdict for input the grammar accepts.
+    let (code, all) = unverified_names(&f.prefix, &pol, None);
+    assert_eq!(code, 0);
+    let mut all_sorted = all.clone();
+    all_sorted.sort();
+    assert_eq!(all_sorted, ["domain::inherits", "domain::src_dispatch", "domain::src_native"],
+               "the unfiltered baseline the filters are a subset of");
+
+    // (1) ONE valid token — a PROPER subset (the `dispatch` source and the fn inheriting from it), which
+    // is what makes the control above discriminating: a filter that had stopped filtering would return 3.
+    let (code, mut got) = unverified_names(&f.prefix, &pol, Some("dispatch"));
+    got.sort();
+    assert_eq!((code, got.as_slice()), (0, ["domain::inherits".to_string(), "domain::src_dispatch".to_string()].as_slice()),
+               "--class dispatch selects the dispatch source + its inheritor, and nothing else");
+
+    // (2) a valid COMMA LIST is a union of its tokens.
+    let (code, list) = unverified_names(&f.prefix, &pol, Some("dispatch,native"));
+    assert_eq!(code, 0);
+    assert_eq!(list.len(), 3, "--class dispatch,native unions the two classes: {list:?}");
+    // …and the whitespace a shell-quoted list tends to carry is trimmed, not treated as a token.
+    let (code, spaced) = unverified_names(&f.prefix, &pol, Some(" dispatch , native "));
+    assert_eq!((code, spaced.len()), (0, 3), "a spaced list is the same list");
+
+    // (3) BOTH ALIASES. `dynamic` is not optional: §6.2's own normative diagnostic (`--class dynamic` ==
+    // unfiltered minus setup-only) is stated in terms of it, so an engine that refused it as unrecognised
+    // would break the standing test every engine carries. `*` is all six.
+    let (code, dynamic) = unverified_names(&f.prefix, &pol, Some("dynamic"));
+    assert_eq!((code, dynamic.len()), (0, 3), "`dynamic` is every genuine class; no fixture entry is setup-only");
+    let (code, star) = unverified_names(&f.prefix, &pol, Some("*"));
+    assert_eq!((code, star.len()), (0, 3), "`*` is all six classes");
+    // the mirror control: a valid class nothing here carries selects NOTHING, at exit 0. This is what
+    // separates "the token was accepted" from "the filter stopped filtering".
+    let (code, none) = unverified_names(&f.prefix, &pol, Some("reflect"));
+    assert_eq!((code, none.len()), (0, 0), "a valid class with no candidate is an empty answer, not an error");
+}
+
+#[test]
+fn class_grammar_refuses_an_unrecognised_token_exit_2() {
+    let f = Fixture::new("class-grammar-typo");
+    let pol = write_class_grammar_report(&f);
+    for verb in [
+        vec!["unverified", "--report", &f.prefix, "--policy", &pol, "--json"],
+        vec!["blindspots", "--report", &f.prefix, "--json"],
+    ] {
+        let mut args = verb.clone();
+        args.push("--class");
+        args.push("dyanmic"); // the transposition a human actually makes
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?} must be a usage error, got:\n{err}");
+        // NAME THE TOKEN. Without this the assertion passes against any other exit-2 path in the parser.
+        assert!(err.contains("dyanmic"), "the message must name the offending token, got:\n{err}");
+        assert!(err.contains("unrecognised reason-class"),
+                "…and say what is wrong with it, rather than exiting 2 for some other reason:\n{err}");
+        // LIST THE ACCEPTED SET — all six classes and both aliases, so the line can be fixed from the
+        // message alone.
+        for t in ["reflect", "dispatch", "indirect", "native", "unresolved", "setup", "dynamic", "*"] {
+            assert!(err.contains(t), "the accepted set must list `{t}`, got:\n{err}");
+        }
+        // NO PARTIAL ANSWER. A refused filter must not also print a (narrower) result document — that is
+        // the exact fail-open, one exit code away.
+        assert!(out.stdout.is_empty(), "a refused --class must emit no answer at all: {:?}", String::from_utf8(out.stdout));
+    }
+}
+
+#[test]
+fn class_grammar_refuses_a_repeated_flag_exit_2() {
+    let f = Fixture::new("class-grammar-repeat");
+    let pol = write_class_grammar_report(&f);
+    for verb in [
+        vec!["unverified", "--report", &f.prefix, "--policy", &pol, "--json"],
+        vec!["blindspots", "--report", &f.prefix, "--json"],
+    ] {
+        let mut args = verb.clone();
+        args.extend(["--class", "unresolved", "--class", "native"]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(2), "a repeated --class must be a usage error, got:\n{err}");
+        // BOTH tokens are individually VALID, so this cannot be the unrecognised-token path — and it must
+        // not be the unknown-flag path either (which is what a `--class` that stopped consuming its value
+        // would produce). Asserting the message is what makes the two rules distinguishable: an
+        // exit-code-only test passes against a mutation that deleted this one.
+        assert!(err.contains("more than once"), "the message must say the flag was repeated, got:\n{err}");
+        assert!(err.contains("not a union"),
+                "…and that the two lists are not unioned — last-wins and union are BOTH silent misreadings:\n{err}");
+        assert!(!err.contains("unrecognised reason-class"),
+                "`unresolved` and `native` are both valid tokens; this is the repeat rule, not the token rule:\n{err}");
+        assert!(out.stdout.is_empty(), "a refused --class must emit no answer at all");
+    }
+}
+
+#[test]
+fn blindspots_class_grammar_keeps_its_selection() {
+    // The regression control for the OTHER verb: `blindspots --class` is the SOURCE view (§6.2: direct-only
+    // by definition there), so its counts differ from `unverified`'s and must be pinned separately.
+    let f = Fixture::new("class-grammar-bs");
+    write_class_grammar_report(&f);
+    let names = |class: Option<&str>| -> (i32, Vec<String>) {
+        let mut args: Vec<String> = vec!["blindspots".into(), "--report".into(), f.prefix.clone(), "--json".into()];
+        if let Some(c) = class {
+            args.push("--class".into());
+            args.push(c.into());
+        }
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        let code = out.status.code().unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(text.trim()).unwrap_or(serde_json::json!({}));
+        let mut n: Vec<String> = v["sources"].as_array().cloned().unwrap_or_default().iter()
+            .map(|s| s["fn"].as_str().unwrap_or_default().to_string()).collect();
+        n.sort();
+        (code, n)
+    };
+    assert_eq!(names(None), (0, vec!["domain::src_dispatch".to_string(), "domain::src_native".to_string()]),
+               "both DIRECT sources; `domain::inherits` is inherited-only and is not a source");
+    assert_eq!(names(Some("native")), (0, vec!["domain::src_native".to_string()]));
+    assert_eq!(names(Some("dispatch,native")), (0, vec!["domain::src_dispatch".to_string(), "domain::src_native".to_string()]));
+    assert_eq!(names(Some("dynamic")).1.len(), 2, "`dynamic` drops nothing here — no setup-class source");
+    assert_eq!(names(Some("*")).1.len(), 2);
+    assert_eq!(names(Some("reflect")), (0, vec![]), "a valid class with no source is an empty answer");
+}

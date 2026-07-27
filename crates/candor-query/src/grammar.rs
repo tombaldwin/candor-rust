@@ -148,10 +148,27 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
             "--stats" => stats = true,
             "--class" => {
                 if let Some(v) = args.get(i + 1) {
+                    // SPEC §6.2 ⟨0.24⟩: `--class` takes ONE comma-separated list and is NOT REPEATABLE — a
+                    // second occurrence is a usage error, not a union. Neither of the two plausible silent
+                    // readings is safe: last-wins (what this did) DROPS the first list, and a union would
+                    // WIDEN past what the second flag asked for. Both answer a different question than the
+                    // line on screen, and on `unverified` a quietly different question comes back as a
+                    // quietly different NUMBER.
+                    if class.is_some() {
+                        eprintln!(
+                            "candor-query: --class given more than once — it takes ONE comma-separated \
+                             list (`--class a,b`), not a repeated flag\n  \
+                             a second occurrence is a usage error, not a union (SPEC §6.2 ⟨0.24⟩)"
+                        );
+                        std::process::exit(2);
+                    }
                     class = Some(v.clone());
                     i += 1;
                 } else {
-                    eprintln!("candor-query: --class requires a <class,…> argument (reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)");
+                    eprintln!(
+                        "candor-query: --class requires a <class,…> argument\n  accepted: {}",
+                        crate::containment::CLASS_TOKENS
+                    );
                     std::process::exit(2);
                 }
             }
