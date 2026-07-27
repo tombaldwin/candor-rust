@@ -512,10 +512,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let mut decls_per_file: Vec<(String, String, FileDecls)> = Vec::new(); // (rel, content_hash, decls)
     let mut parsed_files: HashMap<String, syn::File> = HashMap::new();     // rel -> parsed (round 1)
     let mut parsed_locs: HashMap<String, Vec<String>> = HashMap::new();    // rel -> per-fn loc (walk order)
-    // rel -> (decl_index_hash, fninfos, the abort disclosure recorded with them). The third element is
-    // what makes an EMPTY `fninfos` unambiguous: see `FileCache::aborted`.
-    #[allow(clippy::type_complexity)]
-    let mut cached_fninfos: HashMap<String, (String, Vec<FnInfo>, Option<String>)> = HashMap::new();
+    // rel -> (decl_index_hash, fninfos) for entries whose FnInfos are REUSABLE. An entry carrying
+    // `FileCache::aborted` never lands here — see the `aborted` arm below.
+    let mut cached_fninfos: HashMap<String, (String, Vec<FnInfo>)> = HashMap::new();
     // Files whose on-disk entry was already valid for BOTH content + the decl index it recorded — no
     // re-write needed unless the merged index moves (checked after the digest). Lets a no-op / body-only
     // re-scan skip rewriting the whole cache dir (the dominant cost when nothing changed).
@@ -523,10 +522,34 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     for ((rel, ch, cached), r1) in per_file.into_iter().zip(round1) {
         match cached {
             Some(fc) => {
-                // Decls reusable; the FnInfos are CONDITIONALLY reusable (checked after the digest).
-                disk_decl_hash.insert(rel.clone(), fc.decl_index_hash.clone());
+                // The DECLS are reusable either way: they were derived from a successful parse of these
+                // exact bytes, before the walk that may have aborted. The FnInfos are conditionally
+                // reusable (the decl-index check, after the digest) — unless the entry is POISONED.
                 decls_per_file.push((rel.clone(), ch, fc.decls));
-                cached_fninfos.insert(rel, (fc.decl_index_hash, fc.fninfos, fc.aborted));
+                if fc.aborted.is_some() {
+                    // A CACHED ABORT IS A MARKER THAT THESE FNINFOS WERE NEVER DERIVED, NOT AN ANSWER TO
+                    // REPLAY. `39bbc8b` persisted the abort so a warm run could not read `fninfos: []`
+                    // as "analysed, no functions" (the false all-clear); it then replayed the disclosure
+                    // off a content-hash + decl-index match, on the argument that those two are exactly
+                    // the conditions under which reusing the FnInfos is sound. That argument does not
+                    // hold, because the abort is not a function of either. `4f7b704` established the
+                    // mechanism: proc-macro2's fallback `Span` indexes a THREAD-LOCAL source map, and
+                    // whether a moved span lands past the walking thread's map depends on how much each
+                    // rayon worker happened to parse — i.e. on the rest of the crate and on the work
+                    // split, not on this file's bytes. A one-off therefore LATCHED, and `--incremental`
+                    // is exactly the mode nobody re-runs from cold: a permanent spurious `unanalyzed`
+                    // and a gate that can never go green (the mirror of the sin, but still a cached
+                    // wrong answer).
+                    //
+                    // So: keep neither the FnInfos nor the `disk_decl_hash` shortcut. Every downstream
+                    // gate reads `cached_fninfos`, so dropping the entry HERE is the single decision —
+                    // the round-2 re-parse picks the file up (its `cached_fninfos` miss reads as stale),
+                    // pass B walks it, and it either aborts again and discloses by the same cold path,
+                    // byte for byte, or it produces the answer it always owed and the marker clears.
+                    continue;
+                }
+                disk_decl_hash.insert(rel.clone(), fc.decl_index_hash.clone());
+                cached_fninfos.insert(rel, (fc.decl_index_hash, fc.fninfos));
             }
             None => {
                 // A freshly-parsed file (or a parse failure → skip the file entirely, as before).
@@ -566,6 +589,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
     // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
     // set is empty; on a decl edit it is "everything else", re-parsed in parallel (degrade-to-full).
+    // A file whose cached entry carried an ABORT has no `cached_fninfos` row at all (dropped above), so
+    // `unwrap_or(true)` puts it here: the re-attempt is a plain stale-FnInfos re-parse, no special case.
     let need_passb: Vec<&str> = decls_per_file
         .iter()
         .map(|(rel, _, _)| rel.as_str())
@@ -610,26 +635,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // re-attempt from scratch, which is the fail-closed direction.
     let mut no_cache: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (rel, _, _) in &decls_per_file {
-        let reuse = cached_fninfos
-            .get(rel)
-            .filter(|(h, ..)| *h == decl_index_hash)
-            .map(|(_, v, a)| (v.clone(), a.clone()));
-        if let Some((v, aborted)) = reuse {
-            // REPLAY the disclosure that came with the entry. Same content hash AND same decl index is
-            // exactly the condition under which reusing `fninfos` is sound, so it is also exactly the
-            // condition under which the walk that produced them would abort again — the warm run must
-            // therefore say what the cold run said, byte for byte, or it certifies a hole it inherited.
-            if let Some(reason) = aborted {
-                eprintln!("candor-scan: {rel} could not be analyzed (the parser aborted); disclosed as unanalyzed [cached]");
-                had_parse_failure = true;
-                unanalyzed_units.push(candor_report::UnanalyzedUnit { path: rel.clone(), reason });
-            }
+        // Reuse only a set that was DERIVED. An entry whose walk aborted never reaches `cached_fninfos`
+        // (see the `aborted` arm above), so there is nothing here that could replay a disclosure: a file
+        // that aborted last run is re-walked, and earns its disclosure again or loses it.
+        let reuse = cached_fninfos.get(rel).filter(|(h, _)| *h == decl_index_hash).map(|(_, v)| v.clone());
+        if let Some(v) = reuse {
             fns.extend(v.iter().cloned());
             continue;
         }
         // Re-derive: the file needs its parse. Reaching the `else` means its DECLS came from cache (so
-        // it was never in round 1) but the decl index moved and the round-2 re-read/re-parse failed —
-        // the file changed or became unreadable mid-scan. It contributes no FnInfos, which under §2
+        // it was never in round 1) but the round-2 re-read/re-parse failed — the file changed or became
+        // unreadable mid-scan. (Round 2 covers two entrances: the decl index moved, or the entry carried
+        // an abort and its FnInfos were refused. The reason below names neither, because from here they
+        // are the same event and only one of them is true.) It contributes no FnInfos, which under §2
         // rule 3 is a purity claim over every function in it, so disclose it exactly like a round-1
         // failure and refuse to cache anything for it.
         let Some(file) = parsed_files.get(rel) else {
@@ -637,7 +655,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             had_parse_failure = true;
             unanalyzed_units.push(candor_report::UnanalyzedUnit {
                 path: rel.clone(),
-                reason: "source failed to re-read/parse after a decl-index change".into(),
+                reason: "source failed to re-read/parse during re-derivation".into(),
             });
             no_cache.insert(rel.clone());
             continue;
@@ -721,16 +739,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 let fninfos = fresh_fninfos
                     .get(rel)
                     .cloned()
-                    .or_else(|| cached_fninfos.get(rel).map(|(_, v, _)| v.clone()))
+                    .or_else(|| cached_fninfos.get(rel).map(|(_, v)| v.clone()))
                     .unwrap_or_default();
-                // The disclosure travels with the FnInfos it belongs to, from the same source: this
-                // run's abort if the file was walked here, else the one that came with the entry being
-                // reused. A file freshly walked WITHOUT aborting clears any stale flag.
-                let aborted = match (fresh_aborted.get(rel), fresh_fninfos.contains_key(rel)) {
-                    (Some(reason), _) => Some(reason.clone()),
-                    (None, true) => None,
-                    (None, false) => cached_fninfos.get(rel).and_then(|(.., a)| a.clone()),
-                };
+                // The marker travels with the FnInfos it belongs to, and it can only come from THIS run:
+                // a file that aborted last run was re-walked above, so either it aborted again (and is in
+                // `fresh_aborted`) or it produced a real set and the marker is gone. That is what keeps
+                // an abort from surviving more than the one run that observed it — the cache can record
+                // "these FnInfos were never derived", but it can never answer with a stale abort.
+                let aborted = fresh_aborted.get(rel).cloned();
                 files.insert(
                     rel.clone(),
                     FileCache {

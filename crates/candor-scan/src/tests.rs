@@ -5631,22 +5631,28 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// crash it replaced, which at least failed closed, and worse still for being reproducible.
     ///
     /// Three arms, because each is satisfiable by a wrong fix:
-    ///   - COLD then WARM on the SAME bytes: same exit code, same `unanalyzed`, same `functions`.
+    ///   - COLD then WARM on the SAME bytes, THE FILE STILL ABORTING: same exit code, same
+    ///     `unanalyzed`, same `functions`. This is the requirement the original defect established and
+    ///     it holds however the warm run is implemented — by replaying the cached disclosure or, as
+    ///     now, by re-attempting the walk and aborting again.
     ///   - the CONTROL, no injection anywhere: warm must NOT invent a disclosure, and must still reuse
     ///     the cache (a fix that simply refuses to cache, or discloses on every warm run, passes arm 1
     ///     and fails here).
     ///   - the round-1 read/parse failure is untouched: it already re-disclosed every run, because it
     ///     `continue`s BEFORE the write-back. That asymmetry is what located the defect.
+    ///
+    /// The injection stays ON for the warm arm on purpose. Its sibling
+    /// (`a_cached_abort_is_re_attempted_rather_than_latched`) is the other direction — the abort is
+    /// NOT a function of the file's bytes, so a warm run over a file that no longer aborts must not be
+    /// handed the old answer.
     #[test]
-    fn a_warm_incremental_run_replays_a_contained_abort() {
+    fn a_warm_incremental_run_over_a_still_aborting_file_says_what_the_cold_run_said() {
         let _lock = abort_injection_lock();
         let (d, policy) = abort_fixture("warmabort");
         let out = |n: &str| d.join(n).to_string_lossy().into_owned();
 
         let (cold_rc, cold) = incremental_scan(&d, &out("cold"), &policy, Some("src/bad.rs"));
         let (warm_rc, warm) = incremental_scan(&d, &out("warm"), &policy, Some("src/bad.rs"));
-        // …and with the injection GONE, so the disclosure can only come from the cache itself.
-        let (warm2_rc, warm2) = incremental_scan(&d, &out("warm2"), &policy, None);
 
         assert_eq!(cold_rc, 2, "a configured gate must not certify a scan with a hole in it:\n{cold:#}");
         assert_eq!(
@@ -5654,11 +5660,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "THE WARM RUN CERTIFIED A HOLE THE COLD RUN REFUSED TO: the cache persisted the aborted \
              file as an empty-but-confident entry.\ncold:\n{cold:#}\nwarm:\n{warm:#}"
         );
-        assert_eq!(warm2_rc, cold_rc, "the replay must not depend on the fault still being injected:\n{warm2:#}");
-        for (name, v) in [("warm", &warm), ("warm2", &warm2)] {
+        {
+            let (name, v) = ("warm", &warm);
             assert_eq!(
                 v["unanalyzed"], cold["unanalyzed"],
-                "{name}: the aborted file must be disclosed VERBATIM off the cache:\n{v:#}"
+                "{name}: the aborted file must be disclosed IDENTICALLY to the cold run:\n{v:#}"
             );
             assert_eq!(v["functions"], cold["functions"], "{name}: the surviving files' effects moved:\n{v:#}");
             assert_eq!(v["analyzed"], cold["analyzed"], "{name}: the coverage ledger moved:\n{v:#}");
@@ -5684,6 +5690,65 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                  never go green:\n{c2:#}");
         assert_eq!(c1["functions"], c2["functions"], "the warm control's reuse is not byte-equal:\n{c2:#}");
         let _ = std::fs::remove_dir_all(&dc);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// THE ABORT IS NOT A FUNCTION OF THE FILE'S BYTES, so a content-hash match is the wrong licence to
+    /// replay it. `4f7b704` established the mechanism: proc-macro2's fallback `Span` indexes a
+    /// THREAD-LOCAL source map, and whether a moved span falls past the walking thread's map "depends on
+    /// how much each thread happened to parse, i.e. on the rest of the crate" — which under rayon
+    /// work-stealing differs between two runs over identical input. So the cached-abort replay latched a
+    /// ONE-OFF into the cache and served it forever, on a file that now walks perfectly well.
+    ///
+    /// The direction is the mirror of the defect it was fixing rather than the same one — a spurious
+    /// `unanalyzed` entry and a gate that cannot go green, not a false all-clear — but it is still a
+    /// cached wrong answer that no amount of re-running clears, and `--incremental` is exactly where
+    /// nobody re-runs from cold. The treatment is to RE-ATTEMPT: a cached abort marks the entry's
+    /// FnInfos as underived, the file goes back through parse + walk, and it either aborts again (and
+    /// discloses, by the cold path, verbatim) or produces the answer it always owed.
+    ///
+    /// Removing the env-var injection between runs is a faithful model of that: the injection is
+    /// deliberately outside the cache key, so run 2's bytes, decl index and cache entry are all
+    /// identical to run 1's and the ONLY thing that changed is whether the walk aborts — which is
+    /// precisely the variable the real trigger moves and the content hash cannot see.
+    #[test]
+    fn a_cached_abort_is_re_attempted_rather_than_latched() {
+        let _lock = abort_injection_lock();
+        let (d, policy) = abort_fixture("latchabort");
+        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+
+        let (rc1, v1) = incremental_scan(&d, &out("a1"), &policy, Some("src/bad.rs"));
+        assert_eq!(rc1, 2, "the fixture must abort first:\n{v1:#}");
+        assert!(v1["unanalyzed"].as_array().is_some_and(|u| u.iter().any(|x| x["path"] == "src/bad.rs")),
+                "the fixture stopped exercising the abort at all:\n{v1:#}");
+        // The abort DID ride into the cache — this is what makes run 2 a test of the replay gate and
+        // not of a cache that simply forgot. (Also the original defect's guard: the entry must not be
+        // an indistinguishable `fninfos: []`.)
+        let cache: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(d.join(".candor/cache/scan-cache.json")).unwrap()).unwrap();
+        assert!(cache["files"]["src/bad.rs"]["aborted"].is_string(),
+                "the aborted file was cached as an ordinary analysed entry:\n{cache:#}");
+
+        // Run 2: SAME bytes, SAME decl index, SAME cache entry — only the walk no longer aborts.
+        let (rc2, v2) = incremental_scan(&d, &out("a2"), &policy, None);
+        assert!(v2["unanalyzed"].as_array().is_none_or(|u| u.is_empty()),
+                "A ONE-OFF ABORT WAS LATCHED INTO THE CACHE: the file walks cleanly now and the warm run \
+                 still discloses it as unanalyzed, forever, off a content hash that cannot see the \
+                 difference:\n{v2:#}");
+        assert_eq!(rc2, 1,
+                   "…and the gate can never go green again — it must now FIND the re-walked file's Fs, \
+                    not refuse to certify a hole that isn't there:\n{v2:#}");
+        let quals: Vec<&str> = v2["functions"].as_array().into_iter().flatten()
+            .filter_map(|f| f["fn"].as_str()).collect();
+        assert!(quals.iter().any(|q| q.contains("also_reads")),
+                "the re-attempt disclosed nothing but derived nothing either — the effects are still \
+                 missing from the report:\n{v2:#}");
+
+        // …and the cleared state is what got cached: run 3 neither re-discloses nor loses the effect.
+        let (rc3, v3) = incremental_scan(&d, &out("a3"), &policy, None);
+        assert_eq!(rc3, 1, "the cleared state did not persist into the next warm run:\n{v3:#}");
+        assert_eq!(v3["functions"], v2["functions"], "the re-attempt did not cache what it derived:\n{v3:#}");
+        assert_eq!(v3["unanalyzed"], v2["unanalyzed"], "the disclosure came back on run 3:\n{v3:#}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
