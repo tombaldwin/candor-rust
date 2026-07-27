@@ -611,6 +611,75 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
     }
 
     #[test]
+    fn a_chained_deps_unknown_arrives_with_the_reason_class_that_explains_it() {
+        // A TRUST MARKER FAILING OPEN — candor-ts `e66f29e`/`4dad22d`, found here in the chained-dep join.
+        // The join writes `Unknown` straight into `direct`, so the CALLER is the source and there is no
+        // callee entry in this report to inherit a reason from — but it carried no `unknownWhy` at all.
+        // SPEC §4 requires one on a direct source, and the gate's documented fallback ("an Unknown with no
+        // recorded reason is `unresolved`") then answered with the catch-all, so a class-targeted
+        // `deny E Unknown[indirect]` / `[dispatch]` read GREEN over a dependency whose OWN report named
+        // the class. Not a full fail-open — bare `deny Unknown` and `Unknown[dynamic]` still fired — which
+        // is exactly why it survived: the strictest and the broadest gates both worked.
+        //
+        // VERBATIM, not re-derived. `dispatch:<owner>.<member>` carries the one NORMATIVE detail in the §4
+        // vocabulary, and it is what a consumer resolves overrides through; mapping the reason back through
+        // `ReasonClass` and re-emitting a canonical token would destroy precisely that.
+        let d = std::env::temp_dir().join(format!("candor-depwhy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::create_dir_all(&d);
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(d.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [
+              {{"fn": "io::murky", "inferred": ["Unknown"], "unresolved": true,
+                "unknownWhy": ["dispatch:lib.Store.save"], "hash": "deplib#io::murky"}},
+              {{"fn": "io::mute", "inferred": ["Unknown"], "unresolved": true,
+                "hash": "deplib#io::mute"}}
+            ]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+        let v = scan_crate_chained("depwhy", "consumer", "\n[dependencies]\ndeplib = \"1\"\n",
+            "pub fn from_named() { deplib::io::murky(); }\npub fn from_silent() { deplib::io::mute(); }\n",
+            &idx);
+        let why = |n: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(n))
+                .and_then(|f| f["unknownWhy"].as_array().cloned()).unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        assert_eq!(why("from_named"), vec!["dispatch:lib.Store.save".to_string()],
+                   "the dep's reason must cross the join VERBATIM — the `owner.member` detail is normative\n{v:#}");
+        // A dep that declares `Unknown` and no reason (an older report, a foreign producer) must still not
+        // leave the consumer's entry unmarked: fail CLOSED with a canonical §4 kind.
+        let silent = why("from_silent");
+        assert_eq!(silent.len(), 1, "a reasonless dep Unknown left the consumer unmarked\n{v:#}");
+        assert!(silent[0].starts_with("callback:"),
+                "the fallback reason must use a canonical §4 ⟨0.7⟩ kind, got {silent:?}");
+    }
+
+    #[test]
+    fn a_stale_reports_unknown_says_why_it_is_unknown() {
+        // The §2.1 staleness downgrade MANUFACTURES an `Unknown` that no call site is responsible for. It
+        // is still a direct source at the consumer, so it still needs a reason, or the same class-scoped
+        // gate tolerates it.
+        let d = std::env::temp_dir().join(format!("candor-stalewhy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::create_dir_all(&d);
+        std::fs::write(d.join("report.oldlib.scan.json"), r#"{
+            "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
+            "package": "oldlib",
+            "functions": [{"fn": "io::go", "inferred": ["Exec"], "hash": "oldlib#io::go"}]}"#).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+        let e = idx.by_key.get("oldlib#io::go").expect("stale entry present");
+        assert_eq!(e.effects, vec!["Unknown"]);
+        assert_eq!(e.unknown_why.len(), 1, "the staleness downgrade must say why: {:?}", e.unknown_why);
+        assert!(e.unknown_why[0].starts_with("callback:"),
+                "canonical §4 ⟨0.7⟩ kind required, got {:?}", e.unknown_why);
+    }
+
+    #[test]
     fn an_untrusted_report_does_not_grant_the_ledger_coverage_exemption() {
         // §2.1 downgrades a STALE report's effects to `Unknown` — and the very same load ALSO
         // registered its package as COVERED, which is what exempts a crate from the κ blind-spot

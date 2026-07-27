@@ -57,6 +57,11 @@ pub(crate) struct DepFn {
     /// Effects whose surface the dep fn left masking-incomplete — carried so a benign literal in the
     /// consumer can't mask the dep's invisible forbidden endpoint across the join (sweep [30]).
     pub(crate) incomplete: Vec<&'static str>,
+    /// The dep fn's own `unknownWhy` — carried so its `Unknown` does not arrive at the consumer with the
+    /// REASON CLASS stripped off. Verbatim, not re-derived: the strings are already the canonical §4 ⟨0.7⟩
+    /// vocabulary (a conforming producer wrote them) and `dispatch:<owner>.<member>` carries a NORMATIVE
+    /// detail that a consumer needs to resolve overrides — re-deriving would destroy exactly that.
+    pub(crate) unknown_why: Vec<String>,
 }
 
 /// The mutable per-function surface maps a chained dep entry is folded into. Exists only so
@@ -69,6 +74,7 @@ pub(crate) struct DepSink<'a> {
     pub(crate) paths: &'a mut HashMap<String, BTreeSet<String>>,
     pub(crate) tables: &'a mut HashMap<String, BTreeSet<String>>,
     pub(crate) incomplete: &'a mut HashMap<String, BTreeSet<&'static str>>,
+    pub(crate) unknown_why: &'a mut HashMap<String, BTreeSet<String>>,
     pub(crate) blind_direct: &'a mut HashMap<String, BTreeSet<String>>,
     pub(crate) dep_invisible: &'a mut BTreeSet<String>,
 }
@@ -96,6 +102,26 @@ pub(crate) fn apply_dep_fn(de: &DepFn, caller: &str, s: DepSink<'_>) {
     };
     for e in &de.effects {
         s.direct.entry(caller.to_string()).or_default().insert(e);
+    }
+    // AN `Unknown` MUST ARRIVE WITH THE MARKER THAT SAYS SO. SPEC §4 requires `unknownWhy` on any fn that
+    // introduces `Unknown` DIRECTLY, and this join writes straight into `direct` — so the caller IS the
+    // source, with no callee entry in this report to inherit a reason from. Without this the ⟨0.19⟩ class
+    // was simply lost at the boundary: the gate's "an Unknown with no recorded reason is `unresolved`"
+    // fallback then answered with the catch-all, so `deny E Unknown[dispatch]` / `[indirect]` — the
+    // class-targeted policies the Unknown-ratchet is adopted with — read GREEN over a dependency whose own
+    // report named the class. candor-ts `4dad22d` is the same drift one repo over.
+    if de.effects.contains(&"Unknown") {
+        let w = s.unknown_why.entry(caller.to_string()).or_default();
+        if de.unknown_why.is_empty() {
+            // The dep declared `Unknown` and no reason — an older report, a foreign producer, or the §2.1
+            // staleness downgrade, which is not any one call's fault. Fail CLOSED with a canonical §4 kind
+            // rather than leave the field empty: `callback:` is the vocabulary's residual bucket for an
+            // unresolved invocation that is not owner-typed member dispatch, and it classifies `indirect`,
+            // which is inside `Unknown[dynamic]`.
+            w.insert("callback:chained dependency declared Unknown without a reason".to_string());
+        } else {
+            w.extend(de.unknown_why.iter().cloned());
+        }
     }
     ext(s.hosts, &de.hosts);
     ext(s.cmds, &de.cmds);
@@ -275,6 +301,10 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             let mut de = DepFn::default();
             if stale {
                 de.effects.push("Unknown"); // §2.1: a different producer version is not trusted
+                // …and say WHY, or the consumer's Unknown carries no reason class and a class-scoped
+                // `deny` tolerates it. The distrust is the producing version's, not a property of any call
+                // site, so the reason is the same static one for every entry in the report.
+                de.unknown_why.push("callback:chained report from a different producer version".to_string());
             } else {
                 for s in e.get("inferred").and_then(|x| x.as_array()).into_iter().flatten() {
                     if let Some(s) = s.as_str() {
@@ -295,6 +325,8 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 de.paths = strs("paths");
                 de.tables = strs("tables");
                 de.invisible = strs("invisible"); // sweep [8]: carry the blind-crate disclosure across the join
+                // The reason class travels with the `Unknown` it explains. Verbatim — see `DepFn`.
+                de.unknown_why = strs("unknownWhy");
                 // sweep [30]: carry masking-incompleteness (mapped to the static effect alphabet).
                 for s in e.get("incomplete").and_then(|x| x.as_array()).into_iter().flatten() {
                     if let Some(eff) = s.as_str().and_then(candor_classify::cap_from_name) {
