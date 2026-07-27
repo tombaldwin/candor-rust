@@ -5527,8 +5527,8 @@ trait G {
             "README must not claim reference-implementation status (family ruling: candor-java is the reference)");
         assert!(!agents.to_lowercase().contains("the reference implementation of"),
             "AGENTS must not claim reference-implementation status");
-        assert!(readme.contains("spec 0.23"), "README must state the spec 0.23 floor");
-        assert!(agents.contains("spec 0.23"), "AGENTS must state the spec 0.23 floor");
+        assert!(readme.contains("spec 0.24"), "README must state the spec 0.24 floor");
+        assert!(agents.contains("spec 0.24"), "AGENTS must state the spec 0.24 floor");
     }
 
     #[test]
