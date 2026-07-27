@@ -852,7 +852,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // Per-fn DIRECT Unknown-origin reasons (the receipt's `unknownWhy`, spec §2). Coarse, like the lint's
     // per-trait tag: a callback we can't see through, an FFI/extern boundary, or a genuinely-unresolvable
     // bare call. Tracked so the disclosure names WHY, not just that an Unknown exists.
-    let mut unknown_why: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
+    // `String`, not `&'static str`: a chained dependency's own `unknownWhy` is carried VERBATIM across the
+    // join (`dispatch:<owner>.<member>` has a normative detail that re-deriving would destroy), so the set
+    // can no longer be only compile-time literals.
+    let mut unknown_why: HashMap<String, BTreeSet<String>> = HashMap::new();
     // TRANSITIVE DROP-OWNER closure (#3, FIELD edition — R49): constructing a struct `T` also runs the drop
     // glue of any LOCAL drop-type `T` OWNS through a field — directly (`_g: Guard`), via a collection element
     // (`_v: Vec<Guard>`, carried by `field_elem`), or transitively (`_s: Session` where `Session` owns a
@@ -921,7 +924,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // receipt's unresolved count) instead of silently certifying the function pure.
         if f.unresolved {
             direct.entry(f.qual.clone()).or_default().insert("Unknown");
-            unknown_why.entry(f.qual.clone()).or_default().insert("callback:unresolved call");
+            unknown_why.entry(f.qual.clone()).or_default().insert("callback:unresolved call".to_string());
         }
         // DROP-GLUE (#3): local types this fn CONSTRUCTS that have a local `impl Drop`. The `Drop::drop`
         // body runs at scope exit — an implicit edge the call graph misses, so a guard that flushes/closes
@@ -959,7 +962,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{ty}::drop")) {
                         apply_dep_fn(de, &f.qual, DepSink {
                             direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
-                            tables: &mut tables, incomplete: &mut incomplete,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
                             blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
                         });
                     }
@@ -1013,7 +1016,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     if let Some(de) = hit {
                         apply_dep_fn(de, &f.qual, DepSink {
                             direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
-                            tables: &mut tables, incomplete: &mut incomplete,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
                             blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
                         });
                         continue;
@@ -1031,7 +1034,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     unknown_why
                         .entry(f.qual.clone())
                         .or_default()
-                        .insert("dispatch:untyped cross-package receiver");
+                        .insert("dispatch:untyped cross-package receiver".to_string());
                 }
                 continue;
             }
@@ -1041,7 +1044,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{LAZY_UNIT_PREFIX}::{rest}")) {
                         apply_dep_fn(de, &f.qual, DepSink {
                             direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
-                            tables: &mut tables, incomplete: &mut incomplete,
+                            tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
                             blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
                         });
                     }
@@ -1297,7 +1300,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     dep_join_hit = true;
                     apply_dep_fn(de, &f.qual, DepSink {
                         direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
-                        tables: &mut tables, incomplete: &mut incomplete,
+                        tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
                         blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
                     });
                     // (No coverage marking here. A crate whose sibling report we joined is already
@@ -1420,7 +1423,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             let already_handled = classified.is_some() || resolved_local || suppress_bare_leaf || dep_join_hit;
             if !c.is_macro && !already_handled && merged.extern_fns.contains(&c.leaf) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn"); // FFI is a native boundary — canonical `native:` (SPEC §4 ⟨0.7⟩)
+                unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn".to_string()); // FFI is a native boundary — canonical `native:` (SPEC §4 ⟨0.7⟩)
             }
             // §4 HONESTY — AMBIGUOUS LOCAL: a BARE leaf naming TWO-OR-MORE local defs (`tail2`/leaf
             // collision: a free `tail2` + a `Type::tail2` method, or two `Type::method`s) defeats
@@ -1441,7 +1444,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 && by_leaf.get(&c.leaf).is_some_and(|v| v.len() >= 2)
             {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local defs");
+                unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local defs".to_string());
             }
         }
         // DROP-GLUE EDGE (#3): for each LOCAL drop type this fn constructed, add the implicit scope-exit
@@ -1546,6 +1549,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         if inf.is_empty() && !has_blind {
             continue;
         }
+        // THE MARKER MUST TRAVEL WITH THE THING IT DESCRIBES. SPEC §4: `unknownWhy` is REQUIRED when a fn
+        // introduces `Unknown` DIRECTLY (a source) and absent when the `Unknown` is purely inherited — so
+        // the invariant is exactly "`direct` carries Unknown ⇒ `unknownWhy` is non-empty", checked at the
+        // one place every entry is built rather than argued site by site. It is a `debug_assert`: it holds
+        // in every test and over 21 980 entries of real corpus, and a marker gap must never take down a
+        // user's scan in release — the release-mode consequence of a gap is a tolerated Unknown, not a
+        // crash. Reason: the chained-dep join used to write `Unknown` into `direct` with no reason at all,
+        // and nothing in the writer objected.
+        debug_assert!(
+            !direct.get(q).is_some_and(|d| d.contains("Unknown")) || unknown_why.contains_key(q),
+            "`{q}` introduces Unknown DIRECTLY but carries no `unknownWhy` (SPEC §4). Its reason class is \
+             lost, so a `deny E Unknown[class]` gate silently tolerates it — whichever new path put the \
+             Unknown into `direct` must charge its reason beside it."
+        );
         entries.push(ReportEntry {
             func: q.clone(),
             loc: loc.get(q).cloned().unwrap_or_default(),
@@ -1570,10 +1587,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // DIRECTLY-introduced Unknown origins (candor-spec §2 `unknownWhy`): an unresolved callback /
             // fn-pointer call, an FFI/extern boundary, or a genuinely-unresolvable bare call. Coarser than
             // the lint's per-trait tag — by design — but now names WHICH boundary, not just "callback".
-            unknown_why: unknown_why
-                .get(q)
-                .map(|s| s.iter().map(|r| r.to_string()).collect())
-                .unwrap_or_default(),
+            unknown_why: unknown_why.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             // candor-spec §2 `entryPoint`: syntactically we can only spot `main` (the program root). The
             // lint also flags `#[no_mangle]`; the scanner can't see attributes, so it under-marks — the
             // sound direction for an optional reachability hint.
