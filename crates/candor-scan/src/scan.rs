@@ -1469,6 +1469,33 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // same-named method is the COMMON case (`run`/`get`/`handle` across many types), so firing here
             // floods every such call with Unknown. This disclosure is for genuinely-bare FREE calls (the M1
             // case): `run()` with ≥2 free `run` defs, where the silent drop really is a lost local edge.
+            //
+            // ── WHY THE KIND IS `ambiguous:` AND STAYS THAT WAY (measured, 2026-07-27) ────────────────
+            // `ambiguous:` is OUTSIDE SPEC §4 ⟨0.7⟩'s closed four-kind vocabulary, and the reason it is
+            // still emitted is that NONE OF THE FOUR CAN EXPRESS THIS STATE:
+            //   • NOT `dispatch:` — that kind is reserved for unresolved member dispatch WITH a resolvable
+            //     owner type, and its detail is NORMATIVE `<owner>.<member>`. A bare free call has no owner,
+            //     so the detail cannot be formed, and PART 10 rejects a dot-free `dispatch:` outright. It is
+            //     also not dispatch in the first place: exactly ONE function runs and Rust resolves it
+            //     statically — what failed is this ANALYSER's name resolution, not the program's.
+            //   • NOT `callback:` — an unresolved HIGHER-ORDER invocation over a function VALUE. This is a
+            //     named call. And `callback:` is not the residual bucket: §6.2 reaches the residual by the
+            //     ABSENCE of a reason, and `f2309a5` is the record of what reaching for it costs.
+            //   • NOT `native:` / `reflect:` — no foreign boundary, no metadata-driven invocation.
+            // SPEC §6.2's reason-class table ALREADY names `ambiguous*` and rules its class `dispatch`, so
+            // the spec blesses the prefix in one section and omits it from the closed set in another.
+            // Reconciling that is a SPEC rung, not an engine edit.
+            //
+            // AND THE RENAME IS NOT FREE — the counterfactual was BUILT and RUN, not argued. With
+            // `ambiguous*` reclassified to `indirect` (one line in `ReasonClass::classify`, both binaries
+            // kept by content hash), `deny E Unknown[dispatch]` goes from firing on **58 of 200 crates.io
+            // crates to 0 of 200**, and from exit 1 to exit 0 on pgman, ebman and candor-rust alike. That
+            // is not the narrowing candor-ts measured for its malformed `dispatch:` strings (`5ba301c`,
+            // where every reclassified reason named NOTHING); it deletes the rule in this engine, because
+            // every OTHER `dispatch:` rust emits — 20 in a 1062-report census, all
+            // `dispatch:untyped cross-package receiver` — requires a chained dependency to exist at all.
+            // Pinned by `the_ambiguous_reason_kind_and_its_class_are_pinned`; conformance PART 10 now
+            // scans a purpose-built fixture so the kind is VISIBLE there instead of silently absent.
             if !c.is_macro && !c.method && classified.is_none() && !resolved_local && suppress_bare_leaf
                 && !c.path.contains("::")
                 && by_leaf.get(&c.leaf).is_some_and(|v| v.len() >= 2)
