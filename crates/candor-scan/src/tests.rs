@@ -352,13 +352,13 @@
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
         assert!(idx.crates.contains("billing") && idx.crates.contains("old_dep"));
         let post = idx.by_key.get("billing#Ledger::post").expect("tail2 key");
-        assert_eq!(post.effects, vec!["Db"]);
-        assert_eq!(post.tables, vec!["ledger.entries"]);
+        assert_eq!(post.effects, BTreeSet::from(["Db"]));
+        assert_eq!(post.tables, BTreeSet::from(["ledger.entries".to_string()]));
         assert!(idx.by_key.contains_key("billing#post"), "unambiguous leaf key");
         assert!(!idx.by_key.contains_key("billing#dup"), "shared leaf must be dropped, never guessed");
         assert!(idx.by_key.contains_key("billing#a::dup"), "tail2 still disambiguates the dups");
         let old = idx.by_key.get("old_dep#go").expect("stale entry present");
-        assert_eq!(old.effects, vec!["Unknown"], "stale version must downgrade to Unknown");
+        assert_eq!(old.effects, BTreeSet::from(["Unknown"]), "stale version must downgrade to Unknown");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -850,7 +850,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
         let _ = std::fs::remove_dir_all(&d);
         let e = idx.by_key.get("oldlib#io::go").expect("stale entry present");
-        assert_eq!(e.effects, vec!["Unknown"], "the §2.1 downgrade itself must not move");
+        assert_eq!(e.effects, BTreeSet::from(["Unknown"]), "the §2.1 downgrade itself must not move");
         assert!(e.unknown_why.is_empty(),
                 "the staleness downgrade INVENTED a reason class: {:?}", e.unknown_why);
         assert_eq!(
@@ -978,7 +978,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
                 "the join gate must still cover both, stale included: {:?}", idx.crates);
         assert!(idx.untrusted.contains("stalelib"), "a stale report's package must be untrusted");
         assert!(!idx.untrusted.contains("freshlib"), "a fresh report's package must stay trusted");
-        assert_eq!(idx.by_key.get("stalelib#io::go").map(|e| e.effects.clone()), Some(vec!["Unknown"]));
+        assert_eq!(idx.by_key.get("stalelib#io::go").map(|e| e.effects.clone()), Some(BTreeSet::from(["Unknown"])));
 
         // End to end: the consumer's report is what a reader sees.
         let src = "\
@@ -1052,10 +1052,10 @@ pub fn unlisted_fresh() { freshlib::io::danger(); }
         // 1. THE ENTRY IS KEPT, VERBATIM. Not downgraded to `Unknown` the way a stale one is, and its
         //    literal surface travels with it.
         let e = idx.by_key.get("brokelib#io::go").expect("the incomplete report's entry must survive");
-        assert_eq!(e.effects, vec!["Exec"],
+        assert_eq!(e.effects, BTreeSet::from(["Exec"]),
                    "an incomplete report's entries were derived from source it DID read — downgrading \
                     them is the staleness treatment and it does not belong here");
-        assert_eq!(e.cmds, vec!["/bin/ls".to_string()], "the literal surface travels with the entry");
+        assert_eq!(e.cmds, BTreeSet::from(["/bin/ls".to_string()]), "the literal surface travels with the entry");
         // 2. The join gate still sees the crate — coverage and chained-ness are different questions.
         assert!(idx.crates.contains("brokelib"), "the join must still fire: {:?}", idx.crates);
 
@@ -1270,7 +1270,7 @@ pub fn unlisted_whole() { wholelib::io::danger(); }
                 "a distrusted report's completeness claim buys it nothing — the two sets must stay \
                  disjoint or the disclosures double up: {:?}", idx.incomplete_pkgs);
         // …and the entries take the STALENESS treatment, not the incompleteness one.
-        assert_eq!(idx.by_key.get("oldbroke#io::go").map(|e| e.effects.clone()), Some(vec!["Unknown"]));
+        assert_eq!(idx.by_key.get("oldbroke#io::go").map(|e| e.effects.clone()), Some(BTreeSet::from(["Unknown"])));
     }
 
     /// `ambiguous:same-name local defs` IS OUTSIDE SPEC §4 ⟨0.7⟩'s CLOSED VOCABULARY, ON PURPOSE, AND THE
@@ -1356,19 +1356,19 @@ pub fn go() { helper(); }
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
         // 1. the NEW key: the full qual distinguishes what the leaf and the tail2 cannot.
         assert_eq!(idx.by_key.get("deplib#sync::Client::fetch").map(|e| e.effects.clone()),
-                   Some(vec!["Net"]), "full-qual key missing for the effectful module's Client::fetch");
+                   Some(BTreeSet::from(["Net"])), "full-qual key missing for the effectful module's Client::fetch");
         assert_eq!(idx.by_key.get("deplib#mock::Client::fetch").map(|e| e.effects.clone()),
-                   Some(Vec::new()), "full-qual key missing for the pure module's Client::fetch");
+                   Some(BTreeSet::new()), "full-qual key missing for the pure module's Client::fetch");
         // and the imprecise shapes still refuse to guess between the two, as before.
         assert!(!idx.by_key.contains_key("deplib#Client::fetch"), "a shared tail2 must stay dropped");
         assert!(!idx.by_key.contains_key("deplib#fetch"), "a shared leaf must stay dropped");
         // 2. the SECOND direction: a short qual whose full qual EQUALS its tail2 / leaf must keep the
         //    key it already had — the dedup, not a self-collision that removes it.
-        assert_eq!(idx.by_key.get("deplib#Root::only").map(|e| e.effects.clone()), Some(vec!["Fs"]),
+        assert_eq!(idx.by_key.get("deplib#Root::only").map(|e| e.effects.clone()), Some(BTreeSet::from(["Fs"])),
                    "a 2-segment qual self-collided and dropped its own tail2 key");
-        assert_eq!(idx.by_key.get("deplib#only").map(|e| e.effects.clone()), Some(vec!["Fs"]),
+        assert_eq!(idx.by_key.get("deplib#only").map(|e| e.effects.clone()), Some(BTreeSet::from(["Fs"])),
                    "a 2-segment qual's leaf key was dropped");
-        assert_eq!(idx.by_key.get("deplib#bare").map(|e| e.effects.clone()), Some(vec!["Exec"]),
+        assert_eq!(idx.by_key.get("deplib#bare").map(|e| e.effects.clone()), Some(BTreeSet::from(["Exec"])),
                    "a 1-segment qual self-collided and dropped its own leaf key");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -7027,7 +7027,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let _ = std::fs::remove_dir_all(&dep);
         assert!(idx.by_key.contains_key("deplib#work"),
                 "the key was WITHDRAWN because one claim was restated — the consumer then reads the call pure");
-        assert_eq!(idx.by_key.get("deplib#work").map(|d| d.effects.clone()), Some(vec!["Exec"]),
+        assert_eq!(idx.by_key.get("deplib#work").map(|d| d.effects.clone()), Some(BTreeSet::from(["Exec"])),
                    "the surviving entry must be the claim both copies made");
     }
 
@@ -7052,4 +7052,90 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let _ = std::fs::remove_dir_all(&dep);
         assert!(!idx.by_key.contains_key("deplib#work"),
                 "two entries claiming DIFFERENT effects under one key must still be withdrawn — never guess");
+    }
+
+    /// THE SECOND DIRECTION AGAIN, one notch finer, and it is the one a set-equality relaxation can
+    /// walk past: two entries that AGREE ON EFFECTS and differ in a literal SURFACE. That is the
+    /// majority of real collisions (1536 of 2041 on pgman's dep tree, 2255 of 3276 on ebman's) and
+    /// merging them is a measured 12–20% disclosure increase, deliberately NOT taken. Written before
+    /// the exemption was widened, so the widening had something to fail against.
+    #[test]
+    fn two_entries_agreeing_on_effects_but_not_on_surfaces_are_still_withdrawn() {
+        let dep = std::env::temp_dir().join(format!("candor-dupkey-surf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        std::fs::create_dir_all(&dep).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let mk = |host: &str| format!(r#"{{"candor": {{"version": "{me}", "toolchain": "s", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [{{"fn": "work", "inferred": ["Net"], "hosts": ["{host}"], "hash": "deplib#work"}}]}}"#);
+        std::fs::write(dep.join("a.deplib.scan.json"), mk("a.example.com")).unwrap();
+        std::fs::write(dep.join("b.deplib.scan.json"), mk("b.example.com")).unwrap();
+        let idx = load_dep_reports(dep.to_str());
+        let _ = std::fs::remove_dir_all(&dep);
+        assert!(!idx.by_key.contains_key("deplib#work"),
+                "two entries naming DIFFERENT hosts under one key agree about `Net` and disagree about \
+                 WHERE — still a disagreement, still withdrawn. Only a restatement is exempt");
+    }
+
+    /// …AND THE EXEMPTION MUST BE ABOUT THE CLAIM, NOT ITS SERIALISATION. `6f2210c` compared two
+    /// colliding entries with derived `PartialEq`, which on a `Vec` is ORDER-SENSITIVE and
+    /// DUPLICATE-SENSITIVE — so two entries stating the same thing in a different order were still
+    /// withdrawn, and the key went absent, which under ⟨0.21⟩ is a positive purity claim. The same
+    /// cardinal sin `6f2210c` closed, surviving for any producer that happens to order a vector
+    /// differently.
+    ///
+    /// MEASURED FIRST (standing bar item 8): over 850 real dep reports — 72 490 key collisions — this
+    /// shape occurs ZERO times, because a report the §2.1 staleness gate lets through was written by
+    /// this binary's version and this writer emits every one of these vectors from a `BTreeSet`. But
+    /// `scan-{CARGO_PKG_VERSION}` is a CRATE VERSION, not a build id: any producer claiming it passes
+    /// the gate, including a different build of the same version, a hand-written report (this suite
+    /// writes them), and any future field whose construction site is not a set.
+    ///
+    /// SO THE FIELDS ARE SETS NOW, rather than the comparison being taught to sort. `apply_dep_fn`
+    /// folds EVERY DepFn field into a `BTreeSet` — the join's result is invariant under permutation
+    /// and duplication of all eight — so set equality is not a relaxation of the never-guess rule but
+    /// its exact statement: two set-equal entries are operationally indistinguishable and there is
+    /// nothing to choose between. Making it a TYPE fact rather than a comparison keeps a field added
+    /// later from silently re-opening it, which is what a hand-written per-field comparison would do.
+    #[test]
+    fn an_identical_claim_serialised_differently_does_not_withdraw_the_key() {
+        let dep = std::env::temp_dir().join(format!("candor-dupkey-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        std::fs::create_dir_all(&dep).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // The SAME claim, twice: same effects, same hosts, same paths — different ORDER, and the second
+        // copy restates one host. Nothing here is ambiguous; there is no third answer to guess.
+        let a = format!(r#"{{"candor": {{"version": "{me}", "toolchain": "s", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [{{"fn": "work", "inferred": ["Exec", "Net"],
+              "hosts": ["a.example.com", "b.example.com"], "paths": ["/tmp/x", "/tmp/y"],
+              "hash": "deplib#work"}}]}}"#);
+        let b = format!(r#"{{"candor": {{"version": "{me}", "toolchain": "s", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [{{"fn": "work", "inferred": ["Net", "Exec"],
+              "hosts": ["b.example.com", "a.example.com", "a.example.com"], "paths": ["/tmp/y", "/tmp/x"],
+              "hash": "deplib#work"}}]}}"#);
+        std::fs::write(dep.join("a.deplib.scan.json"), a).unwrap();
+        std::fs::write(dep.join("b.deplib.scan.json"), b).unwrap();
+        let idx = load_dep_reports(dep.to_str());
+        assert!(idx.by_key.contains_key("deplib#work"),
+                "the key was WITHDRAWN over the ORDER of two identical claims — a consumer of \
+                 `deplib::work` then reads a `Net`+`Exec` call as PURE, with no entry and no hedge");
+        let e = idx.by_key.get("deplib#work").unwrap();
+        assert_eq!(e.effects.iter().copied().collect::<Vec<_>>(), vec!["Exec", "Net"],
+                   "the surviving entry must be the claim both copies made");
+        assert_eq!(e.hosts.iter().cloned().collect::<Vec<_>>(),
+                   vec!["a.example.com".to_string(), "b.example.com".to_string()],
+                   "…including its literal surface, deduplicated");
+        // AND AT THE CONSUMER, which is where the cardinal sin actually lands: the effect must arrive.
+        let v = scan_crate_chained("dupkeyorder", "consumer", "\n[dependencies]\ndeplib = \"1\"\n",
+            "pub fn go() { deplib::work(); }\n", &idx);
+        let _ = std::fs::remove_dir_all(&dep);
+        let effs: Vec<String> = v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some("go"))
+            .and_then(|f| f["inferred"].as_array().cloned()).unwrap_or_default()
+            .iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        assert_eq!(effs, vec!["Exec".to_string(), "Net".to_string()],
+                   "the consumer went silent over a serialisation difference between two copies of one \
+                    claim — ⟨0.21⟩ reads that absence as a purity claim");
     }
