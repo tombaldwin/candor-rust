@@ -2,33 +2,65 @@
 
 use crate::*;
 
-/// Parse a `--class <c,…>` filter into reason classes (SPEC §3.1 ⟨0.20⟩): the six tokens, `dynamic` (every
-/// genuine class), or `*` (all six). An unknown token warns + is skipped; all-unknown ⇒ an empty set that
-/// matches nothing. Shared shape with the java `Query.parseClassFilter`.
-pub(crate) fn parse_class_filter(spec: &str) -> std::collections::HashSet<candor_classify::policy::ReasonClass> {
+/// The accepted `--class` token set, spelled once (SPEC §6.2 ⟨0.24⟩ THE FLAG'S VALUE GRAMMAR): the six
+/// reason classes plus the two aliases. `dynamic` is here because the clause's own normative diagnostic
+/// (`--class dynamic` == unfiltered minus setup-only) uses it — an engine that rejected it would fail the
+/// test every engine carries.
+pub(crate) const CLASS_TOKENS: &str =
+    "reflect, dispatch, indirect, native, unresolved, setup (aliases: dynamic, *)";
+
+/// Parse a `--class <c,…>` filter into reason classes (SPEC §3.1 ⟨0.20⟩, value grammar pinned normative at
+/// §6.2 ⟨0.24⟩): ONE comma-separated list of the six tokens, `dynamic` (every genuine class — i.e. all six
+/// MINUS `setup`), or `*` (all six).
+///
+/// AN UNRECOGNISED TOKEN IS A USAGE ERROR (`Err`, which every caller turns into exit 2), and it is
+/// deliberately NOT the policy side's drop-with-a-warning. The asymmetry is the point and a reviewer will
+/// ask about it: on the policy side, dropping a token off `deny E Unknown[reflect,dyanmic]` leaves the
+/// WIDER rule standing, so the failure is loud — the gate over-fires and someone comes to look. Here the
+/// token is a FILTER, so dropping it leaves a NARROWER one: `--class dyanmic` would quietly answer a
+/// question the user never asked, with a SMALLER number, and a smaller number out of `unverified` is
+/// indistinguishable from a real all-clear. That is precisely the fail-open §6.2 exists to close, in the
+/// one verb whose job is to say "green, but not provably so". A query flag that cannot be honoured is
+/// REFUSED, not approximated.
+pub(crate) fn parse_class_filter(
+    spec: &str,
+) -> Result<std::collections::HashSet<candor_classify::policy::ReasonClass>, String> {
     use candor_classify::policy::ReasonClass;
     const ALL: [ReasonClass; 6] = [
         ReasonClass::Reflect, ReasonClass::Dispatch, ReasonClass::Indirect,
         ReasonClass::Native, ReasonClass::Unresolved, ReasonClass::Setup,
     ];
     let mut out = std::collections::HashSet::new();
+    let mut star = false;
     for t in spec.split(',') {
         let t = t.trim();
         if t.is_empty() {
             continue;
         }
         if t == "*" {
-            return ALL.into_iter().collect();
-        }
-        if t == "dynamic" {
+            star = true;
+        } else if t == "dynamic" {
             out.extend(ReasonClass::dynamic_set());
         } else if let Some(rc) = ReasonClass::from_token(t) {
             out.insert(rc);
         } else {
-            eprintln!("candor-query: --class ignores unknown reason-class `{t}` (known: reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*)");
+            // Name the offending token and list the accepted set — the user has to be able to fix the
+            // line from the message alone (a typo is the overwhelmingly likely cause).
+            return Err(format!(
+                "candor-query: --class: unrecognised reason-class `{t}`\n  \
+                 accepted: {CLASS_TOKENS}\n  \
+                 a --class value that cannot be honoured is refused, not dropped: dropping it would \
+                 narrow the filter and answer a question you did not ask, with a smaller number \
+                 (SPEC §6.2 ⟨0.24⟩)"
+            ));
         }
     }
-    out
+    // `*` is evaluated after the whole list so a `*,dyanmic` still reports the typo rather than
+    // short-circuiting past it — the refusal must not depend on token order.
+    if star {
+        return Ok(ALL.into_iter().collect());
+    }
+    Ok(out)
 }
 
 // ── containment ───────────────────────────────────────────────────────────────────────────────────
@@ -79,7 +111,13 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
     // `--class <c,…>` (SPEC §3.1 ⟨0.20⟩): keep only Unknown SOURCES whose reason classes intersect the
     // filter — the drill-down companion to `--stats`. None ⇒ no filter (`*`/dynamic expand to the classes).
     let class_filter: Option<std::collections::HashSet<candor_classify::policy::ReasonClass>> =
-        g.class.as_deref().map(parse_class_filter);
+        match g.class.as_deref().map(parse_class_filter).transpose() {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("{msg}");
+                return 2;
+            }
+        };
     let matches = |e: &candor_report::ReportEntry| -> bool {
         use candor_classify::policy::ReasonClass;
         match &class_filter {

@@ -6,6 +6,35 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### usage ⟨0.24⟩ — a `--class` value that cannot be honoured is now REFUSED, not quietly narrowed
+
+SPEC §6.2's value grammar, which conformance PART 27 found unimplemented in **all four** engines rather
+than divergent between them — the suite's only `engine: "*"` waiver, and the last thing holding the floor
+below 0.24. `--class <c>[,<c>…]` takes ONE comma-separated list of the six reason classes plus the two
+aliases `dynamic` and `*`. Two things that used to exit 0 now exit 2, on **both** verbs that take the
+flag (`unverified --class` and `blindspots --class`):
+
+- **an unrecognised token.** `--class dyanmic` used to print `--class ignores unknown reason-class …`
+  and carry on with whatever was left of the list — for a single-token list, an EMPTY filter. It now
+  names the token and lists the accepted set.
+- **a repeated `--class`.** It was last-wins, silently discarding the first list. A second occurrence is
+  a usage error, not a union — and not last-wins either. Both silent readings answer a different question
+  than the line on screen.
+
+**Why this is not the policy side's drop-with-a-warning, since the asymmetry looks like an inconsistency
+until you write it down.** A token dropped out of `deny E Unknown[reflect,dyanmic]` leaves the WIDER rule
+standing: the mistake surfaces as a gate that over-fires, and someone comes to look. The same token
+dropped out of `--class` leaves a NARROWER filter, and a narrower filter on `unverified` comes back as a
+SMALLER NUMBER — which is indistinguishable from a real all-clear, in the one verb whose entire job is to
+say "green, but not provably so". That is the fail-open the surrounding §6.2 clause exists to close, and
+it is why the query side refuses what the policy side approximates.
+
+The token rule lives in ONE place (`parse_class_filter`, now `Result`-returning) so the two verbs cannot
+drift, and `*` is evaluated after the whole list is walked — `--class *,dyanmic` still reports the typo
+rather than short-circuiting past it. The refusal emits **no answer document at all**; a narrower result
+one exit code away from a refusal is the same fail-open wearing a different hat. Nothing changes for
+well-formed input: the tests pin the unfiltered baseline and each filter's exact selection, on both verbs.
+
 ### soundness — three silent under-reports, all three found by ONE SPELLING never being tried
 
 Found by conformance PART 24 (split-invariance) on its first run, then each re-derived from a

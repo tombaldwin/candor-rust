@@ -99,7 +99,15 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     // `--class <c,…>` (SPEC §3.1 ⟨0.20⟩, semantics pinned normative at §6.2 ⟨0.24⟩): keep only holes
     // whose Unknown is of a matching reason class — resolved TRANSITIVELY, over the same reach the
     // `deny E Unknown[class]` gate resolves, and failing CLOSED on a hole nothing classified.
-    let class_filter = g.class.as_deref().map(crate::containment::parse_class_filter);
+    // §6.2 ⟨0.24⟩: an unrecognised token is a USAGE ERROR (exit 2), never a silently narrowed filter —
+    // see `parse_class_filter` for why this half of the rule is not the policy side's drop-with-warning.
+    let class_filter = match g.class.as_deref().map(crate::containment::parse_class_filter).transpose() {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return 2;
+        }
+    };
     let want: Option<std::collections::BTreeSet<&str>> = class_filter
         .as_ref()
         .map(|set| set.iter().map(|c| c.token()).collect());
