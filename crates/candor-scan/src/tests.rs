@@ -836,11 +836,12 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         // rust alone said `indirect`, so `deny Unknown[unresolved]` over an untrusted dependency was
         // green on rust and red on the other three.
         //
-        // rust does not follow swift and ts into a `dep-stale:`-shaped token: conformance PART 10 makes
-        // any kind outside the canonical four (bar the two named migration kinds) a HARD divergence, and
-        // this engine already carries one off-vocabulary kind (`ambiguous:`) as an open item. The prose
-        // goes to stderr instead — the channel ts and swift already disclose staleness on, and the one
-        // rust was missing entirely.
+        // rust does not follow swift and ts into a `dep-stale:`-shaped token. ⟨0.24⟩ THE REASON CHANGED
+        // AND THE ANSWER DID NOT: §4 has since REGISTERED `dep:`/`dep-stale:` as permanent kinds and
+        // `ambiguous:` as its fifth, so neither is an "open item" any more — but the SHIPPED conformance
+        // PART 10 still hard-DIVERGEs on any kind outside the canonical four plus its two named migration
+        // kinds, and `dep-stale` is not among them. The prose goes to stderr instead — the channel ts and
+        // swift already disclose staleness on, and the one rust was missing entirely.
         let d = std::env::temp_dir().join(format!("candor-stalewhy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::create_dir_all(&d);
@@ -1274,9 +1275,13 @@ pub fn unlisted_whole() { wholelib::io::danger(); }
         assert_eq!(idx.by_key.get("oldbroke#io::go").map(|e| e.effects.clone()), Some(BTreeSet::from(["Unknown"])));
     }
 
-    /// `ambiguous:same-name local defs` IS OUTSIDE SPEC §4 ⟨0.7⟩'s CLOSED VOCABULARY, ON PURPOSE, AND THE
+    /// `ambiguous:same-name local defs` IS THE FIFTH KIND IN SPEC §4's CLOSED VOCABULARY ⟨0.24⟩, AND THE
     /// RENAME WAS REFUSED WITH A NUMBER. The full §4 argument lives at the emission site in `scan.rs`;
     /// this pins the two facts a future edit would silently change — the KIND and the CLASS it projects to.
+    ///
+    /// It was OUTSIDE the vocabulary until ⟨0.24⟩, and this engine is the reason it is in: rust is the
+    /// only PRODUCER, so rust was the only engine the omission made non-conforming — §6.2's class table
+    /// named `ambiguous*` all along, so every CONSUMER classified it correctly and nobody complained.
     ///
     /// The counterfactual, built and run rather than argued: with `ambiguous*` reclassified `indirect`
     /// (one line in `ReasonClass::classify`, both binaries kept by content hash), `deny E Unknown[dispatch]`
@@ -1291,9 +1296,17 @@ pub fn unlisted_whole() { wholelib::io::danger(); }
     /// away from it), across 220 packages — the cfg-gated-alternative-definitions shape, which a syntactic
     /// scan cannot resolve because it does not evaluate `cfg`.
     ///
-    /// TO CHANGE IT: a SPEC rung adding `ambiguous:` to §4's closed set (§6.2's class table already names
-    /// `ambiguous*` and rules it `dispatch`), not an engine edit — and conformance PART 10 tolerates and
-    /// WARNS on it in the meantime, over a purpose-built fixture, so it is visible rather than absent.
+    /// TO CHANGE IT: a SPEC rung, not an engine edit. That is exactly how it changed — §4 ⟨0.24⟩ cites
+    /// the 58/200 → 0/200 counterfactual above as its reason for admitting the kind rather than deleting
+    /// it, so the number and the vocabulary now stand or fall together. Conformance PART 10 scans a
+    /// purpose-built fixture, so the kind is VISIBLE there instead of silently absent.
+    ///
+    /// THE OTHER HALF OF THE VOCABULARY: this engine has none. A `kind` lives here only as the raw
+    /// `kind:detail` string, read back through `ReasonClass::classify`'s prefix table — there is no
+    /// typed kind enum to drift out of step with it (§4 ⟨0.24⟩ "AN ENGINE HOLDS THIS VOCABULARY TWICE").
+    /// `off_vocabulary_kinds_round_trip_and_classify_through_the_catch_all` is the control that a
+    /// FABRICATED kind still behaves per §2, so "added a fifth kind" and "stopped checking the kind set"
+    /// are not the same diff.
     #[test]
     fn the_ambiguous_reason_kind_and_its_class_are_pinned() {
         let d = std::env::temp_dir().join(format!("candor-ambkind-{}", std::process::id()));

@@ -769,6 +769,27 @@ mod tests {
         assert_eq!(SPEC_VERSION, "0.23");
     }
 
+    /// THE MODEL-LEVEL HALF of the §4 ⟨0.24⟩ forward-compatibility control: the report type must carry an
+    /// `unknownWhy` kind it has never heard of, VERBATIM, in both directions. `unknown_why` is a
+    /// `Vec<String>` on purpose — nothing here parses a kind, so a fabricated one cannot be normalised,
+    /// truncated or dropped on the way through. The classifier half (`banana:whatever` → the conservative
+    /// catch-all) is `off_vocabulary_kinds_round_trip_and_classify_through_the_catch_all` in
+    /// candor-classify; the end-to-end half is in candor-query's CLI tests.
+    #[test]
+    fn an_off_vocabulary_unknown_why_kind_round_trips_verbatim() {
+        // Two shapes a validating writer would be tempted to touch: a kind outside §4's five, and a
+        // `dispatch:` detail carrying colons and spaces rather than the normative `owner.member`.
+        let json = r#"[{"fn":"f","inferred":["Unknown"],
+                        "unknownWhy":["banana:whatever","ambiguous:same-name local defs"]}]"#;
+        let back = report_entries(json).unwrap();
+        assert_eq!(back[0].unknown_why,
+                   vec!["banana:whatever".to_string(), "ambiguous:same-name local defs".to_string()],
+                   "an unrecognised kind must survive READ unchanged and unreordered");
+        let s = serde_json::to_string(&back[0]).unwrap();
+        assert!(s.contains("\"unknownWhy\":[\"banana:whatever\",\"ambiguous:same-name local defs\"]"),
+                "…and survive WRITE unchanged: {s}");
+    }
+
     #[test]
     fn report_entries_skips_a_bad_entry_not_the_whole_file() {
         // One entry missing the required `fn` must lose ONLY itself — not drop every function in the

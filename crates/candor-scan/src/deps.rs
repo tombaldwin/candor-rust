@@ -401,8 +401,18 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 // of the REPORT, so there is no call site to name and no single-tree control to agree
                 // with — three engines and §6.2 are the evidence. The prose lives on stderr instead
                 // (see the disclosure below), the channel ts and swift already use for this and the one
-                // rust had nothing on; PART 10 makes a `dep-stale:`-shaped kind a hard divergence, so
-                // following them into the field itself is not open to this engine.
+                // rust had nothing on.
+                //
+                // ⟨0.24⟩ SPEC §4 NOW REGISTERS `dep:<hash>` AND `dep-stale:<pkg>` AS PERMANENT KINDS —
+                // not migration ones — and §6.2 holds swift's per-ENTRY form up as the correct shape.
+                // The blocker on following swift here is no longer the spec, it is the SHIPPED
+                // conformance harness: PART 10's `CANON` is still the four kinds with `ambiguous` in a
+                // tolerated set, and `dep-stale` is in neither, so emitting it scores a hard DIVERGE
+                // today. Reasonless staleness is still classed correctly on this engine — `apply_dep_fn`
+                // routes it through `unknown_via_dep`, which CONTRIBUTES `unresolved` at the source
+                // (scan.rs) rather than waiting for the join's absence arm. What the missing token costs
+                // is only the REPORT's ability to say "Unknown, and nothing explained it" beside a
+                // reason it does have; see the residual note at that contribution site.
             } else {
                 for s in e.get("inferred").and_then(|x| x.as_array()).into_iter().flatten() {
                     if let Some(s) = s.as_str() {
