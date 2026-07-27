@@ -77,6 +77,11 @@ pub(crate) struct DepSink<'a> {
     pub(crate) unknown_why: &'a mut HashMap<String, BTreeSet<String>>,
     pub(crate) blind_direct: &'a mut HashMap<String, BTreeSet<String>>,
     pub(crate) dep_invisible: &'a mut BTreeSet<String>,
+    /// Callers whose `Unknown` arrived through this join with no reason the dependency recorded — the
+    /// ONE case where a fn carries `Unknown` in `direct` and legitimately has no `unknownWhy`. The
+    /// report writer's §4 invariant reads this to tell that case apart from a genuine marker gap; see
+    /// `apply_dep_fn` and the `debug_assert` in `scan_one`.
+    pub(crate) unknown_via_dep: &'a mut BTreeSet<String>,
 }
 
 /// THE ONE PLACE a chained dep entry's surfaces are charged to a calling function.
@@ -110,17 +115,26 @@ pub(crate) fn apply_dep_fn(de: &DepFn, caller: &str, s: DepSink<'_>) {
     // fallback then answered with the catch-all, so `deny E Unknown[dispatch]` / `[indirect]` — the
     // class-targeted policies the Unknown-ratchet is adopted with — read GREEN over a dependency whose own
     // report named the class. candor-ts `4dad22d` is the same drift one repo over.
+    //
+    // …BUT A REASON THE DEPENDENCY DID NOT GIVE IS NOT INVENTED HERE. The reasonless case used to be
+    // filled with `callback:chained dependency declared Unknown without a reason`, on the argument that
+    // `callback:` is the §4 vocabulary's residual bucket and that failing closed beats an empty field.
+    // Both halves are wrong. `callback:` is not a residual bucket — §4 defines it as an unresolved
+    // higher-order / owner-less INVOCATION, a claim about code, and nothing here observed one. And the
+    // field is not a hole when empty: §6.2 states that "a function whose `Unknown` carries no recorded
+    // reason is treated as `unresolved`" — the catch-all that stays inside `Unknown[*]` and
+    // `Unknown[dynamic]` and that this engine's own under-gating lint tells a policy author to keep. So
+    // the tag added no disclosure; it REPLACED the right class with a wrong one, and
+    // `deny E Unknown[unresolved]` read GREEN on rust while firing on java, ts and swift over
+    // byte-identical input. All three leave this to the §6.2 fallback (swift attaches a `dep:`
+    // provenance pointer and documents that it projects to `unresolved` — same class, and its comment
+    // gives the reason that decides this one: a class the chained arm carries and the single-tree
+    // control does not is a divergence whichever way round it points).
     if de.effects.contains(&"Unknown") {
-        let w = s.unknown_why.entry(caller.to_string()).or_default();
         if de.unknown_why.is_empty() {
-            // The dep declared `Unknown` and no reason — an older report, a foreign producer, or the §2.1
-            // staleness downgrade, which is not any one call's fault. Fail CLOSED with a canonical §4 kind
-            // rather than leave the field empty: `callback:` is the vocabulary's residual bucket for an
-            // unresolved invocation that is not owner-typed member dispatch, and it classifies `indirect`,
-            // which is inside `Unknown[dynamic]`.
-            w.insert("callback:chained dependency declared Unknown without a reason".to_string());
+            s.unknown_via_dep.insert(caller.to_string());
         } else {
-            w.extend(de.unknown_why.iter().cloned());
+            s.unknown_why.entry(caller.to_string()).or_default().extend(de.unknown_why.iter().cloned());
         }
     }
     ext(s.hosts, &de.hosts);
@@ -301,10 +315,16 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             let mut de = DepFn::default();
             if stale {
                 de.effects.push("Unknown"); // §2.1: a different producer version is not trusted
-                // …and say WHY, or the consumer's Unknown carries no reason class and a class-scoped
-                // `deny` tolerates it. The distrust is the producing version's, not a property of any call
-                // site, so the reason is the same static one for every entry in the report.
-                de.unknown_why.push("callback:chained report from a different producer version".to_string());
+                // NO REASON, DELIBERATELY — §6.2 classes it `unresolved`, which is what java, ts and
+                // swift all land on and what the spec prescribes for an Unknown with no recorded reason.
+                // This carried `callback:chained report from a different producer version`, which classes
+                // `indirect`: a claim that some higher-order invocation could not be resolved, when what
+                // actually happened is that a report failed a version check. The distrust is a property
+                // of the REPORT, so there is no call site to name and no single-tree control to agree
+                // with — three engines and §6.2 are the evidence. The prose lives on stderr instead
+                // (see the disclosure below), the channel ts and swift already use for this and the one
+                // rust had nothing on; PART 10 makes a `dep-stale:`-shaped kind a hard divergence, so
+                // following them into the field itself is not open to this engine.
             } else {
                 for s in e.get("inferred").and_then(|x| x.as_array()).into_iter().flatten() {
                     if let Some(s) = s.as_str() {
@@ -373,6 +393,21 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 }
             }
         }
+    }
+    // THE STALENESS DISCLOSURE, on the channel that can carry prose. The §2.1 downgrade puts `Unknown`
+    // on every entry of an untrusted report and withholds its coverage, but until now rust said so
+    // NOWHERE a reader could see: no report field names the report, and the reason field is the wrong
+    // place (a raw reason is gate vocabulary — see the `stale` arm above). candor-ts and candor-swift
+    // both print exactly this line; rust was the only engine silent about it.
+    if !idx.untrusted.is_empty() {
+        let mut names: Vec<&str> = idx.untrusted.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        eprintln!(
+            "candor-scan: {} chained dependency report(s) were produced by a DIFFERENT engine build — \
+             downgraded to Unknown and granted no coverage (§2.1): {}",
+            names.len(),
+            names.join(", ")
+        );
     }
     idx
 }

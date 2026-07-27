@@ -782,6 +782,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // it), but a TRANSITIVE crate the consumer never saw directly, so it is absent from `dep_seen` and
     // would be dropped by the `global_blind` filter. Collected here and unioned into global_blind below.
     let mut dep_invisible: BTreeSet<String> = BTreeSet::new();
+    // Callers whose `Unknown` came across the chain join with no reason the dependency recorded. See
+    // `DepSink::unknown_via_dep` and the §4 invariant in the report writer.
+    let mut unknown_via_dep: BTreeSet<String> = BTreeSet::new();
 
     // Two name indexes for resolving a call to a local definition. `by_leaf` keys on the bare last
     // segment (`new`); `by_tail2` keys on the last TWO segments (`RequestBuilder::new`). The leaf index
@@ -980,6 +983,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                             direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
                             tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
                             blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
                         });
                     }
                 }
@@ -1034,6 +1038,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                             direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
                             tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
                             blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
                         });
                         continue;
                     }
@@ -1062,6 +1067,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                             direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
                             tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
                             blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
                         });
                     }
                 }
@@ -1318,6 +1324,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                         direct: &mut direct, hosts: &mut hosts, cmds: &mut cmds, paths: &mut paths,
                         tables: &mut tables, incomplete: &mut incomplete, unknown_why: &mut unknown_why,
                         blind_direct: &mut blind_direct, dep_invisible: &mut dep_invisible,
+                            unknown_via_dep: &mut unknown_via_dep,
                     });
                     // (No coverage marking here. A crate whose sibling report we joined is already
                     // covered by the `deps_idx.crates` arm of the ledger filter below — that arm is the
@@ -1573,8 +1580,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // user's scan in release — the release-mode consequence of a gap is a tolerated Unknown, not a
         // crash. Reason: the chained-dep join used to write `Unknown` into `direct` with no reason at all,
         // and nothing in the writer objected.
+        //
+        // `unknown_via_dep` IS THE ONE EXEMPTION, and it is §4's own definition rather than a hole punched
+        // in the rule. §4 defines a source as a unit "whose own body has the unresolvable call"; a
+        // consumer of a chained dependency has no such call — its body calls a known function whose
+        // REPORT says Unknown, so its Unknown is INHERITED, across a report boundary instead of a
+        // call-graph edge. The join writes into `direct` only because the callee is not a unit in this
+        // report, which is an implementation fact and not a claim about whose body holds the hole. The
+        // invariant as written forced the boundary case to name one of the four §4 kinds, none of which
+        // projects to `unresolved` (§6.2) — so honouring it produced a FABRICATED class, which is how
+        // `callback:chained dependency declared Unknown without a reason` came to exist. Every in-scan
+        // path is still held to the rule, which is the class of gap this assertion was written to catch.
         debug_assert!(
-            !direct.get(q).is_some_and(|d| d.contains("Unknown")) || unknown_why.contains_key(q),
+            !direct.get(q).is_some_and(|d| d.contains("Unknown"))
+                || unknown_why.contains_key(q)
+                || unknown_via_dep.contains(q),
             "`{q}` introduces Unknown DIRECTLY but carries no `unknownWhy` (SPEC §4). Its reason class is \
              lost, so a `deny E Unknown[class]` gate silently tolerates it — whichever new path put the \
              Unknown into `direct` must charge its reason beside it."
