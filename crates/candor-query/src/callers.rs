@@ -54,7 +54,9 @@ pub(crate) fn cmd_callers(args: &[String]) -> i32 {
 /// callers + the unresolved-dispatch frontier (--include-unknown). The CONFIRMED reachers, plus the
 /// functions that reach `q` only through a `dispatch:OWNER.member` the engine declined to resolve —
 /// disclosed iff a confirmed reacher is an override of OWNER.member (same method AND a subtype of OWNER
-/// per the hierarchy; empty hierarchy → simple-name match, over-lists). Never asserted ("cannot confirm").
+/// per the hierarchy; empty hierarchy → simple-name match, over-lists). A DOT-FREE detail names no owner
+/// at all, so that test is unanswerable and the source is disclosed verbatim ⟨0.24⟩. Never asserted
+/// ("cannot confirm").
 pub(crate) fn callers_via_callgraph_frontier(
     cg: &BTreeMap<String, Vec<String>>,
     entries: &[ReportEntry],
@@ -127,6 +129,29 @@ pub(crate) fn callers_via_callgraph_frontier(
         let mut hits: BTreeSet<&str> = BTreeSet::new();
         for w in &e.unknown_why {
             if let Some(key) = w.strip_prefix("dispatch:") {
+                // ⟨0.24⟩ A DOT-FREE detail names no owner and no member — the engine could not form a
+                // receiver type at all (candor-scan emits `dispatch:untyped cross-package receiver` for a
+                // call into a chained dependency, and a 1062-report census found EVERY dispatch reason on
+                // this engine was that form). Condition (3), "some confirmed reacher is an override of
+                // OWNER.M", is then UNANSWERABLE, and an unanswerable condition MUST NOT be scored as a
+                // failed one: the source is DISCLOSED with the raw detail verbatim. This is the same
+                // direction the no-hierarchy fallback takes one rung up — with no sidecar the subtype test
+                // is unanswerable and the ruling is to over-list, not to drop. The frontier over-lists by
+                // construction and asserts NOTHING into `transitive`, so a spurious entry costs precision
+                // while a dropped one is a false all-clear.
+                //
+                // MEASURED before this guard: `mod.Dotfree.run` carrying `dispatch:untyped cross-package
+                // receiver` appeared NOWHERE in the output, in BOTH the hierarchy and the no-hierarchy arm,
+                // with no diagnostic naming it — because `simple_method`/`declaring_type` fall back to the
+                // WHOLE STRING with no dot, so `by_method.get(m)` could never hit.
+                //
+                // Detected STRUCTURALLY (contains no '.'), never by matching the scanner's wording: an
+                // allowlist of known reason strings silently drops every reason it forgets, which is
+                // exactly the defect being closed.
+                if !key.contains('.') {
+                    hits.insert(key);
+                    continue;
+                }
                 let m = simple_method(key);
                 let owner = declaring_type(key);
                 if let Some(types) = by_method.get(m)
@@ -137,6 +162,13 @@ pub(crate) fn callers_via_callgraph_frontier(
             }
         }
         if !hits.is_empty() {
+            // `viaDispatchOn` keeps its pinned one-entry-per-fn shape, multiple hits ','-joined. A raw
+            // dot-free detail may carry SPACES (the scanner's does) — harmless, the field was never
+            // whitespace-delimited. A detail carrying a ',' would be ambiguous to a consumer that splits
+            // on ',', and that is accepted deliberately: `viaDispatchOn` is a disclosure string candor
+            // itself never re-parses into an owner, no engine emits a comma today, and the alternatives —
+            // escaping (a new sub-grammar in a pinned field) or dropping/truncating the detail — would
+            // either break every existing consumer or re-open the silent drop this change closes.
             possible.push((e.func.clone(), hits.iter().copied().collect::<Vec<_>>().join(",")));
         }
     }
