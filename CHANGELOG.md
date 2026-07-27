@@ -6,6 +6,66 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### disclosure — the report glob claimed a SIDECAR, then reported its own mistake as data loss
+
+Every query run against a prefix with a `<prefix>.<pkg>.hierarchy.json` sidecar beside it printed:
+
+```
+candor: report …/r.app.hierarchy.json failed to parse — its functions are OMITTED from this
+query (corrupt or mid-write); re-run the scan
+```
+
+The sidecar was not corrupt, nothing was omitted, the results were correct, and the scan the user was
+told to re-run was fine. `report_files` discriminated reports from sidecars by SEGMENT COUNT alone —
+`<base>.<crate>.<type>.json`, exactly two segments — which excludes this engine's own sidecars (all
+three-segment: `<base>.<crate>.<type>.callgraph.json`) but not a two-segment one from another
+producer. SPEC §2.2 lets each engine pair a sidecar to its OWN report stem, so `<base>.<pkg>.hierarchy.json`
+is a legitimate name that lands exactly on the `<crate>.<type>` shape. Two globs inside one binary
+disagreed about the same file: `load_hierarchy` read it as a sidecar while `report_files` claimed it as
+a report.
+
+Measured blast radius — 10 verbs (`show`, `where`, `map`, `path`, `impact`, `reachable`, `blindspots`,
+`tour`, `containment`, `callers --include-unknown`) plus `audit`, `receipt`, `diff`, `gains`, and the
+lint's own cross-crate sibling loader. Both `.hierarchy.json` and `.callgraph.json` trigger it.
+
+**It was not purely cosmetic.** Three consequences, each measured against a control run with the
+sidecar removed:
+
+- an **effect-free crate was refused outright**. The bogus parse failure set the `hard_fail` bit that
+  `load_entries_loud` uses to tell "this crate genuinely has no effects" from "every report was
+  corrupt", so a well-formed `"functions": []` report standing beside a sidecar exited **2** with
+  *"refusing to report an empty (all-clear) answer over a corrupt report"*. The query answered nothing.
+- **provenance was lost**: `report_build_version` reads the FIRST report by sorted path, and
+  `r.app.hierarchy.json` sorts before `r.demo.scan.json`, so `gains --json` reported
+  `baseline_version: ""` / `engine_version: ""` where the control gave the real build id — which also
+  silences the §2.1 producing-build mismatch disclosure.
+- `reports <prefix>` — the canonical "what counts as a report" oracle the wrapper's `--exists` check
+  joins on — **listed the sidecars as reports**.
+
+Fixed at the GLOB, not at the parse: `candor_report::SIDECAR_KINDS` names the reserved trailing
+segments (`callgraph`, `hierarchy`, `calibrated`, `layerreach`, `locs`, `gate`) and `report_files`
+excludes a `<type>` that is one of them, so a sidecar never enters the candidate set and there is
+nothing left to diagnose. Suppressing the *message* would have left the file in the set, left all three
+consequences above live, and been one refactor from returning.
+
+This is a **denylist over `<type>`, deliberately**. The accept rule still takes any
+`<base>.<a>.<b>.json`; only names that are provably not crate types are carved out (`<type>` is a
+rustc `CrateType` or another engine's `Swift`/`jar`, never an artifact name). The allowlist inversion —
+accept only known types — would make any report whose type segment we failed to anticipate silently
+invisible to every query, a false all-clear. A denylist can only be *incomplete*, and incompleteness
+here is LOUD: an unregistered sidecar suffix falls back into the candidate set and prints the
+disclosure on every query. Noise, never a swallowed report. A crate legitimately NAMED `hierarchy` is
+untouched — it sits in the `<crate>` position — and that is pinned as a test row.
+
+The control that makes the fix meaningful: with the same sidecars present, a genuinely corrupt REPORT
+must still be disclosed, must name the report and not a sidecar, and must still exit 2. Verified to
+discriminate — with the exclusion disabled both tests go red; with the *wrong* fix (the `eprintln!`
+deleted) the quiet test passes and only the control fails.
+
+Engine-local. candor-ts (`query-core.mjs` `isReport`), candor-java (`Query.java`) and candor-swift
+(`FixCLI.swift`) already exclude these suffixes by name; candor-rust was the one engine discriminating
+by segment count.
+
 ### soundness ⟨0.24⟩ — the dispatch frontier silently dropped this engine's own dominant reason
 
 `callers --include-unknown` built `possibleViaUnknownDispatch` by splitting each `dispatch:` detail into
