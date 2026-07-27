@@ -138,9 +138,78 @@ pub(crate) struct CallCollector<'a> {
     /// of local `let` following; a rebind to a non-resolvable value clears the entry). Grown in source
     /// order, like `vars`. Literal/const-anchored only — a runtime-built binding contributes nothing.
     pub(crate) str_locals: std::collections::HashMap<String, String>,
+    /// FUNCTION-BODY `use` bindings (`fn f() { use deplib::CFG; .. }`) — the same `name -> full path` map
+    /// as `uses`, which is collected from FILE-level items only. A body-level `use` is the OTHER SPELLING
+    /// of a file-level one and reaches the identical code, so consulting only `uses` made a forcing site
+    /// silent purely because of where the import was written. Fn-wide rather than block-scoped: the
+    /// over-approximation direction (a `use` in one block seen by a later block) can only ADD a candidate
+    /// key, and every key here is speculative and inert unless the dependency report actually carries it.
+    pub(crate) local_uses: std::collections::HashMap<String, String>,
+    /// EVERY ident in a binding position anywhere in this body or signature (`let`, param, closure param,
+    /// `for` pattern, match arm) — computed once up front by `lang::bound_idents`. The typed side-tables
+    /// (`vars`, `elem_of`, …) only hold a binding whose type was RECOVERABLE, so they cannot answer "is
+    /// this name shadowed by a local?" for a `let` that typed to nothing. The forcing/provenance sites use
+    /// this instead, so their shadow test does not depend on inference having succeeded.
+    /// Flow-INSENSITIVE and body-wide, matching `vars`' existing discipline: a false shadow costs a
+    /// forcing edge (a miss), where a missed shadow charges a static's effect to a local (a fabrication).
+    pub(crate) bound_names: std::collections::HashSet<String>,
 }
 
 impl<'a> CallCollector<'a> {
+    /// What a bare NAME was imported as, consulting the body-level `use` map first and the file-level one
+    /// second (a body-level `use` shadows a file-level import of the same name). Returns `None` for a name
+    /// no `use` brought in — which is the honest answer for a name declared in this very module.
+    fn use_target(&self, name: &str) -> Option<&String> {
+        self.local_uses.get(name).or_else(|| self.uses.get(name))
+    }
+
+    /// Normalise a WRITTEN module prefix (the segments before a name) into the module path a local unit's
+    /// qual is built from. `crate::` is dropped (a unit qual is crate-relative), `self::` means this
+    /// function's own module, and each `super::` pops one segment off it. An empty result means "this
+    /// module", which is the caller's fallback anyway.
+    fn normalise_modpath(&self, segs: &[&str]) -> String {
+        let mut out: Vec<String> = Vec::new();
+        let mut rest = segs;
+        loop {
+            match rest.first().copied() {
+                Some("crate") => rest = &rest[1..],
+                Some("self") => {
+                    out = self.modpath.split("::").filter(|s| !s.is_empty()).map(str::to_string).collect();
+                    rest = &rest[1..];
+                }
+                Some("super") => {
+                    if out.is_empty() {
+                        out = self.modpath.split("::").filter(|s| !s.is_empty()).map(str::to_string).collect();
+                    }
+                    out.pop();
+                    rest = &rest[1..];
+                }
+                _ => break,
+            }
+        }
+        out.extend(rest.iter().map(|s| s.to_string()));
+        out.join("::")
+    }
+
+    /// The module path a lazy-static forcing site NAMES, derived from the SPELLING rather than from the
+    /// reader's own module. `*m::INNER` names `m`; `use m::INNER; *INNER` names `m` too. Returns `None`
+    /// when the spelling says nothing (a bare name no `use` imported) — then the reader's own module is
+    /// the right answer and the caller falls back to it.
+    ///
+    /// This is the reader half of `lazy_qual`. `5447eba` moved the module path INSIDE the `<lazy>::`
+    /// prefix so two same-named statics stop merging — that made the WRITER module-qualified while the
+    /// reader still built `<lazy>::<my own module>::NAME`, so every cross-module read of a module-scoped
+    /// lazy static missed its unit's tail2 and read silent-pure.
+    fn named_lazy_modpath(&self, segs: &[&str]) -> Option<String> {
+        if segs.len() >= 2 {
+            return Some(self.normalise_modpath(&segs[..segs.len() - 1]));
+        }
+        // A bare name: a `use` (file- or body-level) is what says which module it came from.
+        let full = self.use_target(segs[0])?;
+        let fsegs: Vec<&str> = full.split("::").collect();
+        (fsegs.len() >= 2).then(|| self.normalise_modpath(&fsegs[..fsegs.len() - 1]))
+    }
+
     /// Best-effort type of a method-call receiver, so `recv.method()` can be classified as
     /// `Type::method`. Resolves a bare variable/param/`self` (via `vars`), a `base.field` access (via
     /// the struct `FieldIndex`), and peels `&`/`(..)`/`?`/`.await`. For a method CHAIN
@@ -1060,6 +1129,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         syn::visit::visit_block(self, node);
         self.trait_quals_by_param = saved;
     }
+    /// A `use` written INSIDE a body (`fn f() { use deplib::CFG; .. }`). Pass A's `uses` map is built from
+    /// FILE-level items, so this spelling contributed nothing and every name it imported looked
+    /// crate-local — the forcing/provenance sites below then had no way to learn the name's origin. Record
+    /// it in `local_uses`, which `use_target` consults FIRST.
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        crate::lang::collect_use(&node.tree, String::new(), &mut self.local_uses);
+        syn::visit::visit_item_use(self, node);
+    }
     fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
         // A `#[cfg(feature="X")]`-gated statement/block that is compiled OUT under the active feature set
         // contributes no effects to this fn — don't walk it (else its calls fabricate effects the default
@@ -1199,34 +1276,58 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // marker so the call loop can disclose `Unknown` instead. Requires the CONJUNCTION — untyped AND
         // dep-provenance — and is skipped the moment either the concrete type or a trait bound resolves,
         // because then a real key exists and this would only add noise beside it.
-        if let syn::Expr::Path(rp) = &*node.receiver {
-            if let Some(name) = rp.path.get_ident().map(|i| i.to_string()) {
-                if let Some(callee_path) = self.dep_bound_vars.get(&name) {
-                    if self.resolve_recv_type(&node.receiver).is_none()
-                        && self.resolve_recv_traits(&node.receiver).is_empty()
-                    {
-                        // Angle-bracket marker segment: cannot collide with a real path (the same device
-                        // as `<drop>`/`<construct>`), so it can never reach local resolution or the
-                        // classifier. Bounded at consumption in scan.rs: join, disclose, `continue`.
-                        //
-                        // `<crate>::<untyped>::<the rest of the callee path>::<method>`. The crate root
-                        // alone drives half 1's disclosure; the WHOLE callee path is what half 2 looks up
-                        // in the dep's published `typeSurface.returns`, and it has to be the whole path
-                        // because that map is keyed by the dependency's MODULE-QUALIFIED fn qual. The
-                        // consumer splits it back off with `rsplit_once` — a method leaf is one segment,
-                        // a callee path is not, so splitting from the FRONT (as the reverted attempt did)
-                        // truncates every non-root factory to its first module segment.
-                        let (root, rest) = callee_path.split_once("::").unwrap_or((callee_path, ""));
-                        self.calls.push(Call {
-                            path: format!("{root}::<untyped>::{rest}::{leaf}"),
-                            leaf: leaf.clone(),
-                            str_arg: None,
-                            typed: false,
-                            method: false,
-                            is_macro: false,
-                        });
+        //
+        // BOTH SPELLINGS, and the second one was the hole. `let c = deplib::build(); c.fetch()` routes
+        // through `dep_bound_vars`, which only a `let` ever writes — so `deplib::build().fetch()`, the
+        // very same call with the binding elided, matched no branch and read SILENT-PURE. That is not a
+        // precision gap in an un-attempted position: it is the shipped guard failing to cover its own
+        // ruling that a key which could not be formed must never read pure (conformance PART 21, whose
+        // rust fixture binds the result).
+        let dep_recv_callee: Option<String> = match &*node.receiver {
+            // The BOUND form: a local whose provenance a `let` recorded.
+            syn::Expr::Path(rp) => rp
+                .path
+                .get_ident()
+                .map(|i| i.to_string())
+                .and_then(|n| self.dep_bound_vars.get(&n).cloned()),
+            // The UNBOUND form: the factory call IS the receiver. Same provenance test as `visit_local`'s
+            // (a multi-segment callee path, crate-root checked at CONSUMPTION against the manifest's
+            // declared deps) so the two spellings cannot drift apart again.
+            _ => match peel_recv(&node.receiver) {
+                syn::Expr::Call(c) => match &*c.func {
+                    syn::Expr::Path(p) => {
+                        let full = expand(&path_to_string(&p.path), self.uses);
+                        (full.contains("::") && !full.starts_with("::")).then_some(full)
                     }
-                }
+                    _ => None,
+                },
+                _ => None,
+            },
+        };
+        if let Some(callee_path) = dep_recv_callee {
+            if self.resolve_recv_type(&node.receiver).is_none()
+                && self.resolve_recv_traits(&node.receiver).is_empty()
+            {
+                // Angle-bracket marker segment: cannot collide with a real path (the same device
+                // as `<drop>`/`<construct>`), so it can never reach local resolution or the
+                // classifier. Bounded at consumption in scan.rs: join, disclose, `continue`.
+                //
+                // `<crate>::<untyped>::<the rest of the callee path>::<method>`. The crate root
+                // alone drives half 1's disclosure; the WHOLE callee path is what half 2 looks up
+                // in the dep's published `typeSurface.returns`, and it has to be the whole path
+                // because that map is keyed by the dependency's MODULE-QUALIFIED fn qual. The
+                // consumer splits it back off with `rsplit_once` — a method leaf is one segment,
+                // a callee path is not, so splitting from the FRONT (as the reverted attempt did)
+                // truncates every non-root factory to its first module segment.
+                let (root, rest) = callee_path.split_once("::").unwrap_or((callee_path.as_str(), ""));
+                self.calls.push(Call {
+                    path: format!("{root}::<untyped>::{rest}::{leaf}"),
+                    leaf: leaf.clone(),
+                    str_arg: None,
+                    typed: false,
+                    method: false,
+                    is_macro: false,
+                });
             }
         }
         // Typed call: if the receiver's type resolves, form `Type::method` so the existing per-crate
@@ -1621,7 +1722,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     || self.fn_typed_vars.contains(&name)
                     || self.fn_alias.contains_key(&name)
                     || self.elem_of.contains_key(&name)
-                    || self.trait_vars.contains_key(&name);
+                    || self.trait_vars.contains_key(&name)
+                    // …and every OTHER binding form. The five side-tables above only hold a binding whose
+                    // TYPE was recoverable, so `let C = "aa";` — a `let` whose initializer types to nothing
+                    // — left `C` looking like the imported static and the forcing edge fired on a local
+                    // string. That was harmless while only a QUALIFIED path could force (a shadow is
+                    // spelled bare); adding the bare `use` spelling made it live, and the control caught it.
+                    // `bound_names` is every ident in a binding POSITION anywhere in this body, so the
+                    // shadow test no longer depends on type inference having succeeded.
+                    || self.bound_names.contains(&name);
                 // A DEPENDENCY's lazy static, mentioned qualified (`deplib::CFG`). Forcing it runs the
                 // dep's initializer, which a chained report records as `<lazy>::…NAME` — but only LOCAL
                 // statics are in `lazy_statics`, so nothing was emitted and the consumer read pure even
@@ -1630,11 +1739,50 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // join in scan.rs, which skips it everywhere else, so it can never become a local edge:
                 // an earlier prototype without that guard added a spurious callgraph node because it fired
                 // on every qualified path expression.
-                if !locally_bound && !self.lazy_statics.contains(&name) && node.path.segments.len() >= 2 {
-                    let cr = node.path.segments[0].ident.to_string();
-                    if self.forced_lazies.insert(format!("{cr}\u{0}{name}")) {
+                //
+                // BOTH SPELLINGS. `deplib::CFG` names the crate in the expression; `use deplib::CFG; CFG`
+                // names it in the import and leaves a ONE-segment path behind. Only the first was handled,
+                // so the idiomatic import made the identical read silent-pure — and PART 19's rust fixture
+                // happens to use the qualified spelling, which is why it never saw it. The `use` route also
+                // recovers the dependency's own MODULE path (`use deplib::cfg::CFG` → `<lazy>::cfg::CFG`),
+                // which is the key its report actually carries when the static is not crate-root.
+                //
+                // The dependency's OWN module path is part of the key. Its report writes
+                // `<lazy>::cfg::MODC` for a static declared in its `cfg` module (`lazy_qual`), so the
+                // crate-root spelling alone answers only for a crate-root static — `deplib::cfg::MODC`
+                // asked `<lazy>::MODC` and got silence. Ask both: the full path after the crate root, and
+                // the leaf alone (which is what a dep that RE-EXPORTS the static at its root needs). Each
+                // is speculative and inert unless the chained report carries it, so asking both costs
+                // nothing but answers both shapes.
+                let dep_lazy_keys: Vec<(String, String)> = {
+                    let written: Option<(String, String)> = if node.path.segments.len() >= 2 {
+                        let segs: Vec<String> =
+                            node.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                        Some((segs[0].clone(), segs[1..].join("::")))
+                    } else {
+                        // `use deplib::CFG; CFG` — the crate is named in the IMPORT, not the expression.
+                        self.use_target(&name)
+                            .filter(|f| f.contains("::"))
+                            .cloned()
+                            .and_then(|full| full.split_once("::").map(|(c, r)| (c.to_string(), r.to_string())))
+                    };
+                    match written {
+                        Some((cr, rest)) if !rest.is_empty() => {
+                            let mut v = vec![(cr.clone(), rest.clone())];
+                            if rest != name {
+                                v.push((cr, name.clone()));
+                            }
+                            v
+                        }
+                        _ => Vec::new(),
+                    }
+                };
+                for (cr, key) in dep_lazy_keys {
+                    if !locally_bound && !self.lazy_statics.contains(&name)
+                        && self.forced_lazies.insert(format!("{cr}\u{0}{key}"))
+                    {
                         self.calls.push(Call {
-                            path: format!("{cr}::{LAZY_UNIT_PREFIX}::{name}"),
+                            path: format!("{cr}::{LAZY_UNIT_PREFIX}::{key}"),
                             leaf: name.clone(), str_arg: None,
                             typed: false, method: false, is_macro: false,
                         });
@@ -1649,24 +1797,43 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // `Type::drop` when that drop is EFFECTFUL (pure units are omitted), so a type with
                         // no Drop, or no chained report, resolves to nothing.
                         self.calls.push(Call {
-                            path: format!("{cr}::{DROP_MARKER}::{name}"),
+                            path: format!("{cr}::{DROP_MARKER}::{key}"),
                             leaf: "drop".to_string(), str_arg: None,
                             typed: false, method: false, is_macro: false,
                         });
                     }
                 }
-                if !locally_bound
-                    && self.lazy_statics.contains(&name)
-                    && self.forced_lazies.insert(name.clone())
-                {
-                    let qual = lazy_qual(&self.modpath, &name);
+                if !locally_bound && self.lazy_statics.contains(&name) {
                     // path has `::` so it resolves via the tail2 route in `resolve_target`. The module
                     // path sits INSIDE the prefix precisely so tail2 (`<mod>::<NAME>`) discriminates: with
                     // the old bare `<lazy>::NAME`, two modules each declaring `CFG` produced two units with
                     // the same tail2, `resolve_target`'s uniqueness filter rejected both, and every forcing
                     // site went SILENT-PURE (candor-spec SOUNDNESS-VEIN-global-unit-identity.md).
-                    // Not a macro/typed/method.
-                    self.calls.push(Call { path: qual, leaf: name, str_arg: None, typed: false, method: false, is_macro: false });
+                    //
+                    // …and the READER has to be qualified the same way, which is the half `5447eba` left
+                    // open: `<lazy>::<MY module>::NAME` is the right key only when the static is declared
+                    // in the reader's own module. `fn outside() { let _ = *m::INNER; }` built
+                    // `<lazy>::INNER`, whose tail2 matches no unit, so a module-scoped lazy static read
+                    // from OUTSIDE its module was silent-pure while `m::inside` was charged correctly.
+                    // Take the module the SPELLING names (`m::INNER`, or `use m::INNER; INNER`) and keep
+                    // the reader's-own-module key beside it: they are two candidate keys, each filtered by
+                    // `resolve_target`'s uniqueness rule, so this can only ADD the edge that was missing.
+                    let owned: Vec<String> =
+                        node.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    let segs: Vec<&str> = owned.iter().map(String::as_str).collect();
+                    let mut modpaths = vec![self.modpath.clone()];
+                    if let Some(named) = self.named_lazy_modpath(&segs) {
+                        if named != self.modpath {
+                            modpaths.push(named);
+                        }
+                    }
+                    for mp in modpaths {
+                        let qual = lazy_qual(&mp, &name);
+                        // Not a macro/typed/method.
+                        if self.forced_lazies.insert(qual.clone()) {
+                            self.calls.push(Call { path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false });
+                        }
+                    }
                 }
             }
         }
@@ -1925,7 +2092,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // than silently drop — half 1 of DEP-RECEIVER-TYPING-DESIGN.md. Cleared on any
                         // rebind, and immediately overwritten below if the init DOES type.
                         self.dep_bound_vars.remove(&id.ident.to_string());
-                        if let syn::Expr::Call(c) = &*init.expr {
+                        if let syn::Expr::Call(c) = peel_recv(&init.expr) {
                             if let syn::Expr::Path(p) = &*c.func {
                                 let full = expand(&path_to_string(&p.path), self.uses);
                                 // A multi-segment path whose head is a plausible crate root. The head is
@@ -2152,6 +2319,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // collection / slice / array operand resolves to no local impl → no edge.)
         self.charge_coercion(&node.expr, "Index", "index");
         syn::visit::visit_expr_index(self, node);
+    }
+}
+
+/// Peel the wrappers a method-call RECEIVER can carry without changing which value it is — `&x`, `(x)`,
+/// `{x}`, `x?`, `x.await`. Mirrors the peeling `resolve_recv_type` does, so the untyped-dep-receiver
+/// disclosure sees `deplib::build()` through `(&deplib::build())`, `deplib::build()?` and
+/// `deplib::build().await` exactly as it sees the bare spelling.
+pub(crate) fn peel_recv(expr: &syn::Expr) -> &syn::Expr {
+    let mut e = expr;
+    loop {
+        e = match e {
+            syn::Expr::Reference(r) => &r.expr,
+            syn::Expr::Paren(p) => &p.expr,
+            syn::Expr::Group(g) => &g.expr,
+            syn::Expr::Try(t) => &t.expr,
+            syn::Expr::Await(a) => &a.base,
+            other => return other,
+        };
     }
 }
 
