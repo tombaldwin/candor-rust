@@ -821,6 +821,115 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         let _ = std::fs::remove_dir_all(&dd);
     }
 
+    /// THE SECOND ARM OF SPEC §6.2 ⟨0.24⟩'s CONTROL, and the one this engine was failing: a FRESH
+    /// dependency whose `Unknown` IS explained — not by its own tag (the test above) but **by a `calls`
+    /// EDGE it published**.
+    ///
+    /// §4 makes `unknownWhy` DIRECT-ONLY, so a dep entry whose `Unknown` is purely INHERITED correctly
+    /// carries no reason, and is byte-for-byte indistinguishable from one nothing accounted for.
+    /// Charging both to `unresolved` is the naive form: §6.2 calls contributing it "to one whose
+    /// `Unknown` is correctly classified at the callee" the MIRROR FABRICATION, and the changelog
+    /// calibrates it — the naive rule flips 96/141 and 211/211 on the JVM engine's fresh reports where
+    /// the correct one flips none, and marks 435 on swift where the legitimate count is 0.
+    ///
+    /// MEASURED ON THIS ENGINE BEFORE THE FIX, on TRUSTED reports, over real code: scanning candor-scan
+    /// against its own 173-report dep tree, `deny Unknown[unresolved]` fired on **26** functions and
+    /// `deny Unknown[dispatch]` on 19. After: **0** and **28**. Every one of the 26 traced to 8 callers
+    /// of three `syn` entries whose `Unknown` syn's OWN `calls` chain explains 2–5 hops down as
+    /// `ambiguous:same-name local defs` — class `dispatch`. The effect sets are IDENTICAL across the A/B
+    /// (46 Unknown-bearing functions both sides, 0 changed): no `Unknown` was gained or lost, only its
+    /// reason corrected, and the report gained 8 disclosures it should always have carried.
+    ///
+    /// THE DISCRIMINATION CONTROL IS THE `[dispatch]` COLUMN GOING **UP**. A change that merely stopped
+    /// contributing would take `[unresolved]` to 0 and leave `[dispatch]` at 19. 19 → 28 is what
+    /// distinguishes correcting a class from deleting one, and it is why both directions are asserted
+    /// below rather than just the one that goes quiet.
+    #[test]
+    fn a_dep_unknown_the_deps_own_calls_chain_explains_is_not_charged_the_catch_all() {
+        let dd = std::env::temp_dir().join(format!("candor-depchain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dd);
+        std::fs::create_dir_all(&dd).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // `io::relay` is the new arm: `Unknown`, NO tag of its own, and a published `calls` edge to
+        // `io::deep`, which names the reason. `reflect:` deliberately — a class no other entry here
+        // carries, so a fixture that merely stopped fabricating could not pass by accident.
+        // `io::mute` is the discrimination control: `Unknown`, no tag, and NO edge to carry one.
+        let report = format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [
+              {{"fn": "io::relay", "inferred": ["Unknown"], "calls": ["io::deep"],
+                "hash": "deplib#io::relay"}},
+              {{"fn": "io::deep", "inferred": ["Unknown"], "direct": ["Unknown"],
+                "unknownWhy": ["reflect:Class.forName"], "hash": "deplib#io::deep"}},
+              {{"fn": "io::mute", "inferred": ["Unknown"], "hash": "deplib#io::mute"}}
+            ]}}"#);
+        std::fs::write(dd.join("report.deplib.scan.json"), &report).unwrap();
+        let idx = load_dep_reports(dd.to_str());
+
+        let d = std::env::temp_dir().join(format!("candor-depchain-c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"consumer\"\n\n[dependencies]\ndeplib = \"1\"\n").unwrap();
+        let run = |src: &str, rule: &str, ix: &DepIndex| -> i32 {
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let p = d.join("candor.policy");
+            std::fs::write(&p, format!("{rule}\n")).unwrap();
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+                include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
+                baseline: None, quiet: true, deps_idx: ix,
+            });
+            rc
+        };
+        // (1) THE CHAIN-EXPLAINED ARM. The dependency published the edge AND the reason at its end, so
+        // the consumer must get that class — and must NOT also get the catch-all.
+        let relay = "pub fn one() { deplib::io::relay(); }\n";
+        assert_eq!(run(relay, "deny Unknown[reflect]", &idx), 1,
+                   "a reason the dep's OWN `calls` chain reaches must cross the join");
+        assert_eq!(run(relay, "deny Unknown[unresolved]", &idx), 0,
+                   "THE MIRROR FABRICATION: this `Unknown` IS accounted for, one edge down in the \
+                    dependency's own published graph. Charging it the catch-all is the naive form — \
+                    contributing `unresolved` whenever an `Unknown` is present without asking whether \
+                    anything explains it");
+        // (2) THE DISCRIMINATION CONTROL. Same shape, no edge to carry a reason — still `unresolved`.
+        // Without this, "explain through the chain" and "stop contributing" are the same diff.
+        let mute = "pub fn one() { deplib::io::mute(); }\n";
+        assert_eq!(run(mute, "deny Unknown[unresolved]", &idx), 1,
+                   "an `Unknown` NEITHER a tag NOR a chain accounts for must still fail closed");
+        assert_eq!(run(mute, "deny Unknown[reflect]", &idx), 0, "…and must not borrow a sibling's class");
+        // (3) ROW 3 — both on one function. The class set is a UNION and can only GROW: §6.2's
+        // monotone-denial corollary, which the absence-keyed rule violated.
+        let both = "pub fn one() { deplib::io::relay(); deplib::io::mute(); }\n";
+        assert_eq!(run(both, "deny Unknown[unresolved]", &idx), 1, "the unaccounted one still bites");
+        assert_eq!(run(both, "deny Unknown[reflect]", &idx), 1, "…and so does the chain-explained one");
+        assert_eq!(run(both, "deny Unknown", &idx), 1, "the bare rule bites in every arm");
+        // (4) THE STALENESS GATE. §2.1 refuses to believe a distrusted report's EFFECTS, so it must not
+        // believe its `calls` either — the chain is a claim by the same producer we just refused, and a
+        // resolution pass that read one would launder exactly what the downgrade exists to reject.
+        //
+        // TWO GATES HOLD THIS, AND NEITHER ALONE FAILS THIS ASSERTION — measured by mutating each: the
+        // fixpoint is skipped when `stale`, AND the `stale` arm never reads a reason field at all. Both
+        // had to be removed together before this line went red. Recorded because the natural reading is
+        // that the `!stale` guard is the gate and the other is redundant; it is the pair that is load-
+        // bearing, and deleting either as "dead" leaves a test that no longer defends what it names.
+        let sd = std::env::temp_dir().join(format!("candor-depchain-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sd);
+        std::fs::create_dir_all(&sd).unwrap();
+        std::fs::write(sd.join("report.deplib.scan.json"),
+                       report.replace(&me, "scan-0.0.1-OTHER")).unwrap();
+        let stale = load_dep_reports(sd.to_str());
+        assert_eq!(run(relay, "deny Unknown[unresolved]", &stale), 1,
+                   "a DISTRUSTED report's `calls` chain must not explain anything — the §2.1 downgrade \
+                    is refusing to believe that producer, and its edges are the same producer's claim");
+        assert_eq!(run(relay, "deny Unknown[reflect]", &stale), 0,
+                   "…so the class it would have carried must not reach the gate either");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&dd);
+        let _ = std::fs::remove_dir_all(&sd);
+    }
+
     #[test]
     fn a_stale_reports_unknown_is_classed_unresolved_like_the_rest_of_the_family() {
         // The §2.1 staleness downgrade MANUFACTURES an `Unknown` that no call site is responsible for —

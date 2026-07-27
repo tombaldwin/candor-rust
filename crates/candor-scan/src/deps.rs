@@ -328,6 +328,93 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 }
             }
         }
+        // THE SECOND CONJUNCT OF SPEC §6.2 ⟨0.24⟩'s CONTRIBUTION RULE: an entry's `Unknown` is
+        // UNACCOUNTED only when NEITHER its own tags NOR its published `calls` chain explain it.
+        //
+        // `unknownWhy` is DIRECT-ONLY by design (§4: a reason names a site in the function's OWN body),
+        // so a dep entry whose `Unknown` is purely INHERITED correctly carries no reason — and it is
+        // indistinguishable, field for field, from one nothing accounted for. Charging both to the
+        // catch-all is the NAIVE form §6.2 names and the changelog calibrates: "contributing `unresolved`
+        // to one whose `Unknown` is correctly classified at the callee is the mirror fabrication. A fix
+        // that trades one for the other is not a fix."
+        //
+        // MEASURED HERE BEFORE THIS PASS EXISTED, on TRUSTED reports, with exactly the control §6.2
+        // prescribes — a fresh dependency whose `Unknown` is explained once via its own tag and once via
+        // a `calls` edge. rust passed the tag arm and failed the edge arm: scanning candor-scan over its
+        // own 173-report dep tree, 8 caller functions were charged `unresolved`, and all 8 trace to three
+        // `syn` entries (`parse::F::parse2`, `mac::Macro::parse_body_with`,
+        // `attr::Attribute::parse_nested_meta`) whose `Unknown` syn's OWN `calls` chain explains 2–5 hops
+        // down, at `error::Error::new`, as `ambiguous:same-name local defs` — class `dispatch`, not
+        // `unresolved`. A fabricated class, not a missing one.
+        //
+        // The resolution is a least fixpoint over the report's own graph, and it is a DENYLIST: it carves
+        // out the entries a reason demonstrably reaches and leaves everything else on the conservative
+        // catch-all. An allowlist here — "explain only the shapes I thought of" — would silently return
+        // every shape it forgot to the fabrication.
+        //
+        // GATED ON `!stale` for the same reason the type surface is: §2.1 refuses to believe a distrusted
+        // report's effects, so it must not believe its `calls` either. A stale entry keeps the reasonless
+        // treatment, which is the whole point of the downgrade.
+        let mut chain_why: std::collections::HashMap<String, BTreeSet<String>> = Default::default();
+        if !stale {
+            let mut own: std::collections::HashMap<&str, BTreeSet<String>> = Default::default();
+            let mut edges: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+            for e in fns {
+                let Some(q) = e.get("fn").and_then(|x| x.as_str()) else { continue };
+                let why: BTreeSet<String> = e
+                    .get("unknownWhy")
+                    .and_then(|x| x.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect();
+                if !why.is_empty() {
+                    own.insert(q, why);
+                }
+                let cs: Vec<&str> = e
+                    .get("calls")
+                    .and_then(|x| x.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| s.as_str())
+                    .collect();
+                if !cs.is_empty() {
+                    edges.insert(q, cs);
+                }
+            }
+            // Only worth a fixpoint if the report records BOTH reasons and edges to carry them along.
+            if !own.is_empty() && !edges.is_empty() {
+                let mut acc: std::collections::HashMap<&str, BTreeSet<String>> = own.clone();
+                // Bounded like every other propagation here: the set only grows, over a finite node set,
+                // so the loop terminates; the cap is belt-and-braces against a pathological report.
+                for _ in 0..64 {
+                    let mut moved = false;
+                    for (q, cs) in &edges {
+                        let mut merged = acc.get(q).cloned().unwrap_or_default();
+                        let before = merged.len();
+                        for c in cs {
+                            if let Some(w) = acc.get(c) {
+                                merged.extend(w.iter().cloned());
+                            }
+                        }
+                        if merged.len() != before {
+                            acc.insert(q, merged);
+                            moved = true;
+                        }
+                    }
+                    if !moved {
+                        break;
+                    }
+                }
+                // Keep only the entries this pass ADDS — one whose own tag already answers is untouched,
+                // so the verbatim direct reason still wins and this can only ever fill a blank.
+                for (q, w) in acc {
+                    if !own.contains_key(q) {
+                        chain_why.insert(q.to_string(), w);
+                    }
+                }
+            }
+        }
         // The crate(s) a report COVERS, for the §7.14 ledger exemption (§2 chaining rule 3): the
         // AUTHORITATIVE claim is the envelope's `package` (or the JVM-shape `packages`) field — an
         // EMPTY report ({functions: []}) is an all-pure purity claim for that package, covered and
@@ -435,6 +522,15 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 de.invisible = strs("invisible"); // sweep [8]: carry the blind-crate disclosure across the join
                 // The reason class travels with the `Unknown` it explains. Verbatim — see `DepFn`.
                 de.unknown_why = strs("unknownWhy");
+                // …and when the entry's own tags say nothing, the reason its published `calls` chain
+                // reaches (the fixpoint above). Still verbatim: these are the dependency's own canonical
+                // §4 strings, moved along an edge the dependency itself published, never re-derived.
+                // Only fills a blank — an entry with a direct tag keeps exactly the bytes it shipped.
+                if de.unknown_why.is_empty() {
+                    if let Some(w) = chain_why.get(qual) {
+                        de.unknown_why = w.clone();
+                    }
+                }
                 // sweep [30]: carry masking-incompleteness (mapped to the static effect alphabet).
                 for s in e.get("incomplete").and_then(|x| x.as_array()).into_iter().flatten() {
                     if let Some(eff) = s.as_str().and_then(candor_classify::cap_from_name) {
