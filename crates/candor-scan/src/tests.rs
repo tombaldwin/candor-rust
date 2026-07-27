@@ -650,19 +650,106 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         };
         assert_eq!(why("from_named"), vec!["dispatch:lib.Store.save".to_string()],
                    "the dep's reason must cross the join VERBATIM — the `owner.member` detail is normative\n{v:#}");
-        // A dep that declares `Unknown` and no reason (an older report, a foreign producer) must still not
-        // leave the consumer's entry unmarked: fail CLOSED with a canonical §4 kind.
+        // …AND A REASON THE DEP DID NOT GIVE MUST NOT BE INVENTED. The fallback this test used to assert
+        // stamped `callback:chained dependency declared Unknown without a reason` on a reasonless dep
+        // Unknown, which §6.2 projects to `indirect` — a class naming a higher-order/owner-less
+        // invocation that nothing here observed. §6.2 already answers this case normatively ("a function
+        // whose `Unknown` carries no recorded reason is treated as `unresolved`"), so the empty field is
+        // not a hole; the tag was a WRONG answer replacing a right one, and it made
+        // `deny E Unknown[unresolved]` — the catch-all every conservative adopter keeps — read GREEN on
+        // rust and RED on java/ts/swift over byte-identical input. All three of those leave it to the
+        // fallback: java attaches nothing, ts attaches nothing on the call path, swift attaches a
+        // provenance pointer it documents as projecting to `unresolved`.
         let silent = why("from_silent");
-        assert_eq!(silent.len(), 1, "a reasonless dep Unknown left the consumer unmarked\n{v:#}");
-        assert!(silent[0].starts_with("callback:"),
-                "the fallback reason must use a canonical §4 ⟨0.7⟩ kind, got {silent:?}");
+        assert!(silent.is_empty(),
+                "a reason the dependency never gave was INVENTED for the consumer: {silent:?}\n{v:#}");
+    }
+
+    /// …and the CLASS is what a gate actually reads, so assert it through the gate rather than through
+    /// the string. Two directions, and the second is the one that made this a defect rather than a
+    /// cosmetic difference:
+    ///   - `deny Unknown[unresolved]` MUST fire on a reasonless chained Unknown. §6.2 makes `unresolved`
+    ///     the class of an Unknown with no recorded reason, and it is the catch-all a conservative
+    ///     adopter keeps in every narrowed rule (the engine's own under-gating lint says so). The
+    ///     `callback:` tag took it out of scope: exit 0 on rust, exit 1 on java/ts/swift, same input.
+    ///   - `deny Unknown[indirect]` MUST NOT fire on it. Nothing observed a higher-order or owner-less
+    ///     invocation here; that class was manufactured by the join.
+    ///
+    /// The `dispatch:`-carrying sibling in the same crate is the control: a class the dependency DID
+    /// record must still reach the gate, so this cannot be satisfied by dropping reasons wholesale.
+    #[test]
+    fn a_reasonless_chained_unknown_is_gated_as_unresolved_not_as_a_class_the_join_invented() {
+        let dd = std::env::temp_dir().join(format!("candor-depwhygate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dd);
+        std::fs::create_dir_all(&dd).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(dd.join("report.deplib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [
+              {{"fn": "io::murky", "inferred": ["Unknown"], "unresolved": true,
+                "unknownWhy": ["dispatch:lib.Store.save"], "hash": "deplib#io::murky"}},
+              {{"fn": "io::mute", "inferred": ["Unknown"], "unresolved": true,
+                "hash": "deplib#io::mute"}}
+            ]}}"#)).unwrap();
+        let idx = load_dep_reports(Some(dd.to_str().unwrap()));
+
+        let d = std::env::temp_dir().join(format!("candor-depwhygate-c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"consumer\"\n\n[dependencies]\ndeplib = \"1\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub fn from_silent() { deplib::io::mute(); }\n").unwrap();
+        let run = |rule: &str| -> i32 {
+            let p = d.join("candor.policy");
+            std::fs::write(&p, format!("{rule}\n")).unwrap();
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+                include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
+                baseline: None, quiet: true, deps_idx: &idx,
+            });
+            rc
+        };
+        assert_eq!(run("deny Unknown"), 1, "the bare rule must still bite — the Unknown IS there");
+        assert_eq!(run("deny Unknown[unresolved]"), 1,
+                   "THE CATCH-ALL WENT GREEN: a reasonless chained Unknown was tagged out of \
+                    `unresolved`, so the class every narrowed rule is told to keep no longer sees it — \
+                    and java/ts/swift all exit 1 here");
+        assert_eq!(run("deny Unknown[indirect]"), 0,
+                   "a class NOTHING observed was manufactured by the join: no higher-order or \
+                    owner-less invocation was seen, only a dependency that gave no reason");
+        // The control: a class the dependency DID record must still reach the gate.
+        std::fs::write(d.join("src/lib.rs"), "pub fn from_named() { deplib::io::murky(); }\n").unwrap();
+        assert_eq!(run("deny Unknown[dispatch]"), 1,
+                   "the dep's OWN recorded class stopped reaching the gate — this fix must drop only \
+                    the invented reason, never a carried one");
+        assert_eq!(run("deny Unknown[unresolved]"), 0,
+                   "…and a classified Unknown must NOT also read `unresolved`, or the chained consumer \
+                    gates differently from the same code unsplit");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&dd);
     }
 
     #[test]
-    fn a_stale_reports_unknown_says_why_it_is_unknown() {
-        // The §2.1 staleness downgrade MANUFACTURES an `Unknown` that no call site is responsible for. It
-        // is still a direct source at the consumer, so it still needs a reason, or the same class-scoped
-        // gate tolerates it.
+    fn a_stale_reports_unknown_is_classed_unresolved_like_the_rest_of_the_family() {
+        // The §2.1 staleness downgrade MANUFACTURES an `Unknown` that no call site is responsible for —
+        // which is exactly why it has no class. This test used to require a canonical §4 kind here, and
+        // the only kind that fits nothing is `callback:`, so the downgrade shipped tagged
+        // `callback:chained report from a different producer version` → §6.2 class `indirect`.
+        //
+        // There is no single-tree control for a stale report (staleness is a property of the report, not
+        // of any code), so the deciding evidence is the family: java attaches nothing; ts attaches
+        // nothing on the call path and `stale-dep:<pkg>` on the import path; swift attaches
+        // `dep-stale:<pkg>` and DOCUMENTS that §6.2 projects it to `unresolved`. Three engines, one
+        // class — `unresolved`, which is also what §6.2 prescribes for an Unknown carrying no reason.
+        // rust alone said `indirect`, so `deny Unknown[unresolved]` over an untrusted dependency was
+        // green on rust and red on the other three.
+        //
+        // rust does not follow swift and ts into a `dep-stale:`-shaped token: conformance PART 10 makes
+        // any kind outside the canonical four (bar the two named migration kinds) a HARD divergence, and
+        // this engine already carries one off-vocabulary kind (`ambiguous:`) as an open item. The prose
+        // goes to stderr instead — the channel ts and swift already disclose staleness on, and the one
+        // rust was missing entirely.
         let d = std::env::temp_dir().join(format!("candor-stalewhy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::create_dir_all(&d);
@@ -673,10 +760,14 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         let idx = load_dep_reports(Some(d.to_str().unwrap()));
         let _ = std::fs::remove_dir_all(&d);
         let e = idx.by_key.get("oldlib#io::go").expect("stale entry present");
-        assert_eq!(e.effects, vec!["Unknown"]);
-        assert_eq!(e.unknown_why.len(), 1, "the staleness downgrade must say why: {:?}", e.unknown_why);
-        assert!(e.unknown_why[0].starts_with("callback:"),
-                "canonical §4 ⟨0.7⟩ kind required, got {:?}", e.unknown_why);
+        assert_eq!(e.effects, vec!["Unknown"], "the §2.1 downgrade itself must not move");
+        assert!(e.unknown_why.is_empty(),
+                "the staleness downgrade INVENTED a reason class: {:?}", e.unknown_why);
+        assert_eq!(
+            candor_classify::policy::ReasonClass::classify("anything unrecognized"),
+            candor_classify::policy::ReasonClass::Unresolved,
+            "…and the §6.2 catch-all this relies on must still be the catch-all"
+        );
     }
 
     #[test]
