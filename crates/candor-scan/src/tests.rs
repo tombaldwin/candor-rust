@@ -6473,4 +6473,54 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 "{f} invokes an opaque callable and must disclose it:\n{v:#}"
             );
         }
+    
+    }
+    #[test]
+    fn an_identical_entry_restated_does_not_withdraw_the_key() {
+        // A dep directory holding TWO COPIES of one report is the most ordinary accident there is, and it
+        // used to be a CARDINAL SIN: the never-guess rule saw a shared key, withdrew it, and the consumer
+        // went ABSENT from `functions` — a positive purity claim under ⟨0.21⟩ — over a call the single-report
+        // arm resolves to `Exec`. The rule is about DISAGREEMENT; two entries making the SAME claim are not
+        // ambiguous. Found by candor-swift's fresh-vs-stale fixture, which flagged it for rust and java;
+        // java is clean (last-wins keeps an answer), rust withdrew.
+        let dep = std::env::temp_dir().join(format!("candor-dupkey-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        std::fs::create_dir_all(&dep).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let body = format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [{{"fn": "work", "inferred": ["Exec"], "cmds": ["dupcmd"], "hash": "deplib#work"}}]}}"#);
+        // the SAME report, twice — byte-identical, zero disagreement
+        std::fs::write(dep.join("report.deplib.scan.json"), &body).unwrap();
+        std::fs::write(dep.join("copy.deplib.scan.json"), &body).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dep);
+        assert!(idx.by_key.contains_key("deplib#work"),
+                "the key was WITHDRAWN because one claim was restated — the consumer then reads the call pure");
+        assert_eq!(idx.by_key.get("deplib#work").map(|d| d.effects.clone()), Some(vec!["Exec"]),
+                   "the surviving entry must be the claim both copies made");
+    }
+
+    #[test]
+    fn two_entries_that_disagree_under_one_key_are_still_withdrawn() {
+        // THE SECOND DIRECTION, and it is the one that keeps the never-guess rule intact: relaxing the
+        // withdrawal to "keep the first" would let a leaf collision between two DIFFERENT dep functions
+        // charge one's effects to the other. Only an identical restatement is exempt.
+        let dep = std::env::temp_dir().join(format!("candor-dupkey-dis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dep);
+        std::fs::create_dir_all(&dep).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        let one = format!(r#"{{"candor": {{"version": "{me}", "toolchain": "s", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [{{"fn": "work", "inferred": ["Exec"], "hash": "deplib#work"}}]}}"#);
+        let two = format!(r#"{{"candor": {{"version": "{me}", "toolchain": "s", "spec": "0.23"}},
+            "package": "deplib",
+            "functions": [{{"fn": "work", "inferred": ["Net"], "hash": "deplib#work"}}]}}"#);
+        std::fs::write(dep.join("a.deplib.scan.json"), one).unwrap();
+        std::fs::write(dep.join("b.deplib.scan.json"), two).unwrap();
+        let idx = load_dep_reports(Some(dep.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dep);
+        assert!(!idx.by_key.contains_key("deplib#work"),
+                "two entries claiming DIFFERENT effects under one key must still be withdrawn — never guess");
     }
