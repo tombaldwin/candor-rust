@@ -123,6 +123,106 @@ fn truncated_report_does_not_panic() {
     assert!(stderr.contains("failed to parse"), "a truncated report must be disclosed on stderr, got:\n{stderr}");
 }
 
+// ── a sidecar is NOT a report candidate: no FALSE disclosure, and the real one still fires ────────
+
+/// Write the 2-segment sidecar shape SPEC §2.2 licenses — `<prefix>.<pkg>.hierarchy.json` and
+/// `<prefix>.<pkg>.callgraph.json`. Each engine pairs a sidecar to its OWN report stem, so the segment
+/// count is not fixed by the spec, and these land exactly on the `<crate>.<type>` report shape.
+fn write_two_segment_sidecars(prefix: &str) {
+    std::fs::write(format!("{prefix}.app.hierarchy.json"), r#"{"app.Sub":["app.Base"]}"#).unwrap();
+    std::fs::write(format!("{prefix}.app.callgraph.json"), r#"{"outer":["inner"],"inner":[]}"#).unwrap();
+}
+
+/// A FALSE DISCLOSURE, and the reason it is worth a test: the report-locator glob picked a SIDECAR up
+/// as a report candidate, failed to find `functions` in it, and reported that as data loss —
+/// "report … failed to parse — its functions are OMITTED from this query (corrupt or mid-write);
+/// re-run the scan" — over a scan that was completely fine. Nothing was omitted. A disclosure channel
+/// is only worth anything if a message in it means something, and this one spent that on noise while
+/// telling the user to re-run a good scan (the `net-partner` "ignoring unknown config key" class,
+/// which was printed WHILE the key was being honoured).
+///
+/// Fixed at the GLOB (`candor_report::SIDECAR_KINDS`), not at the parse: the sidecar never enters the
+/// candidate set, so there is nothing to diagnose. Suppressing the message instead would have left the
+/// file in the set and both REAL consequences below live.
+#[test]
+fn a_wellformed_sidecar_is_never_diagnosed_as_a_corrupt_report() {
+    let f = Fixture::new("sidecar-quiet");
+    f.write_report();
+    write_two_segment_sidecars(&f.prefix);
+
+    // Every verb that resolves a report locator — `callers --include-unknown` is the reported repro.
+    for args in [
+        vec!["callers", &f.prefix, "inner", "1", "--include-unknown"],
+        vec!["map", &f.prefix, "0"],
+        vec!["where", "Fs", "--report", &f.prefix],
+        vec!["show", "outer", "--report", &f.prefix],
+        vec!["path", "outer", "Fs", "--report", &f.prefix],
+        vec!["tour", "--report", &f.prefix],
+        vec!["reachable", "--report", &f.prefix],
+        vec!["containment", "--report", &f.prefix],
+        vec!["blindspots", "--report", &f.prefix],
+        vec!["impact", "inner", "--report", &f.prefix],
+    ] {
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        let stderr = String::from_utf8(out.stderr).expect("utf8 stderr");
+        assert!(
+            !stderr.contains("failed to parse"),
+            "`{}` diagnosed a well-formed SIDECAR as a corrupt report — a false disclosure over a good \
+             scan:\n{stderr}",
+            args.join(" ")
+        );
+    }
+
+    // (a) `reports` is the canonical "what counts as a report" oracle (the wrapper's `--exists` check
+    //     joins on it) — it must name the report and neither sidecar.
+    let out = Command::new(bin()).arg("reports").arg(&f.prefix).output().expect("run candor-query");
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("r.rpt.scan.json"), "the real report must be listed, got:\n{stdout}");
+    assert!(!stdout.contains("hierarchy") && !stdout.contains(".app.callgraph"),
+            "a sidecar was listed as a report, got:\n{stdout}");
+
+    // (b) THE CONSEQUENCE THAT WAS NOT JUST NOISE. The sidecar's parse failure set the `hard_fail` bit
+    //     `load_entries_loud` uses to tell "an effect-free crate" from "every report was corrupt". So a
+    //     legitimately EFFECT-FREE crate (a well-formed `functions: []` report) standing beside a
+    //     sidecar was REFUSED at exit 2 — the query answered nothing at all.
+    let g = Fixture::new("sidecar-empty");
+    std::fs::write(
+        format!("{}.rpt.scan.json", g.prefix),
+        r#"{"candor":{"version":"scan-test","toolchain":"stable","spec":"0.7"},"package":"rpt","functions":[]}"#,
+    ).unwrap();
+    write_two_segment_sidecars(&g.prefix);
+    let out = Command::new(bin()).arg("where").arg("Fs").arg("--report").arg(&g.prefix)
+        .output().expect("run candor-query");
+    let stderr = String::from_utf8(out.stderr).expect("utf8 stderr");
+    assert_eq!(out.status.code(), Some(0),
+               "an effect-free crate beside a sidecar must still answer, not be refused as corrupt:\n{stderr}");
+    assert!(!stderr.contains("refusing to report an empty"),
+            "the corruption guard fired on a sidecar, not on a corrupt report:\n{stderr}");
+}
+
+/// THE CONTROL, and without it the test above cannot tell "fixed the false disclosure" from "disabled
+/// the disclosure". With the SAME sidecars present, a genuinely corrupt REPORT must still be disclosed
+/// — and the message must name the REPORT, not a sidecar.
+#[test]
+fn a_corrupt_report_beside_a_sidecar_is_still_disclosed() {
+    let f = Fixture::new("sidecar-control");
+    std::fs::write(f.report_path(), "{ this is : not valid json @@@").unwrap();
+    write_two_segment_sidecars(&f.prefix);
+
+    let out = Command::new(bin()).arg("map").arg(&f.prefix).arg("0").output().expect("run candor-query");
+    let stderr = String::from_utf8(out.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("failed to parse"),
+            "a REAL corrupt report went undisclosed — the sidecar exclusion disabled the channel \
+             instead of un-poisoning it:\n{stderr}");
+    assert!(stderr.contains("r.rpt.scan.json"),
+            "the disclosure must name the corrupt REPORT, got:\n{stderr}");
+    assert!(!stderr.contains("hierarchy.json"),
+            "the disclosure named a SIDECAR, got:\n{stderr}");
+    // …and the corruption guard still refuses to answer an empty (all-clear) query over it.
+    assert_eq!(out.status.code(), Some(2),
+               "a wholly corrupt report must still fail loud, got:\n{stderr}");
+}
+
 #[test]
 fn nonexistent_prefix_fails_loud_exit_2() {
     // A prefix matching NO report files must fail LOUD (exit 2), never read as an authoritative empty

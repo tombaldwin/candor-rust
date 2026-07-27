@@ -13,8 +13,9 @@ pub const EFFECTS: [&str; 11] =
     ["Net", "Db", "Llm", "Fs", "Exec", "Ipc", "Env", "Clock", "Rand", "Clipboard", "Log"];
 
 /// A discovered per-crate report file. candor's report naming convention is
-/// `<prefix>.<crate>.<type>.json`; the sidecars (`<prefix>.calibrated.json`,
-/// `<prefix>.encountered-*.json`) have only ONE segment after the prefix and are NOT reports.
+/// `<prefix>.<crate>.<type>.json`; the sidecars are NOT reports — either because they carry only ONE
+/// segment after the prefix (`<prefix>.calibrated.json`, `<prefix>.encountered-*.json`) or because
+/// their trailing segment is a reserved [`SIDECAR_KINDS`] name (`<prefix>.<pkg>.hierarchy.json`).
 pub struct ReportFile {
     pub path: PathBuf,
     /// The `<crate>` segment of the filename.
@@ -23,11 +24,40 @@ pub struct ReportFile {
     pub kind: String,
 }
 
+/// The reserved trailing name-segments that mark a SIDECAR, never a crate `<type>` — so a sidecar
+/// named `<base>.<pkg>.<kind>.json` can never be mistaken for the report `<base>.<crate>.<type>.json`.
+///
+/// **This is a DENYLIST, deliberately, and the direction matters.** `report_files` still ACCEPTS any
+/// `<base>.<a>.<b>.json`; this list only carves out the names that are provably not crate types. The
+/// allowlist inversion — accepting only a known set of `<type>`s (`lib`/`Rlib`/`Executable`/`scan`/…) —
+/// would make any report whose type segment we failed to anticipate (a new rustc crate type, another
+/// engine's `Swift`/`jar`/`esm` kind) SILENTLY INVISIBLE to every query: a false all-clear, the §4
+/// cardinal sin. A denylist can only ever be *incomplete*, and incompleteness here is LOUD, not silent
+/// — a sidecar suffix missing from this list falls back into the candidate set, fails to parse as a
+/// report, and prints the "failed to parse — its functions are OMITTED" disclosure on stderr for every
+/// query. Noise, not a swallowed report. Add the suffix here when that happens.
+///
+/// Safety of each entry: these are `<type>` positions. `<type>` is a crate/compilation kind (`lib`,
+/// `Rlib`, `Executable`, `Cdylib`, `scan`, and other engines' `Swift`/`jar`), and no engine in the
+/// family names a kind after one of these artifacts. A CRATE legitimately named `hierarchy` is
+/// untouched — it lands in the `<crate>` position (`<base>.hierarchy.lib.json`), which this does not
+/// look at (pinned by `report_files_discriminates_and_parses`).
+///
+/// Sourced from what the family actually writes: `callgraph`/`hierarchy` (SPEC §2.2 — each engine
+/// pairs them to its own report stem, so their segment count is NOT fixed), `calibrated`/`layerreach`/
+/// `encountered-*` (this engine), `locs`/`gate` (candor-ts). candor-ts (`query-core.mjs` `isReport`),
+/// candor-java (`Query.java`) and candor-swift (`FixCLI.swift`) all exclude the same suffixes by name;
+/// this engine discriminated by segment count alone, which covered its OWN 3-segment sidecars but not
+/// a 2-segment one from another producer.
+pub const SIDECAR_KINDS: [&str; 6] =
+    ["callgraph", "hierarchy", "calibrated", "layerreach", "locs", "gate"];
+
 /// Discover the per-crate report files for a prefix (`.candor/report` →
 /// `.candor/report.<crate>.<type>.json`), sorted by path for deterministic output. A directoryless
 /// prefix reads the current directory. ONE discrimination rule — `<crate>.<type>`, exactly two
-/// segments — shared by the lint's cross-crate loader and the CLI's queries, so the two can never
-/// disagree about which files are reports.
+/// segments, and a `<type>` that is not a reserved [`SIDECAR_KINDS`] name — shared by the lint's
+/// cross-crate loader and the CLI's queries, so the two can never disagree about which files are
+/// reports.
 pub fn report_files(prefix: &str) -> Vec<ReportFile> {
     let p = Path::new(prefix);
     // A locator that is an existing FILE ending `.json` is a DIRECT single-report reference (SPEC
@@ -65,6 +95,19 @@ pub fn report_files(prefix: &str) -> Vec<ReportFile> {
         // both segments must be non-empty (`<base>.<crate>..json` would otherwise parse to an empty
         // `kind`) and `kind` must itself be a single segment (no further dots).
         if krate.is_empty() || kind.is_empty() || kind.contains('.') {
+            continue;
+        }
+        // …and `kind` must not be a reserved SIDECAR name. The segment-count rule alone excludes THIS
+        // engine's sidecars (all 3-segment: `<base>.<crate>.<type>.callgraph.json`) but not a 2-segment
+        // one from another producer — SPEC §2.2 lets each engine pair its sidecar to its own report
+        // stem, so `<base>.<pkg>.hierarchy.json` is a legitimate name that lands exactly on the
+        // `<crate>.<type>` shape. Excluded HERE, at the glob, rather than diagnosed after a failed
+        // parse: a sidecar in the candidate set produced a FALSE disclosure ("failed to parse — its
+        // functions are OMITTED … re-run the scan") on a scan that was fine, and worse, it fed the
+        // `load_entries_loud` corruption guard — an effect-free crate (a well-formed `functions: []`
+        // report) beside a sidecar was refused at exit 2. Suppressing the message instead would leave
+        // both of those live and is one refactor from returning.
+        if SIDECAR_KINDS.contains(&kind) {
             continue;
         }
         out.push(ReportFile { path: ent.path(), krate: krate.to_string(), kind: kind.to_string() });
@@ -867,9 +910,17 @@ mod tests {
     }
 
     /// The ONE discrimination rule shared by the lint's cross-crate loader and the CLI: a report is
-    /// `<base>.<crate>.<type>.json` (exactly two segments after the base); sidecars (one segment) and
+    /// `<base>.<crate>.<type>.json` (exactly two segments after the base) whose `<type>` is not a
+    /// reserved [`SIDECAR_KINDS`] name; sidecars (one segment, or a reserved trailing segment) and
     /// any 3+-segment name are NOT reports. Real reports always have a dot-free crate name and type,
     /// so two segments is exact. Sorted by path, with krate/kind parsed from the filename.
+    ///
+    /// The `<pkg>.hierarchy` / `<pkg>.callgraph` rows are the 2-segment sidecar shape SPEC §2.2
+    /// licenses (each engine pairs a sidecar to its OWN report stem, so the count is not fixed). They
+    /// landed exactly on `<crate>.<type>`, entered the candidate set, and every query printed a FALSE
+    /// "report … failed to parse — its functions are OMITTED … re-run the scan" over a perfectly good
+    /// scan. `r.hierarchy.lib.json` is the control that keeps the exclusion a DENYLIST over `<type>`
+    /// and not a ban on the WORD: a crate legitimately called `hierarchy` must still be found.
     #[test]
     fn report_files_discriminates_and_parses() {
         let dir = std::env::temp_dir().join("candor-report-files-test");
@@ -878,12 +929,17 @@ mod tests {
         for f in [
             "r.mycrate.lib.json",          // report ✓ → (mycrate, lib)
             "r.mycrate.Executable.json",   // report ✓ → (mycrate, Executable)
+            "r.hierarchy.lib.json",        // report ✓ → a CRATE named `hierarchy` is not a sidecar
             "r.calibrated.json",           // sidecar ✗ (one segment)
             "r.encountered-mycrate.json",  // sidecar ✗ (one segment)
             "r.a.b.c.json",                // ✗ 3 segments (kind "b.c" has a dot)
             "other.x.y.json",              // ✗ different base
         ] {
             std::fs::write(dir.join(f), "[]").unwrap();
+        }
+        // …and every reserved sidecar kind in the `<type>` position (`<base>.<pkg>.<kind>.json`).
+        for k in SIDECAR_KINDS {
+            std::fs::write(dir.join(format!("r.app.{k}.json")), "{}").unwrap();
         }
         let prefix = dir.join("r");
         let got: Vec<(String, String, String)> = report_files(prefix.to_str().unwrap())
@@ -895,6 +951,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
+                ("r.hierarchy.lib.json".into(), "hierarchy".into(), "lib".into()),
                 ("r.mycrate.Executable.json".into(), "mycrate".into(), "Executable".into()),
                 ("r.mycrate.lib.json".into(), "mycrate".into(), "lib".into()),
             ]
