@@ -1313,11 +1313,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 && c.path.contains("::") && deps_idx.crates.contains(cr_real)
             {
                 let rel = c.path.strip_prefix(&format!("{cr}::")).unwrap_or(&c.path);
-                let hit = if rel.contains("::") {
-                    tail2(rel).and_then(|t2| deps_idx.by_key.get(&format!("{cr_real}#{t2}")))
+                let key = if rel.contains("::") {
+                    tail2(rel).map(|t2| format!("{cr_real}#{t2}"))
                 } else {
-                    deps_idx.by_key.get(&format!("{cr_real}#{rel}"))
+                    Some(format!("{cr_real}#{rel}"))
                 };
+                let hit = key.as_ref().and_then(|k| deps_idx.by_key.get(k));
                 if let Some(de) = hit {
                     dep_join_hit = true;
                     apply_dep_fn(de, &f.qual, DepSink {

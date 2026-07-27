@@ -43,7 +43,7 @@ pub(crate) fn scan_builder_entry_effect(_cr: &str, path: &str) -> Option<&'stati
 }
 
 /// A loaded sibling-report function: the effects + literal surfaces a consumer's call inherits.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct DepFn {
     pub(crate) effects: Vec<&'static str>,
     pub(crate) hosts: Vec<String>,
@@ -385,8 +385,39 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 // so the present-vs-absent branches move `k` into different maps — clippy's map_entry
                 // rewrite (insert-or-modify in place) can't express the remove-on-collision.
                 #[allow(clippy::map_entry)]
-                if idx.by_key.contains_key(&k) {
-                    idx.by_key.remove(&k); // two dep fns share the key — drop it, never guess
+                if let Some(prev) = idx.by_key.get(&k) {
+                    // THE NEVER-GUESS RULE IS ABOUT DISAGREEMENT, NOT REPETITION. Withdrawing a shared key
+                    // is right when two entries say DIFFERENT things — there is no way to choose and a wrong
+                    // choice fabricates. It is wrong when they say the SAME thing: nothing is ambiguous, and
+                    // withdrawing turns a resolved effect into an ABSENT one, which under ⟨0.21⟩ is a
+                    // positive purity claim. MEASURED before the fix: one report chained gives the consumer
+                    // `['Exec']`; the SAME report chained TWICE gives ABSENT with no coverage hedge — a
+                    // cardinal sin reachable by the most ordinary accident there is, a dep directory holding
+                    // two copies of one report. Found by candor-swift's fresh-vs-stale fixture, which hit it
+                    // and flagged it for rust and java; java is CLEAN (its entry conflict is last-wins, so it
+                    // keeps an answer), rust withdrew.
+                    // THE NEVER-GUESS RULE IS ABOUT DISAGREEMENT, NOT REPETITION. Withdrawing a key two
+                    // entries share is right when they say DIFFERENT things — there is no way to choose and a
+                    // wrong choice fabricates. It is wrong when they are IDENTICAL: nothing is ambiguous, and
+                    // withdrawing turns a resolved effect into an ABSENT one, which under ⟨0.21⟩ is a positive
+                    // purity claim. MEASURED before the fix: one report chained gives the consumer `['Exec']`;
+                    // the SAME report chained TWICE gives ABSENT with no coverage hedge — a cardinal sin
+                    // reachable by the most ordinary accident there is, a dep directory holding two copies of
+                    // one report. Found by candor-swift's fresh-vs-stale fixture, which hit it and flagged it
+                    // for rust and java to check; java is CLEAN (its entry conflict is last-wins, so it keeps
+                    // an answer), rust withdrew.
+                    //
+                    // DELIBERATELY ONLY THE IDENTICAL CASE. Entries that AGREE ON EFFECTS but differ in their
+                    // literal surfaces are the majority of real collisions (1536 of 2041 on pgman's dep tree,
+                    // 2255 of 3276 on ebman's) and merging those is arguably right too — but measured, it
+                    // makes 24 of pgman's 200 functions and 108 of ebman's 544 newly carry `Unknown`, because
+                    // the entries being recovered are ones the dependency itself could not resolve. That is a
+                    // 12-20% disclosure increase and a design decision, not a tail on a bug fix; it is filed
+                    // in the work queue with these numbers rather than taken here.
+                    if prev == &de {
+                        continue; // the same claim restated — keep the entry, withdraw nothing
+                    }
+                    idx.by_key.remove(&k); // two dep fns DISAGREE under one key — drop it, never guess
                     ambiguous.insert(k);
                 } else {
                     idx.by_key.insert(k, de.clone());
