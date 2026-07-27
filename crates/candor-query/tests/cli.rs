@@ -952,8 +952,13 @@ fn callers_without_the_flag_omits_the_frontier_key() {
 
 /// The frontier's `possibleViaUnknownDispatch` entries as `(fn, viaDispatchOn)`, for one arm.
 fn frontier_of(prefix: &str) -> Vec<(String, String)> {
+    frontier_of_q(prefix, "work")
+}
+
+/// As `frontier_of`, for a fixture whose target is not `work`.
+fn frontier_of_q(prefix: &str, q: &str) -> Vec<(String, String)> {
     let out = Command::new(bin())
-        .arg("callers").arg(prefix).arg("work").arg("1").arg("--include-unknown")
+        .arg("callers").arg(prefix).arg(q).arg("1").arg("--include-unknown")
         .output().expect("run candor-query");
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value =
@@ -1053,6 +1058,109 @@ fn callers_include_unknown_dot_free_reason_never_matches_a_dot_free_rust_qual() 
             "every dot-free detail is disclosed verbatim, arm-independently (hierarchy={with_hier}): {got:?}"
         );
     }
+}
+
+#[test]
+fn callers_include_unknown_mixed_source_joins_members_and_raw_details_in_sorted_order() {
+    // ⟨0.24⟩ THE MIXED SOURCE, raised by the java engine and now the cross-engine fixture. A function
+    // carrying SEVERAL `dispatch:` reasons — dotted ones that PASS condition (3) and dot-free ones that
+    // cannot be evaluated at all — gets ONE entry, whose `viaDispatchOn` is the sorted, deduplicated,
+    // comma-joined union of the passing members `M` and the raw details. Rust satisfies this by
+    // construction (`BTreeSet<&str>` + `join(",")`), so this is a PIN, not a fix — and unpinned
+    // conformance-by-accident is what the next refactor removes.
+    //
+    // ENCOUNTER ORDER AND SORT ORDER DISAGREE ON PURPOSE — that is the whole value of the test. The
+    // reasons are fed in the order (dot-free, write, run), which is neither sorted nor kind-grouped, and
+    // `write` sorts AFTER the dot-free detail ('w' > 'u'), so the expected string INTERLEAVES the two
+    // kinds. An encounter-order join yields "untyped cross-package receiver,write,run"; a "dotted members
+    // first, then dot-free" join yields "run,write,untyped cross-package receiver". Both must FAIL.
+    let f = Fixture::new("frontier-mixed");
+    // `app.Impl.run` and `app.Zed.write` are both confirmed reachers of `app.Sink.touch`; the hierarchy
+    // puts Impl under BOTH Base and Other (so `app.Dedup.go`'s two distinct owners resolve to the same
+    // member `run` and must collapse) and Zed under Base.
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.24" },
+  "package": "app",
+  "functions": [
+    { "fn": "app.Sink.touch", "inferred": ["Fs"], "direct": ["Fs"] },
+    { "fn": "app.Impl.run", "inferred": ["Fs"], "calls": ["app.Sink.touch"] },
+    { "fn": "app.Zed.write", "inferred": ["Fs"], "calls": ["app.Sink.touch"] },
+    { "fn": "app.Mixed.go", "inferred": ["Unknown"], "unknownWhy": [
+        "dispatch:untyped cross-package receiver",
+        "dispatch:app.Base.write",
+        "dispatch:app.Base.run" ] },
+    { "fn": "app.Dedup.go", "inferred": ["Unknown"], "unknownWhy": [
+        "dispatch:app.Base.run",
+        "dispatch:app.Other.run" ] }
+  ]
+}"#;
+    std::fs::write(format!("{}.app.scan.json", f.prefix), report).unwrap();
+    std::fs::write(
+        format!("{}.app.scan.callgraph.json", f.prefix),
+        r#"{"app.Impl.run":["app.Sink.touch"],"app.Zed.write":["app.Sink.touch"],"app.Sink.touch":[]}"#,
+    ).unwrap();
+    std::fs::write(
+        format!("{}.app.hierarchy.json", f.prefix),
+        r#"{"app.Impl":["app.Base","app.Other"],"app.Zed":["app.Base"]}"#,
+    ).unwrap();
+    let got = frontier_of_q(&f.prefix, "touch");
+    assert_eq!(
+        got,
+        vec![
+            // Two owners (`app.Base`, `app.Other`), one member: Impl is a subtype of both, so both
+            // reasons pass (3) and yield `run` — DEDUPLICATED to a single term, not "run,run".
+            ("app.Dedup.go".to_string(), "run".to_string()),
+            // Three reasons, two kinds, interleaved by sort — NOT grouped by kind, NOT encounter order.
+            ("app.Mixed.go".to_string(), "run,untyped cross-package receiver,write".to_string()),
+        ],
+        "mixed source: sorted+deduplicated union of passing members and raw details: {got:?}"
+    );
+}
+
+#[test]
+fn callers_include_unknown_join_sorts_by_unicode_code_point_not_utf16_code_unit() {
+    // ⟨0.24⟩ THE COLLATION CLAUSE: "sorted" means by UNICODE CODE POINT, equivalently UTF-8 byte order.
+    // The two orders agree everywhere in the BMP and DISAGREE above it: java's `String.compareTo` and
+    // JS's default `Array.sort` compare UTF-16 code units, and a supplementary character's leading
+    // surrogate (U+D800..U+DBFF) sorts BELOW a Private-Use/BMP-tail character in U+E000..U+FFFF even
+    // though its code point is far above.
+    //
+    // Here: U+FF21 (FULLWIDTH LATIN CAPITAL A, UTF-8 `EF BC A1`, UTF-16 `FF21`) vs U+1F600 (GRINNING
+    // FACE, UTF-8 `F0 9F 98 80`, UTF-16 `D83D DE00`). Code point / UTF-8: FF21 FIRST. UTF-16: 1F600
+    // first. The two reasons are fed 1F600-first so encounter order also differs from the expected
+    // order — this test fails on a UTF-16 comparator AND on any lost sort.
+    //
+    // Rust gets this right for free: `Ord for str` is byte-wise over UTF-8, which IS code-point order,
+    // and no plausible rust idiom yields UTF-16 order. Kept anyway because it is the rust arm of a
+    // cross-engine fixture the other engines CAN fail, and because it goes red under a real mutation
+    // (verified against a `sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()))` join).
+    let f = Fixture::new("frontier-collation");
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.24" },
+  "package": "app",
+  "functions": [
+    { "fn": "app.Sink.touch", "inferred": ["Fs"], "direct": ["Fs"] },
+    { "fn": "app.Impl.run", "inferred": ["Fs"], "calls": ["app.Sink.touch"] },
+    { "fn": "app.Wide.go", "inferred": ["Unknown"], "unknownWhy": [
+        "dispatch:\ud83d\ude00-supplementary",
+        "dispatch:\uff21-bmp-tail" ] }
+  ]
+}"#;
+    // (Written as JSON's OWN escapes inside a rust raw string, so the code points are explicit and
+    // survive any editor round-trip, and so a FULLWIDTH `\uff21` is never mistaken for an ASCII `A`
+    // when read: `\ud83d\ude00` is the surrogate pair for U+1F600. serde_json decodes both to the real
+    // characters before candor ever sees them.)
+    std::fs::write(format!("{}.app.scan.json", f.prefix), report).unwrap();
+    std::fs::write(
+        format!("{}.app.scan.callgraph.json", f.prefix),
+        r#"{"app.Impl.run":["app.Sink.touch"],"app.Sink.touch":[]}"#,
+    ).unwrap();
+    let got = frontier_of_q(&f.prefix, "touch");
+    assert_eq!(
+        got,
+        vec![("app.Wide.go".to_string(), "\u{FF21}-bmp-tail,\u{1F600}-supplementary".to_string())],
+        "code-point order puts U+FF21 before U+1F600; UTF-16 code-unit order would invert it: {got:?}"
+    );
 }
 
 // ── blindspots: the Unknown sources ranked by blast radius (SPEC §3.1 ⟨0.6⟩ — was conformance-only) ─
