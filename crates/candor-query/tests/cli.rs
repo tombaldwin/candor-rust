@@ -846,9 +846,16 @@ fn unverified_provably_pure_scope_is_clean() {
 // TESTING.md §3: engine-local behavior needs in-repo coverage; this arm previously lived only in the
 // candor-spec conformance suite. Names are dot-separated (the swift/JVM report shape this arm serves).
 
+/// The dot-free `unknownWhy` detail candor-scan emits for a call whose receiver it could not type at
+/// all (`crates/candor-scan/src/scan.rs`) — the DOMINANT dispatch reason on this engine.
+const DOT_FREE_REASON: &str = "untyped cross-package receiver";
+
 /// Write a report + callgraph (+ optionally a hierarchy sidecar) for the frontier scenario:
-/// confirmed chain `mod.Sub.handle → mod.Target.work`, plus three Unknown-dispatch carriers whose
-/// disclosure depends on the hierarchy gate.
+/// confirmed chain `mod.Sub.handle → mod.Target.work`, plus Unknown-dispatch carriers whose disclosure
+/// depends on the hierarchy gate, one DOT-FREE carrier (⟨0.24⟩ — condition (3) is unanswerable, so it is
+/// disclosed verbatim in every arm), and two CONTROLS that must stay OUT in every arm: `mod.Other.run`
+/// (a well-formed dotted reason on an unrelated owner+member, i.e. condition (3) genuinely FAILS) and
+/// `mod.NoWhy.run` (Unknown with no `dispatch:` reason at all, i.e. condition (1) fails).
 fn write_frontier_fixture(f: &Fixture, with_hierarchy: bool) {
     let report = r#"{
   "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.23" },
@@ -858,7 +865,9 @@ fn write_frontier_fixture(f: &Fixture, with_hierarchy: bool) {
     { "fn": "mod.Sub.handle", "inferred": ["Fs"], "calls": ["mod.Target.work"] },
     { "fn": "mod.Caller.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:mod.Base.handle"] },
     { "fn": "mod.Other.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:mod.Unrelated.frob"] },
-    { "fn": "mod.NotSub.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:mod.Elsewhere.handle"] }
+    { "fn": "mod.NotSub.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:mod.Elsewhere.handle"] },
+    { "fn": "mod.NoWhy.run", "inferred": ["Unknown"], "unknownWhy": ["callback:opaque fn pointer"] },
+    { "fn": "mod.Dotfree.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:untyped cross-package receiver"] }
   ]
 }"#;
     std::fs::write(format!("{}.app.scan.json", f.prefix), report).unwrap();
@@ -884,6 +893,7 @@ fn callers_include_unknown_discloses_the_dispatch_frontier_via_the_hierarchy() {
     // (dispatch on Base.handle; Sub <: Base reaches the target) is IN; a same-named method on an
     // unrelated owner (`mod.NotSub.run` → Elsewhere.handle) and a different method (`mod.Other.run`
     // → Unrelated.frob) are OUT. Disclosed as possible — never asserted into `transitive`.
+    // `mod.Dotfree.run` rides along under ⟨0.24⟩: no owner to test, so it is disclosed verbatim.
     let f = Fixture::new("frontier-hier");
     write_frontier_fixture(&f, true);
     let out = Command::new(bin())
@@ -897,9 +907,11 @@ fn callers_include_unknown_discloses_the_dispatch_frontier_via_the_hierarchy() {
     assert_eq!(v["transitive"], serde_json::json!(["mod.Sub.handle"]),
                "frontier candidates must NOT be asserted into the confirmed set: {v}");
     let poss = v["possibleViaUnknownDispatch"].as_array().expect("frontier array");
-    assert_eq!(poss.len(), 1, "exactly the hierarchy-confirmed overrider's dispatch: {v}");
+    assert_eq!(poss.len(), 2, "the hierarchy-confirmed overrider + the unanswerable dot-free one: {v}");
     assert_eq!(poss[0]["fn"], "mod.Caller.run");
     assert_eq!(poss[0]["viaDispatchOn"], "handle");
+    assert_eq!(poss[1]["fn"], "mod.Dotfree.run");
+    assert_eq!(poss[1]["viaDispatchOn"], DOT_FREE_REASON);
 }
 
 #[test]
@@ -917,7 +929,7 @@ fn callers_include_unknown_without_hierarchy_over_lists_by_simple_name() {
         serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
     let fns: Vec<&str> = v["possibleViaUnknownDispatch"].as_array().unwrap()
         .iter().filter_map(|p| p["fn"].as_str()).collect();
-    assert_eq!(fns, vec!["mod.Caller.run", "mod.NotSub.run"],
+    assert_eq!(fns, vec!["mod.Caller.run", "mod.Dotfree.run", "mod.NotSub.run"],
                "empty hierarchy must fall back to simple-name over-listing: {v}");
 }
 
@@ -936,6 +948,111 @@ fn callers_without_the_flag_omits_the_frontier_key() {
     assert!(v.get("possibleViaUnknownDispatch").is_none(),
             "no --include-unknown → no frontier key: {v}");
     assert_eq!(v["direct"], serde_json::json!(["mod.Sub.handle"]));
+}
+
+/// The frontier's `possibleViaUnknownDispatch` entries as `(fn, viaDispatchOn)`, for one arm.
+fn frontier_of(prefix: &str) -> Vec<(String, String)> {
+    let out = Command::new(bin())
+        .arg("callers").arg(prefix).arg("work").arg("1").arg("--include-unknown")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("json");
+    v["possibleViaUnknownDispatch"].as_array().expect("frontier array").iter()
+        .map(|p| (p["fn"].as_str().unwrap().to_string(),
+                  p["viaDispatchOn"].as_str().unwrap().to_string()))
+        .collect()
+}
+
+#[test]
+fn callers_include_unknown_discloses_a_dot_free_dispatch_reason_verbatim_in_both_arms() {
+    // ⟨0.24⟩ A `dispatch:` detail with NO DOT names no owner and no member, so condition (3) — "some
+    // confirmed reacher is an OVERRIDE of OWNER.M" — is UNANSWERABLE. An unanswerable condition must not
+    // be scored as a failed one, so the source is DISCLOSED with the raw detail verbatim.
+    //
+    // MEASURED before the fix: `mod.Dotfree.run` (carrying candor-scan's own dominant reason,
+    // `dispatch:untyped cross-package receiver`) appeared NOWHERE in the output in EITHER arm and no
+    // diagnostic named it — `simple_method`/`declaring_type` fall back to the whole string with no dot,
+    // so `by_method.get(m)` could never hit. That omission reads to a consumer as "no function may reach
+    // the target through an unresolved dispatch": a false all-clear on the query.
+    for with_hier in [true, false] {
+        let f = Fixture::new(if with_hier { "frontier-dotfree-hier" } else { "frontier-dotfree-flat" });
+        write_frontier_fixture(&f, with_hier);
+        let got = frontier_of(&f.prefix);
+        let entry = got.iter().find(|(fname, _)| fname == "mod.Dotfree.run");
+        assert!(entry.is_some(),
+                "dot-free dispatch source must be disclosed (hierarchy={with_hier}): {got:?}");
+        assert_eq!(entry.unwrap().1, DOT_FREE_REASON,
+                   "viaDispatchOn must be the RAW detail verbatim (hierarchy={with_hier})");
+    }
+}
+
+#[test]
+fn callers_include_unknown_dot_free_disclosure_is_not_a_blanket() {
+    // THE CONTROL — without it a fix is indistinguishable from "disclose everything". Two functions must
+    // stay OUT of the frontier in the arm where the conditions ARE answerable (hierarchy present):
+    //   • `mod.NoWhy.run`  — Unknown, but no `dispatch:` reason at all → condition (1) fails.
+    //   • `mod.Other.run`  — a well-formed dotted reason (`mod.Unrelated.frob`) whose owner AND member
+    //     are unrelated to any confirmed reacher → condition (3) is ANSWERED, and answered "no".
+    //   • `mod.NotSub.run` — same member, wrong owner: (3) answered "no" via the hierarchy.
+    // Only the two entitled entries are listed.
+    let f = Fixture::new("frontier-dotfree-control");
+    write_frontier_fixture(&f, true);
+    let got = frontier_of(&f.prefix);
+    let fns: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(fns, vec!["mod.Caller.run", "mod.Dotfree.run"],
+               "an ANSWERED-no condition stays out; only the unanswerable one is added: {got:?}");
+    for out in ["mod.NoWhy.run", "mod.Other.run", "mod.NotSub.run"] {
+        assert!(!fns.contains(&out), "{out} must NOT be disclosed: {got:?}");
+    }
+}
+
+#[test]
+fn callers_include_unknown_dot_free_reason_never_matches_a_dot_free_rust_qual() {
+    // TASK-(2) REGRESSION PIN, and a real defect measured on the pre-fix binary. Rust function quals are
+    // `::`-separated and contain NO dot, so `simple_method`/`declaring_type` fell back to the WHOLE
+    // STRING on BOTH sides — the reason detail and the confirmed reacher's qual. The override test then
+    // degenerated into whole-string equality, and its outcome depended on accidents of spelling:
+    //   • `dispatch:app::Sub::handle` (== a reacher's whole qual) → MATCHED in both arms, the "subtype"
+    //     check passing only by reflexivity (`ty == owner`) over a string that is not a type name.
+    //   • `dispatch:handle` (== a DOTTED reacher's simple method) → matched with no hierarchy, dropped
+    //     with one — the same detail flipping on the presence of a sidecar.
+    //   • `dispatch:untyped cross-package receiver` → dropped in both arms.
+    // The structural dot-free branch runs FIRST, so no dot-free detail ever reaches `by_method` again:
+    // all three are now disclosed verbatim, identically in both arms. No new false positive is possible
+    // because the branch does not consult the reacher index at all.
+    for with_hier in [true, false] {
+        let f = Fixture::new(if with_hier { "frontier-rustqual-hier" } else { "frontier-rustqual-flat" });
+        let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.23" },
+  "package": "app",
+  "functions": [
+    { "fn": "app::Target::work", "inferred": ["Fs"], "direct": ["Fs"] },
+    { "fn": "app::Sub::handle", "inferred": ["Fs"], "calls": ["app::Target::work"] },
+    { "fn": "app::EqQual::run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:app::Sub::handle"] },
+    { "fn": "app::BareLeaf::run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:handle"] },
+    { "fn": "app::Prose::run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:untyped cross-package receiver"] }
+  ]
+}"#;
+        std::fs::write(format!("{}.app.scan.json", f.prefix), report).unwrap();
+        std::fs::write(
+            format!("{}.app.scan.callgraph.json", f.prefix),
+            r#"{"app::Sub::handle":["app::Target::work"],"app::Target::work":[]}"#,
+        ).unwrap();
+        if with_hier {
+            std::fs::write(format!("{}.app.hierarchy.json", f.prefix), r#"{"app::Sub":["app::Base"]}"#).unwrap();
+        }
+        let got = frontier_of(&f.prefix);
+        assert_eq!(
+            got,
+            vec![
+                ("app::BareLeaf::run".to_string(), "handle".to_string()),
+                ("app::EqQual::run".to_string(), "app::Sub::handle".to_string()),
+                ("app::Prose::run".to_string(), DOT_FREE_REASON.to_string()),
+            ],
+            "every dot-free detail is disclosed verbatim, arm-independently (hierarchy={with_hier}): {got:?}"
+        );
+    }
 }
 
 // ── blindspots: the Unknown sources ranked by blast radius (SPEC §3.1 ⟨0.6⟩ — was conformance-only) ─

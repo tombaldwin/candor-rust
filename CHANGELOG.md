@@ -6,7 +6,35 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
-### soundness ⟨0.21⟩ — a chained report that says it never read some of its own source bought silence
+### soundness ⟨0.24⟩ — the dispatch frontier silently dropped this engine's own dominant reason
+
+`callers --include-unknown` built `possibleViaUnknownDispatch` by splitting each `dispatch:` detail into
+an owner and a member on the LAST DOT, then asking condition (3): is some confirmed reacher an override
+of `OWNER.M`? candor-scan emits `dispatch:untyped cross-package receiver` when it cannot type the
+receiver of a call into a chained dependency — a DOT-FREE detail, and in a 1062-report census EVERY
+dispatch reason on this engine was that form. With no dot, `simple_method`/`declaring_type` both fall
+back to the whole string, so the lookup could never hit and the entry was **dropped with no diagnostic**.
+
+Measured: a report where `mod.Caller.run` carries `dispatch:mod.Base.handle` and `mod.Dotfree.run`
+carries `dispatch:untyped cross-package receiver` produced a frontier containing only `mod.Caller.run`,
+in **both** the hierarchy arm and the no-hierarchy fallback arm. That omission is a false all-clear: a
+consumer reads absence from `possibleViaUnknownDispatch` as "no function may reach the target through an
+unresolved dispatch", which is exactly the claim the engine is not entitled to make.
+
+A dot-free detail names no owner and no member, so condition (3) is **unanswerable — and an unanswerable
+condition must not be scored as a failed one**. Such an entry is now disclosed with `viaDispatchOn` set
+to the raw detail verbatim. This is the direction the no-hierarchy fallback already takes one rung up
+(no sidecar → the subtype test is unanswerable → over-list rather than drop); the frontier over-lists by
+construction and asserts nothing into `transitive`, so a spurious entry costs precision while a dropped
+one costs the answer. Detected structurally (the detail contains no `.`), never by matching the
+scanner's wording — an allowlist of known reason strings silently drops the ones it forgets.
+
+The same whole-string fallback also produced the mirror defect, now closed: a dot-free detail that
+happened to equal a confirmed reacher's dot-free Rust qual (`dispatch:app::Sub::handle`) MATCHED, with
+the subtype check passing only by reflexivity over a string that is not a type name; and
+`dispatch:handle` was disclosed with no hierarchy but dropped with one. Every dot-free detail now takes
+the same branch, before the reacher index is consulted at all, so the answer no longer depends on
+whether a sidecar happens to exist.
 
 SPEC §2 chaining rule 3 turns a report's SILENCE into a purity claim, and registering its crate as
 COVERED is exactly what silences the κ ledger's `invisible` hedge so the silence can be read that
