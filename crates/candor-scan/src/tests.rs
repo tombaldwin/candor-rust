@@ -4785,57 +4785,61 @@ trait G {
 
     // A REFLECTIVE guard on the `--incremental` cache key. `decl_index_digest` decides whether a cached
     // file's Pass-B FnInfos may be reused; a `MergedDecls` field that steers resolution but is MISSING
-    // from the digest = a stale cache silently returning unsound effect sets. Rust has no runtime field
-    // reflection, so this stands in for it two ways: (1) the exhaustive destructure below stops COMPILING
-    // the moment a field is added to `MergedDecls` until you bind it here — forcing the question "is it in
-    // the digest?"; (2) every field is then mutated in isolation and the digest MUST move, proving each is
-    // actually folded in. Add a field → add its `_` binding AND a mutator case, or the build/test fails.
+    // from the digest = a stale cache silently returning unsound effect sets.
+    //
+    // THIS GUARD HAD A HOLE, AND IT WAS THE HOLE ITS OWN COMMENT SAID WAS IMPOSSIBLE (standing bar item 9:
+    // a comment that states a justification is an assertion, and it will be believed). It read "Add a
+    // field → add its `_` binding AND a mutator case, or the build/test fails." The two halves were
+    // maintained as SEPARATE lists: an exhaustive destructure, and a hand-written mutator table. Adding a
+    // field broke only the destructure, so binding it `_` restored the build and the test went green with
+    // the field never exercised. `deref_target` had been sitting in exactly that state — bound, unmutated,
+    // and genuinely absent from the digest.
+    //
+    // It cost nothing YET, and only by an accident of layout (item 0b): the auto-deref chase reads
+    // `merged.deref_target` live in `scan_one` instead of baking it into an FnInfo, so a stale entry could
+    // not replay it. Every other receiver-typing rung of the last month landed in `CallCollector`; the day
+    // this one follows them, a `type Target = …` edit becomes a replayed purity claim.
+    //
+    // The fix is to make the promise TRUE rather than to add the one missing row: ONE list now generates
+    // both halves, so a field cannot have a binding without a mutator. Adding a field breaks compilation
+    // until you write `name => |m| { … }`, which supplies the mutator in the same keystroke. (The swift
+    // catch-all lesson, ported: stop maintaining an enumeration in parallel with the thing it enumerates,
+    // and make the failure mode "won't build" instead of "passes quietly".)
     #[test]
     fn every_merged_decls_field_is_folded_into_the_digest() {
-        // (1) Compile-time exhaustiveness: no `..`, so a new field breaks this line until it's listed.
-        let MergedDecls {
-            fields: _,
-            field_elem: _,
-            field_elem_trait: _,
-            rets: _,
-            enum_tmp: _,
-            trait_impls: _,
-            trait_decls: _,
-            trait_fields: _,
-            prim_aliases: _,
-            extern_fns: _,
-            drop_types: _,
-            deref_target: _,
-            lazy_statics: _,
-            const_strings: _,
-            local_macros: _,
-            blanket_methods: _,
-            root_reexports: _,
-        } = MergedDecls::default();
-
+        /// ONE list, two guarantees: it destructures `MergedDecls` exhaustively (no `..`, so a new field
+        /// stops the build here) and it builds the mutator table from the SAME names.
+        macro_rules! digest_field_table {
+            ($($name:ident => $mutate:expr),+ $(,)?) => {{
+                let MergedDecls { $($name: _),+ } = MergedDecls::default();
+                let t: Vec<(&str, fn(&mut MergedDecls))> = vec![$((stringify!($name), $mutate)),+];
+                t
+            }};
+        }
+        // One mutator per field — each touches exactly that field and nothing else.
+        let table = digest_field_table! {
+            fields => |m| { m.fields.entry("S".into()).or_default().insert("f".into(), "T".into()); },
+            field_elem => |m| { m.field_elem.entry("S".into()).or_default().insert("f".into(), "E".into()); },
+            field_elem_trait => |m| { m.field_elem_trait.entry("S".into()).or_default().insert("f".into(), vec!["Tr".into()]); },
+            rets => |m| { m.rets.insert("f".into(), Some("T".into())); },
+            enum_tmp => |m| { m.enum_tmp.insert("v".into(), Some("E".into())); },
+            trait_impls => |m| { m.trait_impls.entry("Tr".into()).or_default().push("Ty".into()); },
+            trait_decls => |m| { m.trait_decls.entry("Tr".into()).or_default().count += 1; },
+            trait_fields => |m| { m.trait_fields.entry("S".into()).or_default().insert("f".into(), vec!["b".into()]); },
+            prim_aliases => |m| { m.prim_aliases.insert("A".into()); },
+            extern_fns => |m| { m.extern_fns.insert("system".into()); },
+            drop_types => |m| { m.drop_types.insert("Guard".into()); },
+            // `impl Deref for W { type Target = U }` — `w.leaf()` dispatches to `U::leaf`, so a change
+            // here re-resolves every auto-deref call site. This is the row that was missing.
+            deref_target => |m| { m.deref_target.insert("W".into(), "Inner".into()); },
+            lazy_statics => |m| { m.lazy_statics.insert("CONFIG".into()); },
+            const_strings => |m| { m.const_strings.insert("API_BASE".into(), "https://api.openai.com".into()); },
+            local_macros => |m| { m.local_macros.insert("do_io".into(), "() => { fs::write(\"/x\", b\"y\"); }".into()); },
+            blanket_methods => |m| { m.blanket_methods.insert("ext".into(), "T".into()); },
+            root_reexports => |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); },
+        };
         let empty = decl_index_digest(&MergedDecls::default());
-
-        // (2) One mutator per field — each touches exactly that field and nothing else.
-        type Mutator = fn(&mut MergedDecls);
-        let mutators: Vec<(&str, Mutator)> = vec![
-            ("fields", |m| { m.fields.entry("S".into()).or_default().insert("f".into(), "T".into()); }),
-            ("field_elem", |m| { m.field_elem.entry("S".into()).or_default().insert("f".into(), "E".into()); }),
-            ("field_elem_trait", |m| { m.field_elem_trait.entry("S".into()).or_default().insert("f".into(), vec!["Tr".into()]); }),
-            ("rets", |m| { m.rets.insert("f".into(), Some("T".into())); }),
-            ("enum_tmp", |m| { m.enum_tmp.insert("v".into(), Some("E".into())); }),
-            ("trait_impls", |m| { m.trait_impls.entry("Tr".into()).or_default().push("Ty".into()); }),
-            ("trait_decls", |m| { m.trait_decls.entry("Tr".into()).or_default().count += 1; }),
-            ("trait_fields", |m| { m.trait_fields.entry("S".into()).or_default().insert("f".into(), vec!["b".into()]); }),
-            ("prim_aliases", |m| { m.prim_aliases.insert("A".into()); }),
-            ("extern_fns", |m| { m.extern_fns.insert("system".into()); }),
-            ("drop_types", |m| { m.drop_types.insert("Guard".into()); }),
-            ("lazy_statics", |m| { m.lazy_statics.insert("CONFIG".into()); }),
-            ("const_strings", |m| { m.const_strings.insert("API_BASE".into(), "https://api.openai.com".into()); }),
-            ("local_macros", |m| { m.local_macros.insert("do_io".into(), "() => { fs::write(\"/x\", b\"y\"); }".into()); }),
-            ("blanket_methods", |m| { m.blanket_methods.insert("ext".into(), "T".into()); }),
-            ("root_reexports", |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); }),
-        ];
-        for (name, mutate) in mutators {
+        for (name, mutate) in table {
             let mut m = MergedDecls::default();
             mutate(&mut m);
             assert_ne!(

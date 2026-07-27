@@ -307,6 +307,15 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
 /// iteration order or which files happened to contribute. If this digest is unchanged, every fn's
 /// `Call`s resolve identically, so a cached FnInfo set is sound to reuse; if it moves, all files re-run
 /// Pass B. `trait_impls`'s Vec order is load-bearing (CHA), so it is hashed in order, NOT sorted.
+///
+/// EVERY FIELD OF `MergedDecls` MUST BE HASHED HERE, and that is pinned by
+/// `every_merged_decl_field_moves_the_decl_index_digest` rather than by this sentence. `deref_target`
+/// was missing and it did NOT show up as a wrong answer, because the auto-deref chase reads
+/// `merged.deref_target` LIVE in `scan_one` rather than baking it into an FnInfo — so the omission was
+/// harmless by an accident of WHERE the lookup happens, not by anything preventing it. Every other
+/// receiver-typing rung of the last month landed in `CallCollector`; moving this one there too would
+/// have turned a stale `impl Deref for W { type Target = … }` into a replayed purity claim with no
+/// change to this file to hint at it. A digest that summarises the index must summarise all of it.
 pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     let mut s = String::new();
     let nested = |s: &mut String, tag: &str, map: &HashMap<String, HashMap<String, String>>| {
@@ -425,6 +434,18 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     for a in dtk {
         s.push('|');
         s.push_str(a);
+    }
+    s.push('\n');
+    // deref_target — sorted TYPE=Target pairs. A custom `impl Deref for W { type Target = U }` makes
+    // `w.leaf()` dispatch to `U::leaf`, so a change here re-resolves every auto-deref call site.
+    s.push_str("deref_target");
+    let mut dttk: Vec<&String> = m.deref_target.keys().collect();
+    dttk.sort();
+    for k in dttk {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(&m.deref_target[k]);
     }
     s.push('\n');
     // lazy_statics — sorted set of LAZY/deferred static names (naming one adds a forcing edge to its
