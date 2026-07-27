@@ -68,11 +68,38 @@ control (make the dependency's pure lazy static effectful and its reader lights 
 Every gain on real code is (2)'s disclosure, never a concrete effect: functions carrying a direct
 `dispatch:untyped cross-package receiver` go 18 → 52 on ebman, 2 → 18 on pgman, 0 → 31 on candor-rust.
 **That is a large number and it is stated as one** — 95 of 550 ebman functions newly carry `Unknown`,
-about 2.9× the shipped bound-spelling arm's own footprint, and the top shapes are std combinators on a
-value a dependency returned (`chrono::Utc::now().signed_duration_since(..)` ×16,
-`serde_yml::from_str(..).wrap_err(..)`). Whether that band is worth its precision cost is a decided
-question — the same trade the bound spelling already makes — and this change only stops the answer
-depending on whether someone wrote a `let`.
+about 2.9× the shipped bound-spelling arm's own footprint.
+
+**Every one of them is on a CHAINED dependency, and that was measured rather than argued.** The rung's
+THIRD conjunct — the dependency must be chained, because for an unchained one the κ ledger already says
+`invisible: [pkg]` and a second hedge is pure false uncertainty — lives on the shared CONSUMPTION path
+in `scan.rs`, and this change is emission-side only, so the new arm inherits it. Instrumented at the
+marker, *before* the gate:
+
+| | markers | CHAINED | UNCHAINED (suppressed) |
+|---|---|---|---|
+| ebman alone, chained over its 410-crate dep tree | 53 → **141** | 32 → 73 | 21 → **68** |
+| the whole dep-tree walk | 53 → **22,131** | 32 → 73 | 21 → **22,058** |
+
+The conjunct suppresses **99.7%** of the new arm's markers, and the crate heads it suppresses are
+exactly what it was written for: `std` (52), `String` (7), and local modules (`app`, `crate`, `eb_cli`,
+`project`, `cost_cache`, …) — not one of them a real dependency. End-to-end attribution of the 95:
+newly-direct functions with no chained marker **0**; backed only by an unchained marker **0**; of the 28
+functions whose only untyped marker was unchained, **0** gained anything. The responsible crates are
+chrono 21, serde_yml 7, futures 2, tokio 2, toml 1, tracing_subscriber 1, and all eight crates carrying
+a chained marker have substantial reports (chrono 191 fns / 45 published return types; serde_yml 337/24;
+tokio 818/114). The number is real and the disclosures are honest.
+
+**The lever on it is DETERMINATION, not suppression** — the ⟨0.24⟩ ordering, and it applies to both
+spellings identically so it cannot disturb the parity above. Of ebman's 73 chained markers, 10 resolve
+today, 6 miss only because the dependency publishes its key MODULE-qualified where the consumer forms it
+from the written path, and 57 are genuinely absent from the published surface. **37 of those 57 are
+chrono's `Utc::now`, and the reason it is unpublished is a spurious collision**: chrono declares
+`pub fn now() -> DateTime<Utc>` TWICE under mutually exclusive `#[cfg]`s (native and wasm32), the scan
+walks both cfg arms by design, and the return index's never-guess-between-two-same-named-defs rule drops
+the entry — even though **both candidates name the same return type**, so there is nothing to guess
+between. Publishing a collision whose candidates AGREE would recover a little over half of ebman's
+chained untyped markers. Recorded as a lead, not taken here.
 
 The lazy halves gained nothing on real code, which the diff alone cannot distinguish from never firing,
 so the precondition was instrumented instead: the `use`-spelling dependency marker is emitted 28,938 /
