@@ -392,7 +392,7 @@ impl Candor {
             );
             std::process::exit(2);
         }
-        let ParsedPolicy { rules: policy, allow_rules, layer_rules, errors: _ } = parsed_policy;
+        let ParsedPolicy { rules: policy, allow_rules, layer_rules, errors: _, used_aliases: _ } = parsed_policy;
         Self {
             direct: HashMap::new(),
             fs_direct: HashMap::new(),

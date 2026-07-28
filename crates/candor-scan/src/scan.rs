@@ -2017,8 +2017,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         };
         // ⟨0.19⟩ reason-class aliases (SPEC §6.2): a multi-value `unknown-alias` config key the single-value
         // cfg map can't hold — read straight from the discovered config so `Unknown[<alias>]` resolves.
-        let unknown_aliases = candor_classify::policy::discover_config_text(std::path::Path::new(dir))
-            .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
+        //
+        // ⟨0.24⟩ ANCHORED AT THE **POLICY FILE**, NOT THE SCAN TARGET (SPEC §3.1). This line used to say
+        // `Path::new(dir)`, while `candor-query gate --report` anchored at the policy — and all four
+        // engines had exactly that split. MEASURED (2026-07-28) with the policy filed outside the target
+        // and `unknown-alias corp = reflect` beside it: `candor-scan . --policy P --gate-json v` exited
+        // **1** (the alias never resolved, so `deny Unknown[corp]` widened to a bare `deny Unknown`)
+        // while `gate --report R --policy P --gate-json v` exited **0** (the alias resolved and narrowed
+        // to `reflect`, which the crate's `indirect` hole does not match). Two different documents from
+        // the same report and the same policy — **§3.1's byte-equality MUST broken by a file that is
+        // neither the report nor the policy.**
+        //
+        // Vocabulary travels with the policy that uses it. TARGET-SCOPED keys do NOT move: `deps`,
+        // `net-partner` and the scan settings above still anchor at `dir`, because they describe the
+        // thing being scanned rather than the language the rules are written in. Byte-equality now holds
+        // by construction instead of by the two routes happening to be pointed at the same directory.
+        let cfg_vocab = candor_classify::policy::discover_config(std::path::Path::new(&pp));
+        let unknown_aliases = cfg_vocab
+            .as_ref()
+            .map(|(_, t)| candor_classify::policy::parse_unknown_aliases(t))
             .unwrap_or_default();
         // ⟨0.24⟩ THE POLICY COULD NOT BE HONOURED AS WRITTEN (SPEC §6.2) — the same UNREADABLE-POLICY
         // posture as the branch above, and deliberately at the same place in the flow, so this route and
@@ -2031,7 +2048,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // Unknown`, while the same line claimed the rule was being ignored. One of those is a false
         // disclosure and the other is fail-open; the fail-open one is the common case, because a typo
         // lands beside correct tokens far more often than alone.
-        let perrs = crate::gate::policy_errors(&text, &unknown_aliases);
+        let (perrs, used_aliases) = crate::gate::policy_precheck(&text, &unknown_aliases);
+        // ⟨0.24⟩ …and if that config supplied vocabulary the verdict USED, the verdict must name it
+        // (SPEC §3.1). Recorded here, written once by `write_gate_json` — the same shape the violations
+        // and the κ ledger take, so a workspace scan discloses it once rather than per member.
+        if let Some((cfg_path, _)) = cfg_vocab.as_ref() {
+            record_gate_vocabulary(cfg_path, &used_aliases);
+        }
         if !perrs.is_empty() {
             for e in &perrs {
                 eprintln!("candor-scan: policy error — {e}");

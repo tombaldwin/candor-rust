@@ -1700,3 +1700,91 @@ fn scan_refuses_a_policy_naming_an_unrecognised_reason_class_token() {
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// SPEC §3.1 ⟨0.24⟩ **POLICY VOCABULARY ANCHORS AT THE POLICY FILE, ON BOTH ROUTES** (candor-spec
+/// `99eb4e9`) — plus the disclosure that keeps it from acting unnamed.
+///
+/// §3.1 names three channels through which an effect must never enter a gate its report does not carry.
+/// A review found a FOURTH that no engine tested: `.candor/config`'s `unknown-alias`. The scan route
+/// anchored discovery at the **scan target** while all four `gate` verbs anchored at the **policy
+/// file** — so with the policy filed outside the target, `scan --policy P` and `gate --report R --policy
+/// P` expanded the same rule differently and **§3.1's byte-equality MUST was breakable by a file that is
+/// neither the report nor the policy** (measured 2026-07-28: scan exit 1 / gate exit 0, two different
+/// documents from one report and one policy).
+///
+/// Vocabulary travels with the policy that uses it. Target-scoped keys (`deps`, `net-partner`, scan
+/// settings) still anchor at the target, because they describe the thing being scanned.
+///
+/// THE SECOND HALF IS THE DISCLOSURE: discovery walks PARENT directories, so an alias file anywhere
+/// above participates — ambient, and until ⟨0.24⟩ invisible in the output. A verdict changed by a file
+/// the operator cannot see named is the ambient-input failure this format exists to refuse, so the
+/// `--gate-json` document names it.
+#[test]
+fn scan_resolves_policy_vocabulary_beside_the_policy_and_names_the_config_that_moved_the_verdict() {
+    // The crate's only hole is INDIRECT (a call through `&dyn Fn`).
+    let d = make_crate("anchorvocab", "pub fn go(f: &dyn Fn() -> i32) -> i32 { f() }\n");
+    // The policy lives OUTSIDE the scan target, with its vocabulary beside it — the everyday shape for
+    // an org-wide policy checked into its own repo.
+    let home = std::env::temp_dir().join(format!("candor-polhome-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join(".candor")).unwrap();
+    let pp = home.join("org.policy");
+    std::fs::write(&pp, "deny Unknown[corp]\n").unwrap();
+    let cfgpath = home.join(".candor/config");
+
+    let run = |verdict: &std::path::Path| -> (i32, String) {
+        let _ = std::fs::remove_file(verdict);
+        let out = Command::new(bin())
+            .args([
+                d.to_string_lossy().as_ref(),
+                "--out", d.join("rep").to_string_lossy().as_ref(),
+                "--policy", pp.to_string_lossy().as_ref(),
+                "--gate-json", verdict.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .expect("run candor-scan");
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+
+    // (1) THE ANCHOR. `corp = indirect` beside the POLICY must resolve and the rule must FIRE. Before
+    // the fix the scan looked only under the TARGET, found nothing, and the token was unresolvable —
+    // which ⟨0.24⟩'s companion rung now reports as a policy error (exit 2), where it previously widened
+    // the rule to a bare `deny Unknown` in silence.
+    std::fs::write(&cfgpath, "unknown-alias corp = indirect\n").unwrap();
+    let v = d.join("verdict.json");
+    let (rc, err) = run(&v);
+    assert_eq!(rc, 1, "an `unknown-alias` beside the POLICY must resolve on the SCAN route too:\n{err}");
+
+    // (2) THE DISCLOSURE. The config that supplied the vocabulary is NAMED on the verdict, with the
+    // alias it supplied — a verdict moved by a file the operator cannot see named is ambient input.
+    let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v).unwrap()).unwrap();
+    let named = j["vocabulary"]["config"].as_str().map(|s| std::fs::canonicalize(s).ok()).unwrap_or(None);
+    assert_eq!(
+        named,
+        std::fs::canonicalize(&cfgpath).ok(),
+        "the verdict must NAME the config whose vocabulary it used:\n{j:#}"
+    );
+    assert_eq!(j["vocabulary"]["aliases"], serde_json::json!(["corp"]), "{j:#}");
+
+    // (3) THE DISCRIMINATION CONTROL. Same anchor, different definition: `corp = reflect` does NOT match
+    // an indirect hole, so the gate goes GREEN. Without this row (1) is satisfied by an engine that
+    // ignores the alias and widens to a bare `deny Unknown`, which also exits 1 — the exact pre-fix
+    // behaviour. The alias must be steering the verdict, not merely being present.
+    std::fs::write(&cfgpath, "unknown-alias corp = reflect\n").unwrap();
+    let v2 = d.join("verdict2.json");
+    let (rc2, err2) = run(&v2);
+    assert_eq!(rc2, 0, "the alias must NARROW the rule, not just unlock it:\n{err2}");
+
+    // (4) AN UNUSED ALIAS IS NOT DISCLOSED — naming a file that changed nothing trains the reader to
+    // ignore the field, and a verdict with no ambient vocabulary must stay byte-identical to pre-⟨0.24⟩.
+    std::fs::write(&cfgpath, "unknown-alias corp = indirect\n").unwrap();
+    std::fs::write(&pp, "deny Unknown\n").unwrap();
+    let v3 = d.join("verdict3.json");
+    let (rc3, _) = run(&v3);
+    assert_eq!(rc3, 1);
+    let j3: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v3).unwrap()).unwrap();
+    assert!(j3.get("vocabulary").is_none(), "an alias the policy never mentions is not disclosed:\n{j3:#}");
+
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&home);
+}

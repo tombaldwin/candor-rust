@@ -219,15 +219,34 @@ pub fn parse_net_partners(config_text: &str) -> BTreeSet<String> {
 /// process-exit — the caller decides fail-closed); used to resolve `unknown-alias` for the §6.2 gate +
 /// `parsepolicy` so both reflect the same checked-in config.
 pub fn discover_config_text(start: &std::path::Path) -> Option<String> {
+    discover_config(start).map(|(_, t)| t)
+}
+
+/// ⟨0.24⟩ As [`discover_config_text`], but ALSO the PATH the text came from, canonicalized.
+///
+/// **WHY THE PATH IS NOW LOAD-BEARING** (SPEC §3.1): a `.candor/config` supplying `unknown-alias`
+/// vocabulary can move a verdict 0→1, and discovery walks PARENT DIRECTORIES, so a file anywhere above
+/// the policy participates — ambient, and until now invisible in the output. *"A verdict changed by a
+/// file the operator cannot see named in the output is the ambient-input failure this whole format
+/// exists to refuse; the remedy is the same one used everywhere else here — not to forbid the input, but
+/// to make it impossible for it to act unnamed."* So the gate document NAMES it, and the path has to
+/// travel out of discovery for that to be possible.
+///
+/// CANONICALIZED because the two routes reach the same file from different working directories, and
+/// §3.1's byte-equality MUST is about the DOCUMENT: a relative path would differ between them for no
+/// reason other than where each was invoked.
+pub fn discover_config(start: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     if let Ok(p) = std::env::var("CANDOR_CONFIG") {
-        return std::fs::read_to_string(&p).ok();
+        let p = std::path::PathBuf::from(p);
+        return std::fs::read_to_string(&p).ok().map(|t| (canon(&p), t));
     }
-    let start = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+    let start = canon(start);
     let mut cur = if start.is_dir() { Some(start.as_path()) } else { start.parent() };
     while let Some(d) = cur {
         let cand = d.join(".candor/config");
         if cand.is_file() {
-            return std::fs::read_to_string(&cand).ok();
+            return std::fs::read_to_string(&cand).ok().map(|t| (canon(&cand), t));
         }
         cur = d.parent();
     }
@@ -296,6 +315,12 @@ pub struct ParsedPolicy {
     ///
     /// A policy that cannot be honoured as written is not silently rewritten into a different policy.
     pub errors: Vec<String>,
+    /// ⟨0.24⟩ The `.candor/config` `unknown-alias` NAMES this policy actually resolved a token through
+    /// (SPEC §3.1). Non-empty ⇒ a config file supplied vocabulary that PARTICIPATED in the verdict, and
+    /// the `--gate-json` document MUST name that file. Recorded at the point of USE, not from the alias
+    /// map: a config defining ten aliases none of which the policy mentions changed nothing, and naming
+    /// it would train the reader to ignore the field.
+    pub used_aliases: BTreeSet<String>,
 }
 
 /// The hostname part of a `host[:port]` literal, port stripped — so `api.stripe.com` in a rule accepts
@@ -476,14 +501,15 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
 pub fn parse_policy_with_aliases(text: &str, aliases: &std::collections::BTreeMap<String, std::collections::BTreeSet<ReasonClass>>) -> ParsedPolicy {
     parse_policy_impl(text, true, aliases)
 }
-/// ⟨0.24⟩ Just the [`ParsedPolicy::errors`] of `text`, parsed SILENTLY — for a caller that must refuse
-/// BEFORE it parses for real (candor-scan gates before touching the classifier's accumulators). Silent
-/// so the ordinary parse warnings are not printed twice on the same text.
-pub fn parse_policy_errors(
+/// ⟨0.24⟩ [`parse_policy_with_aliases`] but SILENT — for a caller that must inspect
+/// [`ParsedPolicy::errors`] / [`ParsedPolicy::used_aliases`] BEFORE it parses for real (candor-scan
+/// refuses before touching the classifier's accumulators). Silent so the ordinary parse warnings are not
+/// printed twice on the same text.
+pub fn parse_policy_silent(
     text: &str,
     aliases: &std::collections::BTreeMap<String, BTreeSet<ReasonClass>>,
-) -> Vec<String> {
-    parse_policy_impl(text, false, aliases).errors
+) -> ParsedPolicy {
+    parse_policy_impl(text, false, aliases)
 }
 /// Same as [`parse_policy`] but SILENT about malformed rules — for a SECOND, advisory re-parse within the
 /// same run (candor-scan parses once for the gate check and again for the `unverified` disclosure), so the
@@ -591,6 +617,7 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                                 unknown_classes.insert(rc);
                             } else if let Some(a) = aliases.get(cn) {
                                 unknown_classes.extend(a.iter().copied()); // ⟨0.19⟩ config `unknown-alias`
+                                out.used_aliases.insert(cn.to_string()); // ⟨0.24⟩ → the verdict names it
                             } else {
                                 // ⟨0.24⟩ A POLICY ERROR, not a warning — see `ParsedPolicy::errors`. The
                                 // token is still dropped below so `rules` stays well-formed for the

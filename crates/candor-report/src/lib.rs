@@ -739,6 +739,39 @@ pub fn gate_verdict_json_full(
     analyzed_count: usize,
     unanalyzed: &[UnanalyzedUnit],
 ) -> serde_json::Result<String> {
+    gate_verdict_json_v24(violations, coverage, analyzed_count, unanalyzed, None)
+}
+
+/// ⟨0.24⟩ THE AMBIENT-VOCABULARY DISCLOSURE (SPEC §3.1): the `.candor/config` whose `unknown-alias`
+/// definitions a policy rule actually RESOLVED THROUGH, and the alias names it used.
+///
+/// A verdict is supposed to be a function of the report and the policy. An `unknown-alias` beside the
+/// policy moves it 0→1, and discovery WALKS PARENT DIRECTORIES, so a file anywhere above participates —
+/// the fourth channel §3.1's MUST NOT never named. The ruling is not to forbid the input (an alias IS
+/// policy vocabulary, and vocabulary belongs to the policy) but to make it **unable to act unnamed**.
+///
+/// OMITTED unless an alias was actually used, so a verdict from a policy that mentions none is
+/// byte-identical to a pre-⟨0.24⟩ one — and a config defining ten unused aliases stays out, because
+/// naming a file that changed nothing trains the reader to ignore the field.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GateVocabulary {
+    /// The canonical path of the `.candor/config` the aliases came from. Canonical because the scan and
+    /// `gate --report` routes reach the same file from different working directories, and §3.1's
+    /// byte-equality MUST is about the DOCUMENT.
+    pub config: String,
+    /// The alias NAMES a rule resolved through — sorted, so the document is deterministic.
+    pub aliases: Vec<String>,
+}
+
+/// [`gate_verdict_json_full`] plus the ⟨0.24⟩ `vocabulary` disclosure. Appended LAST so that every
+/// verdict without ambient vocabulary — which is nearly all of them — stays byte-identical.
+pub fn gate_verdict_json_v24(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+    vocabulary: Option<&GateVocabulary>,
+) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     #[derive(Serialize)]
     struct Count {
@@ -756,6 +789,8 @@ pub fn gate_verdict_json_full(
         incomplete: bool,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         unanalyzed: &'a [UnanalyzedUnit],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        vocabulary: Option<&'a GateVocabulary>,
     }
     let incomplete = !unanalyzed.is_empty();
     serde_json::to_string_pretty(&Verdict {
@@ -766,6 +801,7 @@ pub fn gate_verdict_json_full(
         coverage,
         incomplete,
         unanalyzed,
+        vocabulary,
     })
 }
 

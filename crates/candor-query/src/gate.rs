@@ -591,10 +591,22 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // report. The ⟨0.20⟩ `net-partner` list is deliberately NOT loaded: `netClass` is read verbatim from
     // the report, so re-classifying its hosts through THIS machine's config would be the re-derivation
     // §3.1 ⟨0.24⟩ forbids (and would make the verdict depend on the consumer's CWD).
-    let aliases = candor_classify::policy::discover_config_text(Path::new(&policy_path))
-        .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
-        .unwrap_or_default();
+    //
+    // ⟨0.24⟩ THE PATH TRAVELS OUT with the text now: a config that supplies vocabulary the verdict used
+    // must be NAMED on the verdict (SPEC §3.1), and discovery walks parent directories, so the file that
+    // moved the answer can be several levels above the one the operator was looking at.
+    let cfg = candor_classify::policy::discover_config(Path::new(&policy_path));
+    let aliases =
+        cfg.as_ref().map(|(_, t)| candor_classify::policy::parse_unknown_aliases(t)).unwrap_or_default();
     let p = candor_classify::policy::parse_policy_with_aliases(&policy_text, &aliases);
+    let vocabulary = (!p.used_aliases.is_empty())
+        .then(|| {
+            cfg.as_ref().map(|(path, _)| candor_report::GateVocabulary {
+                config: path.display().to_string(),
+                aliases: p.used_aliases.iter().cloned().collect(),
+            })
+        })
+        .flatten();
 
     // ⟨0.24⟩ THE POLICY COULD NOT BE HONOURED AS WRITTEN (SPEC §6.2) — the UNREADABLE-POLICY posture,
     // so exit 2 with NO document, exactly like the unreadable-file branch above and byte-identically to
@@ -782,6 +794,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         coverage.as_ref(),
         rep.analyzed_count,
         &rep.unanalyzed,
+        vocabulary.as_ref(),
         want_json,
         gate_json.as_deref(),
     ) {
@@ -808,11 +821,13 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
 /// document, the same field order, the same violation sort. `--json` is `--gate-json -`, so both may fire.
 /// Returns false when a write failed (the caller exits 2 — a verdict a consumer never receives must not
 /// pass for one it did).
+#[allow(clippy::too_many_arguments)]
 fn write_verdict(
     violations: &mut [candor_report::GateViolation],
     coverage: Option<&candor_report::GateCoverage>,
     analyzed_count: usize,
     unanalyzed: &[candor_report::UnanalyzedUnit],
+    vocabulary: Option<&candor_report::GateVocabulary>,
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -828,7 +843,13 @@ fn write_verdict(
     if targets.is_empty() {
         return true;
     }
-    let json = match candor_report::gate_verdict_json_full(violations, coverage, analyzed_count, unanalyzed) {
+    let json = match candor_report::gate_verdict_json_v24(
+        violations,
+        coverage,
+        analyzed_count,
+        unanalyzed,
+        vocabulary,
+    ) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("candor-query gate: could not serialize the gate verdict ({e})");
