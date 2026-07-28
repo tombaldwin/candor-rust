@@ -470,12 +470,20 @@ pub(crate) fn record_gate_analyzed(count: usize, unanalyzed: &[candor_report::Un
     }
 }
 
+/// ⟨0.24⟩ WHY THIS RUN COULD NOT PRODUCE A VERDICT — set at each exit-2 site that is NOT an incomplete
+/// analysis (an unreadable policy, a policy that cannot be honoured as written, an invalid baseline).
+/// Read by [`write_gate_json`], which turns it into the fail-closed refusal document SPEC §3.1 requires.
+/// `OnceLock`, first-writer-wins: the first refusal is the one that stopped the run.
+pub(crate) static GATE_REFUSAL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub(crate) fn record_gate_refusal(why: impl Into<String>) {
+    let _ = GATE_REFUSAL.set(why.into());
+}
+
 /// Write the structured gate verdict `{ spec, ok, violations }` (candor-spec §3.3 ⟨0.8⟩) — the machine
 /// analog of the AS-EFF console lines, accumulated from the SAME `policy_violations` that set the exit
 /// code, so it can never disagree with the gate. Called ONCE, by `scan_main`, after the whole scan (every
-/// workspace member) completes. `-` streams to stdout. On exit 2 (an incomplete scan/gate — unreadable
-/// policy, a parse failure) NO verdict is written: there is no faithful verdict to emit. A no-op unless
-/// `--gate-json` was given.
+/// workspace member) completes. `-` streams to stdout. A no-op unless `--gate-json` was given.
 pub(crate) fn write_gate_json(exit_code: i32) {
     let Some(Some(path)) = GATE_JSON_PATH.get() else { return };
     // ⟨0.21⟩ COMPLETENESS MANIFEST: the accumulated analyzed count + the units that couldn't be analyzed.
@@ -488,10 +496,41 @@ pub(crate) fn write_gate_json(exit_code: i32) {
     // Two distinct exit-2 causes: (a) INCOMPLETE ANALYSIS (a source parse failure) → emit a structured
     // incomplete verdict (Tom's call 2026-07-17, refining §3.3.1 to "no ok:true GUESS": ok:false +
     // incomplete:true + the `unanalyzed` list is honest, never a fabricated pass — a machine learns WHY
-    // the gate couldn't certify); (b) a broken gate CONFIG (unreadable policy) → no faithful verdict, so
-    // write none. The presence of `unanalyzed` distinguishes them, and ONLY (b) suppresses the document.
+    // the gate couldn't certify); (b) a broken gate CONFIG (an unreadable or unhonourable policy).
+    //
+    // ⟨0.24⟩ **(b) NOW WRITES A REFUSAL DOCUMENT TOO — the rule has no exempt cause** (SPEC §3.1
+    // `1503368` (b)). It used to write NOTHING, on the reasoning that a policy nobody could parse has no
+    // faithful verdict to emit. True, and beside the point: the argument that MANDATES a document is that
+    // a CI wrapper of the shape `candor-scan … --gate-json v.json || true; jq .ok v.json` re-reads **the
+    // previous run's document as current**, and a stale green does not care why this run declined to
+    // overwrite it. The hazard is identical for both causes; only the measurement that prompted the
+    // original clause differed.
+    //
+    // A refusal document is not a fabricated verdict, which is what makes this consistent rather than a
+    // reversal: `gate_refusal_json` carries `ok:false`, `refused:true`, the reason, and **NO `violations`
+    // key at all**. The shape already says "no claim about violations", and that is the honest thing to
+    // say when the policy could not be read. Its naive read is the fail-closed one, which is the whole
+    // standard this format holds itself to.
     if exit_code == 2 && unanalyzed.is_empty() {
-        eprintln!("candor-scan: --gate-json not written — the gate config did not load (exit 2)");
+        let why = GATE_REFUSAL.get().cloned().unwrap_or_else(|| {
+            "the gate config did not load (exit 2) — see stderr for the specific cause".to_string()
+        });
+        match candor_report::gate_refusal_json(&why) {
+            Ok(json) => {
+                if path == "-" {
+                    println!("{json}");
+                } else if let Err(e) =
+                    candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes())
+                {
+                    eprintln!(
+                        "candor-scan: could not write the refusal document to --gate-json {path} ({e}) — \
+                         a consumer reading that path will see the PREVIOUS run's verdict, which is \
+                         stale. Delete it, or treat exit 2 as a failure."
+                    );
+                }
+            }
+            Err(e) => eprintln!("candor-scan: could not serialize the refusal document ({e})"),
+        }
         return;
     }
     let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));

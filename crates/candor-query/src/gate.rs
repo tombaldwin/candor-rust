@@ -80,17 +80,18 @@ struct GateReport {
 ///     re-matched and no host is re-mapped through THIS machine's `net-partner` config — which would
 ///     also make the verdict depend on the consumer's CWD.
 ///
-/// `Err(2)` on a locator that matches no report, or one that is found-but-corrupt: §3.1's found-but-
+/// `Err(<reason>)` on a locator that matches no report, or one that is found-but-corrupt: §3.1's found-but-
 /// corrupt rule — a report that cannot be parsed is corrupt input, not an effect-free package, and a
 /// policy gated over the resulting empty map would PASS. Never a silently-empty "no violations".
-fn load_gate_report(prefix: &str) -> Result<GateReport, i32> {
+fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
     let paths = glob_reports(prefix);
     if paths.is_empty() {
-        eprintln!(
-            "candor-query gate: no report files at prefix `{prefix}` — nothing to gate \
-             (scan first: candor-scan . --out {prefix})"
+        let why = format!(
+            "no report files at prefix `{prefix}` — nothing to gate (scan first: candor-scan . --out \
+             {prefix})"
         );
-        return Err(2);
+        eprintln!("candor-query gate: {why}");
+        return Err(why);
     }
     let mut out = GateReport {
         entries: Vec::new(),
@@ -206,11 +207,12 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, i32> {
         out.coverage_packages.extend(cov.uncovered.into_iter().map(|e| e.name));
     }
     if hard_fail {
-        eprintln!(
-            "candor-query gate: refusing to gate over a report that did not load cleanly — \
-             re-run the scan (a partial signature makes a green verdict meaningless)"
-        );
-        return Err(2);
+        let why = "refusing to gate over a report that did not load cleanly — re-run the scan (a \
+                   partial signature makes a green verdict meaningless); the specific key or file is \
+                   named on stderr above"
+            .to_string();
+        eprintln!("candor-query gate: {why}");
+        return Err(why);
     }
     Ok(out)
 }
@@ -457,15 +459,22 @@ const GATE_USAGE: &str =
 /// document whose NAIVE read is the fail-closed one, which is what [`candor_report::gate_refusal_json`]
 /// is (`ok:false`, `refused:true`, the reason, and NO `violations` key).
 ///
-/// **SCOPED TO THE ANSWERABILITY REFUSALS**, which is what the ⟨0.24⟩ measurement was about: the policy
-/// LOADED, and the gate cannot answer it over THIS report (`forbid`/`allow` whole-policy; a scoped
-/// `deny` whose scoping datum is absent). The other exit-2 cause — a gate CONFIG or a report that never
-/// loaded AS one — keeps writing no document, per §3.3's cause (a) and the rows already pinned in
-/// `a_present_but_unparseable_section2_key_refuses_and_an_absent_one_does_not` and candor-scan's
-/// `a_broken_gate_CONFIG_must_still_write_no_verdict_document`: there the input to the verdict is
-/// unreadable, so even `refused: true` would be attributing a refusal to a policy nobody could parse.
-/// (The stale-path hazard is identical for that bucket, and the two rulings are in tension — recorded
-/// for Tom rather than resolved unilaterally, because the fix would break a rule pinned four-way.)
+/// **EVERY EXIT-2 CAUSE, WITH NO EXEMPTIONS** (candor-spec `1503368` (b)). This used to be scoped to the
+/// ANSWERABILITY refusals — the policy LOADED and the gate could not answer it over THIS report — while a
+/// gate CONFIG or a report that never loaded AS one wrote nothing, per §3.3's cause (a). That carve-out
+/// was recorded here as being in tension with the clause above it, and it was: **the stale-path hazard is
+/// identical for both buckets, and a stale green does not care why this run declined to overwrite it.**
+///
+/// The objection the carve-out rested on — "even `refused: true` would be attributing a refusal to a
+/// policy nobody could parse" — is answered by the document's own shape. It carries **no `violations`
+/// key**, so it attributes nothing: it says the run refused and names why, which is exactly what is true
+/// when the policy could not be read at all. Two tests pinned the old rule and both now assert the
+/// document (`a_present_but_unparseable_section2_key_refuses_and_an_absent_one_does_not`, and the
+/// broken-gate-CONFIG row of candor-scan's `a_violation_survives_an_incomplete_scan…`).
+///
+/// That includes the USAGE errors, and the argument scan runs to completion after the first one purely so
+/// the path is known wherever on the line it sits — a document that appears only when the mistake happens
+/// to come after `--gate-json` is a stale-verdict hazard keyed on argument ORDER.
 ///
 /// Returns the exit code (always 2) so call sites read `return refuse(…)`. A failure to WRITE is not
 /// escalated: the exit is already 2 and already fail-closed, and a second exit code would be a lie
@@ -519,6 +528,13 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     let mut policy_flag: Option<String> = None;
     let mut gate_json: Option<String> = None;
     let mut want_json = false;
+    // ⟨0.24⟩ THE USAGE ERROR IS COLLECTED, NOT RETURNED (SPEC §3.1 `1503368` (b)). Returning on the spot
+    // made the DOCUMENT depend on where in the command line the mistake sat: `--gate-json v.json --bogus`
+    // knew the path and `--bogus --gate-json v.json` did not, so one of them wrote the fail-closed
+    // document and the other left yesterday's green on disk — a stale-verdict hazard keyed on argument
+    // ORDER. So the FIRST error is recorded and the scan of the arguments RUNS ON, purely to learn where
+    // the verdict was supposed to go. Nothing else is done with what it finds: the run is already exit 2.
+    let mut usage_error: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -527,16 +543,18 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             "--text" | "--human" => {}
             "--report" => {
                 let Some(v) = args.get(i + 1) else {
-                    eprintln!("candor-query gate: --report requires a <locator> argument ({GATE_USAGE})");
-                    return 2;
+                    usage_error
+                        .get_or_insert_with(|| format!("--report requires a <locator> argument ({GATE_USAGE})"));
+                    break;
                 };
                 report_flag = Some(resolve_locator(v));
                 i += 1;
             }
             "--policy" => {
                 let Some(v) = args.get(i + 1) else {
-                    eprintln!("candor-query gate: --policy requires a <file> argument ({GATE_USAGE})");
-                    return 2;
+                    usage_error
+                        .get_or_insert_with(|| format!("--policy requires a <file> argument ({GATE_USAGE})"));
+                    break;
                 };
                 policy_flag = Some(v.clone());
                 i += 1;
@@ -551,25 +569,29 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                         i += 1;
                     }
                     _ => {
-                        eprintln!(
-                            "candor-query gate: --gate-json requires a value (a path, or `-` for stdout)"
-                        );
-                        return 2;
+                        usage_error.get_or_insert_with(|| {
+                            "--gate-json requires a value (a path, or `-` for stdout)".to_string()
+                        });
                     }
                 }
             }
             other => {
                 // A stray positional is a USAGE error, never ignored: `gate` takes none, so a swallowed
                 // token (a mistyped locator, say) would otherwise gate a DISCOVERED report and read green.
-                if other.starts_with('-') && other.len() > 1 {
-                    eprintln!("candor-query gate: unknown flag `{other}` ({GATE_USAGE})");
-                } else {
-                    eprintln!("candor-query gate: unexpected argument `{other}` ({GATE_USAGE})");
-                }
-                return 2;
+                usage_error.get_or_insert_with(|| {
+                    if other.starts_with('-') && other.len() > 1 {
+                        format!("unknown flag `{other}` ({GATE_USAGE})")
+                    } else {
+                        format!("unexpected argument `{other}` ({GATE_USAGE})")
+                    }
+                });
             }
         }
         i += 1;
+    }
+    if let Some(why) = usage_error {
+        eprintln!("candor-query gate: {why}");
+        return refuse(&why, want_json, gate_json.as_deref());
     }
 
     // The policy: flag, then CANDOR_POLICY, then the config `policy` key — §3.3.1's fallback, the same
@@ -581,19 +603,19 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                 .and_then(|t| config_value(&t, "policy"))
         });
     let Some(policy_path) = policy_path else {
-        eprintln!(
-            "candor-query gate: a policy is required — pass `--policy <file>`, set CANDOR_POLICY, or add \
-             a `policy` key to .candor/config. `gate` applies a policy to an existing report; with no \
-             policy there is no verdict to give."
-        );
-        return 2;
+        let why = "a policy is required — pass `--policy <file>`, set CANDOR_POLICY, or add a `policy` \
+                   key to .candor/config. `gate` applies a policy to an existing report; with no policy \
+                   there is no verdict to give."
+            .to_string();
+        eprintln!("candor-query gate: {why}");
+        return refuse(&why, want_json, gate_json.as_deref());
     };
     let Ok(policy_text) = std::fs::read_to_string(&policy_path) else {
-        eprintln!(
-            "candor-query gate: policy file {policy_path} could not be read — failing (exit 2), policy \
-             NOT evaluated"
+        let why = format!(
+            "policy file {policy_path} could not be read — failing (exit 2), policy NOT evaluated"
         );
-        return 2;
+        eprintln!("candor-query gate: {why}");
+        return refuse(&why, want_json, gate_json.as_deref());
     };
     // ⟨0.19⟩ `unknown-alias` expansion for an `Unknown[<alias>]` filter, anchored to the POLICY file
     // exactly as `parsepolicy` anchors it — an alias is part of the policy's own vocabulary, not of the
@@ -618,21 +640,23 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         .flatten();
 
     // ⟨0.24⟩ THE POLICY COULD NOT BE HONOURED AS WRITTEN (SPEC §6.2) — the UNREADABLE-POLICY posture,
-    // so exit 2 with NO document, exactly like the unreadable-file branch above and byte-identically to
-    // candor-scan's route on the same policy. See `ParsedPolicy::errors` for why this stopped being a
-    // warning: dropping an unrecognised class token rewrites the rule, and the direction that matters
-    // NARROWS it (`deny Unknown[dispatch,nativ]` → `[dispatch]`), so the gate silently stops covering
-    // native-caused holes while the operator reads a gate that looks armed.
+    // exactly like the unreadable-file branch above and byte-identically to candor-scan's route on the
+    // same policy. See `ParsedPolicy::errors` for why this stopped being a warning: dropping an
+    // unrecognised class token rewrites the rule, and the direction that matters NARROWS it (`deny
+    // Unknown[dispatch,nativ]` → `[dispatch]`), so the gate silently stops covering native-caused holes
+    // while the operator reads a gate that looks armed.
     if !p.errors.is_empty() {
         for e in &p.errors {
             eprintln!("candor-query gate: policy error — {e}");
         }
-        eprintln!(
-            "candor-query gate: refusing to evaluate a policy that cannot be honoured AS WRITTEN \
-             (exit 2, policy NOT evaluated). Fix the token, or define it as an `unknown-alias` in the \
-             `.candor/config` beside {policy_path}."
+        let why = format!(
+            "refusing to evaluate a policy that cannot be honoured AS WRITTEN (exit 2, policy NOT \
+             evaluated). Fix the token, or define it as an `unknown-alias` in the `.candor/config` \
+             beside {policy_path}. Policy error(s): {}",
+            p.errors.join("  ·  ")
         );
-        return 2;
+        eprintln!("candor-query gate: {why}");
+        return refuse(&why, want_json, gate_json.as_deref());
     }
 
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
@@ -700,15 +724,20 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     let p = p;
 
     let Some(prefix) = report_flag.or_else(discover_report_prefix) else {
-        eprintln!(
-            "candor-query gate: no report — pass --report <locator> or run from a repo with a .candor/ \
-             dir (scan: candor-scan . --out .candor/report)"
-        );
-        return 2;
+        let why = "no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: \
+                   candor-scan . --out .candor/report)"
+            .to_string();
+        eprintln!("candor-query gate: {why}");
+        return refuse(&why, want_json, gate_json.as_deref());
     };
     let rep = match load_gate_report(&prefix) {
         Ok(r) => r,
-        Err(code) => return code,
+        // ⟨0.24⟩ The reason travels now (SPEC §3.1 `1503368` (b)): a report that did not load is exactly
+        // the case where a consumer reading the `--gate-json` path unconditionally most needs to be told
+        // something other than yesterday's answer.
+        Err(why) => {
+            return refuse(&why, want_json, gate_json.as_deref());
+        }
     };
     // ⟨0.24⟩ THE REPORT JUDGED NOTHING (SPEC §3.1) — DISCLOSED, NOT REFUSED.
     //

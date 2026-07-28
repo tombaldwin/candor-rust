@@ -1979,12 +1979,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // evaluate: the unparsed file's effects are absent, so a clean compare over it is a
         // false-pure (the same posture as the policy gate below).
         if had_parse_failure {
-            eprintln!("candor-scan: baseline guard NOT evaluated — source failed to parse (see above); the guard cannot compare unanalyzed code");
+            let why = "baseline guard NOT evaluated — source failed to parse (see above); the guard \
+                       cannot compare unanalyzed code";
+            eprintln!("candor-scan: {why}");
+            crate::gate::record_gate_refusal(why);
             return (2, json_body);
         }
         match check_baseline(bv, dir, &crate_name, &all, &inferred, crate::gate::unknown_ratchet()) {
             BaselineOutcome::Inactive => {} // absent file: noted, exit unchanged
-            BaselineOutcome::Invalid => return (2, json_body), // diagnostic already printed
+            BaselineOutcome::Invalid => {
+                // diagnostic already printed by check_baseline
+                crate::gate::record_gate_refusal(
+                    "the baseline file could not be read as a baseline — see stderr above (exit 2, \
+                     guard NOT evaluated)",
+                );
+                return (2, json_body);
+            }
             BaselineOutcome::Checked(v) => {
                 for gv in &v {
                     let line = format!("[{}] {}", gv.rule, gv.detail);
@@ -2012,7 +2022,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     if let Some(pp) = policy_path {
         let Ok(text) = std::fs::read_to_string(&pp) else {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
-            eprintln!("candor-scan: policy {pp:?} could not be read; gate NOT enforced");
+            let why = format!("policy {pp:?} could not be read; gate NOT enforced");
+            eprintln!("candor-scan: {why}");
+            crate::gate::record_gate_refusal(why);
             return (2, json_body);
         };
         // ⟨0.19⟩ reason-class aliases (SPEC §6.2): a multi-value `unknown-alias` config key the single-value
@@ -2059,13 +2071,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             for e in &perrs {
                 eprintln!("candor-scan: policy error — {e}");
             }
-            eprintln!(
-                "candor-scan: refusing to evaluate a policy that cannot be honoured AS WRITTEN (exit 2, \
-                 gate NOT enforced) — dropping the token would silently REWRITE the rule, and when the \
-                 token sits beside valid ones the rewrite NARROWS it, so the gate stops covering what \
-                 the operator asked for while still looking armed. Fix the token, or define it as an \
-                 `unknown-alias` in the `.candor/config` beside {pp}."
+            let why = format!(
+                "refusing to evaluate a policy that cannot be honoured AS WRITTEN (exit 2, gate NOT \
+                 enforced) — dropping the token would silently REWRITE the rule, and when the token \
+                 sits beside valid ones the rewrite NARROWS it, so the gate stops covering what the \
+                 operator asked for while still looking armed. Fix the token, or define it as an \
+                 `unknown-alias` in the `.candor/config` beside {pp}. Policy error(s): {}",
+                perrs.join("  ·  ")
             );
+            eprintln!("candor-scan: {why}");
+            crate::gate::record_gate_refusal(why);
             return (2, json_body);
         }
         let outcome = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
@@ -2123,11 +2138,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // precedence holds — a rule that fired on carried evidence dominates, and `v.is_empty()` is the
         // whole of the condition. Never `policy ✓`: the operator asked for a rule that did not run.
         if !outcome.withheld.is_empty() && v.is_empty() {
-            eprintln!(
-                "candor-scan: policy NOT enforced — {} (rule, function) pair(s) could not be evaluated \
-                 (see above); a gate cannot be green over a rule that never ran",
+            let why = format!(
+                "policy NOT enforced — {} (rule, function) pair(s) could not be evaluated (see above); a \
+                 gate cannot be green over a rule that never ran",
                 outcome.withheld.len()
             );
+            eprintln!("candor-scan: {why}");
+            crate::gate::record_gate_refusal(why);
             return (2, json_body);
         }
         // Provable-purity disclosure (advisory — NEVER changes the verdict/exit): pure/deny layers that PASS

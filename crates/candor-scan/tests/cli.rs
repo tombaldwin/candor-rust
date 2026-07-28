@@ -1624,11 +1624,19 @@ fn a_violation_survives_an_incomplete_scan_and_dominates_the_exit_code() {
     assert_eq!(v2["incomplete"], true);
     assert_eq!(v2["violations"].as_array().unwrap().len(), 0, "{v2:#}");
 
-    // AND the OTHER exit-2 cause is untouched: a gate CONFIG that never loaded still writes NO document
-    // (a fabricated verdict would be a guess — SPEC §3.3's cause (a)). Run on a COMPLETE crate, so the
-    // absence is attributable to the config and not to the manifest.
+    // ⟨0.24⟩ AND THE OTHER exit-2 cause writes a REFUSAL document — candor-spec `1503368` (b) removes
+    // the carve-out. This row read `assert!(!v3path.exists(), "a broken gate CONFIG must still write no
+    // verdict document")`, on the reasoning that a policy nobody could parse has no faithful verdict to
+    // emit. True, and beside the point: the argument that mandates a document is that a CI wrapper of
+    // the shape `candor-scan … --gate-json v.json || true; jq .ok v.json` re-reads the PREVIOUS run's
+    // document as current, and a stale green does not care why this run declined to overwrite it.
+    //
+    // A refusal document is not a fabricated verdict — no `violations` key at all — which is why this is
+    // consistent with the rule it replaces rather than a reversal of it. Run on a COMPLETE crate, so the
+    // shape is attributable to the config and not to the manifest.
     let good = make_crate("incompleteviol-cfg", "pub fn go() {}\n");
     let v3path = good.join("verdict3.json");
+    let _ = std::fs::remove_file(&v3path);
     let out3 = Command::new(bin())
         .args([
             good.to_string_lossy().as_ref(),
@@ -1638,7 +1646,15 @@ fn a_violation_survives_an_incomplete_scan_and_dominates_the_exit_code() {
         .output()
         .expect("run candor-scan");
     assert_eq!(out3.status.code(), Some(2), "an unreadable policy is still exit 2");
-    assert!(!v3path.exists(), "a broken gate CONFIG must still write no verdict document");
+    let v3: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&v3path).expect("a refusal document")).unwrap();
+    assert_eq!(v3["ok"], false, "the naive read must be fail-closed:\n{v3:#}");
+    assert_eq!(v3["refused"], true, "{v3:#}");
+    assert!(v3.get("violations").is_none(), "a refusal makes NO claim about violations:\n{v3:#}");
+    assert!(
+        v3["reason"].as_str().unwrap().contains("could not be read"),
+        "…and it names the cause, so the operator is not sent back to a scan they do not own:\n{v3:#}"
+    );
 
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&good);
@@ -1686,10 +1702,18 @@ fn scan_refuses_a_policy_naming_an_unrecognised_reason_class_token() {
         let (rc, err) = run(name, rule, Some(&v));
         assert_eq!(rc, 2, "{name}: a policy that cannot be honoured AS WRITTEN must be refused:\n{err}");
         assert!(err.contains(token), "{name}: the refusal must NAME the token:\n{err}");
+        // ⟨0.24⟩ …and take the UNREADABLE-POLICY posture, byte-identically to `candor-query gate
+        // --report` on the same policy — which since candor-spec `1503368` (b) means a fail-closed
+        // REFUSAL document rather than none at all. This row read `assert!(!v.exists())`. The
+        // byte-equality obligation is what it always was; only the shape both routes must produce moved.
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&v).expect("a refusal document")).unwrap();
+        assert_eq!(doc["ok"], false, "{name}: {doc:#}");
+        assert_eq!(doc["refused"], true, "{name}: {doc:#}");
+        assert!(doc.get("violations").is_none(), "{name}: a refusal claims nothing about violations:\n{doc:#}");
         assert!(
-            !v.exists(),
-            "{name}: …and take the UNREADABLE-POLICY posture — no verdict document, byte-identically to \
-             `candor-query gate --report` on the same policy"
+            doc["reason"].as_str().unwrap().contains(token),
+            "{name}: the document must name the token too — stderr is not the channel CI reads:\n{doc:#}"
         );
     }
     // A config-defined alias is vocabulary, not an error.
