@@ -395,10 +395,15 @@ fn gate_input_from_report(rep: &GateReport) -> ReportSignature {
 /// exited **1**: a message asserting an exit code that had already been overruled. Whether this refusal
 /// decides the exit is the CALLER's fact, not this function's, so the caller says it. What is left here
 /// is the part that is true either way — which rule, which function, and why the evidence is missing.
+///
+/// ⟨0.24⟩ **RETURNS `(rule, why)` PAIRS, NOT PROSE** (SPEC §3.1 `fc4b5f6`). The disclosure is a MACHINE
+/// field now, so the raw policy line is a datum rather than something spliced into a sentence — and the
+/// stderr line is DERIVED from the pair, so the human channel and `unevaluated` cannot disagree about
+/// which rule went unanswered.
 fn unanswerable_scoped_filters(
     p: &candor_classify::policy::ParsedPolicy,
     sig: &ReportSignature,
-) -> Vec<String> {
+) -> Vec<candor_report::Unevaluated> {
     let mut out = Vec::new();
     for r in &p.rules {
         for q in &sig.all {
@@ -413,30 +418,35 @@ fn unanswerable_scoped_filters(
                 && has("Net")
                 && sig.net_classes.get(q).map(|c| c.is_empty()).unwrap_or(true)
             {
-                out.push(format!(
-                    "`{}` narrows on the Net DESTINATION CLASS, but `{q}` carries Net with no `netClass` \
-                     in this report — the field the filter reads is absent, so the narrowing would \
-                     succeed for lack of evidence and drop a Net the bare `deny Net` catches. The rule is \
-                     WITHHELD on `{q}` rather than tolerated there: an absent optional field must not \
-                     relax a fail-closed gate. Use the bare `deny Net`, or gate at scan time.",
-                    r.raw.trim()
-                ));
+                out.push(candor_report::Unevaluated {
+                    rule: r.raw.trim().to_string(),
+                    why: format!(
+                        "it narrows on the Net DESTINATION CLASS, but `{q}` carries Net with no \
+                         `netClass` in this report — the field the filter reads is absent, so the \
+                         narrowing would succeed for lack of evidence and drop a Net the bare `deny Net` \
+                         catches. The rule is WITHHELD on `{q}` rather than tolerated there: an absent \
+                         optional field must not relax a fail-closed gate. Use the bare `deny Net`, or \
+                         gate at scan time."
+                    ),
+                });
                 break;
             }
             if !r.unknown_classes.is_empty()
                 && has("Unknown")
                 && sig.reason_classes.get(q).map(|c| c.is_empty()).unwrap_or(true)
             {
-                out.push(format!(
-                    "`{}` narrows on the Unknown REASON CLASS, but `{q}` carries Unknown with no reason \
-                     reachable in this report — neither its own `unknownWhy` nor a `calls` edge to one. \
-                     §6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel \
-                     missing there is nothing for the filter to read, so the rule is WITHHELD on `{q}` — \
-                     neither charged (which would assert a reason nobody recorded) nor tolerated (which \
-                     would relax the gate for lack of evidence). Use the bare `deny Unknown`, or gate at \
-                     scan time.",
-                    r.raw.trim()
-                ));
+                out.push(candor_report::Unevaluated {
+                    rule: r.raw.trim().to_string(),
+                    why: format!(
+                        "it narrows on the Unknown REASON CLASS, but `{q}` carries Unknown with no reason \
+                         reachable in this report — neither its own `unknownWhy` nor a `calls` edge to \
+                         one. §6.2 resolves the class set TRANSITIVELY over the gate's reach; with the \
+                         channel missing there is nothing for the filter to read, so the rule is WITHHELD \
+                         on `{q}` — neither charged (which would assert a reason nobody recorded) nor \
+                         tolerated (which would relax the gate for lack of evidence). Use the bare `deny \
+                         Unknown`, or gate at scan time."
+                    ),
+                });
                 break;
             }
         }
@@ -480,6 +490,18 @@ const GATE_USAGE: &str =
 /// escalated: the exit is already 2 and already fail-closed, and a second exit code would be a lie
 /// about which refusal happened.
 fn refuse(reason: &str, want_json: bool, gate_json: Option<&str>) -> i32 {
+    refuse_disclosing(reason, &[], want_json, gate_json)
+}
+
+/// ⟨0.24⟩ [`refuse`] carrying the `unevaluated` list (SPEC §3.1 `fc4b5f6`). A SOLE refusal is where the
+/// disclosure matters most: nothing fired, so `reason` is the whole document, and a prose reason is not a
+/// list of rules a consumer can iterate.
+fn refuse_disclosing(
+    reason: &str,
+    unevaluated: &[candor_report::Unevaluated],
+    want_json: bool,
+    gate_json: Option<&str>,
+) -> i32 {
     let mut targets: Vec<&str> = Vec::new();
     if want_json {
         targets.push("-");
@@ -490,7 +512,7 @@ fn refuse(reason: &str, want_json: bool, gate_json: Option<&str>) -> i32 {
         targets.push(p);
     }
     if !targets.is_empty() {
-        match candor_report::gate_refusal_json(reason) {
+        match candor_report::gate_refusal_json_v24(reason, unevaluated) {
             Ok(json) => {
                 for t in targets {
                     if t == "-" {
@@ -678,34 +700,55 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // nothing that COULD dominate, so the refusal is the whole verdict and is taken immediately — which
     // also means a `forbid`-only policy still refuses without needing a report to exist. Deferring is
     // only ever right when something might overrule.
-    let mut policy_refusals: Vec<String> = Vec::new();
+    //
+    // ⟨0.24⟩ **ONE ENTRY PER RULE, NOT PER KIND** (SPEC §3.1 `fc4b5f6`). These two used to be one string
+    // each — `"this policy has 2 forbid rule(s)…"` — which is the KIND AGGREGATE the clause rejects: it
+    // answers *how many* when the operator's question is *which*. The reason genuinely IS a property of
+    // the kind, so the same `why` repeats across that kind's entries; what must not repeat is the `rule`,
+    // and that is the field a consumer joins on.
+    let mut policy_refusals: Vec<candor_report::Unevaluated> = Vec::new();
     if !p.layer_rules.is_empty() {
-        policy_refusals.push(format!(
-            "this policy has {} `forbid` rule(s), which `gate --report` cannot \
-             evaluate — a report's `calls` graph is EFFECT-RELEVANT (only callees with a non-empty effect \
-             set are written), so a crossing into a wholly PURE unit is invisible in it, while `forbid` \
-             matches on NAME. The rule would read green over a crossing a scan fails on. Gate layering at \
-             scan time: candor-scan . --policy {policy_path}",
-            p.layer_rules.len()
-        ));
+        let why = format!(
+            "`gate --report` cannot evaluate a `forbid` rule — a report's `calls` graph is \
+             EFFECT-RELEVANT (only callees with a non-empty effect set are written), so a crossing into a \
+             wholly PURE unit is invisible in it, while `forbid` matches on NAME. The rule would read \
+             green over a crossing a scan fails on. Gate layering at scan time: candor-scan . --policy \
+             {policy_path}"
+        );
+        policy_refusals.extend(p.layer_rules.iter().map(|r| candor_report::Unevaluated {
+            rule: r.raw.trim().to_string(),
+            why: why.clone(),
+        }));
     }
     if !p.allow_rules.is_empty() {
         let effects: BTreeSet<&str> = p.allow_rules.iter().map(|r| r.effect).collect();
-        policy_refusals.push(format!(
-            "this policy has `allow {}` rule(s), which `gate --report` cannot \
-             evaluate — the AS-EFF-008 surface-completeness marker does not ride the report wire as a \
-             gate-usable fact, so a benign visible literal beside a runtime-computed endpoint would be \
-             CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that marker — it also \
-             names a merely unrecognised host.) Gate allowlists at scan time: candor-scan . --policy \
-             {policy_path}",
+        let why = format!(
+            "`gate --report` cannot evaluate an `allow {}` rule — the AS-EFF-008 surface-completeness \
+             marker does not ride the report wire as a gate-usable fact, so a benign visible literal \
+             beside a runtime-computed endpoint would be CERTIFIED here and flagged by a scan. \
+             (`netClass: unknown-host` is NOT that marker — it also names a merely unrecognised host.) \
+             Gate allowlists at scan time: candor-scan . --policy {policy_path}",
             effects.into_iter().collect::<Vec<_>>().join("`/`")
-        ));
+        );
+        policy_refusals.extend(p.allow_rules.iter().map(|r| candor_report::Unevaluated {
+            rule: r.raw.trim().to_string(),
+            why: why.clone(),
+        }));
     }
+    // The human line is DERIVED from the same pair the document carries, so the two channels cannot
+    // disagree about which rule went unanswered — the split that produced the false disposition claim
+    // `8b97e5c` removed.
+    let say = |u: &candor_report::Unevaluated| format!("`{}` — {}", u.rule, u.why);
     if !policy_refusals.is_empty() && p.rules.is_empty() {
-        for why in &policy_refusals {
-            eprintln!("candor-query gate: {why}");
+        for u in &policy_refusals {
+            eprintln!("candor-query gate: {}", say(u));
         }
-        return refuse(&policy_refusals.join("  ·  "), want_json, gate_json.as_deref());
+        return refuse_disclosing(
+            &policy_refusals.iter().map(&say).collect::<Vec<_>>().join("  ·  "),
+            &policy_refusals,
+            want_json,
+            gate_json.as_deref(),
+        );
     }
     // **AND A REFUSED RULE IS UNEVALUATED — THAT IS WHAT REFUSED MEANS.** Dropping them from the policy
     // handed to `gate()` is not tidying: the refusal used to `return` before `gate()` ran, so deferring
@@ -829,10 +872,11 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         // false claim this commit removes.
         let sole: Vec<String> = refused
             .iter()
-            .map(|why| {
+            .map(|u| {
                 format!(
-                    "{why} Refusing (exit 2) — no rule fired on evidence this report carries, so there \
-                     is no verdict to stand beside this."
+                    "{} Refusing (exit 2) — no rule fired on evidence this report carries, so there \
+                     is no verdict to stand beside this.",
+                    say(u)
                 )
             })
             .collect();
@@ -848,7 +892,10 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                 rep.unanalyzed.len()
             );
         }
-        return refuse(&sole.join("  ·  "), want_json, gate_json.as_deref());
+        // ⟨0.24⟩ …and the REFUSAL DOCUMENT carries the list too (SPEC §3.1 `fc4b5f6`). A prose `reason`
+        // is not a list of rules: this is the case where nothing fired, so `reason` is all a consumer
+        // would otherwise have, and it is exactly the case the operator most needs to iterate.
+        return refuse_disclosing(&sole.join("  ·  "), &refused, want_json, gate_json.as_deref());
     }
     // ⟨0.24⟩ THE DOMINATED DISCLOSURE — and the claim in it is now COUNTED, not asserted.
     //
@@ -875,8 +922,8 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             refused.len(),
             violations.len(),
         );
-        for why in &refused {
-            eprintln!("    {why}");
+        for u in &refused {
+            eprintln!("    {}", say(u));
         }
     }
     // Human output goes to STDERR whenever stdout carries the verdict document, exactly as the scan
@@ -919,6 +966,13 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         rep.analyzed_count,
         &rep.unanalyzed,
         vocabulary.as_ref(),
+        // ⟨0.24⟩ THE UNANSWERED RULES RIDE THE SAME DOCUMENT AS THE VIOLATIONS (SPEC §3.1 `fc4b5f6`).
+        // Until now this list existed, was correct, and went to stderr ONLY — so a machine consumer of
+        // an exit-1 verdict could not see that any rule had gone unanswered, which is a finding that
+        // never reaches the consumer arriving through the disclosure this rung added to stop that. It is
+        // BESIDE the violations and not instead of them: Lemma 2 makes a firing rule certain however
+        // these would have resolved.
+        &refused,
         want_json,
         gate_json.as_deref(),
     ) {
@@ -952,6 +1006,7 @@ fn write_verdict(
     analyzed_count: usize,
     unanalyzed: &[candor_report::UnanalyzedUnit],
     vocabulary: Option<&candor_report::GateVocabulary>,
+    unevaluated: &[candor_report::Unevaluated],
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -967,12 +1022,14 @@ fn write_verdict(
     if targets.is_empty() {
         return true;
     }
-    let json = match candor_report::gate_verdict_json_v24(
+    let json = match candor_report::gate_verdict_json_v24_refused(
         violations,
         coverage,
         analyzed_count,
         unanalyzed,
         vocabulary,
+        None,
+        unevaluated,
     ) {
         Ok(j) => j,
         Err(e) => {

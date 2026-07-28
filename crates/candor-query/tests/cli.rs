@@ -3093,3 +3093,105 @@ fn whatif_names_the_operators_own_rule_and_discloses_what_a_narrowed_verdict_res
         "the `Net` filter says nothing about an introduced `Fs`:\n{other:#}"
     );
 }
+
+/// ⟨0.24⟩ `unevaluated` IS IN THE DOCUMENT, ONE ENTRY PER RULE, RAW LINE VERBATIM — SPEC §3.1 `fc4b5f6`.
+///
+/// The exit-1 MUST *"disclose which rules could not be evaluated"* named no field, no shape and no
+/// channel, and this engine put the disclosure on **stderr only**. Measured on `deny Fs` + `allow Fs
+/// /var/data`, exit 1: java and ts carried `unevaluated` in the `--gate-json` document; rust carried
+/// nothing there, so a machine consumer could not see that any rule had gone unanswered.
+///
+/// The `rule` field is asserted VERBATIM and PER RULE because that is where the sibling engine's defect
+/// sits: java aggregates two `forbid` lines to `"forbid (× 2)"`, which answers *how many* when the
+/// operator's question is *which*.
+#[test]
+fn unevaluated_rides_the_gate_json_document_one_entry_per_rule() {
+    let f = Fixture::new("unevaldoc");
+    f.write_report();
+    let pol = f.dir.join("p.policy");
+    let verdict = f.dir.join("v.json");
+    let run = |policy: &str| -> (Option<i32>, String, serde_json::Value) {
+        std::fs::write(&pol, policy).unwrap();
+        let _ = std::fs::remove_file(&verdict); // never read a previous run's answer
+        let out = Command::new(bin())
+            .args(["gate", "--report", &f.report_path(), "--policy"])
+            .arg(&pol)
+            .arg("--gate-json")
+            .arg(&verdict)
+            .env_remove("CANDOR_POLICY")
+            .env_remove("CANDOR_CONFIG")
+            .output()
+            .expect("run candor-query gate");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        let doc = std::fs::read_to_string(&verdict)
+            .unwrap_or_else(|e| panic!("no --gate-json document ({e}); stderr was:\n{err}"));
+        (out.status.code(), err, serde_json::from_str(&doc).unwrap())
+    };
+    let rules_of = |v: &serde_json::Value| -> Vec<String> {
+        v["unevaluated"]
+            .as_array()
+            .map(|a| a.iter().map(|u| u["rule"].as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    };
+
+    // ── THE CONTROL: a policy this verb answers IN FULL carries NO `unevaluated` key. Without this arm
+    // the assertions below are satisfied by a field that is simply always present. ──
+    let (rc, err, v) = run("deny Fs\n");
+    assert_eq!(rc, Some(1), "the control fires: {err}");
+    assert!(
+        v.get("unevaluated").is_none(),
+        "a fully-answered policy must stay byte-identical to a pre-rung verdict: {v}"
+    );
+
+    // ── THE FINDING: a violation the verb IS sure of, beside a rule it is not. Both in the document. ──
+    let (rc, err, v) = run("deny Fs\nallow Fs /var/data\n");
+    assert_eq!(rc, Some(1), "the certain violation still dominates (Lemma 2): {err}");
+    assert!(
+        v["violations"].as_array().is_some_and(|a| !a.is_empty()),
+        "the violation is not displaced by the disclosure: {v}"
+    );
+    assert_eq!(
+        rules_of(&v),
+        vec!["allow Fs /var/data".to_string()],
+        "the unanswered rule reaches the MACHINE channel, with the operator's own line verbatim: {v}"
+    );
+    assert!(
+        v["unevaluated"][0]["why"].as_str().is_some_and(|w| !w.is_empty()),
+        "…and says why: {v}"
+    );
+
+    // ── ONE ENTRY PER RULE, not per KIND. Two `forbid` lines are two entries carrying two raw lines —
+    // the arm that fails against an aggregate like `"forbid (× 2)"`. ──
+    let (rc, err, v) = run("deny Fs\nforbid app -> infra\nforbid web -> db\n");
+    assert_eq!(rc, Some(1), "still exit 1: {err}");
+    assert_eq!(
+        rules_of(&v),
+        vec!["forbid app -> infra".to_string(), "forbid web -> db".to_string()],
+        "TWO forbid lines are TWO entries — an aggregate answers `how many` when the question is \
+         `which`: {v}"
+    );
+
+    // ── THE SOLE REFUSAL: nothing fired, so the document is a REFUSAL — and it carries the list too,
+    // because `reason` is prose and a consumer cannot iterate prose. The MIRROR is asserted in the same
+    // breath: a refusal must still have NO `violations` key, so the disclosure did not turn it into a
+    // verdict claiming none were found. ──
+    let (rc, err, v) = run("forbid app -> infra\nallow Fs /var/data\n");
+    assert_eq!(rc, Some(2), "a policy that is nothing but unanswerable rules refuses: {err}");
+    assert_eq!(v["refused"], serde_json::json!(true), "still a refusal document: {v}");
+    assert!(
+        v.get("violations").is_none(),
+        "MIRROR: a refusal carries no `violations` key — `[]` is the claim it cannot make: {v}"
+    );
+    assert_eq!(
+        rules_of(&v),
+        vec!["forbid app -> infra".to_string(), "allow Fs /var/data".to_string()],
+        "the sole refusal names every rule it could not decide: {v}"
+    );
+
+    // ── AND THE HUMAN CHANNEL IS DERIVED FROM THE SAME PAIRS, so the two cannot disagree about WHICH
+    // rule went unanswered — the split that produced this family's false-disposition defect. ──
+    assert!(
+        err.contains("`forbid app -> infra`") && err.contains("`allow Fs /var/data`"),
+        "stderr names the same rules the document does: {err}"
+    );
+}
