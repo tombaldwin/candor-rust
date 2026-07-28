@@ -2311,6 +2311,76 @@ fn gate_report_refuses_an_unrecognised_reason_class_token_including_beside_valid
     let p = pol(&sub, "alias", "deny Unknown[corp]\n");
     let (rc, _, err) = run_gate(&loc, &p, &[]);
     assert_eq!(rc, 1, "an alias DEFINED beside the policy resolves and the rule fires:\n{err}");
+
+    // ⟨0.24⟩ **THE RULE BINDS THE ALIAS DEFINITION TOO** (candor-spec `be0b9a9`) — and this is the
+    // sharper of the two siblings, because the typo is in the VOCABULARY the policy is written against
+    // rather than in the policy, and it fails open identically. MEASURED: `= dispatch,nativ` silently
+    // became `{dispatch}` and this exact fixture — whose only hole is NATIVE-caused — exited **0**,
+    // where `= dispatch,native` exits 1. Every disclosure fired correctly about a definition that was
+    // not the one on disk.
+    //
+    // The definition is refused WHOLE rather than narrowed, so `corp` is undefined and the policy naming
+    // it lands on the token-error path above. Narrowing it to the tokens that happened to parse is the
+    // same silent rewrite one level down.
+    std::fs::write(sub.join(".candor/config"), "unknown-alias corp = dispatch,nativ\n").unwrap();
+    let (rc, stdout, err) = run_gate(&loc, &p, &[]);
+    assert_eq!(rc, 2, "a typo in the ALIAS DEFINITION must refuse, not narrow the definition:\n{err}");
+    assert!(err.contains("nativ"), "the refusal must name the token in the CONFIG:\n{err}");
+    assert!(stdout.is_empty());
+    // …AND THE BLAST RADIUS IS USE, NOT PRESENCE. A typo'd alias NO POLICY MENTIONS changed nothing, so
+    // it must not turn an unrelated gate red — the mirror over-reach. Same config, a policy that never
+    // names `corp`.
+    std::fs::write(sub.join(".candor/config"), "unknown-alias unused = dispatch,nativ\n").unwrap();
+    let bare_p = pol(&sub, "barealias", "deny Unknown\n");
+    let (rc, _, err) = run_gate(&loc, &bare_p, &[]);
+    assert_eq!(rc, 1, "a typo'd alias the policy never mentions must not refuse the gate:\n{err}");
+}
+
+/// SPEC §6.2 ⟨0.24⟩ **THE SAME RULE ON THE NET DESTINATION-CLASS LIST** (candor-spec `be0b9a9`, which
+/// widens `382a7e0` from "reason-class token" to *any* policy value list: *"each place I let it stay
+/// narrow is a place the same fail-open survives under a different key"*).
+///
+/// MEASURED 2026-07-28: `deny Net[known-telemetry,unknown-hosst]` → **exit 0**, where the correctly
+/// spelled rule exits 1. Byte-identical in shape to the reason-class typo and byte-identical in harm —
+/// the token is dropped, the filter NARROWS to `[known-telemetry]`, and the gate stops covering
+/// unidentifiable destinations while the operator reads a gate that looks armed.
+#[test]
+fn gate_report_refuses_an_unrecognised_net_destination_class_token() {
+    let f = Fixture::new("gate-badnetclass");
+    // The fixture's only Net destination is UNKNOWN-HOST — the class the typo'd token was meant to name,
+    // so the fail-open row is a measurement and not a taxonomy.
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.egress","inferred":["Net"],"direct":["Net"],
+                          "hosts":["h.example.com"],"netClass":["unknown-host"]}]}"#,
+        None,
+    );
+    // CONTROL FIRST: spelled correctly, the rule fires.
+    let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "good", "deny Net[known-telemetry,unknown-host]\n"), &[]);
+    assert_eq!(rc, 1, "the correctly-spelled rule must FIRE, or the rows below prove nothing:\n{err}");
+
+    for (name, text, token) in [
+        // THE FAIL-OPEN ROW: exit 0 before the fix.
+        ("typo_beside_valid", "deny Net[known-telemetry,unknown-hosst]\n", "unknown-hosst"),
+        // The sole-token row: the filter empties and the rule WIDENS to a bare `deny Net`, which exits 1
+        // — but on a rule the engine claimed to be ignoring. A false disclosure, the mirror direction.
+        ("sole_unrecognised", "deny Net[nope]\n", "nope"),
+    ] {
+        let (rc, stdout, err) = run_gate(&loc, &pol(&f.dir, name, text), &[]);
+        assert_eq!(rc, 2, "{name}: a policy that cannot be honoured AS WRITTEN must be refused:\n{err}");
+        assert!(err.contains(token), "{name}: the refusal must NAME the token:\n{err}");
+        assert!(
+            err.contains("unknown-host") && err.contains("known-partner"),
+            "{name}: …and list the ACCEPTED set, which is the only thing that makes it fixable:\n{err}"
+        );
+        assert!(stdout.is_empty(), "{name}: a refused policy produces no verdict");
+    }
+    // `Net[*]` is not an unrecognised token — the wildcard must survive the new strictness.
+    let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "star", "deny Net[*]\n"), &[]);
+    assert_eq!(rc, 1, "`Net[*]` means every destination and must still evaluate:\n{err}");
 }
 
 /// SPEC §3.1 ⟨0.24⟩ THE MINIMAL-REFUSAL RULE. A class-scoped `deny` is NOT unanswerable merely because

@@ -168,6 +168,7 @@ pub fn parse_unknown_aliases(config_text: &str) -> std::collections::BTreeMap<St
             continue;
         }
         let mut set = BTreeSet::new();
+        let mut bad: Vec<&str> = Vec::new();
         for cn in classes.split(',') {
             let cn = cn.trim();
             if cn.is_empty() {
@@ -178,10 +179,38 @@ pub fn parse_unknown_aliases(config_text: &str) -> std::collections::BTreeMap<St
             } else if let Some(rc) = ReasonClass::from_token(cn) {
                 set.insert(rc);
             } else {
-                eprintln!("candor: `unknown-alias {name}` names unknown reason-class `{cn}` — skipped");
+                bad.push(cn);
             }
         }
-        if set.is_empty() {
+        // ⟨0.24⟩ **AN UNRECOGNISED TOKEN REFUSES THE WHOLE DEFINITION** — SPEC §6.2 `be0b9a9`: the rule
+        // binds every policy value list, and *"the second is the sharper one: the typo is in the
+        // vocabulary the policy is written against rather than in the policy itself, and it fails open
+        // identically."*
+        //
+        // MEASURED: `unknown-alias corp = dispatch,nativ` → the DEFINITION silently became `{dispatch}`,
+        // so `deny Unknown[corp]` exited 0 over a native-caused hole that `= dispatch,native` catches.
+        // The alias resolved, `used_aliases` recorded it, the verdict named the config — every disclosure
+        // fired correctly ABOUT A DEFINITION THAT WAS NOT THE ONE ON DISK.
+        //
+        // REFUSING THE DEFINITION rather than minting a new error channel is what makes this fit: an
+        // alias that does not exist is one the policy's own `Unknown[<name>]` cannot resolve, so it lands
+        // on the `errors` path already there and the gate routes refuse with exit 2 — naming the token
+        // AND the accepted set, as §6.2 requires. It also keeps the blast radius honest: a config
+        // defining ten aliases, one of them typo'd and NONE of them mentioned by this policy, changed
+        // nothing, and turning that into a red gate would be the mirror over-reach. The refusal is
+        // triggered by USE, exactly like `used_aliases` (recorded at the point of use, for the same
+        // reason).
+        if !bad.is_empty() {
+            eprintln!(
+                "candor: REFUSING `unknown-alias {name}` — it names unrecognised reason-class(es) `{}` \
+                 (accepted: reflect, dispatch, indirect, native, unresolved, setup, plus `dynamic`). The \
+                 definition is refused WHOLE rather than narrowed to the tokens that parsed: keeping the \
+                 rest would silently redefine `{name}` as something narrower than the config says, and a \
+                 policy using it would gate less than it reads. `{name}` is now undefined, so a policy \
+                 naming it is a policy error (exit 2).",
+                bad.join("`, `")
+            );
+        } else if set.is_empty() {
             eprintln!("candor: ignoring `unknown-alias {name}` — no valid reason-class");
         } else {
             out.insert(name.to_string(), set);
@@ -596,7 +625,16 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                             } else if crate::NET_DEST_CLASSES.contains(&cn) {
                                 net_classes.insert(cn.to_string());
                             } else {
-                                warn_ignore!("candor: policy rule names unknown Net destination-class `{cn}` (known: known-telemetry,known-partner,unknown-host, or *): {line}");
+                                // ⟨0.24⟩ A POLICY ERROR, not a warning — SPEC §6.2 `be0b9a9`. Byte-identical
+                                // in shape to the reason-class arm below, and byte-identical in harm:
+                                // MEASURED `deny Net[known-telemetry,unknown-hosst]` → exit 0 where the
+                                // correctly-spelled rule exits 1. The typo is dropped, the filter NARROWS
+                                // to `[known-telemetry]`, and the gate stops covering unidentifiable
+                                // destinations while the operator reads a gate that looks armed.
+                                out.errors.push(format!(
+                                    "unrecognised Net destination-class `{cn}` in `{line}` — accepted: \
+                                     known-telemetry, known-partner, unknown-host, plus `*`"
+                                ));
                             }
                         }
                         continue;
@@ -627,7 +665,10 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                                     "unrecognised reason-class/alias `{cn}` in `{line}` — accepted: \
                                      reflect, dispatch, indirect, native, unresolved, setup, plus the \
                                      aliases `dynamic` and `*`, plus any `unknown-alias` defined in the \
-                                     `.candor/config` beside the policy"
+                                     `.candor/config` beside the policy. (⟨0.24⟩ an `unknown-alias` whose \
+                                     OWN definition names an unrecognised class is refused WHOLE, so a \
+                                     typo in the config surfaces as an undefined alias here — check the \
+                                     `unknown-alias` lines too, and the line above this one.)"
                                 ));
                             }
                         }
