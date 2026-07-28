@@ -2115,6 +2115,84 @@ fn gate_report_refuses_a_report_that_judged_nothing_but_believes_an_all_pure_one
                 different hat:\n{err}");
 }
 
+/// ⟨0.24⟩ SPEC §2: *"A KEY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT, AND MUST NEVER BE COERCED
+/// TO ITS EMPTY VALUE … Absent may take a documented default. Present-but-unparseable is a refusal —
+/// exit 2, naming the key."*
+///
+/// MEASURED BEFORE THE FIX (2026-07-28), all four rows through the shipped binary:
+///
+///   unanalyzed: [{"unit":…,"why":…}]   exit 0 `policy ✓`   ← ts/java/swift all exited 2
+///   unanalyzed: ["src/broken.rs"]      exit 0 `policy ✓`   ← all four dropped this one
+///   unanalyzed: []                     exit 0              (correct — an explicit completeness claim)
+///   unanalyzed absent                  exit 0              (correct — a complete scan omits the key)
+///
+/// `report_unanalyzed` ended in `from_value(u).ok().unwrap_or_default()`, so both corrupt shapes became
+/// `[]`. **`unanalyzed` NON-EMPTINESS IS THE FAIL-CLOSED TRIGGER**, so that default does not lose a
+/// hedge — it inverts the verdict, and always in the green direction.
+///
+/// BOTH HALVES ARE PINNED HERE ON PURPOSE. A test carrying only the corrupt rows is satisfied by an
+/// engine that refuses every report without an `unanalyzed` key — which is every complete report this
+/// engine writes — so the ABSENT and EMPTY rows are what keep the refusal from becoming its own defect.
+#[test]
+fn a_present_but_unparseable_section2_key_refuses_and_an_absent_one_does_not() {
+    let f = Fixture::new("gate-corrupt-key");
+    let p = pol(&f.dir, "denynet", "deny Net\n");
+    // A report with NO Net anywhere: every exit code below is decided by the KEY, never by a violation.
+    let body = |extra: &str| format!(
+        r#"{{"candor":{{"version":"handwritten","spec":"0.24"}},"package":"app",
+            "analyzed":{{"count":3,"digest":"0"}}{extra},
+            "functions":[{{"fn":"app.pure_enough","inferred":[]}}]}}"#);
+
+    // THE FAIL-OPEN ROWS — corrupt `unanalyzed`, which must refuse and NAME THE KEY.
+    for (name, extra) in [
+        ("wrongfields", r#","unanalyzed":[{"unit":"src/broken.rs","why":"parse error"}]"#),
+        ("barestrings", r#","unanalyzed":["src/broken.rs"]"#),
+        ("notalist", r#","unanalyzed":"src/broken.rs""#),
+    ] {
+        let loc = gate_fixture(&f.dir, name, &body(extra), None);
+        let vfile = f.dir.join(format!("v-{name}.json"));
+        let (rc, out, err) = run_gate(&loc, &p, &["--gate-json", &vfile.to_string_lossy()]);
+        assert_eq!(rc, 2, "a present-but-unparseable `unanalyzed` must refuse, not read as `[]`:\n{err}");
+        assert!(err.contains("`unanalyzed`"), "the refusal must NAME the key it could not read:\n{err}");
+        assert!(!vfile.exists(), "…and write no verdict (SPEC §3.3 exit-2 cause (a)):\n{out}");
+    }
+    // …and the same rule on `analyzed`, including SPEC §2's live boolean row.
+    for (name, extra) in [
+        ("boolcount", r#""analyzed":{"count":true},"#),
+        ("strmanifest", r#""analyzed":"lots","#),
+    ] {
+        let rep = format!(
+            r#"{{"candor":{{"version":"handwritten","spec":"0.24"}},"package":"app",{extra}
+                "functions":[{{"fn":"app.pure_enough","inferred":[]}}]}}"#);
+        let loc = gate_fixture(&f.dir, name, &rep, None);
+        let (rc, _, err) = run_gate(&loc, &p, &[]);
+        assert_eq!(rc, 2, "a manifest that cannot be read is not a manifest:\n{err}");
+        assert!(err.contains("`analyzed`"), "the refusal must NAME the key:\n{err}");
+    }
+
+    // THE CONTROLS — without these the fix above is satisfied by refusing everything. An ABSENT key
+    // takes its documented default, and so does an explicitly EMPTY one.
+    for (name, extra) in [("absent", ""), ("emptylist", r#","unanalyzed":[]"#)] {
+        let loc = gate_fixture(&f.dir, name, &body(extra), None);
+        let vfile = f.dir.join(format!("v-{name}.json"));
+        let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &vfile.to_string_lossy()]);
+        assert_eq!(rc, 0, "an {name} `unanalyzed` is the documented default, never a refusal:\n{err}");
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&vfile).unwrap()).unwrap();
+        assert_eq!(v["ok"], true, "{v:#}");
+        assert!(v.get("incomplete").is_none(), "…and no incompleteness is invented either: {v:#}");
+    }
+    // A digest-less `analyzed` is READABLE — `count` is the load-bearing datum, and the count must reach
+    // the verdict rather than being silently zeroed (the old `.ok()` reader contributed 0 for this shape).
+    let loc = gate_fixture(&f.dir, "nodigest",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app","analyzed":{"count":5},
+            "functions":[{"fn":"app.pure_enough","inferred":[]}]}"#, None);
+    let vfile = f.dir.join("v-nodigest.json");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &vfile.to_string_lossy()]);
+    assert_eq!(rc, 0, "a digest-less manifest is legible, not corrupt:\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&vfile).unwrap()).unwrap();
+    assert_eq!(v["analyzed"]["count"], 5, "the judged count must ride the verdict, not be zeroed: {v:#}");
+}
+
 /// §3.3.1 grammar: `gate` is a QUERY verb with NO positionals, and a missing/unreadable policy is a LOUD
 /// exit 2. A swallowed token is how a gate runs green over a DISCOVERED report the user never named.
 #[test]
