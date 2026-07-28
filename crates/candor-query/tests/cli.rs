@@ -1938,6 +1938,75 @@ fn gate_report_reports_a_certain_violation_over_an_unanswerable_rule_beside_it()
     assert_eq!(rc3, 1, "the firing rule alone must exit 1:\n{err3}");
 }
 
+/// ⟨0.24⟩ **THE DISCLOSURE MAY NOT CLAIM A FIRING THAT DID NOT HAPPEN, AND MAY NOT NAME AN EXIT IT DID
+/// NOT TAKE.** Two false sentences, one cause: text written for the case it was found in, then reached
+/// by a case the precedence correction had just created.
+///
+/// MEASURED 2026-07-28 with `deny Unknown[unresolved] app.murky` as the SOLE rule in the policy —
+///
+///   - the note read *"The verdict stands anyway: a rule FIRED on evidence this report carries"* when
+///     **no rule had**: the only rule in the policy was the unanswerable one. The sentence was attached
+///     unconditionally to the refusal path rather than conditioned on a violation being recorded;
+///   - and the per-rule reason ended *"Refusing (exit 2)."* on a run that exits **1**, because the
+///     disposition was baked into a string written when exit 2 was the only thing that could follow.
+///
+/// A FALSE DISCLOSURE IS WORSE THAN A MISSING ONE — conformance PART 13b is this family's precedent
+/// (`net-partner` reported as an ignored config key WHILE BEING HONOURED). Both halves are asserted in
+/// BOTH directions here: each case must say its own true thing AND must not say the other's.
+#[test]
+fn gate_report_claims_a_firing_rule_only_where_one_actually_fired() {
+    let f = Fixture::new("gate-claim");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app",
+            "analyzed":{"count":2,"digest":"0"},
+            "functions":[
+              {"fn":"app.murky","inferred":["Unknown"]},
+              {"fn":"app.writes","inferred":["Fs"],"direct":["Fs"],"paths":["/etc/hosts"]}]}"#,
+        Some(r#"{"app.murky":[],"app.writes":[]}"#),
+    );
+    const FIRED: &str = "FIRED on evidence this report carries";
+    const REFUSING: &str = "Refusing (exit 2)";
+
+    // CASE 1 — SOLE unanswerable rule. It refuses, so it may say so; and NOTHING fired, so it may not
+    // claim a firing. The old build printed both sentences here and one of them was false.
+    let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "sole", "deny Unknown[unresolved] app.murky\n"), &[]);
+    assert_eq!(rc, 2, "{err}");
+    assert!(err.contains(REFUSING), "a refusal must name its own disposition:\n{err}");
+    assert!(
+        !err.contains(FIRED),
+        "THE FALSE CLAIM: no rule fired on carried evidence — the only rule in this policy is the \
+         unanswerable one:\n{err}"
+    );
+
+    // CASE 2 — a firing rule DOMINATES the same unanswerable one. Now the firing claim is true and must
+    // be made (with the count, so it cannot be printed truthfully at zero), and the exit is 1, so
+    // "Refusing (exit 2)" must NOT appear anywhere in the output.
+    let (rc, _, err) = run_gate(
+        &loc,
+        &pol(&f.dir, "both", "deny Fs app.writes\ndeny Unknown[unresolved] app.murky\n"),
+        &[],
+    );
+    assert_eq!(rc, 1, "{err}");
+    assert!(
+        err.contains("the 1 violation(s) reported below FIRED on evidence this report carries"),
+        "the claim must be COUNTED from the verdict, not asserted beside it:\n{err}"
+    );
+    assert!(
+        !err.contains(REFUSING),
+        "THE OTHER FALSE CLAIM: this run exits 1, so no line of it may announce exit 2:\n{err}"
+    );
+    // …and the withheld rule is still named. Removing a false sentence must not remove the true one.
+    assert!(err.contains("deny Unknown[unresolved] app.murky"), "{err}");
+
+    // CASE 3 — a CLEAN policy says neither thing, which is what makes cases 1 and 2 discriminating
+    // rather than merely wordy.
+    let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "clean", "deny Exec app\n"), &[]);
+    assert_eq!(rc, 0, "{err}");
+    assert!(!err.contains(FIRED) && !err.contains(REFUSING), "{err}");
+}
+
 /// SPEC §3.1 ⟨0.24⟩ **WITHHOLD PER (RULE, FUNCTION)** — candor-spec `5a8cf48`, the half of the
 /// precedence ruling that makes it safe. Applying `8b97e5c` WITHOUT this FABRICATES.
 ///
