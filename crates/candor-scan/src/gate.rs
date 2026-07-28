@@ -444,26 +444,13 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .lock()
         .unwrap()
         .clone();
-    if exit_code == 2 {
-        // Two distinct exit-2 causes: (a) INCOMPLETE ANALYSIS (a source parse failure) → emit a structured
-        // incomplete verdict (Tom's call 2026-07-17, refining §3.3.1 to "no ok:true GUESS": ok:false +
-        // incomplete:true + the `unanalyzed` list is honest, never a fabricated pass — a machine learns WHY
-        // the gate couldn't certify); (b) a broken gate CONFIG (unreadable policy) → no faithful verdict, so
-        // still write none. The presence of `unanalyzed` distinguishes them.
-        if !unanalyzed.is_empty() {
-            let mut none: Vec<GateViolation> = Vec::new();
-            match candor_report::gate_verdict_json_full(&mut none, None, analyzed_count, &unanalyzed) {
-                Ok(json) if path == "-" => println!("{json}"),
-                Ok(json) => {
-                    if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {
-                        eprintln!("candor-scan: could not write --gate-json {path}: {e}");
-                    }
-                }
-                Err(e) => eprintln!("candor-scan: could not serialize gate verdict: {e}"),
-            }
-        } else {
-            eprintln!("candor-scan: --gate-json not written — the gate config did not load (exit 2)");
-        }
+    // Two distinct exit-2 causes: (a) INCOMPLETE ANALYSIS (a source parse failure) → emit a structured
+    // incomplete verdict (Tom's call 2026-07-17, refining §3.3.1 to "no ok:true GUESS": ok:false +
+    // incomplete:true + the `unanalyzed` list is honest, never a fabricated pass — a machine learns WHY
+    // the gate couldn't certify); (b) a broken gate CONFIG (unreadable policy) → no faithful verdict, so
+    // write none. The presence of `unanalyzed` distinguishes them, and ONLY (b) suppresses the document.
+    if exit_code == 2 && unanalyzed.is_empty() {
+        eprintln!("candor-scan: --gate-json not written — the gate config did not load (exit 2)");
         return;
     }
     let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
@@ -483,9 +470,17 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .collect();
     let coverage =
         (!packages.is_empty()).then_some(candor_report::GateCoverage { uncovered: packages.len(), packages });
-    // ⟨0.21⟩ the full verdict carries `analyzed:{count}` (Gap 1); `unanalyzed` is empty on a completed gate
-    // (exit 0/1), so `incomplete`/`unanalyzed` are omitted — byte-compatible with a pre-rung verdict + coverage.
-    match candor_report::gate_verdict_json_full(&mut violations, coverage.as_ref(), analyzed_count, &[]) {
+    // ⟨0.21⟩ the full verdict carries `analyzed:{count}` (Gap 1); on a COMPLETE gate `unanalyzed` is empty,
+    // so `incomplete`/`unanalyzed` are omitted — byte-compatible with a pre-rung verdict + coverage.
+    //
+    // ONE code path now serves every non-config exit, and that is deliberate. The incomplete arm used to
+    // be a separate `match` that hard-coded `&mut none` for the violations and `None` for coverage, which
+    // is how a real `deny Net` finding got deleted from the document on a crate that also had one
+    // unparseable file (measured 2026-07-28; the same defect the `gate --report` route carried, since
+    // that route was written to mirror this one for §3.1 byte-equality). Violations, coverage and the
+    // manifest all ride the ONE verdict; `gate_verdict_json_full` computes `ok = no violations AND not
+    // incomplete`, so exit 1, exit 2-with-a-manifest and exit 0 all get an accurate document.
+    match candor_report::gate_verdict_json_full(&mut violations, coverage.as_ref(), analyzed_count, &unanalyzed) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
             if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {

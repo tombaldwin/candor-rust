@@ -71,30 +71,55 @@ for c in candor-report candor-classify candor-scan candor-query; do
   done
 done
 
-# THE FAIL-CLOSED ARM, which no in-tree crate can reach: a scan whose own analysis was INCOMPLETE exits
-# 2 and writes the ⟨0.21⟩ `ok:false` + `incomplete:true` + `unanalyzed` verdict with NO violations and no
-# coverage note — before recording anything. The manifest travels ON the report, so the report route must
-# reach the same verdict from the same fact, and that document has a different SHAPE from every row above.
+# THE FAIL-CLOSED ARM, which no in-tree crate can reach: a scan whose own analysis was INCOMPLETE writes
+# the ⟨0.21⟩ `ok:false` + `incomplete:true` + `unanalyzed` verdict. The manifest travels ON the report, so
+# the report route must reach the same verdict from the same fact, and that document has a different
+# SHAPE from every row above.
+#
+# TWO ROWS, because SPEC §3.3 makes two claims about this state and they had different fates. "MUST fail
+# closed (exit ≠ 0)" was held by both routes; "a real violation (exit 1) still dominates" was held by
+# NEITHER — both dropped the violations they had just computed and wrote `violations: []` (measured
+# 2026-07-28). One arm with a NON-violating policy could never see that, and this file had only that arm:
+# the two routes were byte-equal because they were making the same mistake.
 inc="$WS/incomplete"; mkdir -p "$inc/src"
 printf '[package]\nname = "incomp"\n' > "$inc/Cargo.toml"
 printf 'pub fn ok_fn() { let _ = std::fs::read_to_string("/x"); }\n' > "$inc/src/lib.rs"
 printf 'fn broken( { { {\n' > "$inc/src/bad.rs"          # the file the parser cannot read
-printf 'deny Fs\n' > "$inc/policy"
 mkdir -p "$inc/out"
-"$SCAN" "$inc" --out "$inc/out/r" --policy "$inc/policy" --gate-json "$WS/inc.scan.json" >/dev/null 2>&1
-rc_scan=$?
-"$QUERY" gate --report "$inc/out/r" --policy "$inc/policy" --gate-json "$WS/inc.gate.json" >/dev/null 2>&1
-rc_gate=$?
-rows=$((rows+1))
-if [ "$rc_scan" -ne 2 ] || [ "$rc_gate" -ne 2 ]; then
-  echo "  FAIL incomplete-report: exit $rc_scan (scan) vs $rc_gate (gate), both must be 2 — a gate cannot"
-  echo "       be green over code candor never analyzed, whichever route reaches it"
-  bad=$((bad+1))
-elif ! cmp -s "$WS/inc.scan.json" "$WS/inc.gate.json"; then
-  echo "  FAIL incomplete-report: the ⟨0.21⟩ incomplete verdict is NOT byte-equal"
-  diff "$WS/inc.scan.json" "$WS/inc.gate.json" | head -20
-  bad=$((bad+1))
-fi
+# Row A — a policy nothing violates: fail closed at exit 2, `violations: []` for the RIGHT reason.
+# Row B — `deny Fs`, which `ok_fn` really does violate: the finding DOMINATES (exit 1) and must be IN
+#         the document, alongside `incomplete`/`unanalyzed` rather than instead of them.
+for arm in "A 2 deny Db" "B 1 deny Fs"; do
+  set -- $arm; tag=$1; want=$2; shift 2; rule="$*"
+  printf '%s\n' "$rule" > "$inc/policy"
+  rm -f "$WS/inc.$tag.scan.json" "$WS/inc.$tag.gate.json" "$inc/out/r".*
+  "$SCAN" "$inc" --out "$inc/out/r" --policy "$inc/policy" --gate-json "$WS/inc.$tag.scan.json" >/dev/null 2>&1
+  rc_scan=$?
+  "$QUERY" gate --report "$inc/out/r" --policy "$inc/policy" --gate-json "$WS/inc.$tag.gate.json" >/dev/null 2>&1
+  rc_gate=$?
+  rows=$((rows+1))
+  if [ "$rc_scan" -ne "$want" ] || [ "$rc_gate" -ne "$want" ]; then
+    echo "  FAIL incomplete-report/$tag ('$rule'): exit $rc_scan (scan) vs $rc_gate (gate), both must be $want"
+    echo "       (§3.3: a gate over unanalyzed code fails closed, and a real violation still dominates)"
+    bad=$((bad+1)); continue
+  fi
+  if ! cmp -s "$WS/inc.$tag.scan.json" "$WS/inc.$tag.gate.json"; then
+    echo "  FAIL incomplete-report/$tag: the ⟨0.21⟩ incomplete verdict is NOT byte-equal"
+    diff "$WS/inc.$tag.scan.json" "$WS/inc.$tag.gate.json" | head -20
+    bad=$((bad+1)); continue
+  fi
+  # THE CONTENT CHECK, without which byte-equality is satisfied by two identically-empty documents.
+  if ! grep -q '"incomplete": true' "$WS/inc.$tag.scan.json"; then
+    echo "  FAIL incomplete-report/$tag: the verdict does not disclose `incomplete`"
+    bad=$((bad+1)); continue
+  fi
+  if [ "$tag" = "B" ] && ! grep -q '"fn": "ok_fn"' "$WS/inc.$tag.scan.json"; then
+    echo "  FAIL incomplete-report/B: the real violation was DELETED from the verdict — a CI consumer"
+    echo "       reads ok:false with nothing in it and the finding never reaches the PR (SPEC §3.3)"
+    cat "$WS/inc.B.scan.json"
+    bad=$((bad+1))
+  fi
+done
 
 if [ "$fired" -eq 0 ]; then
   echo "gate-equivalence: VACUOUS — no policy in the matrix produced a violation; byte-equal empty"

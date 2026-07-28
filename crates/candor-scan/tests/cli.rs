@@ -1555,3 +1555,91 @@ fn a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two(
     assert_eq!(rep.matches("\"fn\": \"twice\"").count(), 2, "the report is unchanged: {rep}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// SPEC §3.3: *"A configured gate over incompletely-analyzed code MUST fail closed (exit ≠ 0); a real
+/// violation (exit 1) still dominates."* Both halves, and the second one is the one that regressed.
+///
+/// MEASURED BEFORE THE FIX (2026-07-28), on a crate with one `deny Net` hit AND one unparseable file:
+/// exit 2, and a `--gate-json` document reading `{ok:false, incomplete:true, violations: []}`. The two
+/// AS-EFF-006 lines were printed to stderr and then DELETED from the document — the `had_parse_failure`
+/// branch returned BEFORE `record_gate_violations`, so the accumulator the verdict is built from was
+/// empty. The exit code was the lesser loss: a CI consumer reading gate.json saw a fail-closed verdict
+/// with NOTHING in it, so the finding never reached the PR.
+///
+/// THE ASSERTION IS ON THE VIOLATION COUNT, not on the exit code — the count is what regressed, and an
+/// exit-code-only test passed throughout. The `deny Db` row below is the CONTROL for the other half: no
+/// violation to dominate, so the same crate must still fail closed at exit 2 with an empty list, which
+/// is the shape the four-way completeness differential pins.
+#[test]
+fn a_violation_survives_an_incomplete_scan_and_dominates_the_exit_code() {
+    let d = make_crate("incompleteviol", "pub mod broken;\npub fn fetch() { let _ = std::net::TcpStream::connect(\"api.example.com:80\"); }\n");
+    std::fs::write(d.join("src/broken.rs"), "pub fn oops( { this is not rust\n").unwrap();
+    let pp = d.join("net.policy");
+    std::fs::write(&pp, "deny Net\n").unwrap();
+    let verdict = d.join("verdict.json");
+    let out = Command::new(bin())
+        .args([
+            d.to_string_lossy().as_ref(),
+            "--out", d.join("rep").to_string_lossy().as_ref(),
+            "--policy", pp.to_string_lossy().as_ref(),
+            "--gate-json", verdict.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("run candor-scan");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&verdict).expect("a verdict document")).unwrap();
+    let fns: Vec<&str> =
+        v["violations"].as_array().unwrap().iter().filter_map(|x| x["fn"].as_str()).collect();
+    assert!(
+        fns.contains(&"fetch"),
+        "the violation must be IN the verdict document, not merely on stderr — an incomplete analysis \
+         must not swallow a real finding (SPEC §3.3):\n{v:#}\nstderr:\n{err}"
+    );
+    assert_eq!(fns.len(), 1, "exactly the one real finding: {fns:?}");
+    // …and the incompleteness is disclosed on the SAME document, not instead of it.
+    assert_eq!(v["ok"], false, "a verdict with a violation is never ok:\n{v:#}");
+    assert_eq!(v["incomplete"], true, "the manifest must still ride the verdict:\n{v:#}");
+    assert_eq!(v["unanalyzed"][0]["path"], "src/broken.rs", "{v:#}");
+    assert_eq!(out.status.code(), Some(1), "a real violation dominates the incomplete exit 2:\n{err}");
+
+    // THE CONTROL — the same incomplete crate under a policy nothing violates still fails CLOSED, with
+    // an empty violation list. Without this row the fix above could be "stopped failing closed".
+    let dbp = d.join("db.policy");
+    std::fs::write(&dbp, "deny Db\n").unwrap();
+    let v2path = d.join("verdict2.json");
+    let out2 = Command::new(bin())
+        .args([
+            d.to_string_lossy().as_ref(),
+            "--out", d.join("rep").to_string_lossy().as_ref(),
+            "--policy", dbp.to_string_lossy().as_ref(),
+            "--gate-json", v2path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out2.status.code(), Some(2), "no violation to dominate → the incomplete refusal stands");
+    let v2: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&v2path).expect("a verdict document")).unwrap();
+    assert_eq!(v2["ok"], false);
+    assert_eq!(v2["incomplete"], true);
+    assert_eq!(v2["violations"].as_array().unwrap().len(), 0, "{v2:#}");
+
+    // AND the OTHER exit-2 cause is untouched: a gate CONFIG that never loaded still writes NO document
+    // (a fabricated verdict would be a guess — SPEC §3.3's cause (a)). Run on a COMPLETE crate, so the
+    // absence is attributable to the config and not to the manifest.
+    let good = make_crate("incompleteviol-cfg", "pub fn go() {}\n");
+    let v3path = good.join("verdict3.json");
+    let out3 = Command::new(bin())
+        .args([
+            good.to_string_lossy().as_ref(),
+            "--policy", good.join("nope.policy").to_string_lossy().as_ref(),
+            "--gate-json", v3path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out3.status.code(), Some(2), "an unreadable policy is still exit 2");
+    assert!(!v3path.exists(), "a broken gate CONFIG must still write no verdict document");
+
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&good);
+}
