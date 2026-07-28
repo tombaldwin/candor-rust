@@ -245,6 +245,14 @@ pub struct ReportMeta {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CoverageEntry {
     pub name: String,
+    /// `#[serde(default)]` on READ only, for the same reason as [`Analyzed::digest`]: `name` is the
+    /// load-bearing datum — the verdict's κ note carries the NAMES, and nothing on the gate route reads
+    /// `calls` at all — so refusing an entry that names an uncovered package for want of its call count
+    /// would DROP a hedge in order to be strict about a decoration. Measured on a hand-built
+    /// `{name, why}` ledger: with `calls` required the whole report was refused; with it defaulted the
+    /// package name still reaches the verdict, which is the disclosure the field exists for. A ledger
+    /// whose entries are not objects at all (`uncovered: [3]`, `coverage: "none"`) is still Corrupt.
+    #[serde(default)]
     pub calls: usize,
 }
 
@@ -855,6 +863,26 @@ mod tests {
             r#","analyzed":null"#,
         ] {
             assert_eq!(an(body), KeyRead::Corrupt, "must not coerce to `count: 0`: {body}");
+        }
+
+        // `coverage` — the same rule one rung less sharp: it never moves `ok`, but it rides the verdict,
+        // so a silently-dropped ledger DELETES a hedge a machine reads.
+        let cv = |body: &str| report_coverage_strict(&format!(r#"{{"package":"p","functions":[]{body}}}"#));
+        assert_eq!(cv(""), KeyRead::Absent, "a fully-covered scan omits the key");
+        assert!(matches!(cv(r#","coverage":{"uncovered":[{"name":"dep","calls":7}]}"#),
+                         KeyRead::Present(c) if c.uncovered[0].calls == 7));
+        // A ledger ENTRY missing its decorative `calls` still NAMES an uncovered package, and the name is
+        // the whole point — refusing it would drop the hedge in order to be strict about a decoration.
+        assert!(matches!(cv(r#","coverage":{"uncovered":[{"name":"dep","why":"not-scanned"}],"covered":[]}"#),
+                         KeyRead::Present(c) if c.uncovered[0].name == "dep" && c.uncovered[0].calls == 0),
+                "a named-but-uncounted uncovered package must still reach the verdict");
+        for body in [
+            r#","coverage":"none""#,
+            r#","coverage":{"uncovered":[3]}"#,     // entries that are not objects
+            r#","coverage":{"uncovered":"dep"}"#,
+            r#","coverage":{"uncovered":[{"calls":7}]}"#, // no NAME — nothing to disclose
+        ] {
+            assert_eq!(cv(body), KeyRead::Corrupt, "must not coerce to an empty ledger: {body}");
         }
     }
 
