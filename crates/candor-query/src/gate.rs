@@ -726,7 +726,20 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // part it could not read.
     let refused = unanswerable_scoped_filters(&p, &sig);
 
-    let mut violations = candor_classify::gate::gate(&p, &sig.as_input());
+    // ⟨0.24⟩ `gate()` now WITHHOLDS the `(rule, function)` pairs whose narrowing filter the signature
+    // cannot answer, instead of charging them off the matcher's `unresolved` floor (SPEC §3.1). On THIS
+    // route the withheld set is by construction a subset of what `unanswerable_scoped_filters` already
+    // refuses — both key on "the rule narrows, the fn carries the effect, the determinable class set is
+    // empty" — so the disclosure below covers it and the two cannot disagree about a function. The
+    // ASSERTION is what keeps that true if either predicate is edited: a pair withheld by the gate and
+    // NOT named by a refusal would be a rule dropped in silence.
+    let outcome = candor_classify::gate::gate(&p, &sig.as_input());
+    debug_assert!(
+        outcome.withheld.is_empty() || !refused.is_empty(),
+        "gate() withheld {:?} but no rule was refused — a withheld rule must always be disclosed",
+        outcome.withheld
+    );
+    let mut violations = outcome.violations;
     if violations.is_empty() && !refused.is_empty() {
         // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated.
         for why in &refused {
