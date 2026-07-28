@@ -3323,3 +3323,89 @@ fn parsepolicy_reports_every_line_it_did_not_honour() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// ⟨0.24⟩ A TYPO'D EFFECT NAME IS A POLICY ERROR, NOT A DELETED RULE — SPEC §6.2 `1e1748a`.
+///
+/// Measured four-way before this: `deny Nett app` → exit 0 and `allow Nett host.example` → exit 0 on
+/// rust, ts, java AND swift. The rule is deleted, the gate is green, and the operator reads an armed
+/// `deny Net` / `allow` that does not exist.
+///
+/// Two cases, and only two, because the grammar defence is real but narrower than it was taken to be:
+/// `allow`'s effect position is a closed set with NO scope reading available, and a `deny` whose effect
+/// list ends up EMPTY is malformed under either reading. **The ambiguous middle stays permissive by
+/// design and is asserted here too** — the arm that keeps this fix from becoming its own over-reach.
+#[test]
+fn a_typod_effect_name_is_a_policy_error_and_the_ambiguous_middle_is_not() {
+    let f = Fixture::new("typoeffect");
+    f.write_report();
+    let pol = f.dir.join("p.policy");
+    let run = |verb: &[&str], policy: &str| -> (Option<i32>, String) {
+        std::fs::write(&pol, policy).unwrap();
+        let mut c = Command::new(bin());
+        c.args(verb).args(["--report", &f.report_path(), "--policy"]).arg(&pol);
+        c.env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG");
+        let out = c.output().expect("run candor-query");
+        (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+
+    for (policy, why) in [
+        ("deny Nett app\n", "a deny whose effect list ends up EMPTY is malformed under either reading"),
+        ("deny notaneffect\n", "…including when the typo is the only token"),
+        ("deny\n", "…and when there is no effect token at all"),
+        ("allow Nett host.example\n", "`allow`'s effect position is closed, with no scope reading"),
+        ("allow Clock whatever\n", "…and a real effect that `allow` does not cover is the same case"),
+    ] {
+        let (rc, err) = run(&["gate"], policy);
+        assert_eq!(rc, Some(2), "gate `{}`: {why}\n{err}", policy.trim());
+        assert!(
+            err.contains("policy error"),
+            "gate `{}` must SAY it is a policy error, not drop the rule in silence:\n{err}",
+            policy.trim()
+        );
+        // The PRE-EDIT verbs refuse it too — answering there from a rule the gate will not apply is
+        // the worse failure, since this is the verb consulted before the edit.
+        let (rc, err) = run(&["whatif", "outer", "Net"], policy);
+        assert_eq!(rc, Some(2), "whatif `{}`: the pre-edit verb refuses it too\n{err}", policy.trim());
+    }
+
+    // ── THE AMBIGUOUS MIDDLE, WHICH MUST STAY OPEN. `deny Net Exex app` has one valid effect and an
+    // unrecognised trailing token that the parser genuinely cannot tell from a legitimate scope. Closing
+    // it would make every scoped rule a coin toss, so it parses, gates, and `parsepolicy` shows which
+    // reading it took by dumping the scope. ──
+    let (rc, err) = run(&["gate"], "deny Net Exex app\n");
+    assert_eq!(rc, Some(0), "the ambiguous middle is NOT refused — `Exex` reads as a scope:\n{err}");
+
+    // …and the reading it took is visible, so the operator can always see it.
+    std::fs::write(&pol, "deny Net Exex app\n").unwrap();
+    let out = Command::new(bin())
+        .arg("parsepolicy")
+        .arg(&pol)
+        .env_remove("CANDOR_CONFIG")
+        .output()
+        .expect("run parsepolicy");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["deny"][0]["scope"], serde_json::json!("Exex"), "the scope reading is shown: {v}");
+
+    // ── THE MIRROR: a policy that is FINE must stay fine. Without this arm the assertions above are
+    // satisfied by refusing everything. ──
+    let (rc, err) = run(&["gate"], "deny Fs\n");
+    assert_eq!(rc, Some(1), "a well-formed policy still gates:\n{err}");
+    let (rc, err) = run(&["gate"], "deny Net\npure core\n");
+    assert_eq!(rc, Some(0), "…and still passes when nothing violates:\n{err}");
+
+    // ── AND `parsepolicy` STILL DOES NOT REFUSE. §3.1: it REPORTS a policy it can read and cannot
+    // honour. A fatal error is exactly what an operator runs this verb to diagnose, so refusing here
+    // would take the diagnosis away at the moment it is needed. ──
+    std::fs::write(&pol, "deny Nett app\nallow Nett host.example\n").unwrap();
+    let out = Command::new(bin())
+        .arg("parsepolicy")
+        .arg(&pol)
+        .env_remove("CANDOR_CONFIG")
+        .output()
+        .expect("run parsepolicy");
+    assert_eq!(out.status.code(), Some(0), "parsepolicy MUST NOT refuse a policy it can read");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rules: Vec<&str> =
+        v["errors"].as_array().unwrap().iter().map(|e| e["rule"].as_str().unwrap()).collect();
+    assert_eq!(rules, vec!["deny Nett app", "allow Nett host.example"], "…it reports both: {v}");
+}

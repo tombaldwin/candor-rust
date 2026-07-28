@@ -722,9 +722,21 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                              \u{2014} `allow` covers only the effects carrying a literal surface: Net/Llm \
                              hosts, Exec commands, Fs paths, Db tables): {line}"
                         );
-                        warn_ignore!("candor: ignoring policy rule ({msg})");
+                        warn_ignore!("candor: policy error — {msg}");
+                        // ⟨0.24⟩ FATAL (SPEC §6.2 `1e1748a`). MEASURED four-way before this:
+                        // `allow Nett host.example` -> exit 0 on rust, ts, java AND swift. The rule is
+                        // DELETED and the certification silently vanishes, so the operator reads an
+                        // armed allowlist that does not exist.
+                        //
+                        // The grammar defence that kept the token rule inside the bracket does NOT
+                        // reach here: `allow`'s effect position is a fixed, closed set with **no scope
+                        // reading available**, so an unrecognised token there is unambiguously a typo
+                        // and there is no legitimate policy it could be. This document already calls a
+                        // dropped rule "the limit case of silently rewritten into a different policy…
+                        // a bigger rewrite than a narrowed filter" — and the bigger rewrite was
+                        // warning-only while the smaller one was already exit 2.
                         not_honoured!(
-                            false,
+                            true,
                             PolicyError::KIND_EFFECT_NAME,
                             other,
                             ["Db", "Exec", "Fs", "Llm", "Net"],
@@ -879,9 +891,21 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                         "`deny` names no known effect (accepted: {}): {line}",
                         acc.join(", ")
                     );
-                    warn_ignore!("candor: ignoring policy rule ({msg})");
+                    warn_ignore!("candor: policy error — {msg}");
+                    // ⟨0.24⟩ FATAL (SPEC §6.2 `1e1748a`). MEASURED four-way: `deny Nett app` -> exit 0
+                    // on all four; the rule is DELETED and the gate is green. `Nett` is read as the
+                    // SCOPE (the first unrecognised token ends the effect list), so the line parses to
+                    // a deny of NOTHING.
+                    //
+                    // **A `deny` whose effect list ends up EMPTY is malformed under EITHER reading** —
+                    // typo-in-the-effect or scope-with-no-effect are both nonsense — so there is no
+                    // legitimate policy it could be and refusing it loses nothing. What stays open is
+                    // only the genuinely ambiguous middle (`deny Net Exex app`: at least one valid
+                    // effect plus an unrecognised trailing token that MIGHT be a scope), which the
+                    // parser cannot tell from a legitimate scope and which `parsepolicy` shows either
+                    // way by dumping the `scope` it read.
                     not_honoured!(
-                        false,
+                        true,
                         PolicyError::KIND_EFFECT_NAME,
                         scope.as_deref().unwrap_or(""),
                         acc,
