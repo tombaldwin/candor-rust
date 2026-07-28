@@ -33,6 +33,48 @@ fn denied_layer(fname: &str, effect: &str, rules: &[candor_classify::policy::Pol
     None
 }
 
+/// ⟨0.24⟩ [`denied_layer`] asked of a REAL function with a REAL signature, so a narrowing filter is
+/// answered rather than ignored.
+///
+/// `denied_layer` above takes a NAME and a HYPOTHETICAL effect — "if this function performed `Net`,
+/// would its layer forbid it?" — which is the right question for `fix`'s climb, where the callers being
+/// classified into the pure span and the hoist frontier are being asked about a layer, not about
+/// evidence they carry. It cannot answer a `deny Net[unknown-host]` / `deny Unknown[reflect]` rule,
+/// because the filter quantifies over the FUNCTION'S destination and reason classes and a hypothetical
+/// has none.
+///
+/// `fix-gate`'s enumeration is not hypothetical: it walks the report's own entries and asks which
+/// `(function, effect)` pairs TRIP a rule — the same question the gate answers, and it must not answer
+/// it differently. MEASURED 2026-07-28: `deny Unknown[reflect]` over an `indirect` hole → the gate exits
+/// 0 and `fix-gate` named a hoist remedy for a crossing that does not exist, which is a boundary
+/// refactor proposed to an agent on the strength of a rule the operator narrowed to exclude it.
+///
+/// So this arm goes through [`candor_classify::gate::rule_hits`], the gate's own firing decision. A
+/// WITHHELD filter counts as NOT charged: `fix-gate` is a remedy for a violation, and there is no
+/// violation to remedy where the gate declined to evaluate — that fact travels on the gate's own
+/// refusal, which is the document that exists to carry it.
+fn denied_layer_evidenced(
+    e: &ReportEntry,
+    effect: &str,
+    rules: &[candor_classify::policy::PolicyRule],
+    reason_classes: Option<&BTreeSet<String>>,
+) -> Option<String> {
+    let effs: Vec<&str> = e.inferred.iter().map(String::as_str).collect();
+    for rule in rules {
+        let in_scope = rule
+            .scope
+            .as_deref()
+            .is_none_or(|s| candor_classify::policy::scope_matches(&e.func, s));
+        if !in_scope {
+            continue;
+        }
+        if candor_classify::gate::rule_hits(rule, &effs, reason_classes, &e.net_class).hits.contains(&effect) {
+            return Some(rule.scope.clone().unwrap_or_default());
+        }
+    }
+    None
+}
+
 /// The computed remedy for one `(function, effect)` boundary crossing — the deterministic cut between
 /// "must stay pure" (`denied_span`) and "may perform the effect" (`hoist_to`). Borrows the report.
 pub(crate) struct RemedyPlan<'a> {
@@ -373,12 +415,16 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     // a sorted key set). The BTreeMap already emits remedies in dedup-key order. (/code-review.)
     let mut sorted: Vec<&ReportEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.func.cmp(&b.func));
+    // ⟨0.24⟩ The transitive reason classes, over the report's own edges — the same fixpoint `gate
+    // --report` and `unverified` run, because the ENUMERATION below must select the gate's violation set
+    // and a narrowing `Unknown[…]` filter quantifies over exactly this.
+    let reason_acc = crate::unverified::reason_class_acc(&entries);
     let mut plans: BTreeMap<String, RemedyPlan> = BTreeMap::new();
     for e in sorted {
         let mut effs: Vec<&String> = e.inferred.iter().collect();
         effs.sort();
         for effect in effs {
-            if let Some(layer) = denied_layer(&e.func, effect, &rules) {
+            if let Some(layer) = denied_layer_evidenced(e, effect, &rules, reason_acc.get(&e.func)) {
                 let plan = compute_remedy(&by_name, &rev, &rules, e, effect, layer);
                 plans.entry(plan.dedup_key()).or_insert(plan);
             }

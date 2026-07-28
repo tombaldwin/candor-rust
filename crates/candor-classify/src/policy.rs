@@ -454,15 +454,50 @@ pub fn scope_matches(name: &str, scope: &str) -> bool {
 /// (`"pure <scope>"`, `"deny Unknown <scope>"`); `deny <E…> <scope>` → (`"deny <E…> <scope>"`,
 /// `"deny <E…> Unknown <scope>"`). Shared so the gate note and `candor unverified` name the identical
 /// rule and upgrade — one source of truth for the disclosure's advice.
+///
+/// ⟨0.24⟩ **THE NARROWING FILTERS ARE RENDERED, and they had to start being rendered in the same commit
+/// that made them REACHABLE here.** Making `unverified_hole_rule` filter-aware is what first lets a
+/// `deny Unknown[reflect]` / `deny Net[unknown-host]` rule be the rule a hole is disclosed under — and
+/// this reconstruction dropped the bracket, so the fix would have printed the operator's narrowed rule
+/// back to them as the WIDE one (`deny Unknown`) and advised the nonsense upgrade `deny Unknown
+/// Unknown`. That is the same mis-attribution `whatif` carries, arriving through the fix for a different
+/// defect: the hazard on this rung is that each correction manufactures its own mirror, so the rendering
+/// moves with the predicate rather than after it.
+///
+/// A rule carrying NO filter renders byte-identically to before, which is what keeps conformance PARTs
+/// 12c/12d (`deny Db Net Unknown domain`, four-way) unmoved.
+///
+/// THE UPGRADE SPLITS on whether the rule already denies `Unknown`. If it does, it can only be here
+/// NARROWED — a bare `deny … Unknown` fires on every `Unknown`, so the function would be a violation and
+/// not a hole — and the upgrade is that term WIDENED to bare `Unknown`, not a second `Unknown` appended.
 pub fn rule_and_upgrade(r: &PolicyRule) -> (String, String) {
     let scope = r.scope.clone().unwrap_or_default();
     let suffix = if scope.is_empty() { String::new() } else { format!(" {scope}") };
     if r.effects.is_empty() {
         // `pure` forbids real effects but not Unknown; to REQUIRE provable purity, add a deny-Unknown.
-        (format!("pure{suffix}"), format!("deny Unknown{suffix}"))
+        return (format!("pure{suffix}"), format!("deny Unknown{suffix}"));
+    }
+    // One effect term, with its narrowing filter if it has one. Class tokens sorted by TOKEN string, as
+    // `parsepolicy` sorts them and as the java reference's `.sorted()` does — the dump and the
+    // disclosure must spell one rule one way.
+    let term = |e: &str| -> String {
+        if e == UNKNOWN && !r.unknown_classes.is_empty() {
+            let mut t: Vec<&str> = r.unknown_classes.iter().map(|c| c.token()).collect();
+            t.sort_unstable();
+            format!("{UNKNOWN}[{}]", t.join(","))
+        } else if e == "Net" && !r.net_classes.is_empty() {
+            format!("Net[{}]", r.net_classes.iter().map(String::as_str).collect::<Vec<_>>().join(","))
+        } else {
+            e.to_string()
+        }
+    };
+    let effs = r.effects.iter().map(|e| term(e)).collect::<Vec<_>>().join(" ");
+    if r.effects.contains(UNKNOWN) {
+        let widened =
+            r.effects.iter().map(|e| if *e == UNKNOWN { UNKNOWN.to_string() } else { term(e) }).collect::<Vec<_>>();
+        (format!("deny {effs}{suffix}"), format!("deny {}{suffix}", widened.join(" ")))
     } else {
-        let effs = r.effects.iter().copied().collect::<Vec<_>>().join(" ");
-        (format!("deny {effs}{suffix}"), format!("deny {effs} Unknown{suffix}"))
+        (format!("deny {effs}{suffix}"), format!("deny {effs} {UNKNOWN}{suffix}"))
     }
 }
 
@@ -473,14 +508,39 @@ pub fn rule_and_upgrade(r: &PolicyRule) -> (String, String) {
 /// this. Returns the first governing rule under which the function is such a hole, or `None` if it is not
 /// one. Shared by candor-scan's gate note and candor-query's `unverified` so "what a hole is" has ONE
 /// definition — the two paths can never drift (conformance PART 12d pins their agreement).
+///
+/// ⟨0.24⟩ **"PASSES" IS NOW ASKED OF THE GATE, NOT OF A SECOND COPY OF IT.** This predicate computed the
+/// passing test from `r.effects` alone — "does the rule NAME an effect this function has?" — which is
+/// the pre-⟨0.19⟩ question, still being asked after two rungs gave rules a NARROWING FILTER. So on
+/// `deny Unknown[reflect]` over an `indirect` hole the gate TOLERATED (exit 0, the class does not match)
+/// while this read the same rule as violated; and a hole is *by definition* a function that PASSES its
+/// rule while `Unknown`, so the real hole was reclassified as a violation-that-isn't and **deleted from
+/// the disclosure** — `unverified` answering "every function in a pure/deny layer is PROVABLY clean ✓"
+/// over a function the gate had just declined to clear. MEASURED 2026-07-28, and reachable with no alias
+/// in play at all: one layer below the widening `ea0df4f` closed, in the same four verbs.
+///
+/// It now calls [`crate::gate::rule_hits`] — the gate's own firing decision — so the two cannot disagree
+/// again. That needs the function's TRANSITIVE reason classes and its ⟨0.20⟩ destination classes, the
+/// same two accumulators the gate reads, which is why they are parameters now rather than derivable.
+///
+/// **THE DIRECTION IS THE MIRROR ARGUMENT.** A filter can only ever SHRINK what a rule charges, so a
+/// filter-aware pass test can only ever find MORE holes — this cannot silently suppress a disclosure
+/// that used to appear. Pinned in both directions by
+/// `a_narrowed_rule_the_gate_tolerates_is_a_hole_and_the_one_it_fires_on_is_not`, in one run, because
+/// the fixture proving the fabrication is closed cannot show the reach closed with it. A WITHHELD filter
+/// — nothing to read — likewise counts as PASSING here: the gate did not clear the function, and an
+/// advisory note's fail-safe direction is to disclose.
 pub fn unverified_hole_rule<'a, S: AsRef<str>>(
     name: &str,
     effects: &[S],
+    reason_classes: Option<&BTreeSet<String>>,
+    net_classes: &[String],
     rules: &'a [PolicyRule],
 ) -> Option<&'a PolicyRule> {
     if !effects.iter().any(|e| e.as_ref() == UNKNOWN) {
         return None;
     }
+    let effs: Vec<&str> = effects.iter().map(AsRef::as_ref).collect();
     rules.iter().find(|r| {
         // in the rule's scope (a scopeless rule governs the whole unit) …
         if let Some(s) = &r.scope {
@@ -488,13 +548,8 @@ pub fn unverified_hole_rule<'a, S: AsRef<str>>(
                 return false;
             }
         }
-        // … and PASSES it (no forbidden real effect — else it is a violation the gate already reports).
-        let violates = if r.effects.is_empty() {
-            effects.iter().any(|e| e.as_ref() != UNKNOWN)
-        } else {
-            effects.iter().any(|e| r.effects.contains(e.as_ref()))
-        };
-        !violates
+        // … and PASSES it — the gate's own answer, narrowing filters and all. Empty `hits` IS passing.
+        crate::gate::rule_hits(r, &effs, reason_classes, net_classes).hits.is_empty()
     })
 }
 
@@ -1005,5 +1060,84 @@ mod tests {
         assert!(!fs_path_covered("etc/app", "/etc/app/cfg"));
         assert!(!fs_path_covered("/etc/app", "etc/app/cfg"));
         assert!(fs_path_covered("etc/app", "etc/app/cfg"));
+    }
+
+    /// ⟨0.24⟩ THE PROVABLE-PURITY DISCLOSURE MUST ASK THE GATE WHAT "PASSES" MEANS — SPEC §6.2, and both
+    /// directions in ONE test, because killing an over-charge is exactly where a silent under-report gets
+    /// introduced and the fixture proving the fabrication is closed cannot show the reach closed with it.
+    ///
+    /// A hole is a function that PASSES its rule while `Unknown`. `unverified_hole_rule` used to compute
+    /// PASSES from `r.effects` alone — the pre-⟨0.19⟩ question, asked after two rungs gave rules a
+    /// NARROWING FILTER — so a rule the gate TOLERATES was read here as violated and the hole was DELETED
+    /// from the disclosure. MEASURED 2026-07-28: `deny Unknown[reflect]` over an `indirect` hole → gate
+    /// exit 0, `unverified` "every function in a pure/deny layer is PROVABLY clean ✓".
+    ///
+    /// ROW 1 (the fix) — the filter does NOT match, so the gate tolerates and this IS a hole.
+    /// ROW 2 (the mirror) — the SAME rule, SAME function, filter spelled to MATCH: the gate fires, so it
+    /// is a violation and NOT a hole. Without row 2 the fix is satisfied by a predicate that calls
+    /// everything a hole, which is the mirror over-report of the thing being fixed.
+    /// ROW 3 — the ⟨0.20⟩ `Net[dest…]` filter, the same shape on the other narrowing axis.
+    /// ROW 4 — no filter at all: byte-identical to pre-⟨0.24⟩, which is what keeps conformance PARTs
+    /// 12c/12d (four-way) from moving.
+    #[test]
+    fn a_narrowed_rule_the_gate_tolerates_is_a_hole_and_the_one_it_fires_on_is_not() {
+        let effs = ["Unknown"];
+        let indirect: BTreeSet<String> = ["indirect".to_string()].into_iter().collect();
+        let hole = |src: &str, classes: Option<&BTreeSet<String>>, nets: &[String]| -> Option<String> {
+            let p = parse_policy(src);
+            unverified_hole_rule("app::go", &effs, classes, nets, &p.rules).map(|r| rule_and_upgrade(r).1)
+        };
+
+        // ROW 1 — tolerated by the gate (indirect ∉ {reflect}) ⇒ a hole, and the upgrade WIDENS the
+        // filter rather than appending a second `Unknown`.
+        assert_eq!(
+            hole("deny Unknown[reflect]\n", Some(&indirect), &[]).as_deref(),
+            Some("deny Unknown"),
+            "a rule the gate TOLERATES leaves the function unproven — that is the disclosure's whole subject"
+        );
+
+        // ROW 2 — THE MIRROR. Same rule, same signature, filter spelled to match: the gate FIRES, so this
+        // is a violation and the disclosure must stay silent about it.
+        assert_eq!(
+            hole("deny Unknown[indirect]\n", Some(&indirect), &[]),
+            None,
+            "a rule the gate FIRES on is a violation, not a hole — filter-awareness must not start \
+             disclosing the gate's own findings back as unproven passes"
+        );
+        assert_eq!(hole("deny Unknown[dynamic]\n", Some(&indirect), &[]), None, "`dynamic` covers indirect");
+
+        // ROW 3 — the ⟨0.20⟩ destination filter, both ways, on a fn carrying Net BESIDE its Unknown.
+        let netfn = ["Net".to_string(), "Unknown".to_string()];
+        let telemetry = vec!["known-telemetry".to_string()];
+        let p = parse_policy("deny Net[unknown-host]\n");
+        assert_eq!(
+            unverified_hole_rule("app::go", &netfn, Some(&indirect), &telemetry, &p.rules)
+                .map(|r| rule_and_upgrade(r).1)
+                .as_deref(),
+            Some("deny Net[unknown-host] Unknown"),
+            "a `Net[dest…]` the fn's destinations do not match is tolerated, so the Unknown beside it is a hole"
+        );
+        let p = parse_policy("deny Net[known-telemetry]\n");
+        assert_eq!(
+            unverified_hole_rule("app::go", &netfn, Some(&indirect), &telemetry, &p.rules).map(|r| r.raw.clone()),
+            None,
+            "MIRROR: the matching destination filter FIRES, so it is a violation and not a hole"
+        );
+
+        // ROW 4 — UNFILTERED, unchanged. `deny Unknown` fires on every Unknown (never a hole); `pure` and
+        // `deny Fs` pass a fn with no real effect (always a hole) — the forms PARTs 12c/12d pin four-way.
+        assert_eq!(hole("deny Unknown\n", Some(&indirect), &[]), None);
+        assert_eq!(hole("pure\n", Some(&indirect), &[]).as_deref(), Some("deny Unknown"));
+        assert_eq!(hole("deny Net Db  domain\ndeny Fs\n", Some(&indirect), &[]).as_deref(), Some("deny Fs Unknown"));
+        assert_eq!(
+            hole("deny Net Db  go\n", Some(&indirect), &[]).as_deref(),
+            Some("deny Db Net Unknown go"),
+            "the sorted multi-effect upgrade PART 12c-deny pins in all four engines"
+        );
+
+        // A WITHHELD filter — no class set to read — counts as PASSING, so the hole is disclosed rather
+        // than dropped. The gate withholds there too; between an advisory note that speaks and one that
+        // goes quiet over a rule that never ran, only the first stays true.
+        assert_eq!(hole("deny Unknown[reflect]\n", None, &[]).as_deref(), Some("deny Unknown"));
     }
 }
