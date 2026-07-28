@@ -14,6 +14,15 @@
 #
 # THE ROW IS VACUOUS UNLESS SOMETHING FIRES. Byte-equal empty verdicts prove little, so the run FAILS
 # when no policy in the matrix produced a violation.
+#
+# ⟨0.24⟩ …AND "SOMETHING FIRED" IS READ OFF THE DOCUMENT, NOT THE EXIT CODE. AUDITED 2026-07-28 by
+# building a mutant serializer that keeps every exit code and writes `violations: []` regardless: of 51
+# rows, exactly ONE noticed — the incomplete/B arm, which is the only one that ever looked INSIDE a
+# document. All 48 matrix rows passed, because both routes deleted the same violations and stayed
+# byte-equal while still exiting 1, and both empty-verdict arms passed because they have no violations
+# to lose. Byte-equality between two routes cannot see a defect the two routes share, and the exit code
+# is one bit. So every row now asserts the §3.3 agreement directly: **exit 1 ⟺ the document carries at
+# least one violation record**, on BOTH documents.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cargo build -p candor-scan -p candor-query --manifest-path "$ROOT/Cargo.toml" || exit 2
@@ -40,7 +49,12 @@ POLICIES=(
   "deny Net[unknown-host]"
 )
 
-rows=0; fired=0; bad=0
+# Does a verdict document carry at least one violation RECORD? The shared serializer pretty-prints an
+# empty list as exactly `"violations": []`, and anything else is multi-line — so this is a content read,
+# not a guess about the exit code.
+has_violation() { ! grep -q '"violations": \[\]' "$1"; }
+
+rows=0; fired=0; fired_doc=0; bad=0
 for c in candor-report candor-classify candor-scan candor-query; do
   d="$ROOT/crates/$c"
   i=0
@@ -68,6 +82,26 @@ for c in candor-report candor-classify candor-scan candor-query; do
       echo "  FAIL $c / '$p': exit $rc_scan (scan) vs $rc_gate (gate)"
       bad=$((bad+1))
     fi
+    # ⟨0.24⟩ THE EXIT CODE AND THE DOCUMENT MUST AGREE, on each route independently. This is the arm the
+    # 2026-07-28 mutant audit added: without it a route that computed the violations, exited 1 on them
+    # and then wrote `violations: []` was indistinguishable from a correct one — and that is not a
+    # hypothetical shape, it is what BOTH routes did over an incomplete analysis until `ff34070`.
+    for side in scan gate; do
+      [ "$side" = scan ] && { doc="$a"; rc="$rc_scan"; } || { doc="$b"; rc="$rc_gate"; }
+      if has_violation "$doc"; then
+        fired_doc=$((fired_doc+1))
+        if [ "$rc" -ne 1 ]; then
+          echo "  FAIL $c / '$p' ($side): exit $rc but the document carries violations — §3.3 forbids the"
+          echo "       exit code and the verdict disagreeing in EITHER direction"
+          bad=$((bad+1))
+        fi
+      elif [ "$rc" -eq 1 ]; then
+        echo "  FAIL $c / '$p' ($side): exit 1 with an EMPTY \`violations\` list — the finding was printed"
+        echo "       and then DELETED from the channel a CI consumer reads. The exit code is one bit; the"
+        echo "       document is the evidence."
+        bad=$((bad+1))
+      fi
+    done
   done
 done
 
@@ -155,9 +189,82 @@ elif ! grep -q 'JUDGED NOTHING' "$WS/jn.err" || ! grep -q 'facade' "$WS/jn.err";
   bad=$((bad+1))
 fi
 
-if [ "$fired" -eq 0 ]; then
-  echo "gate-equivalence: VACUOUS — no policy in the matrix produced a violation; byte-equal empty"
-  echo "                  verdicts prove nothing. Fix the matrix, do not relax the check."
+# ⟨0.24⟩ THE CONFIG-ANCHOR ARM, which nothing above can reach because every row above files the policy
+# INSIDE the scan target. SPEC §3.1: policy VOCABULARY (`unknown-alias`) resolves relative to the
+# `--policy` file's directory on BOTH routes. Until 2026-07-28 the scan route anchored at the TARGET and
+# the gate verb at the POLICY, so with the policy stored elsewhere the same rule expanded differently —
+# **byte-equality breakable by a file that is neither the report nor the policy.** Measured then: scan
+# exit 1 / gate exit 0 on one report and one policy.
+#
+# TWO ROWS, because one cannot tell "the alias resolved" from "the alias was ignored and the rule widened
+# to a bare `deny Unknown`": the FIRING definition and the TOLERATING one must both agree across routes.
+va="$WS/vocab"; mkdir -p "$va/tgt/src" "$va/home/.candor" "$va/tgt/out"
+printf '[package]\nname = "vocab"\n' > "$va/tgt/Cargo.toml"
+printf 'pub fn go(f: &dyn Fn() -> i32) -> i32 { f() }\n' > "$va/tgt/src/lib.rs"  # the hole is `indirect`
+printf 'deny Unknown[corp]\n' > "$va/home/org.policy"
+for arm in "fires indirect 1" "tolerates reflect 0"; do
+  set -- $arm; tag=$1; cls=$2; want=$3
+  printf 'unknown-alias corp = %s\n' "$cls" > "$va/home/.candor/config"
+  rm -f "$WS/vocab.$tag.scan.json" "$WS/vocab.$tag.gate.json" "$va/tgt/out/r".*
+  "$SCAN" "$va/tgt" --out "$va/tgt/out/r" --policy "$va/home/org.policy" \
+      --gate-json "$WS/vocab.$tag.scan.json" >/dev/null 2>&1; rc_scan=$?
+  "$QUERY" gate --report "$va/tgt/out/r" --policy "$va/home/org.policy" \
+      --gate-json "$WS/vocab.$tag.gate.json" >/dev/null 2>&1; rc_gate=$?
+  rows=$((rows+1))
+  if [ "$rc_scan" -ne "$want" ] || [ "$rc_gate" -ne "$want" ]; then
+    echo "  FAIL config-anchor/$tag (corp = $cls): exit $rc_scan (scan) vs $rc_gate (gate), both must be $want"
+    echo "       §3.1: policy VOCABULARY anchors at the --policy file's directory on BOTH routes."
+    bad=$((bad+1)); continue
+  fi
+  if [ ! -f "$WS/vocab.$tag.gate.json" ] || ! cmp -s "$WS/vocab.$tag.scan.json" "$WS/vocab.$tag.gate.json"; then
+    echo "  FAIL config-anchor/$tag: the two routes wrote different documents from one report + one policy"
+    diff "$WS/vocab.$tag.scan.json" "$WS/vocab.$tag.gate.json" 2>&1 | head -20
+    bad=$((bad+1)); continue
+  fi
+  # …and the file that MOVED the verdict is NAMED on it. A verdict changed by a file the operator cannot
+  # see named is the ambient-input failure the format exists to refuse; without this row the arm above is
+  # satisfied by two routes that both ignore the config.
+  if ! grep -q '"vocabulary"' "$WS/vocab.$tag.scan.json" || ! grep -q '"corp"' "$WS/vocab.$tag.scan.json"; then
+    echo "  FAIL config-anchor/$tag: the verdict does not NAME the config that supplied the vocabulary"
+    cat "$WS/vocab.$tag.scan.json"
+    bad=$((bad+1))
+  fi
+done
+
+# ⟨0.24⟩ THE POLICY-ERROR ARM (SPEC §6.2). An unrecognised reason-class token cannot be honoured AS
+# WRITTEN, and dropping it REWRITES the rule — narrowing it when the typo sits beside valid tokens, which
+# is the common case and is fail-open. Both routes take the unreadable-policy posture: exit 2 and NO
+# document. Pinned here because "neither route writes" is itself a byte-equality claim, and because the
+# matrix above would report a missing document as a failure rather than as the contract.
+pe="$WS/policyerr"; mkdir -p "$pe/src" "$pe/out"
+printf '[package]\nname = "polerr"\n' > "$pe/Cargo.toml"
+printf 'pub fn go(f: &dyn Fn() -> i32) -> i32 { f() }\n' > "$pe/src/lib.rs"
+printf 'deny Unknown[dispatch,indirct]\n' > "$pe/policy"        # typo BESIDE a valid token
+printf 'deny Unknown[dispatch,indirect]\n' > "$pe/policy.ok"    # the control: correctly spelled
+rm -f "$WS/pe.scan.json" "$WS/pe.gate.json" "$pe/out/r".*
+"$SCAN" "$pe" --out "$pe/out/r" --policy "$pe/policy.ok" --gate-json "$WS/pe.ctl.json" >/dev/null 2>&1
+rc_ctl=$?
+"$SCAN" "$pe" --out "$pe/out/r" --policy "$pe/policy" --gate-json "$WS/pe.scan.json" >/dev/null 2>&1
+rc_scan=$?
+"$QUERY" gate --report "$pe/out/r" --policy "$pe/policy" --gate-json "$WS/pe.gate.json" >/dev/null 2>&1
+rc_gate=$?
+rows=$((rows+1))
+if [ "$rc_ctl" -ne 1 ]; then
+  echo "  FAIL policy-error: the CONTROL (correctly-spelled rule) did not fire — the row below is vacuous"
+  bad=$((bad+1))
+elif [ "$rc_scan" -ne 2 ] || [ "$rc_gate" -ne 2 ]; then
+  echo "  FAIL policy-error: exit $rc_scan (scan) vs $rc_gate (gate), both must be 2. A policy that cannot"
+  echo "       be honoured as written must not be silently rewritten into a different policy (§6.2)."
+  bad=$((bad+1))
+elif [ -f "$WS/pe.scan.json" ] || [ -f "$WS/pe.gate.json" ]; then
+  echo "  FAIL policy-error: a route wrote a verdict document over a policy it could not read"
+  bad=$((bad+1))
+fi
+
+if [ "$fired" -eq 0 ] || [ "$fired_doc" -eq 0 ]; then
+  echo "gate-equivalence: VACUOUS — no policy in the matrix produced a violation IN A DOCUMENT"
+  echo "                  (exit-1 rows: $fired, rows whose verdict carries a violation record: $fired_doc);"
+  echo "                  byte-equal empty verdicts prove nothing. Fix the matrix, do not relax the check."
   exit 1
 fi
 if [ "$bad" -ne 0 ]; then
@@ -166,5 +273,6 @@ if [ "$bad" -ne 0 ]; then
   echo '  routes into one gate, and the byte-equality is what makes that a property of the code.'
   exit 1
 fi
-echo "gate-equivalence: OK — $rows rows byte-equal, $fired of them with violations (SPEC §3.1 ⟨0.24⟩)"
+echo "gate-equivalence: OK — $rows rows byte-equal; $fired exited 1 and $fired_doc verdict documents"
+echo "                  carry a violation RECORD (SPEC §3.1 ⟨0.24⟩)"
 exit 0
