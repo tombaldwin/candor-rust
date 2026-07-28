@@ -386,6 +386,13 @@ fn gate_input_from_report(rep: &GateReport) -> ReportSignature {
 /// (the precedence correction), the list is a DISCLOSURE that has to travel alongside a verdict, and one
 /// rule out of three is a partial one. At most one message per RULE — the first function that defeats it
 /// is the example; naming all of them would bury the rule.
+///
+/// ⟨0.24⟩ **THE REASON ONLY, WITH NO DISPOSITION.** These strings used to end *"Refusing (exit 2)."* —
+/// written when the only thing that could follow an unanswerable rule WAS exit 2. Since the precedence
+/// correction a firing rule dominates, so the identical sentence was printed verbatim on a run that
+/// exited **1**: a message asserting an exit code that had already been overruled. Whether this refusal
+/// decides the exit is the CALLER's fact, not this function's, so the caller says it. What is left here
+/// is the part that is true either way — which rule, which function, and why the evidence is missing.
 fn unanswerable_scoped_filters(
     p: &candor_classify::policy::ParsedPolicy,
     sig: &ReportSignature,
@@ -407,9 +414,9 @@ fn unanswerable_scoped_filters(
                 out.push(format!(
                     "`{}` narrows on the Net DESTINATION CLASS, but `{q}` carries Net with no `netClass` \
                      in this report — the field the filter reads is absent, so the narrowing would \
-                     succeed for lack of evidence and drop a Net the bare `deny Net` catches. Refusing \
-                     (exit 2) rather than passing: an absent optional field must not relax a fail-closed \
-                     gate. Use the bare `deny Net`, or gate at scan time.",
+                     succeed for lack of evidence and drop a Net the bare `deny Net` catches. The rule is \
+                     WITHHELD on `{q}` rather than tolerated there: an absent optional field must not \
+                     relax a fail-closed gate. Use the bare `deny Net`, or gate at scan time.",
                     r.raw.trim()
                 ));
                 break;
@@ -422,8 +429,10 @@ fn unanswerable_scoped_filters(
                     "`{}` narrows on the Unknown REASON CLASS, but `{q}` carries Unknown with no reason \
                      reachable in this report — neither its own `unknownWhy` nor a `calls` edge to one. \
                      §6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel \
-                     missing, every narrowed filter silently tolerates while only the bare `deny Unknown` \
-                     fires. Refusing (exit 2). Use the bare `deny Unknown`, or gate at scan time.",
+                     missing there is nothing for the filter to read, so the rule is WITHHELD on `{q}` — \
+                     neither charged (which would assert a reason nobody recorded) nor tolerated (which \
+                     would relax the gate for lack of evidence). Use the bare `deny Unknown`, or gate at \
+                     scan time.",
                     r.raw.trim()
                 ));
                 break;
@@ -741,8 +750,22 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     );
     let mut violations = outcome.violations;
     if violations.is_empty() && !refused.is_empty() {
-        // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated.
-        for why in &refused {
+        // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated. THIS is
+        // the branch that gets to say "Refusing (exit 2)", and it says it because it is about to do it.
+        //
+        // BUILT ONCE AND USED FOR BOTH CHANNELS, so the human line and the `--gate-json` document's
+        // `reason` cannot disagree about the disposition — which is precisely the split that produced the
+        // false claim this commit removes.
+        let sole: Vec<String> = refused
+            .iter()
+            .map(|why| {
+                format!(
+                    "{why} Refusing (exit 2) — no rule fired on evidence this report carries, so there \
+                     is no verdict to stand beside this."
+                )
+            })
+            .collect();
+        for why in &sole {
             eprintln!("candor-query gate: {why}");
         }
         if !rep.unanalyzed.is_empty() {
@@ -754,15 +777,32 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                 rep.unanalyzed.len()
             );
         }
-        return refuse(&refused.join("  ·  "), want_json, gate_json.as_deref());
+        return refuse(&sole.join("  ·  "), want_json, gate_json.as_deref());
     }
-    if !refused.is_empty() {
+    // ⟨0.24⟩ THE DOMINATED DISCLOSURE — and the claim in it is now COUNTED, not asserted.
+    //
+    // MEASURED (2026-07-28, `deny Unknown[unresolved] app.opaque` as the SOLE rule in the policy): this
+    // note printed *"The verdict stands anyway: a rule FIRED on evidence this report carries"* when NO
+    // rule had fired on carried evidence — the only rule in the policy was the unanswerable one, and the
+    // "violation" it was standing on was the fabrication the commit before this one removed. The sentence
+    // was attached UNCONDITIONALLY to the refusal path rather than conditioned on a violation having been
+    // recorded, so it could not have been true in the sole-refusal case and was never going to be.
+    //
+    // A FALSE DISCLOSURE IS WORSE THAN A MISSING ONE — this family already has the precedent (`net-partner`
+    // reported as an "ignoring unknown config key" WHILE BEING HONOURED, conformance PART 13b). So the
+    // claim is made from the fact rather than beside it: the branch is guarded on BOTH lists explicitly
+    // rather than on falling past the `return` above, and the sentence NAMES the number of violations it
+    // is standing on. A count cannot be printed truthfully at zero, which is the point — the shape of the
+    // message makes the false version unwritable instead of merely unwritten.
+    if !refused.is_empty() && !violations.is_empty() {
         eprintln!(
             "candor-query gate: NOTE — {} policy rule(s) could not be evaluated over this report and are \
-             NOT answered by the verdict below. The verdict stands anyway: a rule FIRED on evidence this \
-             report carries, and no resolution of an unanswered rule can un-reject a rejected policy \
-             (SPEC §3.1, PAPER3 Lemma 2). Unanswered:",
-            refused.len()
+             NOT answered by the verdict below. The verdict stands anyway: the {} violation(s) reported \
+             below FIRED on evidence this report carries, and no resolution of an unanswered rule can \
+             un-reject an already-rejected policy (SPEC §3.1, PAPER3 Lemma 2). The exit code below \
+             answers those, and NOT these:",
+            refused.len(),
+            violations.len(),
         );
         for why in &refused {
             eprintln!("    {why}");
