@@ -2,6 +2,57 @@
 
 use crate::*;
 
+/// ⟨0.24⟩ **READ A POLICY THE WAY THE GATE READS IT.** The one loader for every verb that reasons about
+/// a policy, so no verb can mean something different by the same file.
+///
+/// MEASURED 2026-07-28. `whatif`, `fix`/`fix-gate` and `unverified` all called bare `parse_policy`,
+/// which loads NO `unknown-alias` vocabulary and reports NO policy errors. With
+/// `unknown-alias corp = reflect` in the config beside the policy and `deny Unknown[corp] app.nat` over
+/// a NATIVE-caused hole:
+///
+///   - the GATE resolves `corp` → `{reflect}`, the class does not match, exit **0**;
+///   - `whatif app.nat Unknown` answered **"⚠ WOULD VIOLATE policy"** and printed the rule back as
+///     `deny Unknown app.nat` — it had silently REWRITTEN the operator's rule to the widest form and was
+///     showing the rewrite as if it were the rule;
+///   - `fix-gate` named a hoist remedy for a violation the gate does not report;
+///   - and `unverified` answered **"every function in a pure/deny layer is PROVABLY clean ✓"**, which is
+///     the direction that matters: a hole is a function that PASSES its rule while being `Unknown`, so
+///     widening the rule turned a real hole into a violation-that-isn't and **deleted it from the
+///     disclosure.** An over-report in three verbs and a lost disclosure in the fourth, from one line.
+///
+/// §6.2 is explicit that the gate and the disclosure MUST apply the same rule, and these are the verbs an
+/// agent consults BEFORE editing. Since ⟨0.24⟩ made an unrecognised token a POLICY ERROR there is a
+/// second half: a verb that ignores `errors` answers from a rule the operator did not write, so the
+/// refusal travels too.
+///
+/// The config is anchored to the POLICY file, never the CWD — SPEC §3.1's rule that vocabulary travels
+/// with the policy that uses it, and the same anchor `cmd_gate` and `parsepolicy` already use.
+pub(crate) fn load_policy_as_the_gate_does(
+    verb: &str,
+    policy_path: &str,
+) -> Result<candor_classify::policy::ParsedPolicy, i32> {
+    let Ok(text) = std::fs::read_to_string(policy_path) else {
+        eprintln!("candor {verb}: policy `{policy_path}` could not be read — nothing computed (exit 2).");
+        return Err(2);
+    };
+    let aliases = candor_classify::policy::discover_config_text(std::path::Path::new(policy_path))
+        .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
+        .unwrap_or_default();
+    let p = candor_classify::policy::parse_policy_with_aliases(&text, &aliases);
+    if !p.errors.is_empty() {
+        for e in &p.errors {
+            eprintln!("candor {verb}: policy error — {e}");
+        }
+        eprintln!(
+            "candor {verb}: refusing to reason about a policy that cannot be honoured AS WRITTEN (exit \
+             2). The gate refuses it too, and answering here from a rule the gate will not apply is the \
+             worse failure: this is the verb consulted BEFORE the edit."
+        );
+        return Err(2);
+    }
+    Ok(p)
+}
+
 // ── whatif ──────────────────────────────────────────────────────────────────────────────────────
 
 /// Segment-aware scope match, IDENTICAL to the lint's `scope_matches` (src/lib.rs) so a `whatif` verdict
@@ -141,14 +192,16 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
     // A SPECIFIED-but-unreadable policy must FAIL LOUD, not silently yield ok:true — a typo'd
     // CANDOR_POLICY path otherwise reads as "no violations" and an agent proceeds with a forbidden
     // edit believing the boundary was checked (/code-review; mirrors cmd_diff's loud no-files check).
+    //
+    // ⟨0.24⟩ Through the SHARED loader, so `whatif`'s pre-edit verdict is computed from the same rules
+    // the gate will apply: `unknown-alias` vocabulary resolved, policy errors refused. It used to call
+    // bare `parse_policy`, which silently widened `deny Unknown[<alias>]` to a bare `deny Unknown` and
+    // then printed the WIDENED rule back to the operator as the one that would be violated.
     let rules = match policy_path.as_deref() {
         None => None,
-        Some(p) => match std::fs::read_to_string(p) {
-            Ok(t) => Some(candor_classify::policy::parse_policy(&t).rules),
-            Err(e) => {
-                eprintln!("candor: policy `{p}` could not be read ({e}) — verdict NOT computed.");
-                return 2;
-            }
+        Some(p) => match load_policy_as_the_gate_does("whatif", p) {
+            Ok(pp) => Some(pp.rules),
+            Err(code) => return code,
         },
     };
     let mut violations: Vec<(&str, String)> = Vec::new();

@@ -9,7 +9,7 @@
 
 use crate::grammar::{parse, report_or_discover, Shape};
 use crate::load::load_entries;
-use candor_classify::policy::{parse_policy, rule_and_upgrade, unverified_hole_rule, PolicyRule};
+use candor_classify::policy::{rule_and_upgrade, unverified_hole_rule, PolicyRule};
 use candor_report::ReportEntry;
 use std::collections::{BTreeSet, HashMap};
 
@@ -76,12 +76,14 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         eprintln!("candor unverified: a policy is required (the check is relative to your pure/deny layers).");
         return 2;
     };
-    let rules = match std::fs::read_to_string(&pp) {
-        Ok(t) => parse_policy(&t).rules,
-        Err(e) => {
-            eprintln!("candor: policy `{pp}` could not be read ({e}) — nothing checked.");
-            return 2;
-        }
+    // ⟨0.24⟩ Through the SHARED loader, and here the old bare `parse_policy` LOST A DISCLOSURE rather
+    // than adding one: a hole is a function that PASSES its rule while being `Unknown`, so widening
+    // `deny Unknown[<alias>]` to a bare `deny Unknown` reclassified real holes as violations-that-aren't
+    // and this verb answered "every function in a pure/deny layer is PROVABLY clean ✓". §6.2: the gate
+    // and the disclosure MUST apply the same rule.
+    let rules = match crate::policy::load_policy_as_the_gate_does("unverified", &pp) {
+        Ok(p) => p.rules,
+        Err(code) => return code,
     };
     let entries = load_entries(prefix);
     if entries.is_empty() {

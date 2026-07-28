@@ -249,13 +249,11 @@ fn load_rules(policy_path: Option<String>) -> Result<Vec<candor_classify::policy
         eprintln!("candor fix: a policy is required (pass a policy file or set CANDOR_POLICY) — the fix is the refactor that restores the boundary the edit crossed.");
         return Err(2);
     };
-    match std::fs::read_to_string(&pp) {
-        Ok(t) => Ok(candor_classify::policy::parse_policy(&t).rules),
-        Err(e) => {
-            eprintln!("candor: policy `{pp}` could not be read ({e}) — no fix computed.");
-            Err(2)
-        }
-    }
+    // ⟨0.24⟩ Through the SHARED loader (`crate::policy::load_policy_as_the_gate_does`): a remedy computed
+    // from a rule the gate does not apply sends an agent to refactor a boundary the gate never asked
+    // about. MEASURED — `deny Unknown[corp]` with `corp` aliased to a non-matching class produced a hoist
+    // plan while the gate exited 0.
+    crate::policy::load_policy_as_the_gate_does("fix", &pp).map(|p| p.rules)
 }
 
 /// Build the callee→callers adjacency from the embedded call lists.

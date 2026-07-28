@@ -1968,6 +1968,81 @@ fn gate_report_reports_a_certain_violation_over_an_unanswerable_rule_beside_it()
     assert_eq!(rc3, 1, "the firing rule alone must exit 1:\n{err3}");
 }
 
+/// SPEC §6.2 ⟨0.24⟩ **EVERY VERB THAT REASONS ABOUT A POLICY MUST READ IT THE WAY THE GATE DOES** —
+/// found in candor-java and confirmed live here. `whatif`, `fix`/`fix-gate` and `unverified` all called
+/// bare `parse_policy`, which loads no `unknown-alias` vocabulary and reports no policy errors, while the
+/// gate loads both.
+///
+/// MEASURED 2026-07-28 with `unknown-alias corp = reflect` beside the policy, `deny Unknown[corp]
+/// app.nat`, and a NATIVE-caused hole: the gate exits 0, `whatif` answered "⚠ WOULD VIOLATE policy",
+/// `fix-gate` named a hoist remedy, and `unverified` answered "PROVABLY clean ✓" — three over-reports
+/// and, in the disclosure verb, a hole DELETED. These are the verbs an agent consults BEFORE editing.
+///
+/// THIS ROW PINS THE HALF THAT IS FIXED: the vocabulary is loaded (so a malformed `unknown-alias` — a
+/// fact ONLY visible to a verb that reads the config at all — refuses) and `ParsedPolicy::errors`
+/// travels. The residual is recorded in the commit and reported for a four-way call: these verbs still
+/// ignore the `Unknown[…]`/`Net[…]` FILTER when matching, and `whatif` reconstructs the rule it prints
+/// from `effects` + `scope` rather than from `raw`, so it shows a rule the operator did not write.
+#[test]
+fn every_policy_reasoning_verb_refuses_what_the_gate_refuses() {
+    let f = Fixture::new("verb-policy");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.nat","inferred":["Unknown"],"direct":["Unknown"],
+                          "unknownWhy":["native:extern fn"]}]}"#,
+        Some(r#"{"app.nat":[]}"#),
+    );
+    std::fs::create_dir_all(f.dir.join(".candor")).unwrap();
+    let p = pol(&f.dir, "aliased", "deny Unknown[corp] app.nat\n");
+    let ps = p.to_string_lossy().into_owned();
+    let run = |verb: &str, extra: &[&str]| -> i32 {
+        let mut args: Vec<String> = vec![verb.into()];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args.extend(["--report".into(), loc.clone(), "--policy".into(), ps.clone()]);
+        Command::new(bin()).args(&args).output().expect("run candor-query").status.code().unwrap_or(-1)
+    };
+    let verbs: [(&str, &[&str]); 4] =
+        [("gate", &[]), ("whatif", &["app.nat", "Unknown"]), ("fix-gate", &[]), ("unverified", &[])];
+
+    // A WELL-FORMED alias: every verb must evaluate, none may refuse. Without this row the assertions
+    // below are satisfied by a verb that refuses every aliased policy.
+    std::fs::write(f.dir.join(".candor/config"), "unknown-alias corp = reflect\n").unwrap();
+    for (verb, extra) in verbs {
+        assert_ne!(run(verb, extra), 2, "`{verb}` must EVALUATE a policy whose alias resolves");
+    }
+
+    // A MALFORMED alias definition — a fact only a verb that reads the CONFIG can see at all, which is
+    // what makes this row prove the vocabulary is loaded rather than merely that errors are checked.
+    std::fs::write(f.dir.join(".candor/config"), "unknown-alias corp = dispatch,nativ\n").unwrap();
+    for (verb, extra) in verbs {
+        assert_eq!(
+            run(verb, extra),
+            2,
+            "`{verb}` must refuse a policy the GATE refuses — answering from a rule the gate will not \
+             apply is the worse failure in a verb consulted BEFORE the edit"
+        );
+    }
+
+    // …and an unrecognised token with no alias in play, so the refusal is not merely alias-shaped.
+    std::fs::write(f.dir.join(".candor/config"), "").unwrap();
+    let bad = pol(&f.dir, "badtok", "deny Unknown[dispatch,nativ] app.nat\n");
+    let bs = bad.to_string_lossy().into_owned();
+    for (verb, extra) in verbs {
+        let mut args: Vec<String> = vec![verb.into()];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args.extend(["--report".into(), loc.clone(), "--policy".into(), bs.clone()]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(2), "`{verb}`: an unrecognised token is a policy error");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("nativ"),
+            "`{verb}`: …and the refusal must name the token"
+        );
+    }
+}
+
 /// ⟨0.24⟩ **THE DISCLOSURE MAY NOT CLAIM A FIRING THAT DID NOT HAPPEN, AND MAY NOT NAME AN EXIT IT DID
 /// NOT TAKE.** Two false sentences, one cause: text written for the case it was found in, then reached
 /// by a case the precedence correction had just created.
