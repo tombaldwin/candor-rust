@@ -2048,25 +2048,30 @@ fn an_incomplete_report_does_not_swallow_the_violations_it_also_carries() {
 }
 
 /// ⟨0.24⟩ SPEC §3.1: A REPORT HANDED DIRECTLY TO THE GATE WITH `analyzed.count: 0` MAKES THE SAME CLAIM
-/// AS A CHAINED ONE — it judged nothing — and must be read the same way. "The obligation is on the
-/// reading, not on the route by which the report arrived."
+/// AS A CHAINED ONE — it judged nothing — and must be read the same way. *"The obligation is on the
+/// reading, not on the route the report arrived by."* **AS A DISCLOSURE, NOT AS AN EXIT CODE:** *"The
+/// exit code and the verdict document are UNCHANGED."*
 ///
-/// Measured before the fix: `gate --report` over a count-0 report printed `policy ✓` and exited 0 — a
-/// green certificate over a signature that makes no claim about any unit, and byte-identical to the
-/// legitimately-all-pure case one row down. REFUSED (exit 2) now, with NO verdict document: SPEC §3.3's
-/// exit-2 rule, cause (a) — the gate could not be evaluated at all, so an `ok:true/false` would be a
-/// guess. (Cause (b)'s machine-legible `incomplete` verdict is keyed to `unanalyzed`, a NAMED list of
-/// source the producer could not read; a count-0 report names nothing, so borrowing that shape would put
-/// a claim on the wire the report does not support.) It lands beside this verb's three existing refusals
-/// — `forbid`, `allow`, the class-scoped `deny` over an absent field — which refuse for the same reason:
-/// evidence the report cannot carry is refused, never evaluated on evidence that is not there.
+/// THIS TEST PINNED THE OPPOSITE UNTIL 2026-07-28, and the clause it was written from has been corrected
+/// (candor-spec `0744d29`). The clause said the verb "MUST say so rather than reporting 'no violations,
+/// exit 0'", which forbade exit 0 — and that contradicted §3.1's OWN byte-equality MUST, because
+/// `candor-scan` over a facade package exits 0 with a clean verdict and this route must match it.
+/// MEASURED on a real crate this engine's own scan judges as count-0: `candor-scan . --policy P
+/// --gate-json a` exited 0 and wrote `{ok:true, analyzed:{count:0}, violations:[]}`; `gate --report er
+/// --policy P --gate-json b` exited 2 and wrote NOTHING — the strongest available failure of the
+/// byte-equality MUST, on a report the scan itself had just produced, on a measured 7–10% of real
+/// dependency reports. Refusing also minted a THIRD exit-2 cause where §3.3 enumerates two.
 ///
-/// THE SECOND ROW IS THE CONTROL and the arms differ in ONE INTEGER: `count: 2` with the same empty
-/// `functions` is a legitimate all-pure package, which §2 rule 3 requires the verb to BELIEVE — exit 0,
-/// clean verdict, no hedge. A refusal keyed on `functions` being empty passes the floor row and fails
-/// here, which is what the plausible-but-wrong fix looks like.
+/// SO THE ASSERTION MOVED TO THE DISCLOSURE. Deleting the refusal without checking the note is the
+/// silent-regression shape this whole verb exists to prevent — the harm the corrected clause names is
+/// the DELETED DISCLOSURE, not the verdict.
+///
+/// THE ALL-PURE ROW IS STILL THE CONTROL and the arms still differ in ONE INTEGER: `count: 2` with the
+/// same empty `functions` is a legitimate all-pure package which §2 rule 3 requires the verb to BELIEVE —
+/// exit 0, clean verdict, and NO note. A predicate keyed on `functions` being empty passes the floor row
+/// and fails here, and over 1997 JVM dependency jars it would have hedged 104 real claims to catch 6.
 #[test]
-fn gate_report_refuses_a_report_that_judged_nothing_but_believes_an_all_pure_one() {
+fn gate_report_discloses_a_report_that_judged_nothing_without_moving_the_verdict() {
     let f = Fixture::new("gate-judged-nothing");
     let p = pol(&f.dir, "denyfs", "deny Fs\n");
     let body = |count: &str| format!(
@@ -2074,20 +2079,27 @@ fn gate_report_refuses_a_report_that_judged_nothing_but_believes_an_all_pure_one
             "analyzed":{{"count":{count},"digest":"0"}},
             "functions":[]}}"#);
 
-    // THE FLOOR: judged nothing → refused, loudly, and the reason names the integer.
+    // THE FLOOR: judged nothing → the verb SAYS SO, names the package, and leaves everything else alone.
     let zero = gate_fixture(&f.dir, "zero", &body("0"), None);
     let vfile = f.dir.join("verdict-zero.json");
-    let (rc, out, err) = run_gate(&zero, &p, &["--gate-json", &vfile.to_string_lossy()]);
-    assert_eq!(rc, 2,
-               "a count-0 report licenses no purity claim, so the verb must not certify:\nout={out}\nerr={err}");
+    let (rc, _, err) = run_gate(&zero, &p, &["--gate-json", &vfile.to_string_lossy()]);
     assert!(err.contains("JUDGED NOTHING") && err.contains("analyzed.count"),
-            "the refusal must name what the report said, or it reads as a broken locator:\n{err}");
-    assert!(!vfile.exists(),
-            "SPEC §3.3 exit-2 cause (a): a gate that could not be evaluated writes NO verdict — an \
-             `ok` either way would be a guess");
-    assert!(!out.contains("\"ok\""), "…and nothing goes to stdout either:\n{out}");
+            "the verb MUST say the report judged nothing — that disclosure IS the obligation, and \
+             deleting the old refusal without it is the defect wearing the fix's clothes:\n{err}");
+    assert!(err.contains("`app`"),
+            "…and must NAME THE PACKAGE, or an adopter chaining twenty reports cannot act on it:\n{err}");
+    assert_eq!(rc, 0,
+               "the exit code is UNCHANGED (⟨0.24⟩): §3.3 has exactly two exit-2 causes and a \
+                judged-nothing dependency is neither, so refusing here splits the verb:\n{err}");
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&vfile).expect("the verdict document is UNCHANGED too — §3.1 byte-equality \
+                                                 with `scan --policy`, which writes one and exits 0")).unwrap();
+    assert_eq!(v["ok"], true, "{v:#}");
+    assert_eq!(v["analyzed"]["count"], 0, "the count-0 manifest rides the verdict verbatim: {v:#}");
+    assert_eq!(v["violations"].as_array().unwrap().len(), 0, "{v:#}");
 
-    // THE CONTROL: judged TWO units, found neither effectful. Unchanged — believed, clean, exit 0.
+    // THE CONTROL: judged TWO units, found neither effectful. Believed, clean, exit 0, and NO note —
+    // the note must be keyed on the integer, never on `functions` being empty.
     let allpure = gate_fixture(&f.dir, "allpure", &body("2"), None);
     let vfile = f.dir.join("verdict-allpure.json");
     let (rc, _, err) = run_gate(&allpure, &p, &["--gate-json", &vfile.to_string_lossy()]);
@@ -2099,12 +2111,14 @@ fn gate_report_refuses_a_report_that_judged_nothing_but_believes_an_all_pure_one
     assert!(v.get("incomplete").is_none(), "a believed all-pure verdict carries no new hedge: {v}");
 
     // SPEC §2's THIRD ROW on this route too: no manifest and no entries is a pre-⟨0.21⟩ producer that
-    // gives the verb nothing to distinguish "judged nothing" from "judged and found nothing".
+    // gives the verb nothing to distinguish "judged nothing" from "judged and found nothing" — so it
+    // gets the same NOTE, and the same untouched verdict.
     let legacy = gate_fixture(&f.dir, "legacy",
         r#"{"candor":{"version":"handwritten","spec":"0.20"},"package":"app","functions":[]}"#, None);
     let (rc, _, err) = run_gate(&legacy, &p, &[]);
-    assert_eq!(rc, 2, "a manifest-less EMPTY report makes no ⟨0.21⟩ claim to gate over:\n{err}");
-    // …and the same producer WITH an entry judged something, the only way it could say so. Not refused.
+    assert_eq!(rc, 0, "a manifest-less EMPTY report is disclosed, not refused (⟨0.24⟩ corrected):\n{err}");
+    assert!(err.contains("JUDGED NOTHING"), "…but it IS disclosed:\n{err}");
+    // …and the same producer WITH an entry judged something, the only way it could say so. No note.
     let legacy_full = gate_fixture(&f.dir, "legacyfull",
         r#"{"candor":{"version":"handwritten","spec":"0.20"},"package":"app",
             "functions":[{"fn":"app.pure_enough","inferred":[]}]}"#, None);
@@ -2113,6 +2127,18 @@ fn gate_report_refuses_a_report_that_judged_nothing_but_believes_an_all_pure_one
                "a pre-⟨0.21⟩ report that LISTS entries judged something — refusing it would withdraw \
                 every manifest-less report from the verb, which is the emptiness fix wearing a \
                 different hat:\n{err}");
+    assert!(!err.contains("JUDGED NOTHING"), "…and it earns no hedge:\n{err}");
+
+    // A JUDGED-NOTHING REPORT STILL GATES. The note is advisory, so the rules must still run over
+    // whatever the report DOES carry — a count-0 report that nevertheless lists an effectful entry is
+    // contradictory input, and the finding in it must not be swallowed by the hedge.
+    let contra = gate_fixture(&f.dir, "contra",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app",
+            "analyzed":{"count":0,"digest":"0"},
+            "functions":[{"fn":"app.reads","inferred":["Fs"],"direct":["Fs"],"paths":["/etc/x"]}]}"#, None);
+    let (rc, _, err) = run_gate(&contra, &p, &[]);
+    assert_eq!(rc, 1, "the gate still evaluates what the report DOES carry:\n{err}");
+    assert!(err.contains("JUDGED NOTHING"), "…and still discloses the contradiction:\n{err}");
 }
 
 /// ⟨0.24⟩ SPEC §2: *"A KEY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT, AND MUST NEVER BE COERCED
