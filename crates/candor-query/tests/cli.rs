@@ -1978,11 +1978,15 @@ fn gate_report_reports_a_certain_violation_over_an_unanswerable_rule_beside_it()
 /// `fix-gate` named a hoist remedy, and `unverified` answered "PROVABLY clean ✓" — three over-reports
 /// and, in the disclosure verb, a hole DELETED. These are the verbs an agent consults BEFORE editing.
 ///
-/// THIS ROW PINS THE HALF THAT IS FIXED: the vocabulary is loaded (so a malformed `unknown-alias` — a
-/// fact ONLY visible to a verb that reads the config at all — refuses) and `ParsedPolicy::errors`
-/// travels. The residual is recorded in the commit and reported for a four-way call: these verbs still
-/// ignore the `Unknown[…]`/`Net[…]` FILTER when matching, and `whatif` reconstructs the rule it prints
-/// from `effects` + `scope` rather than from `raw`, so it shows a rule the operator did not write.
+/// THIS ROW PINS THE FIRST HALF: the vocabulary is loaded (so a malformed `unknown-alias` — a fact ONLY
+/// visible to a verb that reads the config at all — refuses) and `ParsedPolicy::errors` travels.
+///
+/// ⟨0.24⟩ THE TWO RESIDUALS THIS COMMENT RECORDED ARE NOW CLOSED, in that order and not the other. The
+/// FILTER-blind matching went first (`unverified`/`fix-gate` and the shared predicate under both —
+/// `unverified_and_fix_gate_answer_the_narrowed_rule_the_gate_actually_applies`), because fixing the
+/// PRINTED rule while the verdict stayed unfiltered would have attributed an unfiltered verdict to the
+/// operator's own narrowed line: a worse sentence than the one it replaced. `whatif`'s rendering
+/// followed (`whatif_names_the_operators_own_rule_and_discloses_what_a_narrowed_verdict_rests_on`).
 #[test]
 fn every_policy_reasoning_verb_refuses_what_the_gate_refuses() {
     let f = Fixture::new("verb-policy");
@@ -2993,4 +2997,99 @@ fn unverified_and_fix_gate_answer_the_narrowed_rule_the_gate_actually_applies() 
     let u4 = json(&uout4);
     assert_eq!(u4["unverified"].as_array().map(Vec::len), Some(1));
     assert_eq!(u4["unverified"][0]["upgrade"], "deny Unknown app", "PART 12c's four-way form, unmoved");
+}
+
+/// ⟨0.24⟩ **`whatif` MUST NAME THE OPERATOR'S OWN RULE, AND SAY WHAT A NARROWED VERDICT RESTS ON** —
+/// SPEC §6.2 for the first half, §3.1's *an unanswerable condition is DISCLOSED, never scored as a failed
+/// one* for the second.
+///
+/// `whatif` REBUILT the rule it printed from `effects` + `scope` — and from the effect being ASKED
+/// ABOUT rather than the rule's own set. MEASURED 2026-07-28:
+///
+///   `deny Unknown[reflect] app.nat`  printed back as  `deny Unknown app.nat`
+///   `deny Net[unknown-host] app`     printed back as  `deny Net app`
+///   `deny Net Db  app`               printed back as  `deny Net app`
+///
+/// The first two are the sharp ones: a NARROWED rule shown as the WIDE one, in the verb an agent reads
+/// before editing, so the operator's own scoping is invisible at exactly the moment they are deciding
+/// whether it protects them.
+///
+/// **AND THE ORDER MATTERED.** Printing `raw` while the verdict stayed FILTER-BLIND would have been
+/// worse than the bug: the same unconditional "WOULD VIOLATE", now attributed to the narrowed line,
+/// reading as though candor had evaluated a filter it did not. That is why the shared-predicate fix
+/// landed first. It does not carry over to this verb, and the measurement says why: `unverified` and
+/// `fix-gate` read a signature that EXISTS, while `whatif` asks about an effect not written yet, which
+/// has no destination or reason class to match. The question is genuinely unanswerable, so the verdict
+/// stays fail-closed (a pre-edit gate must not guess which class the edit lands in) and the CONDITION
+/// rides beside it — the third arm below, which is the half that keeps `raw` from lying.
+#[test]
+fn whatif_names_the_operators_own_rule_and_discloses_what_a_narrowed_verdict_rests_on() {
+    let f = Fixture::new("whatif-raw");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.nat","inferred":["Unknown"],"direct":["Unknown"],
+                          "unknownWhy":["native:extern fn"]}]}"#,
+        Some(r#"{"app.nat":[]}"#),
+    );
+    let whatif = |text: &str, effect: &str| -> serde_json::Value {
+        let p = pol(&f.dir, "w", text);
+        let out = Command::new(bin())
+            .args(["whatif", "app.nat", effect, "--report", &loc, "--policy", &p.to_string_lossy(), "--json"])
+            .output()
+            .expect("run candor-query");
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap()
+    };
+
+    // ── ARM 1: the rule is named VERBATIM, comment stripped and ends trimmed — including the effects
+    // the operator wrote that the question did not ask about. ──
+    let v = whatif("deny Net Db  app     # keep the app layer pure\n", "Net");
+    assert_eq!(v["ok"], false);
+    assert_eq!(
+        v["violations"][0]["rule"], "deny Net Db  app",
+        "the operator's own line, not one rebuilt from the effect they happened to ask about:\n{v:#}"
+    );
+    let v = whatif("pure app\n", "Net");
+    assert_eq!(v["violations"][0]["rule"], "pure app", "a `pure` rule reads back as itself:\n{v:#}");
+
+    // ── ARM 2: a NARROWED rule keeps its bracket. This is the sharp one — the operator's scoping was
+    // being erased in the verb they consult before editing. ──
+    let v = whatif("deny Unknown[reflect] app.nat\n", "Unknown");
+    assert_eq!(v["violations"][0]["rule"], "deny Unknown[reflect] app.nat", "{v:#}");
+    let v2 = whatif("deny Net[unknown-host] app\n", "Net");
+    assert_eq!(v2["violations"][0]["rule"], "deny Net[unknown-host] app", "{v2:#}");
+
+    // ── ARM 3, THE HALF THAT KEEPS ARM 2 HONEST: the verdict on a narrowed rule is CONDITIONAL, and
+    // says so. Without this, `raw` alone would attribute an unfiltered verdict to a filtered rule. ──
+    assert_eq!(
+        v["violations"][0]["conditional"], "the `Unknown` you introduce is of reason class reflect",
+        "a rule that NARROWS cannot be evaluated against an effect that does not exist yet — §3.1: \
+         disclose the unanswerable condition, never score it as a failed one:\n{v:#}"
+    );
+    assert_eq!(
+        v2["violations"][0]["conditional"], "the `Net` you introduce reaches destination class unknown-host",
+        "{v2:#}"
+    );
+
+    // ── THE MIRROR: an UNFILTERED rule has NO condition to disclose, so the key is absent and the
+    // document is byte-identical to a pre-⟨0.24⟩ one. A `conditional` on every violation would train the
+    // reader to ignore it, which is the same failure as naming a config that changed nothing. ──
+    let plain = whatif("deny Unknown app.nat\n", "Unknown");
+    assert_eq!(plain["violations"][0]["rule"], "deny Unknown app.nat");
+    assert!(
+        plain["violations"][0].get("conditional").is_none(),
+        "a rule that does not narrow rests on no condition:\n{plain:#}"
+    );
+    let bare_net = whatif("deny Net app\n", "Net");
+    assert!(bare_net["violations"][0].get("conditional").is_none(), "{bare_net:#}");
+    // …and the filter must key on the effect being INTRODUCED, not merely on the rule carrying a
+    // bracket: `deny Net[unknown-host] Fs app` asked about `Fs` charges `Fs` unconditionally.
+    let other = whatif("deny Net[unknown-host] Fs app\n", "Fs");
+    assert_eq!(other["violations"][0]["rule"], "deny Net[unknown-host] Fs app");
+    assert!(
+        other["violations"][0].get("conditional").is_none(),
+        "the `Net` filter says nothing about an introduced `Fs`:\n{other:#}"
+    );
 }
