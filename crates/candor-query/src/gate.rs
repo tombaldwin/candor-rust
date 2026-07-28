@@ -38,21 +38,26 @@ struct GateReport {
     unanalyzed: Vec<candor_report::UnanalyzedUnit>,
     /// ⟨0.15⟩ the κ ledger's package NAMES, unioned across reports — the verdict's advisory note.
     coverage_packages: BTreeSet<String>,
-    /// ⟨0.24⟩ Did EVERY report under this locator say it JUDGED NOTHING (SPEC §2's `analyzed.count == 0`
-    /// rule — [`candor_report::report_judged_nothing`])? SPEC §3.1 ⟨0.24⟩ binds the same rule to this
-    /// verb: *"a report presented directly to the gate with `analyzed.count: 0` … has judged nothing, so
-    /// it licenses no purity claim and the verb MUST say so rather than reporting 'no violations,
-    /// exit 0'."*
+    /// ⟨0.24⟩ The PACKAGES under this locator whose report says it JUDGED NOTHING (SPEC §2's
+    /// `analyzed.count == 0` rule — [`candor_report::report_judged_nothing`]). SPEC §3.1 ⟨0.24⟩ binds the
+    /// same rule to this verb: such a report *"has judged nothing, so it licenses no purity claim and
+    /// **the verb MUST SAY SO**. The obligation is on the reading, not on the route the report arrived
+    /// by."*
     ///
-    /// A CONJUNCTION over the file set, not a test on the summed count, and the difference is SPEC §2's
+    /// **A DISCLOSURE, NOT AN EXIT CODE — and this field is a LIST because of it.** ⟨0.24⟩'s corrected
+    /// clause is explicit that *"the exit code and the verdict document are UNCHANGED"*: refusing here
+    /// contradicted §3.1's own byte-equality MUST, since `candor-scan` over a facade package exits 0 with
+    /// a clean verdict and this verb must match it. It also would have minted a third exit-2 cause — §3.3
+    /// enumerates exactly two, a broken gate CONFIG and an INCOMPLETE analysis of the target's own code —
+    /// which is the definition of splitting the verb.
+    ///
+    /// Judged-nothing is decided PER FILE, never on the summed count, and the difference is SPEC §2's
     /// third row: a pre-⟨0.21⟩ report carrying entries and no manifest contributes 0 to the sum while
     /// having plainly judged something. `analyzed` absent ⇒ judged-nothing only when that file also lists
-    /// no entries.
-    ///
-    /// A locator naming several members where SOME judged and some did not is NOT refused: the gate has
-    /// real evidence, and the residual — "judged n and dropped one" vs "judged n−1" — is the half the
-    /// wire cannot carry, which SPEC §2 records as the open format question.
-    judged_nothing: bool,
+    /// no entries. Since the treatment is now a line of prose rather than a refusal, a locator naming
+    /// several members discloses EACH silent one by name instead of only the all-silent case — the
+    /// conjunction only existed because one refusal had to answer for the whole file set.
+    judged_nothing_pkgs: Vec<String>,
 }
 
 /// Load the report(s) at `prefix` AND NOTHING ELSE.
@@ -92,7 +97,7 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, i32> {
         analyzed_count: 0,
         unanalyzed: Vec::new(),
         coverage_packages: BTreeSet::new(),
-        judged_nothing: true,
+        judged_nothing_pkgs: Vec::new(),
     };
     let mut hard_fail = false;
     for path in &paths {
@@ -173,7 +178,16 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, i32> {
         // ⟨0.24⟩ …and separately from the SUM, whether this file judged anything at all. Read from the
         // one shared predicate candor-scan's chained join uses, so the two routes ⟨0.24⟩ binds cannot
         // drift: the rule is about the READING, not the route the report arrived by.
-        out.judged_nothing &= candor_report::report_judged_nothing(&text);
+        if candor_report::report_judged_nothing(&text) {
+            // Named by its `package`, which is what an adopter recognises; the file only when the
+            // envelope carries no name (a pre-⟨0.4⟩ report, or a bare v0.1 array).
+            let pkg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("package").and_then(|p| p.as_str()).map(str::to_owned))
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| path.display().to_string());
+            out.judged_nothing_pkgs.push(pkg);
+        }
         out.unanalyzed.extend(strict!(
             candor_report::report_unanalyzed(&text),
             "unanalyzed",
@@ -554,34 +568,39 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         Ok(r) => r,
         Err(code) => return code,
     };
-    // ⟨0.24⟩ THE REPORT JUDGED NOTHING (SPEC §3.1). This verb's whole contract is that the report IS the
-    // signature — nothing is re-derived, and an entry ABSENT from it is the ⟨0.21⟩ purity claim, taken as
-    // given. A report whose `analyzed.count` is 0 has made no judgment for any unit, so EVERY rule is
-    // answered by silence and the green that follows is the "silently-empty no-violations" the
-    // found-but-corrupt rule one function up already refuses for the same reason: this is not an
-    // effect-free package, it is a package nothing was said about.
+    // ⟨0.24⟩ THE REPORT JUDGED NOTHING (SPEC §3.1) — DISCLOSED, NOT REFUSED.
     //
-    // REFUSED (exit 2), and NO verdict document — SPEC §3.3's exit-2 rule, cause (a): the gate could not
-    // be evaluated at all, so writing an `ok:true/false` would be a guess. Cause (b)'s machine-legible
-    // incomplete verdict is not this: it is keyed to `unanalyzed`, a named list of source the producer
-    // could not read, and a count-0 report names nothing. This lands beside the verb's three existing
-    // refusals (`forbid`, `allow`, the class-scoped `deny` over an absent field), which is the same
-    // treatment for the same reason — a rule whose evidence the report cannot carry is refused rather
-    // than evaluated on evidence that is not there.
+    // This verb's whole contract is that the report IS the signature: nothing is re-derived, and an entry
+    // ABSENT from it is the ⟨0.21⟩ purity claim, taken as given. A report whose `analyzed.count` is 0 has
+    // made no judgment for any unit, so every rule below is answered by silence — this is not an
+    // effect-free package, it is a package nothing was said about, and the verb MUST say so.
     //
-    // BEFORE the gate runs, not after: with no judgment in the signature there is nothing for a verdict
-    // to be about, green OR red, so a contradictory count-0-with-entries report is refused too rather
-    // than reported on. Keyed on the integer — a legitimately all-pure `count: n>0, functions: []`
-    // report is UNTOUCHED by this branch and still gates to a clean exit 0.
-    if rep.judged_nothing {
+    // IT SAYS SO ON STDERR, AND CHANGES NOTHING ELSE. This branch used to `return 2` and write no verdict
+    // document, and that was WRONG in a way three of these lines argued for at length. §3.1's own
+    // byte-equality MUST says this verb's `--gate-json` must match `candor-scan --policy`'s, and a scan
+    // of an empty facade crate exits 0 with a clean `{ok:true, analyzed:{count:0}, violations:[]}`.
+    // Measured 2026-07-28 on a real crate this engine's own scan judges as count-0: the scan wrote that
+    // document and exited 0 while this route exited 2 and wrote NOTHING — the strongest possible failure
+    // of the byte-equality MUST, on a report the scan itself had just produced, and on a measured 7–10%
+    // of real dependency reports. Refusing also minted a THIRD exit-2 cause: §3.3 enumerates exactly two
+    // (a broken gate CONFIG; an INCOMPLETE analysis of the target's OWN code) and a judged-nothing
+    // DEPENDENCY is neither. Tom corrected the spec clause rather than the engines (candor-spec
+    // `0744d29`) — candor-ts had already taken this reading, and the harm here is the DELETED DISCLOSURE,
+    // not the verdict: restoring a verdict would assert an effect the consumer has no evidence for.
+    //
+    // Keyed on the integer, never on `functions` being empty — a legitimately all-pure `count: n>0,
+    // functions: []` report is a CLAIM §2 rule 3 requires this verb to BELIEVE, and a predicate keyed on
+    // emptiness would withdraw it. Measured over 1997 JVM dependency jars, that plausible-but-wrong fix
+    // would have withdrawn 104 real claims to hedge 6.
+    for pkg in &rep.judged_nothing_pkgs {
         eprintln!(
-            "candor-query gate: REFUSING to gate — every report at `{prefix}` says it JUDGED NOTHING \
-             (⟨0.24⟩ `analyzed.count` is 0, absent-with-no-functions, or unreadable). An absent entry is \
-             candor's purity claim only when something was judged, so a green verdict here would certify \
-             a signature that makes no claim about any unit. This is usually a facade or re-export-only \
-             package: gate what it re-exports, or scan the source (candor-scan <dir> --policy {policy_path})"
+            "candor-query gate: NOTE — `{pkg}` says it JUDGED NOTHING (⟨0.24⟩ `analyzed.count` is 0, or \
+             absent with no entries), so the verdict below is about no unit at all: an absent entry is \
+             candor's purity claim only where something was judged. This is usually a facade or \
+             re-export-only package — gate what it re-exports, or scan its source \
+             (candor-scan <dir> --policy {policy_path}). The verdict and exit code are unchanged: this \
+             report makes no claim, and inventing one for it would be the opposite defect."
         );
-        return 2;
     }
     let sig = gate_input_from_report(&rep);
 

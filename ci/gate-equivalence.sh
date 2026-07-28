@@ -121,6 +121,40 @@ for arm in "A 2 deny Db" "B 1 deny Fs"; do
   fi
 done
 
+# THE JUDGED-NOTHING ARM, which no in-tree crate can reach either: a crate with no functions at all, so
+# this engine's OWN scan writes `analyzed.count: 0` and exits 0 with a clean verdict. ⟨0.24⟩ makes that a
+# DISCLOSURE and not an exit code — "the exit code and the verdict document are UNCHANGED" — precisely so
+# that the two routes still agree here. This row is the one that caught the contradiction: the gate route
+# refused with exit 2 and wrote no document at all, against a scan-produced report, on a measured 7-10%
+# of real dependency reports.
+jn="$WS/judgednothing"; mkdir -p "$jn/src" "$jn/out"
+printf '[package]\nname = "facade"\n' > "$jn/Cargo.toml"
+printf 'pub type Alias = u32;\npub struct S;\n' > "$jn/src/lib.rs"   # types only: nothing to judge
+printf 'deny Net\n' > "$jn/policy"
+rm -f "$WS/jn.scan.json" "$WS/jn.gate.json" "$jn/out/r".*
+"$SCAN" "$jn" --out "$jn/out/r" --policy "$jn/policy" --gate-json "$WS/jn.scan.json" >/dev/null 2>&1
+rc_scan=$?
+"$QUERY" gate --report "$jn/out/r" --policy "$jn/policy" --gate-json "$WS/jn.gate.json" 2>"$WS/jn.err" >/dev/null
+rc_gate=$?
+rows=$((rows+1))
+if [ "$rc_scan" -ne "$rc_gate" ]; then
+  echo "  FAIL judged-nothing: exit $rc_scan (scan) vs $rc_gate (gate) on a report the SCAN produced."
+  echo "       §3.1 requires the two routes to agree, and SPEC 0744d29 rules this a stderr disclosure"
+  echo "       with the exit code and the verdict document UNMOVED."
+  bad=$((bad+1))
+elif [ ! -f "$WS/jn.gate.json" ] || ! cmp -s "$WS/jn.scan.json" "$WS/jn.gate.json"; then
+  echo "  FAIL judged-nothing: the count-0 verdict is NOT byte-equal (or the gate wrote none at all)"
+  diff "$WS/jn.scan.json" "$WS/jn.gate.json" 2>&1 | head -20
+  bad=$((bad+1))
+# …and the disclosure the exit code no longer carries MUST be on stderr, naming the package. Without
+# this the row above is satisfied by simply deleting the refusal, which is the defect in fix's clothing.
+elif ! grep -q 'JUDGED NOTHING' "$WS/jn.err" || ! grep -q 'facade' "$WS/jn.err"; then
+  echo "  FAIL judged-nothing: the verb must SAY the report judged nothing and NAME the package —"
+  echo "       ⟨0.24⟩ moves the obligation to the disclosure, it does not remove it. stderr was:"
+  cat "$WS/jn.err"
+  bad=$((bad+1))
+fi
+
 if [ "$fired" -eq 0 ]; then
   echo "gate-equivalence: VACUOUS — no policy in the matrix produced a violation; byte-equal empty"
   echo "                  verdicts prove nothing. Fix the matrix, do not relax the check."
