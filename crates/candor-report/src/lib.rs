@@ -781,6 +781,42 @@ pub fn gate_verdict_json_v24(
     unanalyzed: &[UnanalyzedUnit],
     vocabulary: Option<&GateVocabulary>,
 ) -> serde_json::Result<String> {
+    gate_verdict_json_v24_refused(violations, coverage, analyzed_count, unanalyzed, vocabulary, None)
+}
+
+/// ⟨0.24⟩ [`gate_verdict_json_v24`] plus the REFUSAL DISCLOSURE, for the one document that has to carry
+/// both: **a run that ended refused while already holding a violation established on carried evidence.**
+///
+/// **THE DEFECT THIS SHAPE EXISTS FOR** (SPEC §3.1 `4c79958`, measured 2026-07-28). A pure function gains
+/// an `Fs` call and is scanned against a frozen baseline. With no policy: exit 1, `violations:
+/// ["AS-EFF-005"]`. Add ANY policy carrying a bad token — a typo the regression has nothing to do with —
+/// and the run exited 2 with **no `violations` key at all**. The `[AS-EFF-005]` line still went to stderr,
+/// so the human kept the finding and CI lost it: a typo in a policy token downgraded *"your change added
+/// an effect"* to *"could not evaluate"*.
+///
+/// **PRECEDENCE BINDS THE VERDICT, NOT THE POLICY GATE.** The AS-EFF-005 baseline guard is a DIFFERENT
+/// violation producer, it runs deliberately earlier, and it records into the same accumulator. The
+/// precedence repair had been implemented against the policy gate's own violation list, and the rule that
+/// a refusal document carries no `violations` key was justified by every exit-2 site running before
+/// anything could be recorded — a claim about ORDERING that reads as a claim about SHAPE, and false the
+/// moment a producer's evidence sat upstream of the refusal.
+///
+/// So the document is a strict SUPERSET of [`gate_refusal_json`], in that field order: `spec`, `ok`,
+/// `refused`, `reason`, then the ordinary verdict. A consumer keying on `ok` lands on FAIL; one keying on
+/// `violations` gets the regression it would otherwise have lost; one keying on `refused` still learns the
+/// policy never ran. **`refusal` is `None` everywhere else**, so every document that is not this exact
+/// case stays byte-identical — including the pure refusal (which keeps its absent `violations` key,
+/// because `[]` is precisely the claim it cannot make) and the incomplete-analysis verdict (whose
+/// `incomplete`/`unanalyzed` keys already say why, and which §3.1's byte-equality MUST pairs with a
+/// `gate --report` document that has no refusal to disclose).
+pub fn gate_verdict_json_v24_refused(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+    vocabulary: Option<&GateVocabulary>,
+    refusal: Option<&str>,
+) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     #[derive(Serialize)]
     struct Count {
@@ -790,6 +826,10 @@ pub fn gate_verdict_json_v24(
     struct Verdict<'a> {
         spec: &'static str,
         ok: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        refused: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<&'a str>,
         analyzed: Count,
         violations: &'a [GateViolation],
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -805,7 +845,13 @@ pub fn gate_verdict_json_v24(
     let incomplete = !unanalyzed.is_empty();
     serde_json::to_string_pretty(&Verdict {
         spec: SPEC_VERSION,
-        ok: violations.is_empty() && !incomplete,
+        // A refusal can never be `ok` — but note this is belt-and-braces, not the load-bearing part:
+        // this arm is only ever reached with a violation already recorded, so `ok` is false from
+        // `violations` alone. Keying it on the refusal too means a future caller cannot reach a green
+        // document through this door.
+        ok: violations.is_empty() && !incomplete && refusal.is_none(),
+        refused: refusal.is_some(),
+        reason: refusal,
         analyzed: Count { count: analyzed_count },
         violations,
         coverage,

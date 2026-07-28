@@ -1893,3 +1893,88 @@ fn the_gate_note_discloses_a_hole_a_narrowed_rule_tolerates_and_stays_silent_on_
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// ⟨0.24⟩ A CERTAIN BASELINE REGRESSION SURVIVES AN UNRELATED REFUSAL — SPEC §3.1 `4c79958`.
+///
+/// The worst shape this rung has produced: a pure fn gains an `Fs` call against a frozen baseline, and a
+/// TYPO IN A POLICY TOKEN — which the regression has nothing to do with — used to delete the finding from
+/// the `--gate-json` document. Exit 1 with `violations:["AS-EFF-005"]` became exit 2 with no `violations`
+/// key at all, while the `[AS-EFF-005]` line stayed on stderr. The human kept the finding; CI lost it.
+///
+/// **THE EXIT CODE IS NOT WHERE THE HARM IS**, so the assertions are on the DOCUMENT. Both refusal causes
+/// are covered — an unhonourable policy and an unreadable one — because the defect was in a predicate
+/// (`exit 2 && nothing unanalyzed`) that neither cause was special to.
+#[test]
+fn a_certain_baseline_regression_stays_in_the_document_when_an_unrelated_policy_refuses() {
+    let d = make_crate("blprec", "pub fn go() -> usize { 1 }");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "recording the baseline is a plain scan");
+    std::fs::write(d.join("src/lib.rs"), "pub fn go() -> usize { let _ = std::fs::read(\"/x\"); 1 }").unwrap();
+
+    // Read the `--gate-json` document a run leaves behind. Written to a FRESH path each time so a
+    // missing document can never be mistaken for a previous run's — the stale-verdict hazard this rung
+    // exists to close would otherwise make the test pass by reading the control's answer.
+    let verdict_of = |tag: &str, args: &[&str]| -> (Option<i32>, String, serde_json::Value) {
+        let vp = d.join(format!("verdict-{tag}.json"));
+        let _ = std::fs::remove_file(&vp);
+        let mut a: Vec<&str> = vec!["--gate-json"];
+        let vps = vp.to_string_lossy().to_string();
+        a.push(&vps);
+        a.extend_from_slice(args);
+        let (rc, stdout, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()), &a);
+        let doc = std::fs::read_to_string(&vp)
+            .unwrap_or_else(|e| panic!("{tag}: no --gate-json document at all ({e}) — a consumer reading \
+                                        that path gets the PREVIOUS run's answer:\n{stdout}{stderr}"));
+        (rc, format!("{stdout}{stderr}"), serde_json::from_str(&doc).unwrap())
+    };
+    let has_regression = |v: &serde_json::Value| -> bool {
+        v["violations"].as_array().is_some_and(|a| {
+            a.iter().any(|gv| gv["rule"] == "AS-EFF-005" && gv["fn"] == "go")
+        })
+    };
+
+    // ── THE CONTROL: no policy at all. Exit 1, the regression in the document. ──
+    let (rc, all, ctl) = verdict_of("control", &[]);
+    assert_eq!(rc, Some(1), "a gained effect is a violation: {all}");
+    assert!(has_regression(&ctl), "control: the regression is in the document: {ctl}");
+
+    // ── ARM 1: a policy carrying a token that cannot be honoured (SPEC §6.2). ──
+    let bad = d.join("bad.policy");
+    std::fs::write(&bad, "deny Unknown[dispatch,nativ]\n").unwrap();
+    let (rc, all, v) = verdict_of("badtoken", &["--policy", bad.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(2), "an unhonourable policy still refuses: {all}");
+    assert!(
+        has_regression(&v),
+        "THE FINDING: a typo in a policy token must not delete a certain baseline regression from the \
+         machine channel — precedence binds the VERDICT, not the policy gate (SPEC §3.1): {v}"
+    );
+    // …and the refusal is NOT swallowed by the rescue. Without this the mirror is a document reading
+    // `{ok:false, violations:[AS-EFF-005]}`, from which an operator concludes the gate ran and passed.
+    assert_eq!(v["ok"], serde_json::json!(false), "a refused run is never ok: {v}");
+    assert_eq!(v["refused"], serde_json::json!(true), "the refusal still travels: {v}");
+    assert!(
+        v["reason"].as_str().is_some_and(|s| s.contains("nativ")),
+        "the reason names the token that could not be honoured: {v}"
+    );
+
+    // ── ARM 2: an UNREADABLE policy — the other refusal cause, same predicate. ──
+    let (rc, all, v) = verdict_of("unreadable", &["--policy", "/nonexistent/candor.policy"]);
+    assert_eq!(rc, Some(2), "an unreadable policy still refuses: {all}");
+    assert!(has_regression(&v), "an unreadable policy must not delete it either: {v}");
+    assert_eq!(v["refused"], serde_json::json!(true), "the refusal still travels: {v}");
+
+    // ── THE MIRROR, MEASURED: with NO violation to carry, a refusal is still the MINIMAL document with
+    // NO `violations` key. `[]` is precisely the claim a refusal cannot make, and a fix that rescued the
+    // violation by always emitting the full verdict would have fabricated it here. ──
+    std::fs::write(d.join("src/lib.rs"), "pub fn go() -> usize { 1 }").unwrap(); // back to the baseline
+    let (rc, all, v) = verdict_of("norepr", &["--policy", bad.to_string_lossy().as_ref()]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(2), "still a refusal: {all}");
+    assert_eq!(v["refused"], serde_json::json!(true), "still a refusal document: {v}");
+    assert!(
+        v.get("violations").is_none(),
+        "MIRROR: a refusal with nothing established must carry NO `violations` key — an empty array \
+         reads as \"we looked and found none\", which is the fabrication this format refuses: {v}"
+    );
+}
