@@ -15,6 +15,10 @@ pub mod surface;
 /// accumulator and candor-query's `unverified --class` filter resolve over the SAME reach.
 pub mod propagate;
 
+/// ⟨0.24⟩ The §6.2 GATE over an already-accumulated signature — SHARED so `candor-scan --policy` and
+/// `candor-query gate --report` (SPEC §3.1) are the same gate reached by two routes, not two gates.
+pub mod gate;
+
 /// Project-supplied rules, consulted only when the built-in `classify` returns None.
 pub fn classify_extra(
     crate_name: &str,

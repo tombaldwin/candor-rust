@@ -1446,3 +1446,58 @@ fn model_sdk_crate_call_classifies_llm_and_net() {
     assert!(e.contains(&"Llm".to_string()), "a call into a curated model-SDK crate must be Llm, got {e:?}");
     assert!(e.contains(&"Net".to_string()), "a model-SDK dispatch is also Net, got {e:?}");
 }
+
+/// ONE VERDICT PER (rule, function), even when two UNITS share one qualified name.
+///
+/// `#[cfg(unix)] fn f` beside `#[cfg(not(unix))] fn f` is the everyday shape, and both are analyzed —
+/// so the gate's `all` list carried the name TWICE while `inferred` held one merged signature, and the
+/// gate reported it twice: two byte-identical `GateViolation` records, an inflated
+/// `N policy violation(s)` count, and a `--gate-json` document a consumer would read as two findings.
+///
+/// FOUND BY THE ⟨0.24⟩ §3.1 BYTE-EQUALITY OBLIGATION — `candor-query gate --report` over the same
+/// report cannot reach the duplicate (a report is keyed by name), so the two routes disagreed on 15 of
+/// 90 rows across ebman, pgman and the candor workspace. That is the argument for the verb: no
+/// end-to-end test could have told this apart from a classifier defect.
+#[test]
+fn a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two() {
+    let d = make_crate(
+        "dupqual",
+        "#[cfg(unix)]\npub fn twice() { let _ = std::fs::read_to_string(\"/etc/hosts\"); }\n\
+         #[cfg(not(unix))]\npub fn twice() { let _ = std::fs::read_to_string(\"/etc/hosts\"); }\n\
+         pub fn once() { let _ = std::fs::read_to_string(\"/tmp/x\"); }\n",
+    );
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Fs\n").unwrap();
+    let verdict = d.join("verdict.json");
+    let out = Command::new(bin())
+        .args([
+            d.to_string_lossy().as_ref(),
+            "--out",
+            d.join("rep").to_string_lossy().as_ref(),
+            "--policy",
+            pp.to_string_lossy().as_ref(),
+            "--gate-json",
+            verdict.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(1), "the deny-Fs gate must fire");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&verdict).expect("a verdict")).unwrap();
+    let fns: Vec<&str> =
+        v["violations"].as_array().unwrap().iter().map(|x| x["fn"].as_str().unwrap()).collect();
+    // THE CONTROL that keeps this from passing on an empty verdict: the singly-defined fn is there too,
+    // so the fixture demonstrably fires, and `twice` appearing ONCE is a de-duplication rather than a drop.
+    assert!(fns.contains(&"once"), "the gate must still catch the ordinary fn: {fns:?}");
+    assert_eq!(
+        fns.iter().filter(|f| **f == "twice").count(),
+        1,
+        "two cfg-gated units under one qualified name are ONE signature and must yield ONE violation \
+         (the report is keyed by name, so `candor-query gate --report` cannot produce the duplicate — a \
+         second record here is a scan-vs-gate divergence): {fns:?}"
+    );
+    // …and the report itself still lists both units, so this is a GATE de-duplication, not a lost entry.
+    let rep = std::fs::read_to_string(d.join("rep.dupqual.scan.json")).expect("a report");
+    assert_eq!(rep.matches("\"fn\": \"twice\"").count(), 2, "the report is unchanged: {rep}");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -108,7 +108,7 @@ assumed to honour its bound) is marked by `Unknown` and coverage warnings and li
 | `crates/candor-classify` | the effect classifier (`crate × path → effect`) — pure string logic, no `rustc`; the one source of truth the lint **and** the stable scanner both call |
 | `crates/candor-scan` | the **stable-Rust** backend: a `syn`-based scanner that produces the same report JSON on stock `cargo`, no nightly/dylint (see below) |
 | `crates/candor-report` | the report types + parsing, shared by every backend and the CLI (no `rustc_private`) |
-| `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`/`whatif`/`rewire`/`containment`/`reachable`/`path`/`impact`) as one typed binary |
+| `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`/`whatif`/`rewire`/`containment`/`reachable`/`path`/`impact`) as one typed binary — plus ⟨0.24⟩ `gate --report <locator> --policy <file>`, which applies a policy to an EXISTING report with no scan (the supply-chain verb; SPEC §3.1) |
 | `cargo-candor` | the CLI wrapper — thin bash that orchestrates the backend (`cargo dylint` or `candor-scan`) and dispatches queries to `candor-query` |
 | `sample/` | a small crate written in the capability discipline, for trying conformance mode |
 | `rust-toolchain` | pins the nightly the lint links against (`rustc-dev`) |

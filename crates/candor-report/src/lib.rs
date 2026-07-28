@@ -509,6 +509,15 @@ pub fn report_coverage(text: &str) -> Option<Coverage> {
     serde_json::from_value(val.get("coverage")?.clone()).ok()
 }
 
+/// ⟨0.21⟩ Parse a report's `analyzed` completeness manifest. `None` when the field is absent (a
+/// pre-⟨0.21⟩ producer) or doesn't deserialize. Read by `candor-query gate --report` (SPEC §3.1 ⟨0.24⟩),
+/// where the manifest that rode the report becomes the verdict's `analyzed.count` — the same number the
+/// scan's own `--gate-json` carries, which is half of why the two documents are byte-equal.
+pub fn report_analyzed(text: &str) -> Option<Analyzed> {
+    let val: serde_json::Value = serde_json::from_str(text).ok()?;
+    serde_json::from_value(val.get("analyzed")?.clone()).ok()
+}
+
 /// One structured gate violation (candor-spec §3.3 ⟨0.8⟩), shared by every backend so the verdict
 /// shape is defined ONCE: `effects` is the specific effect set the violation concerns — the denied
 /// set (006), the allow rule's effect (008), the gained set (005), or `[]` (009 layer-flow, no single

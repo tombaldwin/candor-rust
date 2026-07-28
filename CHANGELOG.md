@@ -6,6 +6,71 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### ⟨0.24⟩ `candor-query gate --report <locator> --policy <file>` — apply a policy to an EXISTING report
+
+SPEC §3.1 ⟨0.24⟩ makes this a MUST and rust did not have it: conformance PART 27's R6 row printed
+`NOSURF` for this engine, `NOSURF` does not fail the run, and the 0.24 CHANGELOG entry in candor-spec had
+to be publicly corrected to "pinned 2-of-4" because of it. It is the supply-chain verb — gating a
+dependency's PUBLISHED report is the operation an adopter actually wants and could not previously express
+without re-analysing code they do not have.
+
+**The reason it is a MUST rather than a convenience is that it makes the code-implements-spec direction
+testable at all.** `candor-scan --policy` recomputes the effect set from source, so the classifier is
+always in the loop; `whatif` reports only what a hypothetical INTRODUCES. So the gate had never been
+reachable as a function of a GIVEN signature, and a defect in the GATE and a defect in the CLASSIFIER were
+indistinguishable from any test that could be written here.
+
+**THE SEAM.** The §6.2 matching moved into `candor_classify::gate::gate(&ParsedPolicy, &GateInput)` — one
+copy, two routes in. `candor-scan --policy`'s `policy_violations` is now a thin adapter that builds a
+`GateInput` from the classifier's fixpoints; `candor-query gate --report` builds one from a written report
+and nothing else. `net_classes_of` moved with it, because the report FIELD and the gate FILTER have to be
+the same set.
+
+**A NEW READER WAS NEEDED, and that is not an accident of this codebase.** Every existing loader is built
+to ENRICH — the `.callgraph.json` sidecar, the type hierarchy, chained deps — and this verb has to read
+strictly LESS than any of them, which is not a subset reachable by passing a flag. (candor-swift reported
+the same thing from its own tree.) `load_entries` alone would not do either: it returns the `functions`
+array and drops the §2 envelope the verdict is written from.
+
+**THE MUST NOT: an ABSENT entry is absent.** No callgraph sidecar, no chained dep, no `.candor/config`
+`deps` key, no re-classification of `hosts`/`netClass` through this machine's `net-partner` list. Proved
+with all three back-fill channels open at once over an entry that is not in the report — `deny Fs` exits
+0 — beside the negative control that exits 1 when the same effect is written INTO the report. Both arms
+mutation-verified; without the control, "did not back-fill" and "never evaluated" are the same green.
+
+**ANSWERABILITY: a rule whose evidence the wire does not carry is REFUSED (exit 2), never evaluated** —
+each of the three is fail-OPEN if approximated. `forbid A -> B` and `allow <E> …` are refused
+whole-policy (enforcing the answerable half and exiting 0 is gateless-green); a class-scoped `deny` whose
+scoping datum is an absent optional field is refused per (rule, function), so a scoped rule whose own
+matches carry their evidence still evaluates. The refusal is MINIMAL: because the class set only GROWS and
+`Reject` is upward-closed, a scoped rule whose determinable classes are already non-empty is ANSWERED —
+including the ⟨0.24⟩ CONTRIBUTES counterexample (a reasonless DIRECT `Unknown` under
+`deny E Unknown[unresolved]`), which contributes its class from the entry alone and therefore fires.
+
+**EQUIVALENCE IS THE ACCEPTANCE TEST AND IT IS BYTE-LEVEL** — `analyzed.count`, `reasonClass`, `netClass`
+and the coverage advisory included. Measured over **90 rows**: 30 policies × three corpora (ebman, pgman,
+and this workspace's own five members), 55 of them with violations. `ci/gate-equivalence.sh` keeps 48 of
+those rows as a standing CI gate, and FAILS when no policy in its matrix fires — byte-equal empty verdicts
+prove nothing.
+
+### fix — the scan gate double-counted a violation on two `#[cfg]`-gated units sharing one name
+
+FOUND BY the equivalence obligation above, on 15 of the first 90 rows. `#[cfg(unix)] fn f` beside
+`#[cfg(not(unix))] fn f` puts the qualified name in the gate's function list TWICE while `inferred` holds
+ONE merged signature — so the gate emitted two byte-identical `GateViolation` records, an inflated
+`N policy violation(s)` count, and a `--gate-json` document a consumer reads as two findings. The report
+route cannot reproduce it (a report is keyed by name), which is exactly how it surfaced. The gate now
+answers once per (rule, function); the report is unchanged and still lists both units.
+
+### model cross-check — the engine now agrees with `reference/policy_model.py` directly
+
+The verb's other purpose. 2,949,120 rows: 30 policies (`deny e`, `deny e Unknown[C]`, `pure`) over all
+**98,304 REACHABLE** signatures of the (S, D) lattice, fed to the shipped binary as one report and
+compared against the model's `Reject`. **Zero disagreements.** The domain is `reachable_lattice()`, not
+`full_lattice()`: every engine co-emits `Llm` with `Net`, so `Llm ∈ S ∧ Net ∉ S` names 32,768 points none
+can produce, and the unrestricted run reports them as 40 phantom `deny Net` families — which is the
+negative control proving the differential discriminates at all.
+
 ### usage ⟨0.24⟩ — a `--class` value that cannot be honoured is now REFUSED, not quietly narrowed
 
 SPEC §6.2's value grammar, which conformance PART 27 found unimplemented in **all four** engines rather

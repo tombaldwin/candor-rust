@@ -32,6 +32,7 @@ mod diff;
 mod containment;
 mod state;
 mod fix;
+mod gate;
 mod unverified;
 mod tour;
 
@@ -48,6 +49,7 @@ pub(crate) use diff::*;
 pub(crate) use containment::*;
 pub(crate) use state::*;
 pub(crate) use fix::*;
+pub(crate) use gate::*;
 pub(crate) use unverified::*;
 pub(crate) use tour::*;
 
@@ -81,6 +83,8 @@ fn main() {
         "whatif" => cmd_whatif(rest),
         "fix" => cmd_fix(rest),
         "fix-gate" => cmd_fix_gate(rest),
+        // ⟨0.24⟩ SPEC §3.1: apply a policy to an EXISTING report, with no scan.
+        "gate" => cmd_gate(rest),
         "unverified" => cmd_unverified(rest),
         "rewire" => cmd_rewire(rest),
         "receipt" => cmd_receipt(rest),
@@ -102,7 +106,7 @@ fn main() {
         other => {
             eprintln!(
                 "candor-query: unknown command '{other}' \
-                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|tour|whatif|fix|fix-gate|unverified|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|merge-hook|--agents)"
+                 (audit|show|where|callers|map|diff|containment|reachable|path|impact|blindspots|tour|whatif|fix|fix-gate|gate|unverified|rewire|parsepolicy|receipt|gains|state|reports|locate|gate-verdict|engine-version|merge-hook|--agents)"
             );
             2
         }
@@ -165,6 +169,7 @@ fn print_help() {
         ("whatif   <fn> <Effect> [--report <loc>] [--policy <f>] [--json]", "pre-edit verdict: blast radius + policy violations"),
         ("fix      <fn> <Effect> [--report <loc>] [--policy <f>] [--json]", "the boundary fix: where the effect belongs + the hoist refactor"),
         ("fix-gate [--report <loc>] [--policy <f>] [--json] [--strict]", "a fix for EVERY boundary crossing — advisory; --strict exits 1 while any remains"),
+        ("gate     --report <loc> --policy <f> [--json] [--gate-json <f>]", "apply a policy to an EXISTING report — no scan, no re-derivation (§3.1)"),
         ("unverified [--report <loc>] [--policy <f>] [--strict]", "pure/deny layers that PASS but are Unknown (not PROVABLY clean)"),
         ("rewire   <cur_prefix> <base_prefix> [0|1]", "call edges a function DROPPED vs a baseline (de-wiring)"),
         ("receipt  <prefix>", "the Claude Code receipt's report-derived fields (key<TAB>value)"),

@@ -63,6 +63,14 @@ jobs:
       - name: Test (unit + smoke)
         run: cargo test --workspace
 
+      # SPEC §3.1 ⟨0.24⟩'s ACCEPTANCE TEST for `gate --report`, and it is BYTE-LEVEL: the verdict the
+      # verb writes over a report MUST be byte-equal to the one `candor-scan --policy` wrote while
+      # producing it. It needs BOTH binaries, so it cannot live in `cargo test` (`CARGO_BIN_EXE_*` is
+      # set only for bins of the test's own package). A divergence here is a finding about the GATE —
+      # exactly the defect class the verb exists to make localisable.
+      - name: Gate equivalence (scan --policy ≡ gate --report, byte-level)
+        run: bash ci/gate-equivalence.sh
+
       # Behavioural check: the stateful core (audit + propagation) has no unit test
       # (it needs the dylint harness), so assert real output here — this also catches a
       # regression that makes candor emit nothing at all.

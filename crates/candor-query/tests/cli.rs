@@ -1682,3 +1682,360 @@ fn blindspots_class_grammar_keeps_its_selection() {
     assert_eq!(names(Some("*")).1.len(), 2);
     assert_eq!(names(Some("reflect")), (0, vec![]), "a valid class with no source is an empty answer");
 }
+
+// ── ⟨0.24⟩ `gate --report <locator> --policy <file>` (SPEC §3.1) ──────────────────────────────────
+//
+// Driven through the SHIPPED binary, deliberately: this verb's contract is an EXIT CODE and a
+// stdout/stderr split, and an in-process call can observe neither. (The reference engine found a defect
+// its own unit test passed against, because a `static` had captured stdout at class load.)
+
+/// A hand-written report under `<dir>/report.app.scan.json` — rust's §3.3.1 locator is the PREFIX
+/// `<dir>/report`. Returns the locator. Deletes the directory first: a stale artefact is a flattering
+/// datapoint, and every row below is a control for another row.
+fn gate_fixture(dir: &std::path::Path, sub: &str, report: &str, callgraph: Option<&str>) -> String {
+    let d = dir.join(sub);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("report.app.scan.json"), report).unwrap();
+    if let Some(cg) = callgraph {
+        std::fs::write(d.join("report.app.scan.callgraph.json"), cg).unwrap();
+    }
+    d.join("report").to_string_lossy().into_owned()
+}
+
+fn run_gate(locator: &str, policy: &std::path::Path, extra: &[&str]) -> (i32, String, String) {
+    let mut args: Vec<String> = vec![
+        "gate".into(),
+        "--report".into(),
+        locator.into(),
+        "--policy".into(),
+        policy.to_string_lossy().into_owned(),
+    ];
+    args.extend(extra.iter().map(|s| s.to_string()));
+    let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn pol(dir: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+    let p = dir.join(format!("{name}.policy"));
+    std::fs::write(&p, text).unwrap();
+    p
+}
+
+/// SPEC §3.1 ⟨0.24⟩'s MUST NOT: *an ABSENT entry is absent — the ⟨0.21⟩ purity claim — and MUST NOT be
+/// back-filled from a callgraph sidecar or a chained dep.* All three back-fill channels are opened at
+/// once (the `.callgraph.json` sidecar naming `app.hidden` and its effectful callee, a chained dep
+/// report on `CANDOR_DEPS`, and a `.candor/config` `deps` key beside the report), and `deny Fs` must
+/// still exit 0.
+///
+/// THE NEGATIVE CONTROL IS THE HALF THAT MAKES IT A TEST: the same policy over a report that DOES carry
+/// the effect must exit 1. Without it an engine that ignored the policy entirely would pass — "did not
+/// back-fill" and "never evaluated" are the same green.
+#[test]
+fn gate_report_does_not_backfill_an_absent_entry_and_the_control_fires() {
+    let f = Fixture::new("gate-mustnot");
+    let absent = r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+        "analyzed":{"count":3,"digest":"0"},
+        "functions":[{"fn":"app.visible","inferred":["Net"],"direct":["Net"],
+                      "hosts":["example.com"],"netClass":["unknown-host"]}]}"#;
+    let present = r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+        "analyzed":{"count":3,"digest":"0"},
+        "functions":[{"fn":"app.visible","inferred":["Net"],"direct":["Net"],
+                      "hosts":["example.com"],"netClass":["unknown-host"]},
+                     {"fn":"app.hidden","inferred":["Fs"],"direct":["Fs"],"paths":["/etc/hosts"]}]}"#;
+    let cg = r#"{"app.visible":[],"app.hidden":["dep.readCfg"],"dep.readCfg":[]}"#;
+    let dep = f.dir.join("dep.json");
+    std::fs::write(
+        &dep,
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"dep",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"dep.readCfg","inferred":["Fs"],"direct":["Fs"],"paths":["/etc/hosts"]}]}"#,
+    )
+    .unwrap();
+    let deny_fs = pol(&f.dir, "denyfs", "deny Fs\n");
+
+    let mut codes = Vec::new();
+    for (sub, body) in [("absent", absent), ("present", present)] {
+        let loc = gate_fixture(&f.dir, sub, body, Some(cg));
+        // channel 3: the `.candor/config` `deps` key, in the one directory beside the report.
+        let cfg = f.dir.join(sub).join(".candor");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("config"), format!("deps = {}\n", dep.display())).unwrap();
+        let out = Command::new(bin())
+            .args(["gate", "--report", &loc, "--policy", &deny_fs.to_string_lossy()])
+            .env("CANDOR_DEPS", &dep) // channel 2
+            .output()
+            .expect("run candor-query");
+        codes.push((sub, out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned()));
+    }
+    assert_eq!(
+        codes[0].1, 0,
+        "an ABSENT entry was back-filled: `deny Fs` fired over a report carrying no Fs, with the \
+         callgraph sidecar + CANDOR_DEPS + config `deps` all supplying it\n{}",
+        codes[0].2
+    );
+    assert_eq!(
+        codes[1].1, 1,
+        "NEGATIVE CONTROL: the same policy over a report that DOES carry Fs must exit 1 — without it \
+         this row cannot tell 'not back-filled' from 'policy never evaluated'\n{}",
+        codes[1].2
+    );
+}
+
+/// SPEC §3.1 ⟨0.24⟩ ANSWERABILITY, whole-policy arm: `forbid` and `allow` are REFUSED (exit 2), never
+/// evaluated. `forbid` because a report's `calls` is EFFECT-RELEVANT, so a crossing into a wholly pure
+/// unit is invisible while `forbid` matches on NAME; `allow` because the AS-EFF-008 surface-completeness
+/// marker does not ride the wire as a gate-usable fact. Both are FAIL-OPEN if approximated — the
+/// refusal is what stops a user believing a rule is enforced that never ran.
+#[test]
+fn gate_report_refuses_forbid_and_allow_whole_policy() {
+    let f = Fixture::new("gate-refuse-policy");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.egress","inferred":["Net"],"direct":["Net"],
+                          "hosts":["example.com"],"netClass":["unknown-host"]}]}"#,
+        None,
+    );
+    for (name, text, needle) in [
+        ("forbid", "forbid app -> dep\n", "`forbid`"),
+        ("allow", "allow Net example.com\n", "allow "),
+        // A policy that MIXES an answerable rule with an unanswerable one is still refused whole: the
+        // half-enforced alternative exits 0, which is gateless-green.
+        ("mixed", "deny Net\nforbid app -> dep\n", "`forbid`"),
+    ] {
+        let (rc, stdout, err) = run_gate(&loc, &pol(&f.dir, name, text), &[]);
+        assert_eq!(rc, 2, "{name} must be REFUSED (exit 2), never evaluated:\n{err}");
+        assert!(err.contains(needle), "the refusal must name the offending rule kind, got:\n{err}");
+        assert!(err.contains("scan time"), "…and carry the remedy (gate at scan time), got:\n{err}");
+        assert!(stdout.is_empty(), "a refused policy must produce no verdict at all");
+    }
+    // THE CONTROL: the same report under a rule this verb CAN answer must fire, or the three rows above
+    // prove only that the fixture is inert.
+    let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "bare", "deny Net\n"), &[]);
+    assert_eq!(rc, 1, "the answerable control must FIRE, or the refusals prove nothing:\n{err}");
+}
+
+/// SPEC §3.1 ⟨0.24⟩ ANSWERABILITY, per-(rule, function) arm — and the LIVE fail-open, not a theoretical
+/// one: `deny Net[unknown-host]` over a `Net`-bearing entry with NO `netClass` matched the empty set and
+/// returned exit 0, where the bare `deny Net` returns 1. An absent optional field silently un-scoping a
+/// fail-closed security gate. The bare arms are asserted beside each scoped one — that is what makes the
+/// scoped exit-2 a REFUSAL of a relaxation rather than a signature that simply does not violate.
+#[test]
+fn gate_report_refuses_a_scoped_deny_whose_scoping_datum_is_absent() {
+    let f = Fixture::new("gate-refuse-scoped");
+    let net = gate_fixture(
+        &f.dir,
+        "net",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.egress","inferred":["Net"],"direct":["Net"],"hosts":["example.com"]}]}"#,
+        None,
+    );
+    let unk = gate_fixture(
+        &f.dir,
+        "unk",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.murky","inferred":["Unknown"]}]}"#,
+        None,
+    );
+    let cases = [
+        (&net, "netscoped", "deny Net[unknown-host]\n", 2, "netbare", "deny Net\n"),
+        (&unk, "unkscoped", "deny Unknown[dispatch]\n", 2, "unkbare", "deny Unknown\n"),
+    ];
+    for (loc, sname, stext, swant, bname, btext) in cases {
+        let (rc, _, err) = run_gate(loc, &pol(&f.dir, sname, stext), &[]);
+        assert_eq!(rc, swant, "the scoped rule must be REFUSED, not silently narrowed:\n{err}");
+        assert!(err.contains("Refusing"), "the refusal must say so, got:\n{err}");
+        let (brc, _, berr) = run_gate(loc, &pol(&f.dir, bname, btext), &[]);
+        assert_eq!(brc, 1, "the BARE rule must fire — else the scoped exit 2 proves nothing:\n{berr}");
+    }
+    // A scoped rule whose evidence IS present evaluates normally: the refusal is per (rule, function),
+    // not a blanket ban on scoped rules.
+    let carried = gate_fixture(
+        &f.dir,
+        "carried",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.egress","inferred":["Net"],"direct":["Net"],
+                          "hosts":["example.com"],"netClass":["unknown-host"]}]}"#,
+        None,
+    );
+    let (rc, _, err) = run_gate(&carried, &pol(&f.dir, "netscoped2", "deny Net[unknown-host]\n"), &[]);
+    assert_eq!(rc, 1, "a scoped rule whose scoping datum is PRESENT must evaluate, not refuse:\n{err}");
+    let (rc, _, err) = run_gate(&carried, &pol(&f.dir, "nettel", "deny Net[known-telemetry]\n"), &[]);
+    assert_eq!(rc, 0, "…and tolerate when the class does not match:\n{err}");
+}
+
+/// SPEC §3.1 ⟨0.24⟩ THE MINIMAL-REFUSAL RULE. A class-scoped `deny` is NOT unanswerable merely because
+/// evidence is missing: the class set only GROWS (§6.2 CONTRIBUTES) and `Reject` is upward-closed, so
+/// when the classes determinable FROM THE ENTRY ALONE are non-empty the answer is certain either way.
+/// The ⟨0.24⟩ CONTRIBUTES counterexample — a DIRECT `Unknown` naming no reason — contributes
+/// `unresolved` from the entry with no transitive step, so `deny Unknown[unresolved]` FIRES and must
+/// not be refused. (candor-swift's original refusal here is recorded in SPEC as over-broad.)
+#[test]
+fn gate_report_answers_the_contributes_counterexample_rather_than_refusing_it() {
+    let f = Fixture::new("gate-contributes");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":3,"digest":"0"},
+            "functions":[
+              {"fn":"app.reasonless","inferred":["Unknown"],"direct":["Unknown"]},
+              {"fn":"app.reasoned","inferred":["Unknown"],"direct":["Unknown"],
+               "unknownWhy":["dispatch:app::Trait"]},
+              {"fn":"app.both","inferred":["Unknown"],"calls":["app.reasonless","app.reasoned"]}]}"#,
+        None,
+    );
+    let fired = |name: &str, text: &str| -> (i32, Vec<String>) {
+        let p = pol(&f.dir, name, text);
+        let out = f.dir.join(format!("{name}.verdict.json"));
+        let _ = std::fs::remove_file(&out);
+        let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &out.to_string_lossy()]);
+        assert!(rc != 2, "`{text}` must be ANSWERED, not refused (exit 2):\n{err}");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).expect("a verdict")).unwrap();
+        let mut fns: Vec<String> = v["violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["fn"].as_str().unwrap().to_string())
+            .collect();
+        fns.sort();
+        (rc, fns)
+    };
+    let (rc, fns) = fired("unres", "deny Unknown[unresolved]\n");
+    assert_eq!(rc, 1);
+    assert_eq!(
+        fns,
+        vec!["app.both".to_string(), "app.reasonless".to_string()],
+        "the reasonless DIRECT Unknown contributes `unresolved` AT THE ENTRY, so it composes: the caller \
+         of BOTH a reasonless and a reasoned dep is caught too — the §6.2 counterexample in which adding \
+         a call turned a red verdict green"
+    );
+    // THE DISCRIMINATION CONTROL. Without it this row cannot tell the rule from "contribute
+    // `unresolved` unconditionally": `app.reasoned` named its own class and must stay OUT.
+    let (_, fns) = fired("disp", "deny Unknown[dispatch]\n");
+    assert_eq!(
+        fns,
+        vec!["app.both".to_string(), "app.reasoned".to_string()],
+        "a named direct Unknown keeps ONLY its own class — the naive unconditional contribution would \
+         put `app.reasonless` here too"
+    );
+}
+
+/// `--json` IS `--gate-json -` (SPEC §3.1 ⟨0.24⟩): on a scan `--json <file>` writes the REPORT and there
+/// is none here, so a second meaning would be the one place a consumer could tell the two routes apart.
+/// stdout therefore stays a single pure JSON document — the violation prose goes to stderr, the class of
+/// defect that corrupted the reference engine's stream.
+#[test]
+fn gate_report_json_is_gate_json_dash_and_stdout_stays_parseable() {
+    let f = Fixture::new("gate-json");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":2,"digest":"0"},
+            "coverage":{"uncovered":[{"name":"zeta","calls":2},{"name":"alpha","calls":1}]},
+            "functions":[{"fn":"app.egress","inferred":["Net"],"direct":["Net"],
+                          "hosts":["example.com"],"netClass":["unknown-host"]}]}"#,
+        None,
+    );
+    let p = pol(&f.dir, "denynet", "deny Net\n");
+    let file = f.dir.join("verdict.json");
+    let (rc_json, stdout, err) = run_gate(&loc, &p, &["--json"]);
+    assert_eq!(rc_json, 1);
+    let streamed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("stdout must be pure JSON ({e}): {stdout}\n{err}"));
+    assert!(err.contains("AS-EFF-006"), "the prose belongs on stderr:\n{err}");
+    let (rc_file, stdout2, _) = run_gate(&loc, &p, &["--gate-json", &file.to_string_lossy()]);
+    assert_eq!(rc_file, 1);
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(streamed, written, "`--json` and `--gate-json <file>` must be the same document");
+    assert!(stdout2.contains("AS-EFF-006"), "without a stdout JSON document the prose goes to stdout");
+    // The ⟨0.21⟩ manifest and the ⟨0.15⟩ κ ledger travel ON the report, so the verdict carries them —
+    // this is half of why the document can be byte-equal to `candor-scan --policy`'s.
+    assert_eq!(streamed["analyzed"]["count"], 2);
+    assert_eq!(streamed["coverage"]["uncovered"], 2);
+    assert_eq!(streamed["coverage"]["packages"], serde_json::json!(["alpha", "zeta"]));
+    assert_eq!(streamed["spec"], candor_report_spec());
+}
+
+fn candor_report_spec() -> &'static str {
+    // The verdict declares the spec the BINARY implements; read it from the same constant the report
+    // envelope is stamped from so this assertion can never pin a stale string.
+    candor_report::SPEC_VERSION
+}
+
+/// A ⟨0.21⟩ INCOMPLETE report cannot yield a green gate: the manifest travelled with it, so the same
+/// verdict follows from it that the producing scan reached — exit 2, `ok:false`, `incomplete:true`.
+#[test]
+fn gate_report_will_not_certify_over_a_report_that_declares_itself_incomplete() {
+    let f = Fixture::new("gate-incomplete");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "unanalyzed":[{"path":"src/bad.rs","reason":"source failed to parse"}],
+            "functions":[{"fn":"app.pure_enough","inferred":[]}]}"#,
+        None,
+    );
+    let file = f.dir.join("verdict.json");
+    let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "denyfs", "deny Fs\n"), &["--gate-json", &file.to_string_lossy()]);
+    assert_eq!(rc, 2, "a gate cannot be green over code candor never analyzed:\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["incomplete"], true);
+    assert_eq!(v["unanalyzed"][0]["path"], "src/bad.rs");
+}
+
+/// §3.3.1 grammar: `gate` is a QUERY verb with NO positionals, and a missing/unreadable policy is a LOUD
+/// exit 2. A swallowed token is how a gate runs green over a DISCOVERED report the user never named.
+#[test]
+fn gate_report_grammar_is_loud() {
+    let f = Fixture::new("gate-grammar");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.egress","inferred":["Net"],"direct":["Net"],
+                          "hosts":["e.com"],"netClass":["unknown-host"]}]}"#,
+        None,
+    );
+    let p = pol(&f.dir, "denynet", "deny Net\n");
+    let ps = p.to_string_lossy().into_owned();
+    let missing = f.dir.join("nope.policy").to_string_lossy().into_owned();
+    for (args, needle) in [
+        (vec!["gate", "--report", &loc, "--policy", &ps, "stray"], "unexpected argument"),
+        (vec!["gate", "--report", &loc, "--policy", &ps, "--nope"], "unknown flag"),
+        (vec!["gate", "--report", &loc], "a policy is required"),
+        (vec!["gate", "--report", &loc, "--policy", &missing], "could not be read"),
+        (vec!["gate", "--report", &loc, "--policy"], "--policy requires"),
+        (vec!["gate", "--policy", &ps, "--report"], "--report requires"),
+        // `--gate-json --policy p` must not swallow the next flag and run gateless-green.
+        (vec!["gate", "--report", &loc, "--gate-json", "--policy", &ps], "--gate-json requires"),
+    ] {
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(2), "{args:?} must be a loud usage error:\n{err}");
+        assert!(err.contains(needle), "{args:?} must say `{needle}`, got:\n{err}");
+    }
+    // A locator that matches no report FAILS LOUD — never a silently-empty "no violations".
+    let nowhere = f.dir.join("nothing-here").to_string_lossy().into_owned();
+    let (rc, _, err) = run_gate(&nowhere, &p, &[]);
+    assert_eq!(rc, 2, "an empty locator must not read as a clean gate:\n{err}");
+    // …and so does a report that is FOUND but corrupt (§3.1's found-but-corrupt rule).
+    let bad = gate_fixture(&f.dir, "corrupt", "{ not json at all", None);
+    let (rc, _, err) = run_gate(&bad, &p, &[]);
+    assert_eq!(rc, 2, "a corrupt report is corrupt input, not an effect-free package:\n{err}");
+}
