@@ -379,10 +379,18 @@ fn gate_input_from_report(rep: &GateReport) -> ReportSignature {
 ///
 /// Per (rule, function), NOT per policy: a scoped rule whose matched functions all carry their evidence
 /// evaluates normally, and only the rule that would have been silently narrowed is refused.
-fn unanswerable_scoped_filter(
+///
+/// ⟨0.24⟩ RETURNS EVERY UNANSWERABLE RULE, not the first. SPEC §3.1: *"The refusal message MUST still
+/// disclose which rules could not be evaluated — exit 1 reports the violation it is sure of, it does not
+/// conceal the part it could not read."* Since a refusal can now be OVERRULED by a certain violation
+/// (the precedence correction), the list is a DISCLOSURE that has to travel alongside a verdict, and one
+/// rule out of three is a partial one. At most one message per RULE — the first function that defeats it
+/// is the example; naming all of them would bury the rule.
+fn unanswerable_scoped_filters(
     p: &candor_classify::policy::ParsedPolicy,
     sig: &ReportSignature,
-) -> Option<String> {
+) -> Vec<String> {
+    let mut out = Vec::new();
     for r in &p.rules {
         for q in &sig.all {
             if let Some(s) = &r.scope
@@ -396,7 +404,7 @@ fn unanswerable_scoped_filter(
                 && has("Net")
                 && sig.net_classes.get(q).map(|c| c.is_empty()).unwrap_or(true)
             {
-                return Some(format!(
+                out.push(format!(
                     "`{}` narrows on the Net DESTINATION CLASS, but `{q}` carries Net with no `netClass` \
                      in this report — the field the filter reads is absent, so the narrowing would \
                      succeed for lack of evidence and drop a Net the bare `deny Net` catches. Refusing \
@@ -404,12 +412,13 @@ fn unanswerable_scoped_filter(
                      gate. Use the bare `deny Net`, or gate at scan time.",
                     r.raw.trim()
                 ));
+                break;
             }
             if !r.unknown_classes.is_empty()
                 && has("Unknown")
                 && sig.reason_classes.get(q).map(|c| c.is_empty()).unwrap_or(true)
             {
-                return Some(format!(
+                out.push(format!(
                     "`{}` narrows on the Unknown REASON CLASS, but `{q}` carries Unknown with no reason \
                      reachable in this report — neither its own `unknownWhy` nor a `calls` edge to one. \
                      §6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel \
@@ -417,10 +426,11 @@ fn unanswerable_scoped_filter(
                      fires. Refusing (exit 2). Use the bare `deny Unknown`, or gate at scan time.",
                     r.raw.trim()
                 ));
+                break;
             }
         }
     }
-    None
+    out
 }
 
 // ── the CLI ─────────────────────────────────────────────────────────────────────────────────────
@@ -604,13 +614,59 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     }
     let sig = gate_input_from_report(&rep);
 
-    // The third refusal, and the only one that depends on the REPORT rather than on the policy alone.
-    if let Some(why) = unanswerable_scoped_filter(&p, &sig) {
-        eprintln!("candor-query gate: {why}");
-        return 2;
-    }
+    // ⟨0.24⟩ THE PRECEDENCE: **violation (1) > refusal (2) > incomplete (2)**, and the first rung is
+    // FORCED by Lemma 2 rather than chosen (SPEC §3.1).
+    //
+    // The third refusal — the only one that depends on the REPORT rather than on the policy alone — is
+    // COMPUTED here and ACTED ON below, after the gate has run. It used to `return 2` on this line,
+    // before `gate()` was ever called, so a policy carrying a firing `deny Fs` PLUS one unanswerable
+    // scoped rule exited 2 and wrote NO document: **the certain violation was deleted from the
+    // machine-consumer channel by the rule it had nothing to do with.** Measured 2026-07-28 on
+    // `deny Fs app.fsUnit` + `deny Net[unknown-host] app.netNoClass` — exit 2, no `--gate-json` file,
+    // the `Fs` finding gone. Byte-identical in harm to the incomplete-analysis path `ff34070` fixed one
+    // rung down, and the same fix: compute the verdict FIRST, decide the exit FROM it.
+    //
+    // WHY THE VIOLATION IS SAFE TO REPORT even though a rule went unanswered: if one rule FIRES on
+    // evidence the report carries, the policy is REJECTED, and `Reject` is upward-closed (PAPER3 Lemma
+    // 2) — however the unanswerable rule would have resolved cannot un-reject it. Exit 1 is therefore
+    // not merely fail-closed here, it is CERTAIN, and it is strictly more informative than exit 2
+    // because it names the violation. (All four engines had this backwards; the spec clause pinning
+    // "refusal > violation" was corrected within the hour of being written — candor-spec `7271c69`.)
+    //
+    // The refusal is NOT swallowed: when a violation dominates, every unanswerable rule is still
+    // disclosed on stderr below. Exit 1 reports the violation it is sure of; it does not conceal the
+    // part it could not read.
+    let refused = unanswerable_scoped_filters(&p, &sig);
 
     let mut violations = candor_classify::gate::gate(&p, &sig.as_input());
+    if violations.is_empty() && !refused.is_empty() {
+        // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated.
+        for why in &refused {
+            eprintln!("candor-query gate: {why}");
+        }
+        if !rep.unanalyzed.is_empty() {
+            // Refusal (2) outranks incomplete (2) — same exit, and the refusal is the reason the
+            // verdict does not exist. The manifest still gets said, on the human channel.
+            eprintln!(
+                "candor-query gate: (the report ALSO declares {} unanalyzed unit(s) — that alone would \
+                 have been exit 2)",
+                rep.unanalyzed.len()
+            );
+        }
+        return 2;
+    }
+    if !refused.is_empty() {
+        eprintln!(
+            "candor-query gate: NOTE — {} policy rule(s) could not be evaluated over this report and are \
+             NOT answered by the verdict below. The verdict stands anyway: a rule FIRED on evidence this \
+             report carries, and no resolution of an unanswered rule can un-reject a rejected policy \
+             (SPEC §3.1, PAPER3 Lemma 2). Unanswered:",
+            refused.len()
+        );
+        for why in &refused {
+            eprintln!("    {why}");
+        }
+    }
     // Human output goes to STDERR whenever stdout carries the verdict document, exactly as the scan
     // routes it, so `candor-query gate … --json | jq` sees pure JSON.
     let stdout_is_json = want_json || gate_json.as_deref() == Some("-");

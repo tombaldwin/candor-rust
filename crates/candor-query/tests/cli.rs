@@ -1874,6 +1874,70 @@ fn gate_report_refuses_a_scoped_deny_whose_scoping_datum_is_absent() {
     assert_eq!(rc, 0, "…and tolerate when the class does not match:\n{err}");
 }
 
+/// SPEC §3.1 ⟨0.24⟩ **PRECEDENCE: A CERTAIN VIOLATION DOMINATES A REFUSAL** (candor-spec `7271c69`,
+/// which CORRECTS the "refusal > violation" clause written an hour earlier). One policy carrying BOTH a
+/// firing `deny Fs` and one unanswerable scoped rule exited 2 and wrote NO `--gate-json` document on
+/// rust, java, ts and swift alike — four-way agreement, and four-way wrong. `Reject` is upward-closed
+/// (PAPER3 Lemma 2), so however the unanswerable rule would have resolved cannot un-reject a policy a
+/// firing rule has already rejected: exit 1 is CERTAIN there, and strictly more informative.
+///
+/// **THE ASSERTION IS DOCUMENT-SIDE, AND THAT IS THE WHOLE POINT.** The harm was never the exit code —
+/// it was the certain violation being deleted from the machine-consumer channel, exactly as `ff34070`
+/// measured one rung down for the incomplete case. A test that only checked `rc == 1` would pass on a
+/// route that exits 1 and still writes `violations: []`.
+#[test]
+fn gate_report_reports_a_certain_violation_over_an_unanswerable_rule_beside_it() {
+    let f = Fixture::new("gate-precedence");
+    // ONE report: an Fs unit the firing rule catches, and a Net unit with NO `netClass` — the entry that
+    // makes a `Net[unknown-host]` filter unanswerable.
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":2,"digest":"0"},
+            "functions":[
+              {"fn":"app.fsUnit","inferred":["Fs"],"direct":["Fs"],"paths":["/etc/x"]},
+              {"fn":"app.netNoClass","inferred":["Net"],"direct":["Net"],"hosts":["h.example.com"]}]}"#,
+        None,
+    );
+    let out = f.dir.join("verdict.json");
+    let _ = std::fs::remove_file(&out);
+    let both = pol(&f.dir, "both", "deny Fs app.fsUnit\ndeny Net[unknown-host] app.netNoClass\n");
+    let (rc, _, err) = run_gate(&loc, &both, &["--gate-json", &out.to_string_lossy()]);
+    assert_eq!(rc, 1, "a rule that FIRES on evidence the report carries dominates the refusal:\n{err}");
+    let doc = std::fs::read_to_string(&out)
+        .unwrap_or_else(|e| panic!("a refusal must not delete the verdict document ({e}):\n{err}"));
+    let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    assert_eq!(v["ok"], false);
+    let fns: Vec<&str> =
+        v["violations"].as_array().unwrap().iter().map(|x| x["fn"].as_str().unwrap()).collect();
+    assert_eq!(
+        fns,
+        vec!["app.fsUnit"],
+        "THE CERTAIN VIOLATION MUST BE IN THE DOCUMENT — an exit code is one bit, the document is the \
+         evidence, and this is the channel a PR comment is built from:\n{doc}"
+    );
+    // …AND THE UNANSWERED RULE IS STILL DISCLOSED. Exit 1 reports the violation it is sure of; it does
+    // not conceal the part it could not read (SPEC §3.1). Without this the fix would trade one silence
+    // for another: the operator would read "1 violation" and never learn a second rule never ran.
+    assert!(
+        err.contains("deny Net[unknown-host] app.netNoClass"),
+        "the dominated refusal must still name the rule it could not evaluate:\n{err}"
+    );
+
+    // CONTROL 1 — the refusal is REAL. Drop the firing rule and the same unanswerable rule refuses,
+    // exit 2. Without this row the test cannot tell "violation dominates" from "the refusal was never
+    // triggered by this fixture at all".
+    let sole = pol(&f.dir, "sole", "deny Net[unknown-host] app.netNoClass\n");
+    let (rc2, _, err2) = run_gate(&loc, &sole, &[]);
+    assert_eq!(rc2, 2, "the unanswerable rule alone must still REFUSE:\n{err2}");
+
+    // CONTROL 2 — the firing rule is REAL, and fires alone.
+    let only_fs = pol(&f.dir, "onlyfs", "deny Fs app.fsUnit\n");
+    let (rc3, _, err3) = run_gate(&loc, &only_fs, &[]);
+    assert_eq!(rc3, 1, "the firing rule alone must exit 1:\n{err3}");
+}
+
 /// SPEC §3.1 ⟨0.24⟩ THE MINIMAL-REFUSAL RULE. A class-scoped `deny` is NOT unanswerable merely because
 /// evidence is missing: the class set only GROWS (§6.2 CONTRIBUTES) and `Reject` is upward-closed, so
 /// when the classes determinable FROM THE ENTRY ALONE are non-empty the answer is certain either way.
