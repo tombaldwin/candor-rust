@@ -518,6 +518,64 @@ pub fn report_analyzed(text: &str) -> Option<Analyzed> {
     serde_json::from_value(val.get("analyzed")?.clone()).ok()
 }
 
+/// ⟨0.24⟩ Does this report say it **JUDGED NOTHING** — is its ⟨0.21⟩ `analyzed.count` zero?
+///
+/// **THE DEFECT THIS ANSWERS.** A report carrying `functions: []` and `analyzed.count: 0` bought a
+/// consumer MORE confidence than not having the report at all: the caller drops out of `functions`,
+/// which under ⟨0.21⟩ is a POSITIVE PURITY CLAIM, while the same scan with nothing chained discloses
+/// `invisible` + `coverage.uncovered`. Not a wrong answer — a *confident* one where the honest answer
+/// was a hedge, and it is the DISCLOSURE channel, not the verdict, that reading this restores.
+///
+/// **KEYED ON THE INTEGER, NEVER ON THE EMPTINESS OF `functions`, and that is the whole design.**
+/// `functions: []` is equally the shape of a LEGITIMATE all-pure dependency, whose empty report SPEC §2
+/// chaining rule 3 requires a consumer to BELIEVE. `analyzed.count` is the only thing on the wire that
+/// separates a `pub use`-only facade (count 0) from an all-pure two-function crate (count 2). Measured
+/// over 1997 deduplicated JVM dependency jars: 79 (4.0%) emit count 0, of which only 6 granted any
+/// coverage — but 104 (5.2%) are the legitimate all-pure kind. **A predicate keyed on emptiness would
+/// have withdrawn 104 real claims to catch 6**: the plausible-but-wrong fix is more destructive than
+/// the defect it "fixes", which is why SPEC §2's second table row is a CONTROL and not a footnote.
+///
+/// `has_entries` is whether the report lists any function (either wire shape — the `functions` array or
+/// the v0.1 bare array). It is consulted for EXACTLY ONE row, the manifest-less one.
+///
+/// The rows, in the order they are decided:
+/// - `analyzed` ABSENT and the report lists entries → a pre-⟨0.21⟩ producer that judged something and
+///   said so the only way it could → NOT judged-nothing;
+/// - `analyzed` ABSENT and no entries → SPEC §2's third row: nothing on the wire distinguishes "judged
+///   nothing" from "judged and found nothing", and the unchained reading is the only honest one.
+///   **This retires a pre-⟨0.21⟩ affordance on purpose** — such a report DID buy coverage before;
+/// - `analyzed.count` numeric and ≤ 0 → judged nothing;
+/// - `analyzed.count` numeric and > 0 → judged n, whatever `functions` says. The believed all-pure claim;
+/// - `analyzed` present but UNREADABLE (a null, a string, an object with no numeric `count`) → a
+///   judgment claim that cannot be READ is not a claim → fails CLOSED, the same posture candor-scan's
+///   `declares_itself_incomplete` takes for a malformed `unanalyzed`.
+///
+/// Lives HERE, in the one crate both routes depend on, because ⟨0.24⟩ binds two of them — the chained
+/// join (candor-scan `load_dep_reports`) and `candor-query gate --report` (SPEC §3.1) — and a predicate
+/// written twice is a predicate that can drift between them.
+pub fn claims_to_have_judged_nothing(val: &serde_json::Value, has_entries: bool) -> bool {
+    match val.get("analyzed") {
+        None => !has_entries,
+        Some(a) => match a.get("count").and_then(serde_json::Value::as_f64) {
+            Some(n) => n <= 0.0,
+            None => true,
+        },
+    }
+}
+
+/// [`claims_to_have_judged_nothing`] over raw report TEXT, deriving `has_entries` from whichever wire
+/// shape the report uses. Unparsable text fails CLOSED (it is not a judgment claim either); every caller
+/// on this path refuses such a report before asking, so that value is a posture, not a behaviour.
+pub fn report_judged_nothing(text: &str) -> bool {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(text) else { return true };
+    let has_entries = val
+        .get("functions")
+        .and_then(|x| x.as_array())
+        .or_else(|| val.as_array())
+        .is_some_and(|a| !a.is_empty());
+    claims_to_have_judged_nothing(&val, has_entries)
+}
+
 /// One structured gate violation (candor-spec §3.3 ⟨0.8⟩), shared by every backend so the verdict
 /// shape is defined ONCE: `effects` is the specific effect set the violation concerns — the denied
 /// set (006), the allow rule's effect (008), the gained set (005), or `[]` (009 layer-flow, no single

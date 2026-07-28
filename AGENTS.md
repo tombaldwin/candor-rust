@@ -200,7 +200,10 @@ back-fill it from the callgraph sidecar or a chained dep. Rules whose evidence t
 carry are REFUSED (exit 2) rather than evaluated on partial evidence — `forbid A -> B` (a report's
 `calls` is effect-relevant, so a crossing into a pure unit is invisible), `allow <E> …` (the
 AS-EFF-008 completeness marker is not a gate-usable wire fact), and a class-scoped `deny` over an
-entry whose scoping field is absent. Gate those at scan time instead.
+entry whose scoping field is absent. Gate those at scan time instead. A report whose `analyzed.count`
+is **0** is refused too: it judged nothing, so an absent entry in it is not a purity claim and a green
+verdict would certify a signature that makes no claim about any unit. (`count > 0` with an empty
+`functions` is the opposite — a package that WAS judged and found effect-free — and gates clean.)
 
 `<prefix>` is the report path prefix (e.g. `/tmp/candor-report` — the part before
 `.<crate>.<type>.json`). A prefix matching no report files fails loud (exit 2), so a silent `{}` is

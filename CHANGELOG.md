@@ -6,6 +6,101 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### ⟨0.24⟩ a chained dependency report that judged NOTHING must not read as full coverage
+
+A report carrying `functions: []` and `analyzed.count: 0` bought a consumer **more confidence than not
+chaining the package at all**. Its caller dropped out of `functions` — under ⟨0.21⟩ a positive **purity
+claim** — with no `invisible` on the entry, no `coverage.uncovered` in the envelope, no verdict caveat and
+no line on stderr, while the same scan with `CANDOR_DEPS` unset disclosed all four. Conformance PART 26
+found the same door in all four engines and printed `rust INDISTINGUISHABLE — the engine is not reading
+analyzed.count`.
+
+**The harm stated precisely, because the loose form sends you after the wrong symptom.** The empty report
+carries no effects, so the count-0 arm cannot itself *trip* a gate — it and the unchained arm both exit 0
+on `deny Fs`. What it DELETES is the **disclosure**; the gate flip exists only against the *trusted* arm.
+So this fix restores the disclosure channel and deliberately does not manufacture a verdict: asserting an
+effect the consumer has no evidence for is the mirror sin.
+
+    unchained   entry -> invisible: ['deplib'], coverage.uncovered: [deplib]   exit 0
+    trusted     entry -> ['Fs']                                                exit 1
+    count: 0    pre   entry ABSENT from `functions`, no coverage, no advisory  exit 0
+    count: 0    post  entry -> invisible: ['deplib'], coverage.uncovered       exit 0  + a named stderr line
+
+**WHERE THE RULE LIVES.** A third conjunct on the COVERED set — `deps.rs`'s one `cover` closure and the κ
+ledger's one `covered` predicate — beside the §2.1 staleness gate and the ⟨0.21⟩ incompleteness one.
+Coverage is the single mechanism that turns a report's SILENCE into a purity claim, and this rung is the
+third answer to *"may this silence speak?"*, after staleness and incompleteness. Not the gate: a gate
+reads its verdict off a coverage decision already made, so the rule there would have to be repeated per
+verb and would leave the report, the κ ledger and every other consumer of the same silence untouched.
+Same placement candor-java (`Loader.loadCrossDeps`) and candor-swift (`Deps.swift`) reached independently.
+It needed no new plumbing: withhold coverage and the existing `invisible` / `coverage.uncovered` /
+`--gate-json` block all fall out.
+
+**Coverage is anchored FOUR times here** — the envelope `package`, the JVM-shape `packages[]`, the
+filename fallback and each entry's `hash` prefix — and all four funnel through one closure, so there is
+one place to gate. That matters more for this rung than the last: a count-0 report reaches the entry loop
+with **no entries**, so its `hash` anchor never fires and gating that one alone would have been exactly
+the no-op java measured. `coverage_has_exactly_one_anchor_and_exactly_one_consumer` now enumerates four
+writes and three consumers out of the source.
+
+**THE SECOND ROW OF SPEC §2's TABLE IS A CONTROL, NOT A FOOTNOTE, and it is why this is not a one-liner.**
+`functions: []` is equally the shape of a legitimately all-pure dependency, whose empty report §2 chaining
+rule 3 requires a consumer to BELIEVE. `analyzed.count` is the only thing on the wire that separates them,
+so the predicate is keyed on **that integer** and never on the emptiness of `functions` — `functions`
+enters for exactly one row, the manifest-less one. Measured over 1997 JVM dependency jars: a fix keyed on
+emptiness would have withdrawn **104 real claims to catch 6**.
+
+**BOTH CONTROLS, MUTATION-VERIFIED IN THREE DIRECTIONS.**
+
+- `count: 0` → not covered, and the consumer's answer is asserted **EQUAL to the unchained arm's** report
+  rather than against a literal, because "exactly as if it had not been chained" is what §2 states.
+  Reverting the predicate fails 5 tests, every one on a FLOOR assertion.
+- `count: n>0` → **UNCHANGED**: covered, believed all-pure, exit 0, no hedge, no advisory. Keying on
+  emptiness instead fails 4 tests, every one on a CONTROL assertion — **while the count-0 rows stay
+  green**, which is what a fix that had "worked" looks like from the floor arm alone.
+- Removing the anchor branch, or the ledger conjunct, each fails 4 — including the structural test, which
+  is the one that would otherwise let the two halves drift apart.
+
+**SPEC §2's THIRD ROW retires a pre-⟨0.21⟩ affordance, recorded rather than smuggled.** A manifest-less
+empty report DID buy coverage, and `kappa_ledger_honors_an_empty_chained_report_as_coverage` pinned exactly
+that. Its subject — the envelope `package` field carrying coverage independent of the filename — is
+unchanged; it is RE-POINTED at a manifest-bearing fixture, with the count-0 and manifest-less forms added
+beside it as their own rows, which is what the spec clause asks for.
+
+**CONSERVATIVE ON CONFLICT, and a deliberate divergence from candor-swift.** A crate chained once as judged
+and once as judged-nothing keeps the hedge here; swift subtracts so the real report wins. Swift's argument
+is good (a count-0 report makes no claim in either direction), but rust's index DROPS a key two dep entries
+disagree under, so granting coverage on one report's authority can make the very key that mattered resolve
+to nothing and read confidently pure — the same reasoning `63bbe87` recorded for fresh-vs-stale. The cost
+of being wrong this way is one extra hedge; the other way it is a false all-clear.
+
+**⟨0.24⟩ THE SAME RULE BINDS `gate --report` (SPEC §3.1)** — "the obligation is on the reading, not on the
+route by which the report arrived". Measured: the verb printed `policy ✓` and exited 0 over a count-0
+report, byte-identical to the legitimately-all-pure case. It now **REFUSES (exit 2) and writes no verdict**
+— §3.3's exit-2 cause (a), the gate could not be evaluated at all, so an `ok` either way would be a guess.
+(Cause (b)'s machine-legible `incomplete` verdict is keyed to `unanalyzed`, a NAMED list of source the
+producer could not read; a count-0 report names nothing.) It lands beside the verb's three existing
+refusals, which refuse for the same reason. The predicate itself lives in `candor-report`, the one crate
+both routes depend on — a rule written twice is a rule that can drift between its routes.
+
+**BLAST RADIUS, real chained trees.** 17 of candor-rust's own 173 dep reports (9.8%) say `count: 0`, 27 of
+ebman's 409 (6.6%), 20 of pgman's 270 (7.4%) — every one a macro-only, platform-link-stub, data-blob or
+re-export-only crate (`cfg_if`, `windows_*_msvc`, `icu_*_data`, `stable_deref_trait`, `pin_utils`,
+`static_assertions`). None is manifest-less. Against them stand 16 / 49 / 39 legitimately all-pure reports
+(9.2% / 12.0% / 14.4%) that an emptiness-keyed fix would have hedged. On candor-rust's own chained scan the
+REPORTS are **identical before and after** — none of the 17 is a crate this code demonstrably calls — so
+the whole live effect is one new stderr advisory naming all 17. A rare-facade catch, not a rule that turns
+a dep tree uncovered.
+
+**PART 26**, `rust/empty_zero`: 64 live cells move from `A` (ABSENT — a silent purity claim) to `h`
+(HEDGED_LOSS, the correct §2.1 shape), leaving **0 failing cells**, and
+
+    rust     SEPARATED on 64/80 cells — the engine distinguishes them
+
+where it read `INDISTINGUISHABLE — the engine is not reading analyzed.count`. The `rust/empty_zero` waiver
+in candor-spec's ratchet baseline is now fully STALE (the harness says so: "every cell now passes") and
+should be DELETED rather than narrowed — that is a candor-spec edit and is left alone here.
+
 ### ⟨0.24⟩ `candor-query gate --report <locator> --policy <file>` — apply a policy to an EXISTING report
 
 SPEC §3.1 ⟨0.24⟩ makes this a MUST and rust did not have it: conformance PART 27's R6 row printed
