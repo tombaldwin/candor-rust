@@ -571,41 +571,95 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
     // crate's all-pure purity CLAIM, not a blind spot. Found live: the exemption was keyed on the
     // filename shape + entry hashes, so an empty report still drew a "classifier doesn't cover 1 dependency…" line
     // (candor-java/candor-ts stay correctly quiet on the same shape).
+    //
+    // ⟨0.24⟩ RE-POINTED, NOT DELETED, and the reason is written down because the edit LOOKS like a
+    // weakening. This test's subject is that the ENVELOPE `package` field carries coverage on its own —
+    // independent of the filename and of any join firing — and that subject is unchanged. What changed is
+    // the fixture it makes the point with: an empty report is a purity claim only when its ⟨0.21⟩
+    // manifest says something WAS judged, so the claim arm now carries `analyzed.count: 2` and the two
+    // arms that do NOT make a claim (count 0, and the manifest-less pre-⟨0.21⟩ form of SPEC §2's third
+    // row) sit beside it as their own rows. SPEC §2 ⟨0.24⟩ names this retirement explicitly: "An engine
+    // carrying such a pin should re-point it at a manifest-bearing fixture rather than delete it."
     let d = std::env::temp_dir().join(format!("candor-scan-cli-kappaempty-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("src")).unwrap();
     std::fs::write(d.join("Cargo.toml"),
         "[package]\nname = \"kappaledger\"\n\n[dependencies]\ndepc = \"1\"\n").unwrap();
     std::fs::write(d.join("src/lib.rs"), "pub fn use_dep() { depc::hit(); }\n").unwrap();
-    // The empty depc report, named OUTSIDE the `….<crate>.scan.json` shape — the envelope's
-    // `package` field alone must carry the coverage claim.
-    let rep = d.join("depc-purity.json");
-    std::fs::write(&rep, format!(r#"{{
-        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.23"}},
-        "package": "depc",
-        "functions": []}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
+    // The empty depc reports, all named OUTSIDE the `….<crate>.scan.json` shape — the envelope's
+    // `package` field alone must carry (or withhold) the coverage claim. The three differ in the
+    // ⟨0.21⟩ manifest and in NOTHING else, which is what makes them a control set.
+    let write_rep = |name: &str, manifest: &str| -> std::path::PathBuf {
+        let p = d.join(name);
+        std::fs::write(&p, format!(r#"{{
+            "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.24"}},
+            "package": "depc", {manifest}
+            "functions": []}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
+        p
+    };
+    let claim = write_rep("depc-purity.json", r#""analyzed": {"count": 2, "digest": "0"},"#);
+    let judged_nothing = write_rep("depc-facade.json", r#""analyzed": {"count": 0, "digest": "0"},"#);
+    let no_manifest = write_rep("depc-legacy.json", "");
 
-    // CONTROL (no chaining): the ledger fires — depc is a genuine blind spot.
+    // CONTROL (no chaining): the ledger fires — depc is a genuine blind spot. Its report is the
+    // reference every other arm below is compared against, so it is captured, not just asserted on.
     let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
         .output().expect("run candor-scan");
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("classifier doesn't cover") && stderr.contains("depc"),
-        "without chaining, the called-but-unknown dep must be disclosed: {stderr}");
+    let unchained_stderr = String::from_utf8(out.stderr).unwrap();
+    let unchained: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    assert!(unchained_stderr.contains("classifier doesn't cover") && unchained_stderr.contains("depc"),
+        "without chaining, the called-but-unknown dep must be disclosed: {unchained_stderr}");
 
-    // CHAINED empty report: NO ledger line, and the join-less call reads pure (the claim honored).
-    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
-        .env("CANDOR_DEPS", rep.to_string_lossy().as_ref())
-        .output().expect("run candor-scan");
-    let _ = std::fs::remove_dir_all(&d);
-    assert_eq!(out.status.code(), Some(0));
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(!stderr.contains("classifier doesn't cover"),
-        "an empty chained report is coverage — the ledger must stay quiet: {stderr}");
-    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim())
-        .expect("pure JSON report");
+    let run_chained = |rep: &std::path::Path| -> (i32, String, serde_json::Value) {
+        let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
+            .env("CANDOR_DEPS", rep.to_string_lossy().as_ref())
+            .output().expect("run candor-scan");
+        let code = out.status.code().unwrap_or(-1);
+        let err = String::from_utf8(out.stderr).unwrap();
+        let v = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON");
+        (code, err, v)
+    };
+
+    // (a) THE CLAIM — `analyzed.count: 2` with `functions: []` is a dependency that judged two units and
+    //     found neither effectful. SPEC §2 rule 3 says BELIEVE it: no ledger line, and the join-less call
+    //     reads pure. THIS IS THE CONTROL FOR (b): a "fix" keyed on `functions` being empty rather than on
+    //     the integer would hedge here too, and would have disabled chained coverage rather than
+    //     implemented ⟨0.24⟩.
+    let (code, err, v) = run_chained(&claim);
+    assert_eq!(code, 0);
+    assert!(!err.contains("classifier doesn't cover"),
+        "an empty chained report that JUDGED something is coverage — the ledger must stay quiet: {err}");
+    assert!(!err.contains("judged NOTHING"), "…and it must not draw the ⟨0.24⟩ advisory either: {err}");
     assert!(v["functions"].as_array().unwrap().iter()
             .all(|f| f["fn"].as_str() != Some("use_dep")),
         "the call into the all-pure dep reads pure (omitted from the report): {v}");
+    assert!(v.get("coverage").is_none(), "a covered dep leaves no κ ledger in the envelope: {v}");
+
+    // (b) ⟨0.24⟩ THE FLOOR — `analyzed.count: 0` is "I judged nothing". The consumer must carry EXACTLY
+    //     the disclosure the UNCHAINED arm carries: asserted as EQUALITY with that arm's report rather
+    //     than against a literal, because "exactly as if it had not been chained" is what SPEC §2 states
+    //     and a literal could drift away from the unchained reading without anything noticing.
+    let (code, err, v) = run_chained(&judged_nothing);
+    assert_eq!(code, 0, "a count-0 report adds a HEDGE, never a verdict — there is no effect to charge");
+    assert_eq!(v["functions"], unchained["functions"],
+        "⟨0.24⟩ a count-0 chained report bought MORE confidence than not chaining at all — the caller's \
+         `invisible` disclosure is gone:\nchained={v:#}\nunchained={unchained:#}");
+    assert_eq!(v["coverage"], unchained["coverage"],
+        "…and the envelope's κ ledger with it:\nchained={v:#}\nunchained={unchained:#}");
+    assert!(err.contains("judged NOTHING") && err.contains("depc"),
+        "the withheld coverage must be EXPLAINED — nothing else on any channel says why a crate with a \
+         chained report is being hedged: {err}");
+
+    // (c) SPEC §2's THIRD ROW — no manifest at all (a pre-⟨0.21⟩ producer) and no entries. Nothing on the
+    //     wire distinguishes "judged nothing" from "judged and found nothing", so it falls back to the
+    //     unchained reading too. A deliberate behaviour change: this exact shape DID buy coverage before,
+    //     and it was this test that pinned it.
+    let (_, err, v) = run_chained(&no_manifest);
+    assert_eq!(v["functions"], unchained["functions"],
+        "a manifest-less empty report makes no ⟨0.21⟩ claim, so its silence cannot license one: {v:#}");
+    assert!(err.contains("judged NOTHING"), "…and it is disclosed on the same channel: {err}");
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// A crate whose whole body is `calls` qualified calls spread over two DECLARED-but-unvendored

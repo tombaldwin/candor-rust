@@ -1998,6 +1998,74 @@ fn gate_report_will_not_certify_over_a_report_that_declares_itself_incomplete() 
     assert_eq!(v["unanalyzed"][0]["path"], "src/bad.rs");
 }
 
+/// ⟨0.24⟩ SPEC §3.1: A REPORT HANDED DIRECTLY TO THE GATE WITH `analyzed.count: 0` MAKES THE SAME CLAIM
+/// AS A CHAINED ONE — it judged nothing — and must be read the same way. "The obligation is on the
+/// reading, not on the route by which the report arrived."
+///
+/// Measured before the fix: `gate --report` over a count-0 report printed `policy ✓` and exited 0 — a
+/// green certificate over a signature that makes no claim about any unit, and byte-identical to the
+/// legitimately-all-pure case one row down. REFUSED (exit 2) now, with NO verdict document: SPEC §3.3's
+/// exit-2 rule, cause (a) — the gate could not be evaluated at all, so an `ok:true/false` would be a
+/// guess. (Cause (b)'s machine-legible `incomplete` verdict is keyed to `unanalyzed`, a NAMED list of
+/// source the producer could not read; a count-0 report names nothing, so borrowing that shape would put
+/// a claim on the wire the report does not support.) It lands beside this verb's three existing refusals
+/// — `forbid`, `allow`, the class-scoped `deny` over an absent field — which refuse for the same reason:
+/// evidence the report cannot carry is refused, never evaluated on evidence that is not there.
+///
+/// THE SECOND ROW IS THE CONTROL and the arms differ in ONE INTEGER: `count: 2` with the same empty
+/// `functions` is a legitimate all-pure package, which §2 rule 3 requires the verb to BELIEVE — exit 0,
+/// clean verdict, no hedge. A refusal keyed on `functions` being empty passes the floor row and fails
+/// here, which is what the plausible-but-wrong fix looks like.
+#[test]
+fn gate_report_refuses_a_report_that_judged_nothing_but_believes_an_all_pure_one() {
+    let f = Fixture::new("gate-judged-nothing");
+    let p = pol(&f.dir, "denyfs", "deny Fs\n");
+    let body = |count: &str| format!(
+        r#"{{"candor":{{"version":"handwritten","spec":"0.24"}},"package":"app",
+            "analyzed":{{"count":{count},"digest":"0"}},
+            "functions":[]}}"#);
+
+    // THE FLOOR: judged nothing → refused, loudly, and the reason names the integer.
+    let zero = gate_fixture(&f.dir, "zero", &body("0"), None);
+    let vfile = f.dir.join("verdict-zero.json");
+    let (rc, out, err) = run_gate(&zero, &p, &["--gate-json", &vfile.to_string_lossy()]);
+    assert_eq!(rc, 2,
+               "a count-0 report licenses no purity claim, so the verb must not certify:\nout={out}\nerr={err}");
+    assert!(err.contains("JUDGED NOTHING") && err.contains("analyzed.count"),
+            "the refusal must name what the report said, or it reads as a broken locator:\n{err}");
+    assert!(!vfile.exists(),
+            "SPEC §3.3 exit-2 cause (a): a gate that could not be evaluated writes NO verdict — an \
+             `ok` either way would be a guess");
+    assert!(!out.contains("\"ok\""), "…and nothing goes to stdout either:\n{out}");
+
+    // THE CONTROL: judged TWO units, found neither effectful. Unchanged — believed, clean, exit 0.
+    let allpure = gate_fixture(&f.dir, "allpure", &body("2"), None);
+    let vfile = f.dir.join("verdict-allpure.json");
+    let (rc, _, err) = run_gate(&allpure, &p, &["--gate-json", &vfile.to_string_lossy()]);
+    assert_eq!(rc, 0, "an all-pure package's report is a CLAIM (§2 rule 3) and must still gate clean:\n{err}");
+    assert!(!err.contains("JUDGED NOTHING"), "…with no ⟨0.24⟩ hedge anywhere:\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&vfile).unwrap()).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["violations"].as_array().unwrap().len(), 0);
+    assert!(v.get("incomplete").is_none(), "a believed all-pure verdict carries no new hedge: {v}");
+
+    // SPEC §2's THIRD ROW on this route too: no manifest and no entries is a pre-⟨0.21⟩ producer that
+    // gives the verb nothing to distinguish "judged nothing" from "judged and found nothing".
+    let legacy = gate_fixture(&f.dir, "legacy",
+        r#"{"candor":{"version":"handwritten","spec":"0.20"},"package":"app","functions":[]}"#, None);
+    let (rc, _, err) = run_gate(&legacy, &p, &[]);
+    assert_eq!(rc, 2, "a manifest-less EMPTY report makes no ⟨0.21⟩ claim to gate over:\n{err}");
+    // …and the same producer WITH an entry judged something, the only way it could say so. Not refused.
+    let legacy_full = gate_fixture(&f.dir, "legacyfull",
+        r#"{"candor":{"version":"handwritten","spec":"0.20"},"package":"app",
+            "functions":[{"fn":"app.pure_enough","inferred":[]}]}"#, None);
+    let (rc, _, err) = run_gate(&legacy_full, &p, &[]);
+    assert_eq!(rc, 0,
+               "a pre-⟨0.21⟩ report that LISTS entries judged something — refusing it would withdraw \
+                every manifest-less report from the verb, which is the emptiness fix wearing a \
+                different hat:\n{err}");
+}
+
 /// §3.3.1 grammar: `gate` is a QUERY verb with NO positionals, and a missing/unreadable policy is a LOUD
 /// exit 2. A swallowed token is how a gate runs green over a DISCOVERED report the user never named.
 #[test]

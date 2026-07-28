@@ -212,6 +212,33 @@ pub(crate) struct DepIndex {
     /// rust-specific reason `63bbe87` refused to align the fresh-vs-stale rule. See the fixture
     /// `a_crate_chained_both_complete_and_incomplete_keeps_its_blind_spot_disclosure`.
     pub(crate) incomplete_pkgs: std::collections::HashSet<String>,
+    /// ⟨0.24⟩ Crates whose loaded report says it JUDGED NOTHING — ⟨0.21⟩ `analyzed.count` is 0 (see
+    /// [`candor_report::claims_to_have_judged_nothing`] for the predicate and its shape table). **THE THIRD
+    /// ANSWER TO "MAY THIS REPORT'S SILENCE SPEAK?"**, after staleness (§2.1, [`DepIndex::untrusted`]) and
+    /// incompleteness (⟨0.21⟩, [`DepIndex::incomplete_pkgs`]). Coverage is the single mechanism that turns
+    /// a report's silence into a purity claim, so all three live on the same door.
+    ///
+    /// A count-0 report bought a consumer MORE confidence than not chaining the package at all: the caller
+    /// dropped out of `functions` — a ⟨0.21⟩ positive purity claim — with no `invisible`, no
+    /// `coverage.uncovered`, no verdict caveat and no `--gate-json` coverage block, while the SAME scan
+    /// with nothing chained disclosed all four. The empty report carries no effects, so this arm cannot
+    /// itself trip a gate; what it deleted is the DISCLOSURE, which is why the fix restores that channel
+    /// and does not manufacture a verdict.
+    ///
+    /// Treatment follows [`DepIndex::incomplete_pkgs`], not [`DepIndex::untrusted`]: the crate stays
+    /// CHAINED (its keys are still asked, so a contradictory count-0-with-entries report still answers)
+    /// and only coverage is withheld. Entries are never touched, so this is strictly additive — it can
+    /// only add a hedge, never remove an effect.
+    ///
+    /// CONSERVATIVE ON CONFLICT, like its two neighbours here and UNLIKE candor-swift, which subtracts
+    /// (`unjudgedPkgs.subtract(coveredPkgs)`) so a crate chained once as judged and once as judged-nothing
+    /// keeps the earned claim. Both readings are defensible — swift's is that a count-0 report makes no
+    /// claim in either direction and so should be a no-op beside a real one; this engine's is the one its
+    /// other two refusal sets already take, that a partial report cannot vouch for the part another report
+    /// covered, and the cost of being wrong is one extra hedge rather than one missing one. Pinned by
+    /// `a_crate_chained_both_judged_and_unjudged_keeps_its_blind_spot_disclosure`; flipping it is a
+    /// one-line subtraction at the end of the load, exactly as `incomplete_pkgs` documents.
+    pub(crate) judged_nothing_pkgs: std::collections::HashSet<String>,
     /// ⟨typeSurface.returns⟩ `{crate}#{fn qual}` -> `{crate}#{type qual}`, merged across every loaded
     /// report. Lets a consumer type a receiver bound from a dependency FACTORY, which is otherwise
     /// impossible: a pure factory is absent from the report entirely, so there is no entry on which a
@@ -301,6 +328,13 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // deleting (standing bar item 8c), and this one was the second.
         let incomplete = declares_itself_incomplete(&v);
         let Some(fns) = v.get("functions").and_then(|x| x.as_array()).or_else(|| v.as_array()) else { continue };
+        // ⟨0.24⟩ …and neither does a report that JUDGED NOTHING (`analyzed.count: 0`) — the third answer
+        // to "may this report's silence speak?", ranked BELOW the other two for the same reason
+        // incompleteness ranks below staleness: the three stderr disclosures stay disjoint and the
+        // precedence lives in one place, `cover`'s branch order. Keyed on the INTEGER and never on
+        // `fns.is_empty()` — the two are the same shape on the wire and only the count separates a facade
+        // from a legitimately all-pure crate; `fns` enters ONLY as SPEC §2's manifest-less third row.
+        let judged_nothing = candor_report::claims_to_have_judged_nothing(&v, !fns.is_empty());
         // ⟨typeSurface.returns⟩ Merge this report's published return types. GATED ON `!stale` for the
         // same reason the effects are: a report from a different producer version is not trusted, and a
         // type surface read off one would silently key the consumer through a claim we just refused to
@@ -434,12 +468,22 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // fallback) and gating one of them failed NOTHING. rust has FOUR registration sites — the
         // envelope `package`, the JVM-shape `packages[]`, the filename fallback and each entry's `hash`
         // prefix — and all four go through here, so there is exactly one place to gate. Counted, not
-        // assumed: `cover(` is the only writer of `crates`/`untrusted`/`incomplete_pkgs` in this file.
+        // assumed: `cover(` is the only writer of `crates`/`untrusted`/`incomplete_pkgs`/
+        // `judged_nothing_pkgs` in this file, and `coverage_has_exactly_one_anchor_and_exactly_one_consumer`
+        // fails if a fifth site ever appears.
+        //
+        // ⟨0.24⟩ …AND SO DOES A REPORT THAT JUDGED NOTHING, into `judged_nothing_pkgs`. It rides the SAME
+        // closure for exactly the reason the trap names: a count-0 report reaches the entry loop with no
+        // entries, so the `hash`-prefix anchor never fires for it and gating only that one would have been
+        // a no-op wearing a fix's clothes — the envelope `package` and the FILENAME fallback are the two
+        // anchors that actually carry this shape. Gating the closure gates all four at once.
         let cover = |name: String, idx: &mut DepIndex| {
             if stale {
                 idx.untrusted.insert(name.clone());
             } else if incomplete {
                 idx.incomplete_pkgs.insert(name.clone());
+            } else if judged_nothing {
+                idx.judged_nothing_pkgs.insert(name.clone());
             }
             idx.crates.insert(name);
         };
@@ -634,6 +678,23 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             "candor-scan: {} chained dependency report(s) declare source they could not analyze (⟨0.21⟩ \
              `unanalyzed`) — their entries are KEPT unchanged, but they grant NO coverage, so a key they \
              do not answer discloses instead of reading pure: {}",
+            names.len(),
+            names.join(", ")
+        );
+    }
+    // ⟨0.24⟩ The judged-nothing disclosure, third on the same channel. The REMEDY is named because a
+    // count-0 report is almost always a build artifact rather than a real answer — a facade crate of
+    // `pub use`es, a platform stub, an aggregation target — and the reader's next question is "so what do
+    // I do about it", which the other two lines answer implicitly (rebuild / fix the parse error) and
+    // this one does not.
+    if !idx.judged_nothing_pkgs.is_empty() {
+        let mut names: Vec<&str> = idx.judged_nothing_pkgs.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        eprintln!(
+            "candor-scan: {} chained dependency report(s) judged NOTHING (⟨0.24⟩ `analyzed.count` is 0, \
+             absent-with-no-functions, or unreadable) — they grant NO coverage, so a call into them \
+             discloses exactly as if the report had not been chained at all. Usually a facade or \
+             re-export-only crate: scan what it re-exports: {}",
             names.len(),
             names.join(", ")
         );

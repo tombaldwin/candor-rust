@@ -1384,6 +1384,206 @@ pub fn unlisted_whole() { wholelib::io::danger(); }
         assert_eq!(idx.by_key.get("oldbroke#io::go").map(|e| e.effects.clone()), Some(BTreeSet::from(["Unknown"])));
     }
 
+    /// ⟨0.24⟩ A CHAINED REPORT THAT JUDGED NOTHING (`analyzed.count: 0`) MUST NOT READ AS FULL COVERAGE —
+    /// the third answer to "may this report's silence speak?", after staleness (§2.1) and incompleteness
+    /// (⟨0.21⟩), and the last one the wire can currently express.
+    ///
+    /// THE DEFECT, exactly as conformance PART 26 found it four-way: a report carrying `functions: []` and
+    /// `analyzed.count: 0` bought a consumer MORE confidence than not chaining the package at all.
+    ///
+    ///     dep:      facade crate, `pub use`es only — report: package "facadelib", analyzed.count 0
+    ///     consumer: hits_facade() { facadelib::io::go() }
+    ///               unchained ->  invisible: ['facadelib'] + coverage.uncovered    the honest hedge
+    ///               CHAINED   ->  ABSENT FROM THE REPORT, no coverage field        a ⟨0.21⟩ purity claim
+    ///
+    /// STATE THE HARM PRECISELY, because the loose form sends you after the wrong symptom: the empty
+    /// report carries no effects, so this arm cannot itself TRIP a gate — it and the unchained arm both
+    /// exit 0 on `deny Fs`. What it DELETES is the DISCLOSURE (the `invisible` marker, the κ ledger, the
+    /// verdict caveat, `--gate-json`'s coverage block). The gate flip exists only against the TRUSTED
+    /// arm. So the fix restores the disclosure channel and must not manufacture a verdict — asserting an
+    /// effect the consumer has no evidence for is the mirror sin.
+    ///
+    /// THE SECOND ARM IS A CONTROL, NOT A COURTESY. `functions: []` is equally the shape of a legitimate
+    /// all-pure dependency, which §2 rule 3 requires a consumer to BELIEVE. Keyed on emptiness instead,
+    /// this fixture's count-0 row would still go GREEN while the control failed — which is what a
+    /// plausible-but-wrong fix looks like from the floor arm alone. Measured over 1997 JVM dependency
+    /// jars: 79 count-0, only 6 granting coverage, against 104 legitimate all-pure. See
+    /// [`candor_report::claims_to_have_judged_nothing`].
+    #[test]
+    fn a_report_that_judged_nothing_grants_no_ledger_coverage_exemption() {
+        let d = std::env::temp_dir().join(format!("candor-judgednothing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // The two reports differ in ONE INTEGER and in nothing else. That is the whole experiment.
+        std::fs::write(d.join("report.facadelib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.24"}},
+            "package": "facadelib",
+            "analyzed": {{"count": 0, "digest": "0"}},
+            "functions": []}}"#)).unwrap();
+        std::fs::write(d.join("report.purelib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.24"}},
+            "package": "purelib",
+            "analyzed": {{"count": 2, "digest": "0"}},
+            "functions": []}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+
+        // CHAINED, NOT COVERED — the same split incompleteness takes. The join gate must still see the
+        // crate (a contradictory count-0-WITH-entries report still answers its keys); only the claim that
+        // its SILENCE is informative is withdrawn.
+        assert!(idx.crates.contains("facadelib") && idx.crates.contains("purelib"),
+                "the join gate must still cover both: {:?}", idx.crates);
+        assert!(idx.judged_nothing_pkgs.contains("facadelib"),
+                "a report whose `analyzed.count` is 0 judged nothing and must lose its coverage claim");
+        assert!(!idx.judged_nothing_pkgs.contains("purelib"),
+                "THE CONTROL: `count: 2` with `functions: []` is a believed all-pure claim (§2 rule 3) — \
+                 hedging it would disable chained coverage rather than implement ⟨0.24⟩");
+        // …and it is neither of the other two refusals: nothing distrusted, nothing declared incomplete.
+        assert!(idx.untrusted.is_empty() && idx.incomplete_pkgs.is_empty(),
+                "judging nothing is not staleness and not incompleteness: {:?} {:?}",
+                idx.untrusted, idx.incomplete_pkgs);
+
+        let src = "\
+pub fn hits_facade() { facadelib::io::go(); }
+pub fn hits_pure() { purelib::io::go(); }
+";
+        let v = scan_crate_chained("judgednothing", "consumer",
+            "\n[dependencies]\nfacadelib = \"1\"\npurelib = \"1\"\n", src, &idx);
+        let inv = |name: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .find(|f| f["fn"].as_str() == Some(name))
+                .and_then(|f| f["invisible"].as_array().cloned()).unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        };
+        // 1. THE FLOOR: a function whose only reach is into the crate that judged nothing must disclose it
+        //    blind. Before this rung it was absent from the report entirely — a confident purity claim.
+        assert!(inv("hits_facade").contains(&"facadelib".to_string()),
+                "a fn reaching only a crate whose report judged NOTHING must disclose it blind — the \
+                 absent entry IS a purity claim (§2 rule 3):\n{v:#}");
+        // 2. THE CONTROL: the all-pure report keeps its exemption, and re-disclosing it would be a FALSE
+        //    disclosure — the mirror defect, and worse than a missing one.
+        assert!(!inv("hits_pure").contains(&"purelib".to_string()),
+                "a report that JUDGED two units and found neither effectful is making a claim, and §2 \
+                 rule 3 says believe it:\n{v:#}");
+        // 3. The one ledger the stderr line, the `--gate-json` advisory and the `coverage` field share.
+        let uncovered: Vec<String> = v["coverage"]["uncovered"].as_array().into_iter().flatten()
+            .filter_map(|c| c["name"].as_str().map(String::from)).collect();
+        assert_eq!(uncovered, vec!["facadelib".to_string()],
+                   "the κ ledger must name the unjudged crate and only it\n{v:#}");
+    }
+
+    /// THE MANIFEST SHAPES for ⟨0.24⟩, as a table — the sibling of
+    /// `only_an_absent_or_empty_unanalyzed_is_a_completeness_claim`, and keyed on the INTEGER throughout.
+    /// The `has_entries` argument enters for EXACTLY ONE row (the manifest-less one, SPEC §2's third),
+    /// which is what makes this a count rule rather than an emptiness rule.
+    #[test]
+    fn only_a_positive_analyzed_count_is_a_judgment_claim() {
+        let probe = |analyzed: &str, has_entries: bool| -> bool {
+            let field = if analyzed.is_empty() { String::new() } else { format!("\"analyzed\": {analyzed},") };
+            let text = format!(r#"{{"package": "p", {field} "functions": []}}"#);
+            let v: serde_json::Value = serde_json::from_str(&text).expect("fixture json");
+            candor_report::claims_to_have_judged_nothing(&v, has_entries)
+        };
+        // JUDGED SOMETHING — the rows that keep their coverage.
+        assert!(!probe(r#"{"count": 2, "digest": "0"}"#, false),
+                "count 2 with `functions: []` is the LEGITIMATE all-pure claim — §2 rule 3 says believe it");
+        assert!(!probe(r#"{"count": 1}"#, false),
+                "the rule is about `count`; a digest-less manifest still names a judgment");
+        assert!(!probe("", true),
+                "a pre-⟨0.21⟩ producer that lists entries judged something and said so the only way it could");
+        // JUDGED NOTHING — the floor, plus SPEC §2's third row, plus every unreadable shape.
+        assert!(probe(r#"{"count": 0, "digest": "0"}"#, false), "the real shape: a facade crate");
+        assert!(probe(r#"{"count": 0}"#, true),
+                "…and the count OUTRANKS the entries: a contradictory count-0-with-entries report has \
+                 still told us it judged nothing, and fabricating coverage from the contradiction is the \
+                 confident direction");
+        assert!(probe("", false), "SPEC §2 row 3: no manifest and no entries falls back to the unchained reading");
+        assert!(probe(r#"{"count": -1}"#, false), "a negative count is not a judgment — fail closed");
+        assert!(probe("null", false), "a null manifest cannot be read — fail closed");
+        assert!(probe(r#""some""#, false), "a string manifest cannot be read — fail closed");
+        assert!(probe("{}", false), "a manifest with no `count` cannot be read — fail closed");
+        assert!(probe(r#"{"count": "2"}"#, false), "a non-numeric count cannot be read — fail closed");
+        assert!(probe("7", false), "a scalar manifest cannot be read — fail closed");
+    }
+
+    /// A CRATE CHAINED BOTH JUDGED AND UNJUDGED keeps the hedge — the same conservative-on-conflict answer
+    /// `a_crate_chained_both_complete_and_incomplete_keeps_its_blind_spot_disclosure` records, arriving on
+    /// a third axis, and A DELIBERATE DIVERGENCE FROM candor-swift, which subtracts
+    /// (`unjudgedPkgs.subtract(coveredPkgs)`) so the real report wins.
+    ///
+    /// Swift's argument is good: a count-0 report makes no claim in EITHER direction, so beside a real
+    /// report it should be a no-op, and letting content-free bookkeeping withdraw an earned purity claim
+    /// is the mirror sin. This engine still declines, for the reason its two neighbouring sets already
+    /// decline: rust's index DROPS a key two dep entries disagree under, so a crate granted coverage on
+    /// one report's authority can have the very key that mattered resolve to NOTHING and read confidently
+    /// pure. Two reports for one crate name is routine in a Cargo tree. The cost of being wrong here is
+    /// one extra hedge; the cost of being wrong the other way is a false all-clear.
+    ///
+    /// TO FLIP THIS, if a four-way ruling goes the other way: subtract the crates some report actually
+    /// judged from `idx.judged_nothing_pkgs` at the end of the load, exactly as `incomplete_pkgs`
+    /// documents for its own axis.
+    #[test]
+    fn a_crate_chained_both_judged_and_unjudged_keeps_its_blind_spot_disclosure() {
+        let d = std::env::temp_dir().join(format!("candor-dualjudged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        std::fs::write(d.join("report.real.twolib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.24"}},
+            "package": "twolib",
+            "analyzed": {{"count": 4, "digest": "0"}},
+            "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "twolib#io::go"}}]}}"#)).unwrap();
+        std::fs::write(d.join("report.stub.twolib.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.24"}},
+            "package": "twolib",
+            "analyzed": {{"count": 0, "digest": "0"}},
+            "functions": []}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(idx.judged_nothing_pkgs.contains("twolib"),
+                "a crate one of whose reports judged nothing keeps the hedge — see the doc comment before \
+                 aligning this with swift");
+        // The ANSWERED key still answers: this withholds coverage, it never withdraws an effect.
+        assert_eq!(idx.by_key.get("twolib#io::go").map(|e| e.effects.clone()), Some(BTreeSet::from(["Exec"])),
+                   "withholding coverage must not touch the entries — the change is strictly additive");
+        let v = scan_crate_chained("dualjudged", "consumer", "\n[dependencies]\ntwolib = \"1\"\n",
+            "pub fn hits_two() { twolib::io::go(); }\npub fn hits_unlisted() { twolib::io::other(); }\n", &idx);
+        let f = |name: &str| v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"].as_str() == Some(name)).cloned().unwrap_or(serde_json::Value::Null);
+        assert_eq!(f("hits_two")["inferred"], serde_json::json!(["Exec"]),
+                   "the answered key keeps its effect:\n{v:#}");
+        assert_eq!(f("hits_unlisted")["invisible"], serde_json::json!(["twolib"]),
+                   "…and the unanswered one discloses rather than reading pure:\n{v:#}");
+    }
+
+    /// STALENESS AND INCOMPLETENESS ARE CHECKED FIRST, so the THREE disclosure sets stay disjoint and one
+    /// crate never draws two stderr lines saying the same thing. The precedence lives in exactly one
+    /// place — `cover`'s branch order — and this is what detects a reordering.
+    #[test]
+    fn a_stale_or_incomplete_report_is_not_also_counted_judged_nothing() {
+        let d = std::env::temp_dir().join(format!("candor-precedence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        // Both ALSO judged nothing — so if the branch order ever inverts, both land in the wrong set.
+        std::fs::write(d.join("report.oldstub.scan.json"), r#"{
+            "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
+            "package": "oldstub", "analyzed": {"count": 0, "digest": "0"}, "functions": []}"#).unwrap();
+        std::fs::write(d.join("report.brokestub.scan.json"), format!(r#"{{
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.24"}},
+            "package": "brokestub",
+            "unanalyzed": [{{"path": "src/broken.rs", "reason": "parse error"}}],
+            "analyzed": {{"count": 0, "digest": "0"}}, "functions": []}}"#)).unwrap();
+        let idx = load_dep_reports(Some(d.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(idx.untrusted.contains("oldstub"), "the §2.1 downgrade outranks ⟨0.24⟩");
+        assert!(idx.incomplete_pkgs.contains("brokestub"), "the ⟨0.21⟩ refusal outranks ⟨0.24⟩");
+        assert!(idx.judged_nothing_pkgs.is_empty(),
+                "a crate already refused by an earlier gate must not ALSO be counted judged-nothing — the \
+                 three sets must stay disjoint or the disclosures double up: {:?}", idx.judged_nothing_pkgs);
+    }
+
     /// `ambiguous:same-name local defs` IS THE FIFTH KIND IN SPEC §4's CLOSED VOCABULARY ⟨0.24⟩, AND THE
     /// RENAME WAS REFUSED WITH A NUMBER. The full §4 argument lives at the emission site in `scan.rs`;
     /// this pins the two facts a future edit would silently change — the KIND and the CLASS it projects to.
@@ -7429,29 +7629,40 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// `untrusted` and `incomplete_pkgs` are also READ by the two stderr disclosures in `load_dep_reports`,
     /// so "read nowhere else in the engine" was wrong — "CONSUMED nowhere else" is right, and the comment
     /// now says that. The substance held: three writes, all inside `cover`, and one `covered` predicate.
+    ///
+    /// ⟨0.24⟩ now FOUR writes and THREE refusal sets. The new one matters most here: a count-0 report
+    /// reaches the entry loop with no entries, so its `hash`-prefix anchor never fires and gating that
+    /// anchor alone would have been the exact no-op java measured. Only the closure gates all four.
     #[test]
     fn coverage_has_exactly_one_anchor_and_exactly_one_consumer() {
         let deps = include_str!("deps.rs");
         let scan = include_str!("scan.rs");
         let count = |hay: &str, needle: &str| hay.matches(needle).count();
+        const WRITES: [&str; 4] = [
+            "idx.crates.insert(",
+            "idx.untrusted.insert(",
+            "idx.incomplete_pkgs.insert(",
+            "idx.judged_nothing_pkgs.insert(",
+        ];
         // ONE WRITER EACH, and it is `cover`. A fifth registration site added later — the java shape —
         // fails here rather than silently splitting the gate in two.
-        for w in ["idx.crates.insert(", "idx.untrusted.insert(", "idx.incomplete_pkgs.insert("] {
+        for w in WRITES {
             assert_eq!(count(deps, w), 1,
                        "`{w}` must appear EXACTLY once, inside the one `cover` closure — coverage \
                         registered from a second place is a gate that only half exists (candor-java \
                         `d1d3045`: two anchors, and the mutant gating one failed no test)");
         }
-        // …and `cover` is what holds them: the three writes sit between `let cover =` and its `};`.
+        // …and `cover` is what holds them: the four writes sit between `let cover =` and its `};`.
         let start = deps.find("let cover = |name: String, idx: &mut DepIndex| {").expect("the `cover` closure");
         let end = start + deps[start..].find("\n        };").expect("the closure's end");
         let body = &deps[start..end];
-        for w in ["idx.crates.insert(", "idx.untrusted.insert(", "idx.incomplete_pkgs.insert("] {
+        for w in WRITES {
             assert!(body.contains(w), "`{w}` moved OUT of the `cover` closure — the single anchor is gone");
         }
-        // ONE CONSUMER of the two refusals. Not one READ — the stderr disclosures read them too — but
+        // ONE CONSUMER of the three refusals. Not one READ — the stderr disclosures read them too — but
         // one place where a report's silence is turned into a purity claim.
-        for c in ["deps_idx.untrusted.contains(", "deps_idx.incomplete_pkgs.contains("] {
+        for c in ["deps_idx.untrusted.contains(", "deps_idx.incomplete_pkgs.contains(",
+                  "deps_idx.judged_nothing_pkgs.contains("] {
             assert_eq!(count(scan, c), 1,
                        "`{c}` must be consumed EXACTLY once (the κ-ledger `covered` predicate). A second \
                         consumer means the two fixes have to be repeated there, and nothing would say so");

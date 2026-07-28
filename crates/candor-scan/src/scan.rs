@@ -1626,17 +1626,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // sets again for its two stderr disclosures. CONSUMED nowhere else is the claim, and it is no longer
     // just a claim: `coverage_has_exactly_one_anchor_and_exactly_one_consumer` enumerates the writes and
     // the consumers out of the source and fails on a second of either (four mutants, four named rows).
+    //
+    // ⟨0.24⟩ AND NEITHER DOES A REPORT THAT JUDGED NOTHING — `analyzed.count: 0`, the THIRD answer to
+    // "may this report's silence speak?" and the last one the wire can currently express. Same treatment
+    // as incompleteness (chained, not covered, entries untouched), and the same single conjunct, because
+    // this ledger is still the only place coverage is consumed. See `DepIndex::judged_nothing_pkgs`.
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {
             let real = dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str());
             // COVERED = a report exists for this crate AND the staleness gate did not refuse it AND the
-            // report did not declare itself incomplete. The second and third conjuncts are the two
-            // fixes; spelled as a named local so clippy's boolean simplification can't rewrite the
-            // claims into one unreadable disjunction.
+            // report did not declare itself incomplete AND it judged at least one unit. The second,
+            // third and fourth conjuncts are the three fixes; spelled as a named local so clippy's
+            // boolean simplification can't rewrite the claims into one unreadable disjunction.
             let covered = deps_idx.crates.contains(real)
                 && !deps_idx.untrusted.contains(real)
-                && !deps_idx.incomplete_pkgs.contains(real);
+                && !deps_idx.incomplete_pkgs.contains(real)
+                && !deps_idx.judged_nothing_pkgs.contains(real);
             !covered
                 && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
