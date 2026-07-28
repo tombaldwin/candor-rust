@@ -50,8 +50,9 @@ including the ⟨0.24⟩ CONTRIBUTES counterexample (a reasonless DIRECT `Unknow
 **EQUIVALENCE IS THE ACCEPTANCE TEST AND IT IS BYTE-LEVEL** — `analyzed.count`, `reasonClass`, `netClass`
 and the coverage advisory included. Measured over **90 rows**: 30 policies × three corpora (ebman, pgman,
 and this workspace's own five members), 55 of them with violations. `ci/gate-equivalence.sh` keeps 48 of
-those rows as a standing CI gate, and FAILS when no policy in its matrix fires — byte-equal empty verdicts
-prove nothing.
+those rows as a standing CI gate plus a 49th for the arm no in-tree crate can reach — a scan whose own
+analysis was INCOMPLETE, where both routes must exit 2 and write the same ⟨0.21⟩ `incomplete:true`
+verdict — and it FAILS when no policy in its matrix fires: byte-equal empty verdicts prove nothing.
 
 ### fix — the scan gate double-counted a violation on two `#[cfg]`-gated units sharing one name
 

@@ -71,6 +71,31 @@ for c in candor-report candor-classify candor-scan candor-query; do
   done
 done
 
+# THE FAIL-CLOSED ARM, which no in-tree crate can reach: a scan whose own analysis was INCOMPLETE exits
+# 2 and writes the ⟨0.21⟩ `ok:false` + `incomplete:true` + `unanalyzed` verdict with NO violations and no
+# coverage note — before recording anything. The manifest travels ON the report, so the report route must
+# reach the same verdict from the same fact, and that document has a different SHAPE from every row above.
+inc="$WS/incomplete"; mkdir -p "$inc/src"
+printf '[package]\nname = "incomp"\n' > "$inc/Cargo.toml"
+printf 'pub fn ok_fn() { let _ = std::fs::read_to_string("/x"); }\n' > "$inc/src/lib.rs"
+printf 'fn broken( { { {\n' > "$inc/src/bad.rs"          # the file the parser cannot read
+printf 'deny Fs\n' > "$inc/policy"
+mkdir -p "$inc/out"
+"$SCAN" "$inc" --out "$inc/out/r" --policy "$inc/policy" --gate-json "$WS/inc.scan.json" >/dev/null 2>&1
+rc_scan=$?
+"$QUERY" gate --report "$inc/out/r" --policy "$inc/policy" --gate-json "$WS/inc.gate.json" >/dev/null 2>&1
+rc_gate=$?
+rows=$((rows+1))
+if [ "$rc_scan" -ne 2 ] || [ "$rc_gate" -ne 2 ]; then
+  echo "  FAIL incomplete-report: exit $rc_scan (scan) vs $rc_gate (gate), both must be 2 — a gate cannot"
+  echo "       be green over code candor never analyzed, whichever route reaches it"
+  bad=$((bad+1))
+elif ! cmp -s "$WS/inc.scan.json" "$WS/inc.gate.json"; then
+  echo "  FAIL incomplete-report: the ⟨0.21⟩ incomplete verdict is NOT byte-equal"
+  diff "$WS/inc.scan.json" "$WS/inc.gate.json" | head -20
+  bad=$((bad+1))
+fi
+
 if [ "$fired" -eq 0 ]; then
   echo "gate-equivalence: VACUOUS — no policy in the matrix produced a violation; byte-equal empty"
   echo "                  verdicts prove nothing. Fix the matrix, do not relax the check."
