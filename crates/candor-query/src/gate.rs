@@ -667,15 +667,17 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // unrecognised class token rewrites the rule, and the direction that matters NARROWS it (`deny
     // Unknown[dispatch,nativ]` → `[dispatch]`), so the gate silently stops covering native-caused holes
     // while the operator reads a gate that looks armed.
-    if !p.errors.is_empty() {
-        for e in &p.errors {
+    // ⟨0.24⟩ FATAL errors only — see `ParsedPolicy::fatal_messages`.
+    let fatal = p.fatal_messages();
+    if !fatal.is_empty() {
+        for e in &fatal {
             eprintln!("candor-query gate: policy error — {e}");
         }
         let why = format!(
             "refusing to evaluate a policy that cannot be honoured AS WRITTEN (exit 2, policy NOT \
              evaluated). Fix the token, or define it as an `unknown-alias` in the `.candor/config` \
              beside {policy_path}. Policy error(s): {}",
-            p.errors.join("  ·  ")
+            fatal.join("  ·  ")
         );
         eprintln!("candor-query gate: {why}");
         return refuse(&why, want_json, gate_json.as_deref());

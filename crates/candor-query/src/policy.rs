@@ -39,8 +39,11 @@ pub(crate) fn load_policy_as_the_gate_does(
         .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
         .unwrap_or_default();
     let p = candor_classify::policy::parse_policy_with_aliases(&text, &aliases);
-    if !p.errors.is_empty() {
-        for e in &p.errors {
+    // ⟨0.24⟩ FATAL errors only — `errors` now also carries the DROPPED-but-survivable lines
+    // (`nonsense line`, a malformed `forbid`), which `parsepolicy` reports and no gate route refuses on.
+    let fatal = p.fatal_messages();
+    if !fatal.is_empty() {
+        for e in &fatal {
             eprintln!("candor {verb}: policy error — {e}");
         }
         eprintln!(
@@ -121,7 +124,42 @@ pub(crate) fn cmd_parsepolicy(args: &[String]) -> i32 {
     deny.sort_by_key(|v| v.to_string());
     allow.sort_by_key(|v| v.to_string());
     forbid.sort_by_key(|v| v.to_string());
-    println!("{}", serde_json::json!({ "deny": deny, "allow": allow, "forbid": forbid }));
+    // ⟨0.24⟩ EVERY LINE THE PARSE DID NOT HONOUR (SPEC §3.1 `195d45a`/`901f14d`).
+    //
+    // MEASURED 2026-07-28 on the conformance battery: java 10, ts 4, **rust 0** — this verb emitted no
+    // `errors` key at all. The facts existed and went to stderr as "ignoring policy rule …", so the one
+    // verb that exists to let a consumer diff what an engine made of a policy answered with the
+    // not-honoured half deleted. And it contradicted this engine's own gate, which REFUSES an
+    // unrecognised class token while the parse narrowed it in silence — two answers to one question.
+    //
+    // NOT A REFUSAL. §3.1: *"`parsepolicy` MUST NOT REFUSE a policy it can read and cannot honour. It
+    // REPORTS that parse, including what it could not honour."* So the exit code stays 0 and the errors
+    // ride the document beside the rules that DID parse — including the fatal ones, which every gate
+    // route refuses on and this verb is precisely the tool for diagnosing.
+    //
+    // OMITTED WHEN EMPTY, so a clean parse is byte-identical to the pre-rung dump and the four-way
+    // parsepolicy differential does not move for any policy without an error.
+    //
+    // ORDER IS SOURCE ORDER — the rules above are sorted so the comparison is order-free, but an error
+    // list is a reading of the FILE and the operator's next action is to go to those lines in order.
+    let errors: Vec<serde_json::Value> = p
+        .errors
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "kind": e.kind,
+                "token": e.token,
+                "accepted": e.accepted,
+                "rule": e.rule,
+                "message": e.message,
+            })
+        })
+        .collect();
+    let mut doc = serde_json::json!({ "deny": deny, "allow": allow, "forbid": forbid });
+    if !errors.is_empty() {
+        doc["errors"] = serde_json::Value::Array(errors);
+    }
+    println!("{doc}");
     0
 }
 
