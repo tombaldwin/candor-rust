@@ -769,6 +769,35 @@ pub fn gate_verdict_json_full(
     })
 }
 
+/// ⟨0.24⟩ THE REFUSAL DOCUMENT (SPEC §3.1) — what a gate writes to `--gate-json` when it could not
+/// evaluate the policy AS WRITTEN.
+///
+/// **THE HAZARD THIS CLOSES.** A refusal used to write NOTHING at the requested path, so a CI wrapper
+/// that reads that path unconditionally re-read **the PREVIOUS run's document as current** — yesterday's
+/// green file, still on disk, becomes today's all-clear. Deleting the path is not the fix either: a
+/// consumer that treats a missing file as "nothing to report" fails open by a different route. The only
+/// safe answer is a document whose NAIVE read is the fail-closed one.
+///
+/// **THE SHAPE IS A MUST, AND THE ABSENT KEY IS THE LOAD-BEARING PART.** `ok: false` so a consumer
+/// keying only on `ok` lands on FAIL; `refused: true` + `reason` so one that looks further learns why;
+/// and **no `violations` key at all** — the gate is making no claim about violations here, and `[]` is
+/// precisely the claim it cannot make. An empty array would be read by every consumer in existence as
+/// "we looked and found none", which is the fabrication this whole format refuses.
+///
+/// Deliberately MINIMAL — no `analyzed`, no `coverage`, no manifest. Those fields all describe a
+/// judgment that was made; this document exists to say one was not. The stderr channel still carries the
+/// full disclosure (which rules could not be evaluated, and any completeness note alongside).
+pub fn gate_refusal_json(reason: &str) -> serde_json::Result<String> {
+    #[derive(Serialize)]
+    struct Refusal<'a> {
+        spec: &'static str,
+        ok: bool,
+        refused: bool,
+        reason: &'a str,
+    }
+    serde_json::to_string_pretty(&Refusal { spec: SPEC_VERSION, ok: false, refused: true, reason })
+}
+
 /// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy
 /// v0.1 bare array (no header).
 /// Does the report carry a v0.2 `{ candor: {...}, functions }` ENVELOPE (vs a legacy v0.1 bare array)?
