@@ -204,7 +204,8 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
             Err(code) => return code,
         },
     };
-    let mut violations: Vec<(&str, String)> = Vec::new();
+    // ⟨0.24⟩ `(fn, the rule's OWN source line, the condition that rule's verdict rests on)`.
+    let mut violations: Vec<(&str, String, Option<String>)> = Vec::new();
     if let Some(rules) = &rules {
         for fname in &affected {
             for rule in rules {
@@ -221,12 +222,19 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
                 let in_scope =
                     rule.scope.as_deref().is_none_or(|s| candor_classify::policy::scope_matches(fname, s));
                 if denies && in_scope {
-                    let r = if rule.effects.is_empty() {
-                        format!("pure{}", rule.scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
-                    } else {
-                        format!("deny {effect}{}", rule.scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default())
-                    };
-                    violations.push((fname, r));
+                    // ⟨0.24⟩ **THE RULE'S OWN LINE, VERBATIM.** This used to be REBUILT from `effects` +
+                    // `scope` — and worse, from the effect being ASKED ABOUT rather than the rule's own
+                    // set — so it showed the operator a rule they did not write. MEASURED 2026-07-28:
+                    //
+                    //   `deny Unknown[reflect] app.nat`  printed back as  `deny Unknown app.nat`
+                    //   `deny Net[unknown-host] app`     printed back as  `deny Net app`
+                    //   `deny Net Db  app`               printed back as  `deny Net app`
+                    //
+                    // The first two are the sharp ones: they show a NARROWED rule as the WIDE one, in the
+                    // verb an agent reads before editing, so the operator's own scoping is invisible at
+                    // exactly the moment they are deciding whether it protects them. `raw` is the line
+                    // with its comment stripped and its ends trimmed — the policy as written.
+                    violations.push((fname, rule.raw.clone(), narrowing_condition(rule, effect)));
                     break;
                 }
             }
@@ -238,7 +246,18 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
             "of": targets,
             "effect": effect,
             "affected": affected.iter().collect::<Vec<_>>(),
-            "violations": violations.iter().map(|(f, r)| serde_json::json!({"fn": f, "rule": r})).collect::<Vec<_>>(),
+            "violations": violations
+                .iter()
+                .map(|(f, r, cond)| {
+                    let mut v = serde_json::json!({"fn": f, "rule": r});
+                    // OMITTED unless the rule narrows the introduced effect, so every document from an
+                    // unfiltered policy — which is nearly all of them — stays byte-identical.
+                    if let Some(c) = cond {
+                        v["conditional"] = serde_json::json!(c);
+                    }
+                    v
+                })
+                .collect::<Vec<_>>(),
             "ok": violations.is_empty(),
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
@@ -259,11 +278,48 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
         0
     } else {
         println!("  ⚠ WOULD VIOLATE policy ({}) — run BEFORE the edit:", violations.len());
-        for (f, r) in &violations {
+        for (f, r, cond) in &violations {
             println!("      [AS-EFF-006] `{f}`  (rule: `{r}`)");
+            if let Some(c) = cond {
+                println!("          …IF {c}.");
+                println!("          This rule NARROWS, and the effect you have not written yet has no class to");
+                println!("          match — candor charges it fail-closed rather than guessing which you'd add.");
+            }
         }
         1
     }
+}
+
+/// ⟨0.24⟩ THE CONDITION A `whatif` VERDICT RESTS ON, when the matched rule NARROWS the effect being
+/// introduced — `None` when it does not, which is the ordinary case.
+///
+/// **WHY THIS EXISTS AT ALL, AND WHY IT IS NOT A FILTER-AWARE MATCH.** Printing the rule VERBATIM is
+/// strictly more truthful than rebuilding it, and it is also what makes an existing inaccuracy legible:
+/// `whatif` answers a HYPOTHETICAL — "if this function performed `Net`, what happens?" — and a
+/// `deny Net[unknown-host]` / `deny Unknown[reflect]` rule quantifies over the DESTINATION or REASON
+/// CLASS of the effect you have not written yet. There is no class to match, so the question is
+/// genuinely unanswerable, and `unverified`/`fix-gate`'s fix does not carry over: those two read a
+/// signature that EXISTS.
+///
+/// Charging it is the right default for a pre-edit gate (fail-closed; the edit could land in any class),
+/// and it stays. What was wrong was showing that unconditional verdict beside a rule reconstructed
+/// WITHOUT its filter — the operator read a wide rule, got a wide answer, and never saw their own
+/// narrowing. Printing `raw` without this would be worse still: the same unconditional verdict, now
+/// attributed to the narrowed line, which reads as candor having evaluated a filter it did not.
+///
+/// §3.1 ⟨0.24⟩'s rule for exactly this shape is that **an unanswerable condition must be DISCLOSED,
+/// never scored as a failed one**. So the verdict is unchanged and the condition rides beside it.
+fn narrowing_condition(rule: &candor_classify::policy::PolicyRule, effect: &str) -> Option<String> {
+    if effect == candor_classify::policy::UNKNOWN && !rule.unknown_classes.is_empty() {
+        let mut t: Vec<&str> = rule.unknown_classes.iter().map(|c| c.token()).collect();
+        t.sort_unstable();
+        return Some(format!("the `Unknown` you introduce is of reason class {}", t.join(" / ")));
+    }
+    if effect == "Net" && !rule.net_classes.is_empty() {
+        let t: Vec<&str> = rule.net_classes.iter().map(String::as_str).collect(); // BTreeSet ⇒ sorted
+        return Some(format!("the `Net` you introduce reaches destination class {}", t.join(" / ")));
+    }
+    None
 }
 
 // ── rewire ──────────────────────────────────────────────────────────────────────────────────────
