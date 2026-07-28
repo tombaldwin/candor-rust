@@ -2020,6 +2020,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         let unknown_aliases = candor_classify::policy::discover_config_text(std::path::Path::new(dir))
             .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
             .unwrap_or_default();
+        // ⟨0.24⟩ THE POLICY COULD NOT BE HONOURED AS WRITTEN (SPEC §6.2) — the same UNREADABLE-POLICY
+        // posture as the branch above, and deliberately at the same place in the flow, so this route and
+        // `candor-query gate --report` refuse the same policy identically (exit 2, no verdict document).
+        //
+        // MEASURED (2026-07-28) before this refusal: `deny Unknown[dispatch,nativ]` printed "candor:
+        // policy rule names unknown reason-class/alias `nativ`" and then gated on `[dispatch]` ALONE —
+        // exit 0 over a crate whose only hole was native-caused. The single-token form `deny
+        // Unknown[corp]` did the mirror: the filter emptied and the rule WIDENED to a bare `deny
+        // Unknown`, while the same line claimed the rule was being ignored. One of those is a false
+        // disclosure and the other is fail-open; the fail-open one is the common case, because a typo
+        // lands beside correct tokens far more often than alone.
+        let perrs = crate::gate::policy_errors(&text, &unknown_aliases);
+        if !perrs.is_empty() {
+            for e in &perrs {
+                eprintln!("candor-scan: policy error — {e}");
+            }
+            eprintln!(
+                "candor-scan: refusing to evaluate a policy that cannot be honoured AS WRITTEN (exit 2, \
+                 gate NOT enforced) — dropping the token would silently REWRITE the rule, and when the \
+                 token sits beside valid ones the rewrite NARROWS it, so the gate stops covering what \
+                 the operator asked for while still looking armed. Fix the token, or define it as an \
+                 `unknown-alias` in the `.candor/config` beside {pp}."
+            );
+            return (2, json_body);
+        }
         let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
         for gv in &v {
             let line = format!("[{}] {}", gv.rule, gv.detail);

@@ -28,6 +28,21 @@ pub(crate) use candor_classify::gate::net_classes_of;
 /// signature read from a written report. This function's remaining job is to build the [`GateInput`]
 /// from the classifier's accumulators — including materializing the ⟨0.20⟩ destination classes for
 /// every `Net`-bearing fn, exactly the set the lazy call used to compute on demand.
+/// ⟨0.24⟩ The §6.2 POLICY ERRORS in `policy_text`, resolved against the same `unknown-alias` vocabulary
+/// the gate will use — empty ⇒ the policy can be honoured AS WRITTEN. SILENT (no warnings): the caller
+/// prints these as errors and refuses, and this must not double-print the ordinary parse warnings that
+/// [`policy_violations`] emits on the same text a line later.
+///
+/// A SEPARATE PASS rather than a second return value from `policy_violations`, because the refusal has
+/// to happen BEFORE any of the classifier's accumulators are consulted — the point is that no verdict is
+/// produced from a rewritten policy, not that one is produced and then discarded.
+pub(crate) fn policy_errors(
+    policy_text: &str,
+    unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
+) -> Vec<String> {
+    candor_classify::policy::parse_policy_errors(policy_text, unknown_aliases)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn policy_violations(
     policy_text: &str,

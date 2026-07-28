@@ -376,7 +376,23 @@ impl Candor {
             },
             Err(_) => ParsedPolicy::default(),
         };
-        let ParsedPolicy { rules: policy, allow_rules, layer_rules } = parsed_policy;
+        // ⟨0.24⟩ A POLICY ERROR takes the same posture as the unreadable policy directly above (SPEC
+        // §6.2): exit 2, never a silently-rewritten policy. `deny Unknown[dispatch,nativ]` used to be
+        // dropped down to `[dispatch]` here too, so this lint stopped gating native-caused holes while
+        // the operator read a gate that looked armed.
+        if !parsed_policy.errors.is_empty() {
+            for e in &parsed_policy.errors {
+                eprintln!("candor: policy error — {e}");
+            }
+            eprintln!(
+                "candor: refusing to evaluate a policy that cannot be honoured AS WRITTEN (exit 2) — \
+                 dropping the token would silently REWRITE the rule (widening it when the token is \
+                 alone, NARROWING it when it sits beside valid ones), and a narrowed rule stops gating \
+                 what the operator asked for while the gate still looks armed."
+            );
+            std::process::exit(2);
+        }
+        let ParsedPolicy { rules: policy, allow_rules, layer_rules, errors: _ } = parsed_policy;
         Self {
             direct: HashMap::new(),
             fs_direct: HashMap::new(),
