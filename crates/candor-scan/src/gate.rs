@@ -535,7 +535,28 @@ pub(crate) fn write_gate_json(exit_code: i32) {
     // key at all**. The shape already says "no claim about violations", and that is the honest thing to
     // say when the policy could not be read. Its naive read is the fail-closed one, which is the whole
     // standard this format holds itself to.
-    if exit_code == 2 && unanalyzed.is_empty() {
+    //
+    // ⟨0.24⟩ **…AND ONLY WHEN THE RUN HAS ESTABLISHED NO VIOLATION — the third conjunct, and the one this
+    // predicate was missing** (SPEC §3.1 `4c79958`). It used to read `exit_code == 2 && unanalyzed
+    // .is_empty()`, which conflates *"this run ended refused"* with *"this run evaluated nothing"* — the
+    // exact conflation the clause forbids. MEASURED 2026-07-28: a pure fn gains an `Fs` call against a
+    // frozen baseline; with no policy, exit 1 and `violations: ["AS-EFF-005"]`; add ANY policy carrying a
+    // bad token and the run exited 2 with NO `violations` key. **A typo in a policy token deleted a
+    // certain baseline regression from the machine channel**, while the `[AS-EFF-005]` line stayed on
+    // stderr — the human kept the finding, CI lost it.
+    //
+    // The conflation was invisible because the AS-EFF-005 baseline guard is a DIFFERENT violation
+    // producer from the policy gate, runs deliberately EARLIER (so both record toward one verdict), and
+    // the precedence repair had been scoped to the policy gate's own list. Keying on the shared
+    // accumulator instead of on any one producer is what makes the fix general: it covers the
+    // baseline-regression-then-unreadable-policy case, the baseline-regression-then-unhonourable-policy
+    // case, and the baseline-regression-then-sole-withholding case, without naming any of them.
+    let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    // The shared serializer (candor_report::gate_verdict_json_v24) also fixes the violation ORDER —
+    // (rule, detail), the same order the console prints — so the verdict is deterministic and
+    // byte-comparable across backends. Members already record in that order per crate.
+    let mut violations = acc.lock().unwrap().clone();
+    if exit_code == 2 && unanalyzed.is_empty() && violations.is_empty() {
         let why = GATE_REFUSAL.get().cloned().unwrap_or_else(|| {
             "the gate config did not load (exit 2) — see stderr for the specific cause".to_string()
         });
@@ -557,11 +578,6 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         }
         return;
     }
-    let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
-    // The shared serializer (candor_report::gate_verdict_json) also fixes the violation ORDER —
-    // (rule, detail), the same order the console prints — so the verdict is deterministic and
-    // byte-comparable across backends. Members already record in that order per crate.
-    let mut violations = acc.lock().unwrap().clone();
     // ⟨0.15 staged⟩ the advisory coverage note: present only when a scanned target's κ ledger was
     // non-empty. Verdict-preserving — ok/violations/exit are computed exactly as before (the ⟨0.9⟩
     // provable-purity auto-disclosure precedent); a fully-covered scan's verdict is byte-unchanged.
@@ -592,12 +608,32 @@ pub(crate) fn write_gate_json(exit_code: i32) {
             aliases: g.1.iter().cloned().collect(),
         })
     });
-    match candor_report::gate_verdict_json_v24(
+    // ⟨0.24⟩ …and when this exit-2 run refused WHILE holding a violation, the document carries BOTH: the
+    // violation that dominates (SPEC §3.1 `4c79958` — precedence binds the verdict) and the refusal that
+    // says the policy never ran. Dropping the second half would be the mirror defect: an operator reading
+    // `{ok:false, violations:[AS-EFF-005]}` would conclude the gate had been enforced and passed.
+    //
+    // NARROW BY CONSTRUCTION: `unanalyzed.is_empty()` keeps this off the incomplete-analysis path, whose
+    // `incomplete`/`unanalyzed` keys already carry the reason and whose `gate --report` counterpart has no
+    // refusal to disclose — attaching a second reason channel there would break §3.1's byte-equality MUST
+    // to say something already said.
+    //
+    // The fallback reason is the SAME one the pure-refusal arm uses, and it matters here for the same
+    // reason: reaching this line means the run refused, so an unrecorded `why` must still produce
+    // `refused: true` rather than a document that looks like an ordinary exit-2.
+    let refusal = (exit_code == 2 && unanalyzed.is_empty()).then(|| {
+        GATE_REFUSAL
+            .get()
+            .cloned()
+            .unwrap_or_else(|| "the gate config did not load (exit 2) — see stderr for the specific cause".to_string())
+    });
+    match candor_report::gate_verdict_json_v24_refused(
         &mut violations,
         coverage.as_ref(),
         analyzed_count,
         &unanalyzed,
         vocabulary.as_ref(),
+        refusal.as_deref(),
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
