@@ -28,19 +28,23 @@ pub(crate) use candor_classify::gate::net_classes_of;
 /// signature read from a written report. This function's remaining job is to build the [`GateInput`]
 /// from the classifier's accumulators — including materializing the ⟨0.20⟩ destination classes for
 /// every `Net`-bearing fn, exactly the set the lazy call used to compute on demand.
-/// ⟨0.24⟩ The §6.2 POLICY ERRORS in `policy_text`, resolved against the same `unknown-alias` vocabulary
-/// the gate will use — empty ⇒ the policy can be honoured AS WRITTEN. SILENT (no warnings): the caller
-/// prints these as errors and refuses, and this must not double-print the ordinary parse warnings that
-/// [`policy_violations`] emits on the same text a line later.
+/// ⟨0.24⟩ What the caller must know about `policy_text` BEFORE any verdict is derived from it: its §6.2
+/// POLICY ERRORS (empty ⇒ the policy can be honoured AS WRITTEN), and the `unknown-alias` names it
+/// actually resolved through (non-empty ⇒ a config supplied vocabulary the verdict used, and §3.1 makes
+/// the document NAME that file).
+///
+/// SILENT (no warnings): the caller prints the errors itself, and this must not double-print the
+/// ordinary parse warnings [`policy_violations`] emits on the same text a line later.
 ///
 /// A SEPARATE PASS rather than a second return value from `policy_violations`, because the refusal has
 /// to happen BEFORE any of the classifier's accumulators are consulted — the point is that no verdict is
 /// produced from a rewritten policy, not that one is produced and then discarded.
-pub(crate) fn policy_errors(
+pub(crate) fn policy_precheck(
     policy_text: &str,
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
-) -> Vec<String> {
-    candor_classify::policy::parse_policy_errors(policy_text, unknown_aliases)
+) -> (Vec<String>, BTreeSet<String>) {
+    let p = candor_classify::policy::parse_policy_silent(policy_text, unknown_aliases);
+    (p.errors, p.used_aliases)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,6 +426,25 @@ pub(crate) fn record_gate_coverage(ledger: &[(String, usize)]) {
     acc.lock().unwrap().extend(ledger.iter().map(|(cr, _)| cr.clone()));
 }
 
+/// ⟨0.24⟩ THE AMBIENT-VOCABULARY DISCLOSURE (SPEC §3.1): the `.candor/config` whose `unknown-alias`
+/// definitions a policy rule actually resolved through, plus the alias names used. Accumulated like the
+/// κ ledger so a workspace scan names it ONCE on the shared verdict rather than per member — every
+/// member resolves the same policy against the same config, so the set is idempotent by construction.
+pub(crate) static GATE_VOCABULARY: std::sync::OnceLock<
+    std::sync::Mutex<(String, std::collections::BTreeSet<String>)>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn record_gate_vocabulary(config: &std::path::Path, aliases: &BTreeSet<String>) {
+    if aliases.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    let acc = GATE_VOCABULARY
+        .get_or_init(|| std::sync::Mutex::new((String::new(), std::collections::BTreeSet::new())));
+    let mut g = acc.lock().unwrap();
+    g.0 = config.display().to_string();
+    g.1.extend(aliases.iter().cloned());
+}
+
 /// ⟨0.21⟩ COMPLETENESS MANIFEST: the analyzed-fn count (summed across workspace members) + the units that
 /// could NOT be analyzed, ACCUMULATED toward the `--gate-json` verdict's `analyzed:{count}` (Gap 1, always)
 /// and — when non-empty — the fail-closed `incomplete:true`/`unanalyzed` disclosure (Gap 2). A no-op unless
@@ -495,7 +518,21 @@ pub(crate) fn write_gate_json(exit_code: i32) {
     // that route was written to mirror this one for §3.1 byte-equality). Violations, coverage and the
     // manifest all ride the ONE verdict; `gate_verdict_json_full` computes `ok = no violations AND not
     // incomplete`, so exit 1, exit 2-with-a-manifest and exit 0 all get an accurate document.
-    match candor_report::gate_verdict_json_full(&mut violations, coverage.as_ref(), analyzed_count, &unanalyzed) {
+    // ⟨0.24⟩ …and the ambient vocabulary that participated, if any (SPEC §3.1).
+    let vocabulary = GATE_VOCABULARY.get().and_then(|m| {
+        let g = m.lock().unwrap();
+        (!g.1.is_empty()).then(|| candor_report::GateVocabulary {
+            config: g.0.clone(),
+            aliases: g.1.iter().cloned().collect(),
+        })
+    });
+    match candor_report::gate_verdict_json_v24(
+        &mut violations,
+        coverage.as_ref(),
+        analyzed_count,
+        &unanalyzed,
+        vocabulary.as_ref(),
+    ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
             if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {

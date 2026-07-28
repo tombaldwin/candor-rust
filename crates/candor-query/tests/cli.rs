@@ -2001,6 +2001,63 @@ fn a_refusal_overwrites_a_stale_verdict_and_makes_no_claim_about_violations() {
     assert_eq!(d["violations"].as_array().unwrap().len(), 1, "{d:#}");
 }
 
+/// SPEC §3.1 ⟨0.24⟩ **THE AMBIENT VOCABULARY MUST BE NAMED ON THE VERDICT** (candor-spec `99eb4e9`).
+///
+/// A `.candor/config` `unknown-alias` beside the policy moves this verdict 0→1, and discovery WALKS
+/// PARENT DIRECTORIES, so the file that moved it can sit several levels above the one the operator was
+/// looking at. That is the fourth channel §3.1's MUST NOT never named. The remedy is the one used
+/// everywhere else here — not to forbid the input (an alias IS policy vocabulary), but to make it
+/// impossible for it to act unnamed.
+#[test]
+fn the_config_that_supplied_the_vocabulary_is_named_on_the_verdict() {
+    let f = Fixture::new("gate-vocab");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.viaFfi","inferred":["Unknown"],"direct":["Unknown"],
+                          "unknownWhy":["native:libc::open"]}]}"#,
+        None,
+    );
+    // The policy lives in its OWN directory, with its vocabulary beside it — and the config is written
+    // one level ABOVE the policy, so the row also pins that a PARENT-directory config is disclosed.
+    let home = f.dir.join("polhome");
+    std::fs::create_dir_all(home.join("rules")).unwrap();
+    std::fs::create_dir_all(home.join(".candor")).unwrap();
+    let cfgpath = home.join(".candor/config");
+    std::fs::write(&cfgpath, "unknown-alias corp = native\n").unwrap();
+    let p = pol(&home.join("rules"), "org", "deny Unknown[corp]\n");
+
+    let v = f.dir.join("verdict.json");
+    let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &v.to_string_lossy()]);
+    assert_eq!(rc, 1, "the alias resolves from a config ABOVE the policy:\n{err}");
+    let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v).unwrap()).unwrap();
+    let named = j["vocabulary"]["config"].as_str().map(|s| std::fs::canonicalize(s).ok()).unwrap_or(None);
+    assert_eq!(
+        named,
+        std::fs::canonicalize(&cfgpath).ok(),
+        "a verdict changed by a file the operator cannot see NAMED is ambient input:\n{j:#}"
+    );
+    assert_eq!(j["vocabulary"]["aliases"], serde_json::json!(["corp"]), "{j:#}");
+
+    // THE DISCRIMINATION CONTROL: the same alias pointing somewhere else goes GREEN, so the row above
+    // shows the alias STEERING the verdict rather than merely being present.
+    std::fs::write(&cfgpath, "unknown-alias corp = reflect\n").unwrap();
+    let v2 = f.dir.join("verdict2.json");
+    let (rc2, _, err2) = run_gate(&loc, &p, &["--gate-json", &v2.to_string_lossy()]);
+    assert_eq!(rc2, 0, "the alias narrows the rule:\n{err2}");
+
+    // AND AN UNUSED ALIAS IS NOT NAMED — a verdict with no ambient vocabulary stays byte-identical to a
+    // pre-⟨0.24⟩ one, and naming a file that changed nothing trains the reader to ignore the field.
+    let bare = pol(&home.join("rules"), "bare", "deny Unknown\n");
+    let v3 = f.dir.join("verdict3.json");
+    let (rc3, _, _) = run_gate(&loc, &bare, &["--gate-json", &v3.to_string_lossy()]);
+    assert_eq!(rc3, 1);
+    let j3: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v3).unwrap()).unwrap();
+    assert!(j3.get("vocabulary").is_none(), "an alias the policy never mentions is not disclosed:\n{j3:#}");
+}
+
 /// SPEC §6.2 ⟨0.24⟩ **AN UNRECOGNISED REASON-CLASS TOKEN IN A POLICY IS A POLICY ERROR** (candor-spec
 /// `382a7e0`, which withdraws its own "a dropped policy token can only WIDEN, so the failure is loud"
 /// asymmetry). Measured four-way, dropping the token does both, and one direction is fail-open:
