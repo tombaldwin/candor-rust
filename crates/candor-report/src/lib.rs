@@ -772,6 +772,31 @@ pub struct GateVocabulary {
     pub aliases: Vec<String>,
 }
 
+/// ⟨0.24⟩ ONE POLICY RULE THE VERDICT DID NOT ANSWER (SPEC §3.1 `fc4b5f6`).
+///
+/// **THE DEFECT.** The exit-1 clause *"the refusal message MUST still disclose which rules could not be
+/// evaluated"* named no field, no shape and no channel, and this engine put the disclosure on **stderr
+/// only**. Measured 2026-07-28 on `deny Fs` + `allow Fs /var/data`, exit 1: java and ts emit `unevaluated`
+/// in the `--gate-json` document, rust emitted nothing there. **A machine consumer of rust's exit-1
+/// verdict could not see that any rule went unanswered at all** — a finding that never reaches the
+/// consumer, arriving through the very disclosure this rung added to stop that. stderr is not the machine
+/// channel; that is the same distinction that made the incomplete-analysis defect a defect.
+///
+/// **ONE ENTRY PER RULE, `rule` VERBATIM.** java's aggregate (`"forbid (× 2)"`) answers *how many* when
+/// the operator's question is *which*, so it satisfies a naive reading of "disclose which rules" while
+/// answering the other one. Two `forbid` lines are two entries here, each carrying its own raw line; where
+/// the REASON is a property of the rule KIND rather than of the individual rule, the same `why` simply
+/// repeats — which costs bytes and loses nothing, and is candor-ts's shape (the pinned reference).
+///
+/// Omitted from both documents when empty, so a policy the verb answers in full stays byte-identical.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Unevaluated {
+    /// The RAW policy line, verbatim — the operator's own text, so they can find it in their file.
+    pub rule: String,
+    /// Why this run could not decide it.
+    pub why: String,
+}
+
 /// [`gate_verdict_json_full`] plus the ⟨0.24⟩ `policyVocabulary` disclosure. Appended LAST so that every
 /// verdict without ambient vocabulary — which is nearly all of them — stays byte-identical.
 pub fn gate_verdict_json_v24(
@@ -781,7 +806,7 @@ pub fn gate_verdict_json_v24(
     unanalyzed: &[UnanalyzedUnit],
     vocabulary: Option<&GateVocabulary>,
 ) -> serde_json::Result<String> {
-    gate_verdict_json_v24_refused(violations, coverage, analyzed_count, unanalyzed, vocabulary, None)
+    gate_verdict_json_v24_refused(violations, coverage, analyzed_count, unanalyzed, vocabulary, None, &[])
 }
 
 /// ⟨0.24⟩ [`gate_verdict_json_v24`] plus the REFUSAL DISCLOSURE, for the one document that has to carry
@@ -809,6 +834,7 @@ pub fn gate_verdict_json_v24(
 /// because `[]` is precisely the claim it cannot make) and the incomplete-analysis verdict (whose
 /// `incomplete`/`unanalyzed` keys already say why, and which §3.1's byte-equality MUST pairs with a
 /// `gate --report` document that has no refusal to disclose).
+#[allow(clippy::too_many_arguments)]
 pub fn gate_verdict_json_v24_refused(
     violations: &mut [GateViolation],
     coverage: Option<&GateCoverage>,
@@ -816,6 +842,7 @@ pub fn gate_verdict_json_v24_refused(
     unanalyzed: &[UnanalyzedUnit],
     vocabulary: Option<&GateVocabulary>,
     refusal: Option<&str>,
+    unevaluated: &[Unevaluated],
 ) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     #[derive(Serialize)]
@@ -832,6 +859,12 @@ pub fn gate_verdict_json_v24_refused(
         reason: Option<&'a str>,
         analyzed: Count,
         violations: &'a [GateViolation],
+        /// ⟨0.24⟩ SPEC §3.1 `fc4b5f6` — the rules the verdict above does NOT answer. Beside the
+        /// violations, never instead of them: a firing rule is certain regardless of how these would
+        /// have resolved (Lemma 2), and exit 1 reports the violation it is sure of without concealing
+        /// the part it could not read.
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        unevaluated: &'a [Unevaluated],
         #[serde(skip_serializing_if = "Option::is_none")]
         coverage: Option<&'a GateCoverage>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -854,6 +887,7 @@ pub fn gate_verdict_json_v24_refused(
         reason: refusal,
         analyzed: Count { count: analyzed_count },
         violations,
+        unevaluated,
         coverage,
         incomplete,
         unanalyzed,
@@ -880,14 +914,32 @@ pub fn gate_verdict_json_v24_refused(
 /// judgment that was made; this document exists to say one was not. The stderr channel still carries the
 /// full disclosure (which rules could not be evaluated, and any completeness note alongside).
 pub fn gate_refusal_json(reason: &str) -> serde_json::Result<String> {
+    gate_refusal_json_v24(reason, &[])
+}
+
+/// ⟨0.24⟩ [`gate_refusal_json`] carrying the `unevaluated` disclosure (SPEC §3.1 `fc4b5f6`).
+///
+/// A SOLE refusal is the case where the disclosure matters most: nothing fired, so `reason` is all the
+/// consumer has, and a prose reason is not a list of rules. Empty ⇒ the key is omitted and the document is
+/// byte-identical to the minimal refusal — which keeps the shape's load-bearing property intact, since
+/// what makes a refusal document safe is the ABSENT `violations` key, not the absence of every other one.
+pub fn gate_refusal_json_v24(reason: &str, unevaluated: &[Unevaluated]) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Refusal<'a> {
         spec: &'static str,
         ok: bool,
         refused: bool,
         reason: &'a str,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        unevaluated: &'a [Unevaluated],
     }
-    serde_json::to_string_pretty(&Refusal { spec: SPEC_VERSION, ok: false, refused: true, reason })
+    serde_json::to_string_pretty(&Refusal {
+        spec: SPEC_VERSION,
+        ok: false,
+        refused: true,
+        reason,
+        unevaluated,
+    })
 }
 
 /// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy

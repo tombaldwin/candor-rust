@@ -2107,6 +2107,26 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             for w in &outcome.withheld {
                 eprintln!("    `{}` narrows on the {} class, but `{}` carries no class set to narrow on", w.rule, w.filter, w.func);
             }
+            // ⟨0.24⟩ …AND ONTO THE DOCUMENT, not stderr alone (SPEC §3.1 `fc4b5f6`). This disclosure had
+            // exactly the shape the `gate --report` route's did — correct, complete, and on the wrong
+            // channel — so a machine consumer of an exit-1 verdict here could not see that a rule had
+            // gone unanswered either. ONE ENTRY PER RULE: the first function that defeats it is the
+            // example, and `record_gate_unevaluated` de-duplicates on `rule` across workspace members.
+            let disclosures: Vec<candor_report::Unevaluated> = outcome
+                .withheld
+                .iter()
+                .map(|w| candor_report::Unevaluated {
+                    rule: w.rule.trim().to_string(),
+                    why: format!(
+                        "it narrows on the {} class, but `{}` carries no class set to narrow on — the \
+                         filter had no evidence to read, so the rule is WITHHELD there rather than \
+                         charged (which would assert a class nobody recorded) or tolerated (which would \
+                         relax a fail-closed gate for lack of evidence).",
+                        w.filter, w.func
+                    ),
+                })
+                .collect();
+            crate::gate::record_gate_unevaluated(&disclosures);
         }
         for gv in &v {
             let line = format!("[{}] {}", gv.rule, gv.detail);

@@ -504,6 +504,30 @@ pub(crate) fn record_gate_refusal(why: impl Into<String>) {
     let _ = GATE_REFUSAL.set(why.into());
 }
 
+/// ⟨0.24⟩ THE RULES THIS RUN COULD NOT DECIDE (SPEC §3.1 `fc4b5f6`) — accumulated across workspace
+/// members like the violations, written once onto the verdict as `unevaluated`.
+///
+/// On THIS route the only unanswered rules are the WITHHELD `(rule, function)` pairs: `allow` and
+/// `forbid` are both evaluable here, which is why `gate --report`'s two whole-policy refusals have no
+/// counterpart. ONE ENTRY PER RULE — the first function that defeats it is the example, since naming all
+/// of them would bury the rule the operator has to fix.
+pub(crate) static GATE_UNEVALUATED: std::sync::OnceLock<
+    std::sync::Mutex<Vec<candor_report::Unevaluated>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn record_gate_unevaluated(items: &[candor_report::Unevaluated]) {
+    if items.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    let acc = GATE_UNEVALUATED.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut g = acc.lock().unwrap();
+    for it in items {
+        if !g.iter().any(|e| e.rule == it.rule) {
+            g.push(it.clone());
+        }
+    }
+}
+
 /// Write the structured gate verdict `{ spec, ok, violations }` (candor-spec §3.3 ⟨0.8⟩) — the machine
 /// analog of the AS-EFF console lines, accumulated from the SAME `policy_violations` that set the exit
 /// code, so it can never disagree with the gate. Called ONCE, by `scan_main`, after the whole scan (every
@@ -560,7 +584,13 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         let why = GATE_REFUSAL.get().cloned().unwrap_or_else(|| {
             "the gate config did not load (exit 2) — see stderr for the specific cause".to_string()
         });
-        match candor_report::gate_refusal_json(&why) {
+        // ⟨0.24⟩ …carrying the unanswered rules, which on a SOLE refusal is the whole of what the
+        // consumer can act on (SPEC §3.1 `fc4b5f6`).
+        let sole_unevaluated: Vec<candor_report::Unevaluated> = GATE_UNEVALUATED
+            .get()
+            .map(|m| m.lock().unwrap().clone())
+            .unwrap_or_default();
+        match candor_report::gate_refusal_json_v24(&why, &sole_unevaluated) {
             Ok(json) => {
                 if path == "-" {
                     println!("{json}");
@@ -627,6 +657,14 @@ pub(crate) fn write_gate_json(exit_code: i32) {
             .cloned()
             .unwrap_or_else(|| "the gate config did not load (exit 2) — see stderr for the specific cause".to_string())
     });
+    // ⟨0.24⟩ …and the rules this run could NOT decide (SPEC §3.1 `fc4b5f6`), beside the verdict rather
+    // than instead of it. On this route that is only the WITHHELD pairs; `allow`/`forbid` are evaluable
+    // here, so `gate --report`'s two whole-policy entries have no counterpart and the byte-equality MUST
+    // is untouched on every policy both routes answer in full.
+    let unevaluated: Vec<candor_report::Unevaluated> = GATE_UNEVALUATED
+        .get()
+        .map(|m| m.lock().unwrap().clone())
+        .unwrap_or_default();
     match candor_report::gate_verdict_json_v24_refused(
         &mut violations,
         coverage.as_ref(),
@@ -634,6 +672,7 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         &unanalyzed,
         vocabulary.as_ref(),
         refusal.as_deref(),
+        &unevaluated,
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
