@@ -637,21 +637,37 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
 
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
     // is gateless-green — the user believes a rule is enforced that never ran.
+    //
+    // ⟨0.24⟩ **COMPUTED HERE, ACTED ON AFTER THE GATE — the precedence has no carve-out for a refusal's
+    // KIND** (SPEC §3.1 `1503368`). These two used to `return refuse(…)` on the spot, so MEASURED
+    // 2026-07-28: `deny Fs app.writes` beside `forbid app -> dep` exited 2 with the certain `Fs`
+    // violation absent from the document — the identical harm `8b97e5c` had just fixed for the
+    // per-(rule, function) refusal, surviving one branch higher up because that was not where the
+    // measurement had been taken.
+    //
+    // **Lemma 2 does not care which KIND of refusal stands beside the firing rule.** `Reject` is
+    // upward-closed, so a rule that already fired on carried evidence stays fired however the refused
+    // rule would have resolved. The WHOLE-POLICY granularity of these two governs *which rules go
+    // unevaluated*; it was never a licence to suppress a violation that was evaluated and certain.
+    //
+    // THE EXCEPTION IS PRINCIPLED, NOT AN OPTIMISATION: with no `deny`/`pure` rule in the policy there is
+    // nothing that COULD dominate, so the refusal is the whole verdict and is taken immediately — which
+    // also means a `forbid`-only policy still refuses without needing a report to exist. Deferring is
+    // only ever right when something might overrule.
+    let mut policy_refusals: Vec<String> = Vec::new();
     if !p.layer_rules.is_empty() {
-        let why = format!(
+        policy_refusals.push(format!(
             "this policy has {} `forbid` rule(s), which `gate --report` cannot \
              evaluate — a report's `calls` graph is EFFECT-RELEVANT (only callees with a non-empty effect \
              set are written), so a crossing into a wholly PURE unit is invisible in it, while `forbid` \
              matches on NAME. The rule would read green over a crossing a scan fails on. Gate layering at \
              scan time: candor-scan . --policy {policy_path}",
             p.layer_rules.len()
-        );
-        eprintln!("candor-query gate: {why}");
-        return refuse(&why, want_json, gate_json.as_deref());
+        ));
     }
     if !p.allow_rules.is_empty() {
         let effects: BTreeSet<&str> = p.allow_rules.iter().map(|r| r.effect).collect();
-        let why = format!(
+        policy_refusals.push(format!(
             "this policy has `allow {}` rule(s), which `gate --report` cannot \
              evaluate — the AS-EFF-008 surface-completeness marker does not ride the report wire as a \
              gate-usable fact, so a benign visible literal beside a runtime-computed endpoint would be \
@@ -659,10 +675,29 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
              names a merely unrecognised host.) Gate allowlists at scan time: candor-scan . --policy \
              {policy_path}",
             effects.into_iter().collect::<Vec<_>>().join("`/`")
-        );
-        eprintln!("candor-query gate: {why}");
-        return refuse(&why, want_json, gate_json.as_deref());
+        ));
     }
+    if !policy_refusals.is_empty() && p.rules.is_empty() {
+        for why in &policy_refusals {
+            eprintln!("candor-query gate: {why}");
+        }
+        return refuse(&policy_refusals.join("  ·  "), want_json, gate_json.as_deref());
+    }
+    // **AND A REFUSED RULE IS UNEVALUATED — THAT IS WHAT REFUSED MEANS.** Dropping them from the policy
+    // handed to `gate()` is not tidying: the refusal used to `return` before `gate()` ran, so deferring
+    // it silently started EVALUATING them. Caught by this file's own test on the first run — `deny Net`
+    // beside `allow Net other.example.com` produced an AS-EFF-008 record in the document, derived from a
+    // `surface_incomplete` map `gate_input_from_report` leaves EMPTY on purpose. That is precisely the
+    // unsound verdict the `allow` refusal exists to prevent, now shipped INSIDE the document as if it
+    // were certain, and the same argument applies to `forbid` over an effect-relevant `calls` graph.
+    //
+    // A neat illustration of the general hazard: the question to ask of any short-circuit removal is what
+    // code now runs that never ran, and what it assumed about who would call it. Same question, same
+    // session, second answer.
+    let mut p = p;
+    p.allow_rules.clear();
+    p.layer_rules.clear();
+    let p = p;
 
     let Some(prefix) = report_flag.or_else(discover_report_prefix) else {
         eprintln!(
@@ -733,7 +768,14 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // The refusal is NOT swallowed: when a violation dominates, every unanswerable rule is still
     // disclosed on stderr below. Exit 1 reports the violation it is sure of; it does not conceal the
     // part it could not read.
-    let refused = unanswerable_scoped_filters(&p, &sig);
+    //
+    // ⟨0.24⟩ ONE LIST, BOTH KINDS. The whole-policy `forbid`/`allow` refusals join the per-(rule,
+    // function) ones here rather than having taken their own exit above, because the precedence is
+    // general (SPEC §3.1 `1503368`) and because two refusal channels would mean two chances to write the
+    // disclosure and two chances to forget it. Whole-policy first: it is the bigger claim about what the
+    // verdict below does not cover.
+    let mut refused = policy_refusals;
+    refused.extend(unanswerable_scoped_filters(&p, &sig));
 
     // ⟨0.24⟩ `gate()` now WITHHOLDS the `(rule, function)` pairs whose narrowing filter the signature
     // cannot answer, instead of charging them off the matcher's `unresolved` floor (SPEC §3.1). On THIS

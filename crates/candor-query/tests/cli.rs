@@ -1806,9 +1806,10 @@ fn gate_report_refuses_forbid_and_allow_whole_policy() {
     for (name, text, needle) in [
         ("forbid", "forbid app -> dep\n", "`forbid`"),
         ("allow", "allow Net example.com\n", "allow "),
-        // A policy that MIXES an answerable rule with an unanswerable one is still refused whole: the
-        // half-enforced alternative exits 0, which is gateless-green.
-        ("mixed", "deny Net\nforbid app -> dep\n", "`forbid`"),
+        // A policy whose `deny` half does NOT fire is still refused whole: enforcing the answerable half
+        // and exiting 0 is gateless-green — the user believes a rule is enforced that never ran. This
+        // row used to read `deny Net` and expect 2; see the row below for why it had to change.
+        ("mixed_no_hit", "deny Exec\nforbid app -> dep\n", "`forbid`"),
     ] {
         let (rc, stdout, err) = run_gate(&loc, &pol(&f.dir, name, text), &[]);
         assert_eq!(rc, 2, "{name} must be REFUSED (exit 2), never evaluated:\n{err}");
@@ -1820,6 +1821,35 @@ fn gate_report_refuses_forbid_and_allow_whole_policy() {
     // prove only that the fixture is inert.
     let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "bare", "deny Net\n"), &[]);
     assert_eq!(rc, 1, "the answerable control must FIRE, or the refusals prove nothing:\n{err}");
+
+    // ⟨0.24⟩ **AND A CERTAIN VIOLATION DOMINATES THESE REFUSALS TOO** (candor-spec `1503368`, which
+    // removes the carve-out). This assertion is the reason the `mixed` row above had to change: it read
+    // `deny Net` + `forbid`, and `deny Net` FIRES on this fixture, so it was pinning exactly the
+    // suppression the ruling removes. MEASURED before the fix: exit 2, with the certain `Net` violation
+    // absent from the `--gate-json` document — byte-identical in harm to the per-(rule, function) case
+    // `8b97e5c` fixed, surviving one branch higher because that was not where the measurement was taken.
+    //
+    // **Lemma 2 does not care which KIND of refusal stands beside the firing rule.** Whole-policy
+    // granularity governs which rules go UNEVALUATED; it is not a licence to suppress one that was
+    // evaluated and certain.
+    for (name, text) in
+        [("dom_forbid", "deny Net\nforbid app -> dep\n"), ("dom_allow", "deny Net\nallow Net other.example.com\n")]
+    {
+        let out = f.dir.join(format!("{name}.json"));
+        let _ = std::fs::remove_file(&out);
+        let (rc, _, err) =
+            run_gate(&loc, &pol(&f.dir, name, text), &["--gate-json", &out.to_string_lossy()]);
+        assert_eq!(rc, 1, "{name}: a firing `deny` dominates a whole-policy refusal:\n{err}");
+        let doc = std::fs::read_to_string(&out)
+            .unwrap_or_else(|e| panic!("{name}: the certain violation must reach the document ({e}):\n{err}"));
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let fns: Vec<&str> =
+            v["violations"].as_array().unwrap().iter().map(|x| x["fn"].as_str().unwrap()).collect();
+        assert_eq!(fns, vec!["app.egress"], "{name}: the exit code is one bit, the document is the evidence:\n{doc}");
+        // …and the refused KIND is still disclosed. Exit 1 reports what it is sure of; it does not
+        // conceal the part it could not read.
+        assert!(err.contains("scan time"), "{name}: the dominated refusal must still be named:\n{err}");
+    }
 }
 
 /// SPEC §3.1 ⟨0.24⟩ ANSWERABILITY, per-(rule, function) arm — and the LIVE fail-open, not a theoretical
