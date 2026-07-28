@@ -77,11 +77,7 @@ pub(crate) fn policy_violations(
     // `net-partner` config. The gate used to compute them lazily at the `deny Net[dest…]` site; the set
     // is identical (only a Net-bearing fn could reach that branch) and it is the same derivation scan.rs
     // writes into the report's `netClass`, which is what makes the ⟨0.24⟩ report route byte-equivalent.
-    let net_classes: HashMap<String, Vec<String>> = all
-        .iter()
-        .filter(|q| inferred.get(*q).is_some_and(|s| s.contains("Net")))
-        .map(|q| (q.clone(), net_classes_of(q, hostsacc, incompleteacc, net_partners)))
-        .collect();
+    let net_classes = net_class_map(all, inferred, hostsacc, incompleteacc, net_partners);
     candor_classify::gate::gate(
         &p,
         &candor_classify::gate::GateInput {
@@ -99,28 +95,56 @@ pub(crate) fn policy_violations(
     )
 }
 
+/// ⟨0.20⟩ Each `Net`-bearing fn's destination classes, materialized ONCE from this machine's
+/// `net-partner` config. Extracted because the gate and the provable-purity disclosure must read the
+/// SAME set: the disclosure asks whether a rule PASSES a function, and since ⟨0.20⟩ that question can
+/// turn on a `Net[dest…]` filter, so a disclosure computing its own answer would be a second gate.
+pub(crate) fn net_class_map(
+    all: &[String],
+    inferred: &HashMap<String, BTreeSet<&'static str>>,
+    hostsacc: &HashMap<String, BTreeSet<String>>,
+    incompleteacc: &HashMap<String, BTreeSet<&'static str>>,
+    net_partners: &BTreeSet<String>,
+) -> HashMap<String, Vec<String>> {
+    all.iter()
+        .filter(|q| inferred.get(*q).is_some_and(|s| s.contains("Net")))
+        .map(|q| (q.clone(), net_classes_of(q, hostsacc, incompleteacc, net_partners)))
+        .collect()
+}
+
 /// The provable-purity DISCLOSURE (eval/fixloop/DISPATCH-NOTE.md): functions that PASS a `pure`/`deny` layer
 /// but are `Unknown` — their compliance is asserted, not verified (the Unknown could hide the forbidden
 /// effect; the classic case is a fn/closure-injected port). Advisory — NEVER a violation, so the gate's
 /// verdict/exit is untouched; the caller emits it as a note so an author learns their layer isn't PROVABLY
 /// clean. Returns `(fn, deny-Unknown upgrade)` per hole. Mirrors `candor-query unverified`.
+///
+/// ⟨0.24⟩ THE RE-PARSE CARRIES THE ALIASES NOW, and that is this route's half of `ea0df4f`. The verdict
+/// path resolves `deny Unknown[<alias>]` through the `.candor/config` beside the policy; this advisory
+/// re-parse did not pass them, so the token resolved to nothing, the filter emptied, and the rule
+/// WIDENED to a bare `deny Unknown` — under which every hole is a violation and the note has nothing to
+/// say. The query verb was fixed at `ea0df4f` and this one was the same defect standing in the other
+/// copy: `parse_policy_silent` is `parse_policy_quiet` with the vocabulary, and the QUIET part is still
+/// required (the verdict path already warned about this same text — #21).
 pub(crate) fn unverified_holes(
     policy_text: &str,
     all: &[String],
     inferred: &HashMap<String, BTreeSet<&'static str>>,
+    reasonclassacc: &HashMap<String, BTreeSet<String>>,
+    net_classes: &HashMap<String, Vec<String>>,
+    unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
 ) -> Vec<(String, String)> {
-    use candor_classify::policy::{parse_policy_quiet, rule_and_upgrade, unverified_hole_rule};
-    // QUIET re-parse: the gate check already parsed this same policy and emitted any malformed-rule
-    // warnings — parsing again here (for the advisory `unverified` disclosure) would print each twice in
-    // the CI log (#21). The verdict path (gate check) keeps the warnings; this advisory path stays silent.
-    let rules = parse_policy_quiet(policy_text).rules;
+    use candor_classify::policy::{parse_policy_silent, rule_and_upgrade, unverified_hole_rule};
+    let rules = parse_policy_silent(policy_text, unknown_aliases).rules;
     let empty: BTreeSet<&'static str> = BTreeSet::new();
+    let no_classes: Vec<String> = Vec::new();
     let mut out = Vec::new();
     for q in all {
         // Same predicate + upgrade reconstruction as `candor-query unverified` (candor_classify::policy):
-        // the two disclosure paths share ONE definition of a hole, so they cannot drift.
+        // the two disclosure paths share ONE definition of a hole, so they cannot drift. And since ⟨0.24⟩
+        // that definition is the GATE's own firing decision, fed the same two accumulators the gate got.
         let effs: Vec<&str> = inferred.get(q).unwrap_or(&empty).iter().copied().collect();
-        if let Some(r) = unverified_hole_rule(q, &effs, &rules) {
+        let nets = net_classes.get(q).unwrap_or(&no_classes);
+        if let Some(r) = unverified_hole_rule(q, &effs, reasonclassacc.get(q), nets, &rules) {
             out.push((q.clone(), rule_and_upgrade(r).1));
         }
     }

@@ -40,7 +40,7 @@ use std::collections::{BTreeSet, HashMap};
 /// Contributing `unresolved` to one of those would trade a fail-open for a fabricated class, and a fix
 /// that trades one sin for its mirror is not a fix. rust's report carries `direct` (§2), so the §4
 /// condition is checkable verbatim here rather than approximated.
-fn reason_class_acc(entries: &[ReportEntry]) -> HashMap<String, BTreeSet<String>> {
+pub(crate) fn reason_class_acc(entries: &[ReportEntry]) -> HashMap<String, BTreeSet<String>> {
     use candor_classify::policy::ReasonClass;
     let mut direct: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -113,18 +113,26 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     let want: Option<std::collections::BTreeSet<&str>> = class_filter
         .as_ref()
         .map(|set| set.iter().map(|c| c.token()).collect());
-    // Computed once, and only when a filter was given (it is a fixpoint over the whole report).
-    let reason_acc = want.as_ref().map(|_| reason_class_acc(&entries));
+    // Computed once. ⟨0.24⟩ UNCONDITIONALLY, where it used to be built only for `--class`: the hole
+    // predicate itself needs it now, because a rule with a narrowing `Unknown[…]` filter PASSES or FIRES
+    // on this very set, and the disclosure names the holes the gate did not clear. Making the fixpoint
+    // conditional on the POLICY's shape as well would be a third place that has to agree about which
+    // rules narrow — the arithmetic that decides is one traversal of a report already in memory.
+    let reason_acc = reason_class_acc(&entries);
     let class_matches = |e: &ReportEntry| -> bool {
-        match (&want, &reason_acc) {
-            (Some(w), Some(acc)) => candor_classify::policy::reason_class_matches(acc.get(&e.func), w),
-            _ => true, // no --class ⇒ no filter
+        match &want {
+            Some(w) => candor_classify::policy::reason_class_matches(reason_acc.get(&e.func), w),
+            None => true, // no --class ⇒ no filter
         }
     };
+    let no_classes: Vec<String> = Vec::new();
     let holes: Vec<Hole> = entries
         .iter()
         .filter_map(|e| {
-            unverified_hole_rule(&e.func, &e.inferred, &rules)
+            // ⟨0.20⟩ `netClass` is read VERBATIM off the wire, exactly as `gate --report` reads it — the
+            // gate does not recompute it from the hosts on this route and neither may the disclosure.
+            let nets = if e.net_class.is_empty() { &no_classes } else { &e.net_class };
+            unverified_hole_rule(&e.func, &e.inferred, reason_acc.get(&e.func), nets, &rules)
                 .filter(|_| class_matches(e))
                 .map(|rule| Hole { func: e, rule })
         })

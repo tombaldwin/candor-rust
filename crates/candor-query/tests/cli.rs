@@ -2888,3 +2888,109 @@ fn gate_report_grammar_is_loud() {
     let (rc, _, err) = run_gate(&bad, &p, &[]);
     assert_eq!(rc, 2, "a corrupt report is corrupt input, not an effect-free package:\n{err}");
 }
+
+/// ⟨0.24⟩ **`unverified` AND `fix-gate` MUST READ THE NARROWING FILTER THE GATE READS** — SPEC §6.2,
+/// the report-route half of `a_narrowed_rule_the_gate_tolerates_is_a_hole_and_the_one_it_fires_on_is_not`.
+///
+/// These are the verbs an agent consults BEFORE editing, and they answered from a coarser rule than the
+/// one the gate applies: "does this rule NAME an effect this function has?", computed from `r.effects`
+/// alone — the pre-⟨0.19⟩ question, still being asked after two rungs gave rules a filter. The two
+/// symptoms run opposite ways and BOTH are measured here, on one report and one pair of policies:
+///
+///   - `unverified` LOST A DISCLOSURE. A hole is a function that PASSES its rule while `Unknown`, so a
+///     rule the gate tolerates was read as violated, the real hole was reclassified as a
+///     violation-that-isn't, and the verb answered "every function in a pure/deny layer is PROVABLY
+///     clean ✓" over a function the gate had just declined to clear;
+///   - `fix-gate` GAINED ONE. It named a hoist remedy for a crossing the gate does not report — a
+///     boundary refactor proposed on the strength of a rule the operator narrowed to exclude it.
+///
+/// EVERY ROW HAS ITS MIRROR IN THE SAME RUN, because killing an over-charge is exactly where a silent
+/// under-report gets introduced. `[reflect]` does not name this entry's `indirect` hole (gate exit 0);
+/// `[indirect]` does (gate exit 1). The gate's own exit code is asserted on each, so the two verbs are
+/// compared against the gate rather than against my expectation of it.
+#[test]
+fn unverified_and_fix_gate_answer_the_narrowed_rule_the_gate_actually_applies() {
+    let f = Fixture::new("filter-aware");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.port","inferred":["Unknown"],"direct":["Unknown"],
+                          "unknownWhy":["callback:injected port"]}]}"#,
+        None,
+    );
+    let run = |verb: &str, p: &std::path::Path| -> (i32, String) {
+        let out = Command::new(bin())
+            .args([verb, "--report", &loc, "--policy", &p.to_string_lossy(), "--json"])
+            .output()
+            .expect("run candor-query");
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let json = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+
+    // ── ARM 1: the filter does NOT match (`indirect` ∉ {reflect}) — the gate TOLERATES. ──
+    let miss = pol(&f.dir, "miss", "deny Unknown[reflect] app\n");
+    let (rc, _, err) = run_gate(&loc, &miss, &[]);
+    assert_eq!(rc, 0, "the gate tolerates a class filter this entry does not match:\n{err}");
+
+    let (urc, uout) = run("unverified", &miss);
+    let u = json(&uout);
+    assert_eq!(urc, 0, "advisory");
+    assert_eq!(
+        u["unverified"].as_array().map(Vec::len),
+        Some(1),
+        "the gate DECLINED to clear `app.port` under this rule, so its purity is asserted and not \
+         verified — that is the disclosure's whole subject, and it was empty:\n{uout}"
+    );
+    assert_eq!(u["unverified"][0]["fn"], "app.port");
+    assert_eq!(
+        u["unverified"][0]["rule"], "deny Unknown[reflect] app",
+        "…and the rule is named WITH its filter — printing the operator's narrowed rule back as the \
+         wide one is the mis-attribution this fix must not manufacture:\n{uout}"
+    );
+    assert_eq!(u["unverified"][0]["upgrade"], "deny Unknown app", "widen the filter, not append a second Unknown");
+
+    let (frc, fout) = run("fix-gate", &miss);
+    assert_eq!(frc, 0);
+    assert_eq!(
+        json(&fout)["remedies"].as_array().map(Vec::len),
+        Some(0),
+        "the gate reports no crossing here, so there is no boundary to hoist across:\n{fout}"
+    );
+
+    // ── ARM 2, THE MIRROR: the same rule spelled to MATCH. The gate FIRES, so `app.port` is a
+    // VIOLATION — `unverified` must go silent (it is not an unproven pass) and `fix-gate` must speak
+    // (there is a real crossing). Without this arm, arm 1 is satisfied by a verb that discloses
+    // everything and a `fix-gate` that discloses nothing. ──
+    let hit = pol(&f.dir, "hit", "deny Unknown[indirect] app\n");
+    let (rc2, _, err2) = run_gate(&loc, &hit, &[]);
+    assert_eq!(rc2, 1, "`callback:` classifies as `indirect`, so this filter FIRES:\n{err2}");
+
+    let (_, uout2) = run("unverified", &hit);
+    assert_eq!(
+        json(&uout2)["unverified"].as_array().map(Vec::len),
+        Some(0),
+        "a function the gate CHARGED is a violation, not an unverified pass:\n{uout2}"
+    );
+    let (_, fout2) = run("fix-gate", &hit);
+    assert_eq!(
+        json(&fout2)["remedies"].as_array().map(Vec::len),
+        Some(1),
+        "…and the crossing the gate DOES report still gets its remedy — the filter-aware fix must not \
+         turn `fix-gate` silent on the violations it exists for:\n{fout2}"
+    );
+
+    // ── ARM 3: NO FILTER AT ALL. Both verbs unchanged, which is what keeps conformance PARTs 12b/12c/12d
+    // (four-way) from moving — the fix is confined to the rules the ⟨0.19⟩/⟨0.20⟩ rungs added. ──
+    let bare = pol(&f.dir, "bare", "deny Unknown app\n");
+    let (rc3, _, _) = run_gate(&loc, &bare, &[]);
+    assert_eq!(rc3, 1);
+    let (_, uout3) = run("unverified", &bare);
+    assert_eq!(json(&uout3)["unverified"].as_array().map(Vec::len), Some(0), "a bare deny Unknown fires on every hole");
+    let pure = pol(&f.dir, "pure", "pure app\n");
+    let (_, uout4) = run("unverified", &pure);
+    let u4 = json(&uout4);
+    assert_eq!(u4["unverified"].as_array().map(Vec::len), Some(1));
+    assert_eq!(u4["unverified"][0]["upgrade"], "deny Unknown app", "PART 12c's four-way form, unmoved");
+}

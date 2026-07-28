@@ -1818,3 +1818,78 @@ fn scan_resolves_policy_vocabulary_beside_the_policy_and_names_the_config_that_m
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// ⟨0.24⟩ THE GATE'S OWN NOTE MUST DISCLOSE THE HOLE THE GATE JUST DECLINED TO CLEAR — SPEC §6.2, and
+/// the ROUTE half of `a_narrowed_rule_the_gate_tolerates_is_a_hole_and_the_one_it_fires_on_is_not`.
+///
+/// A plain `--policy` scan auto-emits the provable-purity note (conformance PART 12d) from
+/// `unverified_holes`, and that path carried TWO copies of the same defect:
+///
+///   - the shared predicate computed "PASSES" from `r.effects` alone, blind to the ⟨0.19⟩/⟨0.20⟩
+///     narrowing filters, so a rule the gate TOLERATED read as violated and the hole was deleted; and
+///   - this route's re-parse dropped the `.candor/config` vocabulary, so `deny Unknown[<alias>]` widened
+///     to a bare `deny Unknown` — under which every hole is a violation and the note has nothing to say.
+///     `ea0df4f` fixed the query verb; the same defect was standing here in the other copy.
+///
+/// Both arms in ONE run, because a fix that kills an over-charge is exactly where a silent under-report
+/// gets introduced: `corp = reflect` does NOT match this crate's `indirect` hole (the gate tolerates ⇒
+/// the note MUST name it), and `corp = indirect` DOES (the gate fires ⇒ it is a violation, and the note
+/// MUST stay silent rather than report the gate's own finding back as an unproven pass).
+#[test]
+fn the_gate_note_discloses_a_hole_a_narrowed_rule_tolerates_and_stays_silent_on_one_it_fires_on() {
+    let d = make_crate("gatenotefilter", "pub fn go(f: &dyn Fn() -> i32) -> i32 { f() }\n");
+    let home = std::env::temp_dir().join(format!("candor-notehome-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join(".candor")).unwrap();
+    let pp = home.join("org.policy");
+    let cfgpath = home.join(".candor/config");
+
+    let run = |policy: &std::path::Path| -> (i32, String) {
+        let out = Command::new(bin())
+            .args([
+                d.to_string_lossy().as_ref(),
+                "--out", d.join("rep").to_string_lossy().as_ref(),
+                "--policy", policy.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .expect("run candor-scan");
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+
+    // ── ARM 1, the fix: the filter does NOT match, so the gate tolerates and the note must speak. ──
+    std::fs::write(&pp, "deny Unknown[reflect]\n").unwrap();
+    let (rc, err) = run(&pp);
+    assert_eq!(rc, 0, "`[reflect]` does not name this crate's `indirect` hole — the gate tolerates:\n{err}");
+    assert!(
+        err.contains("`go`  → add  `deny Unknown`"),
+        "a rule the gate DECLINED to clear this function under leaves it unproven, and the note is the \
+         only place that says so — it printed nothing:\n{err}"
+    );
+
+    // …and through an ALIAS, which is this route's own half of `ea0df4f`: the verdict path resolves the
+    // vocabulary and the advisory re-parse used not to, so the rule widened and the note went quiet.
+    std::fs::write(&pp, "deny Unknown[corp]\n").unwrap();
+    std::fs::write(&cfgpath, "unknown-alias corp = reflect\n").unwrap();
+    let (rc_a, err_a) = run(&pp);
+    assert_eq!(rc_a, 0, "corp = reflect does not match an indirect hole:\n{err_a}");
+    assert!(
+        err_a.contains("`go`  → add  `deny Unknown`"),
+        "the advisory re-parse must carry the SAME `.candor/config` vocabulary the verdict resolved \
+         through, or it is reasoning about a rule the operator did not write:\n{err_a}"
+    );
+
+    // ── ARM 2, THE MIRROR: spell the same filter to MATCH. The gate FIRES, so this is a violation and
+    // the note must NOT report it back as an unproven pass. Without this arm, arm 1 is satisfied by a
+    // predicate that calls every Unknown function a hole. ──
+    std::fs::write(&cfgpath, "unknown-alias corp = indirect\n").unwrap();
+    let (rc_m, err_m) = run(&pp);
+    assert_eq!(rc_m, 1, "corp = indirect DOES name this hole — the gate fires:\n{err_m}");
+    assert!(
+        !err_m.contains("→ add"),
+        "a function the gate CHARGED is a violation, not an unverified pass — the note must not \
+         disclose the gate's own finding a second time:\n{err_m}"
+    );
+
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -15,7 +15,7 @@
 //! any test that could be written. Do NOT re-implement the matching on the report side — the §6.2
 //! clause that mandates the verb was written about exactly that mistake.
 
-use crate::policy::{literal_allowed, reason_class_matches, scope_matches, ParsedPolicy};
+use crate::policy::{literal_allowed, reason_class_matches, scope_matches, ParsedPolicy, PolicyRule};
 use candor_report::GateViolation;
 use std::collections::{BTreeSet, HashMap};
 
@@ -108,6 +108,134 @@ pub struct GateOutcome {
     pub withheld: Vec<Withheld>,
 }
 
+/// ⟨0.24⟩ What one §6.2 `deny`/`pure` rule DOES to one function's signature — see [`rule_hits`].
+pub struct RuleHits<'a> {
+    /// The effects this rule CHARGES on this function, after both narrowing filters. Empty ⇒ the rule
+    /// does not fire here, which is what the disclosure calls PASSING.
+    pub hits: Vec<&'a str>,
+    /// The filters — `"Unknown"` / `"Net"` — that had no evidence to read, in that order. The hit was
+    /// dropped from `hits` AND the fact rides out, because dropping it silently is the mirror defect.
+    pub withheld: Vec<&'static str>,
+}
+
+/// ⟨0.24⟩ WHAT ONE §6.2 `deny`/`pure` RULE DOES TO ONE FUNCTION'S SIGNATURE — the firing decision,
+/// extracted so it has exactly one implementation.
+///
+/// **WHY IT IS A FUNCTION NOW.** It was inline in [`gate`], and the provable-purity disclosure
+/// ([`crate::policy::unverified_hole_rule`]) carried its own second copy that asked a coarser question:
+/// "does the rule NAME an effect this function has?", computed from `r.effects` alone. That copy could
+/// not see a narrowing filter, so it disagreed with the gate on exactly the rules the ⟨0.24⟩ rung added
+/// — and the disagreement ran the LOSING way. A hole is a function that PASSES its rule while `Unknown`,
+/// so a rule the gate TOLERATES (`deny Unknown[reflect]` over an `indirect` hole) was read by the
+/// disclosure as a violation-that-isn't and dropped from the output: `unverified` printed **"every
+/// function in a pure/deny layer is PROVABLY clean ✓"** over a function the gate had just declined to
+/// clear. MEASURED 2026-07-28 on a one-function crate; reachable with NO alias in play, one layer below
+/// the alias-widening defect `ea0df4f` closed.
+///
+/// The caller does the SCOPE test and owns the disposition of `withheld`; this answers only "given that
+/// this rule governs this function, what does it charge, and what could it not evaluate?".
+///
+/// `reason_classes` is the ACCUMULATED (post-fixpoint) class set — `None`/empty means the signature
+/// carries none, which is NOT determinable and is withheld, never floored. `net_classes` is the fn's
+/// ⟨0.20⟩ destination classes, likewise already derived.
+pub fn rule_hits<'a>(
+    r: &PolicyRule,
+    effects: &[&'a str],
+    reason_classes: Option<&BTreeSet<String>>,
+    net_classes: &[String],
+) -> RuleHits<'a> {
+    let mut withheld: Vec<&'static str> = Vec::new();
+    let mut hits: Vec<&str> = if r.effects.is_empty() {
+        // `pure` — every EFFECT, but NOT `Unknown`: the §4 trust marker is not an effect
+        // (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). The reference
+        // engine and the deep backend exclude it identically — this engine wrongly counted an
+        // Unknown-only fn as a `pure` violation until 2026-07-09 (a cross-engine verdict split
+        // on the same policy file).
+        effects.iter().copied().filter(|e| *e != "Unknown").collect()
+    } else {
+        effects.iter().copied().filter(|e| r.effects.contains(e)).collect()
+    };
+    // Reason-scoped Unknown: a `deny E Unknown[classes]` (non-empty filter) keeps its Unknown hit
+    // ONLY for a fn whose TRANSITIVE reason classes include one of those classes; else tolerate it
+    // (wrong reason-class). Concrete effects in `hits` are untouched — only Unknown is scoped.
+    if hits.contains(&"Unknown") && !r.unknown_classes.is_empty() {
+        let want: BTreeSet<&str> = r.unknown_classes.iter().map(|c| c.token()).collect();
+        // An Unknown with NO recorded reason is `unresolved` (conservative — stays in
+        // `[*]`/`[unresolved]`). THIS IS A NET, NOT A ROUTE. It is per FUNCTION and keys on the
+        // ABSENCE of a class set, so any other reason on the same function hides whatever it was
+        // covering — which is how a reasonless chained-dep `Unknown` went ungated on every consumer
+        // that also had a reason of its own. That case now CONTRIBUTES `unresolved` where the
+        // signature is BUILT (candor-scan's `reason_class_direct`; `gate_input_from_report` on the
+        // report route) instead of arriving here by absence. What is left for the absence arm is
+        // the RELEASE-mode gap: the writer's §4 invariant is a `debug_assert`, so a future path
+        // that puts `Unknown` into `direct` with no reason fails closed here rather than escaping
+        // the gate. Not dead — it is pinned by
+        // `reason_scoped_unknown_gate_fires_on_match_tolerates_mismatch`.
+        //
+        // ⟨0.24⟩ The rule itself lives in `crate::policy::reason_class_matches` because
+        // `unverified --class` must select over exactly the set this gate scopes over: a gate and
+        // the disclosure naming the holes that gate did not prove, disagreeing, is the defect.
+        //
+        // ⟨0.24⟩ **BUT THE FLOOR IS ASKED FIRST, AND SEPARATELY — SPEC §3.1.** `reason_class_matches`
+        // answers "could this rule apply?", and its absence/empty arm floors at `unresolved` so a
+        // hole nobody classified never slips out of a filter that names its own class. That is the
+        // right fail-closed default for a MATCHER and the WRONG basis for a FIRING: read as grounds
+        // to emit a violation it asserts a reason NOBODY RECORDED. The two questions shared this one
+        // helper safely only while the report route's refusal short-circuited before `gate()` ran;
+        // `8b97e5c` removed that short-circuit (correctly — a certain violation must reach the
+        // document) and the identical constant, on identical data, became a FABRICATION.
+        //
+        // MEASURED 2026-07-28, `deny Unknown[unresolved] app.opaque` over an entry with `inferred:
+        // ["Unknown"]` and no `direct`, no `unknownWhy`, no `calls`: exit 1 with a violation record
+        // in `--gate-json`, for a function whose determinable class set is EMPTY. The record was
+        // self-refuting — it carried no `reasonClass` key at all, because the floor exists only
+        // inside the predicate and never in the data.
+        //
+        // So the three-way split. NOT determinable ⇒ **WITHHELD**: the hit is dropped AND the pair
+        // rides out to the caller, because dropping it silently is the mirror defect (a narrowed
+        // filter tolerating for lack of evidence is the fail-open this whole rung exists to close).
+        // Determinable ⇒ the shared matcher decides, unchanged, and the `Some(cs)` arm it lands on
+        // is the only one a firing may rest on.
+        //
+        // THE MIRROR IS PINNED, because this is where an under-report gets introduced: an entry
+        // whose `unresolved` is INHERITED — a `calls` edge to a reasonless direct `Unknown` — has a
+        // determinable set of `{unresolved}` (contributed at the ENTRY, before the fixpoint) and
+        // MUST still fire. That is `R1_EXPECT["unresolved"]`'s `app.a_reasonless_only`, and
+        // `a_withheld_unknown_filter_does_not_take_the_inherited_one_with_it` beside it.
+        let classes = reason_classes;
+        let determinable = classes.is_some_and(|cs| !cs.is_empty());
+        if !determinable {
+            hits.retain(|e| *e != "Unknown");
+            withheld.push("Unknown");
+        } else if !reason_class_matches(classes, &want) {
+            hits.retain(|e| *e != "Unknown");
+        }
+    }
+    // Net destination-class: a `deny Net[dest…]` (non-empty filter) keeps its Net hit ONLY for a fn
+    // reaching one of those destination classes; else tolerate (only asserted-safe destinations).
+    // Fail-closed: a masked surface / a Net with no visible host is unknown-host (net_classes_of).
+    //
+    // ⟨0.24⟩ SAME THREE-WAY SPLIT AS THE REASON FILTER, and this side is where the shape is easiest
+    // to see because it never fabricated: with no destination classes to read, `any()` over the
+    // empty set is false and the Net hit was DROPPED — the *other* half of the same defect, an
+    // absence-keyed relaxation of a fail-closed gate. Silently tolerating and silently charging are
+    // the two ways to answer a question the evidence cannot settle; WITHHOLDING is the third, and
+    // the only one that stays true. Costs nothing on a signature this engine produced:
+    // `net_classes_of` floors every Net-bearing fn at `unknown-host`, so an empty set here means
+    // "this producer did not carry the field", never "this function reaches nothing".
+    if hits.contains(&"Net") && !r.net_classes.is_empty() {
+        let fn_net = net_classes;
+        if fn_net.is_empty() {
+            hits.retain(|e| *e != "Net");
+            withheld.push("Net");
+        } else if !fn_net.iter().any(|c| r.net_classes.contains(c)) {
+            hits.retain(|e| *e != "Net");
+        }
+    }
+    RuleHits { hits, withheld }
+}
+
+
 /// Apply a parsed §6.2 policy to an already-accumulated signature. THE ONLY matching code in the stable
 /// toolchain — `candor-scan --policy` and `candor-query gate --report` both land here, which is what
 /// makes "the same verdict from the same signature" a property of the code rather than of two
@@ -132,6 +260,10 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
             continue;
         }
         let inf = gi.inferred.get(q).unwrap_or(&empty);
+        // Materialized ONCE per function rather than per (function, rule): `rule_hits` is generic over
+        // nothing, so the two routes' effect representations (`&'static str` interned / `String` off the
+        // wire) converge here instead of inside the matcher.
+        let effs: Vec<&str> = inf.iter().map(AsRef::as_ref).collect();
         // AS-EFF-006 — deny/pure: forbidden effects in the transitive set.
         for r in &p.rules {
             if let Some(s) = &r.scope {
@@ -139,92 +271,16 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     continue;
                 }
             }
-            let mut hits: Vec<&str> = if r.effects.is_empty() {
-                // `pure` — every EFFECT, but NOT `Unknown`: the §4 trust marker is not an effect
-                // (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). The reference
-                // engine and the deep backend exclude it identically — this engine wrongly counted an
-                // Unknown-only fn as a `pure` violation until 2026-07-09 (a cross-engine verdict split
-                // on the same policy file).
-                inf.iter().map(AsRef::as_ref).filter(|e| *e != "Unknown").collect()
-            } else {
-                inf.iter().map(AsRef::as_ref).filter(|e| r.effects.contains(e)).collect()
-            };
-            // Reason-scoped Unknown: a `deny E Unknown[classes]` (non-empty filter) keeps its Unknown hit
-            // ONLY for a fn whose TRANSITIVE reason classes include one of those classes; else tolerate it
-            // (wrong reason-class). Concrete effects in `hits` are untouched — only Unknown is scoped.
-            if hits.contains(&"Unknown") && !r.unknown_classes.is_empty() {
-                let want: BTreeSet<&str> = r.unknown_classes.iter().map(|c| c.token()).collect();
-                // An Unknown with NO recorded reason is `unresolved` (conservative — stays in
-                // `[*]`/`[unresolved]`). THIS IS A NET, NOT A ROUTE. It is per FUNCTION and keys on the
-                // ABSENCE of a class set, so any other reason on the same function hides whatever it was
-                // covering — which is how a reasonless chained-dep `Unknown` went ungated on every consumer
-                // that also had a reason of its own. That case now CONTRIBUTES `unresolved` where the
-                // signature is BUILT (candor-scan's `reason_class_direct`; `gate_input_from_report` on the
-                // report route) instead of arriving here by absence. What is left for the absence arm is
-                // the RELEASE-mode gap: the writer's §4 invariant is a `debug_assert`, so a future path
-                // that puts `Unknown` into `direct` with no reason fails closed here rather than escaping
-                // the gate. Not dead — it is pinned by
-                // `reason_scoped_unknown_gate_fires_on_match_tolerates_mismatch`.
-                //
-                // ⟨0.24⟩ The rule itself lives in `crate::policy::reason_class_matches` because
-                // `unverified --class` must select over exactly the set this gate scopes over: a gate and
-                // the disclosure naming the holes that gate did not prove, disagreeing, is the defect.
-                //
-                // ⟨0.24⟩ **BUT THE FLOOR IS ASKED FIRST, AND SEPARATELY — SPEC §3.1.** `reason_class_matches`
-                // answers "could this rule apply?", and its absence/empty arm floors at `unresolved` so a
-                // hole nobody classified never slips out of a filter that names its own class. That is the
-                // right fail-closed default for a MATCHER and the WRONG basis for a FIRING: read as grounds
-                // to emit a violation it asserts a reason NOBODY RECORDED. The two questions shared this one
-                // helper safely only while the report route's refusal short-circuited before `gate()` ran;
-                // `8b97e5c` removed that short-circuit (correctly — a certain violation must reach the
-                // document) and the identical constant, on identical data, became a FABRICATION.
-                //
-                // MEASURED 2026-07-28, `deny Unknown[unresolved] app.opaque` over an entry with `inferred:
-                // ["Unknown"]` and no `direct`, no `unknownWhy`, no `calls`: exit 1 with a violation record
-                // in `--gate-json`, for a function whose determinable class set is EMPTY. The record was
-                // self-refuting — it carried no `reasonClass` key at all, because the floor exists only
-                // inside the predicate and never in the data.
-                //
-                // So the three-way split. NOT determinable ⇒ **WITHHELD**: the hit is dropped AND the pair
-                // rides out to the caller, because dropping it silently is the mirror defect (a narrowed
-                // filter tolerating for lack of evidence is the fail-open this whole rung exists to close).
-                // Determinable ⇒ the shared matcher decides, unchanged, and the `Some(cs)` arm it lands on
-                // is the only one a firing may rest on.
-                //
-                // THE MIRROR IS PINNED, because this is where an under-report gets introduced: an entry
-                // whose `unresolved` is INHERITED — a `calls` edge to a reasonless direct `Unknown` — has a
-                // determinable set of `{unresolved}` (contributed at the ENTRY, before the fixpoint) and
-                // MUST still fire. That is `R1_EXPECT["unresolved"]`'s `app.a_reasonless_only`, and
-                // `a_withheld_unknown_filter_does_not_take_the_inherited_one_with_it` beside it.
-                let classes = gi.reason_classes.get(q);
-                let determinable = classes.is_some_and(|cs| !cs.is_empty());
-                if !determinable {
-                    hits.retain(|e| *e != "Unknown");
-                    withheld.push(Withheld { rule: r.raw.clone(), func: q.clone(), filter: "Unknown" });
-                } else if !reason_class_matches(classes, &want) {
-                    hits.retain(|e| *e != "Unknown");
-                }
-            }
-            // Net destination-class: a `deny Net[dest…]` (non-empty filter) keeps its Net hit ONLY for a fn
-            // reaching one of those destination classes; else tolerate (only asserted-safe destinations).
-            // Fail-closed: a masked surface / a Net with no visible host is unknown-host (net_classes_of).
-            //
-            // ⟨0.24⟩ SAME THREE-WAY SPLIT AS THE REASON FILTER, and this side is where the shape is easiest
-            // to see because it never fabricated: with no destination classes to read, `any()` over the
-            // empty set is false and the Net hit was DROPPED — the *other* half of the same defect, an
-            // absence-keyed relaxation of a fail-closed gate. Silently tolerating and silently charging are
-            // the two ways to answer a question the evidence cannot settle; WITHHOLDING is the third, and
-            // the only one that stays true. Costs nothing on a signature this engine produced:
-            // `net_classes_of` floors every Net-bearing fn at `unknown-host`, so an empty set here means
-            // "this producer did not carry the field", never "this function reaches nothing".
-            if hits.contains(&"Net") && !r.net_classes.is_empty() {
-                let fn_net = gi.net_classes.get(q).unwrap_or(&no_classes);
-                if fn_net.is_empty() {
-                    hits.retain(|e| *e != "Net");
-                    withheld.push(Withheld { rule: r.raw.clone(), func: q.clone(), filter: "Net" });
-                } else if !fn_net.iter().any(|c| r.net_classes.contains(c)) {
-                    hits.retain(|e| *e != "Net");
-                }
+            // ONE implementation of the firing decision, shared with the provable-purity disclosure
+            // ([`crate::policy::unverified_hole_rule`]) — see [`rule_hits`] for what the second copy cost.
+            let RuleHits { hits, withheld: wh } = rule_hits(
+                r,
+                &effs,
+                gi.reason_classes.get(q),
+                gi.net_classes.get(q).map(Vec::as_slice).unwrap_or(&no_classes),
+            );
+            for filter in wh {
+                withheld.push(Withheld { rule: r.raw.clone(), func: q.clone(), filter });
             }
             if !hits.is_empty() {
                 // §6.2: when Unknown is denied, report ALL reason classes on the fn (transitive), so the

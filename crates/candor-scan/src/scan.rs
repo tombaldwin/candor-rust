@@ -2150,7 +2150,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // Provable-purity disclosure (advisory — NEVER changes the verdict/exit): pure/deny layers that PASS
         // but are Unknown. Surfaces the gap automatically so an author learns their "pure" layer isn't
         // PROVABLY pure (eval/fixloop/DISPATCH-NOTE.md); the `candor-query unverified` query has the detail.
-        let holes = crate::gate::unverified_holes(&text, &all, &inferred);
+        // ⟨0.24⟩ The SAME two accumulators the gate matched on, and the SAME alias vocabulary it
+        // resolved through — the disclosure names the holes the gate declined to clear, so anything it
+        // reads differently is a second gate wearing the first one's name.
+        let hole_nets = crate::gate::net_class_map(&all, &inferred, &hostsacc, &incompleteacc, &net_partners);
+        let holes = crate::gate::unverified_holes(
+            &text,
+            &all,
+            &inferred,
+            &reason_class_acc,
+            &hole_nets,
+            &unknown_aliases,
+        );
         if !holes.is_empty() {
             let mut upgrades: BTreeSet<String> = BTreeSet::new();
             eprintln!(
