@@ -1996,6 +1996,55 @@ fn gate_report_will_not_certify_over_a_report_that_declares_itself_incomplete() 
     assert_eq!(v["ok"], false);
     assert_eq!(v["incomplete"], true);
     assert_eq!(v["unanalyzed"][0]["path"], "src/bad.rs");
+    // The report above carries no forbidden effect, so `violations` is empty for the RIGHT reason. The
+    // test below is the row where it must NOT be empty — the one this test could never have caught.
+}
+
+/// SPEC §3.3: *"A configured gate over incompletely-analyzed code MUST fail closed (exit ≠ 0); a real
+/// violation (exit 1) still dominates."* The test above pins the first half; this one pins the second,
+/// and the second is the half that was broken.
+///
+/// MEASURED BEFORE THE FIX (2026-07-28) on a report carrying two `Net` units AND a one-entry
+/// `unanalyzed`: rust exited 2 and wrote `{ok:false, incomplete:true, violations: []}` — the manifest
+/// branch ran first and called `write_verdict(&mut [], …)` with an EMPTY list. ts, java and swift all
+/// exited 1 with both violations present. The AS-EFF-006 lines WERE printed to stderr, so a human saw
+/// them; a CI consumer reading gate.json saw a fail-closed verdict with nothing in it, and the finding
+/// never reached the PR.
+///
+/// THE ASSERTION IS ON THE VIOLATIONS BEING PRESENT, not on the exit code. The exit code was wrong too,
+/// but exit 2 is still fail-closed — the violation COUNT is what regressed, and it is what a consumer
+/// acts on.
+#[test]
+fn an_incomplete_report_does_not_swallow_the_violations_it_also_carries() {
+    let f = Fixture::new("gate-incomplete-viol");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":9,"digest":"0"},
+            "unanalyzed":[{"path":"src/bad.rs","reason":"source failed to parse"}],
+            "functions":[{"fn":"app.netOne","inferred":["Net"],"direct":["Net"],"hosts":["a.example.com"]},
+                         {"fn":"app.netTwo","inferred":["Net"],"direct":["Net"],"hosts":["b.example.com"]},
+                         {"fn":"app.pure_enough","inferred":[]}]}"#,
+        None,
+    );
+    let file = f.dir.join("verdict.json");
+    let (rc, _, err) =
+        run_gate(&loc, &pol(&f.dir, "denynet", "deny Net\n"), &["--gate-json", &file.to_string_lossy()]);
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let fns: Vec<&str> =
+        v["violations"].as_array().unwrap().iter().filter_map(|x| x["fn"].as_str()).collect();
+    assert_eq!(
+        fns,
+        vec!["app.netOne", "app.netTwo"],
+        "an incomplete manifest must not delete the findings from the verdict a CI consumer reads \
+         (SPEC §3.3 — a real violation dominates):\n{v:#}\nstderr:\n{err}"
+    );
+    // …carried on the SAME document as the incompleteness, never instead of it.
+    assert_eq!(v["ok"], false, "{v:#}");
+    assert_eq!(v["incomplete"], true, "the manifest still rides the verdict:\n{v:#}");
+    assert_eq!(v["unanalyzed"][0]["path"], "src/bad.rs", "{v:#}");
+    assert_eq!(rc, 1, "a real violation dominates the incomplete exit 2:\n{err}");
 }
 
 /// ⟨0.24⟩ SPEC §3.1: A REPORT HANDED DIRECTLY TO THE GATE WITH `analyzed.count: 0` MAKES THE SAME CLAIM

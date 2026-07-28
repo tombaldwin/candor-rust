@@ -550,37 +550,52 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         }
     }
 
-    // ⟨0.21⟩ COMPLETENESS MANIFEST. The scan exits 2 — before recording any violation toward the verdict
-    // — when its own analysis was incomplete; here the same manifest travels ON the report, so the same
-    // verdict follows from it, with the same document: the fail-closed `ok:false` + `incomplete:true` +
-    // the `unanalyzed` list, and no violations and no coverage note, byte-for-byte what
-    // `candor-scan --gate-json` writes on that path.
-    if !rep.unanalyzed.is_empty() {
-        eprintln!(
-            "candor-query gate: NOT certified — the report declares {} unit(s) candor could not analyze; \
-             a gate cannot be green over unanalyzed code",
-            rep.unanalyzed.len()
-        );
-        write_verdict(&mut [], None, rep.analyzed_count, &rep.unanalyzed, want_json, gate_json.as_deref());
-        return 2;
-    }
-
     // ⟨0.15⟩ the advisory κ note — the same names, from the same ledger, that the scan's verdict carries.
     let coverage = (!rep.coverage_packages.is_empty()).then(|| candor_report::GateCoverage {
         uncovered: rep.coverage_packages.len(),
         packages: rep.coverage_packages.iter().cloned().collect(),
     });
-    if !write_verdict(&mut violations, coverage.as_ref(), rep.analyzed_count, &[], want_json, gate_json.as_deref())
-    {
+    // ⟨0.21⟩ COMPLETENESS MANIFEST — ON THE SAME DOCUMENT AS THE VIOLATIONS, never instead of them.
+    //
+    // THE DEFECT THIS ORDERING FIXES (measured 2026-07-28 on a `deny Net` over a report carrying two Net
+    // units AND a one-entry `unanalyzed`): the manifest branch used to run FIRST and write
+    // `write_verdict(&mut [], …)` — an EMPTY violation list — so a CI consumer read `ok:false`,
+    // `incomplete:true` and NO violations, and the two findings that had just been printed to stderr
+    // never reached the PR. Incompleteness and a violation are not alternatives: SPEC §3.3 says a
+    // configured gate over incompletely-analyzed code MUST fail closed (exit ≠ 0) and "a real violation
+    // (exit 1) still dominates". Dominating the EXIT CODE while deleting the finding from the DOCUMENT
+    // is the worse half of the same sin — the exit code is one bit, the document is the evidence.
+    //
+    // So: ONE verdict, always, carrying violations + `analyzed` + (when non-empty) `incomplete`/
+    // `unanalyzed` + the κ note — `gate_verdict_json_full` already computes `ok = no violations AND not
+    // incomplete`. Then the exit code is decided FROM it: 1 if anything was violated, else 2 if anything
+    // was unanalyzed, else 0. candor-scan's route was rewritten to the same shape in the same commit, so
+    // §3.1's byte-equality MUST still holds on this path (it did not before — the two routes agreed only
+    // because they dropped the same violations).
+    if !write_verdict(
+        &mut violations,
+        coverage.as_ref(),
+        rep.analyzed_count,
+        &rep.unanalyzed,
+        want_json,
+        gate_json.as_deref(),
+    ) {
         return 2;
     }
-    if violations.is_empty() {
-        eprintln!("candor-query gate: policy ✓ (the report's own signature — no re-scan, no re-derivation)");
-        0
-    } else {
+    if !violations.is_empty() {
         eprintln!("candor-query gate: {} policy violation(s)", violations.len());
         eprintln!("→ candor-query fix-gate names the remedy for each (or `candor fix <fn> <Effect>` for one)");
         1
+    } else if !rep.unanalyzed.is_empty() {
+        eprintln!(
+            "candor-query gate: NOT certified — the report declares {} unit(s) candor could not analyze; \
+             a gate cannot be green over unanalyzed code",
+            rep.unanalyzed.len()
+        );
+        2
+    } else {
+        eprintln!("candor-query gate: policy ✓ (the report's own signature — no re-scan, no re-derivation)");
+        0
     }
 }
 

@@ -2029,15 +2029,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 println!("{line}");
             }
         }
+        record_gate_violations(&v); // toward the final --gate-json verdict (written once, by scan_main)
         // A configured gate over INCOMPLETE analysis (a source file failed to parse) must NOT report
         // green: the unparsed file's effects are absent, so a `policy ✓` over it is a false-pure. Fail
-        // exit 2 (mirroring the unreadable-policy posture) — never exit 0/1 with a clean-looking ✓. No
-        // --gate-json verdict here: the analysis is incomplete, so there is no faithful verdict to emit.
-        if had_parse_failure {
+        // exit 2 (mirroring the unreadable-policy posture) — never exit 0/1 with a clean-looking ✓.
+        //
+        // RECORDING THE VIOLATIONS FIRST is the fix, and the ORDER is the whole of it (measured
+        // 2026-07-28): this branch used to return BEFORE `record_gate_violations`, so a crate with a real
+        // `deny Net` hit AND one unparseable file wrote `{ok:false, incomplete:true, violations: []}` —
+        // the finding was printed to stderr and then DELETED from the document a CI consumer reads.
+        // SPEC §3.3 asks for both halves: fail closed (exit ≠ 0), and "a real violation (exit 1) still
+        // dominates". So when `v` is non-empty the run falls through to the ordinary violation exit (1)
+        // below, and either way the verdict now carries what was actually found alongside
+        // `incomplete`/`unanalyzed`. `write_gate_json` still writes NO document for the other exit-2
+        // cause — a gate CONFIG that never loaded — where there is nothing faithful to say.
+        if had_parse_failure && v.is_empty() {
             eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
             return (2, json_body);
         }
-        record_gate_violations(&v); // toward the final --gate-json verdict (written once, by scan_main)
         // Provable-purity disclosure (advisory — NEVER changes the verdict/exit): pure/deny layers that PASS
         // but are Unknown. Surfaces the gap automatically so an author learns their "pure" layer isn't
         // PROVABLY pure (eval/fixloop/DISPATCH-NOTE.md); the `candor-query unverified` query has the detail.
