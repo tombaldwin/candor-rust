@@ -67,7 +67,10 @@ pub(crate) fn policy_violations(
     // ⟨0.20⟩ `.candor/config` `net-partner` hosts, so a `deny Net[unknown-host]` tolerates declared partners
     // and the verdict's `netClass` classifies them (NET-DESTINATION-CLASS-DESIGN.md).
     net_partners: &BTreeSet<String>,
-) -> Vec<GateViolation> {
+    // ⟨0.24⟩ Returns the WITHHELD `(rule, function)` pairs beside the violations (SPEC §3.1). Not a
+    // `Vec<GateViolation>` any more, deliberately: a caller that could ignore the second half would
+    // reintroduce the silent-tolerate this rung closed, and the type is the only thing that stops it.
+) -> candor_classify::gate::GateOutcome {
     // The SHARED §6.2 parser, with the ⟨0.19⟩ config aliases — one grammar across all four engines.
     let p = candor_classify::policy::parse_policy_with_aliases(policy_text, unknown_aliases);
     // ⟨0.20⟩ Materialize each Net-bearing fn's destination classes ONCE, from this machine's

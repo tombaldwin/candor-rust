@@ -8,6 +8,34 @@
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
+    /// ⟨0.24⟩ `policy_violations` returns a `GateOutcome` — the violations AND the `(rule, function)`
+    /// pairs the gate WITHHELD (SPEC §3.1). These older unit tests assert over the violations half; the
+    /// tests that are ABOUT withholding call `policy_violations` directly and name both.
+    ///
+    /// A named shim rather than a `.violations` at each of eleven call sites, so that "this assertion
+    /// ignores the withheld half" is visible in the call and not buried in a field access.
+    #[allow(clippy::too_many_arguments)]
+    fn gate_violations(
+        policy_text: &str,
+        all: &[String],
+        inferred: &HashMap<String, BTreeSet<&'static str>>,
+        calls: &HashMap<String, BTreeSet<String>>,
+        hostsacc: &HashMap<String, BTreeSet<String>>,
+        cmdsacc: &HashMap<String, BTreeSet<String>>,
+        pathsacc: &HashMap<String, BTreeSet<String>>,
+        tablesacc: &HashMap<String, BTreeSet<String>>,
+        incompleteacc: &HashMap<String, BTreeSet<&'static str>>,
+        reasonclassacc: &HashMap<String, BTreeSet<String>>,
+        unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
+        net_partners: &BTreeSet<String>,
+    ) -> Vec<GateViolation> {
+        policy_violations(
+            policy_text, all, inferred, calls, hostsacc, cmdsacc, pathsacc, tablesacc, incompleteacc,
+            reasonclassacc, unknown_aliases, net_partners,
+        )
+        .violations
+    }
+
     /// A shared, empty lazy-static name set for direct `CallCollector` constructions in unit tests that
     /// don't exercise the lazy-forcing path (the lazy-forcing tests use the full `scan_one`/`scan_src`).
     fn empty_lazy() -> &'static std::collections::HashSet<String> {
@@ -3792,7 +3820,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tables: HashMap<String, BTreeSet<String>> = HashMap::new();
         tables.insert("db::run".into(), ["audit.log".to_string()].into_iter().collect());
         // deny fires on the transitive set; allow flags the out-of-list host; forbid sees ui -> db.
-        let v = policy_violations(
+        let v = gate_violations(
             "deny Net api\nallow Net in api good.example.com\nforbid ui -> db\n",
             &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new(),
         );
@@ -3803,15 +3831,15 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // 009 is a layer-flow — no single effect, so `effects` is empty.
         assert!(v.iter().any(|g| g.rule == "AS-EFF-009" && g.func == "ui::draw" && g.effects.is_empty()));
         // clean policy -> no violations; `pure` flags ANY effect incl. the Db fn.
-        assert!(policy_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).is_empty());
-        assert_eq!(policy_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).len(), 1);
+        assert!(gate_violations("deny Exec\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).is_empty());
+        assert_eq!(gate_violations("pure db\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).len(), 1);
         // the Db table allowlist: db::run reaches audit.log — outside `ledger.*` -> violation;
         // covered by `audit.*` -> clean. ui::draw INHERITS Db but the literal propagation is the
         // caller's tablesacc, supplied here only for db::run, so only db::run flags.
-        let bad = policy_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new());
+        let bad = gate_violations("allow Db in db ledger.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new());
         assert_eq!(bad.len(), 1, "{}", bad.iter().map(|x| x.detail.clone()).collect::<Vec<_>>().join(" | "));
         assert!(bad[0].detail.contains("audit.log"));
-        assert!(policy_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).is_empty());
+        assert!(gate_violations("allow Db in db audit.*\n", &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &empty_inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new()).is_empty());
     }
 
     #[test]
@@ -3826,7 +3854,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut rc: HashMap<String, BTreeSet<String>> = HashMap::new();
         rc.insert("dom::svc".into(), ["native".to_string()].into_iter().collect());
         let gate = |pol: &str, rc: &HashMap<String, BTreeSet<String>>| {
-            policy_violations(pol, &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, rc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new())
+            gate_violations(pol, &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, rc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new())
         };
         // matching class → fires
         assert_eq!(gate("deny Net Unknown[native]\n", &rc).len(), 1, "Unknown[native] must fire on a native-class Unknown");
@@ -3834,10 +3862,42 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert!(gate("deny Net Unknown[reflect]\n", &rc).is_empty(), "Unknown[reflect] must tolerate a native-class Unknown");
         // bare Unknown → fires regardless of class
         assert_eq!(gate("deny Net Unknown\n", &rc).len(), 1, "bare deny Unknown fires on any Unknown");
-        // an Unknown with NO recorded reason class → treated as `unresolved` (conservative)
+        // ⟨0.24⟩ AN `Unknown` WITH NO RECORDED REASON CLASS IS **WITHHELD**, NOT CHARGED — SPEC §3.1.
+        //
+        // THIS ASSERTION USED TO READ `…len() == 1, "no reason class ⇒ unresolved"`, and it was pinning
+        // the FABRICATION. `reason_class_matches` floors an absent/empty class set at `unresolved` — the
+        // right fail-closed default for a MATCHER ("could this rule apply?") and the wrong basis for a
+        // FIRING ("did it?"): read as grounds to emit a violation it asserts a reason nobody recorded.
+        // Harmless while the report route's refusal short-circuited before `gate()` ran; a live
+        // fabrication the moment `8b97e5c` (correctly) removed that short-circuit.
+        //
+        // Withheld is not tolerated either — the pair rides out so the caller refuses (exit 2) rather
+        // than printing `policy ✓` over a rule that never ran.
         let none: HashMap<String, BTreeSet<String>> = HashMap::new();
-        assert_eq!(gate("deny Net Unknown[unresolved]\n", &none).len(), 1, "no reason class ⇒ unresolved");
-        assert!(gate("deny Net Unknown[reflect]\n", &none).is_empty(), "no reason class must NOT match a specific class");
+        let full = |pol: &str, rc: &HashMap<String, BTreeSet<String>>| {
+            policy_violations(pol, &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, rc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new())
+        };
+        let o = full("deny Net Unknown[unresolved]\n", &none);
+        assert!(o.violations.is_empty(), "an UNEVIDENCED reason class must not be CHARGED: {:?}", o.violations);
+        assert_eq!(o.withheld.len(), 1, "…it must be WITHHELD, and the pair must travel: {o:?}");
+        assert_eq!(o.withheld[0].func, "dom::svc");
+        assert_eq!(o.withheld[0].filter, "Unknown");
+        let o = full("deny Net Unknown[reflect]\n", &none);
+        assert!(o.violations.is_empty(), "no reason class must NOT match a specific class");
+        assert_eq!(o.withheld.len(), 1, "…and it is withheld under EVERY narrowed filter, not tolerated under some");
+        // THE MIRROR, in the same test so it cannot be deleted separately: the class set is EVIDENCED
+        // here, so the identical rule still fires. Withholding must cost nothing on a signature that
+        // carries its classes.
+        assert_eq!(gate("deny Net Unknown[unresolved]\n", &{
+            let mut m: HashMap<String, BTreeSet<String>> = HashMap::new();
+            m.insert("dom::svc".into(), ["unresolved".to_string()].into_iter().collect());
+            m
+        }).len(), 1, "an EVIDENCED `unresolved` must still fire — this is the under-report mirror");
+        // …and the bare `deny Unknown` is never narrowed, so it is never withheld: the escape hatch the
+        // refusal message recommends has to actually work.
+        let bare = full("deny Net Unknown\n", &none);
+        assert_eq!(bare.violations.len(), 1, "bare deny Unknown fires with no class set at all");
+        assert!(bare.withheld.is_empty(), "a rule that does not narrow has nothing to withhold");
     }
 
     #[test]
@@ -3857,7 +3917,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let rc_acc = crate::propagate::propagate_str(&rc_direct, &calls, &all);
         let empty: HashMap<String, BTreeSet<String>> = HashMap::new();
         let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
-        let v = policy_violations("deny Net Unknown[native]\n", &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, &rc_acc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new());
+        let v = gate_violations("deny Net Unknown[native]\n", &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, &rc_acc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new());
         assert_eq!(v.len(), 2, "Unknown[native] must fire on BOTH the native callee and the caller inheriting its Unknown");
         // §6.2 ⟨0.19⟩: the verdict carries reasonClass on the Unknown denial — on the caller too (transitive).
         for gv in &v {
@@ -3891,7 +3951,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let empty_inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
         let empty_rc: HashMap<String, BTreeSet<String>> = HashMap::new();
         let partners: BTreeSet<String> = ["api.stripe.com".to_string()].into_iter().collect();
-        let v = policy_violations(
+        let v = gate_violations(
             "deny Net[unknown-host]\n", &all, &inferred, &calls, &hostsacc, &empty, &empty, &empty,
             &empty_inc, &empty_rc, &std::collections::BTreeMap::new(), &partners,
         );
@@ -3908,12 +3968,12 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut pinf = inferred.clone();
         pinf.insert("d::partner".into(), ["Net"].into_iter().collect());
         let pacc = crate::propagate::propagate_str(&phosts, &calls, &pall);
-        let pv = policy_violations(
+        let pv = gate_violations(
             "deny Net[unknown-host]\n", &pall, &pinf, &calls, &pacc, &empty, &empty, &empty,
             &empty_inc, &empty_rc, &std::collections::BTreeMap::new(), &partners,
         );
         assert!(!pv.iter().any(|g| g.func == "d::partner"), "a config net-partner is tolerated");
-        let bare = policy_violations(
+        let bare = gate_violations(
             "deny Net\n", &pall, &pinf, &calls, &pacc, &empty, &empty, &empty,
             &empty_inc, &empty_rc, &std::collections::BTreeMap::new(), &partners,
         );
@@ -3937,7 +3997,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let tables: HashMap<String, BTreeSet<String>> = HashMap::new();
         let mut inc: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
         inc.insert("a::mask".into(), ["Net"].into_iter().collect()); // mask also has an invisible reach
-        let v = policy_violations(
+        let v = gate_violations(
             "allow Net api.stripe.com\n",
             &all, &inferred, &calls, &hosts, &empty, &empty, &tables, &inc, &empty, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new(),
         );

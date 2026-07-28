@@ -1938,6 +1938,130 @@ fn gate_report_reports_a_certain_violation_over_an_unanswerable_rule_beside_it()
     assert_eq!(rc3, 1, "the firing rule alone must exit 1:\n{err3}");
 }
 
+/// SPEC §3.1 ⟨0.24⟩ **WITHHOLD PER (RULE, FUNCTION)** — candor-spec `5a8cf48`, the half of the
+/// precedence ruling that makes it safe. Applying `8b97e5c` WITHOUT this FABRICATES.
+///
+/// **THE NEW-REACHABILITY DEFECT.** Once a firing rule stops short-circuiting the refusal, `gate()` runs
+/// on inputs it had never been handed. `candor_classify::policy::reason_class_matches` floors an
+/// absent/empty class set at `unresolved` — the correct fail-closed default for a MATCHER ("could this
+/// rule apply?") and the WRONG basis for a FIRING ("did it?"). MEASURED 2026-07-28 on this exact
+/// fixture: `deny Unknown[unresolved] app.opaque` ALONE printed a note ending *"Refusing (exit 2)"* and
+/// then **exited 1 with a violation record for that rule and function in the `--gate-json` document**,
+/// for an entry whose determinable class set is EMPTY. The record refuted itself — it carried no
+/// `reasonClass` key at all, because the floor lives in the predicate and never in the data.
+///
+/// **THE MIRROR IS ROW D, AND IT IS NOT OPTIONAL.** Killing a fabrication is exactly where a silent
+/// under-report gets introduced, and the fixture proving the fabrication is closed cannot show the reach
+/// closed with it. So the same rule, over an entry whose `unresolved` is INHERITED through a `calls`
+/// edge, must still fire — that class set is EVIDENCED (contributed at the entry, before the fixpoint),
+/// and conformance `R1_EXPECT["unresolved"]` pins the same property.
+#[test]
+fn gate_report_withholds_an_unevidenced_scoped_rule_instead_of_fabricating_a_violation() {
+    let f = Fixture::new("gate-withhold");
+    // `app.opaque` — `Unknown` inferred, NO `direct`, NO `unknownWhy`, NO `calls` edge. Its class set is
+    // determinable from the entry alone as EMPTY, which is the whole of the unanswerable condition.
+    // `app.writes` beside it is the certain violation the precedence rung must still deliver.
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app",
+            "analyzed":{"count":2,"digest":"0"},
+            "functions":[
+              {"fn":"app.opaque","inferred":["Unknown"]},
+              {"fn":"app.writes","inferred":["Fs"],"direct":["Fs"],"paths":["/etc/hosts"]}]}"#,
+        Some(r#"{"app.opaque":[],"app.writes":[]}"#),
+    );
+    let doc_of = |name: &str, text: &str| -> (i32, String, serde_json::Value) {
+        let out = f.dir.join(format!("{name}.verdict.json"));
+        // DELETE BEFORE MEASURING: a stale document from the previous row is exactly the flattering
+        // artifact this suite exists to refuse.
+        let _ = std::fs::remove_file(&out);
+        let (rc, _, err) =
+            run_gate(&loc, &pol(&f.dir, name, text), &["--gate-json", &out.to_string_lossy()]);
+        let v = std::fs::read_to_string(&out)
+            .ok()
+            .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+            .unwrap_or(serde_json::Value::Null);
+        (rc, err, v)
+    };
+
+    // ROW A — THE FABRICATION. The unanswerable rule ALONE. It must refuse, and the document must carry
+    // NO violation for `app.opaque`: the assertion is document-side because that is the channel the
+    // fabricated record reached.
+    let (rc, err, v) = doc_of("scoped", "deny Unknown[unresolved] app.opaque\n");
+    assert_eq!(rc, 2, "a rule with no evidence to fire on must be WITHHELD, not charged:\n{err}");
+    assert_eq!(v["refused"], true, "…and a sole withholding is the refusal posture:\n{v}");
+    assert!(
+        v["violations"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "A VIOLATION HERE IS A FABRICATION — `app.opaque`'s determinable class set is empty, so this \
+         record asserts a reason nobody recorded:\n{v}"
+    );
+
+    // ROW B — THE LIVE-FIXTURE CONTROL. The BARE rule asks a question the effect set alone answers, so
+    // it fires. Without this row, row A passes on a fixture that simply does not violate.
+    let (rc, err, v) = doc_of("bare", "deny Unknown app.opaque\n");
+    assert_eq!(rc, 1, "the bare rule must FIRE — else row A proves nothing:\n{err}");
+    assert_eq!(v["violations"][0]["fn"], "app.opaque", "{v}");
+
+    // ROW C — BOTH PROPERTIES AT ONCE, which is the requirement `5a8cf48` adds to `8b97e5c`: the certain
+    // violation still reaches the document (restoring the short-circuit would re-break that), AND the
+    // unevidenced one is not charged beside it. Withholding is per (rule, function), never whole-policy.
+    let (rc, err, v) = doc_of("both", "deny Fs app.writes\ndeny Unknown[unresolved] app.opaque\n");
+    assert_eq!(rc, 1, "the certain violation dominates the withholding:\n{err}");
+    let fns: Vec<&str> =
+        v["violations"].as_array().unwrap().iter().map(|x| x["fn"].as_str().unwrap()).collect();
+    assert_eq!(
+        fns,
+        vec!["app.writes"],
+        "EXACTLY the evidenced violation, and exactly one: `app.writes` must be present (the `8b97e5c` \
+         property) and `app.opaque` absent (the `5a8cf48` property):\n{v}"
+    );
+    assert!(
+        err.contains("deny Unknown[unresolved] app.opaque"),
+        "…and the WITHHELD rule is still disclosed — withholding it silently is the mirror defect:\n{err}"
+    );
+
+    // ROW D — THE MIRROR. An `unresolved` that is INHERITED is EVIDENCED, and the identical rule must
+    // still fire on it. `app.src` raises `Unknown` DIRECTLY and names no reason, so it CONTRIBUTES
+    // `unresolved` at the entry; `app.inherits` reaches it through `calls` and accumulates the same
+    // class over the gate's own reach (SPEC §6.2). Both must be charged, and both must carry the
+    // `reasonClass` that proves the charge was evidenced.
+    let mloc = gate_fixture(
+        &f.dir,
+        "m",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app",
+            "analyzed":{"count":3,"digest":"0"},
+            "functions":[
+              {"fn":"app.inherits","inferred":["Unknown"],"calls":["app.src"]},
+              {"fn":"app.src","inferred":["Unknown"],"direct":["Unknown"]},
+              {"fn":"app.opaque","inferred":["Unknown"]}]}"#,
+        Some(r#"{"app.inherits":["app.src"],"app.src":[],"app.opaque":[]}"#),
+    );
+    let out = f.dir.join("mirror.verdict.json");
+    let _ = std::fs::remove_file(&out);
+    let (rc, _, err) = run_gate(
+        &mloc,
+        &pol(&f.dir, "mirror", "deny Unknown[unresolved] app\n"),
+        &["--gate-json", &out.to_string_lossy()],
+    );
+    assert_eq!(rc, 1, "AN EVIDENCED `unresolved` MUST STILL FIRE — this is the under-report mirror:\n{err}");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let hits: Vec<&str> =
+        v["violations"].as_array().unwrap().iter().map(|x| x["fn"].as_str().unwrap()).collect();
+    assert_eq!(
+        hits,
+        vec!["app.inherits", "app.src"],
+        "the direct reasonless Unknown AND the caller inheriting it, and ONLY those:\n{v}"
+    );
+    for gv in v["violations"].as_array().unwrap() {
+        assert_eq!(
+            gv["reasonClass"][0], "unresolved",
+            "a charged Unknown must carry the class that evidenced the charge — the fabricated record \
+             carried none, and that absence is the tell:\n{gv}"
+        );
+    }
+}
+
 /// SPEC §3.1 ⟨0.24⟩ **A REFUSAL MUST STILL WRITE A `--gate-json` DOCUMENT** (candor-spec `107755b`).
 ///
 /// **THE HAZARD, AND WHY THE STALE FILE IS SEEDED HERE.** A refusal wrote nothing at the requested path,

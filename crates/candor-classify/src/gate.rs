@@ -79,14 +79,44 @@ pub struct GateInput<'a, E: AsRef<str> + Ord> {
     pub net_classes: &'a HashMap<String, Vec<String>>,
 }
 
+/// ⟨0.24⟩ ONE `(rule, function)` THE GATE COULD NOT EVALUATE — SPEC §3.1: *"a rule FIRES on a function
+/// only where the match is evidenced by that function's own entry, and is WITHHELD exactly where it is
+/// not. Withholding is per `(rule, function)`, never whole-policy."*
+///
+/// A withheld pair is NOT a tolerated one. Tolerating means the evidence was read and did not match;
+/// withholding means there was no evidence to read, and the two must not arrive at a consumer wearing the
+/// same face. The caller decides the disposition — a violation elsewhere dominates (exit 1, disclose), a
+/// sole withholding is a refusal (exit 2) — but it can only do that if the fact reaches it, which is why
+/// this rides out of [`gate`] beside the violations instead of being logged here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Withheld {
+    /// The rule's source line, verbatim (`PolicyRule::raw`).
+    pub rule: String,
+    /// The function the rule could not be evaluated ON. The same rule may fire on another.
+    pub func: String,
+    /// Which narrowing filter had nothing to read — `"Unknown"` or `"Net"`.
+    pub filter: &'static str,
+}
+
+/// ⟨0.24⟩ What [`gate`] returns: the violations it is SURE of, and the `(rule, function)` pairs it
+/// WITHHELD. Both halves travel, because the verdict is both (SPEC §3.1).
+#[derive(Debug, Default)]
+pub struct GateOutcome {
+    /// Sorted by (rule, detail).
+    pub violations: Vec<GateViolation>,
+    /// Sorted by (rule, func). Empty on every policy whose filters the signature can answer.
+    pub withheld: Vec<Withheld>,
+}
+
 /// Apply a parsed §6.2 policy to an already-accumulated signature. THE ONLY matching code in the stable
 /// toolchain — `candor-scan --policy` and `candor-query gate --report` both land here, which is what
 /// makes "the same verdict from the same signature" a property of the code rather than of two
-/// consistent authors. Returns the violations, sorted by (rule, detail).
-pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> Vec<GateViolation> {
+/// consistent authors. Returns the violations, sorted by (rule, detail), AND the withheld pairs.
+pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOutcome {
     let empty: BTreeSet<E> = BTreeSet::new();
     let no_classes: Vec<String> = Vec::new();
     let mut out = Vec::new();
+    let mut withheld: Vec<Withheld> = Vec::new();
     // ONE VERDICT PER (rule, function), whatever the caller's enumeration. `all` is a list of UNITS on
     // the scan route, and two units can share one qualified name — `#[cfg(unix)] fn f` beside
     // `#[cfg(not(unix))] fn f` is the everyday case. Their signatures were already merged into one
@@ -139,18 +169,60 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> Vec<Gat
                 // ⟨0.24⟩ The rule itself lives in `crate::policy::reason_class_matches` because
                 // `unverified --class` must select over exactly the set this gate scopes over: a gate and
                 // the disclosure naming the holes that gate did not prove, disagreeing, is the defect.
-                let matched = reason_class_matches(gi.reason_classes.get(q), &want);
-                if !matched {
+                //
+                // ⟨0.24⟩ **BUT THE FLOOR IS ASKED FIRST, AND SEPARATELY — SPEC §3.1.** `reason_class_matches`
+                // answers "could this rule apply?", and its absence/empty arm floors at `unresolved` so a
+                // hole nobody classified never slips out of a filter that names its own class. That is the
+                // right fail-closed default for a MATCHER and the WRONG basis for a FIRING: read as grounds
+                // to emit a violation it asserts a reason NOBODY RECORDED. The two questions shared this one
+                // helper safely only while the report route's refusal short-circuited before `gate()` ran;
+                // `8b97e5c` removed that short-circuit (correctly — a certain violation must reach the
+                // document) and the identical constant, on identical data, became a FABRICATION.
+                //
+                // MEASURED 2026-07-28, `deny Unknown[unresolved] app.opaque` over an entry with `inferred:
+                // ["Unknown"]` and no `direct`, no `unknownWhy`, no `calls`: exit 1 with a violation record
+                // in `--gate-json`, for a function whose determinable class set is EMPTY. The record was
+                // self-refuting — it carried no `reasonClass` key at all, because the floor exists only
+                // inside the predicate and never in the data.
+                //
+                // So the three-way split. NOT determinable ⇒ **WITHHELD**: the hit is dropped AND the pair
+                // rides out to the caller, because dropping it silently is the mirror defect (a narrowed
+                // filter tolerating for lack of evidence is the fail-open this whole rung exists to close).
+                // Determinable ⇒ the shared matcher decides, unchanged, and the `Some(cs)` arm it lands on
+                // is the only one a firing may rest on.
+                //
+                // THE MIRROR IS PINNED, because this is where an under-report gets introduced: an entry
+                // whose `unresolved` is INHERITED — a `calls` edge to a reasonless direct `Unknown` — has a
+                // determinable set of `{unresolved}` (contributed at the ENTRY, before the fixpoint) and
+                // MUST still fire. That is `R1_EXPECT["unresolved"]`'s `app.a_reasonless_only`, and
+                // `a_withheld_unknown_filter_does_not_take_the_inherited_one_with_it` beside it.
+                let classes = gi.reason_classes.get(q);
+                let determinable = classes.is_some_and(|cs| !cs.is_empty());
+                if !determinable {
+                    hits.retain(|e| *e != "Unknown");
+                    withheld.push(Withheld { rule: r.raw.clone(), func: q.clone(), filter: "Unknown" });
+                } else if !reason_class_matches(classes, &want) {
                     hits.retain(|e| *e != "Unknown");
                 }
             }
             // Net destination-class: a `deny Net[dest…]` (non-empty filter) keeps its Net hit ONLY for a fn
             // reaching one of those destination classes; else tolerate (only asserted-safe destinations).
             // Fail-closed: a masked surface / a Net with no visible host is unknown-host (net_classes_of).
+            //
+            // ⟨0.24⟩ SAME THREE-WAY SPLIT AS THE REASON FILTER, and this side is where the shape is easiest
+            // to see because it never fabricated: with no destination classes to read, `any()` over the
+            // empty set is false and the Net hit was DROPPED — the *other* half of the same defect, an
+            // absence-keyed relaxation of a fail-closed gate. Silently tolerating and silently charging are
+            // the two ways to answer a question the evidence cannot settle; WITHHOLDING is the third, and
+            // the only one that stays true. Costs nothing on a signature this engine produced:
+            // `net_classes_of` floors every Net-bearing fn at `unknown-host`, so an empty set here means
+            // "this producer did not carry the field", never "this function reaches nothing".
             if hits.contains(&"Net") && !r.net_classes.is_empty() {
                 let fn_net = gi.net_classes.get(q).unwrap_or(&no_classes);
-                let matched = fn_net.iter().any(|c| r.net_classes.contains(c));
-                if !matched {
+                if fn_net.is_empty() {
+                    hits.retain(|e| *e != "Net");
+                    withheld.push(Withheld { rule: r.raw.clone(), func: q.clone(), filter: "Net" });
+                } else if !fn_net.iter().any(|c| r.net_classes.contains(c)) {
                     hits.retain(|e| *e != "Net");
                 }
             }
@@ -263,5 +335,9 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> Vec<Gat
     // puts the constant '[' first and all AS-EFF codes are same-length), without allocating two Strings
     // per comparison.
     out.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
-    out
+    // Deterministic for the same reason the violations are: a disclosure a consumer diffs between runs
+    // must not reorder because a HashMap iterated differently.
+    withheld.sort_by(|a, b| (&a.rule, &a.func).cmp(&(&b.rule, &b.func)));
+    withheld.dedup();
+    GateOutcome { violations: out, withheld }
 }

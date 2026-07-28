@@ -2068,7 +2068,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             );
             return (2, json_body);
         }
-        let v = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
+        let outcome = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
+        let v = outcome.violations;
+        // ⟨0.24⟩ WITHHELD `(rule, function)` PAIRS — SPEC §3.1. On THIS route the classifier is in the
+        // loop, so a narrowing filter with nothing to read means the signature itself lacks a class set
+        // for a function that carries `Unknown` — which candor-scan's own `reason_class_direct`
+        // contribution is supposed to make unreachable (the §4 invariant beside the writer is a
+        // `debug_assert`, so release builds have no net). It used to reach the gate as a FIRING anyway,
+        // via the matcher's `unresolved` floor, and assert a reason nobody recorded.
+        //
+        // Withheld is NOT tolerated: with no violation to dominate it, the gate could not be evaluated and
+        // says so (exit 2, the refusal posture), rather than printing `policy ✓` over a rule that never
+        // ran. With a violation beside it, exit 1 dominates (`Reject` is upward-closed) and the withheld
+        // rule is disclosed alongside — the same precedence the report route applies.
+        if !outcome.withheld.is_empty() {
+            eprintln!(
+                "candor-scan: {} policy rule(s) could NOT be evaluated on {} function(s) — the narrowing \
+                 filter had no evidence to read, so the rule is WITHHELD there rather than charged or \
+                 tolerated (SPEC §3.1). This is a candor defect, not a policy one: report it.",
+                outcome.withheld.iter().map(|w| &w.rule).collect::<BTreeSet<_>>().len(),
+                outcome.withheld.len()
+            );
+            for w in &outcome.withheld {
+                eprintln!("    `{}` narrows on the {} class, but `{}` carries no class set to narrow on", w.rule, w.filter, w.func);
+            }
+        }
         for gv in &v {
             let line = format!("[{}] {}", gv.rule, gv.detail);
             if stdout_is_json {
@@ -2093,6 +2117,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // cause — a gate CONFIG that never loaded — where there is nothing faithful to say.
         if had_parse_failure && v.is_empty() {
             eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
+            return (2, json_body);
+        }
+        // ⟨0.24⟩ A SOLE WITHHOLDING is a refusal (SPEC §3.1). Ordered AFTER the violation exit so the
+        // precedence holds — a rule that fired on carried evidence dominates, and `v.is_empty()` is the
+        // whole of the condition. Never `policy ✓`: the operator asked for a rule that did not run.
+        if !outcome.withheld.is_empty() && v.is_empty() {
+            eprintln!(
+                "candor-scan: policy NOT enforced — {} (rule, function) pair(s) could not be evaluated \
+                 (see above); a gate cannot be green over a rule that never ran",
+                outcome.withheld.len()
+            );
             return (2, json_body);
         }
         // Provable-purity disclosure (advisory — NEVER changes the verdict/exit): pure/deny layers that PASS
