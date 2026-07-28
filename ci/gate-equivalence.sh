@@ -224,7 +224,7 @@ for arm in "fires indirect 1" "tolerates reflect 0"; do
   # …and the file that MOVED the verdict is NAMED on it. A verdict changed by a file the operator cannot
   # see named is the ambient-input failure the format exists to refuse; without this row the arm above is
   # satisfied by two routes that both ignore the config.
-  if ! grep -q '"vocabulary"' "$WS/vocab.$tag.scan.json" || ! grep -q '"corp"' "$WS/vocab.$tag.scan.json"; then
+  if ! grep -q '"policyVocabulary"' "$WS/vocab.$tag.scan.json" || ! grep -q '"corp"' "$WS/vocab.$tag.scan.json"; then
     echo "  FAIL config-anchor/$tag: the verdict does not NAME the config that supplied the vocabulary"
     cat "$WS/vocab.$tag.scan.json"
     bad=$((bad+1))

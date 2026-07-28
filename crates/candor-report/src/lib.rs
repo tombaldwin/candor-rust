@@ -753,6 +753,15 @@ pub fn gate_verdict_json_full(
 /// OMITTED unless an alias was actually used, so a verdict from a policy that mentions none is
 /// byte-identical to a pre-⟨0.24⟩ one — and a config defining ten unused aliases stays out, because
 /// naming a file that changed nothing trains the reader to ignore the field.
+///
+/// **THE WIRE KEY IS `policyVocabulary`, AND THAT IS A SPEC MUST** (§3.1 ⟨0.24⟩, `b4e9155`). I required
+/// the disclosure and specified no shape, and three engines invented three names within the hour —
+/// `vocabulary` here, `policyVocabulary` in java, `configSources: [path]` in swift. The clause picks
+/// `policyVocabulary` because the verdict already carries other vocabularies (effects, reason classes)
+/// and the bare word does not say WHOSE; and it pins the OBJECT form because a disclosure naming the
+/// source file but not the alias content leaves the reader knowing they were affected and not how. This
+/// engine was the outlier on the NAME only — the shape was already right, so this is a rename and not a
+/// redesign.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GateVocabulary {
     /// The canonical path of the `.candor/config` the aliases came from. Canonical because the scan and
@@ -763,7 +772,7 @@ pub struct GateVocabulary {
     pub aliases: Vec<String>,
 }
 
-/// [`gate_verdict_json_full`] plus the ⟨0.24⟩ `vocabulary` disclosure. Appended LAST so that every
+/// [`gate_verdict_json_full`] plus the ⟨0.24⟩ `policyVocabulary` disclosure. Appended LAST so that every
 /// verdict without ambient vocabulary — which is nearly all of them — stays byte-identical.
 pub fn gate_verdict_json_v24(
     violations: &mut [GateViolation],
@@ -789,7 +798,8 @@ pub fn gate_verdict_json_v24(
         incomplete: bool,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         unanalyzed: &'a [UnanalyzedUnit],
-        #[serde(skip_serializing_if = "Option::is_none")]
+        // §3.1 ⟨0.24⟩ pins the WIRE key as `policyVocabulary`; the local binding keeps the short name.
+        #[serde(rename = "policyVocabulary", skip_serializing_if = "Option::is_none")]
         vocabulary: Option<&'a GateVocabulary>,
     }
     let incomplete = !unanalyzed.is_empty();

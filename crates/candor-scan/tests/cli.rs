@@ -1782,13 +1782,19 @@ fn scan_resolves_policy_vocabulary_beside_the_policy_and_names_the_config_that_m
     // (2) THE DISCLOSURE. The config that supplied the vocabulary is NAMED on the verdict, with the
     // alias it supplied — a verdict moved by a file the operator cannot see named is ambient input.
     let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v).unwrap()).unwrap();
-    let named = j["vocabulary"]["config"].as_str().map(|s| std::fs::canonicalize(s).ok()).unwrap_or(None);
+    let named = j["policyVocabulary"]["config"].as_str().map(|s| std::fs::canonicalize(s).ok()).unwrap_or(None);
     assert_eq!(
         named,
         std::fs::canonicalize(&cfgpath).ok(),
         "the verdict must NAME the config whose vocabulary it used:\n{j:#}"
     );
-    assert_eq!(j["vocabulary"]["aliases"], serde_json::json!(["corp"]), "{j:#}");
+    assert_eq!(j["policyVocabulary"]["aliases"], serde_json::json!(["corp"]), "{j:#}");
+    // …UNDER THE SPEC'S NAME. §3.1 ⟨0.24⟩ (`b4e9155`) pins the key as `policyVocabulary`, because the
+    // verdict already carries other vocabularies (effects, reason classes) and the bare word does not say
+    // WHOSE. This engine emitted `vocabulary` and was the last red cell in conformance PART 27's
+    // `key-parity(opt)`. The old name is asserted ABSENT as well: an engine keeping both keys would
+    // satisfy the new assertion while leaving the divergence exactly where it was.
+    assert!(j.get("vocabulary").is_none(), "the pre-`b4e9155` key must not survive beside it:\n{j:#}");
 
     // (3) THE DISCRIMINATION CONTROL. Same anchor, different definition: `corp = reflect` does NOT match
     // an indirect hole, so the gate goes GREEN. Without this row (1) is satisfied by an engine that
@@ -1807,7 +1813,7 @@ fn scan_resolves_policy_vocabulary_beside_the_policy_and_names_the_config_that_m
     let (rc3, _) = run(&v3);
     assert_eq!(rc3, 1);
     let j3: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v3).unwrap()).unwrap();
-    assert!(j3.get("vocabulary").is_none(), "an alias the policy never mentions is not disclosed:\n{j3:#}");
+    assert!(j3.get("policyVocabulary").is_none(), "an alias the policy never mentions is not disclosed:\n{j3:#}");
 
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&home);
