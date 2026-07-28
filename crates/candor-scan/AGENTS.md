@@ -189,7 +189,18 @@ candor-query path     <prefix> <fn> <Effect> [--json]
 candor-query tour     [<N>] [--report <locator>] [--json]   # the N (default 10) most surprising transitive reaches
 candor-query gains    <cur_prefix> <base_prefix> [--json]   # supply-chain alarm: effects a surface gained
 candor-query diff     <cur_prefix> <base_prefix> <0|1> <baseline_ver> <engine_ver>
+candor-query gate     --report <locator> --policy <file> [--json] [--gate-json <f>]
 ```
+
+`gate` applies a policy to a report you ALREADY HAVE — no scan, no source. It is the supply-chain
+verb (gate a dependency's published report without re-analysing code you do not have) and its exit
+codes are `candor-scan --policy`'s exactly: 0 clean, 1 violation, 2 refused. It reads the report file
+and nothing else: an entry ABSENT from the report is candor's purity claim, and `gate` will not
+back-fill it from the callgraph sidecar or a chained dep. Rules whose evidence the report cannot
+carry are REFUSED (exit 2) rather than evaluated on partial evidence — `forbid A -> B` (a report's
+`calls` is effect-relevant, so a crossing into a pure unit is invisible), `allow <E> …` (the
+AS-EFF-008 completeness marker is not a gate-usable wire fact), and a class-scoped `deny` over an
+entry whose scoping field is absent. Gate those at scan time instead.
 
 `<prefix>` is the report path prefix (e.g. `/tmp/candor-report` — the part before
 `.<crate>.<type>.json`). A prefix matching no report files fails loud (exit 2), so a silent `{}` is

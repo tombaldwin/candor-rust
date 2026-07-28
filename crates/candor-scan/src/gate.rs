@@ -11,35 +11,23 @@ use crate::*;
 /// `[{rule}] {detail}`; --gate-json serializes these records verbatim.
 pub(crate) use candor_report::GateViolation;
 
-/// ⟨0.20⟩ The `Net` destination classes an fn reaches (transitive) — the SINGLE derivation shared by the
-/// report's `netClass` field (scan.rs) and the gate: an exact host-literal match (`net_dest_class`) for the
-/// visible hosts, plus the fail-closed `unknown-host` when the Net surface is masked (`incomplete` has Net)
-/// OR carries no visible host (a runtime endpoint). Call only for an fn known to have Net; returns sorted.
-pub(crate) fn net_classes_of(
-    q: &str,
-    hostsacc: &HashMap<String, BTreeSet<String>>,
-    incompleteacc: &HashMap<String, BTreeSet<&'static str>>,
-    partners: &BTreeSet<String>,
-) -> Vec<String> {
-    let mut classes: BTreeSet<String> = hostsacc
-        .get(q)
-        .into_iter()
-        .flatten()
-        .map(|h| candor_classify::net_dest_class(h, partners).to_string())
-        .collect();
-    let masked = incompleteacc.get(q).is_some_and(|s| s.contains("Net"));
-    let no_hosts = hostsacc.get(q).map(|s| s.is_empty()).unwrap_or(true);
-    if masked || no_hosts {
-        classes.insert("unknown-host".to_string());
-    }
-    classes.into_iter().collect()
-}
+/// ⟨0.20⟩ The `Net` destination classes an fn reaches (transitive). MOVED to `candor_classify::gate`
+/// at ⟨0.24⟩ and re-exported here so scan.rs's `netClass` writer keeps its call site: the report FIELD
+/// and the gate FILTER have to be the same set, and §3.1's byte-equivalence obligation is exactly the
+/// claim that they are — so the derivation now sits next to the gate that reads it off the wire.
+pub(crate) use candor_classify::gate::net_classes_of;
 
 /// Evaluate a CANDOR_POLICY (parsed by the SHARED §6.2 parser in candor-classify, so this gate can
 /// never disagree with the nightly/JVM gates on grammar) over a finished scan. Returns one line per
 /// violation: deny/pure (AS-EFF-006) against the transitive `inferred` sets, literal allowlists
 /// (AS-EFF-008) against the transitive hosts/cmds/paths/tables surfaces, layering `forbid A -> B`
 /// (AS-EFF-009) by reachability over the local call graph.
+///
+/// ⟨0.24⟩ THE SCAN ROUTE INTO THE GATE, and now only that: the matching itself moved to
+/// `candor_classify::gate::gate`, which `candor-query gate --report` (SPEC §3.1) also calls with a
+/// signature read from a written report. This function's remaining job is to build the [`GateInput`]
+/// from the classifier's accumulators — including materializing the ⟨0.20⟩ destination classes for
+/// every `Net`-bearing fn, exactly the set the lazy call used to compute on demand.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn policy_violations(
     policy_text: &str,
@@ -61,171 +49,32 @@ pub(crate) fn policy_violations(
     // and the verdict's `netClass` classifies them (NET-DESTINATION-CLASS-DESIGN.md).
     net_partners: &BTreeSet<String>,
 ) -> Vec<GateViolation> {
-    use candor_classify::policy::{literal_allowed, parse_policy_with_aliases, scope_matches};
-    let p = parse_policy_with_aliases(policy_text, unknown_aliases);
-    let empty: BTreeSet<&'static str> = BTreeSet::new();
-    let mut out = Vec::new();
-    for q in all {
-        let inf = inferred.get(q).unwrap_or(&empty);
-        // AS-EFF-006 — deny/pure: forbidden effects in the transitive set.
-        for r in &p.rules {
-            if let Some(s) = &r.scope {
-                if !scope_matches(q, s) {
-                    continue;
-                }
-            }
-            let mut hits: Vec<&str> = if r.effects.is_empty() {
-                // `pure` — every EFFECT, but NOT `Unknown`: the §4 trust marker is not an effect
-                // (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). The reference
-                // engine and the deep backend exclude it identically — this engine wrongly counted an
-                // Unknown-only fn as a `pure` violation until 2026-07-09 (a cross-engine verdict split
-                // on the same policy file).
-                inf.iter().copied().filter(|e| *e != "Unknown").collect()
-            } else {
-                inf.iter().copied().filter(|e| r.effects.contains(e)).collect()
-            };
-            // Reason-scoped Unknown: a `deny E Unknown[classes]` (non-empty filter) keeps its Unknown hit
-            // ONLY for a fn whose TRANSITIVE reason classes include one of those classes; else tolerate it
-            // (wrong reason-class). Concrete effects in `hits` are untouched — only Unknown is scoped.
-            if hits.contains(&"Unknown") && !r.unknown_classes.is_empty() {
-                let want: BTreeSet<&str> = r.unknown_classes.iter().map(|c| c.token()).collect();
-                // An Unknown with NO recorded reason is `unresolved` (conservative — stays in
-                // `[*]`/`[unresolved]`). THIS IS A NET, NOT A ROUTE. It is per FUNCTION and keys on the
-                // ABSENCE of a class set, so any other reason on the same function hides whatever it was
-                // covering — which is how a reasonless chained-dep `Unknown` went ungated on every consumer
-                // that also had a reason of its own. That case now CONTRIBUTES `unresolved` at
-                // `reason_class_direct` (scan.rs) instead of arriving here by absence. What is left for the
-                // absence arm is the RELEASE-mode gap: the writer's §4 invariant is a `debug_assert`, so a
-                // future path that puts `Unknown` into `direct` with no reason fails closed here rather than
-                // escaping the gate. Not dead — it is pinned by
-                // `reason_scoped_unknown_gate_fires_on_match_tolerates_mismatch`.
-                //
-                // ⟨0.24⟩ The rule itself moved to candor-classify (`reason_class_matches`) because
-                // `unverified --class` must select over exactly the set this gate scopes over: a gate and
-                // the disclosure naming the holes that gate did not prove, disagreeing, is the defect.
-                let matched = candor_classify::policy::reason_class_matches(reasonclassacc.get(q), &want);
-                if !matched {
-                    hits.retain(|e| *e != "Unknown");
-                }
-            }
-            // Net destination-class: a `deny Net[dest…]` (non-empty filter) keeps its Net hit ONLY for a fn
-            // reaching one of those destination classes; else tolerate (only asserted-safe destinations).
-            // Fail-closed: a masked surface / a Net with no visible host is unknown-host (net_classes_of).
-            if hits.contains(&"Net") && !r.net_classes.is_empty() {
-                let fn_net = net_classes_of(q, hostsacc, incompleteacc, net_partners);
-                let matched = fn_net.iter().any(|c| r.net_classes.contains(c));
-                if !matched {
-                    hits.retain(|e| *e != "Net");
-                }
-            }
-            if !hits.is_empty() {
-                // §6.2: when Unknown is denied, report ALL reason classes on the fn (transitive), so the
-                // consumer sees every reason the strict gate bit — not just the class the rule matched.
-                let reason_class = if hits.contains(&"Unknown") {
-                    reasonclassacc.get(q).map(|cs| cs.iter().cloned().collect()).unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
-                let net_class = if hits.contains(&"Net") {
-                    net_classes_of(q, hostsacc, incompleteacc, net_partners)
-                } else {
-                    Vec::new()
-                };
-                out.push(GateViolation {
-                    rule: "AS-EFF-006".into(),
-                    func: q.clone(),
-                    effects: hits.iter().map(|s| s.to_string()).collect(),
-                    detail: format!("`{q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
-                    reason_class,
-                    net_class,
-                });
-            }
-        }
-        // AS-EFF-008 — literal allowlists over the transitive literal surfaces.
-        for r in &p.allow_rules {
-            if let Some(s) = &r.scope {
-                if !scope_matches(q, s) {
-                    continue;
-                }
-            }
-            if !inf.contains(r.effect) {
-                continue;
-            }
-            let lits = match r.effect {
-                // `Llm` ⟨0.13⟩ rides the Net host surface (SPEC §1) — `allow Llm <host>` certifies the same
-                // captured hosts as `allow Net`, restricted to the MODEL hosts (a model call's host WAS
-                // captured as a Net literal). Matches candor-java's checkAllowlist("Llm", hostFixpoint, …).
-                "Net" | "Llm" => hostsacc.get(q),
-                "Exec" => cmdsacc.get(q),
-                "Db" => tablesacc.get(q),
-                _ => pathsacc.get(q),
-            };
-            // An INCOMPLETE surface (a structurally-invisible reach) can't be certified even with visible
-            // hosts — else a benign literal masks the invisible forbidden endpoint (the masking evasion).
-            // `Llm` keys off the NET incompleteness (it rides the Net host literal): a runtime/masked model
-            // host that fails-closes Net must fail-close `allow Llm` too (incompleteAsLlm in candor-java).
-            let inc_key = if r.effect == "Llm" { "Net" } else { r.effect };
-            let surface_incomplete = incompleteacc.get(q).is_some_and(|s| s.contains(inc_key));
-            match lits {
-                Some(ls) if !ls.is_empty() && !surface_incomplete => {
-                    let bad: Vec<&str> =
-                        ls.iter().filter(|l| !literal_allowed(r.effect, l, &r.literals)).map(String::as_str).collect();
-                    if !bad.is_empty() {
-                        out.push(GateViolation {
-                            rule: "AS-EFF-008".into(),
-                            func: q.clone(),
-                            effects: vec![r.effect.to_string()],
-                            detail: format!("`{q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw),
-                            ..Default::default()
-                        });
-                    }
-                }
-                _ => out.push(GateViolation {
-                    rule: "AS-EFF-008".into(),
-                    func: q.clone(),
-                    effects: vec![r.effect.to_string()],
-                    detail: format!("`{q}` performs {} with no visible literal — the surface cannot be certified: `{}`", r.effect, r.raw),
-                    ..Default::default()
-                }),
-            }
-        }
-        // AS-EFF-009 — layering: no fn in scope A may transitively reach scope B.
-        for r in &p.layer_rules {
-            if !scope_matches(q, &r.from) {
-                continue;
-            }
-            let mut seen: BTreeSet<&str> = BTreeSet::new();
-            let mut stack: Vec<&str> = calls.get(q).map(|cs| cs.iter().map(String::as_str).collect()).unwrap_or_default();
-            let mut hit: Option<&str> = None;
-            while let Some(n) = stack.pop() {
-                if !seen.insert(n) {
-                    continue;
-                }
-                if scope_matches(n, &r.to) {
-                    hit = Some(n);
-                    break;
-                }
-                if let Some(cs) = calls.get(n) {
-                    stack.extend(cs.iter().map(String::as_str));
-                }
-            }
-            if let Some(h) = hit {
-                out.push(GateViolation {
-                    rule: "AS-EFF-009".into(),
-                    func: q.clone(),
-                    effects: Vec::new(), // a layer-flow has no single effect
-                    detail: format!("`{q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-    // Sort by (rule, detail) — identical order to the old rendered-line sort (the "[rule] detail" render
-    // puts the constant '[' first and all AS-EFF codes are same-length), without allocating two Strings
-    // per comparison.
-    out.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
-    out
+    // The SHARED §6.2 parser, with the ⟨0.19⟩ config aliases — one grammar across all four engines.
+    let p = candor_classify::policy::parse_policy_with_aliases(policy_text, unknown_aliases);
+    // ⟨0.20⟩ Materialize each Net-bearing fn's destination classes ONCE, from this machine's
+    // `net-partner` config. The gate used to compute them lazily at the `deny Net[dest…]` site; the set
+    // is identical (only a Net-bearing fn could reach that branch) and it is the same derivation scan.rs
+    // writes into the report's `netClass`, which is what makes the ⟨0.24⟩ report route byte-equivalent.
+    let net_classes: HashMap<String, Vec<String>> = all
+        .iter()
+        .filter(|q| inferred.get(*q).is_some_and(|s| s.contains("Net")))
+        .map(|q| (q.clone(), net_classes_of(q, hostsacc, incompleteacc, net_partners)))
+        .collect();
+    candor_classify::gate::gate(
+        &p,
+        &candor_classify::gate::GateInput {
+            all,
+            inferred,
+            calls,
+            hosts: hostsacc,
+            cmds: cmdsacc,
+            paths: pathsacc,
+            tables: tablesacc,
+            surface_incomplete: incompleteacc,
+            reason_classes: reasonclassacc,
+            net_classes: &net_classes,
+        },
+    )
 }
 
 /// The provable-purity DISCLOSURE (eval/fixloop/DISPATCH-NOTE.md): functions that PASS a `pure`/`deny` layer
