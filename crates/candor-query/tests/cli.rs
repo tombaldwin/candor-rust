@@ -2716,10 +2716,22 @@ fn a_present_but_unparseable_section2_key_refuses_and_an_absent_one_does_not() {
     ] {
         let loc = gate_fixture(&f.dir, name, &body(extra), None);
         let vfile = f.dir.join(format!("v-{name}.json"));
-        let (rc, out, err) = run_gate(&loc, &p, &["--gate-json", &vfile.to_string_lossy()]);
+        let _ = std::fs::remove_file(&vfile);
+        let (rc, _out, err) = run_gate(&loc, &p, &["--gate-json", &vfile.to_string_lossy()]);
         assert_eq!(rc, 2, "a present-but-unparseable `unanalyzed` must refuse, not read as `[]`:\n{err}");
         assert!(err.contains("`unanalyzed`"), "the refusal must NAME the key it could not read:\n{err}");
-        assert!(!vfile.exists(), "…and write no verdict (SPEC §3.3 exit-2 cause (a)):\n{out}");
+        // ⟨0.24⟩ …AND WRITE THE FAIL-CLOSED DOCUMENT. This row read `assert!(!vfile.exists())` — the
+        // §3.3 "no document on a config-shaped exit 2" rule — until candor-spec `1503368` (b) removed
+        // that carve-out. The argument that MANDATES a document (a CI wrapper reading the path
+        // unconditionally re-reads the PREVIOUS run's verdict as current) is exactly as true here: a
+        // stale green does not care why this run declined to overwrite it. A report that did not load
+        // has no violations to reason about, which is precisely why the document carries no
+        // `violations` key — the shape already says "no claim about violations".
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&vfile).expect("a refusal document")).unwrap();
+        assert_eq!(v["ok"], false, "the naive read of this document must be the fail-closed one:\n{v:#}");
+        assert_eq!(v["refused"], true, "{v:#}");
+        assert!(v.get("violations").is_none(), "a refusal makes NO claim about violations:\n{v:#}");
     }
     // …and the same rule on `analyzed`, including SPEC §2's live boolean row.
     for (name, extra) in [
