@@ -15,11 +15,22 @@ SCAN="${CANDOR_SCAN_BIN:-$ROOT/target/release/candor-scan}"
 # awk (not `\s` — BSD sed/grep don't support it): strip a trailing comment, drop the `deny` keyword.
 DENIED=$(awk '/^[[:space:]]*deny[[:space:]]/{sub(/#.*/,""); $1=""; sub(/^[[:space:]]+/,""); print; exit}' "$ROOT/.candor/policy")
 [ -n "$DENIED" ] || { echo "self-gate: no deny rule in .candor/policy"; exit 2; }
+# EVERY WRITE GOES TO A TEMP DIR, and nothing under the working tree is touched.
+#
+# This loop used to `rm -rf "$d/.candor"` before AND after each scan, to be sure it read a fresh report
+# rather than a stale one. Those directories hold EIGHT TRACKED FILES (`crates/*/.candor/report.*.json`),
+# so a plain run of this script deleted them and never put them back — and it caught an agent inside a
+# `git add -A`, committing the deletions. Restoring afterwards would still leave a window, and scoping
+# the removal to untracked paths would make the script's correctness depend on what happens to be
+# checked in. `--out <temp prefix>` is the version with no destructive step at all: freshness comes from
+# the directory being NEW, which is also what the old `rm -rf` was actually buying.
+WS="$(mktemp -d "${TMPDIR:-/tmp}/candor-self-gate.XXXXXX")"
+trap 'rm -rf "$WS"' EXIT
 rc=0
 for c in candor-report candor-classify candor-scan candor-query; do
   d="$ROOT/crates/$c"
-  rm -rf "$d/.candor"; "$SCAN" "$d" >/dev/null 2>&1
-  rpt="$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)"
+  "$SCAN" "$d" --out "$WS/$c/report" >/dev/null 2>&1
+  rpt="$(ls "$WS/$c"/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)"
   [ -n "$rpt" ] || { echo "self-gate: candor-scan produced no report for $c"; rc=2; continue; }
   out="$(DENIED="$DENIED" python3 - "$rpt" <<'PY'
 import json, os, sys
@@ -31,7 +42,6 @@ sys.exit(1 if bad else 0)
 PY
 )"
   if [ -n "$out" ]; then echo "$c:"; echo "$out"; rc=1; fi
-  rm -rf "$d/.candor"
 done
 [ "$rc" -eq 0 ] && echo "self-gate: OK (candor's own code performs no Net/Db/Exec/Ipc)" || echo "self-gate: FAILED"
 exit "$rc"
