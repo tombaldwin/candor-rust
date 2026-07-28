@@ -233,9 +233,15 @@ done
 
 # ⟨0.24⟩ THE POLICY-ERROR ARM (SPEC §6.2). An unrecognised reason-class token cannot be honoured AS
 # WRITTEN, and dropping it REWRITES the rule — narrowing it when the typo sits beside valid tokens, which
-# is the common case and is fail-open. Both routes take the unreadable-policy posture: exit 2 and NO
-# document. Pinned here because "neither route writes" is itself a byte-equality claim, and because the
-# matrix above would report a missing document as a failure rather than as the contract.
+# is the common case and is fail-open. Both routes take the unreadable-policy posture: exit 2.
+#
+# ⟨0.24⟩ …AND BOTH NOW WRITE A REFUSAL DOCUMENT (candor-spec `1503368` (b) removes the "no document on a
+# config-shaped exit 2" carve-out — a CI wrapper reading the path unconditionally re-reads yesterday's
+# green otherwise). This arm asserted "NEITHER route writes", which was a byte-equality claim about an
+# absence; it now asserts the far stronger thing, that both write and both write the SAME SHAPE:
+# `ok:false`, `refused:true`, NO `violations` key, and the offending token named IN THE DOCUMENT (stderr
+# is not the channel CI reads). The `reason` PROSE is deliberately not compared — each route names its
+# own remedy, and forcing one string would make the check about the copy rather than the contract.
 pe="$WS/policyerr"; mkdir -p "$pe/src" "$pe/out"
 printf '[package]\nname = "polerr"\n' > "$pe/Cargo.toml"
 printf 'pub fn go(f: &dyn Fn() -> i32) -> i32 { f() }\n' > "$pe/src/lib.rs"
@@ -256,9 +262,25 @@ elif [ "$rc_scan" -ne 2 ] || [ "$rc_gate" -ne 2 ]; then
   echo "  FAIL policy-error: exit $rc_scan (scan) vs $rc_gate (gate), both must be 2. A policy that cannot"
   echo "       be honoured as written must not be silently rewritten into a different policy (§6.2)."
   bad=$((bad+1))
-elif [ -f "$WS/pe.scan.json" ] || [ -f "$WS/pe.gate.json" ]; then
-  echo "  FAIL policy-error: a route wrote a verdict document over a policy it could not read"
+elif [ ! -f "$WS/pe.scan.json" ] || [ ! -f "$WS/pe.gate.json" ]; then
+  echo "  FAIL policy-error: a route wrote NO document on exit 2 — a consumer reading that path sees the"
+  echo "       PREVIOUS run's verdict, which is stale (SPEC §3.1 ⟨0.24⟩, candor-spec 1503368)"
   bad=$((bad+1))
+else
+  for r in scan gate; do
+    d="$WS/pe.$r.json"
+    if ! grep -q '"refused": true' "$d" || ! grep -q '"ok": false' "$d"; then
+      echo "  FAIL policy-error/$r: the refusal document's naive read is not the fail-closed one"; cat "$d"
+      bad=$((bad+1))
+    elif grep -q '"violations"' "$d"; then
+      echo "  FAIL policy-error/$r: a refusal must make NO claim about violations"; cat "$d"
+      bad=$((bad+1))
+    elif ! grep -q 'indirct' "$d"; then
+      echo "  FAIL policy-error/$r: the document does not NAME the token — stderr is not the CI channel"
+      cat "$d"
+      bad=$((bad+1))
+    fi
+  done
 fi
 
 if [ "$fired" -eq 0 ] || [ "$fired_doc" -eq 0 ]; then
