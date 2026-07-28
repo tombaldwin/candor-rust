@@ -596,6 +596,24 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         .unwrap_or_default();
     let p = candor_classify::policy::parse_policy_with_aliases(&policy_text, &aliases);
 
+    // ⟨0.24⟩ THE POLICY COULD NOT BE HONOURED AS WRITTEN (SPEC §6.2) — the UNREADABLE-POLICY posture,
+    // so exit 2 with NO document, exactly like the unreadable-file branch above and byte-identically to
+    // candor-scan's route on the same policy. See `ParsedPolicy::errors` for why this stopped being a
+    // warning: dropping an unrecognised class token rewrites the rule, and the direction that matters
+    // NARROWS it (`deny Unknown[dispatch,nativ]` → `[dispatch]`), so the gate silently stops covering
+    // native-caused holes while the operator reads a gate that looks armed.
+    if !p.errors.is_empty() {
+        for e in &p.errors {
+            eprintln!("candor-query gate: policy error — {e}");
+        }
+        eprintln!(
+            "candor-query gate: refusing to evaluate a policy that cannot be honoured AS WRITTEN \
+             (exit 2, policy NOT evaluated). Fix the token, or define it as an `unknown-alias` in the \
+             `.candor/config` beside {policy_path}."
+        );
+        return 2;
+    }
+
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
     // is gateless-green — the user believes a rule is enforced that never ran.
     if !p.layer_rules.is_empty() {

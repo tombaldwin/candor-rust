@@ -2001,6 +2001,68 @@ fn a_refusal_overwrites_a_stale_verdict_and_makes_no_claim_about_violations() {
     assert_eq!(d["violations"].as_array().unwrap().len(), 1, "{d:#}");
 }
 
+/// SPEC §6.2 ⟨0.24⟩ **AN UNRECOGNISED REASON-CLASS TOKEN IN A POLICY IS A POLICY ERROR** (candor-spec
+/// `382a7e0`, which withdraws its own "a dropped policy token can only WIDEN, so the failure is loud"
+/// asymmetry). Measured four-way, dropping the token does both, and one direction is fail-open:
+///
+///   - `deny Unknown[corp]` — the ONLY token is unrecognised, the filter empties, and the rule WIDENS to
+///     a bare `deny Unknown` while the engine prints "ignoring policy rule" and then keeps and re-scopes
+///     it. A FALSE DISCLOSURE, but at least loud in the strict direction.
+///   - `deny Unknown[dispatch,nativ]` — **a typo BESIDE valid tokens.** Dropped, the rule NARROWS to
+///     `[dispatch]`, and it stops gating native-caused holes entirely while the operator reads a gate
+///     that looks armed. **That is the fail-open, and it is the common case: a typo lands beside correct
+///     tokens far more often than alone.**
+///
+/// THE FIXTURE'S ONLY HOLE IS NATIVE-CAUSED, which is what makes the narrowing row a measurement rather
+/// than a taxonomy: before the fix that row exited **0**, a green gate over exactly the hole the
+/// operator wrote the rule to catch.
+#[test]
+fn gate_report_refuses_an_unrecognised_reason_class_token_including_beside_valid_ones() {
+    let f = Fixture::new("gate-badclass");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.viaFfi","inferred":["Unknown"],"direct":["Unknown"],
+                          "unknownWhy":["native:libc::open"]}]}"#,
+        None,
+    );
+    // THE CONTROL FIRST, because every row below is only meaningful if the fixture is live: spelled
+    // correctly, the rule FIRES.
+    let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "good", "deny Unknown[dispatch,native]\n"), &[]);
+    assert_eq!(rc, 1, "the correctly-spelled rule must FIRE, or the rows below prove nothing:\n{err}");
+
+    for (name, text, token) in [
+        // THE FAIL-OPEN ROW. Before the fix: exit 0 — narrowed to `[dispatch]`, so the native hole the
+        // rule was written for went ungated, silently.
+        ("typo_beside_valid", "deny Unknown[dispatch,nativ]\n", "nativ"),
+        // The widening row: exit 1 before the fix, but on a rule the engine claimed to be IGNORING.
+        ("sole_unrecognised", "deny Unknown[corp]\n", "corp"),
+    ] {
+        let (rc, stdout, err) = run_gate(&loc, &pol(&f.dir, name, text), &[]);
+        assert_eq!(
+            rc, 2,
+            "{name}: a policy that cannot be honoured AS WRITTEN must be refused, never silently \
+             rewritten into a different policy:\n{err}"
+        );
+        assert!(err.contains(token), "{name}: the refusal must NAME the token:\n{err}");
+        assert!(
+            err.contains("unresolved") && err.contains("dispatch"),
+            "{name}: …and list the ACCEPTED set, which is the only thing that makes it fixable:\n{err}"
+        );
+        assert!(stdout.is_empty(), "{name}: a refused policy produces no verdict");
+    }
+    // A CONFIG-DEFINED alias is still vocabulary, not an error — the refusal must not swallow the
+    // ⟨0.19⟩ `unknown-alias` feature it looks exactly like from the parser's seat.
+    let sub = f.dir.join("aliased");
+    std::fs::create_dir_all(sub.join(".candor")).unwrap();
+    std::fs::write(sub.join(".candor/config"), "unknown-alias corp = native\n").unwrap();
+    let p = pol(&sub, "alias", "deny Unknown[corp]\n");
+    let (rc, _, err) = run_gate(&loc, &p, &[]);
+    assert_eq!(rc, 1, "an alias DEFINED beside the policy resolves and the rule fires:\n{err}");
+}
+
 /// SPEC §3.1 ⟨0.24⟩ THE MINIMAL-REFUSAL RULE. A class-scoped `deny` is NOT unanswerable merely because
 /// evidence is missing: the class set only GROWS (§6.2 CONTRIBUTES) and `Reject` is upward-closed, so
 /// when the classes determinable FROM THE ENTRY ALONE are non-empty the answer is certain either way.

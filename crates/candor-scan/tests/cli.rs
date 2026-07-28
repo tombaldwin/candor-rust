@@ -1643,3 +1643,60 @@ fn a_violation_survives_an_incomplete_scan_and_dominates_the_exit_code() {
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&good);
 }
+
+/// SPEC §6.2 ⟨0.24⟩ **THE SCAN ROUTE TAKES THE SAME POLICY-ERROR RULE AS `gate --report`** (candor-spec
+/// `382a7e0`). An unrecognised reason-class token used to be dropped with a warning, which REWRITES the
+/// rule the operator wrote — and the direction that matters narrows it:
+///
+///   `deny Unknown[dispatch,indirct]` → gated on `[dispatch]` alone → **exit 0** over a crate whose only
+///   hole is `indirect`. A gate that looks armed and covers nothing it was written to cover.
+///
+/// Both routes now refuse identically (exit 2, no verdict document), which is also what keeps §3.1's
+/// byte-equality MUST true on a broken policy: neither route writes a document, so there is nothing to
+/// disagree about.
+#[test]
+fn scan_refuses_a_policy_naming_an_unrecognised_reason_class_token() {
+    // The one hole is INDIRECT (a call through a `&dyn Fn`), so the narrowing row's green is a real
+    // miss, not a vacuous pass.
+    let d = make_crate("badclass", "pub fn go(f: &dyn Fn() -> i32) -> i32 { f() }\n");
+    let run = |name: &str, rule: &str, gate_json: Option<&std::path::Path>| -> (i32, String) {
+        let pp = d.join(format!("{name}.policy"));
+        std::fs::write(&pp, rule).unwrap();
+        let mut args: Vec<String> =
+            vec![d.to_string_lossy().into_owned(), "--policy".into(), pp.to_string_lossy().into_owned()];
+        if let Some(g) = gate_json {
+            args.push("--gate-json".into());
+            args.push(g.to_string_lossy().into_owned());
+        }
+        let out = Command::new(bin()).args(&args).output().expect("run candor-scan");
+        (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    // CONTROL — spelled correctly the rule FIRES, so every row below is about the TOKEN.
+    let (rc, err) = run("good", "deny Unknown[dispatch,indirect]\n", None);
+    assert_eq!(rc, 1, "the correctly-spelled rule must fire, or the rows below prove nothing:\n{err}");
+
+    let v = d.join("verdict.json");
+    for (name, rule, token) in [
+        // THE FAIL-OPEN ROW: exit 0 before the fix.
+        ("typo_beside_valid", "deny Unknown[dispatch,indirct]\n", "indirct"),
+        // The widening row: loud, but on a rule the engine claimed to be ignoring.
+        ("sole_unrecognised", "deny Unknown[corp]\n", "corp"),
+    ] {
+        let _ = std::fs::remove_file(&v);
+        let (rc, err) = run(name, rule, Some(&v));
+        assert_eq!(rc, 2, "{name}: a policy that cannot be honoured AS WRITTEN must be refused:\n{err}");
+        assert!(err.contains(token), "{name}: the refusal must NAME the token:\n{err}");
+        assert!(
+            !v.exists(),
+            "{name}: …and take the UNREADABLE-POLICY posture — no verdict document, byte-identically to \
+             `candor-query gate --report` on the same policy"
+        );
+    }
+    // A config-defined alias is vocabulary, not an error.
+    std::fs::create_dir_all(d.join(".candor")).unwrap();
+    std::fs::write(d.join(".candor/config"), "unknown-alias corp = indirect\n").unwrap();
+    let (rc, err) = run("aliased", "deny Unknown[corp]\n", None);
+    assert_eq!(rc, 1, "a defined alias resolves and the rule fires — the refusal must not eat ⟨0.19⟩:\n{err}");
+
+    let _ = std::fs::remove_dir_all(&d);
+}

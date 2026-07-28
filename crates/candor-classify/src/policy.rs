@@ -278,6 +278,24 @@ pub struct ParsedPolicy {
     pub rules: Vec<PolicyRule>,
     pub allow_rules: Vec<AllowRule>,
     pub layer_rules: Vec<LayerRule>,
+    /// ⟨0.24⟩ POLICY ERRORS — a policy that cannot be honoured AS WRITTEN (SPEC §6.2). Non-empty ⇒ every
+    /// gate route MUST refuse: exit 2, the unreadable-policy posture. Not a warning list: the rules in
+    /// `rules` are what the text would mean if the error were tolerated, and tolerating it is the defect.
+    ///
+    /// Today the only member is an unrecognised reason-class/alias token in an `Unknown[…]` filter. The
+    /// asymmetry that used to justify a warning — "a dropped policy token leaves a WIDER rule standing,
+    /// so the failure is loud" — is false in the case that matters, and the false half is FAIL-OPEN:
+    ///
+    ///   - `deny Unknown[corp]` (sole unrecognised token) — the filter empties and the rule WIDENS to a
+    ///     bare `deny Unknown`, while the engine prints "ignoring policy rule" and then KEEPS and
+    ///     re-scopes it. Merely surprising, but a FALSE DISCLOSURE.
+    ///   - `deny Unknown[dispatch,nativ]` (a typo BESIDE valid tokens) — the token is dropped, the rule
+    ///     NARROWS to `[dispatch]`, and it stops gating native-caused holes entirely while the operator
+    ///     reads a gate that looks armed. **That is the fail-open, and it is the common case: a typo
+    ///     lands beside correct tokens far more often than alone.**
+    ///
+    /// A policy that cannot be honoured as written is not silently rewritten into a different policy.
+    pub errors: Vec<String>,
 }
 
 /// The hostname part of a `host[:port]` literal, port stripped — so `api.stripe.com` in a rule accepts
@@ -458,6 +476,15 @@ pub fn parse_policy(text: &str) -> ParsedPolicy {
 pub fn parse_policy_with_aliases(text: &str, aliases: &std::collections::BTreeMap<String, std::collections::BTreeSet<ReasonClass>>) -> ParsedPolicy {
     parse_policy_impl(text, true, aliases)
 }
+/// ⟨0.24⟩ Just the [`ParsedPolicy::errors`] of `text`, parsed SILENTLY — for a caller that must refuse
+/// BEFORE it parses for real (candor-scan gates before touching the classifier's accumulators). Silent
+/// so the ordinary parse warnings are not printed twice on the same text.
+pub fn parse_policy_errors(
+    text: &str,
+    aliases: &std::collections::BTreeMap<String, BTreeSet<ReasonClass>>,
+) -> Vec<String> {
+    parse_policy_impl(text, false, aliases).errors
+}
 /// Same as [`parse_policy`] but SILENT about malformed rules — for a SECOND, advisory re-parse within the
 /// same run (candor-scan parses once for the gate check and again for the `unverified` disclosure), so the
 /// CI log doesn't print every "ignoring policy rule …" warning twice (#21). The first parse already warned.
@@ -565,7 +592,16 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                             } else if let Some(a) = aliases.get(cn) {
                                 unknown_classes.extend(a.iter().copied()); // ⟨0.19⟩ config `unknown-alias`
                             } else {
-                                warn_ignore!("candor: policy rule names unknown reason-class/alias `{cn}` (known: reflect,dispatch,indirect,native,unresolved,setup; aliases: dynamic,*, or a config `unknown-alias`): {line}");
+                                // ⟨0.24⟩ A POLICY ERROR, not a warning — see `ParsedPolicy::errors`. The
+                                // token is still dropped below so `rules` stays well-formed for the
+                                // advisory readers (`unverified`, `parsepolicy`); the gate routes refuse
+                                // on `errors` before any of it is used as a verdict.
+                                out.errors.push(format!(
+                                    "unrecognised reason-class/alias `{cn}` in `{line}` — accepted: \
+                                     reflect, dispatch, indirect, native, unresolved, setup, plus the \
+                                     aliases `dynamic` and `*`, plus any `unknown-alias` defined in the \
+                                     `.candor/config` beside the policy"
+                                ));
                             }
                         }
                         continue;
