@@ -438,6 +438,62 @@ fn unanswerable_scoped_filters(
 const GATE_USAGE: &str =
     "usage: candor-query gate --report <locator> --policy <file> [--json] [--gate-json <file>]";
 
+/// ⟨0.24⟩ REFUSE: exit 2, AND write the refusal document `--gate-json` was promised (SPEC §3.1).
+///
+/// **THE STALE-VERDICT HAZARD.** A refusal used to return 2 having written nothing at all, so a CI
+/// wrapper of the shape `candor-query gate … --gate-json v.json || true; jq .ok v.json` re-read **the
+/// PREVIOUS run's document as current** — a green file from yesterday's clean run, still on disk, is how
+/// a refusal becomes an all-clear. Deleting the path is not the fix either: a consumer that treats a
+/// missing file as "nothing to report" fails open by a different route. The only safe answer is a
+/// document whose NAIVE read is the fail-closed one, which is what [`candor_report::gate_refusal_json`]
+/// is (`ok:false`, `refused:true`, the reason, and NO `violations` key).
+///
+/// **SCOPED TO THE ANSWERABILITY REFUSALS**, which is what the ⟨0.24⟩ measurement was about: the policy
+/// LOADED, and the gate cannot answer it over THIS report (`forbid`/`allow` whole-policy; a scoped
+/// `deny` whose scoping datum is absent). The other exit-2 cause — a gate CONFIG or a report that never
+/// loaded AS one — keeps writing no document, per §3.3's cause (a) and the rows already pinned in
+/// `a_present_but_unparseable_section2_key_refuses_and_an_absent_one_does_not` and candor-scan's
+/// `a_broken_gate_CONFIG_must_still_write_no_verdict_document`: there the input to the verdict is
+/// unreadable, so even `refused: true` would be attributing a refusal to a policy nobody could parse.
+/// (The stale-path hazard is identical for that bucket, and the two rulings are in tension — recorded
+/// for Tom rather than resolved unilaterally, because the fix would break a rule pinned four-way.)
+///
+/// Returns the exit code (always 2) so call sites read `return refuse(…)`. A failure to WRITE is not
+/// escalated: the exit is already 2 and already fail-closed, and a second exit code would be a lie
+/// about which refusal happened.
+fn refuse(reason: &str, want_json: bool, gate_json: Option<&str>) -> i32 {
+    let mut targets: Vec<&str> = Vec::new();
+    if want_json {
+        targets.push("-");
+    }
+    if let Some(p) = gate_json
+        && !(want_json && p == "-")
+    {
+        targets.push(p);
+    }
+    if !targets.is_empty() {
+        match candor_report::gate_refusal_json(reason) {
+            Ok(json) => {
+                for t in targets {
+                    if t == "-" {
+                        println!("{json}");
+                    } else if let Err(e) =
+                        candor_report::write_atomic(Path::new(t), format!("{json}\n").as_bytes())
+                    {
+                        eprintln!(
+                            "candor-query gate: could not write the refusal document to --gate-json {t} \
+                             ({e}) — a consumer reading that path will see the PREVIOUS run's verdict, \
+                             which is stale. Delete it, or treat exit 2 as a failure."
+                        );
+                    }
+                }
+            }
+            Err(e) => eprintln!("candor-query gate: could not serialize the refusal document ({e})"),
+        }
+    }
+    2
+}
+
 /// `candor-query gate --report <locator> --policy <file> [--json] [--gate-json <file>]`
 ///
 /// A QUERY verb, not a scan flag, so it inherits §3.3.1's grammar unchanged: the same `--report` locator
@@ -543,20 +599,21 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
     // is gateless-green — the user believes a rule is enforced that never ran.
     if !p.layer_rules.is_empty() {
-        eprintln!(
-            "candor-query gate: this policy has {} `forbid` rule(s), which `gate --report` cannot \
+        let why = format!(
+            "this policy has {} `forbid` rule(s), which `gate --report` cannot \
              evaluate — a report's `calls` graph is EFFECT-RELEVANT (only callees with a non-empty effect \
              set are written), so a crossing into a wholly PURE unit is invisible in it, while `forbid` \
              matches on NAME. The rule would read green over a crossing a scan fails on. Gate layering at \
              scan time: candor-scan . --policy {policy_path}",
             p.layer_rules.len()
         );
-        return 2;
+        eprintln!("candor-query gate: {why}");
+        return refuse(&why, want_json, gate_json.as_deref());
     }
     if !p.allow_rules.is_empty() {
         let effects: BTreeSet<&str> = p.allow_rules.iter().map(|r| r.effect).collect();
-        eprintln!(
-            "candor-query gate: this policy has `allow {}` rule(s), which `gate --report` cannot \
+        let why = format!(
+            "this policy has `allow {}` rule(s), which `gate --report` cannot \
              evaluate — the AS-EFF-008 surface-completeness marker does not ride the report wire as a \
              gate-usable fact, so a benign visible literal beside a runtime-computed endpoint would be \
              CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that marker — it also \
@@ -564,7 +621,8 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
              {policy_path}",
             effects.into_iter().collect::<Vec<_>>().join("`/`")
         );
-        return 2;
+        eprintln!("candor-query gate: {why}");
+        return refuse(&why, want_json, gate_json.as_deref());
     }
 
     let Some(prefix) = report_flag.or_else(discover_report_prefix) else {
@@ -653,7 +711,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                 rep.unanalyzed.len()
             );
         }
-        return 2;
+        return refuse(&refused.join("  ·  "), want_json, gate_json.as_deref());
     }
     if !refused.is_empty() {
         eprintln!(

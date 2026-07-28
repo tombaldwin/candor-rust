@@ -1938,6 +1938,69 @@ fn gate_report_reports_a_certain_violation_over_an_unanswerable_rule_beside_it()
     assert_eq!(rc3, 1, "the firing rule alone must exit 1:\n{err3}");
 }
 
+/// SPEC §3.1 ⟨0.24⟩ **A REFUSAL MUST STILL WRITE A `--gate-json` DOCUMENT** (candor-spec `107755b`).
+///
+/// **THE HAZARD, AND WHY THE STALE FILE IS SEEDED HERE.** A refusal wrote nothing at the requested path,
+/// so the canonical CI wrapper — `candor-query gate … --gate-json v.json; jq .ok v.json` — re-read **the
+/// previous run's document as current**. A green file from yesterday's clean run, still on disk, is how
+/// a refusal becomes an all-clear. The fixture writes exactly that green file first, because a test that
+/// starts from an ABSENT path can only show a file was created; it cannot show the reader was rescued
+/// from the value that was actually there. Deleting the path is not the fix either — a consumer that
+/// reads a missing file as "nothing to report" fails open by a different route.
+///
+/// **`violations` MUST BE ABSENT, NOT EMPTY.** The gate is making no claim about violations, and `[]` is
+/// precisely the claim it cannot make: every consumer in existence reads it as "we looked and found
+/// none". That assertion is the one that separates this fix from the shape a hurried version would take.
+#[test]
+fn a_refusal_overwrites_a_stale_verdict_and_makes_no_claim_about_violations() {
+    let f = Fixture::new("gate-refusal-doc");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.netNoClass","inferred":["Net"],"direct":["Net"],
+                          "hosts":["h.example.com"]}]}"#,
+        None,
+    );
+    // Each of the three §3.1 ANSWERABILITY refusals, all of which used to leave the path untouched.
+    for (name, text) in [
+        ("scoped", "deny Net[unknown-host] app.netNoClass\n"),
+        ("forbidr", "forbid app -> dep\n"),
+        ("allowr", "allow Net example.com\n"),
+    ] {
+        let v = f.dir.join(format!("v-{name}.json"));
+        // YESTERDAY'S GREEN, on disk, exactly as a CI wrapper would find it.
+        std::fs::write(&v, "{\n  \"spec\": \"0.24\",\n  \"ok\": true,\n  \"violations\": []\n}\n").unwrap();
+        let (rc, _, err) = run_gate(&loc, &pol(&f.dir, name, text), &["--gate-json", &v.to_string_lossy()]);
+        assert_eq!(rc, 2, "{name} must still refuse:\n{err}");
+        let doc = std::fs::read_to_string(&v).expect("the path still exists");
+        let d: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(
+            d["ok"], false,
+            "{name}: a consumer keying ONLY on `ok` must land on FAIL — it read yesterday's `true`:\n{doc}"
+        );
+        assert_eq!(d["refused"], true, "{name}: …and one keying on `refused` learns why:\n{doc}");
+        assert!(
+            d.get("violations").is_none(),
+            "{name}: `violations` must be ABSENT, not empty — an empty array is exactly the claim a \
+             refusal cannot make, and every consumer reads it as 'we looked and found none':\n{doc}"
+        );
+        assert!(
+            d["reason"].as_str().is_some_and(|s| !s.is_empty()),
+            "{name}: the document must carry the refusal reason:\n{doc}"
+        );
+    }
+    // CONTROL — the same machinery on a policy this verb CAN answer still writes a real verdict, with a
+    // `violations` key. Without it, "always write a refusal document" would pass by refusing everything.
+    let v = f.dir.join("v-ok.json");
+    let (rc, _, err) = run_gate(&loc, &pol(&f.dir, "bare", "deny Net\n"), &["--gate-json", &v.to_string_lossy()]);
+    assert_eq!(rc, 1, "the answerable control must FIRE:\n{err}");
+    let d: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v).unwrap()).unwrap();
+    assert!(d.get("refused").is_none(), "a real verdict is not a refusal: {d:#}");
+    assert_eq!(d["violations"].as_array().unwrap().len(), 1, "{d:#}");
+}
+
 /// SPEC §3.1 ⟨0.24⟩ THE MINIMAL-REFUSAL RULE. A class-scoped `deny` is NOT unanswerable merely because
 /// evidence is missing: the class set only GROWS (§6.2 CONTRIBUTES) and `Reject` is upward-closed, so
 /// when the classes determinable FROM THE ENTRY ALONE are non-empty the answer is certain either way.
