@@ -279,6 +279,13 @@ pub struct UnanalyzedUnit {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Analyzed {
     pub count: usize,
+    /// `#[serde(default)]` on READ only — this engine always writes it. `count` is the load-bearing
+    /// datum (it is what the verdict carries and what §2's judged-nothing rule is keyed on); `digest` is
+    /// an opaque fingerprint nothing gates on. Refusing `{"count": 5}` for a missing digest would mint a
+    /// refusal SPEC §2 does not ask for, over a manifest whose claim is perfectly readable — and the
+    /// ⟨0.24⟩ present-but-unparseable rule is about claims that CANNOT be read, not about tidiness.
+    /// A non-integer `count` (`true`, `"5"`, absent) still makes the whole key `KeyRead::Corrupt`.
+    #[serde(default)]
     pub digest: String,
 }
 
@@ -490,32 +497,97 @@ pub fn report_type_surface(text: &str) -> Option<TypeSurface> {
     serde_json::from_value(val.get("typeSurface")?.clone()).ok()
 }
 
-/// ⟨proposed — Gap 2⟩ Parse a report's `unanalyzed` field. Empty when absent (a complete scan or any
-/// pre-rung report) — absence is never an error, just "nothing unanalyzed travelled."
-pub fn report_unanalyzed(text: &str) -> Vec<UnanalyzedUnit> {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|v| v.get("unanalyzed").cloned())
-        .and_then(|u| serde_json::from_value(u).ok())
-        .unwrap_or_default()
+/// ⟨0.24⟩ THE THREE ANSWERS A §2 KEY CAN GIVE A VERDICT READER, kept apart because two of them were
+/// being collapsed into one and the collapse was always in the fail-open direction.
+///
+/// SPEC §2: *"A KEY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT, AND MUST NEVER BE COERCED TO ITS
+/// EMPTY VALUE. … That default is always the permissive value — `0`, `[]`, absent — so the coercion
+/// converts corrupt input into a claim, and on every one of these keys the claim is the safe-looking
+/// one. … `unwrap_or_default`, `?? []`, `optional(...).orElse(…)` and their siblings are the exact
+/// idiom to grep for, and finding one on a §2 key is a defect until proven otherwise."*
+///
+/// [`Absent`](KeyRead::Absent) may take the key's documented default. [`Corrupt`](KeyRead::Corrupt)
+/// may not: it is a refusal, exit 2, naming the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyRead<T> {
+    /// The key is not on the wire. Its documented default applies — for `unanalyzed` that is "nothing
+    /// unanalyzed travelled", which is what every complete report this engine writes looks like
+    /// (`skip_serializing_if = "Vec::is_empty"`).
+    Absent,
+    /// The key is present and read as written.
+    Present(T),
+    /// The key is PRESENT and could not be read as its documented type. Never a default.
+    Corrupt,
+}
+
+impl<T> KeyRead<T> {
+    /// The value when present, the caller's default when ABSENT — and `None` when CORRUPT, which is the
+    /// case a bare `unwrap_or_default` erased. Callers that must refuse match on the variant instead.
+    pub fn or_default_if_absent(self, absent: T) -> Option<T> {
+        match self {
+            KeyRead::Absent => Some(absent),
+            KeyRead::Present(v) => Some(v),
+            KeyRead::Corrupt => None,
+        }
+    }
+}
+
+/// Read one §2 envelope key strictly: ABSENT and PRESENT-BUT-UNPARSEABLE are different answers.
+/// Unparseable report TEXT is `Corrupt` too — every caller on this path already refuses such a report
+/// before asking, so that arm is a posture rather than a behaviour.
+fn read_key<T: serde::de::DeserializeOwned>(text: &str, key: &str) -> KeyRead<T> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(text) else { return KeyRead::Corrupt };
+    match val.get(key) {
+        None => KeyRead::Absent,
+        Some(v) => match serde_json::from_value::<T>(v.clone()) {
+            Ok(t) => KeyRead::Present(t),
+            Err(_) => KeyRead::Corrupt,
+        },
+    }
+}
+
+/// ⟨0.21⟩ Read a report's `unanalyzed` manifest (SPEC §2, Gap 2). ABSENT is a complete scan or a
+/// pre-rung producer and takes the documented empty default; PRESENT-BUT-UNPARSEABLE is `Corrupt`.
+///
+/// **THIS IS THE SHARPEST OF THE §2 KEYS AND IT WAS THE ONE THAT WAS WRONG.** `unanalyzed`
+/// NON-EMPTINESS *is* the fail-closed trigger, so coercing an unreadable one to `[]` does not merely
+/// lose a disclosure — it converts exit 2 into `policy ✓`. Measured 2026-07-28 on
+/// `unanalyzed: [{"unit":…,"why":…}]` (right shape, wrong field names — exactly what a hand-built or
+/// foreign-produced report yields): this function's `from_value(u).ok().unwrap_or_default()` returned
+/// `[]` and candor-rust exited 0 GREEN where ts, java and swift all refused. `unanalyzed: ["a.rs"]`, a
+/// bare string list, went green in all four.
+pub fn report_unanalyzed(text: &str) -> KeyRead<Vec<UnanalyzedUnit>> {
+    read_key(text, "unanalyzed")
 }
 
 /// ⟨0.15 staged⟩ Parse a report's `coverage` envelope field (spec §2). `None` when the field is
 /// absent (a fully-covered scan, or any pre-⟨0.15⟩ report), the text isn't a JSON object, or the
 /// field doesn't deserialize — absence of the ledger is never an error, just "no disclosure
 /// travelled" (the pre-⟨0.15⟩ posture).
+///
+/// **THE LENIENT READER, kept for the ENRICHMENT callers** (`load.rs`, the query surfaces), where a
+/// coverage note that cannot be read costs precision and nothing else. The VERDICT route reads
+/// [`report_coverage_strict`] instead: there the κ ledger rides the gate document, so silently dropping
+/// an unreadable one deletes a disclosure from a verdict a machine acts on — the same shape as
+/// `unanalyzed`, one rung less sharp.
 pub fn report_coverage(text: &str) -> Option<Coverage> {
     let val: serde_json::Value = serde_json::from_str(text).ok()?;
     serde_json::from_value(val.get("coverage")?.clone()).ok()
 }
 
-/// ⟨0.21⟩ Parse a report's `analyzed` completeness manifest. `None` when the field is absent (a
-/// pre-⟨0.21⟩ producer) or doesn't deserialize. Read by `candor-query gate --report` (SPEC §3.1 ⟨0.24⟩),
-/// where the manifest that rode the report becomes the verdict's `analyzed.count` — the same number the
-/// scan's own `--gate-json` carries, which is half of why the two documents are byte-equal.
-pub fn report_analyzed(text: &str) -> Option<Analyzed> {
-    let val: serde_json::Value = serde_json::from_str(text).ok()?;
-    serde_json::from_value(val.get("analyzed")?.clone()).ok()
+/// ⟨0.24⟩ [`report_coverage`] with ABSENT and PRESENT-BUT-UNPARSEABLE told apart, for the verdict route.
+pub fn report_coverage_strict(text: &str) -> KeyRead<Coverage> {
+    read_key(text, "coverage")
+}
+
+/// ⟨0.21⟩ Read a report's `analyzed` completeness manifest. ABSENT is a pre-⟨0.21⟩ producer and takes
+/// the documented `count: 0` contribution; PRESENT-BUT-UNPARSEABLE (`"analyzed": "lots"`,
+/// `{"count": true}`) is `Corrupt` — SPEC §2's stated shape-table row. Read by `candor-query gate
+/// --report` (SPEC §3.1 ⟨0.24⟩), where the manifest that rode the report becomes the verdict's
+/// `analyzed.count` — the same number the scan's own `--gate-json` carries, which is half of why the
+/// two documents are byte-equal, and a number a reader must never invent.
+pub fn report_analyzed(text: &str) -> KeyRead<Analyzed> {
+    read_key(text, "analyzed")
 }
 
 /// ⟨0.24⟩ Does this report say it **JUDGED NOTHING** — is its ⟨0.21⟩ `analyzed.count` zero?
@@ -725,13 +797,65 @@ mod tests {
         let units = vec![UnanalyzedUnit { path: "src/broken.rs".into(), reason: "source failed to read/parse".into() }];
         let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None).unwrap();
         assert!(json.contains("\"unanalyzed\""), "unanalyzed must serialize when non-empty");
-        let parsed = report_unanalyzed(&json);
+        let KeyRead::Present(parsed) = report_unanalyzed(&json) else { panic!("must read back") };
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].path, "src/broken.rs");
         // empty: omitted entirely (a complete scan is byte-identical to a pre-rung report)
         let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None).unwrap();
         assert!(!clean.contains("unanalyzed"), "an empty unanalyzed must be omitted");
-        assert!(report_unanalyzed(&clean).is_empty());
+        assert_eq!(report_unanalyzed(&clean), KeyRead::Absent, "…and reads back as ABSENT, not as corrupt");
+    }
+
+    /// ⟨0.24⟩ SPEC §2's SHAPE TABLE for the §2 keys a VERDICT reads: **ABSENT and PRESENT-BUT-UNPARSEABLE
+    /// are different answers, and only the first may take a default.** Every row here returned the
+    /// PERMISSIVE default before the fix, because `report_unanalyzed` ended in
+    /// `.ok().unwrap_or_default()`.
+    ///
+    /// `unanalyzed` is the sharp one: its NON-EMPTINESS is the fail-closed trigger, so `[]` is not a lost
+    /// hedge, it is an inverted verdict (`candor-query gate --report` exited 0 `policy ✓` where ts, java
+    /// and swift exited 2 — measured 2026-07-28). The `analyzed` rows are SPEC §2's own stated table,
+    /// including the boolean that candor-swift really did read as `1`.
+    #[test]
+    fn a_present_but_unparseable_section2_key_is_corrupt_and_an_absent_one_is_not() {
+        let unan = |body: &str| {
+            report_unanalyzed(&format!(r#"{{"package":"p","functions":[],{body}}}"#))
+        };
+        // ABSENT — the documented default applies. This is what every complete report this engine writes
+        // looks like, so an over-strict reader would refuse the whole corpus.
+        assert_eq!(unan(r#""x":1"#), KeyRead::Absent);
+        // PRESENT and well-formed, both arms.
+        assert_eq!(unan(r#""unanalyzed":[]"#), KeyRead::Present(vec![]));
+        assert!(matches!(unan(r#""unanalyzed":[{"path":"a.rs","reason":"why"}]"#), KeyRead::Present(v) if v.len() == 1));
+        // PRESENT and UNPARSEABLE — every one of these coerced to `[]` before.
+        for body in [
+            r#""unanalyzed":[{"unit":"a.rs","why":"parse error"}]"#, // right shape, wrong field names
+            r#""unanalyzed":["src/broken.rs"]"#,                     // a bare string list
+            r#""unanalyzed":"src/broken.rs""#,                       // a bare string
+            r#""unanalyzed":{"path":"a.rs","reason":"w"}"#,          // one object, not a list
+            r#""unanalyzed":null"#,
+            r#""unanalyzed":3"#,
+        ] {
+            assert_eq!(unan(body), KeyRead::Corrupt, "must not coerce to the empty list: {body}");
+        }
+
+        let an = |body: &str| report_analyzed(&format!(r#"{{"package":"p","functions":[]{body}}}"#));
+        assert_eq!(an(""), KeyRead::Absent, "a pre-⟨0.21⟩ producer omits the manifest");
+        assert_eq!(an(r#","analyzed":{"count":5,"digest":"ab"}"#),
+                   KeyRead::Present(Analyzed { count: 5, digest: "ab".into() }));
+        // A digest-less manifest is READABLE — `count` is the load-bearing datum, and refusing here would
+        // mint a refusal §2 does not ask for over a claim that is perfectly legible.
+        assert_eq!(an(r#","analyzed":{"count":5}"#),
+                   KeyRead::Present(Analyzed { count: 5, digest: String::new() }));
+        for body in [
+            r#","analyzed":{"count":true}"#,  // SPEC §2's live swift row: a boolean is NOT an integer
+            r#","analyzed":{"count":"5"}"#,
+            r#","analyzed":{"count":-1}"#,
+            r#","analyzed":{"digest":"ab"}"#, // no count at all — nothing to read
+            r#","analyzed":"lots""#,
+            r#","analyzed":null"#,
+        ] {
+            assert_eq!(an(body), KeyRead::Corrupt, "must not coerce to `count: 0`: {body}");
+        }
     }
 
     #[test]

@@ -127,15 +127,69 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, i32> {
                 continue;
             }
         }
-        out.analyzed_count += candor_report::report_analyzed(&text).map(|a| a.count).unwrap_or(0);
+        // ⟨0.24⟩ EVERY §2 ENVELOPE KEY THE VERDICT READS IS READ STRICTLY HERE: ABSENT may take its
+        // documented default, PRESENT-BUT-UNPARSEABLE is a refusal that NAMES THE KEY. SPEC §2: *"That
+        // default is always the permissive value — `0`, `[]`, absent — so the coercion converts corrupt
+        // input into a claim, and on every one of these keys the claim is the safe-looking one."*
+        //
+        // MEASURED (2026-07-28) on `unanalyzed: [{"unit":…,"why":…}]` — the right shape with the wrong
+        // field names, exactly what a hand-built or foreign-produced report yields: the old
+        // `from_value(u).ok().unwrap_or_default()` in `report_unanalyzed` returned `[]`, and since
+        // `unanalyzed` NON-EMPTINESS *is* the fail-closed trigger, candor-rust exited 0 `policy ✓` where
+        // ts, java and swift all exited 2. Not a lost hedge — an inverted verdict.
+        //
+        // The refusal is per-key and names it, because "this report did not load" sends the user back to
+        // a scan they may not own, while "your `unanalyzed` key is not `[{path, reason}]`" is actionable.
+        macro_rules! strict {
+            ($read:expr, $key:literal, $shape:literal, $permissive:literal, $absent:expr) => {
+                match $read {
+                    candor_report::KeyRead::Absent => $absent,
+                    candor_report::KeyRead::Present(v) => v,
+                    candor_report::KeyRead::Corrupt => {
+                        eprintln!(
+                            "candor-query gate: report {} — the `{}` key is PRESENT but is not {} (SPEC §2). \
+                             A key that cannot be READ is corrupt input, never its empty value: coerced to \
+                             the default it would become a claim, and here that default is {}. Fix the key, \
+                             or re-run the scan that wrote it.",
+                            path.display(),
+                            $key,
+                            $shape,
+                            $permissive,
+                        );
+                        hard_fail = true;
+                        continue;
+                    }
+                }
+            };
+        }
+        out.analyzed_count += strict!(
+            candor_report::report_analyzed(&text),
+            "analyzed",
+            "`{ count: <integer>, digest: <hex> }`",
+            "`count: 0`, which understates the judged universe every downstream number is scaled against",
+            Default::default()
+        )
+        .count;
         // ⟨0.24⟩ …and separately from the SUM, whether this file judged anything at all. Read from the
         // one shared predicate candor-scan's chained join uses, so the two routes ⟨0.24⟩ binds cannot
         // drift: the rule is about the READING, not the route the report arrived by.
         out.judged_nothing &= candor_report::report_judged_nothing(&text);
-        out.unanalyzed.extend(candor_report::report_unanalyzed(&text));
-        if let Some(cov) = candor_report::report_coverage(&text) {
-            out.coverage_packages.extend(cov.uncovered.into_iter().map(|e| e.name));
-        }
+        out.unanalyzed.extend(strict!(
+            candor_report::report_unanalyzed(&text),
+            "unanalyzed",
+            "a list of `{ path, reason }`",
+            "the EMPTY list — and `unanalyzed` non-emptiness IS the fail-closed trigger, so that default \
+             turns this verb's exit 2 into `policy ✓`",
+            Vec::new()
+        ));
+        let cov: candor_report::Coverage = strict!(
+            candor_report::report_coverage_strict(&text),
+            "coverage",
+            "`{ uncovered: [{ name, calls }] }`",
+            "an EMPTY κ ledger, which deletes the coverage hedge from the verdict a machine reads",
+            Default::default()
+        );
+        out.coverage_packages.extend(cov.uncovered.into_iter().map(|e| e.name));
     }
     if hard_fail {
         eprintln!(
