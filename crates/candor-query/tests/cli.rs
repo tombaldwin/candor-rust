@@ -2331,13 +2331,15 @@ fn the_config_that_supplied_the_vocabulary_is_named_on_the_verdict() {
     let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &v.to_string_lossy()]);
     assert_eq!(rc, 1, "the alias resolves from a config ABOVE the policy:\n{err}");
     let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v).unwrap()).unwrap();
-    let named = j["vocabulary"]["config"].as_str().map(|s| std::fs::canonicalize(s).ok()).unwrap_or(None);
+    let named = j["policyVocabulary"]["config"].as_str().map(|s| std::fs::canonicalize(s).ok()).unwrap_or(None);
     assert_eq!(
         named,
         std::fs::canonicalize(&cfgpath).ok(),
         "a verdict changed by a file the operator cannot see NAMED is ambient input:\n{j:#}"
     );
-    assert_eq!(j["vocabulary"]["aliases"], serde_json::json!(["corp"]), "{j:#}");
+    assert_eq!(j["policyVocabulary"]["aliases"], serde_json::json!(["corp"]), "{j:#}");
+    // …under the name §3.1 ⟨0.24⟩ pins (`b4e9155`), on the REPORT route too, and with the old key gone.
+    assert!(j.get("vocabulary").is_none(), "the pre-`b4e9155` key must not survive beside it:\n{j:#}");
 
     // THE DISCRIMINATION CONTROL: the same alias pointing somewhere else goes GREEN, so the row above
     // shows the alias STEERING the verdict rather than merely being present.
@@ -2353,7 +2355,7 @@ fn the_config_that_supplied_the_vocabulary_is_named_on_the_verdict() {
     let (rc3, _, _) = run_gate(&loc, &bare, &["--gate-json", &v3.to_string_lossy()]);
     assert_eq!(rc3, 1);
     let j3: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v3).unwrap()).unwrap();
-    assert!(j3.get("vocabulary").is_none(), "an alias the policy never mentions is not disclosed:\n{j3:#}");
+    assert!(j3.get("policyVocabulary").is_none(), "an alias the policy never mentions is not disclosed:\n{j3:#}");
 }
 
 /// SPEC §6.2 ⟨0.24⟩ **AN UNRECOGNISED REASON-CLASS TOKEN IN A POLICY IS A POLICY ERROR** (candor-spec
