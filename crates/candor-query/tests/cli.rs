@@ -3195,3 +3195,131 @@ fn unevaluated_rides_the_gate_json_document_one_entry_per_rule() {
         "stderr names the same rules the document does: {err}"
     );
 }
+
+/// ⟨0.24⟩ `parsepolicy` REPORTS EVERY LINE IT DID NOT HONOUR — SPEC §3.1 `195d45a` + `901f14d`.
+///
+/// Measured on the conformance battery before this: java 10, ts 4, **rust 0** — this verb emitted no
+/// `errors` key at all. The facts existed and went to stderr, so the one verb that exists to let a
+/// consumer diff what an engine made of a policy answered with the not-honoured half deleted. It also
+/// contradicted this engine's own gate, which REFUSES an unrecognised class token while the parse
+/// narrowed it in silence.
+///
+/// `kind` is asserted against the SPEC's closed set, not the reference engine's: java emits `forbid
+/// form`, `allow values` and `rule kind` (space), three of which are outside `901f14d`'s four values.
+#[test]
+fn parsepolicy_reports_every_line_it_did_not_honour() {
+    let f = Fixture::new("parsepolerr");
+    let pol = f.dir.join("p.policy");
+    let parse = |text: &str| -> serde_json::Value {
+        std::fs::write(&pol, text).unwrap();
+        let out = Command::new(bin())
+            .arg("parsepolicy")
+            .arg(&pol)
+            .env_remove("CANDOR_CONFIG")
+            .output()
+            .expect("run candor-query parsepolicy");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "§3.1: parsepolicy MUST NOT REFUSE a policy it can read and cannot honour — it REPORTS the \
+             parse. stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("parsepolicy emits one JSON document")
+    };
+    let errs = |v: &serde_json::Value| -> Vec<(String, String, String)> {
+        v["errors"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|e| {
+                        (
+                            e["kind"].as_str().unwrap().to_string(),
+                            e["token"].as_str().unwrap().to_string(),
+                            e["rule"].as_str().unwrap().to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // ── THE CONTROL: a policy honoured in full carries NO `errors` key, so a clean parse stays
+    // byte-identical to the pre-rung dump and the four-way differential does not move. ──
+    let v = parse("deny Fs\nallow Net github.com\nforbid app -> infra\npure core\n");
+    assert!(v.get("errors").is_none(), "a clean parse emits no `errors` key: {v}");
+
+    // ── THE FINDING: one line of each kind the parser drops, in SOURCE order. ──
+    let v = parse(concat!(
+        "deny notaneffect\n",          // effect-name  — a deny naming no known effect
+        "allow Clock whatever\n",      // effect-name  — allow's closed effect position
+        "forbid bad\n",                // rule-kind    — the arrow is not its own token
+        "nonsense line\n",             // rule-kind    — no such rule keyword
+        "allow Net in\n",              // rule-kind    — allow naming no values
+        "deny Fs Unknown[bogus,reflect] io\n",  // reason-class/alias
+        "deny Net[bogus,unknown-host] mixed\n", // Net destination-class
+    ));
+    let got = errs(&v);
+    assert_eq!(got.len(), 7, "EVERY not-honoured line is reported, not just the fatal ones: {v}");
+    let kinds: Vec<&str> = got.iter().map(|(k, _, _)| k.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "effect-name",
+            "effect-name",
+            "rule-kind",
+            "rule-kind",
+            "rule-kind",
+            "reason-class/alias",
+            "Net destination-class",
+        ],
+        "`kind` is drawn from §3.1's CLOSED set, in source order: {v}"
+    );
+    // The raw line travels verbatim — it is what the operator has to go and fix.
+    assert_eq!(got[0].2, "deny notaneffect");
+    assert_eq!(got[6].2, "deny Net[bogus,unknown-host] mixed");
+    // …and the offending TOKEN is named, not just the line.
+    assert_eq!(got[5].1, "bogus", "the token is the finding: {v}");
+    assert_eq!(got[3].1, "nonsense");
+    // `accepted` is an ARRAY OF TOKENS, never prose (candor-ts emits a prose string, which is
+    // unparseable by the consumer the field exists for).
+    for e in v["errors"].as_array().unwrap() {
+        assert!(
+            e["accepted"].is_array(),
+            "`accepted` is an array of tokens: {e}"
+        );
+    }
+    assert_eq!(
+        v["errors"][5]["accepted"],
+        serde_json::json!(["reflect", "dispatch", "indirect", "native", "unresolved", "setup", "dynamic", "*"]),
+        "the reason-class vocabulary is named token by token: {v}"
+    );
+
+    // ── THE MIRROR: reporting a dropped line must NOT make the gate refuse it. `errors` widened; what
+    // REFUSES did not. A build that survived `nonsense line` yesterday still survives it. ──
+    let v = parse("deny Fs\nnonsense line\n");
+    assert_eq!(errs(&v).len(), 1, "the dropped line is reported: {v}");
+    assert_eq!(
+        v["deny"].as_array().map(Vec::len),
+        Some(1),
+        "…and the rest of the policy still parsed: {v}"
+    );
+    // …AND MEASURED THROUGH THE GATE, which is where the mirror would actually bite. Reporting is not
+    // refusing: a policy whose only defect is a dropped line still gates, and `deny Fs` still fires.
+    f.write_report();
+    std::fs::write(&pol, "deny Fs\nnonsense line\n").unwrap();
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.report_path(), "--policy"])
+        .arg(&pol)
+        .env_remove("CANDOR_POLICY")
+        .env_remove("CANDOR_CONFIG")
+        .output()
+        .expect("run candor-query gate");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "MIRROR: widening `errors` must not widen what REFUSES — `deny Fs` still fires beside a dropped \
+         line (exit 1, not 2). stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

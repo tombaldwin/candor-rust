@@ -380,8 +380,10 @@ impl Candor {
         // §6.2): exit 2, never a silently-rewritten policy. `deny Unknown[dispatch,nativ]` used to be
         // dropped down to `[dispatch]` here too, so this lint stopped gating native-caused holes while
         // the operator read a gate that looked armed.
-        if !parsed_policy.errors.is_empty() {
-            for e in &parsed_policy.errors {
+        // ⟨0.24⟩ FATAL errors only — see `ParsedPolicy::fatal_messages`.
+        let fatal = parsed_policy.fatal_messages();
+        if !fatal.is_empty() {
+            for e in &fatal {
                 eprintln!("candor: policy error — {e}");
             }
             eprintln!(

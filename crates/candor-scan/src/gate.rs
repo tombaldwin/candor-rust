@@ -44,7 +44,10 @@ pub(crate) fn policy_precheck(
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
 ) -> (Vec<String>, BTreeSet<String>) {
     let p = candor_classify::policy::parse_policy_silent(policy_text, unknown_aliases);
-    (p.errors, p.used_aliases)
+    // ⟨0.24⟩ FATAL errors only. `ParsedPolicy::errors` now also carries the lines the parser DROPPED but
+    // could survive (a malformed `forbid`, an unknown rule kind) — those are `parsepolicy`'s to report,
+    // and refusing a build on them would be the opposite defect.
+    (p.fatal_messages().into_iter().map(str::to_string).collect(), p.used_aliases)
 }
 
 #[allow(clippy::too_many_arguments)]

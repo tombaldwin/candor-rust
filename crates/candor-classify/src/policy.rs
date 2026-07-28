@@ -320,6 +320,55 @@ pub struct LayerRule {
     pub raw: String,
 }
 
+/// ⟨0.24⟩ ONE POLICY LINE THE PARSER DID NOT HONOUR AS WRITTEN (SPEC §3.1 `901f14d` / `195d45a`).
+///
+/// **THE DEFECT.** `parsepolicy` emitted **no `errors` key at all** (measured 2026-07-28 on the
+/// conformance battery: java 10, ts 4, rust 0, swift 0). Every one of these facts existed — they were
+/// printed to stderr as "ignoring policy rule …" — so the verb whose entire purpose is to let a consumer
+/// diff what an engine made of a policy answered the question with the not-honoured half deleted. Worse,
+/// it was INCONSISTENT with this engine's own gate: the gate refuses an unrecognised class token while
+/// the parse narrowed it silently, which is two answers to one question.
+///
+/// **`kind` IS A CLOSED SET, AND IT IS THE SPEC'S, NOT THE REFERENCE ENGINE'S.** `901f14d` pins four
+/// values: `reason-class/alias`, `Net destination-class`, `effect-name`, `rule-kind`. Measured, candor-java
+/// emits `forbid form`, `allow values` and `rule kind` (space, not hyphen) — three values outside the set
+/// and one spelling divergence — and candor-ts renames `kind`→`vocabulary` and `rule`→`where` and emits
+/// `accepted` as a PROSE STRING. This engine follows the clause: a line that names a rule keyword but does
+/// not form that keyword's rule formed no rule kind, so it is `rule-kind`.
+///
+/// `accepted` is an ARRAY OF TOKENS — the tokens that WOULD have been honoured in the position the bad one
+/// occupies. Empty where the position is open-ended (a host, a path), which is a fact about the grammar
+/// rather than a gap in the report.
+#[derive(Debug, Clone)]
+pub struct PolicyError {
+    /// One of [`PolicyError::KIND_REASON_CLASS`], [`PolicyError::KIND_NET_CLASS`],
+    /// [`PolicyError::KIND_EFFECT_NAME`], [`PolicyError::KIND_RULE_KIND`].
+    pub kind: &'static str,
+    /// The offending token, verbatim. Empty when the position was EMPTY (a missing arrow, an `allow` with
+    /// no values) — which is itself the finding.
+    pub token: String,
+    /// The tokens accepted in that position. Empty ⇒ the position takes an open-ended literal.
+    pub accepted: Vec<String>,
+    /// The raw policy line, verbatim.
+    pub rule: String,
+    /// The human sentence — the same text the stderr channel carries, so the two cannot disagree.
+    pub message: String,
+    /// ⟨0.24⟩ Does this error make the policy UNHONOURABLE, so every gate route must refuse (exit 2)?
+    ///
+    /// FATAL and REPORTED are different questions and this field is the only place they are told apart.
+    /// A dropped `nonsense line` is reported and survivable — the rest of the policy means what it says.
+    /// A rewritten `deny Unknown[dispatch,nativ]` is not: the rule that RAN is not the rule that was
+    /// written, and the direction that matters NARROWS it.
+    pub fatal: bool,
+}
+
+impl PolicyError {
+    pub const KIND_REASON_CLASS: &'static str = "reason-class/alias";
+    pub const KIND_NET_CLASS: &'static str = "Net destination-class";
+    pub const KIND_EFFECT_NAME: &'static str = "effect-name";
+    pub const KIND_RULE_KIND: &'static str = "rule-kind";
+}
+
 /// The rule kinds parsed from a CANDOR_POLICY file.
 #[derive(Default, Debug)]
 pub struct ParsedPolicy {
@@ -343,13 +392,30 @@ pub struct ParsedPolicy {
     ///     lands beside correct tokens far more often than alone.**
     ///
     /// A policy that cannot be honoured as written is not silently rewritten into a different policy.
-    pub errors: Vec<String>,
+    ///
+    /// ⟨0.24⟩ THIS LIST NOW HOLDS EVERY LINE THE PARSER DID NOT HONOUR, fatal or not (SPEC §3.1
+    /// `195d45a`) — `parsepolicy` reports them all, and the gate routes refuse on
+    /// [`ParsedPolicy::fatal_messages`] alone. Widening the LIST without widening what REFUSES is the
+    /// whole of the change: a dropped `nonsense line` was always survivable and stays so.
+    pub errors: Vec<PolicyError>,
     /// ⟨0.24⟩ The `.candor/config` `unknown-alias` NAMES this policy actually resolved a token through
     /// (SPEC §3.1). Non-empty ⇒ a config file supplied vocabulary that PARTICIPATED in the verdict, and
     /// the `--gate-json` document MUST name that file. Recorded at the point of USE, not from the alias
     /// map: a config defining ten aliases none of which the policy mentions changed nothing, and naming
     /// it would train the reader to ignore the field.
     pub used_aliases: BTreeSet<String>,
+}
+
+impl ParsedPolicy {
+    /// ⟨0.24⟩ The messages of the errors that make the policy UNHONOURABLE — what every gate route
+    /// refuses on. Non-empty ⇒ exit 2, the unreadable-policy posture.
+    ///
+    /// Separate from `errors` because REPORTED and FATAL are different questions, and conflating them in
+    /// either direction is a defect: refusing on every dropped line would make `nonsense line` fail a
+    /// build, and reporting only the fatal ones is the silent narrowing this rung exists to close.
+    pub fn fatal_messages(&self) -> Vec<&str> {
+        self.errors.iter().filter(|e| e.fatal).map(|e| e.message.as_str()).collect()
+    }
 }
 
 /// The hostname part of a `host[:port]` literal, port stripped — so `api.stripe.com` in a rule accepts
@@ -604,6 +670,23 @@ pub fn parse_policy_quiet(text: &str) -> ParsedPolicy {
 fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMap<String, std::collections::BTreeSet<ReasonClass>>) -> ParsedPolicy {
     macro_rules! warn_ignore { ($($a:tt)*) => { if warn { eprintln!($($a)*); } } }
     let mut out = ParsedPolicy::default();
+    // ⟨0.24⟩ Record a line the parser did not honour (SPEC §3.1 `195d45a`), on the ONE list `parsepolicy`
+    // reports and the gate routes filter for `fatal`. The stderr sentence and `message` are the SAME
+    // string by construction — a disclosure that can drift from the one beside it is how this family
+    // produced a FALSE disclosure once already (conformance PART 13b).
+    macro_rules! not_honoured {
+        ($fatal:expr, $kind:expr, $token:expr, $accepted:expr, $rule:expr, $msg:expr) => {{
+            let message: String = $msg;
+            out.errors.push(PolicyError {
+                kind: $kind,
+                token: ($token).to_string(),
+                accepted: ($accepted).iter().map(|s: &&str| s.to_string()).collect(),
+                rule: ($rule).to_string(),
+                message,
+                fatal: $fatal,
+            });
+        }};
+    }
     // `str::lines()` splits on \n and \r\n but NOT bare \r — a classic-Mac file then collapses to ONE
     // line, and since \r is also an in-line ASCII-ws token separator (is_ascii_ws), every rule after the
     // first was glued into the first rule's tokens and dropped (sweep [16], a gateless-green divergence).
@@ -633,9 +716,20 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                     "Exec" => "Exec",
                     "Fs" => "Fs",
                     "Db" => "Db",
-                    _ => {
-                        warn_ignore!(
-"candor: ignoring policy rule (allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables): {line}"
+                    other => {
+                        let msg = format!(
+                            "unknown effect-name `{other}` in `allow` (accepted: Db, Exec, Fs, Llm, Net \
+                             \u{2014} `allow` covers only the effects carrying a literal surface: Net/Llm \
+                             hosts, Exec commands, Fs paths, Db tables): {line}"
+                        );
+                        warn_ignore!("candor: ignoring policy rule ({msg})");
+                        not_honoured!(
+                            false,
+                            PolicyError::KIND_EFFECT_NAME,
+                            other,
+                            ["Db", "Exec", "Fs", "Llm", "Net"],
+                            line,
+                            msg
                         );
                         continue;
                     }
@@ -650,7 +744,12 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                 };
                 let literals: BTreeSet<String> = rest.iter().map(|h| h.to_string()).collect();
                 if literals.is_empty() {
-                    warn_ignore!("candor: ignoring policy rule (allow {effect} names no values): {line}");
+                    let msg = format!("`allow {effect}` names no values: {line}");
+                    warn_ignore!("candor: ignoring policy rule ({msg})");
+                    // `accepted` is EMPTY on purpose: the position takes an open-ended literal (a host, a
+                    // path, a command, a table), so there is no token list to offer. A fact about the
+                    // grammar, not a gap in the report.
+                    not_honoured!(false, PolicyError::KIND_RULE_KIND, "", [], line, msg);
                     continue;
                 }
                 out.allow_rules.push(AllowRule { effect, scope, literals, raw: line.to_string() });
@@ -686,10 +785,17 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                                 // correctly-spelled rule exits 1. The typo is dropped, the filter NARROWS
                                 // to `[known-telemetry]`, and the gate stops covering unidentifiable
                                 // destinations while the operator reads a gate that looks armed.
-                                out.errors.push(format!(
-                                    "unrecognised Net destination-class `{cn}` in `{line}` — accepted: \
-                                     known-telemetry, known-partner, unknown-host, plus `*`"
-                                ));
+                                not_honoured!(
+                                    true,
+                                    PolicyError::KIND_NET_CLASS,
+                                    cn,
+                                    ["known-telemetry", "known-partner", "unknown-host", "*"],
+                                    line,
+                                    format!(
+                                        "unrecognised Net destination-class `{cn}` in `{line}` — \
+                                         accepted: known-telemetry, known-partner, unknown-host, plus `*`"
+                                    )
+                                );
                             }
                         }
                         continue;
@@ -716,15 +822,32 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                                 // token is still dropped below so `rules` stays well-formed for the
                                 // advisory readers (`unverified`, `parsepolicy`); the gate routes refuse
                                 // on `errors` before any of it is used as a verdict.
-                                out.errors.push(format!(
-                                    "unrecognised reason-class/alias `{cn}` in `{line}` — accepted: \
-                                     reflect, dispatch, indirect, native, unresolved, setup, plus the \
-                                     aliases `dynamic` and `*`, plus any `unknown-alias` defined in the \
-                                     `.candor/config` beside the policy. (⟨0.24⟩ an `unknown-alias` whose \
-                                     OWN definition names an unrecognised class is refused WHOLE, so a \
-                                     typo in the config surfaces as an undefined alias here — check the \
-                                     `unknown-alias` lines too, and the line above this one.)"
-                                ));
+                                not_honoured!(
+                                    true,
+                                    PolicyError::KIND_REASON_CLASS,
+                                    cn,
+                                    [
+                                        "reflect",
+                                        "dispatch",
+                                        "indirect",
+                                        "native",
+                                        "unresolved",
+                                        "setup",
+                                        "dynamic",
+                                        "*"
+                                    ],
+                                    line,
+                                    format!(
+                                        "unrecognised reason-class/alias `{cn}` in `{line}` — accepted: \
+                                         reflect, dispatch, indirect, native, unresolved, setup, plus the \
+                                         aliases `dynamic` and `*`, plus any `unknown-alias` defined in \
+                                         the `.candor/config` beside the policy. (⟨0.24⟩ an \
+                                         `unknown-alias` whose OWN definition names an unrecognised class \
+                                         is refused WHOLE, so a typo in the config surfaces as an \
+                                         undefined alias here — check the `unknown-alias` lines too, and \
+                                         the line above this one.)"
+                                    )
+                                );
                             }
                         }
                         continue;
@@ -747,7 +870,24 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                     }
                 }
                 if effects.is_empty() {
-                    warn_ignore!("candor: ignoring policy rule (no known effect named): {line}");
+                    // The accepted set is the §1 effect vocabulary plus `Unknown` — SORTED, so the
+                    // document is deterministic and diffable across engines.
+                    let mut acc: Vec<&str> = candor_report::EFFECTS.to_vec();
+                    acc.push(UNKNOWN);
+                    acc.sort_unstable();
+                    let msg = format!(
+                        "`deny` names no known effect (accepted: {}): {line}",
+                        acc.join(", ")
+                    );
+                    warn_ignore!("candor: ignoring policy rule ({msg})");
+                    not_honoured!(
+                        false,
+                        PolicyError::KIND_EFFECT_NAME,
+                        scope.as_deref().unwrap_or(""),
+                        acc,
+                        line,
+                        msg
+                    );
                     continue;
                 }
                 // `*` (or bare `Unknown`) means all classes ⇒ empty filter (matches any Unknown).
@@ -776,7 +916,11 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                 let arrow = toks.next().unwrap_or("");
                 let b = toks.next().unwrap_or("");
                 if a.is_empty() || arrow != "->" || b.is_empty() {
-                    warn_ignore!("candor: ignoring layering rule (want `forbid <scope> -> <scope>`): {line}");
+                    let msg = format!("`forbid` is malformed (want `forbid <scope> -> <scope>`): {line}");
+                    warn_ignore!("candor: ignoring layering rule ({msg})");
+                    // The token reported is whatever sat in the ARROW position — `->` must be its own
+                    // token, so `forbid glued->arrow` finds nothing there and that absence is the finding.
+                    not_honoured!(false, PolicyError::KIND_RULE_KIND, arrow, ["->"], line, msg);
                     continue;
                 }
                 out.layer_rules.push(LayerRule {
@@ -785,7 +929,20 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                     raw: line.to_string(),
                 });
             }
-            other => warn_ignore!("candor: ignoring policy rule (unknown kind `{other}`): {line}"),
+            other => {
+                let msg = format!(
+                    "unknown rule kind `{other}` (accepted: allow, deny, forbid, pure): {line}"
+                );
+                warn_ignore!("candor: ignoring policy rule ({msg})");
+                not_honoured!(
+                    false,
+                    PolicyError::KIND_RULE_KIND,
+                    other,
+                    ["allow", "deny", "forbid", "pure"],
+                    line,
+                    msg
+                );
+            }
         }
     }
     out
