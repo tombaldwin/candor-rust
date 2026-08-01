@@ -6,6 +6,44 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### ⟨0.24⟩ "PROVABLY clean" over a report declaring source candor could not read
+
+SPEC §3.2 `ec1a441`/`93cef40`/`142740a`. `0075987` ruled the omit-`ok` shape for `whatif` and this engine
+implemented it **for `whatif`, in `whatif`'s own file** — `unverified.rs` and `fix.rs` contained zero
+occurrences of `incomplete`. MEASURED on a report declaring one `unanalyzed` unit, **no `Unknown` holes at
+all**, and a `deny Net app` nothing violates:
+
+```text
+  gate --report        exit 2   ok:false, incomplete:true + manifest   ← correct
+  unverified --strict  exit 0   {"ok": true, "unverified": []}
+                       stdout   "every function in a pure/deny layer is PROVABLY clean … ✓"
+  fix-gate  --strict   exit 0   {"ok": true, "remedies": []}
+                       stdout   "no deny/pure boundary crossings in this report ✓"
+```
+
+`unverified`, `fix-gate` and `fix` now read the ⟨0.21⟩ manifest through the SAME file set and the SAME
+reader `gate --report` uses, emit `incomplete: true` + the `unanalyzed` manifest, **OMIT `ok`** (never
+`ok: false` — on an advisory verb that asserts a finding the analysis did not make), and exit 2 under
+`--strict`. **On every channel**: the prose `✓` is the prose `ok: true`, and `unverified` had a second
+sentence of the same kind — *"The gate still PASSES"* — which is not merely unhedged but false, since the
+gate exits 2 over those bytes. `fix` carries the disclosure with its exit code unchanged (it answers no
+`ok`, matching its own gate-refusal branch and candor-ts).
+
+`142740a` also folds in the WITHHELD-RULE trigger, where this engine emitted `ok: false`: where a rule was
+withheld no hole was FOUND, the question was declined, so `false` asserts the finding that did not happen
+— the same shape and the same answer as the incompleteness trigger, ruled a day apart. And "the same
+bytes" means the same report SET: MEASURED here as a null result, since both routes go through one
+`glob_reports`, but pinned by a row so a later split cannot reintroduce candor-java's defect silently.
+
+The findings still ship in every case — a partial answer that says it is partial beats a refusal.
+
+13-mutant audit, all killed. The one that mattered: **keeping the `✓` on `unverified`'s all-clear branch
+SURVIVED** the first draft of the row, because every existing fixture pairs incompleteness with something
+else to find and the verb never reached its own all-clear line. A/B on 40 real report corpora × 7 policies
+× 8 invocations (2240 runs): **one** difference, and it is the intended `142740a` change on a legacy
+`hosts`-only report. Those 40 corpora declare zero `unanalyzed` units between them, so they prove no loss
+and nothing else — the incompleteness path is exercised by hand-written fixtures.
+
 ### ⟨0.24⟩ a chained dependency report that judged NOTHING must not read as full coverage
 
 A report carrying `functions: []` and `analyzed.count: 0` bought a consumer **more confidence than not

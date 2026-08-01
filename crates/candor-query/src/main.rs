@@ -29,6 +29,7 @@ mod show;
 mod callers;
 mod policy;
 mod diff;
+mod completeness;
 mod containment;
 mod state;
 mod fix;
