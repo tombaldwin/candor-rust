@@ -760,16 +760,29 @@ pub fn gate_verdict_json_full(
 /// `policyVocabulary` because the verdict already carries other vocabularies (effects, reason classes)
 /// and the bare word does not say WHOSE; and it pins the OBJECT form because a disclosure naming the
 /// source file but not the alias content leaves the reader knowing they were affected and not how. This
-/// engine was the outlier on the NAME only — the shape was already right, so this is a rename and not a
-/// redesign.
+/// engine was the outlier on the NAME. It was **not** already right on the shape, as this comment claimed
+/// for three days — see `aliases` below: the ENVELOPE was an object and the `aliases` VALUE was an array,
+/// and `7f5b5ba` ruled against the array on the very sentence quoted above.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GateVocabulary {
     /// The canonical path of the `.candor/config` the aliases came from. Canonical because the scan and
     /// `gate --report` routes reach the same file from different working directories, and §3.1's
     /// byte-equality MUST is about the DOCUMENT.
     pub config: String,
-    /// The alias NAMES a rule resolved through — sorted, so the document is deterministic.
-    pub aliases: Vec<String>,
+    /// ⟨0.24⟩ **EACH ALIAS NAME → THE REASON-CLASS TOKENS IT EXPANDS TO — AN OBJECT, AND THAT IS A SPEC
+    /// MUST** (§3.1, candor-spec `7f5b5ba`): `{"corp": ["native", "reflect"]}`. Keys sorted and each
+    /// value sorted, so the document is deterministic across runs and across the scan / `gate --report`
+    /// routes that §3.1 requires to be byte-equal.
+    ///
+    /// This engine shipped the bare-name array `["corp"]`, as did java and swift; candor-ts kept the
+    /// object and won on the clause's OWN sentence rather than on a headcount. `configSources: [path]`
+    /// is rejected above because *a disclosure that names the source but not the content leaves the
+    /// reader knowing they were affected and not how* — and `["corp"]` fails that same test one level
+    /// down. **`corp = reflect` and `corp = reflect,native` gate DIFFERENTLY under one unchanged policy
+    /// line**, so a reader given only the NAME cannot tell which gate ran, which is exactly what this
+    /// disclosure exists to prevent. The object is a strict SUPERSET — its keys are the old array — so
+    /// no consumer of the array form loses anything, and the `config` path is untouched beside it.
+    pub aliases: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 /// ⟨0.24⟩ ONE POLICY RULE THE VERDICT DID NOT ANSWER (SPEC §3.1 `fc4b5f6`).

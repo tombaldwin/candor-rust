@@ -9,7 +9,7 @@
 //! Pure, stable Rust (string parsing only — no rustc types), so it lives beside the classifier.
 
 use crate::cap_from_name;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The honesty marker (SPEC §4). Denyable so `deny Unknown <scope>` forbids the *unverifiable* case.
 pub const UNKNOWN: &str = "Unknown";
@@ -398,12 +398,24 @@ pub struct ParsedPolicy {
     /// [`ParsedPolicy::fatal_messages`] alone. Widening the LIST without widening what REFUSES is the
     /// whole of the change: a dropped `nonsense line` was always survivable and stays so.
     pub errors: Vec<PolicyError>,
-    /// ⟨0.24⟩ The `.candor/config` `unknown-alias` NAMES this policy actually resolved a token through
-    /// (SPEC §3.1). Non-empty ⇒ a config file supplied vocabulary that PARTICIPATED in the verdict, and
-    /// the `--gate-json` document MUST name that file. Recorded at the point of USE, not from the alias
-    /// map: a config defining ten aliases none of which the policy mentions changed nothing, and naming
-    /// it would train the reader to ignore the field.
-    pub used_aliases: BTreeSet<String>,
+    /// ⟨0.24⟩ The `.candor/config` `unknown-alias` definitions this policy actually resolved a token
+    /// through (SPEC §3.1) — **name → the reason-class TOKENS it expanded to**, not a bare name list.
+    /// Non-empty ⇒ a config file supplied vocabulary that PARTICIPATED in the verdict, and the
+    /// `--gate-json` document MUST name that file. Recorded at the point of USE, not from the alias map:
+    /// a config defining ten aliases none of which the policy mentions changed nothing, and naming it
+    /// would train the reader to ignore the field.
+    ///
+    /// ⟨0.24⟩ **THE VALUE TRAVELS WITH THE NAME, AND THAT IS A SPEC MUST** (§3.1, candor-spec `7f5b5ba`).
+    /// This engine shipped the bare name — as did java and swift — and candor-ts kept the map and won the
+    /// argument from the clause's OWN sentence: `configSources: [path]` is rejected there because *a
+    /// disclosure that names the source but not the content leaves the reader knowing they were affected
+    /// and not how*, and `["corp"]` fails that same test one level down. **`corp = reflect` and
+    /// `corp = reflect,native` gate DIFFERENTLY under one unchanged policy line**, so a reader given only
+    /// the name cannot tell which gate ran. The map is a strict superset — the keys recover the old array.
+    ///
+    /// Class TOKENS rather than `ReasonClass`, so the wire order is the token's alphabetical one (which
+    /// is what candor-ts's `[...set].sort()` produces) and not `ReasonClass`'s declaration order.
+    pub used_aliases: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl ParsedPolicy {
@@ -828,7 +840,10 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                                 unknown_classes.insert(rc);
                             } else if let Some(a) = aliases.get(cn) {
                                 unknown_classes.extend(a.iter().copied()); // ⟨0.19⟩ config `unknown-alias`
-                                out.used_aliases.insert(cn.to_string()); // ⟨0.24⟩ → the verdict names it
+                                // ⟨0.24⟩ → the verdict names it AND what it expanded to (SPEC §3.1
+                                // `7f5b5ba`): the NAME alone cannot tell a reader which gate ran.
+                                out.used_aliases
+                                    .insert(cn.to_string(), a.iter().map(|c| c.token().to_string()).collect());
                             } else {
                                 // ⟨0.24⟩ A POLICY ERROR, not a warning — see `ParsedPolicy::errors`. The
                                 // token is still dropped below so `rules` stays well-formed for the
