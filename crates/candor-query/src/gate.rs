@@ -656,7 +656,10 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         .then(|| {
             cfg.as_ref().map(|(path, _)| candor_report::GateVocabulary {
                 config: path.display().to_string(),
-                aliases: p.used_aliases.iter().cloned().collect(),
+                // ⟨0.24⟩ name → the classes it expanded to, verbatim from the parse (SPEC §3.1
+                // `7f5b5ba`) — the same map candor-scan's route accumulates, so §3.1's byte-equality
+                // MUST holds one level down too.
+                aliases: p.used_aliases.clone(),
             })
         })
         .flatten();

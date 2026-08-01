@@ -42,7 +42,7 @@ pub(crate) use candor_classify::gate::net_classes_of;
 pub(crate) fn policy_precheck(
     policy_text: &str,
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
-) -> (Vec<String>, BTreeSet<String>) {
+) -> (Vec<String>, UsedAliases) {
     let p = candor_classify::policy::parse_policy_silent(policy_text, unknown_aliases);
     // ⟨0.24⟩ FATAL errors only. `ParsedPolicy::errors` now also carries the lines the parser DROPPED but
     // could survive (a malformed `forbid`, an unknown rule kind) — those are `parsepolicy`'s to report,
@@ -457,22 +457,29 @@ pub(crate) fn record_gate_coverage(ledger: &[(String, usize)]) {
 }
 
 /// ⟨0.24⟩ THE AMBIENT-VOCABULARY DISCLOSURE (SPEC §3.1): the `.candor/config` whose `unknown-alias`
-/// definitions a policy rule actually resolved through, plus the alias names used. Accumulated like the
-/// κ ledger so a workspace scan names it ONCE on the shared verdict rather than per member — every
-/// member resolves the same policy against the same config, so the set is idempotent by construction.
-pub(crate) static GATE_VOCABULARY: std::sync::OnceLock<
-    std::sync::Mutex<(String, std::collections::BTreeSet<String>)>,
-> = std::sync::OnceLock::new();
+/// definitions a policy rule actually resolved through, and **what each of those aliases expanded to**
+/// (`7f5b5ba` — the name alone cannot tell a reader which gate ran). Accumulated like the κ ledger so a
+/// workspace scan names it ONCE on the shared verdict rather than per member — every member resolves the
+/// same policy against the same config, so the map is idempotent by construction.
+/// ⟨0.24⟩ `unknown-alias` NAME → the reason-class TOKENS it expands to (SPEC §3.1 `7f5b5ba`). Named
+/// because both this accumulator and [`policy_precheck`]'s return carry it, and the two have to be the
+/// same type for the disclosure to reach the verdict unchanged.
+pub(crate) type UsedAliases = std::collections::BTreeMap<String, BTreeSet<String>>;
 
-pub(crate) fn record_gate_vocabulary(config: &std::path::Path, aliases: &BTreeSet<String>) {
+pub(crate) static GATE_VOCABULARY: std::sync::OnceLock<std::sync::Mutex<(String, UsedAliases)>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn record_gate_vocabulary(config: &std::path::Path, aliases: &UsedAliases) {
     if aliases.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
     let acc = GATE_VOCABULARY
-        .get_or_init(|| std::sync::Mutex::new((String::new(), std::collections::BTreeSet::new())));
+        .get_or_init(|| std::sync::Mutex::new((String::new(), std::collections::BTreeMap::new())));
     let mut g = acc.lock().unwrap();
     g.0 = config.display().to_string();
-    g.1.extend(aliases.iter().cloned());
+    for (name, classes) in aliases {
+        g.1.insert(name.clone(), classes.clone());
+    }
 }
 
 /// ⟨0.21⟩ COMPLETENESS MANIFEST: the analyzed-fn count (summed across workspace members) + the units that
@@ -638,7 +645,7 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         let g = m.lock().unwrap();
         (!g.1.is_empty()).then(|| candor_report::GateVocabulary {
             config: g.0.clone(),
-            aliases: g.1.iter().cloned().collect(),
+            aliases: g.1.clone(),
         })
     });
     // ⟨0.24⟩ …and when this exit-2 run refused WHILE holding a violation, the document carries BOTH: the

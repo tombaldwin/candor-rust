@@ -1788,7 +1788,20 @@ fn scan_resolves_policy_vocabulary_beside_the_policy_and_names_the_config_that_m
         std::fs::canonicalize(&cfgpath).ok(),
         "the verdict must NAME the config whose vocabulary it used:\n{j:#}"
     );
-    assert_eq!(j["policyVocabulary"]["aliases"], serde_json::json!(["corp"]), "{j:#}");
+    // ⟨0.24⟩ AN OBJECT — name → the classes it EXPANDED TO (SPEC §3.1 `7f5b5ba`). `["corp"]` names the
+    // alias and drops the definition, and the definition is the half that moved the verdict: `corp =
+    // indirect` and `corp = indirect,native` gate differently under the SAME policy line, so a reader
+    // given only the name cannot tell which gate ran. `candor-query gate --report`'s counterpart row
+    // carries the two-config differential in full; this one pins that the SCAN route emits the identical
+    // shape, which is §3.1's byte-equality MUST one level down.
+    assert_eq!(j["policyVocabulary"]["aliases"], serde_json::json!({"corp": ["indirect"]}), "{j:#}");
+    // THE MIRROR: the object is a strict SUPERSET, so the alias NAME is still recoverable (the keys ARE
+    // the old array) and the `config` path asserted just above is untouched.
+    assert_eq!(
+        j["policyVocabulary"]["aliases"].as_object().expect("an OBJECT").keys().collect::<Vec<_>>(),
+        vec!["corp"],
+        "{j:#}"
+    );
     // …UNDER THE SPEC'S NAME. §3.1 ⟨0.24⟩ (`b4e9155`) pins the key as `policyVocabulary`, because the
     // verdict already carries other vocabularies (effects, reason classes) and the bare word does not say
     // WHOSE. This engine emitted `vocabulary` and was the last red cell in conformance PART 27's

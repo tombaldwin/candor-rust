@@ -2341,7 +2341,13 @@ fn the_config_that_supplied_the_vocabulary_is_named_on_the_verdict() {
         std::fs::canonicalize(&cfgpath).ok(),
         "a verdict changed by a file the operator cannot see NAMED is ambient input:\n{j:#}"
     );
-    assert_eq!(j["policyVocabulary"]["aliases"], serde_json::json!(["corp"]), "{j:#}");
+    // ⟨0.24⟩ AN OBJECT, name → the classes it EXPANDED TO (SPEC §3.1 `7f5b5ba`) — see the
+    // `…_names_what_the_alias_expanded_to…` row below for why the bare-name array was ruled out.
+    assert_eq!(
+        j["policyVocabulary"]["aliases"],
+        serde_json::json!({"corp": ["native"]}),
+        "the alias's DEFINITION is what moved the verdict, so it travels with the name:\n{j:#}"
+    );
     // …under the name §3.1 ⟨0.24⟩ pins (`b4e9155`), on the REPORT route too, and with the old key gone.
     assert!(j.get("vocabulary").is_none(), "the pre-`b4e9155` key must not survive beside it:\n{j:#}");
 
@@ -2360,6 +2366,101 @@ fn the_config_that_supplied_the_vocabulary_is_named_on_the_verdict() {
     assert_eq!(rc3, 1);
     let j3: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v3).unwrap()).unwrap();
     assert!(j3.get("policyVocabulary").is_none(), "an alias the policy never mentions is not disclosed:\n{j3:#}");
+}
+
+/// SPEC §3.1 ⟨0.24⟩ **`policyVocabulary.aliases` IS AN OBJECT — EACH ALIAS MAPS TO THE CLASSES IT
+/// EXPANDS TO** (candor-spec `7f5b5ba`).
+///
+/// **THE MEASUREMENT THIS ROW IS.** Two `.candor/config` files, ONE unchanged policy line, and two
+/// DIFFERENT verdicts — 1 violation against 2. Under the bare-name array this engine shipped, both
+/// verdicts disclosed the identical `["corp"]`, so a reader handed either document could not tell which
+/// gate had run. That is the same failure §3.1 already rejects `configSources: [path]` for, one level
+/// down: *a disclosure that names the source but not the content leaves the reader knowing they were
+/// affected and not how*. candor-ts kept the object and argued it from that sentence; three engines
+/// including this one moved.
+///
+/// The assertion is on the DIFFERENCE between the two documents, not on either alone. An engine that
+/// emits a constant object would satisfy a single-document shape check and leave the divergence exactly
+/// where it was — the same trap the `vocabulary`/`policyVocabulary` row above guards with its
+/// absent-key assert.
+///
+/// **AND THE MIRROR**, because the object is a strict SUPERSET and must lose nothing: the `config` path
+/// is still named on both, and the alias NAME is still recoverable from both (the keys ARE the old
+/// array). A "fix" that swapped the names out for the classes would pass a naive difference check while
+/// deleting the half the previous rung added.
+#[test]
+fn the_vocabulary_disclosure_names_what_the_alias_expanded_to_not_merely_that_one_was_used() {
+    let f = Fixture::new("gate-vocab-value");
+    // Two holes of DIFFERENT reason classes, so one alias definition can cover one and the wider
+    // definition can cover both — the verdict moves without the policy moving.
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":2,"digest":"0"},
+            "functions":[{"fn":"app.viaFfi","inferred":["Unknown"],"direct":["Unknown"],
+                          "unknownWhy":["native:libc::open"]},
+                         {"fn":"app.viaRefl","inferred":["Unknown"],"direct":["Unknown"],
+                          "unknownWhy":["reflect:Any::downcast"]}]}"#,
+        None,
+    );
+    let home = f.dir.join("polhome");
+    std::fs::create_dir_all(home.join("rules")).unwrap();
+    std::fs::create_dir_all(home.join(".candor")).unwrap();
+    let cfgpath = home.join(".candor/config");
+    // ONE policy line, unchanged across both runs. Everything that moves below is the config's.
+    let p = pol(&home.join("rules"), "org", "deny Unknown[corp]\n");
+
+    let vocab_of = |cfg: &str, out: &str| -> (i32, serde_json::Value) {
+        std::fs::write(&cfgpath, cfg).unwrap();
+        let v = f.dir.join(out);
+        let (rc, _, err) = run_gate(&loc, &p, &["--gate-json", &v.to_string_lossy()]);
+        let j: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&v).unwrap_or_else(|e| panic!("no verdict at {out} ({e}):\n{err}")),
+        )
+        .unwrap();
+        (rc, j)
+    };
+
+    let (rc_narrow, narrow) = vocab_of("unknown-alias corp = reflect\n", "narrow.json");
+    let (rc_wide, wide) = vocab_of("unknown-alias corp = reflect,native\n", "wide.json");
+
+    // THE TWO GATES ARE DIFFERENT — the premise the disclosure has to carry.
+    assert_eq!(rc_narrow, 1, "the narrow definition catches the reflect hole:\n{narrow:#}");
+    assert_eq!(rc_wide, 1, "the wide definition catches both:\n{wide:#}");
+    assert_eq!(narrow["violations"].as_array().unwrap().len(), 1, "{narrow:#}");
+    assert_eq!(wide["violations"].as_array().unwrap().len(), 2, "{wide:#}");
+
+    // …AND THE DISCLOSURE SAYS SO. Under the array form both of these were `["corp"]`.
+    assert_ne!(
+        narrow["policyVocabulary"]["aliases"], wide["policyVocabulary"]["aliases"],
+        "two configs that gate DIFFERENTLY under one unchanged policy line must not produce the same \
+         vocabulary disclosure — that is the whole of `7f5b5ba`:\nnarrow {narrow:#}\nwide {wide:#}"
+    );
+    assert_eq!(
+        narrow["policyVocabulary"]["aliases"],
+        serde_json::json!({"corp": ["reflect"]}),
+        "{narrow:#}"
+    );
+    assert_eq!(
+        wide["policyVocabulary"]["aliases"],
+        serde_json::json!({"corp": ["native", "reflect"]}),
+        "the classes are sorted, so the document is deterministic across runs:\n{wide:#}"
+    );
+
+    // THE MIRROR — the object is a SUPERSET, so neither half of the previous rung may go missing.
+    for (label, j) in [("narrow", &narrow), ("wide", &wide)] {
+        let named =
+            j["policyVocabulary"]["config"].as_str().map(|s| std::fs::canonicalize(s).ok()).unwrap_or(None);
+        assert_eq!(
+            named,
+            std::fs::canonicalize(&cfgpath).ok(),
+            "{label}: the config path must survive the shape change:\n{j:#}"
+        );
+        let keys: Vec<&String> =
+            j["policyVocabulary"]["aliases"].as_object().expect("an OBJECT").keys().collect();
+        assert_eq!(keys, vec!["corp"], "{label}: the keys ARE the old array — the names are not lost:\n{j:#}");
+    }
 }
 
 /// SPEC §6.2 ⟨0.24⟩ **AN UNRECOGNISED REASON-CLASS TOKEN IN A POLICY IS A POLICY ERROR** (candor-spec
