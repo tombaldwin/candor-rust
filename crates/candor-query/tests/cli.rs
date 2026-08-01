@@ -3510,3 +3510,142 @@ fn a_typod_effect_name_is_a_policy_error_and_the_ambiguous_middle_is_not() {
         v["errors"].as_array().unwrap().iter().map(|e| e["rule"].as_str().unwrap()).collect();
     assert_eq!(rules, vec!["deny Nett app", "allow Nett host.example"], "…it reports both: {v}");
 }
+
+/// SPEC §3.2 ⟨0.24⟩ **`whatif` OVER AN INCOMPLETE REPORT OMITS `ok` — not `true`, and not `false`
+/// either** (candor-spec `0075987`).
+///
+/// **THE DEFECT, measured here and independently in candor-java, and REPORTED rather than decided —
+/// which is why it is now ruled.** Over a report declaring `unanalyzed`, this verb answered
+/// `{"ok": true, …}`, exit 0, `✓ within policy`, with no disclosure on ANY channel — while
+/// `candor-query gate` over the SAME report exits 2. `whatif`'s `affected` set is a reverse-reachability
+/// closure over the callgraph, so a caller living in a file the scan could not parse is INVISIBLE to it:
+/// the blast radius is computed over a universe the analysis knows it cannot fully see, and `true` is a
+/// claim that input does not license. It is not a gate, but its `ok` reads as one.
+///
+/// **THE ASSERTION IS ABSENCE, AND THAT IS THE POINT.** `assert_eq!(v["ok"], false)` passes on
+/// `serde_json`'s `Value::Null` comparison being false-y in neither direction — but more importantly it
+/// would pass on the WRONG FIX. `ok: false` asserts a VIOLATION the analysis never found: the
+/// fabrication mirror, worse than the thing it replaces. So the row asserts the key is GONE, which is
+/// the only shape where `if (r.ok)` is falsy without anything being invented.
+///
+/// **THE MIRROR**, on the same fixture with one key removed: a COMPLETE report must still carry `ok`.
+/// A "fix" that dropped `ok` unconditionally would satisfy every absence assertion above and delete the
+/// verb's answer for every user who has no unanalyzed code.
+#[test]
+fn whatif_over_an_incomplete_report_omits_ok_rather_than_answering_either_boolean() {
+    let f = Fixture::new("whatif-incomplete");
+    let report = |unanalyzed: &str| {
+        format!(
+            r#"{{"candor":{{"version":"handwritten","spec":"0.24"}},"package":"app",
+                "analyzed":{{"count":2,"digest":"0"}},{unanalyzed}
+                "functions":[{{"fn":"app.handler","inferred":[],"direct":[]}},
+                             {{"fn":"app.leaf","inferred":[],"direct":[]}}]}}"#
+        )
+    };
+    let whatif = |sub: &str, unanalyzed: &str, policy: &str| -> (i32, serde_json::Value, String) {
+        let loc = gate_fixture(&f.dir, sub, &report(unanalyzed), Some(r#"{"app.handler":["app.leaf"]}"#));
+        let p = pol(&f.dir, sub, policy);
+        let out = Command::new(bin())
+            .args(["whatif", "app.leaf", "Net", "--report", &loc, "--policy", &p.to_string_lossy(), "--json"])
+            .output()
+            .expect("run candor-query");
+        (
+            out.status.code().unwrap_or(-1),
+            serde_json::from_slice(&out.stdout).expect("a JSON document"),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    const MANIFEST: &str = r#""unanalyzed":[{"path":"src/opaque.rs","reason":"parse error"}],"#;
+
+    // ── ARM 1: the report declares unanalyzed source, and no rule fires. THE GREEN LIGHT IS WITHHELD. ──
+    let (rc, v, _) = whatif("clean", MANIFEST, "deny Net app.elsewhere\n");
+    assert!(
+        v.get("ok").is_none(),
+        "`ok` must be ABSENT — a consumer writing `if (r.ok)` has to get a falsy value and fail safe, \
+         and `ok: false` would assert a violation the analysis never found:\n{v:#}"
+    );
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v:#}");
+    assert_eq!(
+        v["unanalyzed"],
+        serde_json::json!([{"path": "src/opaque.rs", "reason": "parse error"}]),
+        "the manifest travels, so a consumer that looks past `incomplete` learns exactly what was \
+         unread:\n{v:#}"
+    );
+    // …AND THE PARTIAL ANSWER STILL SHIPS. §3.2: *a partial answer that says it is partial is worth
+    // more than a refusal, and `whatif` is consulted BEFORE an edit, where the alternative is the
+    // operator guessing.* An implementation that refused here would pass the absence assert above.
+    assert_eq!(
+        v["affected"],
+        serde_json::json!(["app.handler", "app.leaf"]),
+        "the blast radius is hedged, never withheld:\n{v:#}"
+    );
+    assert_eq!(v["violations"], serde_json::json!([]), "{v:#}");
+    assert_eq!(rc, 0, "the exit code is unchanged — §3.3's exit-2 causes are a GATE's, and this is not one");
+
+    // ── ARM 2: the same incompleteness WITH a rule that fires. The violation is certain regardless of
+    // what went unread (Lemma 2 — an unseen caller can only ADD to the affected set), so it ships; `ok`
+    // still does not, because its absence is about the SET being partial, not about the verdict. ──
+    let (rc2, v2, _) = whatif("firing", MANIFEST, "deny Net app\n");
+    assert!(v2.get("ok").is_none(), "{v2:#}");
+    assert_eq!(v2["incomplete"], serde_json::json!(true), "{v2:#}");
+    assert_eq!(v2["violations"].as_array().unwrap().len(), 2, "the finding is not suppressed:\n{v2:#}");
+    assert_eq!(rc2, 1, "a certain violation still fails:\n{v2:#}");
+
+    // ── THE MIRROR: NO `unanalyzed` key ⇒ the report is complete ⇒ `ok` is BACK, and `incomplete` and
+    // the manifest are both absent, so every ordinary document stays byte-identical to a pre-rung one. ──
+    let (rc3, v3, _) = whatif("complete", "", "deny Net app.elsewhere\n");
+    assert_eq!(
+        v3["ok"],
+        serde_json::json!(true),
+        "a COMPLETE report must still get its answer — dropping `ok` unconditionally would satisfy every \
+         absence assert above and delete the verb for everyone with no unanalyzed code:\n{v3:#}"
+    );
+    assert!(v3.get("incomplete").is_none(), "{v3:#}");
+    assert!(v3.get("unanalyzed").is_none(), "{v3:#}");
+    assert_eq!(rc3, 0);
+    // …and an EMPTY manifest is the same claim as an absent one: the scan saw everything.
+    let (_, v4, _) = whatif("emptymanifest", r#""unanalyzed":[],"#, "deny Net app.elsewhere\n");
+    assert_eq!(v4["ok"], serde_json::json!(true), "{v4:#}");
+    assert!(v4.get("incomplete").is_none(), "{v4:#}");
+}
+
+/// SPEC §2 + §3.2 ⟨0.24⟩ — the corrupt-key arm of the row above: an `unanalyzed` key that is PRESENT
+/// but is not `[{ path, reason }]`.
+///
+/// §2's rule is that *a key that cannot be READ is corrupt input, never its empty value* — and here the
+/// empty value is exactly what licenses `ok`, so coercing it converts corrupt input into the green
+/// claim. This is not hypothetical: the identical coercion was MEASURED on the gate route (2026-07-28,
+/// `{"unit":…,"why":…}` — the right shape with the wrong field names, what a hand-built or
+/// foreign-produced report yields) and it turned an exit 2 into `policy ✓`.
+///
+/// The gate REFUSES on this. `whatif` cannot: a refusal here sends the operator back to guessing, which
+/// is the thing the verb exists to replace. So it takes the same fail-safe posture through the
+/// DISCLOSURE instead — `ok` withheld, `incomplete: true`, and the key named on stderr.
+#[test]
+fn whatif_treats_an_unreadable_unanalyzed_key_as_incomplete_rather_than_as_empty() {
+    let f = Fixture::new("whatif-corrupt-manifest");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "unanalyzed":[{"unit":"src/opaque.rs","why":"parse error"}],
+            "functions":[{"fn":"app.leaf","inferred":[],"direct":[]}]}"#,
+        Some(r#"{"app.leaf":[]}"#),
+    );
+    let p = pol(&f.dir, "w", "deny Net app.elsewhere\n");
+    let out = Command::new(bin())
+        .args(["whatif", "app.leaf", "Net", "--report", &loc, "--policy", &p.to_string_lossy(), "--json"])
+        .output()
+        .expect("run candor-query");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a JSON document");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(v.get("ok").is_none(), "an unreadable manifest is not an empty one:\n{v:#}\n{err}");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v:#}");
+    // NOTHING IS INVENTED: there is no readable manifest, so none is emitted. `incomplete` alone is the
+    // whole of what the input licenses, and stderr NAMES the key — "your `unanalyzed` key is not
+    // `[{path, reason}]`" is actionable where "this report did not load" sends the user to a scan they
+    // may not own.
+    assert!(v.get("unanalyzed").is_none(), "a manifest that could not be read is not fabricated:\n{v:#}");
+    assert!(err.contains("`unanalyzed` key is PRESENT"), "the key is named on stderr: {err}");
+}
