@@ -6,61 +6,23 @@
 //! though the domain may reach Net at runtime). This names every such function in a governed layer and the
 //! `deny <E> Unknown <scope>` upgrade that makes the intent provable. Advisory: exit 0, or `--strict` → exit
 //! 1 so CI can REQUIRE provable purity. The gate's verdict is untouched — this only discloses the gap.
+//!
+//! ⟨0.24⟩ It ALSO names every function `gate --report` could not JUDGE (SPEC §3.2, candor-spec
+//! `4fd140c`: *an advisory verb may be LESS certain than the gate, never more*) — with the MISSING
+//! EVIDENCE as the reason, the gate's `unevaluated` shape beside it, and `--strict` → exit 2 there,
+//! matching the gate.
 
 use crate::grammar::{parse, report_or_discover, Shape};
 use crate::load::load_entries;
 use candor_classify::policy::{rule_and_upgrade, unverified_hole_rule, PolicyRule};
 use candor_report::ReportEntry;
-use std::collections::{BTreeSet, HashMap};
 
-/// The per-function TRANSITIVE reason-class set, rebuilt from a report — candor-scan's gate-side
-/// `reason_class_acc` (scan.rs), recomputed on this side of the report boundary and over the same
-/// `propagate_str` least fixpoint, so `unverified --class` selects over exactly the set a
-/// `deny E Unknown[class]` gate scopes over.
-///
-/// TWO FAULTS LIVE HERE, and only fixing BOTH is a fix.
-///
-/// (1) `unknownWhy` is DIRECT-ONLY by design — §4: a reason names an unresolvable site in the
-/// function's OWN body — so a function whose `Unknown` is purely INHERITED from a callee carries no
-/// reason of its own. Matching a filter against that field reads a field answering a different
-/// question, and the old predicate (`unknownWhy` ∩ filter ≠ ∅) therefore dropped every inherited hole
-/// from every filter, INCLUDING one naming the class the callee recorded. Measured on this engine
-/// before the fix: 6 of 7 `unverified` holes on candor-scan's own sources, 101 of 124 `Unknown`
-/// entries on ebman and 37 of 60 on pgman, carry no direct reason at all. Hence the fixpoint.
-///
-/// (2) The empty set must FAIL CLOSED, not open. §6.2: a function whose `Unknown` carries no recorded
-/// reason CONTRIBUTES `unresolved`. That is `reason_class_matches`'s absence arm — but that arm is a
-/// NET keyed on the WHOLE set being empty, so any other reason on the same function swallows it. The
-/// case that can co-occur with a reason is contributed HERE instead, per entry, into the DIRECT map so
-/// it propagates to callers like any other class.
-///
-/// THE GATE ON (2) IS THE POINT, and getting it wrong is the mirror fabrication. It is `direct ∋
-/// Unknown` with nothing named — the unit INTRODUCED the hole and did not say why — NOT "the reason set
-/// is absent", which is also exactly what a correctly-classified INHERITED `Unknown` looks like.
-/// Contributing `unresolved` to one of those would trade a fail-open for a fabricated class, and a fix
-/// that trades one sin for its mirror is not a fix. rust's report carries `direct` (§2), so the §4
-/// condition is checkable verbatim here rather than approximated.
-pub(crate) fn reason_class_acc(entries: &[ReportEntry]) -> HashMap<String, BTreeSet<String>> {
-    use candor_classify::policy::ReasonClass;
-    let mut direct: HashMap<String, BTreeSet<String>> = HashMap::new();
-    let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
-    let mut all: Vec<String> = Vec::with_capacity(entries.len());
-    for e in entries {
-        all.push(e.func.clone());
-        if !e.calls.is_empty() {
-            calls.insert(e.func.clone(), e.calls.iter().cloned().collect());
-        }
-        let mut cs: BTreeSet<String> =
-            e.unknown_why.iter().map(|w| ReasonClass::classify(w).token().to_string()).collect();
-        if cs.is_empty() && e.direct.iter().any(|d| d == "Unknown") {
-            cs.insert(ReasonClass::Unresolved.token().to_string());
-        }
-        if !cs.is_empty() {
-            direct.insert(e.func.clone(), cs);
-        }
-    }
-    candor_classify::propagate::propagate_str(&direct, &calls, &all)
-}
+// ⟨0.24⟩ **THE REASON-CLASS FIXPOINT USED TO LIVE HERE, AND THAT WAS THE DEFECT'S HOME ADDRESS** (SPEC
+// §3.2, candor-spec `4fd140c`). `reason_class_acc` was this verb's own copy of the gate's accumulator —
+// the same two faults reasoned through twice, in two files — and *"an advisory verb may be LESS certain
+// than the gate, never more"* is a COMPARISON between the two, which two copies can only ever satisfy by
+// coincidence. Both this verb and `fix-gate` now read [`crate::gate::report_signature`], the accumulator
+// `gate --report` itself is judged from, and take the ANSWERABILITY set from the same object.
 
 pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true });
@@ -81,10 +43,11 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     // `deny Unknown[<alias>]` to a bare `deny Unknown` reclassified real holes as violations-that-aren't
     // and this verb answered "every function in a pure/deny layer is PROVABLY clean ✓". §6.2: the gate
     // and the disclosure MUST apply the same rule.
-    let rules = match crate::policy::load_policy_as_the_gate_does("unverified", &pp) {
-        Ok(p) => p.rules,
+    let parsed = match crate::policy::load_policy_as_the_gate_does("unverified", &pp) {
+        Ok(p) => p,
         Err(code) => return code,
     };
+    let rules = &parsed.rules;
     let entries = load_entries(prefix);
     if entries.is_empty() {
         eprintln!("candor unverified: no report for `{prefix}` — scan the crate first.");
@@ -118,7 +81,11 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     // on this very set, and the disclosure names the holes the gate did not clear. Making the fixpoint
     // conditional on the POLICY's shape as well would be a third place that has to agree about which
     // rules narrow — the arithmetic that decides is one traversal of a report already in memory.
-    let reason_acc = reason_class_acc(&entries);
+    //
+    // ⟨0.24⟩ AND IT IS THE GATE'S OWN SIGNATURE, not a second accumulator beside it (SPEC §3.2) — see the
+    // note where `reason_class_acc` used to live.
+    let sig = crate::gate::report_signature(&entries);
+    let reason_acc = &sig.reason_classes;
     let class_matches = |e: &ReportEntry| -> bool {
         match &want {
             Some(w) => candor_classify::policy::reason_class_matches(reason_acc.get(&e.func), w),
@@ -132,14 +99,36 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
             // ⟨0.20⟩ `netClass` is read VERBATIM off the wire, exactly as `gate --report` reads it — the
             // gate does not recompute it from the hosts on this route and neither may the disclosure.
             let nets = if e.net_class.is_empty() { &no_classes } else { &e.net_class };
-            unverified_hole_rule(&e.func, &e.inferred, reason_acc.get(&e.func), nets, &rules)
+            unverified_hole_rule(&e.func, &e.inferred, reason_acc.get(&e.func), nets, rules)
                 .filter(|_| class_matches(e))
                 .map(|rule| Hole { func: e, rule })
         })
         .collect();
 
+    // ⟨0.24⟩ **THE FUNCTIONS THE GATE COULD NOT JUDGE AT ALL** — SPEC §3.2, candor-spec `4fd140c`:
+    // *"where the gate would refuse for want of evidence, `unverified` MUST NAME the function."*
+    //
+    // THE DEFECT, measured four-way by conformance R11 and here on this engine before the fix: over a
+    // report carrying `hosts` and no `netClass`, under `deny Net[unknown-host] app`, `gate --report`
+    // exits 2 — §3.1 answerability, it CANNOT judge `app.noClass` — and this verb printed
+    // `{"ok": false, "unverified": [app.nativeHole]}`, exit 0. It named a hole, so every "the verb said
+    // SOMETHING" check passed; the function the gate withheld on was cleared in silence. **The verb whose
+    // entire job is "your green gate is not provably green" was more confident than the gate over
+    // identical bytes.**
+    //
+    // A function the gate COULD NOT JUDGE is an unverified hole in the strongest sense this verb has, so
+    // it is named — and the reason recorded is **the MISSING EVIDENCE**, `why` verbatim from the gate's
+    // own refusal. Recording what a derivation would have concluded instead (this engine could floor
+    // `app.noClass` at `unknown-host` from its `hosts` in one line) is the move the ruling forbids: a
+    // derivation is not a hedge, it is a second opinion, and it would restate the defect as a disclosure.
+    //
+    // **NOT SUBJECT TO `--class`.** That filter selects holes by REASON CLASS, and the whole content of
+    // an entry here is that the class evidence is the thing missing — narrowing it away would be the
+    // absence-keyed relaxation this rung exists to close, arriving through a flag.
+    let unanswered = crate::gate::unanswerable_pairs(&parsed, &sig);
+
     if want_json {
-        let items: Vec<_> = holes
+        let mut items: Vec<_> = holes
             .iter()
             .map(|h| {
                 let (rule, upgrade) = rule_and_upgrade(h.rule);
@@ -151,19 +140,39 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
                 })
             })
             .collect();
-        let out = serde_json::json!({ "ok": items.is_empty(), "unverified": items });
+        // `rule` is the join field a consumer already uses against `unevaluated` (SPEC §3.1), and `why`
+        // is the SAME string the pair carries — one function built both, so the two cannot drift. There
+        // is no `upgrade`: no policy edit makes a missing field appear, and printing one would advise a
+        // remedy for the wrong problem.
+        items.extend(unanswered.iter().map(|u| {
+            serde_json::json!({ "fn": u.func, "rule": u.rule, "why": u.why })
+        }));
+        let out = serde_json::json!({
+            "ok": items.is_empty(),
+            "unverified": items,
+            // ⟨0.24⟩ THE GATE'S OWN SHAPE, `[{rule, why}]` (SPEC §3.1 `fc4b5f6`), one entry per RULE —
+            // deliberately NOT a second spelling. Omitted entirely when everything was answerable, so an
+            // ordinary document stays byte-identical to a pre-ruling one.
+            "unevaluated": unevaluated_json(&unanswered),
+        });
+        let mut out = out;
+        if unanswered.is_empty() {
+            out.as_object_mut().unwrap().remove("unevaluated");
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
-        return if strict && !holes.is_empty() { 1 } else { 0 };
+        return unverified_exit(strict, !holes.is_empty(), !unanswered.is_empty());
     }
 
-    if holes.is_empty() {
+    if holes.is_empty() && unanswered.is_empty() {
         println!("candor unverified: every function in a pure/deny layer is PROVABLY clean (no Unknown holes) ✓");
         return 0;
     }
-    println!(
-        "candor unverified — {} function(s) PASS their policy but aren't PROVABLY clean:\n",
-        holes.len()
-    );
+    if !holes.is_empty() {
+        println!(
+            "candor unverified — {} function(s) PASS their policy but aren't PROVABLY clean:\n",
+            holes.len()
+        );
+    }
     let mut upgrades: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for h in &holes {
         let (rule, upgrade) = rule_and_upgrade(h.rule);
@@ -179,12 +188,63 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         println!("     → make it provable:  add  `{upgrade}`");
         println!();
     }
-    println!("  The gate still PASSES — this is advisory. To REQUIRE provable purity, add:");
-    for u in &upgrades {
-        println!("      {u}");
+    if !unanswered.is_empty() {
+        println!(
+            "candor unverified — {} function(s) the GATE COULD NOT JUDGE over this report (`candor-query \
+             gate --report` refuses on them, SPEC §3.1):\n",
+            unanswered.len()
+        );
+        for u in &unanswered {
+            println!("  `{}`  (in `{}`)", u.func, u.rule);
+            println!("     {}", u.why);
+            println!();
+        }
     }
-    if strict {
-        return 1;
+    if !holes.is_empty() {
+        // "on these" ONLY when the unanswered block is also on screen, where an unqualified "the gate
+        // still PASSES" would be false. With nothing unanswered the sentence is the pre-ruling one, to
+        // the byte — measured across 224 OLD/NEW runs over four corpora and eight policies, where this
+        // line was the ONLY difference until it was made conditional.
+        let scope = if unanswered.is_empty() { "" } else { " on these" };
+        println!("  The gate still PASSES{scope} — this is advisory. To REQUIRE provable purity, add:");
+        for u in &upgrades {
+            println!("      {u}");
+        }
     }
-    0
+    unverified_exit(strict, !holes.is_empty(), !unanswered.is_empty())
+}
+
+/// ⟨0.24⟩ The `unevaluated` disclosure — the gate's `[{rule, why}]`, ONE ENTRY PER RULE.
+///
+/// Per-rule rather than per-function because that is the shape `gate --report` emits and SPEC §3.1
+/// `fc4b5f6` fixes; the per-FUNCTION detail is in `unverified` itself, where the ruling puts it, and the
+/// two join on `rule`.
+fn unevaluated_json(unanswered: &[crate::gate::Unanswerable]) -> Vec<serde_json::Value> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    unanswered
+        .iter()
+        .filter(|u| seen.insert(u.rule.as_str()))
+        .map(|u| serde_json::json!({ "rule": u.rule, "why": u.why }))
+        .collect()
+}
+
+/// ⟨0.24⟩ `--strict`'s exit code, with the REFUSAL DOMINATING (SPEC §3.2, candor-spec `4fd140c`:
+/// *"`--strict` exits 2, matching the gate"*).
+///
+/// **THE PRECEDENCE IS THE OPPOSITE OF THE GATE'S, AND FOR THE GATE'S OWN REASON.** There, a firing rule
+/// dominates a refusal because `Reject` is upward-closed: exit 1 is CERTAIN and no missing evidence can
+/// un-reject it. Here neither outcome is certain — both are advisory — and the question the exit code
+/// answers is *did this verb evaluate the policy you gave it?*. Where the gate answered "no" with a 2,
+/// this verb answering 1 would claim it got further than the gate did on identical bytes, which is the
+/// bound the ruling sets. So 2 wins, and the holes are still all named in the document either way.
+///
+/// Without `--strict` the verb is advisory and exits 0, unchanged: the ruling is about the DISCLOSURE,
+/// and minting a non-zero exit for the default agent-loop invocation would fail builds this verb has
+/// never failed.
+fn unverified_exit(strict: bool, any_holes: bool, any_unanswered: bool) -> i32 {
+    match (strict, any_unanswered, any_holes) {
+        (true, true, _) => 2,
+        (true, false, true) => 1,
+        _ => 0,
+    }
 }

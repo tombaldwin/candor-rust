@@ -285,7 +285,7 @@ fn compute_remedy<'a>(
 /// Read + parse a policy, loud-failing (exit 2) on an unreadable path — the same fail-loud contract as
 /// `whatif`, so a typo'd policy never yields a confident plan against a silently-empty ruleset. Returns the
 /// deny/`pure` rules on success.
-fn load_rules(policy_path: Option<String>) -> Result<Vec<candor_classify::policy::PolicyRule>, i32> {
+fn load_rules(policy_path: Option<String>) -> Result<candor_classify::policy::ParsedPolicy, i32> {
     let policy_path = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
     let Some(pp) = policy_path else {
         eprintln!("candor fix: a policy is required (pass a policy file or set CANDOR_POLICY) — the fix is the refactor that restores the boundary the edit crossed.");
@@ -295,7 +295,43 @@ fn load_rules(policy_path: Option<String>) -> Result<Vec<candor_classify::policy
     // from a rule the gate does not apply sends an agent to refactor a boundary the gate never asked
     // about. MEASURED — `deny Unknown[corp]` with `corp` aliased to a non-matching class produced a hoist
     // plan while the gate exited 0.
-    crate::policy::load_policy_as_the_gate_does("fix", &pp).map(|p| p.rules)
+    crate::policy::load_policy_as_the_gate_does("fix", &pp)
+}
+
+/// ⟨0.24⟩ **A REMEDY MUST NOT REST ON EVIDENCE THE GATE REFUSED TO READ** — SPEC §3.2, candor-spec
+/// `4fd140c`: *"`fix-gate` MUST NOT offer a remedy premised on evidence the gate refused to read. A hoist
+/// plan for a boundary the gate could not adjudicate is a confident instruction resting on a guess."*
+///
+/// The pairs come from [`crate::gate::unanswerable_pairs`] — `gate --report`'s OWN answerability
+/// predicate, not a copy of it — so "which boundaries are off limits" is decided once for the gate and
+/// both advisory verbs.
+///
+/// MEASURED on this engine before the ruling, over the R11 report (`hosts`, no `netClass`) under
+/// `deny Net[unknown-host] app`: `gate --report` exited 2 and `fix-gate` printed `{"ok": true,
+/// "remedies": []}`, exit 0 — an unqualified all-clear over bytes the gate declined to judge. The
+/// remedy itself was already withheld (`denied_layer_evidenced` goes through the gate's `rule_hits`,
+/// which WITHHOLDS the hit); what was missing was that the verb SAID SO, and `ok: true` said the
+/// opposite. `fix` (one function) was worse: it went through the filter-BLIND `denied_layer` and printed
+/// a full hoist plan for `app.noClass`.
+///
+/// **`ok` IS OMITTED, NOT SET TO FALSE** — the shape SPEC §3.2 `0075987` fixed for `whatif`, copied for
+/// its REASONING and not its familiarity. `ok: true` asserts there is no boundary crossing, over a
+/// boundary nothing adjudicated; `ok: false` would assert a crossing the analysis never found, which is
+/// the fabrication mirror and worse than what it replaces. So the key goes away, `unevaluated` takes its
+/// place, and a consumer writing `if (r.ok)` gets falsy and fails safe.
+///
+/// The two verbs below therefore call [`crate::gate::unanswerable_pairs`] directly, and this is where
+/// the reasoning lives.
+///
+/// ⟨0.24⟩ The `unevaluated` disclosure for a remedy document — the gate's `[{rule, why}]` shape (SPEC
+/// §3.1 `fc4b5f6`), one entry per RULE, never a second spelling.
+fn unevaluated_json(unanswered: &[crate::gate::Unanswerable]) -> Vec<serde_json::Value> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    unanswered
+        .iter()
+        .filter(|u| seen.insert(u.rule.as_str()))
+        .map(|u| serde_json::json!({ "rule": u.rule, "why": u.why }))
+        .collect()
 }
 
 /// Build the callee→callers adjacency from the embedded call lists.
@@ -327,10 +363,11 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
     let prefix = &prefix;
     let want_json = g.want_json;
     let policy_path = g.policy.clone();
-    let rules = match load_rules(policy_path) {
-        Ok(r) => r,
+    let parsed = match load_rules(policy_path) {
+        Ok(p) => p,
         Err(c) => return c,
     };
+    let rules = &parsed.rules;
 
     let entries = load_entries(prefix);
     if entries.is_empty() {
@@ -359,7 +396,46 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
         println!("candor fix: `{}` does not perform {effect} — nothing to hoist.", start.func);
         return 0;
     }
-    let Some(layer) = denied_layer(&start.func, effect, &rules) else {
+    // ⟨0.24⟩ **THE GATE IS ASKED FIRST — SPEC §3.2 (`4fd140c`).** MEASURED here on the R11 report: over
+    // `deny Net[unknown-host] app` with `app.noClass` carrying `hosts` and no `netClass`,
+    // `gate --report` exits 2 refusing to judge it, and this verb printed a complete hoist plan —
+    // `deniedSpan`, `site`, `policyAlternative`, exit 0 — because [`denied_layer`] asks whether the rule
+    // NAMES the effect and cannot see the narrowing filter at all. That is the ruling's exact harm, one
+    // verb over from where it was measured: a confident refactoring instruction resting on a guess.
+    //
+    // The pairs are the gate's own ([`crate::gate::unanswerable_pairs`]), matched on THIS function, so
+    // the two cannot drift about which boundary is off limits.
+    let sig = crate::gate::report_signature(&entries);
+    let refused: Vec<_> =
+        crate::gate::unanswerable_pairs(&parsed, &sig).into_iter().filter(|u| u.func == start.func).collect();
+    if !refused.is_empty() {
+        for u in &refused {
+            eprintln!("candor fix: `{}` — {}", u.rule, u.why);
+        }
+        if want_json {
+            // A machine consumer piping this to `jq` must get a DOCUMENT, not empty stdout — an empty
+            // stdout is read as "no remedy needed", which is the confident answer this branch exists to
+            // withhold. No plan keys and no `ok`: the verb computed nothing, and it says which rule
+            // stopped it in the gate's own `unevaluated` shape.
+            let out = serde_json::json!({
+                "fn": start.func,
+                "effect": effect,
+                "unevaluated": unevaluated_json(&refused),
+            });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            return 0;
+        }
+        println!(
+            "candor fix: `{}` performs {effect}, but `candor-query gate --report` CANNOT JUDGE it over \
+             this report ({} rule(s) above went unevaluated) — so there is no remedy to compute. Hoisting \
+             across a boundary nothing adjudicated would be a confident instruction resting on a guess: \
+             gate at scan time, or use the unnarrowed rule.",
+            start.func,
+            refused.len()
+        );
+        return 0;
+    }
+    let Some(layer) = denied_layer(&start.func, effect, rules) else {
         println!(
             "candor fix: `{}` performs {effect}, but no policy forbids it there — the boundary isn't crossed, nothing to fix.",
             start.func
@@ -368,7 +444,7 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
     };
 
     let rev = reverse_graph(&entries);
-    let plan = compute_remedy(&by_name, &rev, &rules, start, effect, layer);
+    let plan = compute_remedy(&by_name, &rev, rules, start, effect, layer);
 
     if want_json {
         println!("{}", serde_json::to_string_pretty(&plan.to_json()).unwrap());
@@ -395,10 +471,11 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     let prefix = &prefix;
     let want_json = g.want_json;
     let policy_path = g.policy.clone();
-    let rules = match load_rules(policy_path) {
-        Ok(r) => r,
+    let parsed = match load_rules(policy_path) {
+        Ok(p) => p,
         Err(c) => return c,
     };
+    let rules = &parsed.rules;
 
     let entries = load_entries(prefix);
     if entries.is_empty() {
@@ -417,15 +494,19 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     sorted.sort_by(|a, b| a.func.cmp(&b.func));
     // ⟨0.24⟩ The transitive reason classes, over the report's own edges — the same fixpoint `gate
     // --report` and `unverified` run, because the ENUMERATION below must select the gate's violation set
-    // and a narrowing `Unknown[…]` filter quantifies over exactly this.
-    let reason_acc = crate::unverified::reason_class_acc(&entries);
+    // and a narrowing `Unknown[…]` filter quantifies over exactly this. It is now literally the gate's
+    // OWN accumulator (SPEC §3.2, `4fd140c`): this verb reads `gate --report`'s signature rather than
+    // rebuilding one, and takes the ANSWERABILITY set off the same object.
+    let sig = crate::gate::report_signature(&entries);
+    let reason_acc = &sig.reason_classes;
+    let unanswered = crate::gate::unanswerable_pairs(&parsed, &sig);
     let mut plans: BTreeMap<String, RemedyPlan> = BTreeMap::new();
     for e in sorted {
         let mut effs: Vec<&String> = e.inferred.iter().collect();
         effs.sort();
         for effect in effs {
-            if let Some(layer) = denied_layer_evidenced(e, effect, &rules, reason_acc.get(&e.func)) {
-                let plan = compute_remedy(&by_name, &rev, &rules, e, effect, layer);
+            if let Some(layer) = denied_layer_evidenced(e, effect, rules, reason_acc.get(&e.func)) {
+                let plan = compute_remedy(&by_name, &rev, rules, e, effect, layer);
                 plans.entry(plan.dedup_key()).or_insert(plan);
             }
         }
@@ -433,17 +514,54 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
 
     if want_json {
         let remedies: Vec<_> = plans.values().map(|p| p.to_json()).collect();
-        let out = serde_json::json!({ "ok": remedies.is_empty(), "remedies": remedies });
+        let mut out = serde_json::json!({ "remedies": remedies });
+        // ⟨0.24⟩ See [`unanswerable_for`]: `ok` is written ONLY where every rule was answerable — every
+        // ordinary document, which therefore stays byte-identical to a pre-ruling one. Over a boundary
+        // the gate refused, neither boolean is a statement, so the key is ABSENT and `unevaluated` says
+        // which rule went unanswered and why.
+        if unanswered.is_empty() {
+            out["ok"] = serde_json::json!(plans.is_empty());
+        } else {
+            out["unevaluated"] = serde_json::json!(unevaluated_json(&unanswered));
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes
         // the exit code follow `ok`, so a CI job can REQUIRE zero outstanding crossings (mirrors
         // `unverified --strict`). exit 2 (no report / unreadable policy) already returned above.
-        return if g.strict && !plans.is_empty() { 1 } else { 0 };
+        return fix_gate_exit(g.strict, !plans.is_empty(), !unanswered.is_empty());
     }
 
+    // ONE LINE PER RULE, matching the gate's own channel: the first function that defeats a rule is the
+    // example, and 194 lines (measured on a stripped ebman report) would bury it. The per-FUNCTION list
+    // is `unverified`'s job, where the ruling puts it.
+    {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for u in unanswered.iter().filter(|u| seen.insert(u.rule.as_str())) {
+            let n = unanswered.iter().filter(|o| o.rule == u.rule).count();
+            eprintln!(
+                "candor fix-gate: `{}` — {} No remedy is computed for `{}`{}: a hoist plan for a boundary \
+                 the gate could not adjudicate is a confident instruction resting on a guess. \
+                 `candor unverified` names them all.",
+                u.rule,
+                u.why,
+                u.func,
+                if n > 1 { format!(" or the {} other function(s) this rule cannot be evaluated on", n - 1) } else { String::new() }
+            );
+        }
+    }
     if plans.is_empty() {
-        println!("candor fix-gate: no deny/pure boundary crossings in this report ✓");
-        return 0;
+        if unanswered.is_empty() {
+            println!("candor fix-gate: no deny/pure boundary crossings in this report ✓");
+        } else {
+            // NO `✓`. The tick is the same claim in prose, over a report the gate refused to judge.
+            println!(
+                "candor fix-gate: no deny/pure boundary crossings CAN BE COMPUTED from this report — \
+                 {} rule/function pair(s) went unevaluated (above), and `candor-query gate --report` \
+                 refuses over these bytes.",
+                unanswered.len()
+            );
+        }
+        return fix_gate_exit(g.strict, false, !unanswered.is_empty());
     }
     let n = plans.len();
     println!(
@@ -459,12 +577,33 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         print!("{s}");
     }
     println!("\n  (Advisory: candor names the shape, you write the code; the gate re-scan verifies each fix.)");
+    let rc = fix_gate_exit(g.strict, true, !unanswered.is_empty());
     if g.strict {
         // `--strict` turns the advisory into a CI gate: a non-empty remedy set is a failure (exit 1), so a
         // job can REQUIRE the boundary be clean before merge (mirrors `unverified --strict`). Without it the
         // remedy prints and the run stays green — the agent-loop default.
-        println!("  (--strict: {n} outstanding boundary crossing(s) → exit 1)");
-        return 1;
+        if rc == 2 {
+            println!(
+                "  (--strict: {n} outstanding boundary crossing(s), AND {} rule/function pair(s) the gate \
+                 could not evaluate → exit 2, matching `gate --report`)",
+                unanswered.len()
+            );
+        } else {
+            println!("  (--strict: {n} outstanding boundary crossing(s) → exit 1)");
+        }
     }
-    0
+    rc
+}
+
+/// ⟨0.24⟩ `fix-gate --strict`'s exit code, with the REFUSAL DOMINATING — SPEC §3.2 (`4fd140c`):
+/// *"`--strict` exits 2, matching the gate."* Same argument as `unverified`'s
+/// [`crate::unverified::unverified_exit`]: neither outcome here is certain, so the exit answers *did this
+/// verb evaluate the policy you gave it?*, and answering 1 where the gate answered 2 claims it got
+/// further than the gate on identical bytes. Without `--strict` the verb stays advisory at exit 0.
+fn fix_gate_exit(strict: bool, any_plans: bool, any_unanswered: bool) -> i32 {
+    match (strict, any_unanswered, any_plans) {
+        (true, true, _) => 2,
+        (true, false, true) => 1,
+        _ => 0,
+    }
 }

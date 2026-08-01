@@ -129,7 +129,7 @@ impl ReasonClass {
 /// The empty arm is a NET, not a route: it keys on the ABSENCE of a class set, so any other reason on
 /// the same function hides whatever it was covering. The reasonless case that CAN co-occur with a
 /// reason — a direct `Unknown` the unit did not name — must therefore contribute `unresolved` into the
-/// DIRECT map before propagation (candor-scan's `unknown_via_dep`, candor-query's `reason_class_acc`),
+/// DIRECT map before propagation (candor-scan's `unknown_via_dep`, candor-query's report-side signature),
 /// not arrive here by absence.
 pub fn reason_class_matches(classes: Option<&BTreeSet<String>>, want: &BTreeSet<&str>) -> bool {
     match classes {
