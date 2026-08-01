@@ -3607,6 +3607,31 @@ fn whatif_over_an_incomplete_report_omits_ok_rather_than_answering_either_boolea
     let (_, v4, _) = whatif("emptymanifest", r#""unanalyzed":[],"#, "deny Net app.elsewhere\n");
     assert_eq!(v4["ok"], serde_json::json!(true), "{v4:#}");
     assert!(v4.get("incomplete").is_none(), "{v4:#}");
+
+    // ── THE HUMAN CHANNEL CARRIES THE SAME HEDGE. `0075987` states the defect as "no disclosure on ANY
+    // channel", and an operator reading an unqualified blast radius and a `✓` has been told exactly what
+    // `ok: true` says. This arm exists because a MUTANT that kept the whole JSON fix and deleted only
+    // the printed note survived the entire suite: absence asserts on `ok` cannot see the other channel.
+    let human = |sub: &str, unanalyzed: &str| -> String {
+        let loc = gate_fixture(&f.dir, sub, &report(unanalyzed), Some(r#"{"app.handler":["app.leaf"]}"#));
+        let p = pol(&f.dir, sub, "deny Net app.elsewhere\n");
+        let out = Command::new(bin())
+            .args(["whatif", "app.leaf", "Net", "--report", &loc, "--policy", &p.to_string_lossy()])
+            .output()
+            .expect("run candor-query");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let h = human("human-incomplete", MANIFEST);
+    assert!(h.contains("INCOMPLETE"), "the operator is told the universe was partial:\n{h}");
+    assert!(h.contains("src/opaque.rs"), "…and what was unread:\n{h}");
+    assert!(
+        !h.contains("✓ within policy"),
+        "the `✓` is withheld for the reason `ok` is — it is a claim over a set known to be partial:\n{h}"
+    );
+    // AND THE MIRROR ON THIS CHANNEL TOO: a complete report still gets its unqualified `✓`.
+    let h2 = human("human-complete", "");
+    assert!(h2.contains("✓ within policy"), "{h2}");
+    assert!(!h2.contains("INCOMPLETE"), "no hedge where none is owed:\n{h2}");
 }
 
 /// SPEC §2 + §3.2 ⟨0.24⟩ — the corrupt-key arm of the row above: an `unanalyzed` key that is PRESENT
