@@ -222,7 +222,7 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
 /// The owned accumulators a [`candor_classify::gate::GateInput`] borrows. Built from a written report
 /// and nothing else; the counterpart of candor-scan's `policy_violations`, which builds the same struct
 /// from the classifier's fixpoints. Both feed the one `candor_classify::gate::gate`.
-struct ReportSignature {
+pub(crate) struct ReportSignature {
     all: Vec<String>,
     inferred: HashMap<String, BTreeSet<String>>,
     calls: HashMap<String, BTreeSet<String>>,
@@ -230,9 +230,12 @@ struct ReportSignature {
     cmds: HashMap<String, BTreeSet<String>>,
     paths: HashMap<String, BTreeSet<String>>,
     tables: HashMap<String, BTreeSet<String>>,
-    /// Deliberately EMPTY — see [`gate_input_from_report`]; every `allow` rule is refused upstream.
+    /// Deliberately EMPTY — see [`report_signature`]; every `allow` rule is refused upstream.
     surface_incomplete: HashMap<String, BTreeSet<String>>,
-    reason_classes: HashMap<String, BTreeSet<String>>,
+    /// The TRANSITIVE reason classes — §6.2's `D`. `pub(crate)` because the advisory verbs read it from
+    /// HERE rather than running a second fixpoint of their own: `unverified` and `fix-gate` select over
+    /// exactly the set the gate scopes over, and a private copy is how they came to disagree with it.
+    pub(crate) reason_classes: HashMap<String, BTreeSet<String>>,
     net_classes: HashMap<String, Vec<String>>,
 }
 
@@ -268,7 +271,15 @@ impl ReportSignature {
 /// direct-only by contract (SPEC §4) while §6.2 resolves the class set over the gate's own reach. It runs
 /// the SHARED `propagate_str` over the REPORT's own `calls` edges: report data in, report data out, and
 /// the same fixpoint the scan route uses, so the two cannot drift.
-fn gate_input_from_report(rep: &GateReport) -> ReportSignature {
+///
+/// ⟨0.24⟩ **TAKES THE ENTRIES, NOT THE `GateReport`, BECAUSE THE ADVISORY VERBS BUILD IT TOO** (SPEC
+/// §3.2, candor-spec `4fd140c`: *an advisory verb may be LESS certain than the gate, never more*).
+/// `unverified` and `fix-gate` used to carry their own reason-class fixpoint (`reason_class_acc`) — the
+/// same arithmetic, written twice, which is one of the three shapes that law was written about. They now
+/// read the gate's own signature, so "which classes does this function have" has one answer on this side
+/// of the report boundary. The `GateReport` envelope (the ⟨0.21⟩ manifest, the κ ledger) is the
+/// VERDICT's input and stays with the gate.
+pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     let mut inferred: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -279,7 +290,7 @@ fn gate_input_from_report(rep: &GateReport) -> ReportSignature {
     let mut why_direct: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut names: BTreeSet<String> = BTreeSet::new();
 
-    for e in &rep.entries {
+    for e in entries {
         let fn_ = e.func.clone();
         names.insert(fn_.clone());
         // UNION on a repeated `fn` rather than overwrite: a duplicate key is malformed input, and the
@@ -368,7 +379,7 @@ fn gate_input_from_report(rep: &GateReport) -> ReportSignature {
 /// would have added could only have added matches, and the rule is answered — it fires or it does not,
 /// and no further evidence can change which. Only an EMPTY determinable set leaves the question open,
 /// and that is the only state refused here. Concretely this is why a reasonless DIRECT `Unknown` gated
-/// by `deny E Unknown[unresolved]` is ANSWERED and not refused: `gate_input_from_report` contributes
+/// by `deny E Unknown[unresolved]` is ANSWERED and not refused: `report_signature` contributes
 /// `unresolved` from the entry itself, with no transitive step, so the set is not empty. (candor-swift's
 /// original refusal of that case is recorded in the SPEC as over-broad.)
 ///
@@ -400,10 +411,58 @@ fn gate_input_from_report(rep: &GateReport) -> ReportSignature {
 /// field now, so the raw policy line is a datum rather than something spliced into a sentence — and the
 /// stderr line is DERIVED from the pair, so the human channel and `unevaluated` cannot disagree about
 /// which rule went unanswered.
+///
+/// ⟨0.24⟩ **IT IS A THIN WRAPPER NOW — SPEC §3.2 (candor-spec `4fd140c`).** The pairs themselves are
+/// [`unanswerable_pairs`], because the ADVISORY verbs need them per FUNCTION and this verb needs them per
+/// RULE, and computing that twice is exactly the shape *"an advisory verb may be less certain than the
+/// gate, never more"* was written about. MEASURED before the split, conformance R11 over a report with
+/// `hosts` and no `netClass` under `deny Net[unknown-host] app`: `gate --report` exited 2 refusing to
+/// judge `app.noClass`, while `unverified` cleared it and named a different hole, exit 0. Below, this
+/// function keeps its OLD output byte-for-byte — one entry per rule, the first function that defeats it
+/// as the example — so the gate's own disclosure is unchanged by the sharing.
 fn unanswerable_scoped_filters(
     p: &candor_classify::policy::ParsedPolicy,
     sig: &ReportSignature,
 ) -> Vec<candor_report::Unevaluated> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    unanswerable_pairs(p, sig)
+        .into_iter()
+        // At most one message per RULE — the first function that defeats it is the example; naming all
+        // of them would bury the rule. `unanswerable_pairs` yields rules in policy order and functions
+        // in `sig.all` order, so "first" is the same function this reported before it was extracted.
+        .filter(|u| seen.insert(u.rule.clone()))
+        .map(|u| candor_report::Unevaluated { rule: u.rule, why: u.why })
+        .collect()
+}
+
+/// ⟨0.24⟩ ONE `(rule, function)` THE GATE CANNOT EVALUATE OVER THIS REPORT, and why its evidence is
+/// missing — the unit [`unanswerable_scoped_filters`] aggregates and the unit the ADVISORY verbs need.
+pub(crate) struct Unanswerable {
+    /// The rule's source line, verbatim.
+    pub(crate) rule: String,
+    /// The function the rule could not be evaluated ON. The same rule may be answerable on another.
+    pub(crate) func: String,
+    /// WHICH EVIDENCE IS MISSING — never the class a derivation would have supplied. SPEC §3.2: *"the
+    /// reason recorded is the MISSING EVIDENCE, never the derived class"*; recording a derivation would
+    /// restate the defect as a disclosure.
+    pub(crate) why: String,
+}
+
+/// ⟨0.24⟩ EVERY `(rule, function)` PAIR THE GATE WOULD REFUSE — the answerability question asked once,
+/// for every consumer of the answer (SPEC §3.1 for the refusal, §3.2 `4fd140c` for why it is shared).
+///
+/// The gate reports these per RULE and refuses; `unverified` must NAME each `func` as a hole, because a
+/// function the gate COULD NOT JUDGE is an unverified hole in the strongest sense that verb has; and
+/// `fix-gate` must not plan a hoist across a boundary this names. Three consumers, one predicate: the
+/// law being enforced is a COMPARISON between verbs, so it is checked by construction rather than by
+/// three authors agreeing.
+///
+/// See [`unanswerable_scoped_filters`] above for the whole argument about WHEN a scoped filter is
+/// unanswerable and why the refusal is minimal.
+pub(crate) fn unanswerable_pairs(
+    p: &candor_classify::policy::ParsedPolicy,
+    sig: &ReportSignature,
+) -> Vec<Unanswerable> {
     let mut out = Vec::new();
     for r in &p.rules {
         for q in &sig.all {
@@ -418,8 +477,9 @@ fn unanswerable_scoped_filters(
                 && has("Net")
                 && sig.net_classes.get(q).map(|c| c.is_empty()).unwrap_or(true)
             {
-                out.push(candor_report::Unevaluated {
+                out.push(Unanswerable {
                     rule: r.raw.trim().to_string(),
+                    func: q.clone(),
                     why: format!(
                         "it narrows on the Net DESTINATION CLASS, but `{q}` carries Net with no \
                          `netClass` in this report — the field the filter reads is absent, so the \
@@ -429,14 +489,19 @@ fn unanswerable_scoped_filters(
                          gate at scan time."
                     ),
                 });
-                break;
+                // NO `break`. The gate names one function per rule as the example, and that aggregation
+                // now lives in [`unanswerable_scoped_filters`] — stopping here would ALSO stop the
+                // advisory verbs at one function per rule, which is the defect in miniature: a second
+                // function the gate could not judge, cleared in silence because a first one was named.
+                continue;
             }
             if !r.unknown_classes.is_empty()
                 && has("Unknown")
                 && sig.reason_classes.get(q).map(|c| c.is_empty()).unwrap_or(true)
             {
-                out.push(candor_report::Unevaluated {
+                out.push(Unanswerable {
                     rule: r.raw.trim().to_string(),
+                    func: q.clone(),
                     why: format!(
                         "it narrows on the Unknown REASON CLASS, but `{q}` carries Unknown with no reason \
                          reachable in this report — neither its own `unknownWhy` nor a `calls` edge to \
@@ -447,7 +512,6 @@ fn unanswerable_scoped_filters(
                          Unknown`, or gate at scan time."
                     ),
                 });
-                break;
             }
         }
     }
@@ -759,7 +823,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // handed to `gate()` is not tidying: the refusal used to `return` before `gate()` ran, so deferring
     // it silently started EVALUATING them. Caught by this file's own test on the first run — `deny Net`
     // beside `allow Net other.example.com` produced an AS-EFF-008 record in the document, derived from a
-    // `surface_incomplete` map `gate_input_from_report` leaves EMPTY on purpose. That is precisely the
+    // `surface_incomplete` map `report_signature` leaves EMPTY on purpose. That is precisely the
     // unsound verdict the `allow` refusal exists to prevent, now shipped INSIDE the document as if it
     // were certain, and the same argument applies to `forbid` over an effect-relevant `calls` graph.
     //
@@ -821,7 +885,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
              report makes no claim, and inventing one for it would be the opposite defect."
         );
     }
-    let sig = gate_input_from_report(&rep);
+    let sig = report_signature(&rep.entries);
 
     // ⟨0.24⟩ THE PRECEDENCE: **violation (1) > refusal (2) > incomplete (2)**, and the first rung is
     // FORCED by Lemma 2 rather than chosen (SPEC §3.1).

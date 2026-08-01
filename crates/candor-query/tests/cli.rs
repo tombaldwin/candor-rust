@@ -3674,3 +3674,240 @@ fn whatif_treats_an_unreadable_unanalyzed_key_as_incomplete_rather_than_as_empty
     assert!(v.get("unanalyzed").is_none(), "a manifest that could not be read is not fabricated:\n{v:#}");
     assert!(err.contains("`unanalyzed` key is PRESENT"), "the key is named on stderr: {err}");
 }
+
+/// ⟨0.24⟩ **AN ADVISORY VERB MAY BE LESS CERTAIN THAN THE GATE, NEVER MORE** — SPEC §3.2, candor-spec
+/// `4fd140c`, and conformance PART 27 row R11 (`rust advisory-bound`).
+///
+/// **THE DEFECT, measured four-way.** Over a report carrying `hosts` and NO `netClass`, under
+/// `deny Net[unknown-host] app`:
+///
+/// ```text
+///   gate --report   exit 2   §3.1 answerability — it CANNOT judge `app.noClass`
+///   unverified      exit 0   {"ok": false, "unverified": [app.nativeHole]}
+/// ```
+///
+/// The verb whose entire job is *"your green gate is not provably green"* cleared the one function the
+/// gate withheld on, and named a DIFFERENT hole — which is why R11's assertion is PER FUNCTION. A weaker
+/// form ("the verb names SOMETHING") passed on all four engines while the defect stood.
+///
+/// **THE ASSERTIONS THAT WOULD PASS ON A WRONG FIX, and are therefore not the ones made here.** Naming
+/// `app.noClass` with the DERIVED destination class as its reason would satisfy every count below while
+/// restating the defect as a disclosure — this engine could floor it at `unknown-host` from `hosts` in
+/// one line — so the reason is asserted to be the MISSING EVIDENCE. And `assert_eq!(fix_gate["ok"],
+/// false)` would pass on the fabrication mirror (`0075987`), so the row asserts the key is GONE.
+///
+/// **THE MIRROR IS IN THE SAME RUN, on the same two reports.** A function the gate CAN clear must not
+/// start being named, `unevaluated` must be ABSENT from an ordinary document, `ok` must come back, and
+/// `fix` must still plan the remedy for a crossing the gate DOES charge. Measured across 368 OLD/NEW
+/// runs over four real corpora × eight policies: zero differences on reports where every rule was
+/// answerable — and on those corpora the count of `Net`-with-no-`netClass` entries is ZERO, which is
+/// why the row below hand-writes the state instead of trusting a corpus to contain it.
+#[test]
+fn an_advisory_verb_names_what_the_gate_could_not_judge_and_stays_quiet_where_it_could() {
+    let f = Fixture::new("advisory-bound");
+    // R11's report, verbatim: a hole the class filter excludes, a Net entry with NO `netClass`, and a
+    // plain violator so the gate has something to charge.
+    let refused_loc = gate_fixture(
+        &f.dir,
+        "refused",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":3,"digest":"0"},
+            "functions":[
+              {"fn":"app.nativeHole","inferred":["Unknown"],"direct":["Unknown"],"unknownWhy":["native:dlopen"]},
+              {"fn":"app.noClass","inferred":["Net"],"direct":["Net"],"hosts":["api.example.com"]},
+              {"fn":"app.noClass2","inferred":["Net"],"direct":["Net"],"hosts":["b.example.com"]},
+              {"fn":"app.writes","inferred":["Fs"],"direct":["Fs"],"paths":["/etc/hosts"]}]}"#,
+        None,
+    );
+    // THE MIRROR REPORT: the SAME shape with the one field the gate needs. Every rule is answerable, so
+    // the gate charges `app.hasClass` and this verb must behave exactly as it did before the ruling.
+    let answered_loc = gate_fixture(
+        &f.dir,
+        "answered",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":3,"digest":"0"},
+            "functions":[
+              {"fn":"app.nativeHole","inferred":["Unknown"],"direct":["Unknown"],"unknownWhy":["native:dlopen"]},
+              {"fn":"app.hasClass","inferred":["Net"],"direct":["Net"],"hosts":["api.example.com"],
+               "netClass":["unknown-host"]},
+              {"fn":"app.writes","inferred":["Fs"],"direct":["Fs"],"paths":["/etc/hosts"]}]}"#,
+        None,
+    );
+    let netclass = pol(&f.dir, "netclass", "deny Net[unknown-host] app\n");
+    let run = |verb: &str, loc: &str, extra: &[&str]| -> (i32, String, String) {
+        let mut args: Vec<String> =
+            vec![verb.into(), "--report".into(), loc.into(), "--policy".into(),
+                 netclass.to_string_lossy().into_owned()];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        let out = Command::new(bin()).args(&args).env_remove("CANDOR_POLICY").output().expect("run");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let json = |s: &str| -> serde_json::Value {
+        serde_json::from_str(s).unwrap_or_else(|e| panic!("not JSON ({e}):\n{s}"))
+    };
+
+    // ── ARM 1: THE GATE REFUSES. ────────────────────────────────────────────────────────────────
+    let (grc, _, gerr) = run_gate(&refused_loc, &netclass, &[]);
+    assert_eq!(grc, 2, "the gate CANNOT judge `app.noClass` over this report:\n{gerr}");
+    assert!(gerr.contains("app.noClass"), "…and it says which function:\n{gerr}");
+
+    let (urc, uout, _) = run("unverified", &refused_loc, &["--json"]);
+    let u = json(&uout);
+    let named: Vec<&str> =
+        u["unverified"].as_array().unwrap().iter().map(|h| h["fn"].as_str().unwrap()).collect();
+    assert!(
+        named.contains(&"app.noClass"),
+        "the gate exited 2 — it could NOT clear `app.noClass` — yet the verb does not name it \
+         (named: {named:?}). The advisory verb is more confident than the gate over identical bytes:\n{uout}"
+    );
+    // EVERY function the gate could not judge, not just the one the gate quotes as its example. The
+    // gate names ONE function per rule (naming all of them would bury the rule) and a fix that inherited
+    // that `break` would clear the second one in silence — the defect in miniature.
+    assert!(
+        named.contains(&"app.noClass2"),
+        "the SECOND unjudgeable function too — the gate reports one example per rule, this verb reports \
+         the functions (named: {named:?}):\n{uout}"
+    );
+    // The verb's OWN job is unmoved: the hole the class filter excludes is still disclosed.
+    assert!(named.contains(&"app.nativeHole"), "the ordinary hole is still named:\n{uout}");
+    let refusal = u["unverified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["fn"] == "app.noClass")
+        .expect("named above");
+    let why = refusal["why"].as_str().unwrap_or("");
+    assert!(
+        why.contains("netClass") && why.contains("absent"),
+        "the reason recorded is the MISSING EVIDENCE:\n{why}"
+    );
+    assert!(
+        !why.contains("unknown-host") || why.contains("no `netClass`"),
+        "…and NEVER the derived class — this engine can floor `app.noClass` at `unknown-host` from its \
+         `hosts` in one line, and recording that would restate the defect as a disclosure:\n{why}"
+    );
+    assert!(
+        refusal["upgrade"].is_null(),
+        "no policy edit makes a missing field appear, so there is no upgrade to advise:\n{uout}"
+    );
+    // `unevaluated` is the GATE'S OWN SHAPE, not a second spelling — and the same list the gate emits.
+    let verdict = f.dir.join("v.json");
+    let _ = std::fs::remove_file(&verdict);
+    let _ = run_gate(&refused_loc, &netclass, &["--gate-json", &verdict.to_string_lossy()]);
+    let gdoc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&verdict).expect("gate document")).unwrap();
+    assert_eq!(
+        u["unevaluated"], gdoc["unevaluated"],
+        "the disclosure is the gate's, byte for byte — inventing a second spelling is the mistake SPEC \
+         §3.2 says this document has made four times:\n{uout}"
+    );
+    assert_eq!(u["unevaluated"].as_array().map(Vec::len), Some(1), "one entry per RULE:\n{uout}");
+    assert_eq!(urc, 0, "advisory by default — the ruling is about the DISCLOSURE");
+    let (src, _, _) = run("unverified", &refused_loc, &["--json", "--strict"]);
+    assert_eq!(src, 2, "`--strict` exits 2, MATCHING the gate — answering 1 would claim it got further");
+
+    // THE HUMAN CHANNEL, which a mutant that fixed only the JSON survived once before (`531c415`).
+    let (_, utext, _) = run("unverified", &refused_loc, &[]);
+    assert!(utext.contains("app.noClass"), "the operator is told too:\n{utext}");
+    assert!(
+        utext.contains("COULD NOT JUDGE"),
+        "…and told it is a refusal, not an ordinary hole:\n{utext}"
+    );
+
+    // `fix-gate`: no remedy premised on evidence the gate refused, `ok` withheld, `unevaluated` carried.
+    let (frc, fout, _) = run("fix-gate", &refused_loc, &["--json"]);
+    let fg = json(&fout);
+    assert_eq!(fg["remedies"].as_array().map(Vec::len), Some(0), "no hoist plan for it:\n{fout}");
+    assert!(
+        fg.get("ok").is_none(),
+        "`ok: true` asserts there is no crossing over a boundary nothing adjudicated, and `ok: false` \
+         would assert a crossing never found (the fabrication mirror, SPEC §3.2 `0075987`) — so the KEY \
+         IS GONE. `assert_eq!(ok, false)` would have passed on the wrong fix:\n{fout}"
+    );
+    assert_eq!(fg["unevaluated"], gdoc["unevaluated"], "same shape, same list:\n{fout}");
+    assert_eq!(frc, 0, "advisory by default");
+    let (fsrc, _, _) = run("fix-gate", &refused_loc, &["--json", "--strict"]);
+    assert_eq!(fsrc, 2, "`--strict` exits 2, matching the gate");
+    let (_, ftext, ferr) = run("fix-gate", &refused_loc, &[]);
+    assert!(!ftext.contains('✓'), "the tick is the same claim in prose:\n{ftext}");
+    assert!(ferr.contains("app.noClass"), "the operator learns which boundary went unjudged:\n{ferr}");
+
+    // `fix` (ONE function) was the worst of the three: it went through the filter-BLIND `denied_layer`
+    // and printed a complete hoist plan — `deniedSpan`, `site`, `policyAlternative` — for exactly the
+    // boundary the gate refused.
+    let (xrc, xout, xerr) = {
+        let out = Command::new(bin())
+            .args(["fix", "app.noClass", "Net", "--report", &refused_loc, "--policy"])
+            .arg(&netclass)
+            .arg("--json")
+            .env_remove("CANDOR_POLICY")
+            .output()
+            .expect("run");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let x = json(&xout);
+    assert!(x.get("hoistTo").is_none() && x.get("deniedSpan").is_none(),
+        "a hoist plan for a boundary the gate could not adjudicate is a confident instruction resting \
+         on a guess:\n{xout}");
+    assert_eq!(x["unevaluated"], gdoc["unevaluated"], "it says WHY it computed nothing:\n{xout}");
+    assert_eq!(xrc, 0);
+    assert!(xerr.contains("netClass"), "and on the human channel:\n{xerr}");
+
+    // ── ARM 2, THE MIRROR: every rule answerable. Nothing new may appear. ───────────────────────
+    let (grc2, _, gerr2) = run_gate(&answered_loc, &netclass, &[]);
+    assert_eq!(grc2, 1, "`app.hasClass` carries the class the filter names, so the gate CHARGES:\n{gerr2}");
+
+    let (urc2, uout2, _) = run("unverified", &answered_loc, &["--json"]);
+    let u2 = json(&uout2);
+    let named2: Vec<&str> =
+        u2["unverified"].as_array().unwrap().iter().map(|h| h["fn"].as_str().unwrap()).collect();
+    assert_eq!(
+        named2,
+        vec!["app.nativeHole"],
+        "a function the gate CAN judge must NOT start being named — the over-report mirror, and the \
+         direction a fabrication fix introduces:\n{uout2}"
+    );
+    assert!(
+        u2.get("unevaluated").is_none(),
+        "an ordinary document stays byte-identical to a pre-ruling one:\n{uout2}"
+    );
+    assert_eq!(urc2, 0);
+    let (src2, _, _) = run("unverified", &answered_loc, &["--json", "--strict"]);
+    assert_eq!(src2, 1, "…and `--strict` is back to 1: holes, but nothing unevaluated");
+    let (_, utext2, _) = run("unverified", &answered_loc, &[]);
+    assert!(
+        utext2.contains("The gate still PASSES — "),
+        "the unqualified sentence returns where nothing went unevaluated — 224 OLD/NEW runs over four \
+         corpora showed this line was the whole of the churn until it was made conditional:\n{utext2}"
+    );
+
+    let (frc2, fout2, _) = run("fix-gate", &answered_loc, &["--json"]);
+    let fg2 = json(&fout2);
+    assert_eq!(fg2["ok"], false, "`ok` COMES BACK where every rule was answerable:\n{fout2}");
+    assert!(fg2.get("unevaluated").is_none(), "…and nothing went unevaluated:\n{fout2}");
+    assert_eq!(
+        fg2["remedies"].as_array().map(Vec::len),
+        Some(1),
+        "…and the crossing the gate DOES charge still gets its remedy — a fix that turned `fix-gate` \
+         silent on real violations would pass every absence assert above:\n{fout2}"
+    );
+    assert_eq!(frc2, 0);
+    let out = Command::new(bin())
+        .args(["fix", "app.hasClass", "Net", "--report", &answered_loc, "--policy"])
+        .arg(&netclass)
+        .arg("--json")
+        .env_remove("CANDOR_POLICY")
+        .output()
+        .expect("run");
+    let x2 = json(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(x2["fn"], "app.hasClass");
+    assert!(x2.get("deniedSpan").is_some(), "`fix` still plans where the gate charges:\n{x2}");
+}
