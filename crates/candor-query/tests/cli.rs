@@ -3806,6 +3806,18 @@ fn an_advisory_verb_names_what_the_gate_could_not_judge_and_stays_quiet_where_it
          §3.2 says this document has made four times:\n{uout}"
     );
     assert_eq!(u["unevaluated"].as_array().map(Vec::len), Some(1), "one entry per RULE:\n{uout}");
+    // ⟨0.24⟩ **AND `ok` IS OMITTED HERE TOO, NOT `false`** — SPEC §3.2 `142740a`. `4fd140c` argued the
+    // `false` deliberately and it was wrong by that clause's own reasoning one paragraph earlier: where
+    // a rule is WITHHELD no hole was FOUND, the question was declined, so `false` asserts the finding
+    // that did not happen — the fabrication mirror, which is exactly why the sibling INCOMPLETENESS
+    // trigger omits the field. Two clauses a day apart, one shape. MEASURED on this engine before the
+    // change: `{"ok": false, "unverified": [app.noClass], "unevaluated": [...]}` while `gate --report`
+    // refused outright; `fix-gate` (asserted below) was already right, and the family split
+    // two-against-two exactly as it had on the sibling trigger.
+    assert!(
+        u.get("ok").is_none(),
+        "the KEY IS GONE — `assert_eq!(ok, false)` would pass on the fabrication mirror:\n{uout}"
+    );
     assert_eq!(urc, 0, "advisory by default — the ruling is about the DISCLOSURE");
     let (src, _, _) = run("unverified", &refused_loc, &["--json", "--strict"]);
     assert_eq!(src, 2, "`--strict` exits 2, MATCHING the gate — answering 1 would claim it got further");
@@ -3879,6 +3891,15 @@ fn an_advisory_verb_names_what_the_gate_could_not_judge_and_stays_quiet_where_it
         u2.get("unevaluated").is_none(),
         "an ordinary document stays byte-identical to a pre-ruling one:\n{uout2}"
     );
+    // …AND `ok` COMES BACK, with the value the findings license. The mirror for `142740a`: removing the
+    // key unconditionally would satisfy the absence assert above and delete the answer for everyone
+    // whose rules the gate can evaluate.
+    assert_eq!(
+        u2["ok"],
+        serde_json::json!(false),
+        "a report the gate CAN judge still gets a boolean, and here it is `false` because a hole WAS \
+         found — that is a finding, not a declined question:\n{uout2}"
+    );
     assert_eq!(urc2, 0);
     let (src2, _, _) = run("unverified", &answered_loc, &["--json", "--strict"]);
     assert_eq!(src2, 1, "…and `--strict` is back to 1: holes, but nothing unevaluated");
@@ -3910,4 +3931,376 @@ fn an_advisory_verb_names_what_the_gate_could_not_judge_and_stays_quiet_where_it
     let x2 = json(&String::from_utf8_lossy(&out.stdout));
     assert_eq!(x2["fn"], "app.hasClass");
     assert!(x2.get("deniedSpan").is_some(), "`fix` still plans where the gate charges:\n{x2}");
+}
+
+/// SPEC §3.2 ⟨0.24⟩ **THE OMIT-`ok` RULE BINDS EVERY ADVISORY VERB, ON EVERY CHANNEL IT ANSWERS ON** —
+/// candor-spec `ec1a441`.
+///
+/// **THE DEFECT, AND IT WAS STRUCTURAL RATHER THAN A SLIP.** `0075987` ruled this for `whatif` and this
+/// engine implemented it for `whatif`, in `whatif`'s own file; `unverified.rs` and `fix.rs` contained
+/// ZERO occurrences of `incomplete`. Measured on the release build over the fixture below — a report
+/// declaring one `unanalyzed` unit, NO `Unknown` holes at all, and a `deny Net app` nothing violates:
+///
+/// ```text
+///   gate --report        exit 2   ok:false, incomplete:true + manifest   ← correct
+///   unverified --strict  exit 0   {"ok": true, "unverified": []}
+///                        stdout   "every function in a pure/deny layer is PROVABLY clean … ✓"
+///   fix-gate  --strict   exit 0   {"ok": true, "remedies": []}
+///                        stdout   "no deny/pure boundary crossings in this report ✓"
+/// ```
+///
+/// "PROVABLY clean" over a report that declares source candor could not read — and `--strict` is how CI
+/// consumes both verbs.
+///
+/// **NO EXISTING FIXTURE HAD THIS SHAPE.** Every prior one pairs incompleteness with something else to
+/// find, so the question *"nothing to report, but I could not see everything"* was never asked. That is
+/// why the row's core arm has an EMPTY finding list: the verb's whole answer is then the all-clear.
+///
+/// **THE ASSERTION IS ABSENCE.** `assert_eq!(v["ok"], false)` would pass on the fabrication mirror —
+/// on an advisory verb `false` asserts *"a hole exists, here it is"* beside an empty array, a finding
+/// the analysis never made. So the row asserts the KEY IS GONE.
+///
+/// **THE HUMAN CHANNEL IS ASSERTED SEPARATELY** because a test that reads one channel is evidence about
+/// one channel: this engine built a mutant that kept the whole JSON fix and deleted only the printed
+/// line, and it SURVIVED THE ENTIRE SUITE. The prose `✓` is the prose `ok: true`. `unverified` turned
+/// out to have a SECOND sentence of the same kind — *"The gate still PASSES"* — which is not merely
+/// unhedged but false, since `gate --report` exits 2 over these bytes; found by reading every printed
+/// sentence for the claim it makes, which is what the every-channel clause asks for.
+///
+/// **THE MIRROR IS IN THE SAME RUN**: a COMPLETE report must still carry `ok`, still print its `✓` and
+/// its "the gate still PASSES", and still exit 0/1. A fix that omitted `ok` unconditionally would
+/// satisfy every absence assert here and delete the field for everyone.
+#[test]
+fn an_advisory_verb_over_an_incomplete_report_omits_ok_on_every_channel_it_answers_on() {
+    let f = Fixture::new("advisory-incomplete");
+    // `app.reader` performs Fs (so `deny Fs app` has a real remedy to compute), `app.hole` is an
+    // Unknown that PASSES `deny Net app` (so the holes branch of the human channel is reachable), and
+    // `app.plain` is ordinary. Under `deny Net app` NOTHING violates and NOTHING is unanswerable — the
+    // reviewer's fixture, where incompleteness is the only thing there is to say.
+    let report = |unanalyzed: &str| {
+        format!(
+            r#"{{"candor":{{"version":"handwritten","spec":"0.24"}},"package":"app",
+                "analyzed":{{"count":3,"digest":"0"}},{unanalyzed}
+                "functions":[{{"fn":"app.reader","inferred":["Fs"],"direct":["Fs"],"paths":["/x"]}},
+                             {{"fn":"app.hole","inferred":["Unknown"],"unknownWhy":["a fn-pointer call"]}},
+                             {{"fn":"app.plain","inferred":[]}}]}}"#
+        )
+    };
+    const MANIFEST: &str = r#""unanalyzed":[{"path":"src/opaque.rs","reason":"parse error"}],"#;
+    let run = |sub: &str, unanalyzed: &str, verb: &str, policy: &str, extra: &[&str]| -> (i32, String, String) {
+        let loc = gate_fixture(&f.dir, sub, &report(unanalyzed), Some(r#"{"app.reader":[],"app.hole":[],"app.plain":[]}"#));
+        let p = pol(&f.dir, sub, policy);
+        let mut args: Vec<String> =
+            vec![verb.into(), "--report".into(), loc, "--policy".into(), p.to_string_lossy().into_owned()];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let jrun = |sub: &str, unanalyzed: &str, verb: &str, policy: &str, extra: &[&str]| -> (i32, serde_json::Value) {
+        let (rc, so, se) = run(sub, unanalyzed, verb, policy, extra);
+        (rc, serde_json::from_str(&so).unwrap_or_else(|e| panic!("a JSON document ({e}):\n{so}\n{se}")))
+    };
+    let manifest = serde_json::json!([{"path": "src/opaque.rs", "reason": "parse error"}]);
+
+    for verb in ["unverified", "fix-gate"] {
+        let findings = if verb == "unverified" { "unverified" } else { "remedies" };
+
+        // ── ARM 1: incomplete, and NOTHING ELSE TO SAY. The all-clear is the whole answer, and it is
+        // withdrawn. ──
+        let (rc, v) = jrun(&format!("{verb}-incomplete"), MANIFEST, verb, "deny Net app.elsewhere\n", &["--json", "--strict"]);
+        assert!(
+            v.get("ok").is_none(),
+            "{verb}: `ok` must be ABSENT — a consumer writing `if (r.ok)` has to get a falsy value and \
+             fail safe, and `ok: false` would assert a finding the analysis never made:\n{v:#}"
+        );
+        assert_eq!(v["incomplete"], serde_json::json!(true), "{verb}:\n{v:#}");
+        assert_eq!(v["unanalyzed"], manifest, "{verb}: the manifest travels:\n{v:#}");
+        assert_eq!(v[findings], serde_json::json!([]), "{verb}: the findings still ship:\n{v:#}");
+        assert_eq!(rc, 2, "{verb} --strict exits 2 — `gate --report` does over these bytes:\n{v:#}");
+        // …and WITHOUT `--strict` the verb stays advisory at 0: the ruling is about the disclosure, and
+        // the document above still carries it.
+        let (rc_adv, v_adv) = jrun(&format!("{verb}-advisory"), MANIFEST, verb, "deny Net app.elsewhere\n", &["--json"]);
+        assert_eq!(rc_adv, 0, "{verb}:\n{v_adv:#}");
+        assert_eq!(v_adv["incomplete"], serde_json::json!(true), "{verb}:\n{v_adv:#}");
+
+        // ── THE MIRROR: no manifest ⇒ complete ⇒ `ok` is BACK and nothing is added, so every ordinary
+        // document stays byte-identical to a pre-rung one. ──
+        let (rc2, v2) = jrun(&format!("{verb}-complete"), "", verb, "deny Net app.elsewhere\n", &["--json", "--strict"]);
+        assert_eq!(
+            v2["ok"],
+            serde_json::json!(true),
+            "{verb}: a COMPLETE report must still get its answer — omitting `ok` unconditionally would \
+             satisfy every absence assert above and delete the field for everyone:\n{v2:#}"
+        );
+        assert!(v2.get("incomplete").is_none(), "{verb}:\n{v2:#}");
+        assert!(v2.get("unanalyzed").is_none(), "{verb}:\n{v2:#}");
+        assert_eq!(rc2, 0, "{verb}:\n{v2:#}");
+        // …and an EMPTY manifest says the same thing an absent one does: the scan saw everything.
+        let (_, v3) = jrun(&format!("{verb}-emptymanifest"), r#""unanalyzed":[],"#, verb, "deny Net app.elsewhere\n", &["--json"]);
+        assert_eq!(v3["ok"], serde_json::json!(true), "{verb}:\n{v3:#}");
+        assert!(v3.get("incomplete").is_none(), "{verb}:\n{v3:#}");
+    }
+
+    // ── ARM 2: incomplete AND a certain finding. The finding is not suppressed — a partial answer that
+    // says it is partial beats a refusal — but `ok` still does not ship, because its absence is about
+    // the SET being partial, not about the verdict. `--strict` still exits 2, not 1: the smaller code
+    // would claim this verb saw more than the gate, which refuses outright. ──
+    let (rc, v) = jrun("fixgate-firing", MANIFEST, "fix-gate", "deny Fs app\n", &["--json", "--strict"]);
+    assert!(v.get("ok").is_none(), "{v:#}");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v:#}");
+    assert_eq!(v["remedies"].as_array().unwrap().len(), 1, "the remedy is hedged, never withheld:\n{v:#}");
+    assert_eq!(rc, 2, "{v:#}");
+    // THE MIRROR for that arm: complete + firing is the pre-rung document, `ok: false` and exit 1.
+    let (rc2, v2) = jrun("fixgate-firing-complete", "", "fix-gate", "deny Fs app\n", &["--json", "--strict"]);
+    assert_eq!(v2["ok"], serde_json::json!(false), "{v2:#}");
+    assert_eq!(rc2, 1, "{v2:#}");
+
+    // ── THE HUMAN CHANNEL, which the asserts above CANNOT SEE. ──
+    //
+    // FIRST the reviewer's own shape — incomplete with NOTHING to report — because that is the branch
+    // where the all-clear sentence IS the verb's whole answer, and it is a DIFFERENT branch from the
+    // one below. **A mutant that kept this `✓` SURVIVED the row until this arm existed**: every other
+    // fixture here carries a hole, so `unverified` never reached its own all-clear line, and the
+    // measured defect is the one sentence no fixture was asking about.
+    let (rc_h0, h0, _) =
+        run("human-incomplete-clean", MANIFEST, "unverified", "deny Net app.elsewhere\n", &["--strict"]);
+    assert!(
+        !h0.contains("PROVABLY clean (no Unknown holes) ✓"),
+        "\"PROVABLY clean\" over a report declaring source candor could not read — the prose `ok: true`, \
+         on the one branch where it is the entire answer:\n{h0}"
+    );
+    assert!(h0.contains("INCOMPLETE") && h0.contains("src/opaque.rs"), "{h0}");
+    assert_eq!(rc_h0, 2, "…and the human channel's exit code is the JSON channel's:\n{h0}");
+
+    let (_, h, _) = run("human-incomplete", MANIFEST, "unverified", "deny Net app\n", &[]);
+    assert!(h.contains("INCOMPLETE"), "the operator is told the universe was partial:\n{h}");
+    assert!(h.contains("src/opaque.rs"), "…and exactly what was unread:\n{h}");
+    assert!(
+        !h.contains("PROVABLY clean (no Unknown holes) ✓"),
+        "the `✓` is the prose `ok: true` and is withheld for the same reason:\n{h}"
+    );
+    assert!(
+        !h.contains("The gate still PASSES"),
+        "and so is this one, which is not merely unhedged but FALSE — `gate --report` exits 2 over \
+         these bytes, so the gate does not pass:\n{h}"
+    );
+    // …the holes are still all NAMED. Withdrawing the claim must not withdraw the disclosure.
+    assert!(h.contains("app.hole"), "the finding still ships on this channel too:\n{h}");
+    let (_, hf, _) = run("human-incomplete-fg", MANIFEST, "fix-gate", "deny Net app.elsewhere\n", &[]);
+    assert!(hf.contains("INCOMPLETE") && !hf.contains("no deny/pure boundary crossings in this report ✓"), "{hf}");
+
+    // AND THE MIRROR ON THIS CHANNEL: a complete report gets both sentences back, unqualified.
+    let (_, h2, _) = run("human-complete", "", "unverified", "deny Net app\n", &[]);
+    assert!(h2.contains("The gate still PASSES"), "no hedge where none is owed:\n{h2}");
+    assert!(!h2.contains("INCOMPLETE"), "{h2}");
+    let (_, h3, _) = run("human-complete-clean", "", "unverified", "deny Net app.elsewhere\n", &[]);
+    assert!(h3.contains("PROVABLY clean (no Unknown holes) ✓"), "{h3}");
+    let (_, h4, _) = run("human-complete-fg", "", "fix-gate", "deny Net app.elsewhere\n", &[]);
+    assert!(h4.contains("no deny/pure boundary crossings in this report ✓"), "{h4}");
+}
+
+/// SPEC §3.2 ⟨0.24⟩ **AN ADVISORY VERB'S INCOMPLETENESS VERDICT IS AT LEAST AS PESSIMISTIC AS THE
+/// GATE'S OVER THE SAME BYTES** — candor-spec `93cef40` — and the `fix` half of `ec1a441`.
+///
+/// `93cef40` states the rule as a RELATION rather than a shape, because candor-swift and candor-ts had
+/// implemented the manifest reader twice with different ELEMENT rules: **skipping a malformed element
+/// makes the advisory verb read a SHORTER `unanalyzed` list than the gate reads from the identical
+/// file**, so a report the gate calls incomplete gets a clean advisory answer. Asserted here as the
+/// relation: over inputs the gate does not clear, no advisory verb may answer clean. In this engine it
+/// holds by CONSTRUCTION — one file set, one reader, shared with `load_gate_report` — and this row is
+/// what would notice if a later change gave either route its own.
+///
+/// `fix` is not named in `ec1a441` (it answers no `ok`), but every answer it gives is a claim over the
+/// report: *"does not perform E — nothing to hoist"* rests on an effect set accumulated over the
+/// callgraph, and a hoist plan names the CALLERS to move the effect to. So it carries the disclosure on
+/// both channels — with its EXIT CODE unchanged at 0, matching its own gate-refusal branch (`4fd140c`)
+/// and candor-ts, since a second exit policy inside one verb would rank the gate's outright refusal as
+/// the milder finding.
+#[test]
+fn an_advisory_verb_is_never_less_sensitive_to_incompleteness_than_the_gate() {
+    let f = Fixture::new("advisory-gate-bound");
+    let body = |unanalyzed: &str| {
+        format!(
+            r#"{{"candor":{{"version":"handwritten","spec":"0.24"}},"package":"app",
+                "analyzed":{{"count":2,"digest":"0"}},{unanalyzed}
+                "functions":[{{"fn":"app.reader","inferred":["Fs"],"direct":["Fs"],"paths":["/x"]}},
+                             {{"fn":"app.plain","inferred":[]}}]}}"#
+        )
+    };
+    // Each row is a manifest the GATE does not clear. `[{unit,why}]` is the right shape with the wrong
+    // field names — what a hand-built or foreign-produced report yields, and the exact input that
+    // turned this engine's gate from exit 2 into `policy ✓` in 2026-07-28's measurement. The mixed row
+    // is `93cef40`'s own case: one readable element beside one that is not.
+    for (sub, unanalyzed) in [
+        ("readable", r#""unanalyzed":[{"path":"src/opaque.rs","reason":"parse error"}],"#),
+        ("wrongfields", r#""unanalyzed":[{"unit":"src/opaque.rs","why":"parse error"}],"#),
+        ("barestrings", r#""unanalyzed":["src/opaque.rs"],"#),
+        ("mixed", r#""unanalyzed":[{"path":"src/a.rs","reason":"parse error"},{"unit":"src/b.rs"}],"#),
+    ] {
+        let loc = gate_fixture(&f.dir, sub, &body(unanalyzed), Some(r#"{"app.reader":[],"app.plain":[]}"#));
+        let p = pol(&f.dir, sub, "deny Net app.elsewhere\n");
+        let go = |verb: &str| -> (i32, serde_json::Value) {
+            let out = Command::new(bin())
+                .args([verb, "--report", &loc, "--policy", &p.to_string_lossy(), "--json", "--strict"])
+                .output()
+                .expect("run candor-query");
+            let so = String::from_utf8_lossy(&out.stdout).into_owned();
+            (out.status.code().unwrap_or(-1), serde_json::from_str(&so).unwrap_or(serde_json::Value::Null))
+        };
+        let (grc, gv) = go("gate");
+        assert_ne!(grc, 0, "[{sub}] the control: the gate must not clear this report:\n{gv:#}");
+        for verb in ["unverified", "fix-gate"] {
+            let (rc, v) = go(verb);
+            assert!(
+                v.get("ok").is_none(),
+                "[{sub}] {verb} read a manifest the gate could not — an element that cannot be read is \
+                 still an element saying something was not analysed:\n{v:#}"
+            );
+            assert_eq!(v["incomplete"], serde_json::json!(true), "[{sub}] {verb}:\n{v:#}");
+            assert_eq!(rc, 2, "[{sub}] {verb} must not exit smaller than the gate:\n{v:#}");
+        }
+    }
+    // …and NOTHING IS FABRICATED where nothing could be read: the `unanalyzed` key travels only when a
+    // manifest was actually parsed. `incomplete` alone is what an unreadable key licenses, and stderr
+    // names the key, which is the actionable half.
+    let loc = gate_fixture(&f.dir, "wrongfields", &body(r#""unanalyzed":[{"unit":"x","why":"y"}],"#), None);
+    let p = pol(&f.dir, "wrongfields", "deny Net app.elsewhere\n");
+    let out = Command::new(bin())
+        .args(["unverified", "--report", &loc, "--policy", &p.to_string_lossy(), "--json"])
+        .output()
+        .expect("run");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a JSON document");
+    assert!(v.get("unanalyzed").is_none(), "a manifest that could not be read is not invented:\n{v:#}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("`unanalyzed` key is PRESENT"),
+        "the key is NAMED: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // ── `fix`: the disclosure reaches the plan document and the prose, and the exit code does not move.
+    let loc = gate_fixture(
+        &f.dir,
+        "fixverb",
+        &body(r#""unanalyzed":[{"path":"src/opaque.rs","reason":"parse error"}],"#),
+        Some(r#"{"app.reader":[],"app.plain":[]}"#),
+    );
+    let p = pol(&f.dir, "fixverb", "deny Fs app\n");
+    let fix = |args: &[&str]| -> (i32, String, String) {
+        let mut a: Vec<String> = vec!["fix".into(), "app.reader".into(), "Fs".into(), "--report".into(), loc.clone(),
+                                      "--policy".into(), p.to_string_lossy().into_owned()];
+        a.extend(args.iter().map(|s| s.to_string()));
+        let out = Command::new(bin()).args(&a).output().expect("run");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (rc, so, se) = fix(&["--json"]);
+    let v: serde_json::Value = serde_json::from_str(&so).unwrap_or_else(|e| panic!("a plan document ({e}):\n{so}"));
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v:#}");
+    assert!(v.get("deniedSpan").is_some(), "the plan is hedged, never withheld:\n{v:#}");
+    assert!(
+        se.contains("INCOMPLETE"),
+        "…and the note is on STDERR here, because stdout is a document and prose beside it would \
+         corrupt it: {se}"
+    );
+    assert_eq!(rc, 0, "the exit code is unchanged: this verb answers no `ok` for `--strict` to follow");
+    let (_, so2, _) = fix(&[]);
+    assert!(so2.contains("INCOMPLETE") && so2.contains("src/opaque.rs"), "{so2}");
+    // THE MIRROR: a complete report's plan document is byte-identical to a pre-rung one.
+    let loc2 = gate_fixture(&f.dir, "fixverb-complete", &body(""), Some(r#"{"app.reader":[],"app.plain":[]}"#));
+    let out = Command::new(bin())
+        .args(["fix", "app.reader", "Fs", "--report", &loc2, "--policy", &p.to_string_lossy(), "--json"])
+        .output()
+        .expect("run");
+    let v2: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a plan document");
+    assert!(v2.get("incomplete").is_none() && v2.get("unanalyzed").is_none(), "{v2:#}");
+    assert!(v2.get("deniedSpan").is_some(), "{v2:#}");
+}
+
+/// SPEC §3.2 ⟨0.24⟩ **"THE SAME BYTES" MEANS THE SAME REPORT SET** — candor-spec `142740a`.
+///
+/// candor-java measured the at-least-as-pessimistic relation of `93cef40` and found the two sides were
+/// never reading the same input: **`gate --report <prefix>` reads the report SET the locator names,
+/// while every other verb read the ONE file the prefix expansion picked.** Two siblings under one
+/// prefix with the manifest in the second — the gate exits 2, `unverified --strict` comes back clean.
+/// The verb was not less pessimistic than the gate; it was answering a different question, and the
+/// comparison silently did not apply. **A relation between two readers is only a constraint while both
+/// read the same thing.**
+///
+/// **MEASURED HERE: A NULL RESULT.** This engine has no such split — `report_completeness` and
+/// `load_entries` both go through `glob_reports`, the same function `load_gate_report` uses, so the
+/// envelope is already unioned over the whole located set. java's shape is not this engine's. The row
+/// exists anyway because the property is cheap to state and a later change that gave either route its
+/// own locator handling would restore exactly java's defect, silently, in the one place where silence
+/// is what the whole rung is about.
+///
+/// The MIRROR is the single-report locator: unchanged, one unit, no invented union.
+#[test]
+fn the_advisory_verbs_read_the_same_report_set_the_gate_does() {
+    let f = Fixture::new("advisory-report-set");
+    let d = f.dir.join("twin");
+    std::fs::create_dir_all(&d).unwrap();
+    // Sibling reports under ONE prefix. The manifest is in the SECOND — java's exact fixture, where a
+    // reader that takes "the file the prefix picked" sees a complete report and answers clean.
+    std::fs::write(
+        d.join("report.alpha.scan.json"),
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"alpha",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"alpha.plain","inferred":[]}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("report.beta.scan.json"),
+        r#"{"candor":{"version":"handwritten","spec":"0.24"},"package":"beta",
+            "analyzed":{"count":1,"digest":"0"},
+            "unanalyzed":[{"path":"src/opaque.rs","reason":"parse error"}],
+            "functions":[{"fn":"beta.plain","inferred":[]}]}"#,
+    )
+    .unwrap();
+    let loc = d.join("report").to_string_lossy().into_owned();
+    let p = pol(&f.dir, "set", "deny Net app\n");
+    // `--strict` is an ADVISORY-verb flag; the gate is always strict. Passing it there yields a usage
+    // error whose exit code is also 2 — a vacuous control, and how the first draft of this row passed
+    // its gate assertion while comparing against an empty document.
+    let go = |verb: &str, extra: &[&str]| -> (i32, serde_json::Value) {
+        let mut a: Vec<String> =
+            vec![verb.into(), "--report".into(), loc.clone(), "--policy".into(),
+                 p.to_string_lossy().into_owned(), "--json".into()];
+        a.extend(extra.iter().map(|s| s.to_string()));
+        let out = Command::new(bin()).args(&a).output().expect("run candor-query");
+        let so = String::from_utf8_lossy(&out.stdout).into_owned();
+        (
+            out.status.code().unwrap_or(-1),
+            serde_json::from_str(&so).unwrap_or_else(|e| panic!("[{verb}] a JSON document ({e}):\n{so}")),
+        )
+    };
+    let (grc, gv) = go("gate", &[]);
+    assert_eq!(grc, 2, "the control: the gate reads the SET and finds the sibling's manifest:\n{gv:#}");
+    assert_eq!(gv["unanalyzed"].as_array().map(Vec::len), Some(1), "…and carries it:\n{gv:#}");
+    for verb in ["unverified", "fix-gate"] {
+        let (rc, v) = go(verb, &["--strict"]);
+        assert_eq!(
+            v["unanalyzed"], gv["unanalyzed"],
+            "[{verb}] the same list off the same set — a shorter one is not less certain than the gate, \
+             it is a different question:\n{v:#}"
+        );
+        assert!(v.get("ok").is_none(), "[{verb}]:\n{v:#}");
+        assert_eq!(rc, 2, "[{verb}]:\n{v:#}");
+    }
+    // THE MIRROR: a locator naming ONE file reads exactly that file — the union is over what the
+    // locator LOCATES, never over a directory it did not name.
+    let one = d.join("report.alpha.scan.json").to_string_lossy().into_owned();
+    let out = Command::new(bin())
+        .args(["unverified", "--report", &one, "--policy", &p.to_string_lossy(), "--json", "--strict"])
+        .output()
+        .expect("run");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a JSON document");
+    assert_eq!(v["ok"], serde_json::json!(true), "the sibling's manifest is not pulled in:\n{v:#}");
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{v:#}");
 }

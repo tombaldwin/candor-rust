@@ -376,6 +376,32 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
     }
     let by_name: HashMap<&str, &ReportEntry> = entries.iter().map(|e| (e.func.as_str(), e)).collect();
 
+    // ⟨0.24⟩ WHAT THE PRODUCING SCAN COULD NOT SEE (SPEC §3.2 `ec1a441`, [`crate::completeness`]).
+    // `fix` is NOT one of the verbs `ec1a441` names, because it answers no `ok` — but it is the same
+    // harm one verb over, which is how `4fd140c` reached it too, and every one of its answers is a claim
+    // over the report: *"does not perform E — nothing to hoist"* rests on an effect set accumulated over
+    // the callgraph (a callee in an unread file contributes nothing), and a hoist plan names the CALLERS
+    // to move the effect to (a caller in an unread file is missing from `site`/`hoistTo`).
+    //
+    // So the DISCLOSURE reaches every one of them — on stderr when stdout carries a document, since two
+    // of the four answers are prose in BOTH modes — and `incomplete`/`unanalyzed` ride the documents. The
+    // EXIT CODE stays 0: this verb answers no `ok` for `--strict` to follow, its sibling refusal branch
+    // below deliberately exits 0 for the same reason (`4fd140c`), and a second, contradictory exit
+    // policy inside one verb would say the gate's refusal is the milder finding. candor-ts agrees —
+    // measured today, its `fix` exits 0 and emits no manifest at all on this path.
+    let comp = crate::completeness::report_completeness(prefix);
+    comp.warn_unreadable("fix");
+    let (so_what, tail) = (
+        "any remedy below is computed over a universe candor cannot fully see",
+        "A callee in one of those contributes no effect here, and a caller in one is invisible to the \
+         hoist. `gate --report` exits 2 over these bytes. Re-scan for a complete answer.",
+    );
+    if want_json {
+        comp.eprint_note(so_what, tail);
+    } else {
+        comp.print_note(so_what, tail);
+    }
+
     // Resolve `target` among the best-tier name matches, PREFERRING one that actually performs the effect —
     // so a bare leaf (`save`) resolves to the violating `Repo.save`, not a same-named pure `Cache.save` that
     // happens to sort first. (Must match candor-ts/candor-java/candor-swift exactly — a divergence here flips
@@ -417,11 +443,12 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
             // stdout is read as "no remedy needed", which is the confident answer this branch exists to
             // withhold. No plan keys and no `ok`: the verb computed nothing, and it says which rule
             // stopped it in the gate's own `unevaluated` shape.
-            let out = serde_json::json!({
+            let mut out = serde_json::json!({
                 "fn": start.func,
                 "effect": effect,
                 "unevaluated": unevaluated_json(&refused),
             });
+            comp.write_json(&mut out);
             println!("{}", serde_json::to_string_pretty(&out).unwrap());
             return 0;
         }
@@ -447,7 +474,9 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
     let plan = compute_remedy(&by_name, &rev, rules, start, effect, layer);
 
     if want_json {
-        println!("{}", serde_json::to_string_pretty(&plan.to_json()).unwrap());
+        let mut out = plan.to_json();
+        comp.write_json(&mut out);
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
         let mut s = String::new();
         plan.render_text(&mut s);
@@ -500,6 +529,17 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     let sig = crate::gate::report_signature(&entries);
     let reason_acc = &sig.reason_classes;
     let unanswered = crate::gate::unanswerable_pairs(&parsed, &sig);
+    // ⟨0.24⟩ …and what the producing scan could not SEE AT ALL (SPEC §3.2 `ec1a441`, and
+    // [`crate::completeness`] for the reasoning). Independent of `unanswered`: that is a function candor
+    // analyzed and the gate could not JUDGE, this is source the scan never read, so there is no function
+    // to name. It bites this verb twice — the crossing itself may be in an unread file, and a remedy is
+    // a hoist to the nearest allowed-layer CALLER, which is missing from the plan exactly as a caller in
+    // an unparsed file is missing from `whatif`'s blast radius. MEASURED on the release build over a
+    // report declaring one `unanalyzed` unit and a `deny Net app` nothing violates:
+    // `{"ok": true, "remedies": []}`, exit 0 under `--strict`, and the stdout line
+    // *"no deny/pure boundary crossings in this report ✓"*.
+    let comp = crate::completeness::report_completeness(prefix);
+    comp.warn_unreadable("fix-gate");
     let mut plans: BTreeMap<String, RemedyPlan> = BTreeMap::new();
     for e in sorted {
         let mut effs: Vec<&String> = e.inferred.iter().collect();
@@ -519,16 +559,22 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         // ordinary document, which therefore stays byte-identical to a pre-ruling one. Over a boundary
         // the gate refused, neither boolean is a statement, so the key is ABSENT and `unevaluated` says
         // which rule went unanswered and why.
-        if unanswered.is_empty() {
+        // ⟨0.24⟩ …and an INCOMPLETE report suppresses `ok` for the same reason (`ec1a441`), on the same
+        // OMIT-don't-falsify rule: `ok: false` would assert a boundary crossing beside an empty
+        // `remedies`. `unevaluated` is not exclusive with it — a report can be both refused-on and
+        // incomplete, and each says something the other does not.
+        if unanswered.is_empty() && !comp.incomplete() {
             out["ok"] = serde_json::json!(plans.is_empty());
-        } else {
+        }
+        if !unanswered.is_empty() {
             out["unevaluated"] = serde_json::json!(unevaluated_json(&unanswered));
         }
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes
         // the exit code follow `ok`, so a CI job can REQUIRE zero outstanding crossings (mirrors
         // `unverified --strict`). exit 2 (no report / unreadable policy) already returned above.
-        return fix_gate_exit(g.strict, !plans.is_empty(), !unanswered.is_empty());
+        return fix_gate_exit(g.strict, !plans.is_empty(), !unanswered.is_empty(), comp.incomplete());
     }
 
     // ONE LINE PER RULE, matching the gate's own channel: the first function that defeats a rule is the
@@ -549,19 +595,35 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
             );
         }
     }
+    // ⟨0.24⟩ THE HUMAN CHANNEL (SPEC §3.2 `ec1a441`) — printed BEFORE the verdict, because it qualifies
+    // the remedies below as much as the all-clear. A mutant that kept the JSON fix and deleted only this
+    // call survived the entire suite: the `✓` below IS the prose `ok: true`.
+    comp.print_note(
+        "the remedies below are computed over a universe candor cannot fully see",
+        "A crossing in one of those is INVISIBLE here, and so is a caller a hoist would target. \
+         `gate --report` exits 2 over these bytes. Re-scan for a complete answer.",
+    );
     if plans.is_empty() {
-        if unanswered.is_empty() {
+        if unanswered.is_empty() && !comp.incomplete() {
             println!("candor fix-gate: no deny/pure boundary crossings in this report ✓");
         } else {
-            // NO `✓`. The tick is the same claim in prose, over a report the gate refused to judge.
+            // NO `✓`. The tick is the same claim in prose, over a report the gate refused to judge or
+            // was never shown all of. Both causes are named, because they are different repairs: one
+            // wants a policy the gate can evaluate, the other wants a scan that reads every file.
+            let mut why: Vec<String> = Vec::new();
+            if !unanswered.is_empty() {
+                why.push(format!("{} rule/function pair(s) went unevaluated (above)", unanswered.len()));
+            }
+            if comp.incomplete() {
+                why.push(format!("{} unit(s) were never analyzed (above)", comp.units()));
+            }
             println!(
                 "candor fix-gate: no deny/pure boundary crossings CAN BE COMPUTED from this report — \
-                 {} rule/function pair(s) went unevaluated (above), and `candor-query gate --report` \
-                 refuses over these bytes.",
-                unanswered.len()
+                 {}, and `candor-query gate --report` refuses over these bytes.",
+                why.join(", ")
             );
         }
-        return fix_gate_exit(g.strict, false, !unanswered.is_empty());
+        return fix_gate_exit(g.strict, false, !unanswered.is_empty(), comp.incomplete());
     }
     let n = plans.len();
     println!(
@@ -577,16 +639,22 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         print!("{s}");
     }
     println!("\n  (Advisory: candor names the shape, you write the code; the gate re-scan verifies each fix.)");
-    let rc = fix_gate_exit(g.strict, true, !unanswered.is_empty());
+    let rc = fix_gate_exit(g.strict, true, !unanswered.is_empty(), comp.incomplete());
     if g.strict {
         // `--strict` turns the advisory into a CI gate: a non-empty remedy set is a failure (exit 1), so a
         // job can REQUIRE the boundary be clean before merge (mirrors `unverified --strict`). Without it the
         // remedy prints and the run stays green — the agent-loop default.
-        if rc == 2 {
+        if rc == 2 && !unanswered.is_empty() {
             println!(
                 "  (--strict: {n} outstanding boundary crossing(s), AND {} rule/function pair(s) the gate \
                  could not evaluate → exit 2, matching `gate --report`)",
                 unanswered.len()
+            );
+        } else if rc == 2 {
+            println!(
+                "  (--strict: {n} outstanding boundary crossing(s), AND {} unit(s) the scan never \
+                 analyzed → exit 2, matching `gate --report`)",
+                comp.units()
             );
         } else {
             println!("  (--strict: {n} outstanding boundary crossing(s) → exit 1)");
@@ -600,8 +668,11 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
 /// [`crate::unverified::unverified_exit`]: neither outcome here is certain, so the exit answers *did this
 /// verb evaluate the policy you gave it?*, and answering 1 where the gate answered 2 claims it got
 /// further than the gate on identical bytes. Without `--strict` the verb stays advisory at exit 0.
-fn fix_gate_exit(strict: bool, any_plans: bool, any_unanswered: bool) -> i32 {
-    match (strict, any_unanswered, any_plans) {
+///
+/// ⟨0.24⟩ An INCOMPLETE report joins the 2 (`ec1a441`), for the identical reason: `gate --report` exits
+/// 2 over those bytes, so any smaller code claims this verb saw more than the gate did.
+fn fix_gate_exit(strict: bool, any_plans: bool, any_unanswered: bool, incomplete: bool) -> i32 {
+    match (strict, any_unanswered || incomplete, any_plans) {
         (true, true, _) => 2,
         (true, false, true) => 1,
         _ => 0,

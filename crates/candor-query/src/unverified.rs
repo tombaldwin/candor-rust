@@ -11,6 +11,12 @@
 //! `4fd140c`: *an advisory verb may be LESS certain than the gate, never more*) — with the MISSING
 //! EVIDENCE as the reason, the gate's `unevaluated` shape beside it, and `--strict` → exit 2 there,
 //! matching the gate.
+//!
+//! ⟨0.24⟩ …and over an INCOMPLETE report it omits `ok` entirely (SPEC §3.2, candor-spec `ec1a441`) —
+//! see [`crate::completeness`], where the measurement and the reasoning live. **This verb is the
+//! sharpest case in the family**: it exists to say *"your green gate is not provably green"*, and a
+//! function in an unanalyzed file is absent from `functions`, so it cannot be enumerated as an
+//! unverified pass at all — that absence is exactly what the verb would have to report.
 
 use crate::grammar::{parse, report_or_discover, Shape};
 use crate::load::load_entries;
@@ -127,6 +133,16 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     // absence-keyed relaxation this rung exists to close, arriving through a flag.
     let unanswered = crate::gate::unanswerable_pairs(&parsed, &sig);
 
+    // ⟨0.24⟩ **AND WHAT THE PRODUCING SCAN COULD NOT SEE AT ALL** — SPEC §3.2, candor-spec `ec1a441`.
+    // The two disclosures are independent and both are needed: `unanswered` is a function candor DID
+    // analyze and the gate could not JUDGE; this is source the scan never read, so there is no function
+    // to name. MEASURED on the release build over a report declaring one `unanalyzed` unit, NO holes and
+    // `deny Net app` that nothing violates: `{"ok": true, "unverified": []}`, exit 0 under `--strict`,
+    // and the stdout line *"every function in a pure/deny layer is PROVABLY clean (no Unknown holes) ✓"*
+    // — over a report that declares source candor could not read.
+    let comp = crate::completeness::report_completeness(prefix);
+    comp.warn_unreadable("unverified");
+
     if want_json {
         let mut items: Vec<_> = holes
             .iter()
@@ -159,11 +175,45 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         if unanswered.is_empty() {
             out.as_object_mut().unwrap().remove("unevaluated");
         }
+        // ⟨0.24⟩ `ok` is REMOVED, not set to `false` (SPEC §3.2 `ec1a441`): `false` here would assert
+        // "an unverified hole exists, here it is" beside an empty array — a finding the analysis never
+        // made. `unverified` and `unevaluated` still ship: a partial answer that says it is partial
+        // beats a refusal. On a COMPLETE report nothing below fires and the document is byte-identical.
+        //
+        // ⟨0.24⟩ **AND THE WITHHELD-RULE TRIGGER TAKES THE SAME ANSWER** (SPEC §3.2 `142740a`). This
+        // engine emitted `ok: false` there, which `4fd140c` argued for deliberately and which was wrong
+        // by that same clause's own reasoning: where a rule was WITHHELD, no hole was FOUND — the
+        // question was declined — so `false` asserts the finding that did not happen. The two triggers
+        // were ruled a day apart and looked like two cases; they are one shape and one answer.
+        // MEASURED here before the change: `deny Net[unknown-host] app` over a `hosts`-only entry gave
+        // `{"ok": false, …}` while `gate --report` refused outright. `fix-gate` was already right.
+        if comp.incomplete() || !unanswered.is_empty() {
+            out.as_object_mut().unwrap().remove("ok");
+            comp.write_json(&mut out);
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
-        return unverified_exit(strict, !holes.is_empty(), !unanswered.is_empty());
+        return unverified_exit(strict, !holes.is_empty(), !unanswered.is_empty(), comp.incomplete());
     }
 
+    // ⟨0.24⟩ THE HUMAN CHANNEL, AND IT IS THE ONE A TEST CANNOT SEE. A mutant that kept the whole JSON
+    // fix and deleted this call survived the entire suite (SPEC §3.2 `ec1a441`) — the prose `✓` IS the
+    // prose `ok: true`. Printed FIRST, so it qualifies the lists below as much as the verdict.
+    comp.print_note(
+        "the functions named below are only those candor could see",
+        "A function in one of those is ABSENT from the report, so it cannot be named here at all. \
+         `gate --report` exits 2 over these bytes. Re-scan for a complete answer.",
+    );
+
     if holes.is_empty() && unanswered.is_empty() {
+        if comp.incomplete() {
+            // NO `✓`, and not "PROVABLY" anything. The withheld tick is the same withdrawal `ok` is:
+            // a claim of provable purity over a set candor is on record as not having seen.
+            println!(
+                "candor unverified: nothing candor COULD SEE is an unverified hole — but see the \
+                 INCOMPLETE note above; this is NOT the provably-clean all-clear."
+            );
+            return unverified_exit(strict, false, false, true);
+        }
         println!("candor unverified: every function in a pure/deny layer is PROVABLY clean (no Unknown holes) ✓");
         return 0;
     }
@@ -205,13 +255,26 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         // still PASSES" would be false. With nothing unanswered the sentence is the pre-ruling one, to
         // the byte — measured across 224 OLD/NEW runs over four corpora and eight policies, where this
         // line was the ONLY difference until it was made conditional.
-        let scope = if unanswered.is_empty() { "" } else { " on these" };
-        println!("  The gate still PASSES{scope} — this is advisory. To REQUIRE provable purity, add:");
+        //
+        // ⟨0.24⟩ …and over an INCOMPLETE report it is not narrowed but WITHDRAWN, because it is false:
+        // `gate --report` over these bytes exits 2, so "the gate still PASSES" is a claim about the
+        // gate that the gate contradicts. Found by reading this verb's every printed sentence for the
+        // claim it makes, which is what `ec1a441`'s every-channel clause asks for — the `✓` was not the
+        // only one.
+        if comp.incomplete() {
+            println!(
+                "  The gate does NOT pass over this report — it declares unanalyzed unit(s) (above) and \
+                 `gate --report` exits 2. Once the scan is complete, to REQUIRE provable purity add:"
+            );
+        } else {
+            let scope = if unanswered.is_empty() { "" } else { " on these" };
+            println!("  The gate still PASSES{scope} — this is advisory. To REQUIRE provable purity, add:");
+        }
         for u in &upgrades {
             println!("      {u}");
         }
     }
-    unverified_exit(strict, !holes.is_empty(), !unanswered.is_empty())
+    unverified_exit(strict, !holes.is_empty(), !unanswered.is_empty(), comp.incomplete())
 }
 
 /// ⟨0.24⟩ The `unevaluated` disclosure — the gate's `[{rule, why}]`, ONE ENTRY PER RULE.
@@ -241,8 +304,14 @@ fn unevaluated_json(unanswered: &[crate::gate::Unanswerable]) -> Vec<serde_json:
 /// Without `--strict` the verb is advisory and exits 0, unchanged: the ruling is about the DISCLOSURE,
 /// and minting a non-zero exit for the default agent-loop invocation would fail builds this verb has
 /// never failed.
-fn unverified_exit(strict: bool, any_holes: bool, any_unanswered: bool) -> i32 {
-    match (strict, any_unanswered, any_holes) {
+///
+/// ⟨0.24⟩ **AN INCOMPLETE REPORT JOINS THE 2**, SPEC §3.2 `ec1a441` — *"`--strict` (the CI form) exits
+/// 2"* — and it is the same argument one rung along: `gate --report` exits 2 over these bytes, so
+/// answering 0 (or 1) claims this verb got further than the gate on identical input. It sits beside the
+/// refusal rather than under it because both are the SAME answer, *this verb did not evaluate the
+/// policy you gave it over the code you gave it*.
+fn unverified_exit(strict: bool, any_holes: bool, any_unanswered: bool, incomplete: bool) -> i32 {
+    match (strict, any_unanswered || incomplete, any_holes) {
         (true, true, _) => 2,
         (true, false, true) => 1,
         _ => 0,
