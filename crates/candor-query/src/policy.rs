@@ -58,6 +58,65 @@ pub(crate) fn load_policy_as_the_gate_does(
 
 // ── whatif ──────────────────────────────────────────────────────────────────────────────────────
 
+/// ⟨0.24⟩ WHAT THE REPORTS UNDER A LOCATOR SAY THE PRODUCING SCAN COULD NOT SEE (SPEC §2's
+/// `unanalyzed` manifest), read for `whatif`'s sake.
+///
+/// **THE DEFECT** (SPEC §3.2 ⟨0.24⟩, candor-spec `0075987` — measured independently by this engine and
+/// by candor-java, and reported rather than decided, which is why it is now ruled). Over a report
+/// declaring `unanalyzed`, `whatif` answered `{"ok": true, …}`, exit 0, `✓ within policy`, with no
+/// disclosure on ANY channel — while `candor-query gate` over the SAME report exits 2. `whatif`'s
+/// `affected` set is a reverse-reachability closure over the callgraph, so **a caller living in a file
+/// the scan could not parse is invisible to it**: the blast radius is computed over a universe the
+/// analysis knows it cannot fully see, and `true` is a claim that input does not license.
+///
+/// **`ok` IS OMITTED, NOT SET TO FALSE**, and that distinction is the whole of the ruling. `ok: false`
+/// would assert a VIOLATION the analysis never found — the fabrication mirror, and worse than the thing
+/// it replaces. So the field goes away and `incomplete: true` + the manifest take its place: a consumer
+/// writing `if (r.ok)` gets a falsy value and fails safe, one that looks further learns what was unread.
+/// This is deliberately NOT the refusal document's shape (`ok: false` + `refused: true`), where
+/// `ok: false` is *true* because the gate did not pass; **a shape is copied for its reasoning, not for
+/// its familiarity**, and here neither boolean is a statement.
+///
+/// **`affected` AND `violations` STILL SHIP.** A partial answer that says it is partial beats a refusal,
+/// and `whatif` is consulted BEFORE an edit, where the alternative is the operator guessing.
+struct WhatifCompleteness {
+    /// The manifest as far as it could be READ, unioned across the reports under the locator.
+    unanalyzed: Vec<candor_report::UnanalyzedUnit>,
+    /// An `unanalyzed` key that is PRESENT but is not `[{path, reason}]`. SPEC §2: *"a key that cannot
+    /// be READ is corrupt input, never its empty value"* — and here the empty value is exactly what
+    /// licenses `ok`, so coercing it would convert corrupt input into the green claim. The gate route
+    /// REFUSES on this (exit 2, `strict!` in gate.rs, measured 2026-07-28 on a report with the right
+    /// shape and the wrong field names); `whatif` cannot refuse — a refusal here sends the operator back
+    /// to guessing — so it takes the same fail-safe posture through the disclosure instead.
+    unreadable: Vec<String>,
+}
+
+impl WhatifCompleteness {
+    /// Is the universe this verb reasoned over known-partial? Either arm suppresses `ok`.
+    fn incomplete(&self) -> bool {
+        !self.unanalyzed.is_empty() || !self.unreadable.is_empty()
+    }
+}
+
+/// Read the ⟨0.21⟩ manifest off every report under `prefix`.
+///
+/// A locator matching NO report is NOT incomplete: `whatif` runs off the callgraph sidecar, an absent
+/// report is the ordinary pre-scan case the verb already fails on above, and treating "no manifest" as
+/// "incomplete" would put the hedge on every run and train the reader to ignore it — the same reason the
+/// vocabulary disclosure is omitted when no alias was used.
+fn whatif_completeness(prefix: &str) -> WhatifCompleteness {
+    let mut out = WhatifCompleteness { unanalyzed: Vec::new(), unreadable: Vec::new() };
+    for path in glob_reports(prefix) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        match candor_report::report_unanalyzed(&text) {
+            candor_report::KeyRead::Present(u) => out.unanalyzed.extend(u),
+            candor_report::KeyRead::Absent => {}
+            candor_report::KeyRead::Corrupt => out.unreadable.push(path.display().to_string()),
+        }
+    }
+    out
+}
+
 /// Segment-aware scope match, IDENTICAL to the lint's `scope_matches` (src/lib.rs) so a `whatif` verdict
 /// matches what the policy gate would actually do — `domain` matches `app::domain::f` and `domain_logic`,
 /// but NOT `subdomain`. Keep in lockstep with the lint.
@@ -279,8 +338,20 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
         }
     }
 
+    // ⟨0.24⟩ Did the producing scan see all of the target's own source? SPEC §3.2 (`0075987`) — see
+    // [`WhatifCompleteness`] for why the answer is neither `ok: true` nor `ok: false`.
+    let comp = whatif_completeness(prefix);
+    for p in &comp.unreadable {
+        eprintln!(
+            "candor: report {p} — the `unanalyzed` key is PRESENT but is not a list of `{{ path, reason }}` \
+             (SPEC §2). A key that cannot be READ is corrupt input, never its empty value, and here the \
+             empty value is what licenses `ok` — so this answer is reported INCOMPLETE. Fix the key, or \
+             re-run the scan that wrote it."
+        );
+    }
+
     if want_json {
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "of": targets,
             "effect": effect,
             "affected": affected.iter().collect::<Vec<_>>(),
@@ -296,9 +367,24 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
                     v
                 })
                 .collect::<Vec<_>>(),
-            "ok": violations.is_empty(),
         });
+        // ⟨0.24⟩ SPEC §3.2 `0075987`. `ok` is written ONLY on a document whose `affected` set was
+        // computed over a universe the analysis could see all of — every ordinary run, which therefore
+        // stays byte-identical. Over an incomplete report the key is ABSENT (`if (r.ok)` is falsy and
+        // fails safe) and `incomplete` + the manifest say what was unread instead.
+        if comp.incomplete() {
+            out["incomplete"] = serde_json::json!(true);
+            if !comp.unanalyzed.is_empty() {
+                out["unanalyzed"] = serde_json::json!(comp.unanalyzed);
+            }
+        } else {
+            out["ok"] = serde_json::json!(violations.is_empty());
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        // THE EXIT CODE IS UNCHANGED, and deliberately: `0075987`'s remedy is the DOCUMENT's, and §3.3
+        // enumerates the exit-2 causes for a GATE — this verb is not one, so minting a third here would
+        // make an advisory pre-edit query fail a build. The shell reader keeps the violation count it
+        // always had; the machine reader loses the `ok` it must not be given.
         return if violations.is_empty() { 0 } else { 1 };
     }
 
@@ -307,12 +393,40 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
     for f in &affected {
         println!("      {f}");
     }
+    // ⟨0.24⟩ THE SAME HEDGE ON THE HUMAN CHANNEL (SPEC §3.2 `0075987`). The JSON reader loses `ok`; the
+    // operator would otherwise read an unqualified blast radius and a `✓`, which is the same claim in
+    // prose. Printed BEFORE the verdict, because it qualifies the `affected` list above as much as it
+    // qualifies the verdict below — a caller in an unparsed file is missing from BOTH.
+    if comp.incomplete() {
+        println!(
+            "  ⚠ INCOMPLETE — the report(s) under this locator declare {} unit(s) candor could not analyze,",
+            comp.unanalyzed.len() + comp.unreadable.len()
+        );
+        println!("      so the blast radius above is computed over a universe candor cannot fully see:");
+        for u in &comp.unanalyzed {
+            println!("      {} — {}", u.path, u.reason);
+        }
+        for p in &comp.unreadable {
+            println!("      {p} — its `unanalyzed` manifest could not be read (see above)");
+        }
+        println!("      A caller living in one of those is INVISIBLE here. Re-scan for a complete answer.");
+    }
     if rules.is_none() {
         println!("  (no policy given — pass a policy file or set CANDOR_POLICY for the gate verdict)");
         return 0;
     }
     if violations.is_empty() {
-        println!("  ✓ within policy — this edit introduces no `deny`/`pure` boundary violation.");
+        // The `✓` is withheld on an incomplete report for the reason `ok` is: it is a claim over a set
+        // known to be partial. The weaker sentence is not a hedge for its own sake — it is the only one
+        // the input licenses.
+        if comp.incomplete() {
+            println!(
+                "  · nothing candor COULD SEE violates a `deny`/`pure` boundary — but see the INCOMPLETE \
+                 note above; this is not an all-clear."
+            );
+        } else {
+            println!("  ✓ within policy — this edit introduces no `deny`/`pure` boundary violation.");
+        }
         0
     } else {
         println!("  ⚠ WOULD VIOLATE policy ({}) — run BEFORE the edit:", violations.len());
