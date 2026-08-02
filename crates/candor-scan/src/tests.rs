@@ -7798,6 +7798,59 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// ⟨0.24⟩ now FOUR writes and THREE refusal sets. The new one matters most here: a count-0 report
     /// reaches the entry loop with no entries, so its `hash`-prefix anchor never fires and gating that
     /// anchor alone would have been the exact no-op java measured. Only the closure gates all four.
+    /// EVERY INCOMPLETE-ANALYSIS REFUSAL IS GATED ON HAVING NOTHING TO REPORT — a census, in the shape of
+    /// `coverage_has_exactly_one_anchor_and_exactly_one_consumer` below and for the same reason.
+    ///
+    /// SPEC §3.3.1 has two clauses: *"A configured gate over incompletely-analyzed code MUST fail closed
+    /// (exit ≠ 0); **a real violation (exit 1) still dominates.**"* A refusal written as bare
+    /// `if had_parse_failure { return (2, …) }` implements the first and breaks the second, and the cost
+    /// is not the exit code — on exit 2 the verdict document carries no violations, so the finding is
+    /// **deleted from the artifact a CI consumer reads**.
+    ///
+    /// THIS ENGINE SHIPPED THAT DEFECT TWICE, AT TWO SITES, AND FIXED THEM A WEEK APART. The policy gate
+    /// was corrected on 2026-07-28; the AS-EFF-005 baseline guard — thirty lines up the same function —
+    /// kept the bare form until 2026-08-02, because the first fix wrote its entire reasoning into the
+    /// policy gate's comment and never looked at the other copy. A comment cannot census its siblings.
+    /// This can: the bare form is asserted to appear ZERO times, so a third gate added later cannot
+    /// quietly reintroduce it.
+    ///
+    /// WHY EMPTINESS IS THE RIGHT CONJUNCT rather than "never refuse": a parse failure makes the scan see
+    /// LESS, and these gates fire on effects PRESENT or GAINED, so less evidence can only MASK a violation,
+    /// never manufacture one. A violation found beside unreadable source is therefore real and must be
+    /// reported; a CLEAN gate over unreadable source is the false-pure clause 1 forbids. Both directions
+    /// are live behaviour, pinned by `a_baseline_regression_beside_an_unparseable_file_still_reaches_the_verdict`
+    /// and by conformance PART 29 four-way. This test guards the SHAPE, so the behaviour tests cannot be
+    /// satisfied by a third site nobody wrote one for.
+    #[test]
+    fn every_incomplete_refusal_is_gated_on_having_nothing_to_report() {
+        let scan = include_str!("scan.rs");
+        let count = |hay: &str, needle: &str| hay.matches(needle).count();
+
+        // THE BARE FORM IS THE DEFECT. `if had_parse_failure {` as a refusal condition returns before the
+        // violations exist, which is exactly what both shipped defects did.
+        assert_eq!(count(scan, "if had_parse_failure {"), 0,
+                   "a refusal guarded by `had_parse_failure` ALONE returns before the violations are \
+                    recorded — §3.3.1 says a real violation still dominates, and the document it writes \
+                    carries `violations: []`. Conjoin it with the emptiness test, as both existing gates do");
+
+        // …and the guarded form is what both gates use. Counted, not merely present: if a gate is deleted
+        // this drops and the test says so rather than passing on the survivor.
+        assert_eq!(count(scan, "if had_parse_failure && v.is_empty() {"), 2,
+                   "expected exactly TWO incomplete-refusal sites — the policy gate and the AS-EFF-005 \
+                    baseline guard. A third gate is fine, but it has to be added HERE too, which is the \
+                    whole point of counting");
+
+        // VACUITY FLOOR (standing bar item 8): if a rename makes the patterns unfindable, every assertion
+        // above passes on nothing — including the `== 0`, which is the one that matters most and is also
+        // the easiest to satisfy by accident.
+        assert!(scan.contains("let mut had_parse_failure"),
+                "this test located no `had_parse_failure` at all — it is asserting about source it can no \
+                 longer find, and would go green through the very defect it exists to catch");
+        assert!(count(scan, "had_parse_failure") >= 4,
+                "the flag is set from several places (unparsed files, a failed read, the ⟨0.21⟩ gate) and \
+                 read by two — fewer than four occurrences means this test is looking at the wrong thing");
+    }
+
     #[test]
     fn coverage_has_exactly_one_anchor_and_exactly_one_consumer() {
         let deps = include_str!("deps.rs");
