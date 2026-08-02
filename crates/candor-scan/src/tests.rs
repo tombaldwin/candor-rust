@@ -2035,7 +2035,6 @@ pub fn uses_mod_mock() -> String { let c = deplib::mock::client(); c.send() }
         }
     }
 
-    #[test]
     /// A GENERIC INSTANTIATION IS NOT A WRAPPER, and refusing both cost a whole class of dependency.
     ///
     /// `bound_return_type` used to refuse ANY path carrying a type argument, because one "means a WRAPPER
