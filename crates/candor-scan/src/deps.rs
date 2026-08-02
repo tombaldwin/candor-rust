@@ -321,7 +321,29 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             files.push(canon);
         }
     };
-    for tok in spec.split(':').filter(|t| !t.is_empty()) {
+    // SPLIT ON WHITESPACE, COLON *AND* COMMA — SPEC §3.4 says `deps`/`CANDOR_DEPS` is "whitespace-separated
+    // report paths", and this engine split on `:` alone. A two-path spec therefore arrived as ONE token,
+    // matched no file, and rust chained NOTHING while printing "CANDOR_DEPS entry not found, skipped" and
+    // the ordinary uncovered-package hedge — indistinguishable, in the report, from having been handed no
+    // reports at all.
+    //
+    // FOUND THROUGH A WAIVER THAT NAMED THE WRONG CAUSE. Conformance PART 26's `stale_beside` arm passes
+    // `"<trusted> <stale>"`, and rust's waiver for it read "the key is withdrawn, the effect is gone and
+    // the package is re-declared uncovered" — a precise diagnosis of a mechanism that was not running. The
+    // arm had been measuring rust-with-nothing-chained since it was written. Measured, same fixture:
+    //
+    //     space-separated   go -> []                    nothing chained (this bug)
+    //     colon-separated   go -> ['Exec','Unknown']     the entry union, working
+    //
+    // NOT the cardinal sin — the package is disclosed `invisible` and stderr names the skip, so the
+    // failure is loud. It is a conformance defect, and it was hiding behind a waiver that read as a
+    // soundness finding, which is worse than either on its own.
+    //
+    // candor-java has documented `space/colon/comma` since its loader was written; matching it here makes
+    // the family convention one rule rather than three. Colon and comma are supersets of the spec, not
+    // substitutes for it: an existing colon-separated spec keeps working, which is what every rust
+    // fixture and this engine's own `--deps` output use.
+    for tok in spec.split([' ', '\t', '\n', '\r', ':', ',']).filter(|t| !t.is_empty()) {
         let p = Path::new(tok);
         if p.is_dir() {
             for e in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
