@@ -397,6 +397,50 @@
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// SPEC §3.4 SAYS WHITESPACE, AND THIS ENGINE SPLIT ON `:` ALONE. A two-path `CANDOR_DEPS` therefore
+    /// arrived as ONE token, matched no file, and rust chained NOTHING — while printing "entry not found,
+    /// skipped" and the ordinary uncovered hedge, so the report was indistinguishable from one produced
+    /// with no dep reports at all.
+    ///
+    /// FOUND THROUGH A WAIVER THAT NAMED THE WRONG CAUSE, which is the durable part. Conformance PART 26's
+    /// `stale_beside` arm passes `"<trusted> <stale>"`, and rust's baseline waiver for it read "the key is
+    /// withdrawn, the effect is gone and the package is re-declared uncovered" — a precise description of a
+    /// mechanism that was not running. That arm had been measuring rust-with-nothing-chained since it was
+    /// written, and the waiver made the reading look diagnosed rather than unexamined.
+    ///
+    /// All three separators are asserted because supporting one is what caused this: colon and comma are
+    /// SUPERSETS of the spec (candor-java has documented `space/colon/comma` since its loader was written),
+    /// and every existing rust fixture plus this engine's own `--deps` output uses colon.
+    #[test]
+    fn candor_deps_splits_on_whitespace_as_well_as_colon_and_comma() {
+        let d = std::env::temp_dir().join(format!("candor-depsep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
+        for (file, eff) in [("a.alib.scan.json", "Exec"), ("b.blib.scan.json", "Net")] {
+            let pkg = if eff == "Exec" { "alib" } else { "blib" };
+            std::fs::write(d.join(file), format!(r#"{{
+                "candor": {{"version": "{me}", "toolchain": "s", "spec": "0.24"}},
+                "package": "{pkg}",
+                "functions": [{{"fn": "go", "inferred": ["{eff}"], "hash": "{pkg}#go"}}]}}"#)).unwrap();
+        }
+        let a = d.join("a.alib.scan.json"); let b = d.join("b.blib.scan.json");
+        let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+        for (label, spec) in [("space", format!("{a} {b}")),
+                              ("colon", format!("{a}:{b}")),
+                              ("comma", format!("{a},{b}")),
+                              ("tab",   format!("{a}\t{b}")),
+                              ("mixed", format!("{a} , {b}"))] {
+            let idx = load_dep_reports(Some(&spec));
+            assert_eq!(idx.by_key.get("alib#go").map(|e| e.effects.clone()), Some(BTreeSet::from(["Exec"])),
+                       "{label}-separated CANDOR_DEPS did not chain the FIRST report");
+            assert_eq!(idx.by_key.get("blib#go").map(|e| e.effects.clone()), Some(BTreeSet::from(["Net"])),
+                       "{label}-separated CANDOR_DEPS did not chain the SECOND report — a spec-conforming \
+                        two-path spec must not silently resolve to zero reports");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The shared source for the binder-scoping pair below: a dispatch trait with ONE effectful impl,
     /// so anything that wrongly resolves a shadowed name through `trait_vars` shows up as `Fs`.
     #[cfg(test)]
