@@ -1975,16 +1975,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // toward the one --gate-json verdict; the exit code is the max of the two (2 short-circuits).
     let mut guard_code = 0;
     if let Some(bv) = &baseline_value {
-        // A configured guard over INCOMPLETE analysis (a source file failed to parse) must not
-        // evaluate: the unparsed file's effects are absent, so a clean compare over it is a
-        // false-pure (the same posture as the policy gate below).
-        if had_parse_failure {
-            let why = "baseline guard NOT evaluated — source failed to parse (see above); the guard \
-                       cannot compare unanalyzed code";
-            eprintln!("candor-scan: {why}");
-            crate::gate::record_gate_refusal(why);
-            return (2, json_body);
-        }
+        // NOTE: the incomplete-analysis refusal is INSIDE the `Checked` arm below, not here. It used to
+        // sit at this point — before `check_baseline` ran at all — and that ordering dropped real
+        // findings. See the comment on the refusal for the measurement.
         match check_baseline(bv, dir, &crate_name, &all, &inferred, crate::gate::unknown_ratchet()) {
             BaselineOutcome::Inactive => {} // absent file: noted, exit unchanged
             BaselineOutcome::Invalid => {
@@ -2005,6 +1998,39 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     }
                 }
                 record_gate_violations(&v); // toward the final --gate-json verdict
+                // A configured guard over INCOMPLETE analysis must not certify: the unparsed file's
+                // effects are absent, so a clean compare over it is a false-pure. But **a real
+                // regression still dominates** (SPEC §3.3.1: *"A configured gate over
+                // incompletely-analyzed code MUST fail closed (exit ≠ 0); a real violation (exit 1)
+                // still dominates."*), so the refusal is gated on `v.is_empty()` and sits AFTER the
+                // compare rather than before it.
+                //
+                // MEASURED, and the ordering was the whole defect. This check used to run BEFORE
+                // `check_baseline` was called at all, so a crate with a real AS-EFF-005 regression AND
+                // one unparseable file exited 2 and wrote `{ok:false, incomplete:true, violations: []}`:
+                //
+                //     regression alone              -> exit 1, violations: 1 [AS-EFF-005]
+                //     regression + a parse failure  -> exit 2, violations: 0   <-- the finding, GONE
+                //
+                // The regression is not merely mis-coded, it is ABSENT FROM THE ARTIFACT a CI consumer
+                // reads — a machine-consumer under-report, which is the cardinal sin wearing an exit
+                // code. The POLICY gate below had exactly this defect and it was fixed on 2026-07-28;
+                // this is its sibling site, and the fix did not reach it. Two identical sequences, one
+                // repaired: check the other copy.
+                //
+                // WHY EVALUATING OVER AN INCOMPLETE SCAN IS SAFE IN THE DIRTY DIRECTION, which is what
+                // licenses this: a parse failure makes the new scan see LESS, and AS-EFF-005 fires on
+                // effects GAINED. Less evidence can only MASK a gain, never manufacture one — so a
+                // regression found here is real, while a clean compare is exactly the false-pure the
+                // refusal still exists to prevent. The asymmetry is the argument; without it this would
+                // be trading a dropped finding for a fabricated one.
+                if had_parse_failure && v.is_empty() {
+                    let why = "baseline guard NOT evaluated — source failed to parse (see above); the \
+                               guard cannot compare unanalyzed code";
+                    eprintln!("candor-scan: {why}");
+                    crate::gate::record_gate_refusal(why);
+                    return (2, json_body);
+                }
                 if v.is_empty() {
                     eprintln!("candor-scan: baseline guard ✓ — no function gained an effect (advisory floor: the syntactic backend under-reports)");
                 } else {

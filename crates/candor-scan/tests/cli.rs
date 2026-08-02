@@ -844,6 +844,66 @@ fn baseline_guard_flags_a_gained_effect_exit_1_and_rides_the_gate_json() {
         "AS-EFF-005 joins the structured verdict: {v}");
 }
 
+/// A REAL REGRESSION DOMINATES AN INCOMPLETE SCAN — SPEC §3.3.1, verbatim: *"A configured gate over
+/// incompletely-analyzed code MUST fail closed (exit ≠ 0); **a real violation (exit 1) still
+/// dominates.**"* Both halves, and the second one was missing here.
+///
+/// The incomplete-analysis refusal used to run BEFORE `check_baseline` was called at all, so a crate
+/// carrying a real AS-EFF-005 regression AND one unparseable file exited 2 and wrote
+/// `{ok:false, incomplete:true, violations: []}` — the regression **absent from the artifact** a CI
+/// consumer reads, not merely mis-coded. A machine-consumer under-report wearing an exit code.
+///
+/// THE POLICY GATE HAD EXACTLY THIS DEFECT AND WAS FIXED 2026-07-28; this is its sibling site and the
+/// fix did not reach it. Two identical sequences, one repaired.
+///
+/// BOTH DIRECTIONS ARE ASSERTED, because the refusal is still right when there is nothing to report: a
+/// CLEAN compare over unanalyzed code is the false-pure the refusal exists to prevent, and a fix that
+/// simply dropped the refusal would trade a lost finding for a fabricated all-clear. What licenses
+/// evaluating at all is an ASYMMETRY: a parse failure makes the scan see LESS, and AS-EFF-005 fires on
+/// effects GAINED, so less evidence can only MASK a regression, never manufacture one.
+#[test]
+fn a_baseline_regression_beside_an_unparseable_file_still_reaches_the_verdict() {
+    let d = make_crate("blincomplete", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "recording the baseline is a plain scan");
+    let base = format!("{}.blincomplete.scan.json", pre.to_string_lossy());
+
+    // (a) THE CONTROL: the regression alone must be exit 1 with the finding, or the row below proves
+    //     nothing about incompleteness — it would just be measuring a guard that never fires.
+    std::fs::write(d.join("src/lib.rs"),
+        "pub fn go() { let _ = std::fs::read(\"/x\"); std::process::Command::new(\"sh\").status().unwrap(); }").unwrap();
+    let v1 = d.join("v1.json");
+    let (rc, _, err) = scan_with_baseline(&d, Some(&base), &["--gate-json", v1.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(1), "the control must fire: {err}");
+    let j1: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v1).unwrap()).unwrap();
+    assert_eq!(j1["violations"].as_array().unwrap().len(), 1, "control verdict: {j1}");
+
+    // (b) THE ROW: the same regression, with one file that fails to parse beside it.
+    std::fs::write(d.join("src/broken.rs"), "pub fn broken( {{{ not rust\n").unwrap();
+    let v2 = d.join("v2.json");
+    let (rc, _, err) = scan_with_baseline(&d, Some(&base), &["--gate-json", v2.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(1),
+        "a REAL regression must dominate an incomplete scan (§3.3.1) — exit 2 here reported \
+         'I could not analyse' over 'your code regressed': {err}");
+    let j2: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v2).unwrap()).unwrap();
+    assert!(j2["violations"].as_array().unwrap().iter().any(|gv| gv["rule"] == "AS-EFF-005"),
+        "the regression must be IN THE DOCUMENT, not just on stderr — dropping it is the \
+         machine-consumer under-report: {j2}");
+    assert_eq!(j2["incomplete"], serde_json::json!(true),
+        "…and the incompleteness must ALSO be carried — this is both halves, not a swap: {j2}");
+    assert!(!j2["unanalyzed"].as_array().unwrap().is_empty(), "the unparsed file is named: {j2}");
+
+    // (c) THE OTHER DIRECTION: no regression, same unparseable file. The refusal MUST survive — a clean
+    //     compare over unanalyzed code is a false-pure, and exit 0 here would be the fabricated all-clear.
+    std::fs::write(d.join("src/lib.rs"), "pub fn go() { let _ = std::fs::read(\"/x\"); }").unwrap();
+    let (rc, _, err) = scan_with_baseline(&d, Some(&base), &[]);
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(rc, Some(2),
+        "with nothing to report, the guard must still REFUSE over an incomplete scan: {err}");
+    assert!(err.contains("baseline guard NOT evaluated"), "and say so: {err}");
+}
+
 #[test]
 fn baseline_guard_clean_compare_exits_0_and_new_fns_are_exempt() {
     // No gains → exit 0 with the guard-✓ receipt; and a NEW effectful fn (absent from the baseline)
