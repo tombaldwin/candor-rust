@@ -1928,7 +1928,14 @@ pub fn by_ordinary_call() { deplib::io::fetch(); }
         // `tag` keeps two tests' temp trees APART. Without it both wrote `candor-ts-deplib-<pid>` and,
         // running in parallel in one process, each read the other's crate — standing-bar item 7 in
         // miniature (a stale/foreign output read back as this measurement's result).
-        let d = std::env::temp_dir().join(format!("candor-ts-{tag}-{name}-{}", std::process::id()));
+        // …AND A PER-CALL COUNTER, because tag+name+pid is not unique ENOUGH: cargo runs tests as parallel
+        // THREADS of one process, so `process::id()` is shared, and any two calls agreeing on (tag, name)
+        // race on `remove_dir_all` + `create_dir_all` + `write`. Measured at a 25% failure rate over 20
+        // runs — `write(src/lib.rs)` returning NotFound because a concurrent call had just removed the
+        // tree between this call's `create_dir_all` and its write. Serial (`--test-threads=1`) never failed.
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("candor-ts-{tag}-{name}-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n{manifest_extra}")).unwrap();
