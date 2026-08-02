@@ -383,8 +383,15 @@
         assert_eq!(post.effects, BTreeSet::from(["Db"]));
         assert_eq!(post.tables, BTreeSet::from(["ledger.entries".to_string()]));
         assert!(idx.by_key.contains_key("billing#post"), "unambiguous leaf key");
-        assert!(!idx.by_key.contains_key("billing#dup"), "shared leaf must be dropped, never guessed");
-        assert!(idx.by_key.contains_key("billing#a::dup"), "tail2 still disambiguates the dups");
+        // A SHARED LEAF UNIONS ITS CANDIDATES rather than being dropped. Dropping it took the CALLER out
+        // of `functions` — a ⟨0.21⟩ purity claim over a call that may reach either body. `a::dup` does
+        // `Net` and `b::dup` does `Fs`, so a call the consumer cannot resolve to one of them may do both.
+        assert_eq!(idx.by_key.get("billing#dup").map(|e| e.effects.clone()),
+                   Some(BTreeSet::from(["Fs", "Net"])),
+                   "a shared leaf must union — never guess, but never go silent either");
+        assert_eq!(idx.by_key.get("billing#a::dup").map(|e| e.effects.clone()),
+                   Some(BTreeSet::from(["Net"])),
+                   "tail2 still disambiguates the dups — the union must not reach a key that does not collide");
         let old = idx.by_key.get("old_dep#go").expect("stale entry present");
         assert_eq!(old.effects, BTreeSet::from(["Unknown"]), "stale version must downgrade to Unknown");
         let _ = std::fs::remove_dir_all(&d);
@@ -1010,26 +1017,32 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
     /// other way. SPEC §2.1 is silent: it says only that a version mismatch downgrades the inherited
     /// EFFECTS to `Unknown`, and says nothing about the ledger exemption when two reports disagree.
     ///
-    /// WHY RUST IS RIGHT HERE, and it is not a matter of taste. Coverage is the claim that an ABSENT
-    /// entry is a purity claim (§2 rule 3). rust's index DROPS a key two dep functions share rather
-    /// than picking — the never-guess rule — so when a fresh and a stale report both carry a function,
-    /// the key is withdrawn and a consumer's call resolves to NOTHING. Grant that package coverage and
-    /// the call reads confidently PURE: a real effect, in the fresh report, silently gone. Withholding
-    /// coverage is the only thing standing between that collision and a false all-clear, which is why
-    /// this test asserts the effect is DISCLOSED and not merely that a flag is set.
+    /// TWO ARGUMENTS USED TO HOLD THIS UP. ONE OF THEM IS NOW DEAD, AND THE HEDGE STAYS ON THE OTHER.
     ///
-    /// java and ts can afford fresh-wins because their entry-level conflict keeps an answer: java's
-    /// `crossDeps.put` is last-wins (one of the two survives) and ts merges into a Set (the fresh
-    /// effects AND the stale `Unknown`). Neither can reach "no answer at all". The divergence is
-    /// therefore downstream of a design choice the spec leaves open, not a defect in one engine.
-    /// **candor-swift drops the colliding key exactly as rust does (`Deps.swift` `insert`) AND resolves
-    /// coverage fresh-wins, so the shape above should be checked there** — not done here, since it is
-    /// another engine's repo and another engine's measurement.
+    /// **The dead one — withdrawal.** This test used to argue: rust's index DROPS a key two dep functions
+    /// share, so a fresh-plus-stale collision resolves to NOTHING; grant the package coverage and the call
+    /// reads confidently PURE with the fresh report's effect silently gone. Withholding coverage was "the
+    /// only thing standing between that collision and a false all-clear". Entries are UNIONED now
+    /// (ENTRY-COLLISION-DECISION.md), the collision resolves, and that argument no longer describes the
+    /// engine. Left visible rather than deleted, because a fixture whose stated reason has quietly expired
+    /// is how a guard turns into a habit.
     ///
-    /// TO FLIP THIS, if a four-way ruling goes the other way: make `cover` in `deps.rs` subtract
-    /// `untrusted` from the fresh names at the end of the load (the ts/swift shape), and the first
-    /// assertion below inverts. Do not flip it without also fixing the colliding-key half, or this
-    /// fixture becomes a demonstration of a silent under-report rather than a guard against one.
+    /// **The surviving one — coverage cannot tell versions apart.** From `DepIndex::untrusted`'s own doc:
+    /// *a fresh report for part of a crate cannot vouch for the part the stale one covered.* Coverage is
+    /// keyed by package NAME, and the whole reason two reports collide here is that the name spans two
+    /// VERSIONS. Granting coverage on the fresh report's authority would certify the silence of a version
+    /// nothing trusted ever analyzed: a function present only in the stale version, absent from both
+    /// reports because the stale one judged it pure, would read pure on the authority of a report that
+    /// never saw it. That is independent of how collisions resolve, so the union does not touch it.
+    ///
+    /// java and ts can afford fresh-wins because their entry-level conflict always keeps an answer.
+    /// **candor-swift drops the colliding key exactly as rust did (`Deps.swift` `insert`) AND resolves
+    /// coverage fresh-wins — that pairing is the unsound one and it is the open swift row.**
+    ///
+    /// TO FLIP THIS, a four-way ruling would have to answer the version argument above, not the
+    /// withdrawal one: it needs coverage keyed finer than the package name, or an explicit decision that a
+    /// stale report's silence may speak. A one-line subtraction in `cover` is the mechanism, but it is no
+    /// longer the whole question.
     #[test]
     fn a_package_chained_both_fresh_and_stale_keeps_its_blind_spot_disclosure() {
         let d = std::env::temp_dir().join(format!("candor-duallib-{}", std::process::id()));
@@ -1060,11 +1073,15 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
                 "a package one of whose reports failed the §2.1 check lost its untrusted mark — see the \
                  doc comment before aligning this with java/ts/swift");
         assert!(!idx.untrusted.contains("solo"), "the control package must stay trusted");
-        // The premise, asserted rather than assumed: the shared key really is withdrawn, so the fresh
-        // report's `Exec` is NOT recoverable from the index.
-        assert!(!idx.by_key.contains_key("duallib#io::go"),
-                "the collision resolved to an answer — if this ever changes, the argument above changes \
-                 with it and fresh-wins may become safe");
+        // THE PREMISE, ASSERTED RATHER THAN ASSUMED — and it has INVERTED since this test was written.
+        // The shared key now resolves: entries are unioned, so the fresh report's `Exec` survives beside
+        // the stale report's §2.1 `Unknown` downgrade. The hedge below is kept all the same, and the
+        // doc comment above says which of the two arguments for it died with the withdrawal.
+        assert_eq!(idx.by_key.get("duallib#io::go").map(|d| d.effects.clone()),
+                   Some(BTreeSet::from(["Exec", "Unknown"])),
+                   "the trusted report's `Exec` and the distrusted report's `Unknown` must BOTH survive: \
+                    the union is what stops a report we refused to believe from erasing a fact from one we \
+                    do, and what stops the collision from erasing both");
 
         let v = scan_crate_chained("duallib", "consumer",
             "\n[dependencies]\nduallib = \"1\"\nsolo = \"1\"\n",
@@ -1339,18 +1356,19 @@ pub fn unlisted_whole() { wholelib::io::danger(); }
         assert!(probe("3"), "a number completeness claim cannot be read — fail closed");
     }
 
-    /// A CRATE CHAINED BOTH COMPLETE AND INCOMPLETE: rust does NOT let the complete report win, and the
-    /// refusal is the same one `63bbe87` measured for fresh-vs-stale. candor-swift subtracts
-    /// (`incompletePkgs.subtract(coveredPkgs)`) and java re-registers per report; rust keeps the
-    /// conservative answer, because rust's index DROPS a key two dep entries disagree under. Grant the
-    /// crate coverage on the complete report's authority and a disagreeing key resolves to NOTHING and
-    /// reads confidently PURE — a false all-clear manufactured by the reconciliation. Two versions of one
-    /// crate in a Cargo tree is routine (7 of 167 dep reports in candor-rust's own tree, 30 of 378 in
-    /// ebman's) and the crate NAME cannot tell them apart, so this is the shape that actually occurs.
+    /// A CRATE CHAINED BOTH COMPLETE AND INCOMPLETE: rust does NOT let the complete report win.
+    /// candor-swift subtracts (`incompletePkgs.subtract(coveredPkgs)`) and java re-registers per report.
     ///
-    /// TO FLIP THIS, if a four-way ruling goes the other way: `idx.incomplete_pkgs.subtract(&idx.crates
-    /// covered by a complete report)` at the end of the load — and fix the colliding-key half first, or
-    /// this fixture becomes a demonstration of a silent under-report instead of a guard against one.
+    /// SAME TWO ARGUMENTS AS ITS FRESH-VS-STALE SIBLING, and the same one has expired — see
+    /// `a_package_chained_both_fresh_and_stale_keeps_its_blind_spot_disclosure` for the full statement.
+    /// The withdrawal argument ("a disagreeing key resolves to NOTHING, so granting coverage manufactures
+    /// a false all-clear") is gone: entries are unioned now and the key resolves. What survives is that
+    /// coverage is keyed by crate NAME while the collision exists precisely BECAUSE the name spans two
+    /// versions — routine in a Cargo tree, 7 of 167 dep reports in candor-rust's own and 30 of 378 in
+    /// ebman's — so a complete report cannot certify the silence of the version it never read.
+    ///
+    /// TO FLIP THIS, answer the version argument, not the withdrawal one. The mechanism is still
+    /// `idx.incomplete_pkgs.subtract(…)` at the end of the load; the mechanism was never the hard part.
     #[test]
     fn a_crate_chained_both_complete_and_incomplete_keeps_its_blind_spot_disclosure() {
         let d = std::env::temp_dir().join(format!("candor-dualcomplete-{}", std::process::id()));
@@ -1373,10 +1391,15 @@ pub fn unlisted_whole() { wholelib::io::danger(); }
         assert!(idx.incomplete_pkgs.contains("duolib"),
                 "a crate one of whose reports declares itself incomplete must keep the hedge — see the \
                  doc comment before aligning this with java/swift");
-        // The premise, asserted rather than assumed: the shared key really is withdrawn.
-        assert!(!idx.by_key.contains_key("duolib#io::go"),
-                "the collision resolved to an answer — if this ever changes the argument above changes \
-                 with it and complete-wins may become safe");
+        // THE PREMISE, INVERTED with the union: the shared key resolves. An INCOMPLETE report's entries
+        // are kept verbatim rather than downgraded (that is the ⟨0.21⟩ treatment, and the difference from
+        // staleness is the whole point), so the union here is `Exec` from the whole report with nothing
+        // added by the broken one — which is exactly right, since `inferred: []` contributes no effect.
+        assert_eq!(idx.by_key.get("duolib#io::go").map(|d| d.effects.clone()),
+                   Some(BTreeSet::from(["Exec"])),
+                   "the complete report's `Exec` must survive the collision — withdrawing the key dropped \
+                    it, and with the crate hedged the caller kept only a blind-spot note where it should \
+                    carry the effect itself");
         let v = scan_crate_chained("dualcomplete", "consumer", "\n[dependencies]\nduolib = \"1\"\n",
             "pub fn hits_duo() { duolib::io::go(); }\n", &idx);
         let duo = v["functions"].as_array().into_iter().flatten()
@@ -1688,10 +1711,12 @@ pub fn go() { helper(); }
         // PRECISELY (`deplib#sync::Client::fetch`) had no key to ask on and had to settle for tail2 —
         // where `sync::Client` and `mock::Client` are the same string. The full qual is the third key.
         //
-        // The SECOND direction is the one that can go wrong (standing bar item 0): a 1- or 2-segment
-        // qual's "full qual" IS its leaf/tail2 string, so an undeduped push would self-collide and the
-        // never-guess rule would DROP a key that worked before — a silent under-report introduced by a
-        // purely additive change. Both are asserted here.
+        // The SECOND direction is the one that could go wrong (standing bar item 0): a 1- or 2-segment
+        // qual's "full qual" IS its leaf/tail2 string, so an undeduped push self-collides. Under the
+        // never-guess rule that DROPPED a key that worked before — a silent under-report introduced by a
+        // purely additive change. The entry union has since made that accident harmless (unioning an entry
+        // with itself is the identity), so these two rows now guard the dedup as a COST property rather
+        // than a soundness one. Kept asserted because a reader should not have to re-derive which it is.
         let d = std::env::temp_dir().join(format!("candor-fullqual-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::create_dir_all(&d);
@@ -1710,9 +1735,32 @@ pub fn go() { helper(); }
                    Some(BTreeSet::from(["Net"])), "full-qual key missing for the effectful module's Client::fetch");
         assert_eq!(idx.by_key.get("deplib#mock::Client::fetch").map(|e| e.effects.clone()),
                    Some(BTreeSet::new()), "full-qual key missing for the pure module's Client::fetch");
-        // and the imprecise shapes still refuse to guess between the two, as before.
-        assert!(!idx.by_key.contains_key("deplib#Client::fetch"), "a shared tail2 must stay dropped");
-        assert!(!idx.by_key.contains_key("deplib#fetch"), "a shared leaf must stay dropped");
+        // …and the imprecise shapes UNION the candidates rather than withdrawing them. MEASURED on the
+        // binary, same fixture, the `by_key` rule the only difference: a consumer calling an unresolvable
+        // `deplib::fetch()` was ABSENT FROM `functions` ENTIRELY — zero entries, no `Unknown`, no
+        // `invisible`, no hedge of any kind — while the call may reach `sync::Client::fetch` and its `Net`.
+        // Under ⟨0.21⟩ that absence is a positive purity claim: the cardinal sin, on the imprecise key,
+        // inside ONE report. After: `inferred: ["Net"]`.
+        //
+        // THIS IS A DIFFERENT POPULATION FROM THE ONE ENTRY-COLLISION-DECISION.md MEASURED, which is why
+        // the union is applied here too rather than only across reports. That note's corpus evidence — every
+        // disagreement is one function at two crate VERSIONS, so the union is the correct answer rather than
+        // a hedge — was collected ACROSS reports. This collision is WITHIN one: two genuinely different
+        // functions sharing a leaf, the case the note reserved as the union's real cost. The measurement
+        // above says both populations carry the same defect, so both take the same rule.
+        //
+        // AND IT IS NOT THE FABRICATION MIRROR. Charging `Net` to an unresolved `deplib::fetch()` is not a
+        // wrong answer, it is the honest over-approximation of a call whose target the consumer cannot
+        // determine — the runtime may reach either body. The precision that matters is preserved by the KEY
+        // SCHEME rather than by withdrawal: a consumer that CAN name its target asks the full qual and still
+        // gets `[]` for the pure one, which is exactly what the two assertions above pin.
+        assert_eq!(idx.by_key.get("deplib#Client::fetch").map(|e| e.effects.clone()),
+                   Some(BTreeSet::from(["Net"])),
+                   "a shared tail2 must UNION its candidates — withdrawing it made the caller vanish from \
+                    `functions`, a purity claim over a call that may reach `Net`");
+        assert_eq!(idx.by_key.get("deplib#fetch").map(|e| e.effects.clone()),
+                   Some(BTreeSet::from(["Net"])),
+                   "a shared leaf must UNION its candidates, for the same reason as the tail2");
         // 2. the SECOND direction: a short qual whose full qual EQUALS its tail2 / leaf must keep the
         //    key it already had — the dedup, not a self-collision that removes it.
         assert_eq!(idx.by_key.get("deplib#Root::only").map(|e| e.effects.clone()), Some(BTreeSet::from(["Fs"])),
@@ -7653,10 +7701,20 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     }
 
     #[test]
-    fn two_entries_that_disagree_under_one_key_are_still_withdrawn() {
-        // THE SECOND DIRECTION, and it is the one that keeps the never-guess rule intact: relaxing the
-        // withdrawal to "keep the first" would let a leaf collision between two DIFFERENT dep functions
-        // charge one's effects to the other. Only an identical restatement is exempt.
+    fn two_entries_that_disagree_under_one_key_are_unioned() {
+        // THE FAMILY-WIDE ENTRY-COLLISION RULE (candor-spec/ENTRY-COLLISION-DECISION.md): two entries
+        // under one key are UNIONED — never withdrawn, never picked between.
+        //
+        // THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is the decision, not a regression. It
+        // read `..._are_still_withdrawn` and defended withdrawal on the grounds that keeping either entry
+        // would charge one dep function's effects to another. What that argument missed is the price:
+        // withdrawal removes the key, so the CALLER drops out of `functions`, and under ⟨0.21⟩ an absent
+        // entry is a positive claim of purity. It traded a precision loss for the cardinal sin.
+        //
+        // Measured across candor-rust/pgman/ebman, the union costs SEVEN effect-items in total and closes
+        // 123 purity claims, and every measured disagreement is one function at two VERSIONS of one crate
+        // (both bodies in the build, so the union is the correct answer rather than a hedge). The live
+        // instance is `hyper#client::conn::http1::Builder::handshake` — `['Log']` @0.14.32 vs `[]` @1.9.0.
         let dep = std::env::temp_dir().join(format!("candor-dupkey-dis-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dep);
         std::fs::create_dir_all(&dep).unwrap();
@@ -7671,8 +7729,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         std::fs::write(dep.join("b.deplib.scan.json"), two).unwrap();
         let idx = load_dep_reports(Some(dep.to_str().unwrap()));
         let _ = std::fs::remove_dir_all(&dep);
-        assert!(!idx.by_key.contains_key("deplib#work"),
-                "two entries claiming DIFFERENT effects under one key must still be withdrawn — never guess");
+        assert_eq!(idx.by_key.get("deplib#work").map(|d| d.effects.clone()),
+                   Some(BTreeSet::from(["Exec", "Net"])),
+                   "two entries claiming DIFFERENT effects under one key must UNION — withdrawing the key \
+                    takes the CALLER out of `functions`, which under ⟨0.21⟩ is a purity claim over a call \
+                    that reaches both");
     }
 
     /// THE ANCHOR COUNT IS A CLAIM ABOUT THE SOURCE, SO THE SOURCE IS WHAT ANSWERS IT.
@@ -7739,13 +7800,19 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                  downgrades entries, it does not stop the join), and this test is about COVERAGE");
     }
 
-    /// THE SECOND DIRECTION AGAIN, one notch finer, and it is the one a set-equality relaxation can
-    /// walk past: two entries that AGREE ON EFFECTS and differ in a literal SURFACE. That is the
-    /// majority of real collisions (1536 of 2041 on pgman's dep tree, 2255 of 3276 on ebman's) and
-    /// merging them is a measured 12–20% disclosure increase, deliberately NOT taken. Written before
-    /// the exemption was widened, so the widening had something to fail against.
+    /// ONE NOTCH FINER, and it is the majority case: two entries that AGREE ON EFFECTS and differ only in
+    /// a literal SURFACE — 1536 of 2041 collisions on pgman's dep tree, 2255 of 3276 on ebman's.
+    ///
+    /// THIS TEST ALSO INVERTED, and the reason it was written the other way is worth keeping. Withdrawal
+    /// treated a surface difference as a disagreement and dropped the key, so the commonest collision
+    /// there is took the caller out of `functions` over effects the two entries AGREED ON. The cost of
+    /// merging them was recorded as "a 12–20% disclosure increase, deliberately not taken" — and that
+    /// number is real but it was read as noise. It is the fix working: the functions that newly carry
+    /// `Unknown` are ones whose keys were being dropped silently, so what changed is not that they became
+    /// less certain, it is that their uncertainty is now SAID. Absence was never the cheaper answer; it
+    /// was the same uncertainty spelled as a purity claim.
     #[test]
-    fn two_entries_agreeing_on_effects_but_not_on_surfaces_are_still_withdrawn() {
+    fn two_entries_agreeing_on_effects_but_not_on_surfaces_are_unioned() {
         let dep = std::env::temp_dir().join(format!("candor-dupkey-surf-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dep);
         std::fs::create_dir_all(&dep).unwrap();
@@ -7757,9 +7824,15 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         std::fs::write(dep.join("b.deplib.scan.json"), mk("b.example.com")).unwrap();
         let idx = load_dep_reports(dep.to_str());
         let _ = std::fs::remove_dir_all(&dep);
-        assert!(!idx.by_key.contains_key("deplib#work"),
-                "two entries naming DIFFERENT hosts under one key agree about `Net` and disagree about \
-                 WHERE — still a disagreement, still withdrawn. Only a restatement is exempt");
+        let e = idx.by_key.get("deplib#work").expect(
+            "two entries naming DIFFERENT hosts under one key AGREE about `Net` — withdrawing the key over \
+             a surface difference dropped the caller from `functions` entirely, a purity claim over an \
+             effect neither entry disputed");
+        assert_eq!(e.effects, BTreeSet::from(["Net"]), "the effect both entries stated");
+        assert_eq!(e.hosts,
+                   BTreeSet::from(["a.example.com".to_string(), "b.example.com".to_string()]),
+                   "BOTH hosts must survive: the surfaces union for the same reason the effects do — each \
+                    is reachable, so naming only one would under-report WHERE the `Net` goes");
     }
 
     /// …AND THE EXEMPTION MUST BE ABOUT THE CLAIM, NOT ITS SERIALISATION. `6f2210c` compared two

@@ -46,13 +46,20 @@ pub(crate) fn scan_builder_entry_effect(_cr: &str, path: &str) -> Option<&'stati
 ///
 /// EVERY FIELD IS A SET, AND THAT IS LOAD-BEARING RATHER THAN TIDY. `apply_dep_fn` folds all eight
 /// into `BTreeSet`s, so the join's result is invariant under the ORDER and the MULTIPLICITY of every
-/// one of them — the serialisation carries no information the consumer can use. The index's
-/// never-guess rule withdraws a key two entries DISAGREE under and exempts a restatement, and that
-/// exemption is decided by `PartialEq`: derived on a `Vec` it is order- and duplicate-sensitive, so
-/// two entries stating one claim in different orders read as a disagreement, the key is withdrawn,
-/// and under ⟨0.21⟩ the consumer's silence is a purity claim — the cardinal sin `6f2210c` closed,
-/// re-opened for any producer that happens to serialise a vector differently. Stating it in the TYPE
-/// rather than in the comparison is what stops a field added later from re-opening it silently.
+/// one of them — the serialisation carries no information the consumer can use.
+///
+/// It is now what makes `union_with` below TOTAL: two entries colliding under one index key are
+/// unioned field-by-field rather than one being chosen or the key withdrawn (see the merge site and
+/// candor-spec/ENTRY-COLLISION-DECISION.md). Being sets is what makes that union associative,
+/// commutative and idempotent, so the index is invariant under the ORDER the reports are loaded in —
+/// which is precisely the property java's `deny Fs` flip lacked: there, renaming a dep report file
+/// changed the effect the consumer saw.
+///
+/// Historically this doc argued the same point about `PartialEq`: withdrawal exempted an identical
+/// restatement, that exemption was decided by `PartialEq`, and derived on a `Vec` it would have been
+/// order-sensitive — so two entries stating one claim in different orders read as a DISAGREEMENT and
+/// the key was withdrawn, a purity claim under ⟨0.21⟩. That hazard is now structural rather than
+/// guarded: nothing is withdrawn, so no serialisation accident can manufacture one.
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct DepFn {
     pub(crate) effects: BTreeSet<&'static str>,
@@ -72,6 +79,32 @@ pub(crate) struct DepFn {
     /// vocabulary (a conforming producer wrote them) and `dispatch:<owner>.<member>` carries a NORMATIVE
     /// detail that a consumer needs to resolve overrides — re-deriving would destroy exactly that.
     pub(crate) unknown_why: BTreeSet<String>,
+}
+
+impl DepFn {
+    /// Fold another entry for the SAME index key into this one — the family-wide entry-collision rule
+    /// (candor-spec/ENTRY-COLLISION-DECISION.md), replacing withdrawal.
+    ///
+    /// EVERY FIELD, NOT JUST `effects`. That is the measured half of the decision: withdrawal discarded
+    /// the whole entry, and the κ ledger (`invisible`) and the call edges (`calls`, applied by the
+    /// caller) disagree far more often than the effects do — 30/37/273 and 57/120/326 against
+    /// `inferred`'s 2/8/113 on candor-rust/pgman/ebman. A union that covered only `effects` would keep
+    /// closing the purity claim while still dropping the disclosure that says what was not analyzed.
+    ///
+    /// EXHAUSTIVE BY DESTRUCTURING, so a field added later cannot silently opt out of the union and
+    /// re-open the vein — the compiler names it here. This is the same reason the fields are sets: the
+    /// invariant belongs in a place a later edit has to walk past, not in a comment.
+    pub(crate) fn union_with(&mut self, other: &DepFn) {
+        let DepFn { effects, hosts, cmds, paths, tables, invisible, incomplete, unknown_why } = other;
+        self.effects.extend(effects.iter().copied());
+        self.hosts.extend(hosts.iter().cloned());
+        self.cmds.extend(cmds.iter().cloned());
+        self.paths.extend(paths.iter().cloned());
+        self.tables.extend(tables.iter().cloned());
+        self.invisible.extend(invisible.iter().cloned());
+        self.incomplete.extend(incomplete.iter().copied());
+        self.unknown_why.extend(unknown_why.iter().cloned());
+    }
 }
 
 /// The mutable per-function surface maps a chained dep entry is folded into. Exists only so
@@ -273,10 +306,13 @@ pub(crate) fn declares_itself_incomplete(v: &serde_json::Value) -> bool {
 pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     let mut idx = DepIndex::default();
     let Some(spec) = spec else { return idx };
-    // Canonical-path dedup: the same report loaded twice would self-collide on every key and be
+    // Canonical-path dedup: the same report loaded twice used to self-collide on every key and be
     // dropped as 'ambiguous', silently killing the chain (review: --deps + CANDOR_DEPS=.candor/deps
-    // — the natural combination — did exactly that). Directories walk RECURSIVELY: --deps writes
-    // one subdirectory per name@version.
+    // — the natural combination — did exactly that). The entry union has since made that particular
+    // accident harmless (unioning an entry with itself is the identity), so this is now a COST guard
+    // rather than a correctness one: parsing and folding every report twice is pure waste. Kept for
+    // that reason, and because a reader should not have to re-derive which of the two it is.
+    // Directories walk RECURSIVELY: --deps writes one subdirectory per name@version.
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     let mut seen_files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     let mut push_file = |f: std::path::PathBuf, files: &mut Vec<std::path::PathBuf>| {
@@ -302,7 +338,10 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         }
     }
     let my_version = format!("scan-{}", env!("CARGO_PKG_VERSION"));
-    let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // NOTE: there is no `ambiguous` set any more. The ENTRY index unions colliding keys and withdraws
+    // nothing, so nothing needs remembering as poisoned. `ret_ambiguous` below is the RETURN-TYPE index,
+    // which is a different question and still withdraws: guessing a receiver type fabricates a call
+    // target, whereas the fallback is half 1's disclosure rather than silence.
     let mut ret_ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in &files {
         let Ok(text) = std::fs::read_to_string(f) else {
@@ -606,49 +645,46 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             }
             push_key(format!("{krate}#{qual}"), &mut keys);
             for k in keys {
-                if ambiguous.contains(&k) {
-                    continue;
-                }
-                // Not the `entry` API: a collision REMOVES the key (and remembers it as ambiguous),
-                // so the present-vs-absent branches move `k` into different maps — clippy's map_entry
-                // rewrite (insert-or-modify in place) can't express the remove-on-collision.
-                #[allow(clippy::map_entry)]
-                if let Some(prev) = idx.by_key.get(&k) {
-                    // THE NEVER-GUESS RULE IS ABOUT DISAGREEMENT, NOT REPETITION. Withdrawing a key two
-                    // entries share is right when they say DIFFERENT things — there is no way to choose and a
-                    // wrong choice fabricates. It is wrong when they are IDENTICAL: nothing is ambiguous, and
-                    // withdrawing turns a resolved effect into an ABSENT one, which under ⟨0.21⟩ is a positive
-                    // purity claim. MEASURED before the fix: one report chained gives the consumer `['Exec']`;
-                    // the SAME report chained TWICE gives ABSENT with no coverage hedge — a cardinal sin
-                    // reachable by the most ordinary accident there is, a dep directory holding two copies of
-                    // one report. Found by candor-swift's fresh-vs-stale fixture, which hit it and flagged it
-                    // for rust and java to check; java is CLEAN (its entry conflict is last-wins, so it keeps
-                    // an answer), rust withdrew.
-                    //
-                    // DELIBERATELY ONLY THE IDENTICAL CASE. Entries that AGREE ON EFFECTS but differ in their
-                    // literal surfaces are the majority of real collisions (1536 of 2041 on pgman's dep tree,
-                    // 2255 of 3276 on ebman's) and merging those is arguably right too — but measured, it
-                    // makes 24 of pgman's 200 functions and 108 of ebman's 544 newly carry `Unknown`, because
-                    // the entries being recovered are ones the dependency itself could not resolve. That is a
-                    // 12-20% disclosure increase and a design decision, not a tail on a bug fix; it is filed
-                    // in the work queue with these numbers rather than taken here.
-                    //
-                    // AND "IDENTICAL" MEANS THE CLAIM, NOT ITS SERIALISATION — which is why every `DepFn`
-                    // field is a `BTreeSet` (see the type). Derived `PartialEq` on a `Vec` compares
-                    // element-wise and order-sensitively, so two entries stating one claim in different
-                    // orders, or one of them restating a host, read as a DISAGREEMENT here and the key is
-                    // withdrawn: the same cardinal sin this exemption exists to close, surviving for any
-                    // producer that happens to order a vector differently. `apply_dep_fn` folds every field
-                    // into a set, so set equality is not a relaxation of never-guess — two set-equal entries
-                    // are operationally indistinguishable and there is nothing to choose between.
-                    if prev == &de {
-                        continue; // the same claim restated — keep the entry, withdraw nothing
-                    }
-                    idx.by_key.remove(&k); // two dep fns DISAGREE under one key — drop it, never guess
-                    ambiguous.insert(k);
-                } else {
-                    idx.by_key.insert(k, de.clone());
-                }
+                // TWO ENTRIES UNDER ONE KEY ARE UNIONED — never withdrawn, never picked between.
+                // Decided family-wide in candor-spec/ENTRY-COLLISION-DECISION.md after measuring all four
+                // engines against three real `.candor/deps` trees, and this is the arm that was unsound.
+                //
+                // WHAT THIS REPLACES: withdrawal. Two entries disagreeing under one key used to REMOVE the
+                // key, so the calling function vanished from `functions` entirely — which under ⟨0.21⟩ is
+                // a positive claim of purity, the cardinal sin. Named live instance on one of the
+                // most-depended-upon crates there is:
+                //
+                //     hyper#client::conn::http1::Builder::handshake  ['Log'] @0.14.32  vs  [] @1.9.0
+                //
+                // Both hyper versions are legitimately in the tree (cargo permits semver-major
+                // duplicates), rust withdrew the key, and the consumer read it as ABSENT = pure.
+                //
+                // WHY UNION IS NOT A HEDGE HERE. The objection to unioning is that two entries under one
+                // key may be two DIFFERENT functions that merely collide, so the union charges one's
+                // effects to the other — a fabrication, and that is exactly why this withdrew. Measured,
+                // that objection describes NOTHING in the corpus: every one of the 123 disagreements
+                // across candor-rust/pgman/ebman is one function at two VERSIONS of one crate
+                // (thiserror-impl 1.x/2.x, rustix 0.38/1.1, http 0.2/1.4, hyper 0.14/1.9). For a version
+                // pair the union is not an over-approximation, it is the CORRECT answer: both bodies are
+                // in the build, the package-scoped key cannot express which one a caller resolves to, so
+                // the runtime may execute either and their union is simply what the key means. Total cost
+                // of the union across all three corpora: SEVEN effect-items, to close 123 purity claims.
+                //
+                // WITHDRAWING COST MORE THAN THE EFFECTS, which is what made this a whole-entry fix rather
+                // than an effects one. The key carries the κ ledger and the call edges too, and both
+                // disagree far more often than `inferred` does (`invisible` 30/37/273, `calls` 57/120/326
+                // against `inferred`'s 2/8/113). Withdrawal discarded all of it at once — including the
+                // coverage disclosure whose entire job is to say what was NOT analyzed. `direct` and
+                // `unknownWhy` union at zero measured cost in every corpus: one side is always a subset of
+                // the other, so the union is just "the one that said something".
+                //
+                // THE IDENTICAL-RESTATEMENT EXEMPTION IS NOW SUBSUMED rather than special-cased. It used to
+                // be a separate `prev == &de` branch guarding against a dep directory holding two copies of
+                // one report; unioning a set with itself is already the identity, so the case needs no arm.
+                // That is also why the `PartialEq`-on-`BTreeSet` reasoning in `DepFn`'s doc comment is no
+                // longer load-bearing for soundness — a producer serialising a vector in a different order
+                // can no longer manufacture a "disagreement" that withdraws a key.
+                idx.by_key.entry(k).or_default().union_with(&de);
             }
         }
     }
