@@ -4,6 +4,24 @@ All notable changes to candor are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
+## Unreleased — ⟨spec 0.26⟩
+
+### ⟨0.26⟩ THE HIERARCHY SIDECAR'S KEY SET IS ITS MANIFEST — consumer half
+
+SPEC §2.2 `4cae735`. `is_subtype_of` is now the two-valued face of a three-valued `subtype_of`:
+`hier.get(t)` returning `None` used to skip the frame in silence, so "indexed, no supertypes" and "never
+analysed" both answered `false` — a positive claim about a type nobody analysed, which drops a reacher
+from the `callers --include-unknown` frontier with no diagnostic. Unanswerable now collapses to TRUE at
+the call site: over-list, never drop. A POSITIVE still DOMINATES an unknown branch.
+
+This engine is CONSUMER-ONLY — candor-scan writes no hierarchy sidecar — so every hierarchy it walks came
+from candor-java or candor-ts. The producer's completeness is never this engine's to assume, which is what
+makes the tri-state load-bearing here.
+
+MEASURED: with a sidecar missing one key on the path, the frontier answered `[]`; with NO sidecar at all
+it answered correctly. **Partial information was worse than none.** Pinned by conformance PART 30 (P6),
+verified to catch both by restoring the silent `continue` and by a stub that never answers No.
+
 ## [0.25.0] — 2026-08-02
 
 ⟨spec 0.25⟩ **Floor bump only — no behaviour change in this engine.** SPEC §2 chaining rule 1 now states
@@ -11,7 +29,6 @@ that an ambiguous join key is UNIONED rather than dropped; this engine already i
 (conformance PARTs 25/26 pin it four-way), so 0.25 records the contract catching up with the code. See
 candor-spec/CHANGELOG.md for the measurement and the reversal note.
 
-## Unreleased
 
 ### ⟨0.24⟩ "PROVABLY clean" over a report declaring source candor could not read
 
