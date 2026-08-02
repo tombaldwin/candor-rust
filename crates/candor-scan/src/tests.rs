@@ -420,7 +420,7 @@
         for (file, eff) in [("a.alib.scan.json", "Exec"), ("b.blib.scan.json", "Net")] {
             let pkg = if eff == "Exec" { "alib" } else { "blib" };
             std::fs::write(d.join(file), format!(r#"{{
-                "candor": {{"version": "{me}", "toolchain": "s", "spec": "0.25"}},
+                "candor": {{"version": "{me}", "toolchain": "s", "spec": "0.26"}},
                 "package": "{pkg}",
                 "functions": [{{"fn": "go", "inferred": ["{eff}"], "hash": "{pkg}#go"}}]}}"#)).unwrap();
         }
@@ -1512,12 +1512,12 @@ pub fn unlisted_whole() { wholelib::io::danger(); }
         let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
         // The two reports differ in ONE INTEGER and in nothing else. That is the whole experiment.
         std::fs::write(d.join("report.facadelib.scan.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.25"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.26"}},
             "package": "facadelib",
             "analyzed": {{"count": 0, "digest": "0"}},
             "functions": []}}"#)).unwrap();
         std::fs::write(d.join("report.purelib.scan.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.25"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.26"}},
             "package": "purelib",
             "analyzed": {{"count": 2, "digest": "0"}},
             "functions": []}}"#)).unwrap();
@@ -1625,12 +1625,12 @@ pub fn hits_pure() { purelib::io::go(); }
         std::fs::create_dir_all(&d).unwrap();
         let me = format!("scan-{}", env!("CARGO_PKG_VERSION"));
         std::fs::write(d.join("report.real.twolib.scan.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.25"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.26"}},
             "package": "twolib",
             "analyzed": {{"count": 4, "digest": "0"}},
             "functions": [{{"fn": "io::go", "inferred": ["Exec"], "hash": "twolib#io::go"}}]}}"#)).unwrap();
         std::fs::write(d.join("report.stub.twolib.scan.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.25"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.26"}},
             "package": "twolib",
             "analyzed": {{"count": 0, "digest": "0"}},
             "functions": []}}"#)).unwrap();
@@ -1666,7 +1666,7 @@ pub fn hits_pure() { purelib::io::go(); }
             "candor": {"version": "scan-0.0.1", "toolchain": "stable", "spec": "0.3"},
             "package": "oldstub", "analyzed": {"count": 0, "digest": "0"}, "functions": []}"#).unwrap();
         std::fs::write(d.join("report.brokestub.scan.json"), format!(r#"{{
-            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.25"}},
+            "candor": {{"version": "{me}", "toolchain": "stable", "spec": "0.26"}},
             "package": "brokestub",
             "unanalyzed": [{{"path": "src/broken.rs", "reason": "parse error"}}],
             "analyzed": {{"count": 0, "digest": "0"}}, "functions": []}}"#)).unwrap();
@@ -5990,8 +5990,8 @@ trait G {
             "README must not claim reference-implementation status (family ruling: candor-java is the reference)");
         assert!(!agents.to_lowercase().contains("the reference implementation of"),
             "AGENTS must not claim reference-implementation status");
-        assert!(readme.contains("spec 0.25"), "README must state the spec 0.25 floor");
-        assert!(agents.contains("spec 0.25"), "AGENTS must state the spec 0.25 floor");
+        assert!(readme.contains("spec 0.26"), "README must state the spec 0.26 floor");
+        assert!(agents.contains("spec 0.26"), "AGENTS must state the spec 0.26 floor");
     }
 
     #[test]

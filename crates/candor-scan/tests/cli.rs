@@ -445,7 +445,7 @@ fn gate_json_writes_the_structured_verdict_faithful_to_the_exit_code() {
         serde_json::from_str(&std::fs::read_to_string(&gp).expect("gate.json written")).expect("valid JSON");
     let _ = std::fs::remove_dir_all(&d);
 
-    assert_eq!(verdict["spec"], "0.25", "verdict declares the spec version");
+    assert_eq!(verdict["spec"], "0.26", "verdict declares the spec version");
     assert_eq!(verdict["ok"], false, "ok:false on a failing gate");
     let viols = verdict["violations"].as_array().expect("violations array");
     assert_eq!(viols.len(), 1, "one violation: {verdict}");
@@ -592,7 +592,7 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
     let write_rep = |name: &str, manifest: &str| -> std::path::PathBuf {
         let p = d.join(name);
         std::fs::write(&p, format!(r#"{{
-            "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.25"}},
+            "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.26"}},
             "package": "depc", {manifest}
             "functions": []}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
         p
