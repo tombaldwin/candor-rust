@@ -746,8 +746,23 @@ pub(crate) fn bound_return_type(
     // carries no methods under `Result`. `path_to_string` maps `s.ident` only, so the rest of this
     // function has always been argument-blind — this guard was the whole of it.
     //
-    // STRICTLY ADDITIVE: every path previously accepted had no arguments to ignore, so no published entry
-    // changes. It can only turn `None` into `Some`.
+    // ADDITIVE AT THIS FUNCTION, NOT NECESSARILY AT THE PUBLISHED SURFACE — the first version of this
+    // comment said "STRICTLY ADDITIVE … it can only turn `None` into `Some`", and a self-review measured
+    // that false. Here it IS additive: every path previously accepted had no arguments to ignore. But
+    // `build_type_surface` applies the never-guess rule over the results, so binding MORE returns creates
+    // collisions that did not exist, and a collision DROPS the key. Measured against this commit's parent
+    // on a fn declared twice under mutually exclusive `#[cfg]`s, one arm returning `A` and the other
+    // `W<A>`:
+    //
+    //     before   returns: {"ar#mk": "ar#A"}      published = 1
+    //     after    returns: (absent)               published = 0
+    //
+    // AND THE NEW BEHAVIOUR IS THE CORRECT ONE, which is why the code stands and only the claim changed.
+    // The two arms return genuinely different types, so `let x = mk();` holds an `A` or a `W<A>` depending
+    // on target; publishing `ar#A` unconditionally was true on ONE target and asserted on both. Before the
+    // fix the generic arm simply did not bind, so the collision was invisible and one arm's answer was
+    // published as if it were the only one. Dropping it is never-guess working on evidence it could not
+    // previously see. Pinned by `type_surface_drops_a_cfg_pair_that_returns_DIFFERENT_types`.
     //
     // MEASURED, and the queue's diagnosis was wrong. On the real `chrono`, `offset::utc::Utc::now` — whose
     // entry already carries `Clock` — published NO return type, because it returns `DateTime<Utc>`. The
