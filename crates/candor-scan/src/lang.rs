@@ -727,11 +727,36 @@ pub(crate) fn bound_return_type(
     if p.qself.is_some() {
         return None; // `<T as Trait>::Assoc` — an associated type, not a nameable nominal
     }
-    // ANY generic argument means a WRAPPER (`Result<_>`/`Option<_>`/`Vec<_>`/`Box<_>`) or a generic
-    // instantiation (`Wrapper<T>` — the design note's open question, deliberately left unanswered).
-    if p.path.segments.iter().any(|s| !matches!(s.arguments, syn::PathArguments::None)) {
-        return None;
-    }
+    // THE TYPE ARGUMENTS ARE IGNORED; THE OUTER PATH IS WHAT THE BINDING HOLDS.
+    //
+    // This used to refuse ANY path carrying a generic argument, because one "means a WRAPPER
+    // (`Result<_>`/`Option<_>`/`Vec<_>`/`Box<_>`) or a generic instantiation (`Wrapper<T>` — the design
+    // note's open question, deliberately left unanswered)". Those are two cases and only the first needed
+    // refusing:
+    //
+    //   `Result<Conn, E>`   the binding holds a RESULT. Keying it to `Conn` is the lie the reverted
+    //                       attempt published — `.map`/`.unwrap`/`.is_ok` are the Result's, and charging
+    //                       `Conn::send`'s Fs to a caller that never ran it is a fabrication.
+    //   `DateTime<Utc>`     the binding holds a DATETIME. `DateTime`'s methods ARE the binding's methods.
+    //                       Nothing here was ever unsound; it fell through the same door.
+    //
+    // Keying on the OUTER path is right for BOTH, and it is the exact opposite of the reverted defect:
+    // that one UNWRAPPED (`Result<Conn,E>` -> `Conn`); this never looks inside the angle brackets at all.
+    // `Result<Conn,E>` -> `Result` is TRUE, and harmlessly unresolvable because a crate's own report
+    // carries no methods under `Result`. `path_to_string` maps `s.ident` only, so the rest of this
+    // function has always been argument-blind — this guard was the whole of it.
+    //
+    // STRICTLY ADDITIVE: every path previously accepted had no arguments to ignore, so no published entry
+    // changes. It can only turn `None` into `Some`.
+    //
+    // MEASURED, and the queue's diagnosis was wrong. On the real `chrono`, `offset::utc::Utc::now` — whose
+    // entry already carries `Clock` — published NO return type, because it returns `DateTime<Utc>`. The
+    // work queue filed the cause as a SPURIOUS COLLISION: chrono declares `now()` twice under mutually
+    // exclusive `#[cfg]`s, so "the return index sees two same-named defs and the never-guess rule drops
+    // the entry even though both name the same type". It does not: a synthetic with a `#[cfg]`-duplicated
+    // NON-generic return publishes fine, and chrono's entry never reaches the collision rule at all
+    // (`bound_returns=0` for it — there is nothing to collide). Isolated on three one-line variants:
+    // `Plain` binds, `DateTime<Utc>` does not, `DateTime<u8>` does not. The generic was the whole cause.
     if is_non_nominal_type(ty) {
         return None; // a bare primitive names no type a dep report carries methods under
     }

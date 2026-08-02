@@ -2029,6 +2029,76 @@ pub fn uses_mod_mock() -> String { let c = deplib::mock::client(); c.send() }
     }
 
     #[test]
+    /// A GENERIC INSTANTIATION IS NOT A WRAPPER, and refusing both cost a whole class of dependency.
+    ///
+    /// `bound_return_type` used to refuse ANY path carrying a type argument, because one "means a WRAPPER
+    /// (`Result<_>`/`Option<_>`) or a generic instantiation (`Wrapper<T>` — the design note's open
+    /// question, deliberately left unanswered)". Two cases, one door, and only the first needed refusing:
+    /// a `let d = dep::now();` where `now() -> DateTime<Utc>` holds a **DateTime**, and DateTime's methods
+    /// ARE that binding's methods.
+    ///
+    /// Keying on the OUTER path is right for both and is the exact opposite of the reverted defect, which
+    /// UNWRAPPED (`Result<Conn,E>` → `Conn`). This never looks inside the angle brackets.
+    ///
+    /// MEASURED on the real `chrono`: `bound_returns` 245 → 758, published 45 → 108, and
+    /// `offset::utc::Utc::now` — whose entry already carries `Clock` — went from publishing no return type
+    /// to `chrono#datetime::DateTime`. End to end on the fixture below the consumer goes
+    /// `['Clock','Unknown']` → `['Clock','Fs']`: DETERMINATION replacing disclosure, the ⟨0.24⟩ ordering.
+    ///
+    /// THE WORK QUEUE HAD THE CAUSE WRONG, which is why this test spells the mechanism out. It filed the
+    /// missing entry as a SPURIOUS COLLISION — chrono declares `now()` twice under mutually exclusive
+    /// `#[cfg]`s, so "the return index sees two same-named defs and the never-guess rule drops the entry
+    /// even though both name the same type". It does not: a `#[cfg]`-duplicated NON-generic return
+    /// publishes fine (asserted below), and chrono's entry never reached the collision rule at all. The
+    /// generic was the whole cause; the duplication was a coincidence of the crate that surfaced it.
+    #[test]
+    fn type_surface_publishes_a_generic_instantiation_but_still_not_a_wrapper() {
+        let dep = scan_crate_chained("gen", "deplib", "", "\
+pub struct Held<T> { pub t: T }
+impl<T> Held<T> { pub fn touch(&self) { let _ = std::fs::read(\"/etc/x\"); } }
+pub struct Marker;
+pub struct Plain;
+impl Plain { pub fn touch(&self) { let _ = std::fs::read(\"/etc/x\"); } }
+pub fn make() -> Held<Marker> { Held { t: Marker } }
+pub fn wrapped() -> Result<Held<Marker>, String> { Ok(Held { t: Marker }) }
+#[cfg(not(target_arch = \"wasm32\"))]
+pub fn dup() -> Plain { Plain }
+#[cfg(target_arch = \"wasm32\")]
+pub fn dup() -> Plain { Plain }
+", &DepIndex::default());
+        let ts = &dep["typeSurface"]["returns"];
+        assert_eq!(ts["deplib#make"].as_str(), Some("deplib#Held"),
+                   "a generic INSTANTIATION must publish its outer type — the binding holds a `Held`:\n{dep}");
+        assert!(ts.get("deplib#wrapped").is_none(),
+                "a `-> Result<Held<_>,E>` must still refuse: the binding holds a Result, and keying it to \
+                 the payload is the reverted attempt's defect:\n{dep}");
+        // THE `#[cfg]` DUPLICATION IS A NON-EVENT, and asserting it is what falsifies the queue's
+        // "spurious collision" diagnosis rather than leaving it to a commit message.
+        assert_eq!(ts["deplib#dup"].as_str(), Some("deplib#Plain"),
+                   "two `#[cfg]`-exclusive defs naming the SAME return type must publish it — there is \
+                    nothing to guess between:\n{dep}");
+
+        let (idx, dir) = chain("gen", "deplib", &dep);
+        let app = scan_crate_chained("gen", "app", "\n[dependencies]\ndeplib = \"1\"\n", "\
+pub fn typed() { let h = deplib::make(); h.touch(); }
+pub fn via_result() { let r = deplib::wrapped(); let _ = r.is_ok(); }
+", &idx);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(effects_of(&app, "typed").contains(&"Fs".to_string()),
+                "the consumer must inherit the generic's method effect — this is the whole point, and \
+                 before the fix it read `Unknown` instead:\n{app}");
+        assert!(!effects_of(&app, "via_result").contains(&"Fs".to_string()),
+                "a Result binding was keyed through its payload's methods:\n{app}");
+    }
+
+    /// NOTE FOR THE TEST BELOW: it still passes, but the LINE that protects it moved. `Result`/`Option`
+    /// returns are no longer refused by `bound_return_type`'s generic guard (that guard is gone); they
+    /// resolve to `deplib#Result` / `deplib#Option` and are then dropped by `build_type_surface`'s
+    /// `nonpure` gate, because the crate owns no type by those names and so carries no methods under
+    /// them. The outcome is identical and the mechanism is not — if the `nonpure` gate is ever relaxed,
+    /// THIS is the test that starts failing, and its assertions are about the wrapper rather than about
+    /// that gate.
+    #[test]
     fn type_surface_refuses_to_key_through_a_wrapper_and_never_falls_silent_on_a_miss() {
         // ⟨typeSurface.returns⟩ requirements (b) and (c), both confirmed defects of the reverted attempt.
         //
