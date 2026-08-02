@@ -2051,6 +2051,41 @@ pub fn uses_mod_mock() -> String { let c = deplib::mock::client(); c.send() }
     /// even though both name the same type". It does not: a `#[cfg]`-duplicated NON-generic return
     /// publishes fine (asserted below), and chrono's entry never reached the collision rule at all. The
     /// generic was the whole cause; the duplication was a coincidence of the crate that surfaced it.
+    /// THE COST OF BINDING MORE RETURNS, pinned so it stays deliberate. Found by self-review, correcting a
+    /// claim this commit's message made and got wrong ("strictly additive — it can only turn `None` into
+    /// `Some`").
+    ///
+    /// Binding generic instantiations means `build_type_surface` sees collisions it could not see before,
+    /// and a collision DROPS the key. Measured against the parent commit, on a fn declared twice under
+    /// mutually exclusive `#[cfg]`s whose arms return DIFFERENT types:
+    ///
+    ///     before   returns: {"ar#mk": "ar#A"}   published = 1
+    ///     after    returns: (absent)            published = 0
+    ///
+    /// THE DROP IS CORRECT AND THE OLD BEHAVIOUR WAS THE DEFECT. `let x = mk();` holds an `A` or a `W<A>`
+    /// depending on target, so publishing `ar#A` unconditionally was true on ONE target and asserted on
+    /// both. Before the fix the generic arm did not bind at all, so the disagreement was invisible and one
+    /// arm's answer went out as if it were the only one. This is never-guess working on evidence it could
+    /// not previously see — and it is the exact opposite of the `#[cfg]` case one test down, where both
+    /// arms name the SAME type and the key must survive. Both rows are needed: a "fix" that made
+    /// `#[cfg]` pairs always publish would pass that one and reintroduce this.
+    #[test]
+    fn type_surface_drops_a_cfg_pair_that_returns_different_types() {
+        let dep = scan_crate_chained("cfgdiff", "deplib", "", "\
+pub struct A; impl A { pub fn touch(&self) { let _ = std::fs::read(\"/x\"); } }
+pub struct W<T> { pub t: T }
+impl W<A> { pub fn touch(&self) { let _ = std::fs::read(\"/x\"); } }
+#[cfg(not(target_arch = \"wasm32\"))]
+pub fn mk() -> A { A }
+#[cfg(target_arch = \"wasm32\")]
+pub fn mk() -> W<A> { W { t: A } }
+", &DepIndex::default());
+        let ts = &dep["typeSurface"]["returns"];
+        assert!(ts.get("deplib#mk").is_none(),
+                "two `#[cfg]` arms returning DIFFERENT types must withdraw the key — publishing either one \
+                 asserts on both targets what is true on one:\n{dep}");
+    }
+
     #[test]
     fn type_surface_publishes_a_generic_instantiation_but_still_not_a_wrapper() {
         let dep = scan_crate_chained("gen", "deplib", "", "\
