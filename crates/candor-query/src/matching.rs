@@ -62,26 +62,60 @@ pub(crate) fn declaring_type(f: &str) -> &str {
     f.rfind('.').map(|i| &f[..i]).unwrap_or(f)
 }
 
+/// The answer to a subtype question, ⟨0.26⟩ THREE-VALUED because the sidecar format now distinguishes
+/// what it could not before. SPEC §2.2 makes the KEY SET the manifest: a producer emits a key for every
+/// type it indexed, `[]` included, so a type with NO key is one the pass never looked at.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Subtype {
+    Yes,
+    No,
+    /// The walk left the indexed set. NOT a failed test — an unasked question, and per §3.1 an
+    /// unanswerable condition must be disclosed rather than scored as a failed one.
+    Unanswerable,
+}
+
 /// Reflexive+transitive subtype test over the hierarchy sidecar.
-pub(crate) fn is_subtype_of(ty: &str, owner: &str, hier: &BTreeMap<String, Vec<String>>) -> bool {
+///
+/// This engine writes no hierarchy sidecar of its own (candor-scan emits none), so every hierarchy it
+/// walks came from candor-java or candor-ts — which is exactly why the tri-state matters here: the
+/// producer's completeness is not this engine's to assume. `hier.get(t)` returning `None` used to skip
+/// the frame silently, so "indexed, no supertypes" and "never analysed" both fell through to `false`.
+/// That is a positive claim about a type nobody analysed, and in the dispatch frontier it removes a
+/// reacher from a disclosure with no diagnostic — measured in both producer engines as `[]` where the
+/// control gives the dispatching function.
+///
+/// A POSITIVE DOMINATES: reaching `owner` down one branch is `Yes` even if another branch ran off the
+/// indexed set. The relation is established, and an unknown branch cannot un-establish it.
+pub(crate) fn subtype_of(ty: &str, owner: &str, hier: &BTreeMap<String, Vec<String>>) -> Subtype {
     if ty == owner {
-        return true;
+        return Subtype::Yes;
     }
+    let mut saw_unindexed = false;
     let mut seen: HashSet<&str> = HashSet::new();
     let mut stack: Vec<&str> = vec![ty];
     while let Some(t) = stack.pop() {
-        if let Some(sups) = hier.get(t) {
-            for s in sups {
-                if s == owner {
-                    return true;
-                }
-                if seen.insert(s.as_str()) {
-                    stack.push(s.as_str());
-                }
+        let Some(sups) = hier.get(t) else {
+            saw_unindexed = true;
+            continue;
+        };
+        for s in sups {
+            if s == owner {
+                return Subtype::Yes;
+            }
+            if seen.insert(s.as_str()) {
+                stack.push(s.as_str());
             }
         }
     }
-    false
+    if saw_unindexed { Subtype::Unanswerable } else { Subtype::No }
+}
+
+/// The two-valued form used by the dispatch frontier. `Unanswerable` collapses to TRUE — over-list, never
+/// drop — which is the direction §2.2 ⟨0.26⟩ requires and the opposite of what absence used to do. It is
+/// also the direction this frontier already takes one rung up: with NO sidecar at all the subtype test is
+/// unanswerable and the ruling is to over-list, so partial information must not be worse than none.
+pub(crate) fn is_subtype_of(ty: &str, owner: &str, hier: &BTreeMap<String, Vec<String>>) -> bool {
+    subtype_of(ty, owner, hier) != Subtype::No
 }
 
 /// Normalize a function path for layer derivation: a UFCS trait-impl path `<Type as Trait>::method`

@@ -978,9 +978,15 @@ fn write_frontier_fixture(f: &Fixture, with_hierarchy: bool) {
     .unwrap();
     if with_hierarchy {
         // type → its supertypes: Sub is (only) a subtype of Base.
+        //
+        // ⟨0.26⟩ `mod.Base` carries its OWN key with an empty array. §2.2 makes the KEY SET the manifest,
+        // so a root is not optional bookkeeping: without it a walk up from `mod.Sub` runs off the indexed
+        // set and every question it was asked becomes UNANSWERABLE — including the ones this fixture's
+        // controls need ANSWERED NO. See `callers_include_unknown_unindexed_type_is_unanswerable_not_no`
+        // for the pre-rung shape and what it costs.
         std::fs::write(
             format!("{}.app.hierarchy.json", f.prefix),
-            r#"{"mod.Sub":["mod.Base"]}"#,
+            r#"{"mod.Sub":["mod.Base"],"mod.Base":[]}"#,
         )
         .unwrap();
     }
@@ -1155,6 +1161,82 @@ fn callers_include_unknown_discloses_a_dot_free_dispatch_reason_verbatim_in_both
         assert_eq!(entry.unwrap().1, DOT_FREE_REASON,
                    "viaDispatchOn must be the RAW detail verbatim (hierarchy={with_hier})");
     }
+}
+
+/// ⟨0.26⟩ THE SIDECAR'S KEY SET IS ITS MANIFEST (SPEC §2.2), so a type with NO key was never analysed
+/// and NOTHING may be concluded about it.
+///
+/// `hier.get(t)` returning `None` used to skip the frame silently, collapsing "indexed, no supertypes"
+/// and "never analysed" into the same answer: `false`. That is a positive claim about a type nobody
+/// analysed, and here it removes a reacher from a disclosure with no diagnostic at all.
+///
+/// This engine writes NO hierarchy sidecar (candor-scan emits none), so every hierarchy it walks came
+/// from candor-java or candor-ts — the producer's completeness is not this engine's to assume, which is
+/// what makes the tri-state load-bearing on this side of the family.
+///
+/// The chain is deliberately TWO levels (`Sub` → `Mid` → `Base`). A flat one cannot see this defect: the
+/// walk hits OWNER as an immediate supertype and returns YES before it ever reaches an unindexed type,
+/// so old and new code agree. The gap has to be IN the path.
+fn write_two_level_frontier_fixture(f: &Fixture, hier: &str) {
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.23" },
+  "package": "app",
+  "functions": [
+    { "fn": "mod.Target.work", "inferred": ["Fs"], "direct": ["Fs"] },
+    { "fn": "mod.Sub.handle", "inferred": ["Fs"], "calls": ["mod.Target.work"] },
+    { "fn": "mod.Caller.run", "inferred": ["Unknown"], "unknownWhy": ["dispatch:mod.Base.handle"] }
+  ]
+}"#;
+    std::fs::write(format!("{}.app.scan.json", f.prefix), report).unwrap();
+    std::fs::write(
+        format!("{}.app.scan.callgraph.json", f.prefix),
+        r#"{"mod.Sub.handle":["mod.Target.work"],"mod.Target.work":[]}"#,
+    )
+    .unwrap();
+    if !hier.is_empty() {
+        std::fs::write(format!("{}.app.hierarchy.json", f.prefix), hier).unwrap();
+    }
+}
+
+#[test]
+fn callers_include_unknown_unindexed_type_is_unanswerable_not_no() {
+    let names = |hier: &str, tag: &str| -> Vec<String> {
+        let f = Fixture::new(tag);
+        write_two_level_frontier_fixture(&f, hier);
+        frontier_of(&f.prefix).into_iter().map(|(n, _)| n).collect()
+    };
+    let disclosed = vec!["mod.Caller.run".to_string()];
+
+    // COMPLETE sidecar: every type on the walk is indexed and the chain reaches `mod.Base` — YES.
+    assert_eq!(
+        names(r#"{"mod.Sub":["mod.Mid"],"mod.Mid":["mod.Base"],"mod.Base":[]}"#, "sidecar-complete"),
+        disclosed);
+
+    // PARTIAL sidecar: `mod.Sub` is indexed and names `mod.Mid`, but `mod.Mid` itself was never indexed,
+    // so the chain beyond it is unreadable and the relation cannot be ruled out. UNANSWERABLE → disclose.
+    // PRE-⟨0.26⟩ THIS ARM RETURNED `[]` — the reacher vanished because a type nobody analysed was read
+    // as "has no supertypes".
+    assert_eq!(names(r#"{"mod.Sub":["mod.Mid"]}"#, "sidecar-partial"), disclosed);
+
+    // ABSENT sidecar: the documented simple-name fallback, which over-lists. PARTIAL INFORMATION MUST NOT
+    // BE WORSE THAN NONE — this pair is the invariant the defect broke, and the reason the repair needed a
+    // format change rather than a consumer-side patch: without the manifest neither side can tell a
+    // producer's silence from its answer.
+    assert_eq!(names("", "sidecar-absent"), disclosed);
+
+    // THE NEGATIVE CONTROL, so this is not "always disclose". Every type the walk touches IS indexed and
+    // the chain ends without reaching `mod.Base` — a complete NO, and the reacher drops out. Without this
+    // row the tri-state would pass by answering YES to everything.
+    assert_eq!(
+        names(r#"{"mod.Sub":["mod.Mid"],"mod.Mid":[],"mod.Base":[]}"#, "sidecar-answered-no"),
+        Vec::<String>::new());
+
+    // A POSITIVE DOMINATES an unknown branch: `mod.Sub` reaches `mod.Base` down one arm and an unindexed
+    // type down another. The established relation is not weakened by the branch nobody analysed, so this
+    // is YES for a REASON rather than by falling through to the unanswerable rule.
+    assert_eq!(
+        names(r#"{"mod.Sub":["mod.Base","mod.Unseen"],"mod.Base":[]}"#, "sidecar-positive-dominates"),
+        disclosed);
 }
 
 #[test]
