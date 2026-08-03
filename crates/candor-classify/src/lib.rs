@@ -40,7 +40,7 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 81] = [
+pub const CALIBRATED_CRATES: [&str; 82] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer;
     // pnet is raw L2/L3 packet capture)
@@ -79,6 +79,9 @@ pub const CALIBRATED_CRATES: [&str; 81] = [
     // TUI: the terminal is a user dialogue channel (Ipc), exactly as dialoguer/console already rule.
     // crossterm does the tty I/O; ratatui renders to a Buffer and drives a backend that does.
     "crossterm", "ratatui",
+    // tracing_subscriber: the fmt INIT terminals write program output (Log); the EnvFilter constructors
+    // read RUST_LOG (Env). Everything else — layers, formatters, filter types — is a builder.
+    "tracing_subscriber",
 ];
 
 pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
@@ -1355,6 +1358,32 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // `tracing_subscriber` — the subscriber that gives `tracing` somewhere to go. TWO effects, and the
+    // filing said "Log/Fs": VERIFIED against 0.3.23, the Fs half is WRONG.
+    //
+    //   Log — `fmt/fmt_layer.rs:749` defaults `make_writer: io::stdout`, so the fmt INIT terminals install
+    //         a subscriber that writes program output. Same family as `log`/`tracing`/`env_logger`.
+    //   Env — `fmt/mod.rs:1219` reads `RUST_LOG` on the `init()` path, `fmt_layer.rs` reads `NO_COLOR`,
+    //         and `filter/env/builder.rs:189,203` read `env::var(self.env_var_name())`.
+    //
+    // NOT Fs. The only `std::fs` in the crate is `impl MakeWriter for std::fs::File` — the crate ACCEPTING
+    // a caller-supplied File, not opening one. The caller's `File::create` is classified on the caller, so
+    // charging Fs here would double-count, exactly the `serde_json::from_reader` caveat one crate over.
+    //
+    // The builders (`fmt()`, `layer()`, `with_writer`, `with_target`, `EnvFilter::new`) are PURE: they
+    // describe a subscriber. Only the INIT terminals install one, and only the from-env constructors read.
+    if crate_name == "tracing_subscriber" {
+        if path.ends_with("::init") || path.ends_with("::try_init") {
+            return Some("Log");
+        }
+        if path.ends_with("::from_default_env") || path.ends_with("::try_from_default_env")
+            || path.ends_with("::from_env") || path.ends_with("::from_env_lossy")
+            || path.ends_with("::try_from_env")
+        {
+            return Some("Env");
+        }
+        return None;
+    }
     // `crossterm` — the terminal driver. The tty is a USER DIALOGUE CHANNEL, so this is Ipc, matching the
     // ruling `dialoguer`/`console`/`terminal_colorsaurus` already carry rather than a new one.
     //
@@ -2140,6 +2169,18 @@ mod tests {
         assert_eq!(classify("ratatui", "ratatui::layout::Layout::split"), None);
         assert_eq!(classify("ratatui", "ratatui::style::Style::fg"), None);
         assert_eq!(classify("ratatui", "ratatui::buffer::Buffer::set_string"), None);
+
+        // tracing_subscriber — two effects, both read off 0.3.23. The filing said "Log/Fs"; the Fs half
+        // is wrong (the crate ACCEPTS a File as a writer, it never opens one).
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::init"), Some("Log"));
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::try_init"), Some("Log"));
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::SubscriberBuilder::init"), Some("Log"));
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::EnvFilter::from_default_env"), Some("Env"));
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::EnvFilter::from_env"), Some("Env"));
+        // builders DESCRIBE a subscriber; they do not install one
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::layer"), None);
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::fmt::SubscriberBuilder::with_target"), None);
+        assert_eq!(classify("tracing_subscriber", "tracing_subscriber::EnvFilter::new"), None);
 
         assert_eq!(classify("env_logger", "env_logger::init"), Some("Log"));
         assert_eq!(classify("env_logger", "env_logger::try_init"), Some("Log"));
