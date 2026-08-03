@@ -6,6 +6,27 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased — ⟨spec 0.26⟩
 
+### ⚠ κ breadth: `tracing_subscriber` — Log + Env, and the filing's `Fs` is wrong
+
+Third of the ledger-mined batch, verified against 0.3.23:
+
+  · **Log** — `fmt/fmt_layer.rs:749` defaults `make_writer: io::stdout`, so the fmt INIT terminals
+    (`fmt::init`, `try_init`, `SubscriberBuilder::init`) install a subscriber that writes program output.
+  · **Env** — `fmt/mod.rs:1219` reads `RUST_LOG` on the `init()` path, `fmt_layer.rs` reads `NO_COLOR`,
+    and `filter/env/builder.rs:189,203` read `env::var(self.env_var_name())`. So `EnvFilter`'s from-env
+    constructors are Env.
+
+**NOT Fs.** The filing said "Log/Fs"; the only `std::fs` in the crate is `impl MakeWriter for
+std::fs::File` — the crate ACCEPTING a caller-supplied File, never opening one. The caller's
+`File::create` is already classified on the caller, so charging Fs here would double-count. Same shape as
+the `serde_json::from_reader` caveat one crate over, and the second time in this batch that a filed
+effect did not survive reading the source.
+
+The builders (`fmt()`, `layer()`, `with_target`, `EnvFilter::new`) DESCRIBE a subscriber and stay pure.
+
+    BEFORE  setup/filtered/build -> invisible:[tracing_subscriber];  uncovered = [(tracing_subscriber, 3)]
+    AFTER   setup -> Log,  filtered -> Env,  build -> pure (omitted);  uncovered = []
+
 ### κ breadth: `REVIEWED_PURE_CRATES` — serde_json, serde_yml, toml, regex, sha2
 
 The other half of the ledger-mined batch, and it needed a NEW mechanism rather than a new list entry.
