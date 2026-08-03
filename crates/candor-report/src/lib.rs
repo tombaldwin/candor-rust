@@ -133,12 +133,19 @@ pub struct ReportEntry {
     pub inferred: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub direct: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub declared: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub undeclared: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overdeclared: Vec<String>,
+    // ⟨0.26⟩ OPTION, NOT A DEFAULTED VEC — the §2 rule has a deserialization half and this is it. The trio
+    // is the §5 capability-reconciliation output: PRESENT means that pass ran, ABSENT means it did not,
+    // and `[]` from an engine that computed nothing is forbidden (it claims "no function performs an
+    // undeclared effect"). `#[serde(default)]` over a `Vec` destroyed exactly that distinction on the way
+    // in — an absent key deserialized to `vec![]`, indistinguishable from an explicit empty answer, so a
+    // producer's careful omission became the same claim with extra steps. This engine runs no §5 pass, so
+    // it always writes `None`; the Option matters when READING another engine's report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undeclared: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overdeclared: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unresolved: bool,
     /// True if the RUNTIME invokes this function rather than (only) project code — a reachability ROOT
@@ -1137,6 +1144,40 @@ mod tests {
         // a clean report drops nothing
         let clean = r#"[{"fn":"a","inferred":["Fs"],"hash":""}]"#;
         assert_eq!(report_entries_counted(clean).unwrap().1, 0);
+    }
+
+    #[test]
+    /// ⟨0.26⟩ The §2 rule's DESERIALIZATION half: "absent" must survive into the consumer's own model.
+    ///
+    /// The trio is the §5 reconciliation output — present means that pass ran, absent means it did not,
+    /// and `[]` from an engine that computed nothing is a claim ("no function performs an undeclared
+    /// effect"). `#[serde(default)]` over a `Vec` destroyed that on the way IN: an absent key became
+    /// `vec![]`, indistinguishable from an explicit empty answer, so a producer's careful omission turned
+    /// back into the same claim with extra steps. Both directions are asserted because the rule has two
+    /// halves and only one of them is about writing.
+    #[test]
+    fn the_reconciliation_trio_distinguishes_absent_from_empty() {
+        // ABSENT in → None, NOT Some(vec![]). This is the assertion the old `Vec` type could not make.
+        let absent: ReportEntry = serde_json::from_str(r#"{"fn":"f","inferred":["Fs"]}"#).unwrap();
+        assert_eq!(absent.undeclared, None, "an ABSENT key means the §5 pass did not run");
+        assert_eq!(absent.declared, None);
+        assert_eq!(absent.overdeclared, None);
+
+        // An EXPLICIT empty array is a different input and must stay distinguishable — it is what an
+        // engine that DID run the pass and found nothing would write.
+        let empty: ReportEntry =
+            serde_json::from_str(r#"{"fn":"f","inferred":["Fs"],"undeclared":[]}"#).unwrap();
+        assert_eq!(empty.undeclared, Some(vec![]), "an explicit [] is an ANSWER, not an absence");
+        assert_ne!(empty.undeclared, absent.undeclared,
+                   "absent and empty must not collapse — that collapse IS the defect");
+
+        // And out: None is omitted (this engine's scanner runs no §5 pass), Some is written.
+        let none_out = serde_json::to_string(&ReportEntry {
+            func: "f".into(), ..Default::default() }).unwrap();
+        assert!(!none_out.contains("undeclared"), "None must be OMITTED, never written as []: {none_out}");
+        let some_out = serde_json::to_string(&ReportEntry {
+            func: "f".into(), undeclared: Some(vec!["Fs".into()]), ..Default::default() }).unwrap();
+        assert!(some_out.contains("\"undeclared\":[\"Fs\"]"), "Some must be written: {some_out}");
     }
 
     #[test]

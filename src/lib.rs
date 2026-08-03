@@ -3736,9 +3736,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                     calls,
                     inferred: owned_set(effs),
                     direct: owned_set(&direct),
-                    declared: owned_set(&declared),
-                    undeclared: owned(&undeclared),
-                    overdeclared: owned(&unused),
+                    // ⟨0.26⟩ SOME — the deep lint DOES run the §5 reconciliation, so these are answers.
+                    declared: Some(owned_set(&declared)),
+                    undeclared: Some(owned(&undeclared)),
+                    overdeclared: Some(owned(&unused)),
                     unresolved: has_unknown,
                     entry_point: rust_is_entry_point(cx, f.to_def_id(), entry_fn),
                     hash: dph_hex(cx.tcx, f.to_def_id()),
