@@ -6,6 +6,36 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased — ⟨spec 0.26⟩
 
+### κ breadth: `REVIEWED_PURE_CRATES` — serde_json, serde_yml, toml, regex, sha2
+
+The other half of the ledger-mined batch, and it needed a NEW mechanism rather than a new list entry.
+`CALIBRATED_CRATES` means "classify has effect rules here", and `calibrated_crates_are_live` fails any
+entry no rule matches — "a dead entry would silently suppress a real coverage warning". A genuinely pure
+crate has no rule to be live, so it cannot go there, and inventing a rule to get it in would be worse
+than the noise.
+
+So: a separate list the κ ledger consults, `classify` never does. **It manufactures purity claims** — a
+crate here stops being disclosed and starts being believed — so every entry was checked against its
+source in the local cargo registry for `std::{fs,net,process,env}` and stdio use. Every apparent hit was
+a DOC COMMENT (serde_json's ``/// [`File`]: std::fs::File``, serde_yml's `///  io::stdout()`).
+
+**`color_eyre` was on the same filing and is deliberately NOT here**: it is absent from this machine's
+registry, so it could not be checked, and an unverifiable entry is exactly what the list forbids.
+
+The caveat worth stating: `serde_json::from_reader`/`to_writer` DO move bytes — through a handle the
+CALLER had to obtain, and obtaining it (`File::open`, `TcpStream::connect`) is already classified on the
+caller. The crate performs no syscall of its own, so charging it would double-count.
+
+Two guards, because the list is a claim: `reviewed_pure_and_calibrated_are_disjoint` (a crate cannot be
+both rule-covered and effect-free — the ledger ORs the lists, so a contradiction would resolve silently
+to "covered"), and `reviewed_pure_crates_classify_as_pure` (if someone later adds a rule for one of
+these, the claim is dead and the entry must be re-read rather than silently outvoted).
+
+    BEFORE  digest/matches/parse -> invisible:[sha2|regex|serde_json]
+            coverage.uncovered = [(regex, 3), (serde_json, 1), (sha2, 1)]
+    AFTER   all three omitted as pure;  coverage.uncovered = []
+    CONTROL readfile -> ['Fs'] in BOTH arms — a real effect is untouched
+
 ### ⚠ κ breadth: `crossterm` + `ratatui` are CALIBRATED — the tty is an `Ipc` channel
 
 Ledger-mined, per the standing practice of batching by call-count rather than speculating: the

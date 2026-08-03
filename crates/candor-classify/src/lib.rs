@@ -89,6 +89,30 @@ pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
 /// treat them as *covered* — otherwise it would mislabel the most common async crates as blind spots.
 pub const PATH_CALIBRATED_CRATES: [&str; 3] = ["tokio", "async_std", "mio"];
 
+/// Crates REVIEWED AND FOUND TO PERFORM NO EFFECT OF THEIR OWN — the κ ledger treats them as covered, so
+/// their calls stop being disclosed blind spots.
+///
+/// SEPARATE FROM `CALIBRATED_CRATES` BY NECESSITY, not taste. That list means "classify has effect rules
+/// here", and `calibrated_crates_are_live` fails any entry no rule matches — "a dead entry would silently
+/// suppress a real coverage warning". A genuinely pure crate has no rule to be live, so it cannot go
+/// there; without this list the only way to silence its noise would be to invent a rule, which is worse.
+///
+/// **THIS LIST MANUFACTURES PURITY CLAIMS, so an entry needs evidence and not a reputation.** A crate here
+/// stops being disclosed and starts being believed. Each of these was checked against its source in the
+/// local cargo registry for `std::{fs,net,process,env}` and stdio use, and every apparent hit was a DOC
+/// COMMENT (serde_json's `/// [`File`]: std::fs::File`, serde_yml's `///  io::stdout()`):
+///
+///   serde_json 1.0.151, serde_yml 0.0.12, toml 1.1.3, regex 1.13.1, sha2 0.11.0
+///
+/// `color_eyre` was on the same filing and is NOT here: it is absent from this machine's registry, so it
+/// could not be checked, and an unverifiable entry is exactly what this doc comment forbids.
+///
+/// THE SERIALIZER CAVEAT, worth stating because it is the one that looks wrong: `serde_json::from_reader`
+/// and `to_writer` do move bytes — but through a handle the CALLER had to obtain, and obtaining it (a
+/// `File::open`, a `TcpStream::connect`) is already classified on the caller. The crate performs no
+/// syscall of its own, so charging it would double-count an effect the caller already carries.
+pub const REVIEWED_PURE_CRATES: [&str; 5] = ["serde_json", "serde_yml", "toml", "regex", "sha2"];
+
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
 /// liveness test probes: at least one must match for every `CALIBRATED_CRATES` entry, else the entry is
 /// dead. Exported as ONE source of truth because the nightly lint crate (`src/lib.rs`) runs the SAME
@@ -1950,6 +1974,39 @@ mod tests {
     }
 
     #[test]
+    /// The two coverage lists mean OPPOSITE things and must stay disjoint.
+    ///
+    /// `CALIBRATED_CRATES` = "classify has effect rules here". `REVIEWED_PURE_CRATES` = "read it, it
+    /// performs nothing". A crate in both would be asserting both at once, and the ledger consults them
+    /// with an OR — so the contradiction would resolve silently to "covered" and nobody would look again.
+    #[test]
+    fn reviewed_pure_and_calibrated_are_disjoint() {
+        for c in REVIEWED_PURE_CRATES {
+            assert!(!CALIBRATED_CRATES.contains(&c),
+                    "`{c}` is in BOTH lists — it cannot be rule-covered AND effect-free");
+            assert!(!PATH_CALIBRATED_CRATES.contains(&c), "`{c}` is in BOTH lists (path-calibrated)");
+            assert!(!CALIBRATED_PREFIXES.iter().any(|p| c.starts_with(p)),
+                    "`{c}` is covered by a calibrated PREFIX as well as the pure list");
+        }
+    }
+
+    /// A reviewed-pure crate must actually classify as pure — the mirror of `calibrated_crates_are_live`.
+    ///
+    /// The list makes candor BELIEVE these crates rather than disclose them, so if someone later adds a
+    /// rule for one, the claim "performs no effect of its own" is dead and the entry has to be re-read,
+    /// not silently outvoted by the rule. Probed with the same tails the liveness test uses, which is a
+    /// broad sweep of the effectful verb shapes candor knows.
+    #[test]
+    fn reviewed_pure_crates_classify_as_pure() {
+        for c in REVIEWED_PURE_CRATES {
+            for t in CALIBRATION_PROBE_TAILS {
+                assert!(classify(c, &format!("{c}{t}")).is_none(),
+                        "`{c}` is listed REVIEWED-PURE but classify() gives it an effect on `{c}{t}` — \
+                         one of the two is wrong, and the list is the claim");
+            }
+        }
+    }
+
     fn calibrated_crates_are_live() {
         // Conversely, every crate advertised as calibrated must actually be matched by classify() for
         // some representative path — a dead entry would silently suppress a real coverage warning.
