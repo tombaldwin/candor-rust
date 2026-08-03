@@ -2022,7 +2022,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// The two coverage lists mean OPPOSITE things and must stay disjoint.
     ///
     /// `CALIBRATED_CRATES` = "classify has effect rules here". `REVIEWED_PURE_CRATES` = "read it, it
@@ -2056,6 +2055,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn calibrated_crates_are_live() {
         // Conversely, every crate advertised as calibrated must actually be matched by classify() for
         // some representative path — a dead entry would silently suppress a real coverage warning.

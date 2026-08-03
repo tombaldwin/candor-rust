@@ -1146,7 +1146,6 @@ mod tests {
         assert_eq!(report_entries_counted(clean).unwrap().1, 0);
     }
 
-    #[test]
     /// ⟨0.26⟩ The §2 rule's DESERIALIZATION half: "absent" must survive into the consumer's own model.
     ///
     /// The trio is the §5 reconciliation output — present means that pass ran, absent means it did not,
