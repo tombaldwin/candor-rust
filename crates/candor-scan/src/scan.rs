@@ -1712,9 +1712,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             loc: loc.get(q).cloned().unwrap_or_default(),
             inferred: inf.iter().map(|s| s.to_string()).collect(),
             direct: direct.get(q).map(|d| d.iter().map(|s| s.to_string()).collect()).unwrap_or_default(),
-            declared: Vec::new(),
-            undeclared: Vec::new(),
-            overdeclared: Vec::new(),
+            // ⟨0.26⟩ NONE, not empty. The stable scanner runs no §5 capability-reconciliation pass, and
+            // an empty set would CLAIM one ran: `undeclared: []` reads as "this function performs no
+            // undeclared effect". Absent means not computed. (The deep lint DOES run the pass and emits
+            // `Some(...)` — one type, two honest answers.)
+            declared: None,
+            undeclared: None,
+            overdeclared: None,
             // Honest blind-spot signal: this function (transitively) reached a callable the scan couldn't
             // see through. Mirrors the lint's `unresolved = has Unknown`, so the receipt's unresolved
             // count is truthful for the stable backend too — not a hardcoded 0.
