@@ -6,6 +6,41 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased — ⟨spec 0.26⟩
 
+### ⚠ κ breadth: `crossterm` + `ratatui` are CALIBRATED — the tty is an `Ipc` channel
+
+Ledger-mined, per the standing practice of batching by call-count rather than speculating: the
+2026-07-14 four-ecosystem sweep put **ratatui at 3,345 disclosed calls across three real repos**, the
+single loudest source of blind-spot noise.
+
+**The backlog said "mark ratatui reviewed-pure". Reading ratatui-0.29.0 REFUTES that**, and marking the
+crate pure would have claimed purity over the one API that writes: `terminal/terminal.rs`'s
+`draw`/`try_draw`/`flush`/`clear`/`autoresize`/`hide_cursor`/`show_cursor` all end in a backend flush,
+and `backend/` writes to the terminal. So the split follows the source, not the filing — the render
+surface (widgets, layout, buffer, style, text) is genuinely pure and is now COVERED rather than
+disclosed; the Terminal verbs are `Ipc`.
+
+`Ipc` because the tty is a user dialogue channel — the ruling `dialoguer`, `console` and
+`terminal_colorsaurus` already carry here. Not a new effect class for a new crate.
+
+crossterm likewise, verified against 0.28.1: `command.rs`'s `execute`/`queue` end in `self.flush()?`,
+`event::read`/`poll` read tty input, `enable_raw_mode`/`disable_raw_mode`/`size`/`window_size` talk to
+the device. Its Command VALUE types (`Print`, `MoveTo`, `SetForegroundColor`) describe an action rather
+than performing one and stay pure.
+
+**`size()` and `window_size()` are classified deliberately**, though they only read: once a crate is
+CALIBRATED an unmatched path is a PURITY CLAIM rather than a disclosed blind spot, so a tty ioctl left
+to fall through would be claimed pure. Calibrating a crate raises the cost of an omission, which is the
+part of this work to be careful about.
+
+⚠ VERDICT-AFFECTING, in the sound direction: three effects that were `invisible` are now DETERMINED, so
+a `deny Ipc` policy fires where it previously could not. Measured on a fixture:
+
+    BEFORE  build_ui, render -> invisible:[ratatui];  setup, wait -> invisible:[crossterm]
+            coverage.uncovered = [(ratatui, 4), (crossterm, 2)]
+    AFTER   build_ui -> pure (omitted);  render, setup, wait -> Ipc
+            coverage.uncovered = []
+
+
 ### ⟨0.26⟩ THE HIERARCHY SIDECAR'S KEY SET IS ITS MANIFEST — consumer half
 
 SPEC §2.2 `4cae735`. `is_subtype_of` is now the two-valued face of a three-valued `subtype_of`:

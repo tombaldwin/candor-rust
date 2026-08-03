@@ -40,7 +40,7 @@ pub fn classify_extra(
 /// receipt's coverage check reads candor's real coverage instead of a hand-copied list.
 /// Keep in lockstep with `classify` below — the `db_crates_are_calibrated` and
 /// `calibrated_crates_are_live` tests (in this crate's `tests` module) enforce both directions.
-pub const CALIBRATED_CRATES: [&str; 79] = [
+pub const CALIBRATED_CRATES: [&str; 81] = [
     // network (aws_config resolves credentials over the network on `.load()`;
     // git2 remote ops — fetch/push/connect — contact the network; async_net is smol's net layer;
     // pnet is raw L2/L3 packet capture)
@@ -76,6 +76,9 @@ pub const CALIBRATED_CRATES: [&str; 79] = [
     "sqlx_core", "walkdir", "filetime", "clircle",
     "execute", "ctrlc", "clap", "jiff", "env_logger",
     "dialoguer", "console", "terminal_colorsaurus", "backoff", "grep_cli",
+    // TUI: the terminal is a user dialogue channel (Ipc), exactly as dialoguer/console already rule.
+    // crossterm does the tty I/O; ratatui renders to a Buffer and drives a backend that does.
+    "crossterm", "ratatui",
 ];
 
 pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
@@ -97,6 +100,7 @@ pub const CALIBRATION_PROBE_TAILS: &[&str] = &[
     "::datalink::channel", "::WalkBuilder::build_parallel", "::RecommendedWatcher::new",
     "::X::connect", "::Utc::now", "::X::load", "::__private_api::log", "::tempfile", "::glob",
     "::X::run", "::dotenv", "::random", "::emit", "::X::emit_span_lint", "::X::anything",
+    "::X::draw",
     "::SaltString::generate", "::hash", "::OsRng::fill_bytes",
     // verb-precise crates whose whole-crate rules were narrowed to the effectful surface (the pure
     // accessors/ctors/data-types now return None), so the liveness probe must name an EFFECTFUL path:
@@ -1327,6 +1331,50 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
+    // `crossterm` — the terminal driver. The tty is a USER DIALOGUE CHANNEL, so this is Ipc, matching the
+    // ruling `dialoguer`/`console`/`terminal_colorsaurus` already carry rather than a new one.
+    //
+    // VERIFIED against crossterm-0.28.1 rather than assumed: `command.rs` `execute`/`queue` end in
+    // `self.flush()?` on the writer (real code, not a doc example), `event::read`/`poll` read tty input,
+    // and `terminal::{enable,disable}_raw_mode` + `size`/`window_size` talk to the device.
+    //
+    // `size`/`window_size`/`is_raw_mode_enabled` ARE classified, and that is deliberate: once a crate is
+    // CALIBRATED every unmatched path becomes a PURITY CLAIM rather than a disclosed blind spot, so a tty
+    // ioctl left to fall through would be claimed pure. The genuinely pure surface — the Command VALUE
+    // types (`Print`, `MoveTo`, `SetForegroundColor`), the style/event data types — carries none of these
+    // tails and stays pure correctly.
+    if crate_name == "crossterm" {
+        if path.ends_with("::execute") || path.ends_with("::queue")
+            || path.ends_with("::event::read") || path.ends_with("::event::poll")
+            || path.ends_with("::enable_raw_mode") || path.ends_with("::disable_raw_mode")
+            || path.ends_with("::size") || path.ends_with("::window_size")
+            || path.ends_with("::is_raw_mode_enabled")
+        {
+            return Some("Ipc");
+        }
+        return None;
+    }
+    // `ratatui` — the TUI renderer, and the single loudest source of disclosed-blind calls measured in the
+    // 2026-07-14 four-ecosystem sweep (3,345 across three real repos). The backlog filed it as
+    // "mark reviewed-pure"; VERIFYING against ratatui-0.29.0 REFUTES that for part of the surface:
+    // `terminal/terminal.rs` `draw`/`flush`/`clear`/`autoresize`/`hide_cursor`/`show_cursor` end in a
+    // backend flush, and `backend/` writes to the terminal. Marking the whole crate pure would have
+    // claimed purity over the one API that actually writes.
+    //
+    // So the split is where the sweep's noise actually is: the BULK of those 3,345 calls are widget,
+    // layout, buffer, style and text constructors — genuinely pure, and now covered rather than disclosed.
+    // The Terminal/backend verbs are Ipc, same channel as crossterm underneath them.
+    if crate_name == "ratatui" {
+        if path.ends_with("::draw") || path.ends_with("::try_draw") || path.ends_with("::flush")
+            || path.ends_with("::autoresize") || path.ends_with("::clear")
+            || path.ends_with("::hide_cursor") || path.ends_with("::show_cursor")
+            || path.ends_with("::insert_before")
+            || path.ends_with("::set_cursor_position") || path.ends_with("::get_cursor_position")
+        {
+            return Some("Ipc");
+        }
+        return None;
+    }
     // `console` — terminal handle + styling. The `Term` read/write verbs do tty I/O (Ipc, the user
     // dialogue channel; note there is NO `write_str` — `Term` impls `io::Write`). The free-fn terminal
     // detection (`colors_enabled`/`user_attended`) reads `CLICOLOR`/`CLICOLOR_FORCE` (Env). The `Style`
@@ -2011,6 +2059,31 @@ mod tests {
         assert_eq!(classify("jiff", "jiff::Span::checked_add"), None); // pure arithmetic
 
         // env_logger — init installs the logger + reads RUST_LOG (Log); config setters pure.
+        // TUI — the tty is a user dialogue channel (Ipc), the ruling dialoguer/console already carry.
+        // Each verb below was read off the crate source (crossterm-0.28.1, ratatui-0.29.0), not guessed.
+        assert_eq!(classify("crossterm", "crossterm::ExecutableCommand::execute"), Some("Ipc"));
+        assert_eq!(classify("crossterm", "crossterm::QueueableCommand::queue"), Some("Ipc"));
+        assert_eq!(classify("crossterm", "crossterm::event::read"), Some("Ipc"));
+        assert_eq!(classify("crossterm", "crossterm::event::poll"), Some("Ipc"));
+        assert_eq!(classify("crossterm", "crossterm::terminal::enable_raw_mode"), Some("Ipc"));
+        // a tty IOCTL must not fall through: in a CALIBRATED crate an unmatched path is a purity CLAIM
+        assert_eq!(classify("crossterm", "crossterm::terminal::size"), Some("Ipc"));
+        // the Command VALUE types are pure — they describe an action, they do not perform one
+        assert_eq!(classify("crossterm", "crossterm::style::Print"), None);
+        assert_eq!(classify("crossterm", "crossterm::cursor::MoveTo"), None);
+
+        // ratatui: the backlog said "mark reviewed-pure"; the SOURCE says `Terminal::draw` ends in a
+        // backend flush, so the write surface is Ipc and only the render surface is pure.
+        assert_eq!(classify("ratatui", "ratatui::Terminal::draw"), Some("Ipc"));
+        assert_eq!(classify("ratatui", "ratatui::Terminal::flush"), Some("Ipc"));
+        assert_eq!(classify("ratatui", "ratatui::Terminal::clear"), Some("Ipc"));
+        assert_eq!(classify("ratatui", "ratatui::Terminal::hide_cursor"), Some("Ipc"));
+        // the BULK of the 3,345 disclosed calls — widgets, layout, style — are genuinely pure
+        assert_eq!(classify("ratatui", "ratatui::widgets::Paragraph::new"), None);
+        assert_eq!(classify("ratatui", "ratatui::layout::Layout::split"), None);
+        assert_eq!(classify("ratatui", "ratatui::style::Style::fg"), None);
+        assert_eq!(classify("ratatui", "ratatui::buffer::Buffer::set_string"), None);
+
         assert_eq!(classify("env_logger", "env_logger::init"), Some("Log"));
         assert_eq!(classify("env_logger", "env_logger::try_init"), Some("Log"));
         assert_eq!(classify("env_logger", "env_logger::Builder::init"), Some("Log"));
