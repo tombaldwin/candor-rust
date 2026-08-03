@@ -107,8 +107,14 @@ pub const PATH_CALIBRATED_CRATES: [&str; 3] = ["tokio", "async_std", "mio"];
 ///
 ///   serde_json 1.0.151, serde_yml 0.0.12, toml 1.1.3, regex 1.13.1, sha2 0.11.0
 ///
-/// `color_eyre` was on the same filing and is NOT here: it is absent from this machine's registry, so it
-/// could not be checked, and an unverifiable entry is exactly what this doc comment forbids.
+/// `color_eyre` was on the same filing and is NOT here — FETCHED AND CHECKED 2026-08-03, and it is not
+/// pure. It reads `RUST_BACKTRACE` / `RUST_LIB_BACKTRACE` / `RUST_SPANTRACE` / `COLORBT_SHOW_HIDDEN`
+/// (Env, `config.rs:939..1175`) and **opens source files to render code snippets** (Fs,
+/// `config.rs:248`). It is also not CALIBRATED, deliberately: the `File::open` sits inside
+/// `impl fmt::Display for SourceSection`, reached when a report is RENDERED rather than through any named
+/// verb a caller invokes — so there is no path for a rule to match, and calibrating the crate would turn
+/// that render path into an unmatched path, i.e. a PURITY CLAIM over the file read. Its calls therefore
+/// stay disclosed as a blind spot. The noise is real; it is also honest, and that is the right trade.
 ///
 /// THE SERIALIZER CAVEAT, worth stating because it is the one that looks wrong: `serde_json::from_reader`
 /// and `to_writer` do move bytes — but through a handle the CALLER had to obtain, and obtaining it (a
