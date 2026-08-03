@@ -57,6 +57,18 @@ these, the claim is dead and the entry must be re-read rather than silently outv
     AFTER   all three omitted as pure;  coverage.uncovered = []
     CONTROL readfile -> ['Fs'] in BOTH arms — a real effect is untouched
 
+### ratatui `widgets::canvas` is carved out — the `::draw` tail was FABRICATING
+
+Review of the same-day rule above. `ratatui::widgets::canvas::Context::draw(&shape)` sets `self.dirty`
+and paints into an in-memory `Painter` — no terminal, no writer, provably pure — but it ends in `::draw`
+and the tails were charging it `Ipc`. MEASURED as a live fabrication (`plot(ctx) -> [Ipc]`), and it is a
+HOT path: a TUI drawing charts or maps calls it per shape, per frame.
+
+Carved out as a DENYLIST (`::canvas::` returns pure) rather than narrowing the tails to `Terminal::`,
+per the family rule: an allowlist silently under-reports whatever it forgot, and the write surface here
+is Terminal AND the backends, so pinning to `Terminal::` would have dropped a direct
+`CrosstermBackend::flush`. Both directions are now pinned by tests.
+
 ### ⚠ κ breadth: `crossterm` + `ratatui` are CALIBRATED — the tty is an `Ipc` channel
 
 Ledger-mined, per the standing practice of batching by call-count rather than speculating: the

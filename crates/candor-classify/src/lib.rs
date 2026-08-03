@@ -1418,6 +1418,20 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // layout, buffer, style and text constructors — genuinely pure, and now covered rather than disclosed.
     // The Terminal/backend verbs are Ipc, same channel as crossterm underneath them.
     if crate_name == "ratatui" {
+        // CARVE-OUT FIRST: `widgets::canvas` is an IN-MEMORY grid. `Context::draw(&shape)` sets
+        // `self.dirty` and paints into a `Painter` — no terminal, no writer, provably pure — but it ends
+        // in `::draw` and the tails below would have charged it `Ipc`. MEASURED as a live fabrication on a
+        // fixture (`plot(ctx) -> ['Ipc']`) before this line existed, and it is a HOT path: a TUI drawing
+        // charts or maps calls it per shape per frame.
+        //
+        // A DENYLIST (carve out the proven-pure module) rather than an allowlist of `Terminal::`, per the
+        // family rule: an allowlist silently under-reports whatever it forgot, and the write surface here
+        // is Terminal AND the backends (`CrosstermBackend::flush`), so pinning to `Terminal::` would drop
+        // a direct backend call. Reading the crate, canvas is the only module whose methods collide with
+        // these tails.
+        if path.contains("::canvas::") {
+            return None;
+        }
         if path.ends_with("::draw") || path.ends_with("::try_draw") || path.ends_with("::flush")
             || path.ends_with("::autoresize") || path.ends_with("::clear")
             || path.ends_with("::hide_cursor") || path.ends_with("::show_cursor")
@@ -2164,6 +2178,13 @@ mod tests {
         assert_eq!(classify("ratatui", "ratatui::Terminal::flush"), Some("Ipc"));
         assert_eq!(classify("ratatui", "ratatui::Terminal::clear"), Some("Ipc"));
         assert_eq!(classify("ratatui", "ratatui::Terminal::hide_cursor"), Some("Ipc"));
+        // REGRESSION: `widgets::canvas` is an in-memory grid. `Context::draw` ends in `::draw` and was
+        // FABRICATING Ipc — caught in review, measured on a fixture, and a hot path (per shape, per frame).
+        assert_eq!(classify("ratatui", "ratatui::widgets::canvas::Context::draw"), None);
+        assert_eq!(classify("ratatui", "ratatui::widgets::canvas::Context::layer"), None);
+        // …while the real write surface still classifies, including a DIRECT backend call (which is why
+        // the carve-out is a denylist on canvas rather than an allowlist on `Terminal::`).
+        assert_eq!(classify("ratatui", "ratatui::backend::CrosstermBackend::flush"), Some("Ipc"));
         // the BULK of the 3,345 disclosed calls — widgets, layout, style — are genuinely pure
         assert_eq!(classify("ratatui", "ratatui::widgets::Paragraph::new"), None);
         assert_eq!(classify("ratatui", "ratatui::layout::Layout::split"), None);
