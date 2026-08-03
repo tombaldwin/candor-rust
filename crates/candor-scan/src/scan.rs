@@ -1647,6 +1647,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
+                // REVIEWED-PURE: read and found to perform no effect of its own, so its silence is an
+                // answer rather than a gap. A separate list from the calibrated ones because those must
+                // carry a live rule (`calibrated_crates_are_live`) and a pure crate has none — see the
+                // evidence requirement on `REVIEWED_PURE_CRATES`.
+                && !candor_classify::REVIEWED_PURE_CRATES.contains(&cr.as_str())
         })
         .map(|(cr, n)| (cr.clone(), *n))
         .collect();
