@@ -5990,8 +5990,12 @@ trait G {
             "README must not claim reference-implementation status (family ruling: candor-java is the reference)");
         assert!(!agents.to_lowercase().contains("the reference implementation of"),
             "AGENTS must not claim reference-implementation status");
-        assert!(readme.contains("spec 0.26"), "README must state the spec 0.26 floor");
-        assert!(agents.contains("spec 0.26"), "AGENTS must state the spec 0.26 floor");
+        // DERIVED from the engine's own constant, not hardcoded. The literal form made this gate break on
+        // every floor bump — a version-coupled assertion whose fix each release is to edit a literal,
+        // which is exactly the drift it exists to catch, aimed at itself.
+        let floor = candor_report::SPEC_VERSION;
+        assert!(readme.contains(&format!("spec {floor}")), "README must state the spec {floor} floor");
+        assert!(agents.contains(&format!("spec {floor}")), "AGENTS must state the spec {floor} floor");
     }
 
     #[test]
