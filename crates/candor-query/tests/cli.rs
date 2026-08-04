@@ -357,7 +357,7 @@ fn gate_verdict_absent_parts_is_the_clean_verdict() {
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["spec"], "0.26");
+    assert_eq!(v["spec"], "0.27");
     assert_eq!(v["violations"], serde_json::json!([]));
 }
 
@@ -1326,7 +1326,7 @@ fn callers_include_unknown_mixed_source_joins_members_and_raw_details_in_sorted_
     // puts Impl under BOTH Base and Other (so `app.Dedup.go`'s two distinct owners resolve to the same
     // member `run` and must collapse) and Zed under Base.
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.26" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.27" },
   "package": "app",
   "functions": [
     { "fn": "app.Sink.touch", "inferred": ["Fs"], "direct": ["Fs"] },
@@ -1383,7 +1383,7 @@ fn callers_include_unknown_join_sorts_by_unicode_code_point_not_utf16_code_unit(
     // (verified against a `sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()))` join).
     let f = Fixture::new("frontier-collation");
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.26" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.27" },
   "package": "app",
   "functions": [
     { "fn": "app.Sink.touch", "inferred": ["Fs"], "direct": ["Fs"] },
