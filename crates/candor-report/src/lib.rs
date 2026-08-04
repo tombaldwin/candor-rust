@@ -230,7 +230,7 @@ pub struct ReportEntry {
 /// from the engine build id (`ReportMeta::version`) and from the crate release version. Bumped only when
 /// the spec contract changes; emitted as the envelope's `spec` so a consumer can see which contract a
 /// report conforms to. Both backends and the JVM port declare the SAME value — see candor-spec §2.1.
-pub const SPEC_VERSION: &str = "0.26";
+pub const SPEC_VERSION: &str = "0.27";
 
 /// The envelope header: which engine produced the report (`version` = build id, `toolchain`), and which
 /// candor-spec contract it implements (`spec`).
@@ -321,6 +321,14 @@ pub fn fnv1a_hex(sorted_quals: &[String]) -> String {
     format!("{h:016x}")
 }
 
+/// ⟨0.27⟩ SPEC §2.1 `resolves` — the OPTIONAL refinement surfaces THIS ENGINE computes.
+///
+/// A producer MUST NOT list a surface it does not compute: that turns "unimplemented" into a false
+/// "undetermined", which is the exact inversion the field exists to prevent. So this constant is the one
+/// place to change when an optional surface is implemented, and adding a name here without the
+/// implementation is a defect, not an aspiration.
+pub const RESOLVES: &[&str] = &["fs"];
+
 /// The v0.2 self-describing report: a provenance header plus the function entries.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Report {
@@ -339,6 +347,15 @@ pub struct Report {
     /// let `interfaceUnion` ride gated).
     #[serde(rename = "typeSurface", default, skip_serializing_if = "Option::is_none")]
     pub type_surface: Option<TypeSurface>,
+    /// ⟨0.27⟩ SPEC §2.1 `resolves` — the OPTIONAL per-function refinement surfaces this producer actually
+    /// computes. Without it the absence of such a field is overloaded between "does not compute this" and
+    /// "computed and could not determine it", and a consumer cannot read the omission at all.
+    ///
+    /// MUST NOT list a surface the engine does not compute: that converts "unimplemented" into a false
+    /// "undetermined", the exact inversion the field exists to prevent. Omitted when empty so a report
+    /// with nothing to declare stays byte-identical to a pre-rung one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolves: Vec<String>,
     pub functions: Vec<ReportEntry>,
 }
 
@@ -467,9 +484,16 @@ pub fn to_packaged_report_json_full(
         // Keys sort by serde field order in the struct; `unanalyzed` after `analyzed`, before `functions`.
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         unanalyzed: &'a [UnanalyzedUnit],
+        /// ⟨0.27⟩ SPEC §2.1 — emitted by BOTH writers. A capability declaration that appeared on only one
+        /// of an engine's report paths would make the same engine's omissions readable in one report and
+        /// unreadable in another, which is worse than not declaring at all.
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        resolves: &'a [&'a str],
         functions: &'a [ReportEntry],
     }
-    serde_json::to_string_pretty(&Out { candor, package, coverage, analyzed, unanalyzed, functions })
+    serde_json::to_string_pretty(&Out {
+        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, functions,
+    })
 }
 
 /// ⟨proposed: typeSurface⟩ As [`to_packaged_report_json_full`], additionally carrying the type surface.
@@ -498,11 +522,17 @@ pub fn to_packaged_report_json_typed(
         unanalyzed: &'a [UnanalyzedUnit],
         #[serde(rename = "typeSurface", skip_serializing_if = "Option::is_none")]
         type_surface: Option<&'a TypeSurface>,
+        /// ⟨0.27⟩ SPEC §2.1 — the optional refinement surfaces this producer computes. Listed because
+        /// candor-scan resolves `fs` read/write kinds; without the declaration a consumer cannot tell
+        /// an omitted `fs` ("reached, kind undetermined") from an engine that never computes kinds.
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        resolves: &'a [&'a str],
         functions: &'a [ReportEntry],
     }
     let ts = type_surface.filter(|t| !t.returns.is_empty());
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, type_surface: ts, functions,
+        candor, package, coverage, analyzed, unanalyzed, type_surface: ts,
+        resolves: RESOLVES, functions,
     })
 }
 
@@ -1186,6 +1216,7 @@ mod tests {
             coverage: None,
             unanalyzed: vec![],
             type_surface: None,
+            resolves: vec![],
             functions: vec![ReportEntry {
                 func: "f".into(),
                 inferred: vec!["Db".into(), "Unknown".into()],
@@ -1210,8 +1241,8 @@ mod tests {
         assert!(!empty.contains("unknownWhy"), "empty unknownWhy must be omitted: {empty}");
         assert!(!empty.contains("entryPoint"), "false entryPoint must be omitted: {empty}");
         // the spec contract version (§2.1) is emitted in the envelope header.
-        assert!(s.contains("\"spec\":\"0.26\""), "envelope must carry the spec version: {s}");
-        assert_eq!(SPEC_VERSION, "0.26");
+        assert!(s.contains("\"spec\":\"0.27\""), "envelope must carry the spec version: {s}");
+        assert_eq!(SPEC_VERSION, "0.27");
     }
 
     /// THE MODEL-LEVEL HALF of the §4 ⟨0.24⟩ forward-compatibility control: the report type must carry an
