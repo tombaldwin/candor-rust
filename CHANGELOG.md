@@ -6,6 +6,32 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+### SPEC §2 `fs` — the field existed and nothing ever wrote to it
+
+`pub fs: Vec<String>` has been in the wire model for a long time, and the construction site read
+`fs: Vec::new()`. Hardcoded empty. Never populated.
+
+That is WORSE than not having the field. An absent field says "this producer does not track kinds"; a
+present-but-always-empty one says "kind undetermined" on every function forever — a claim the engine was
+in no position to make, dressed in the schema that implies support. And §2's own omit-rather-than-guess
+rule is precisely what made it invisible: every empty answer looked legitimate.
+
+Found while pinning `fs` in conformance, after the other three engines gained it. The state was not the
+two-of-four it looked like: java emitted, swift and ts had nothing, and rust had a dead field.
+
+`fs_kind(path)` now refines an Fs the classifier already PROVED with the direction its verb implies, on the
+same contract as the other three engines: `["read"]`, `["write"]`, `["read","write"]`, or `[]` when the
+verb does not say. DIRECT ONLY, never propagated over edges — a caller reaching one writer and one
+undetermined-kind callee would inherit `["write"]` and thereby claim "writes but never reads", the partial
+claim §2 forbids.
+
+Measured: `std::fs::copy` → `["read","write"]`, `read_to_string` → `["read"]`, `write` → `["write"]`, a
+function that merely REACHES a writer → omitted, `OpenOptions` (direction lives in the builder chain, not
+the terminal verb) → omitted.
+
+Tests assert what the classifier refuses to say as much as what it says; both halves probed by breaking
+them. 245 tests green.
+
 ## [0.26.0] — 2026-08-04 ⟨spec 0.26⟩
 
 ### ⚠ κ breadth: `tracing_subscriber` — Log + Env, and the filing's `Fs` is wrong

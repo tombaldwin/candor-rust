@@ -860,6 +860,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // `fastrand` → Rand, propagated to ~14 fns incl `Runtime::new`.)
     let mut direct: HashMap<String, BTreeSet<&'static str>> = HashMap::new();
     let mut hosts: HashMap<String, BTreeSet<String>> = HashMap::new();
+    // SPEC §2 `fs` — DIRECT ONLY, deliberately, matching candor-java's `fsDirect`, candor-swift and
+    // candor-ts. It must NOT be propagated over call edges: a caller reaching one callee that writes and
+    // another whose kind is undetermined would inherit `["write"]` and thereby claim "writes but never
+    // reads", the partial claim §2 forbids. Direct-only keeps the field a statement about calls this
+    // function makes itself, where every contributing verb was seen.
+    let mut fskinds: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut cmds: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut paths: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut tables: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -1340,6 +1346,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             if let Some(eff) = classified.filter(|_| !suppress_bare_leaf && !resolved_local) {
                 direct.entry(f.qual.clone()).or_default().insert(eff);
+                // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb
+                // the table does not recognise contributes nothing, so the field stays absent rather than
+                // half-claimed.
+                if eff == "Fs" {
+                    for k in candor_classify::fs_kind(&c.path) {
+                        fskinds.entry(f.qual.clone()).or_default().insert((*k).to_string());
+                    }
+                }
                 // §1 ⟨0.13⟩ model-SDK dispatch is `Llm` + `Net`, added UNCONDITIONALLY — a model-SDK
                 // crate call IS a model dispatch AND is network I/O, regardless of what `classified`
                 // carried. Insert BOTH: a model-SDK crate whose call ALSO resolves via `classify` to
@@ -1731,7 +1745,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // The cross-crate join key (spec §2): `crate#qual`, derivable by any consumer from its
             // own syntactic view of the call — what CANDOR_DEPS chaining matches against.
             hash: format!("{crate_name}#{q}"),
-            fs: Vec::new(),
+            // SPEC §2 `fs`: the read/write kinds this fn's OWN Fs calls revealed. Was hardcoded empty —
+            // the field existed in the wire model and nothing ever wrote to it, which is worse than
+            // absent because the struct implied support.
+            fs: fskinds.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             hosts: hostsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             cmds: cmdsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             paths: pathsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
