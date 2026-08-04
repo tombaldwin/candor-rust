@@ -365,7 +365,10 @@ for v in deep["violations"]: print("viol:", v["rule"], v["fn"], ",".join(v["effe
 print("PARITY" if proj(deep) == proj(scan) else f"MISMATCH {proj(deep)} vs {proj(scan)}")
 PY
 )
-want "deep verdict declares spec 0.26 and fails"         "$gjcmp" "spec: 0.26 ok: False"
+# DERIVED, not hardcoded — the literal form broke on the 0.27 bump. Same class as the doc-drift gate and
+# candor-agents' test.py: a version-coupled assertion whose fix each release is to re-edit a literal.
+SPEC_DECLARED="$(grep -oE 'SPEC_VERSION: &str = "[0-9.]+"' "$ROOT/crates/candor-report/src/lib.rs" | grep -oE '[0-9]+\.[0-9]+')"
+want "deep verdict declares spec $SPEC_DECLARED and fails"  "$gjcmp" "spec: $SPEC_DECLARED ok: False"
 want "deep verdict pins the violation (rule/fn/effects)" "$gjcmp" "viol: AS-EFF-006 domain_logic Fs detail"
 want "deep and scan verdicts agree on the §3.3 projection" "$gjcmp" "PARITY"
 # A CLEAN gate writes the clean verdict { ok: true, violations: [] } and exits 0.
