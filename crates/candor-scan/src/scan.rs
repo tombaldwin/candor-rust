@@ -1350,9 +1350,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 // the table does not recognise contributes nothing, so the field stays absent rather than
                 // half-claimed.
                 if eff == "Fs" {
-                    for k in candor_classify::fs_kind(&c.path) {
-                        fskinds.entry(f.qual.clone()).or_default().insert((*k).to_string());
-                    }
+                    // A verb revealing no direction records the POISON marker "?" rather than nothing.
+                    // Abstaining would let a caller inherit a neighbour's ["write"] and claim "writes but
+                    // never reads" over a reach whose kind was never determined — the partial claim §2
+                    // forbids. Suppressed at emit; it never reaches the wire.
+                    let kinds = candor_classify::fs_kind(&c.path);
+                    let e = fskinds.entry(f.qual.clone()).or_default();
+                    if kinds.is_empty() { e.insert("?".to_string()); }
+                    else { for k in kinds { e.insert((*k).to_string()); } }
                 }
                 // §1 ⟨0.13⟩ model-SDK dispatch is `Llm` + `Net`, added UNCONDITIONALLY — a model-SDK
                 // crate call IS a model dispatch AND is network I/O, regardless of what `classified`
@@ -1546,6 +1551,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let all: Vec<String> = fns.iter().map(|f| f.qual.clone()).collect();
     let inferred = propagate(&direct, &calls, &all);
     let hostsacc = propagate_str(&hosts, &calls, &all);
+    // `fs` kinds propagate like the literal surfaces; the "?" poison propagates WITH them, which is what
+    // makes a caller of an undetermined-kind function inherit the suppression rather than a half-answer.
+    let fskindsacc = propagate_str(&fskinds, &calls, &all);
     let cmdsacc = propagate_str(&cmds, &calls, &all);
     let pathsacc = propagate_str(&paths, &calls, &all);
     let tablesacc = propagate_str(&tables, &calls, &all);
@@ -1748,7 +1756,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // SPEC §2 `fs`: the read/write kinds this fn's OWN Fs calls revealed. Was hardcoded empty —
             // the field existed in the wire model and nothing ever wrote to it, which is worse than
             // absent because the struct implied support.
-            fs: fskinds.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+            // SPEC §2 `fs`: the read/write kinds reachable from this fn. Kinds TRAVEL the call graph —
+            // a caller that transitively only writes IS a writer — but a partial answer must not: if any
+            // contributing Fs had no determined kind, the "?" poison is present and the WHOLE field is
+            // suppressed. Matches candor-java's FS_UNKNOWN discipline; pinned by conformance PART 31.
+            fs: fskindsacc.get(q)
+                .filter(|s| !s.contains("?"))
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default(),
             hosts: hostsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             cmds: cmdsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
             paths: pathsacc.get(q).map(|s| s.iter().cloned().collect()).unwrap_or_default(),

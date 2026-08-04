@@ -21,9 +21,11 @@ two-of-four it looked like: java emitted, swift and ts had nothing, and rust had
 
 `fs_kind(path)` now refines an Fs the classifier already PROVED with the direction its verb implies, on the
 same contract as the other three engines: `["read"]`, `["write"]`, `["read","write"]`, or `[]` when the
-verb does not say. DIRECT ONLY, never propagated over edges — a caller reaching one writer and one
-undetermined-kind callee would inherit `["write"]` and thereby claim "writes but never reads", the partial
-claim §2 forbids.
+verb does not say. Kinds PROPAGATE over call edges (a caller that transitively only writes is a writer), with a
+`"?"` poison travelling alongside: any contributing `Fs` with no determined kind suppresses the whole
+field, because `["write"]` there would claim "writes but never reads" about a function that may do both.
+Matches candor-java's `FS_UNKNOWN` discipline. (The first version of this was direct-only — corrected
+before release when conformance PART 31 showed the four engines disagreeing.)
 
 Measured: `std::fs::copy` → `["read","write"]`, `read_to_string` → `["read"]`, `write` → `["write"]`, a
 function that merely REACHES a writer → omitted, `OpenOptions` (direction lives in the builder chain, not
