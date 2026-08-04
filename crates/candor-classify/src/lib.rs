@@ -1538,6 +1538,45 @@ pub fn cap_from_name(name: &str) -> Option<&'static str> {
 /// that does NOT run the analysed project's own code (so `make`/`npm`/`cargo` are deliberately
 /// absent — they stay the cliff). The reference engines share this table so the `Exec` boundary —
 /// the one boundary every engine hits — refines identically (the §4-consistency argument).
+/// SPEC §2 `fs` — for a call ALREADY classified `Fs`, the read/write direction its path implies.
+/// `["read"]`, `["write"]`, `["read","write"]`, or `[]` when the verb does not say.
+///
+/// THE EMPTY CASE IS THE DISCIPLINE. §2: *"when `Fs` is reached but its kind is unknown … the field MUST
+/// be omitted rather than guessed. An empty or partial `fs` would be read as a positive claim ('reads but
+/// never writes'), which is the §4 trust contract's forbidden direction."* So an unrecognised verb
+/// contributes nothing and the field stays absent; absence means "kind undetermined", never "read-only".
+///
+/// A syntactic refinement of an effect already proved, NOT a soundness claim. Deliberately the same
+/// vocabulary as candor-java's `fsKind`, candor-swift's and candor-ts's — the surface is spec'd four-way,
+/// and four engines inventing four verb tables for one field is how a shared field stops meaning one thing.
+pub fn fs_kind(path: &str) -> &'static [&'static str] {
+    // the terminal segment is the verb (`std::fs::write`, `File::create`, `f.read_to_string`)
+    let leaf = path.rsplit("::").next().unwrap_or(path);
+    // Reads the source AND writes the destination in one call.
+    if matches!(leaf, "copy" | "rename" | "hard_link" | "soft_link" | "symlink") {
+        return &["read", "write"];
+    }
+    const WRITE: &[&str] = &[
+        "write", "write_all", "write_fmt", "write_vectored", "create", "create_new", "create_dir",
+        "create_dir_all", "remove_file", "remove_dir", "remove_dir_all", "set_permissions",
+        "set_len", "set_modified", "set_times", "append", "flush", "sync_all", "sync_data",
+        "write_at", "truncate",
+    ];
+    const READ: &[&str] = &[
+        "read", "read_to_string", "read_to_end", "read_exact", "read_dir", "read_link",
+        "metadata", "symlink_metadata", "exists", "try_exists", "canonicalize", "open",
+        "read_at", "file_type", "permissions", "modified", "accessed", "created", "len",
+    ];
+    if WRITE.contains(&leaf) { return &["write"]; }
+    if READ.contains(&leaf) { return &["read"]; }
+    // `OpenOptions` carries the direction in its BUILDER chain, not its terminal verb, so `.open()` on one
+    // says nothing here and is deliberately left to the READ arm above only when it is `File::open`
+    // (unambiguously a read). Anything else: no claim.
+    if leaf.starts_with("write") || leaf.starts_with("append") { return &["write"]; }
+    if leaf.starts_with("read") { return &["read"]; }
+    &[]
+}
+
 pub fn classify_command_head(cmd: &str) -> &'static [&'static str] {
     // Only UNAMBIGUOUS single-effect tools belong here. A multi-modal head (`git status` is local,
     // `git push` is Net; `rsync` local-vs-remote) would FABRICATE the effect for its common case —
@@ -2596,5 +2635,47 @@ mod tests {
         // connection / lifecycle ops take no SQL — must NOT flag.
         assert!(!is_db_query_arg("connect") && !is_db_query_arg("open") && !is_db_query_arg("begin"));
         assert!(!is_db_query_arg("commit") && !is_db_query_arg("ping") && !is_db_query_arg("get_conn"));
+    }
+}
+
+#[cfg(test)]
+mod fs_kind_tests {
+    use super::fs_kind;
+
+    /// SPEC §2 `fs`. Most of what these assert is what the classifier REFUSES to say: §2 requires the
+    /// field be "omitted rather than guessed", because an empty or partial `fs` reads as a positive claim
+    /// ("reads but never writes") — the §4 trust contract's forbidden direction.
+    #[test]
+    fn write_verbs() {
+        for p in ["std::fs::write", "std::fs::create_dir_all", "std::fs::remove_file",
+                  "File::create", "std::fs::set_permissions", "f::write_all"] {
+            assert_eq!(fs_kind(p), &["write"], "{p} mutates the disk");
+        }
+    }
+
+    #[test]
+    fn read_verbs() {
+        for p in ["std::fs::read_to_string", "std::fs::read_dir", "std::fs::metadata",
+                  "File::open", "std::fs::canonicalize", "f::read_to_end"] {
+            assert_eq!(fs_kind(p), &["read"], "{p} observes without mutating");
+        }
+    }
+
+    /// A copy/rename reads the source AND writes the destination — one call, both kinds.
+    #[test]
+    fn two_locator_verbs_are_both() {
+        for p in ["std::fs::copy", "std::fs::rename", "std::fs::hard_link"] {
+            assert_eq!(fs_kind(p), &["read", "write"], "{p}");
+        }
+    }
+
+    /// THE LOAD-BEARING CASE. A verb that does not reveal direction must contribute NOTHING — not a
+    /// default, not a guess. Anything here returning a kind would let a function claim "reads but never
+    /// writes" on the strength of a verb that said neither.
+    #[test]
+    fn unrevealing_verbs_make_no_claim() {
+        for p in ["std::fs::OpenOptions", "some_crate::do_thing", "std::fs::File", "f::seek"] {
+            assert!(fs_kind(p).is_empty(), "{p} must not claim a direction it did not reveal");
+        }
     }
 }
