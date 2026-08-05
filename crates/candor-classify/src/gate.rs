@@ -106,6 +106,12 @@ pub struct GateOutcome {
     pub violations: Vec<GateViolation>,
     /// Sorted by (rule, func). Empty on every policy whose filters the signature can answer.
     pub withheld: Vec<Withheld>,
+    /// ⟨0.27⟩ SPEC §4 — the RAW TEXT of every rule whose SCOPE bound no function, sorted. A rule that
+    /// bound nothing was evaluated and matched nothing, so it cannot have caught anything; scoring it as
+    /// satisfied makes a one-character typo in a layer name a permanently green gate. This is a
+    /// DISCLOSURE beside the verdict, never a new verdict: the caller prints it and MUST NOT let it
+    /// change the exit code (a zero-match rule is legitimate when one policy is shared across repos).
+    pub zero_match: Vec<String>,
 }
 
 /// ⟨0.24⟩ What one §6.2 `deny`/`pure` rule DOES to one function's signature — see [`rule_hits`].
@@ -395,5 +401,42 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
     // must not reorder because a HashMap iterated differently.
     withheld.sort_by(|a, b| (&a.rule, &a.func).cmp(&(&b.rule, &b.func)));
     withheld.dedup();
-    GateOutcome { violations: out, withheld }
+    // ⟨0.27⟩ ZERO-MATCH DISCLOSURE. Counted over the SAME key set the gate iterated, so "bound nothing"
+    // means here exactly what it means to the gate. A `deny`/`pure` with NO scope applies to every
+    // function and so can never be this kind of typo — excluded. A layer rule counts a match on either
+    // endpoint, over the call-graph keys it binds across.
+    let mut zero: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for r in &p.rules {
+        if r.scope.is_some() {
+            zero.entry(r.raw.as_str()).or_insert(0);
+        }
+    }
+    for r in &p.layer_rules {
+        zero.entry(r.raw.as_str()).or_insert(0);
+    }
+    if !zero.is_empty() {
+        let mut names: std::collections::BTreeSet<&str> =
+            gi.all.iter().map(|q| q.as_str()).collect();
+        names.extend(gi.calls.keys().map(String::as_str));
+        for n in names {
+            for r in &p.rules {
+                if let Some(s) = &r.scope {
+                    if scope_matches(n, s) {
+                        *zero.entry(r.raw.as_str()).or_insert(0) += 1;
+                    }
+                }
+            }
+            for r in &p.layer_rules {
+                if scope_matches(n, &r.from) || scope_matches(n, &r.to) {
+                    *zero.entry(r.raw.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let zero_match: Vec<String> = zero
+        .into_iter()
+        .filter(|(_, c)| *c == 0)
+        .map(|(raw, _)| raw.to_string())
+        .collect();
+    GateOutcome { violations: out, withheld, zero_match }
 }

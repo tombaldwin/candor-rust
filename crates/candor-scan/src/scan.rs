@@ -2151,6 +2151,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             return (2, json_body);
         }
         let outcome = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
+        // ⟨0.27⟩ SPEC §4 — a rule whose SCOPE bound NO function is UNANSWERABLE, and is DISCLOSED rather
+        // than scored as satisfied. MEASURED here before the fix: `deny Fs orders` exits 1 on a real
+        // violation and `deny Fs ordrs` exits 0 in silence, so a one-character typo in a layer name is a
+        // permanently green gate — and `unverified` then calls the layer "PROVABLY clean". The remedy is
+        // disclosure, NOT refusal: a zero-match rule is legitimate when one policy is shared across
+        // repositories and a layer exists in only some, so the exit code is deliberately untouched.
+        for raw in &outcome.zero_match {
+            eprintln!(
+                "candor: policy rule matched NO function — `{raw}`. It was evaluated and bound nothing, \
+                 so it cannot have caught anything. Legitimate when one policy is shared across repos; \
+                 a typo'd layer name otherwise."
+            );
+        }
         let v = outcome.violations;
         // ⟨0.24⟩ WITHHELD `(rule, function)` PAIRS — SPEC §3.1. On THIS route the classifier is in the
         // loop, so a narrowing filter with nothing to read means the signature itself lacks a class set
