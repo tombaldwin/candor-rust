@@ -2,6 +2,26 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+> **AUDIT 2026-08-05 — this file had not been touched since 2026-07-09 and four of its claims are
+> contradicted by the code.** Checked against the repo, not against the file's own prose, which is the
+> method the umbrella backlog's audit note prescribes after that one found 8 of 13 headings wrong.
+>
+>   · **`macro_rules!` body effects — SHIPPED, not deferred.** Listed below as too risky to attempt; it
+>     landed as R48 (`94f333c`, hardened in `8585c42`), and the code is at
+>     `crates/candor-scan/src/decls.rs:731`. It recovers the pervasive local-logging-wrapper idiom.
+>   · **The "naive fixpoint, a worklist rewrite isn't worth it" note — the worklist SHIPPED.**
+>     `crates/candor-scan/src/propagate.rs:19,50` is a worklist, seeded per function, with a documented
+>     re-enqueue rule. The 0.23.1 performance sweep did it.
+>   · **"MCP tool-set divergence (#4), STILL OPEN" — the integration it names NO LONGER EXISTS.**
+>     There is no `integrations/mcp/` in the umbrella; the MCP surface is candor-ts's `mcp.mjs`, shipped
+>     through the editor integrations. The item is not open, it is void.
+>   · **Envelope divergence (`undeclared`) — decided, not drifting.** `crates/candor-scan/src/scan.rs:1743`
+>     emits `undeclared: None` deliberately, because `undeclared: []` would CLAIM the pass ran and found
+>     nothing. Absent means not computed. That is the spec's own absence rule, applied on purpose.
+>
+> Entries below still carrying those claims are stale. The rest of the file has not been re-verified
+> line by line — treat an unannotated entry here as a claim, and read the code before acting on it.
+
 > **Review note (2026-06-21).** Landed since this file was last swept (some entries below are now stale —
 > see annotations): the `unknownWhy` vocabulary harmonised to the canonical 4 kinds + a conformance check
 > (PART 10); the dispatch-frontier (`callers --include-unknown`, spec 0.7) across class/protocol engines
@@ -11,7 +31,7 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
 > inherited-into-project silent-pure vein class (active-record / repository / modeled-base-subclass) was
 > closed in candor-java and CONFIRMED not shared — candor-ts/scan disclose `Unknown` for the same shape
 > (their AST/syntactic models never resolve-to-nothing-then-pure). STILL OPEN here: the κ-treadmill
-> dep-tree scanning (P2), the CI self-guard nightly ICE (a rustc bug), and the MCP tool-set divergence (#4).
+> dep-tree scanning (P2), the CI self-guard nightly ICE (a rustc bug), and the MCP tool-set divergence (#4 — **VOID 2026-08-05: `integrations/mcp/` no longer exists**).
 
 ## Direction — where the value actually concentrates (a critical read)
 
@@ -281,7 +301,7 @@ that's the narrow, modest-value axis. Diminishing returns.
   (1) the GENERAL "any unresolvable bare call → Unknown" — rejected for now because it FLOODS (measured 80
   false-positive Unknowns on tokio: closure-param invokes, macro-defined locals, cfg-gated fns, re-exports);
   needs a way to distinguish a genuinely-foreign bare call from a syntactically-unresolved-but-pure local one
-  (e.g. seed from extern/glob-import provenance) before widening disclosure. (2) bare local `macro_rules!`
+  (e.g. seed from extern/glob-import provenance) before widening disclosure. (2) **[STALE — SHIPPED as R48 `94f333c`, decls.rs:731]** bare local `macro_rules!`
   body effects (the transcriber token-soup parse is fragile — risks fabrication). (3) Deref/Index/operator
   implicit-coercion edges (no syntactic call node; needs type-directed coercion the syntactic backend lacks).
 
@@ -629,7 +649,7 @@ fixpoint profiled on ripgrep (negligible).
   call edges, and a const reference isn't a Call expr anyway).
 - **Baseline key is `def_path_str`** — not guaranteed unique; identical stringly-named items
   (rare) could collide in the guard. Names are the only stable cross-run key, so this is inherent.
-- **Effect/fs fixpoint is naive iterate-to-convergence**, not a worklist (`O(rounds × V × E)` per
+- **[STALE — the worklist SHIPPED in the 0.23.1 sweep; see propagate.rs:19,50 and the 2026-08-05 audit at the top]** ~~Effect/fs fixpoint is naive iterate-to-convergence~~, not a worklist (`O(rounds × V × E)` per
   crate). Measured negligible: on ripgrep (52k lines) the largest crate (`rg`: 1179 fns / 3302 edges)
   fixpoints in 0.42 ms, ~0.7 ms total across the workspace — ~0.017% of the run. Per-crate cost is
   dominated by call resolution + rustc, not propagation, so a worklist rewrite isn't worth it.
@@ -639,7 +659,7 @@ fixpoint profiled on ripgrep (negligible).
 > **Status (2026-06-21):** item 1(d) `unknownWhy` vocabulary divergence is **DONE** (harmonised to the
 > canonical reflect/native/dispatch/callback + a conformance check, PART 10). Item 3 is **partly done**
 > (conformance now covers 8 effects + the dispatch frontier + `containment` PART 11; Clipboard/Ipc and the
-> desugared-call generative forms remain). Items 1(a/b/c/e/f) envelope-field divergence and 4 (MCP tool-set)
+> desugared-call generative forms remain). Items 1(a/b/c/e/f) envelope-field divergence (**`undeclared` is a DECISION, scan.rs:1743**) and 4 (MCP tool-set — **VOID**)
 > are still **open**.
 
 These four are NOT simple bugs — they are cross-engine consistency / coverage efforts that need a
