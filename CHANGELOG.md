@@ -6,6 +6,8 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+## [0.27.0] — 2026-08-05
+
 ### SPEC §2 `fs` — the field existed and nothing ever wrote to it
 
 `pub fs: Vec<String>` has been in the wire model for a long time, and the construction site read
