@@ -5,6 +5,13 @@ All notable changes to candor are recorded here. Format loosely follows
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
 ## Unreleased
+- **⟨0.28 PROPOSED⟩ `engine` is now a recognized `.candor/config` key here, and disclosed as INERT.**
+  candor-java enforces the pin (a build that is not the pinned one exits 2, so the engine and the
+  committed baseline cannot drift apart); this engine does not enforce it yet. It accepts the key
+  regardless, because a key the spec defines must never be reported as an *unknown* one — that would
+  tell an operator their pin was ignored while a sibling engine was enforcing it, which is the
+  false-disclosure class this project already got wrong once with `net-partner`.
+
 
 ## [0.27.0] — 2026-08-05
 

@@ -5,7 +5,10 @@
 /// must not silently drop the gate), a known-but-unimplemented key (this engine reads `policy` +
 /// `baseline` + `deps`) is inert. Values: first token = key (ASCII-lowercased), rest of line =
 /// value; `#` comments; blanks.
-pub(crate) const CONFIG_KEYS: [&str; 10] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet"];
+/// ⟨0.28 PROPOSED⟩ `engine` is in the vocabulary and NOT implemented here on purpose: candor-java enforces
+/// the pin, and a key this spec defines must never be reported as an unknown one — that would tell an
+/// operator their pin was ignored while a sibling engine was enforcing it.
+pub(crate) const CONFIG_KEYS: [&str; 11] = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet", "engine"];
 
 /// The subset of [`CONFIG_KEYS`] this engine actually wires to a mode. The rest are spec-inert here —
 /// but a checked-in enforcement key that silently does nothing is a DECLARED-GATE-SILENTLY-OFF (the
