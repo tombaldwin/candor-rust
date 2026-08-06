@@ -164,6 +164,11 @@ pub(crate) fn enforce_engine_pin(dir: &str) {
             eprintln!("        (e.g. `engine rust v{running}`) for a repo scanned by more than one engine.");
             eprintln!("        Failing (exit 2) rather than ignoring it: a pin that cannot be read is a");
             eprintln!("        guard the operator believes is on.");
+            // Through the standard refusal machinery, so the document reaches a `--gate-json -` STREAM
+            // as well as a file. Arming only covers files (a stream has no stale document to replace),
+            // so a refusal on the stream route wrote NOTHING — §3.1 says a refusal must still write one.
+            crate::gate::record_gate_refusal(".candor/config has an `engine` line that is not an engine version");
+            crate::gate::write_gate_json(2);
             std::process::exit(2);
         }
         Mismatch => {
@@ -173,6 +178,9 @@ pub(crate) fn enforce_engine_pin(dir: &str) {
             eprintln!("        dispatch, so its report is not comparable with a baseline the pinned engine wrote.");
             eprintln!("        Either run the pinned engine, or update the pin and regenerate the baseline in the");
             eprintln!("        same change. Exit 2 (unevaluable), not 1 — this is not a policy violation.");
+            crate::gate::record_gate_refusal(format!(
+                ".candor/config pins engine {p} but this build is candor-scan {running}"));
+            crate::gate::write_gate_json(2);
             std::process::exit(2);
         }
         Undetermined => {
