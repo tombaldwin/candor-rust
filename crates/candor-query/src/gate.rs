@@ -931,6 +931,19 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         "gate() withheld {:?} but no rule was refused — a withheld rule must always be disclosed",
         outcome.withheld
     );
+    // ⟨0.27⟩ SPEC §4 — THE ZERO-MATCH DISCLOSURE BELONGS ON THIS ROUTE TOO, and its absence here was
+    // found by a cross-engine differential: java and swift disclosed on `gate --report`, rust and ts did
+    // not, so the same typo'd policy was reported by two engines and silently scored as satisfied by two.
+    // §4's MUST carries no route qualifier, and this is the SUPPLY-CHAIN gate — the surface a consumer
+    // points at a report someone else produced, and the one ⟨0.24⟩ called the enforcement surface. The
+    // exit code is untouched here exactly as it is on the scan route.
+    for raw in &outcome.zero_match {
+        eprintln!(
+            "candor: policy rule matched NO function — `{raw}`. It was evaluated and bound nothing, \
+             so it cannot have caught anything. Legitimate when one policy is shared across repos; \
+             a typo'd layer name otherwise."
+        );
+    }
     let mut violations = outcome.violations;
     if violations.is_empty() && !refused.is_empty() {
         // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated. THIS is

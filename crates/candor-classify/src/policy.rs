@@ -1387,9 +1387,12 @@ pub fn engine_pin_for(text: &str, impl_name: &str) -> Option<String> {
         match rest.len() {
             0 => bad = true,                                  // a bare `engine` line
             1 => slot(&mut wild, rest[0].to_string()),        // engine <version>
-            2 if IMPLS.contains(&rest[0].to_ascii_lowercase().as_str()) => {
+            // A KNOWN qualifier decides the line's OWNER before anything else is judged. `engine swift
+            // 0.99.0 junk` is swift's problem, and swift refuses on it; poisoning rust's whole config
+            // over a line naming another engine turns one typo into a family-wide outage (SPEC §3.4).
+            _ if IMPLS.contains(&rest[0].to_ascii_lowercase().as_str()) => {
                 if rest[0].eq_ignore_ascii_case(impl_name) {
-                    slot(&mut qual, rest[1].to_string());
+                    if rest.len() == 2 { slot(&mut qual, rest[1].to_string()); } else { bad = true; }
                 }
             }
             _ => bad = true,                                  // trailing junk / unknown qualifier
@@ -1421,7 +1424,7 @@ pub fn pin_verdict(pin: Option<&str>, running: &str) -> PinVerdict {
 /// can never match: the difference decides whether the operator reads "wrong version" or "that is not
 /// a version".
 fn normalize_version(raw: &str) -> Option<String> {
-    let s = raw.trim().trim_start_matches(['v', 'V']);
+    let s = raw.trim().strip_prefix(['v', 'V']).unwrap_or_else(|| raw.trim());
     let parts: Vec<&str> = s.split('.').collect();
     if !(parts.len() == 2 || parts.len() == 3) || !parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
         return None;
