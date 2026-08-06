@@ -163,6 +163,33 @@ pub(crate) fn scan_main() {
             }
         }
     }
+    // A SCAN TARGET THAT DOES NOT EXIST IS UNEVALUABLE, NOT CLEAN. This engine scanned a nonexistent
+    // path, found nothing, and exited 0 with `ok: true` and `analyzed.count 0` — so a typo'd path in CI
+    // is a PERMANENT GREEN, and the stderr even claimed it had "wrote 0 effectful functions" there.
+    // java and ts refuse; swift refuses. Found by a review probing what the new arming would be
+    // faithfully replaced BY.
+    if !std::path::Path::new(&dir).exists() {
+        eprintln!("candor-scan: no such path: {dir}");
+        eprintln!("        point candor-scan at a crate or workspace directory. Exit 2 (unevaluable) —");
+        eprintln!("        a target that is not there is not a clean scan.");
+        let _ = GATE_JSON_PATH.set(gate_json_path.clone());
+        crate::gate::record_gate_refusal(format!("no such path: {dir}"));
+        crate::gate::write_gate_json(2);
+        std::process::exit(2);
+    }
+    // THE VERDICT PATH MUST NOT BE THE POLICY PATH. Arming writes to `--gate-json` before anything is
+    // read, so `--policy P --gate-json P` OVERWROTE the policy with the armed JSON, and every line of it
+    // then parsed as an unknown rule — warned, not refused — so a gate that exits 1 exited 0 with
+    // `ok: true`, and the user's policy file was gone. The collision is user error; silently turning a
+    // red gate green and destroying the input is not an acceptable response to it.
+    if let (Some(pp), Some(gp)) = (policy_path.as_ref(), gate_json_path.as_ref()) {
+        if gp != "-" && std::path::Path::new(pp) == std::path::Path::new(gp) {
+            eprintln!("candor-scan: --policy and --gate-json name the SAME file ({pp}) — refusing (exit 2).");
+            eprintln!("        The verdict is written before the policy is read, so this would overwrite");
+            eprintln!("        your policy and then gate on the wreckage. Give the verdict its own path.");
+            std::process::exit(2);
+        }
+    }
     // ARM THE VERDICT THE INSTANT THE PATH IS KNOWN — before the config layer, which is ITSELF an
     // exit-2 cause (an unusable CANDOR_CONFIG, or a committed `.candor/config` that cannot be read). It
     // used to be armed 25 lines below this, so a config refusal exited 2 leaving the previous run's
