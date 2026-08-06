@@ -163,6 +163,13 @@ pub(crate) fn scan_main() {
             }
         }
     }
+    // ARM THE VERDICT THE INSTANT THE PATH IS KNOWN — before the config layer, which is ITSELF an
+    // exit-2 cause (an unusable CANDOR_CONFIG, or a committed `.candor/config` that cannot be read). It
+    // used to be armed 25 lines below this, so a config refusal exited 2 leaving the previous run's
+    // GREEN on disk while the comment on the arming claimed "anything that can exit must come after".
+    // The rule is only true if the arming is first; candor-java arms at flag-parse for this reason.
+    let _ = GATE_JSON_PATH.set(gate_json_path);
+    crate::gate::arm_gate_json();
     // `.candor/config` (candor-spec §config): the checked-in floor under the env vars. Discovery is
     // anchored to the SCAN TARGET (walk up from `dir` to the repo root's .candor/config), never the CWD;
     // $CANDOR_CONFIG overrides discovery. FAIL-CLOSED when configured-but-unusable (exit 2 — the §6.2
@@ -192,8 +199,6 @@ pub(crate) fn scan_main() {
     // RECORD violations (record_gate_violations); the verdict is written ONCE here after the whole scan —
     // per-member writes let a clean last member overwrite an earlier violator's verdict (ok:true vs exit 1).
     // Dependency scans under --deps run gate-free (policy=None in scan_one), so they record nothing.
-    let _ = GATE_JSON_PATH.set(gate_json_path);
-    crate::gate::arm_gate_json();   // ⟨0.24⟩ fail-closed from the first instant — see the fn
     // THE PIN CHECK RUNS AFTER THE ARMING, and the order is the whole point. It used to run 25 lines
     // earlier, so its exit 2 left the PREVIOUS run's `--gate-json` document on disk — a false green on
     // the machine channel from the release's flagship guard. Anything that can exit must come after the

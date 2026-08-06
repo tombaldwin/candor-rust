@@ -1402,6 +1402,12 @@ pub fn engine_pin_for(text: &str, impl_name: &str) -> Option<String> {
     if bad {
         return Some("<unreadable>".to_string());
     }
+    // AN UNREADABLE UNQUALIFIED LINE IS NOT HIDDEN BY A QUALIFIED PIN. `qual ?? wild` returned the qua
+    // lified value, so `engine garbage` beside a good qualified line passed SILENTLY here while candor-java ex
+    // ited 2 — the exact mirror of the bug just fixed in java, four engines the other way. Unreadability is a property of the LINE; precedence only decides which VERSION applies.
+    if let Some(w) = &wild {
+        if normalize_version(w).is_none() { return Some(w.clone()); }
+    }
     qual.or(wild)
 }
 
