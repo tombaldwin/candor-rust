@@ -1337,3 +1337,94 @@ mod tests {
         assert_eq!(hole("deny Unknown[reflect]\n", None, &[]).as_deref(), Some("deny Unknown"));
     }
 }
+
+// ── ⟨0.27⟩ SPEC §3.4 `engine` — the engine↔baseline coupling ─────────────────────────────────────
+/// What an `engine` pin says about the build that is running. Data, not a print-and-exit, so every
+/// branch is testable — including the two that MUST NOT change the exit code.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PinVerdict {
+    /// No pin, or a pin qualified for another implementation. Today's behaviour, exactly.
+    Absent,
+    Match,
+    /// A different version — the engine↔baseline coupling is broken. Exit 2 (UNEVALUABLE, never 1).
+    Mismatch,
+    /// Present but unreadable (`engine latest`, a bare `engine`, trailing junk). Exit 2: a pin that
+    /// cannot be read is a guard the operator believes is on. This is the one place §6.2's
+    /// warn-and-skip posture INVERTS — skipping a key that ADDS something costs that key; skipping a
+    /// PIN costs the guard.
+    Malformed,
+    /// Well-formed, and this build cannot state its own release. UNANSWERABLE — §3.1's rule applies:
+    /// disclosed, never scored, INCLUDING as satisfied.
+    Undetermined,
+}
+
+/// The pin that applies to `impl_name` — the qualified form wins over the unqualified one, and the
+/// LAST occurrence wins (matching candor-java's map semantics). Two lines that DISAGREE about the same
+/// key return a value that cannot parse, so they surface as [`PinVerdict::Malformed`] rather than one
+/// silently discarding the other: two lines disagreeing about which engine to run is not a preference
+/// to resolve, it is a question the config leaves unanswered.
+pub fn engine_pin_for(text: &str, impl_name: &str) -> Option<String> {
+    const IMPLS: [&str; 5] = ["java", "rust", "ts", "swift", "agents"];
+    let (mut wild, mut qual): (Option<String>, Option<String>) = (None, None);
+    let mut bad = false;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        if !it.next().is_some_and(|k| k.eq_ignore_ascii_case("engine")) {
+            continue;
+        }
+        let rest: Vec<&str> = it.collect();
+        let slot = |cur: &mut Option<String>, v: String| {
+            if cur.as_ref().is_some_and(|p| *p != v) {
+                *cur = Some(format!("{} / {v}", cur.as_ref().unwrap()));
+            } else {
+                *cur = Some(v);
+            }
+        };
+        match rest.len() {
+            0 => bad = true,                                  // a bare `engine` line
+            1 => slot(&mut wild, rest[0].to_string()),        // engine <version>
+            2 if IMPLS.contains(&rest[0].to_ascii_lowercase().as_str()) => {
+                if rest[0].eq_ignore_ascii_case(impl_name) {
+                    slot(&mut qual, rest[1].to_string());
+                }
+            }
+            _ => bad = true,                                  // trailing junk / unknown qualifier
+        }
+    }
+    if bad {
+        return Some("<unreadable>".to_string());
+    }
+    qual.or(wild)
+}
+
+/// [`PinVerdict`] for `pin` against `running`. Pure: no printing, no exit.
+pub fn pin_verdict(pin: Option<&str>, running: &str) -> PinVerdict {
+    let Some(pin) = pin else { return PinVerdict::Absent };
+    let Some(want) = normalize_version(pin) else { return PinVerdict::Malformed };
+    if running.trim().is_empty() || running == "unknown" {
+        return PinVerdict::Undetermined;
+    }
+    if want == normalize_version(running).unwrap_or_else(|| running.trim().to_string()) {
+        PinVerdict::Match
+    } else {
+        PinVerdict::Mismatch
+    }
+}
+
+/// A pin token → its comparable form, or None when it is not a version at all. A leading `v` is
+/// optional (the GitHub-tag `v0.27.0` and the crate `0.27.0` are the same pin) and a two-part `0.27`
+/// means `0.27.0`. Anything else — `latest`, a branch name — is MALFORMED rather than a version that
+/// can never match: the difference decides whether the operator reads "wrong version" or "that is not
+/// a version".
+fn normalize_version(raw: &str) -> Option<String> {
+    let s = raw.trim().trim_start_matches(['v', 'V']);
+    let parts: Vec<&str> = s.split('.').collect();
+    if !(parts.len() == 2 || parts.len() == 3) || !parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    Some(if parts.len() == 2 { format!("{s}.0") } else { s.to_string() })
+}
