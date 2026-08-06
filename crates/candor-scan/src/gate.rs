@@ -568,6 +568,34 @@ pub(crate) fn record_gate_unevaluated(items: &[candor_report::Unevaluated]) {
 /// analog of the AS-EFF console lines, accumulated from the SAME `policy_violations` that set the exit
 /// code, so it can never disagree with the gate. Called ONCE, by `scan_main`, after the whole scan (every
 /// workspace member) completes. `-` streams to stdout. A no-op unless `--gate-json` was given.
+/// ⟨0.24⟩ ARM THE VERDICT FAIL-CLOSED, at the first instant of the run.
+///
+/// Any exit before a verdict is written must not leave the PREVIOUS run's document in place — a CI
+/// wrapper that reads the artifact instead of the exit code would then report a pass over a run that
+/// refused. An adversarial review found exactly that on the ⟨0.27⟩ engine-pin refusal: exit 2 with a
+/// seeded `{"ok":true}` still on disk, in rust, ts AND swift, while candor-java overwrote it.
+///
+/// Arming at the START is what makes this a CLASS fix rather than one branch: every exit path — the pin,
+/// a corrupt baseline, a panic, a kill — leaves a refusal unless the run got far enough to replace it.
+/// candor-java's `armGateJson` is the model, and the wording is deliberately about the RUN, not the code.
+pub(crate) fn arm_gate_json() {
+    let Some(Some(path)) = GATE_JSON_PATH.get() else { return };
+    if path == "-" { return; }                 // a stream has no previous document to be stale
+    let doc = format!(
+        "{{\n \"spec\": \"{}\",\n \"ok\": false,\n \"refused\": true,\n \"reason\": \"{}\"\n}}\n",
+        candor_report::SPEC_VERSION,
+        "the gate did not complete — this document was written when the run STARTED and was never \
+         replaced by a verdict, so the run failed, crashed or was killed before it could decide. It is \
+         NOT a verdict about the code; see the run's stderr for the cause."
+    );
+    if let Err(e) = std::fs::write(path, doc) {
+        eprintln!(
+            "candor-scan: could not arm --gate-json {path} fail-closed ({e}) — if this run does not \
+             complete, that path may still hold a PREVIOUS run's verdict"
+        );
+    }
+}
+
 pub(crate) fn write_gate_json(exit_code: i32) {
     let Some(Some(path)) = GATE_JSON_PATH.get() else { return };
     // ⟨0.21⟩ COMPLETENESS MANIFEST: the accumulated analyzed count + the units that couldn't be analyzed.
