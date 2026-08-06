@@ -168,7 +168,6 @@ pub(crate) fn scan_main() {
     // $CANDOR_CONFIG overrides discovery. FAIL-CLOSED when configured-but-unusable (exit 2 — the §6.2
     // unreadable-policy posture); only genuine absence is empty.
     let cfg = load_candor_config(&dir);
-    enforce_engine_pin(&dir);
     // The policy source is resolved HERE, once (flag wins, CANDOR_POLICY env next, the config file as the
     // floor) — never inside scan_one, so --deps dependency scans can't inherit the root gate via the env.
     let policy = policy_path
@@ -194,6 +193,12 @@ pub(crate) fn scan_main() {
     // per-member writes let a clean last member overwrite an earlier violator's verdict (ok:true vs exit 1).
     // Dependency scans under --deps run gate-free (policy=None in scan_one), so they record nothing.
     let _ = GATE_JSON_PATH.set(gate_json_path);
+    crate::gate::arm_gate_json();   // ⟨0.24⟩ fail-closed from the first instant — see the fn
+    // THE PIN CHECK RUNS AFTER THE ARMING, and the order is the whole point. It used to run 25 lines
+    // earlier, so its exit 2 left the PREVIOUS run's `--gate-json` document on disk — a false green on
+    // the machine channel from the release's flagship guard. Anything that can exit must come after the
+    // verdict is armed fail-closed.
+    enforce_engine_pin(&dir);
     if deps_mode {
         let code = run_with_deps(&dir, prefix, want_json, include_tests, policy, baseline);
         write_gate_json(code);
