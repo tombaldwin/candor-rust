@@ -8,6 +8,11 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## [0.27.0] — 2026-08-05
 
+- **A nonexistent scan target exited 0 with `ok: true`** — a typo'd path in CI was a permanent green.
+- **`--policy P --gate-json P` destroyed the policy and turned a red gate green**, because the verdict is
+  written before the policy is read. Refused.
+- **Pin refusals now reach a `--gate-json -` stream**, which arming (files only) could not cover.
+
 - **A refusal must never leave the last run's green: `--gate-json` is now armed FAIL-CLOSED at run
   start.** With a mismatched or unreadable `engine` pin this engine exited 2 and left the PREVIOUS run's
   verdict document on disk, so a CI wrapper reading the artifact rather than the exit code reported a
