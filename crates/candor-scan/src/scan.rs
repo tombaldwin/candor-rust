@@ -17,6 +17,105 @@ use crate::*;
 /// ADVISORY ONLY: one stderr line. It never touches the report, the gate verdict, or the exit code.
 const UNCOVERED_CALLS_NUDGE_MIN: usize = 50;
 
+/// Learn `--gate-json` and `--policy` from argv with NO side effects (SPEC §3.3.1 ⟨0.27⟩).
+///
+/// Deliberately permissive: it is not the validator, it only needs the paths early enough that the
+/// collision check and the arming can both precede the first write. The real parse below still owns
+/// every diagnostic.
+fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>) {
+    let (mut gate, mut policy) = (None, None);
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        let takes = matches!(a.as_str(), "--gate-json" | "--policy");
+        if !takes {
+            continue;
+        }
+        let v = match it.peek() {
+            Some(v) if v.as_str() == "-" || !v.starts_with('-') => (*v).clone(),
+            _ => continue,
+        };
+        it.next();
+        if a == "--gate-json" {
+            gate = Some(v);
+        } else {
+            policy = Some(v);
+        }
+    }
+    (gate, policy)
+}
+
+/// SPEC §3.3.1 ⟨0.27⟩ — is this one artifact under two names?
+///
+/// NOT a path-component comparison. The guard that shipped here compared `Path::new(pp) ==
+/// Path::new(gp)`, which a review defeated with `--policy /w/P --gate-json ./P` run from `/w`: same
+/// file, different spelling, policy destroyed, exit 0 with `ok: true`. Canonicalisation resolves `.`,
+/// `..` and symlinks; where the sink does not exist yet (the normal case — we are about to create it)
+/// its parent is canonicalised and the file name appended. "Resolve the artifact, not just the string"
+/// is the rule that caught the release verifier; it applies here for the same reason.
+fn same_artifact(a: &str, b: &str) -> bool {
+    if a == "-" || b == "-" {
+        return false;
+    }
+    fn resolve(p: &str) -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(p);
+        if let Ok(c) = p.canonicalize() {
+            return Some(c);
+        }
+        let parent = p.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        Some(parent.canonicalize().ok()?.join(p.file_name()?))
+    }
+    match (resolve(a), resolve(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Refuse a `--gate-json` sink that names an INPUT of this run, having written nothing (exit 2).
+///
+/// Arming writes before the run knows its answer, so pointing the sink at the policy destroys the
+/// policy: measured, `--policy P --gate-json P` on violating code exited 0 with `ok: true` because the
+/// armed JSON replaced P and every line of it parsed as an unknown rule. The gate ran over zero rules —
+/// a machine-readable all-clear produced by deleting the question.
+fn refuse_gate_json_over_input(gate: &str, other: Option<&str>, flag: &str) {
+    let Some(other) = other else { return };
+    if !same_artifact(gate, other) {
+        return;
+    }
+    eprintln!("candor-scan: --gate-json {gate} names the SAME FILE as {flag} {other} — refusing (exit 2).");
+    eprintln!("        The verdict is armed before the policy is read, so this would overwrite your");
+    eprintln!("        policy and then gate on the wreckage. Nothing was written; give the verdict its");
+    eprintln!("        own path.");
+    std::process::exit(2);
+}
+
+/// `.candor/config` is never a verdict sink, wherever it is (SPEC §3.3.1 ⟨0.27⟩).
+///
+/// The per-input checks can only name inputs the run was TOLD about; the config is DISCOVERED by
+/// walking up from the target, so by the time its path is known the arming has already destroyed it.
+/// A check on the SHAPE needs no discovery, so it can run before the first write and it covers a config
+/// found anywhere up the tree. No legitimate run writes a gate verdict to `config` inside `.candor`.
+fn refuse_gate_json_at_config(gate: &str) {
+    if gate == "-" {
+        return;
+    }
+    let p = std::path::Path::new(gate);
+    let is_config = p.file_name().is_some_and(|n| n == "config")
+        && p.parent()
+            .and_then(|d| {
+                let d = if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d };
+                d.canonicalize().ok().or_else(|| Some(d.to_path_buf()))
+            })
+            .and_then(|d| d.file_name().map(|n| n == ".candor"))
+            .unwrap_or(false);
+    if !is_config {
+        return;
+    }
+    eprintln!("candor-scan: --gate-json {gate} is a .candor/config — refusing (exit 2). The verdict is");
+    eprintln!("        armed before the config is read, so this would destroy the config that configures");
+    eprintln!("        this run. Nothing was written; give the verdict its own path.");
+    std::process::exit(2);
+}
+
 pub(crate) fn scan_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = ".".to_string();
@@ -27,10 +126,44 @@ pub(crate) fn scan_main() {
     let mut gate_json_path: Option<String> = None;
     let mut deps_mode = false;
     let mut incremental = false;
+    // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, and never over an input.
+    //
+    // This pre-pass learns the sink and this run's inputs with NO side effects, so the collision check
+    // below can run before anything is written and the arming can precede EVERY other exit — including
+    // the unknown-flag exit in the loop, which §3.3 names as a broken-gate-config exit-2 cause that must
+    // leave a refusal behind. Arming inside the loop made the contract depend on argv ORDER.
+    let (pre_gate, pre_policy) = prescan_sink_and_inputs(&args);
+    if let Some(gp) = pre_gate.as_deref() {
+        // Order matters and got this wrong: the nonexistent-target refusal below used to run FIRST and
+        // it WRITES, so `candor-scan /nope --policy P --gate-json P` destroyed P via the very refusal
+        // that exists to keep a red gate red. Every write is now downstream of this check.
+        refuse_gate_json_over_input(gp, pre_policy.as_deref(), "--policy");
+        refuse_gate_json_over_input(gp, std::env::var("CANDOR_POLICY").ok().as_deref(), "CANDOR_POLICY");
+        refuse_gate_json_over_input(gp, std::env::var("CANDOR_CONFIG").ok().as_deref(), "CANDOR_CONFIG");
+        refuse_gate_json_at_config(gp);
+        // ARM HERE — earlier than any exit this process can take. It used to be armed after the arg
+        // loop, so the loop's own `unknown flag` exit(2) left the PREVIOUS run's green document on
+        // disk; §3.3 names an unknown flag as a broken-gate-config exit-2 cause, which MUST leave a
+        // refusal. Nothing between this line and the verdict can exit without replacing it.
+        let _ = GATE_JSON_PATH.set(Some(gp.to_string()));
+        crate::gate::arm_gate_json();
+    }
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--out" => prefix = it.next().cloned().unwrap_or_default(),
+            "--out" => {
+                // The dash-check `--gate-json` records as fixed, applied here too: `--out --policy P`
+                // swallowed `--policy` as the prefix, so the displaced bare `P` became the scan target
+                // and the run went GATELESS — exit 0, no gate, writing a report named `--policy.*`.
+                // A valueless gate-adjacent flag must fail, never silently drop the gate.
+                match it.next() {
+                    Some(v) if !v.starts_with('-') => prefix = v.clone(),
+                    _ => {
+                        eprintln!("candor-scan: --out requires a path prefix (a following non-flag value)");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--json" => want_json = true,
             "--include-tests" => include_tests = true,
             "--incremental" => incremental = true,
@@ -177,26 +310,11 @@ pub(crate) fn scan_main() {
         crate::gate::write_gate_json(2);
         std::process::exit(2);
     }
-    // THE VERDICT PATH MUST NOT BE THE POLICY PATH. Arming writes to `--gate-json` before anything is
-    // read, so `--policy P --gate-json P` OVERWROTE the policy with the armed JSON, and every line of it
-    // then parsed as an unknown rule — warned, not refused — so a gate that exits 1 exited 0 with
-    // `ok: true`, and the user's policy file was gone. The collision is user error; silently turning a
-    // red gate green and destroying the input is not an acceptable response to it.
-    if let (Some(pp), Some(gp)) = (policy_path.as_ref(), gate_json_path.as_ref()) {
-        if gp != "-" && std::path::Path::new(pp) == std::path::Path::new(gp) {
-            eprintln!("candor-scan: --policy and --gate-json name the SAME file ({pp}) — refusing (exit 2).");
-            eprintln!("        The verdict is written before the policy is read, so this would overwrite");
-            eprintln!("        your policy and then gate on the wreckage. Give the verdict its own path.");
-            std::process::exit(2);
-        }
-    }
-    // ARM THE VERDICT THE INSTANT THE PATH IS KNOWN — before the config layer, which is ITSELF an
-    // exit-2 cause (an unusable CANDOR_CONFIG, or a committed `.candor/config` that cannot be read). It
-    // used to be armed 25 lines below this, so a config refusal exited 2 leaving the previous run's
-    // GREEN on disk while the comment on the arming claimed "anything that can exit must come after".
-    // The rule is only true if the arming is first; candor-java arms at flag-parse for this reason.
+    // (the --policy/--gate-json collision is refused in the pre-pass at the top of this fn, which is
+    // the only place EARLIER than the first write — see refuse_gate_json_over_input.)
+    // (armed in the pre-pass at the top of this fn — SPEC §3.3.1 ⟨0.27⟩. This `set` is the no-op that
+    // keeps the path correct when no --gate-json was given at all.)
     let _ = GATE_JSON_PATH.set(gate_json_path);
-    crate::gate::arm_gate_json();
     // `.candor/config` (candor-spec §config): the checked-in floor under the env vars. Discovery is
     // anchored to the SCAN TARGET (walk up from `dir` to the repo root's .candor/config), never the CWD;
     // $CANDOR_CONFIG overrides discovery. FAIL-CLOSED when configured-but-unusable (exit 2 — the §6.2
