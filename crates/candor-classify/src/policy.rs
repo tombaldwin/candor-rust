@@ -266,16 +266,35 @@ pub fn discover_config_text(start: &std::path::Path) -> Option<String> {
 /// reason other than where each was invoked.
 pub fn discover_config(start: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    // CONFIGURED-BUT-UNUSABLE FAILS LOUD, ON THIS ROUTE TOO. `.ok()` turned an unreadable config into
+    // "no config", so the run continued WITHOUT whatever it declared — a policy, a baseline, an engine
+    // pin, an `unknown-alias` vocabulary. The SCAN route already refuses; this QUERY route did not, so
+    // `gate --report R --policy P` with a broken CANDOR_CONFIG exited 1 here and 2 in java and ts on the
+    // same input. §3.4's posture does not vary by verb.
     if let Ok(p) = std::env::var("CANDOR_CONFIG") {
         let p = std::path::PathBuf::from(p);
-        return std::fs::read_to_string(&p).ok().map(|t| (canon(&p), t));
+        match std::fs::read_to_string(&p) {
+            Ok(t) => return Some((canon(&p), t)),
+            Err(e) => {
+                eprintln!("candor: CANDOR_CONFIG set but {} could not be read ({e}) — failing (exit 2,", p.display());
+                eprintln!("        unevaluable). A config that cannot be read is a guard the operator believes is on.");
+                std::process::exit(2);
+            }
+        }
     }
     let start = canon(start);
     let mut cur = if start.is_dir() { Some(start.as_path()) } else { start.parent() };
     while let Some(d) = cur {
         let cand = d.join(".candor/config");
         if cand.is_file() {
-            return std::fs::read_to_string(&cand).ok().map(|t| (canon(&cand), t));
+            match std::fs::read_to_string(&cand) {
+                Ok(t) => return Some((canon(&cand), t)),
+                Err(e) => {
+                    eprintln!("candor: {} exists but could not be read ({e}) — failing (exit 2,", cand.display());
+                    eprintln!("        unevaluable). Treating it as absent would run without what it declares.");
+                    std::process::exit(2);
+                }
+            }
         }
         cur = d.parent();
     }
