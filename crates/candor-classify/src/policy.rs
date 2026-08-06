@@ -1384,17 +1384,18 @@ pub fn engine_pin_for(text: &str, impl_name: &str) -> Option<String> {
                 *cur = Some(v);
             }
         };
+        // A KNOWN QUALIFIER DECIDES OWNERSHIP BEFORE ARITY. Checking the one-token case first made `engine swift` a WILDCARD pin whose version is the literal "swift" -> MALFORMED -> exit 2 in every engine, so one operator forgetting a version on a qualified line killed the whole family. SPEC 3.4 says the skip is whole-line 'whatever follows it' -- and nothing following it is a case of that too.
+        if let Some(head) = rest.first() {
+            if IMPLS.contains(&head.to_ascii_lowercase().as_str()) {
+                if head.eq_ignore_ascii_case(impl_name) {
+                    if rest.len() == 2 { slot(&mut qual, rest[1].to_string()); } else { bad = true; }
+                }
+                continue;                                     // another impl's line, whatever follows it
+            }
+        }
         match rest.len() {
             0 => bad = true,                                  // a bare `engine` line
             1 => slot(&mut wild, rest[0].to_string()),        // engine <version>
-            // A KNOWN qualifier decides the line's OWNER before anything else is judged. `engine swift
-            // 0.99.0 junk` is swift's problem, and swift refuses on it; poisoning rust's whole config
-            // over a line naming another engine turns one typo into a family-wide outage (SPEC §3.4).
-            _ if IMPLS.contains(&rest[0].to_ascii_lowercase().as_str()) => {
-                if rest[0].eq_ignore_ascii_case(impl_name) {
-                    if rest.len() == 2 { slot(&mut qual, rest[1].to_string()); } else { bad = true; }
-                }
-            }
             _ => bad = true,                                  // trailing junk / unknown qualifier
         }
     }
