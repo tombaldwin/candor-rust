@@ -609,7 +609,89 @@ fn refuse_disclosing(
 /// `--json` IS `--gate-json -`, deliberately: on a scan `--json <file>` writes the REPORT, and there is
 /// no report to write here, so the verb's machine output is the verdict. A second meaning for `--json`
 /// would be the one place a consumer could tell the two routes apart.
+/// SPEC §3.3.1 ⟨0.27⟩ — is this one artifact under two names? Not a string comparison: `--policy /w/P
+/// --gate-json ./P` run from `/w` names one file twice.
+fn same_artifact(a: &str, b: &str) -> bool {
+    if a == "-" || b == "-" {
+        return false;
+    }
+    fn resolve(p: &str) -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(p);
+        if let Ok(c) = p.canonicalize() {
+            return Some(c);
+        }
+        let parent = p.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        Some(parent.canonicalize().ok()?.join(p.file_name()?))
+    }
+    matches!((resolve(a), resolve(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// `.candor/config` is never a verdict sink, wherever it is.
+fn is_candor_config(p: &str) -> bool {
+    let path = std::path::Path::new(p);
+    path.file_name().is_some_and(|n| n == "config")
+        && path
+            .parent()
+            .map(|d| if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d })
+            .and_then(|d| d.canonicalize().ok().or_else(|| Some(d.to_path_buf())))
+            .and_then(|d| d.file_name().map(|n| n == ".candor"))
+            .unwrap_or(false)
+}
+
 pub(crate) fn cmd_gate(args: &[String]) -> i32 {
+    // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
+    //
+    // Every ENUMERATED exit below already writes a refusal through `refuse`, and the usage-error
+    // collection above is careful to learn the path first — that part was right. What it cannot cover is
+    // the run that never reaches an exit: a panic, an OOM, a CI timeout, a `kill -9` all leave the
+    // PREVIOUS run's green document on disk. Enumerating exits is the approach that keeps missing one;
+    // writing the refusal at the start and letting the verdict replace it does not.
+    //
+    // And arming WRITES, so a sink naming the policy destroys it — measured across four engines as a red
+    // gate turning green with `"ok": true`.
+    {
+        let (mut gate, mut policy) = (None::<&str>, None::<&str>);
+        let mut i = 0;
+        while i < args.len() {
+            let takes = args[i] == "--gate-json" || args[i] == "--policy";
+            if takes {
+                if let Some(v) = args.get(i + 1) {
+                    if v == "-" || !v.starts_with('-') {
+                        if args[i] == "--gate-json" { gate = Some(v) } else { policy = Some(v) }
+                        i += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        if let Some(gp) = gate {
+            let env_policy = std::env::var("CANDOR_POLICY").ok();
+            for (other, flag) in [(policy, "--policy"), (env_policy.as_deref(), "CANDOR_POLICY")] {
+                if let Some(other) = other {
+                    if same_artifact(gp, other) {
+                        eprintln!("candor-query gate: --gate-json {gp} names the SAME FILE as {flag} {other} — refusing (exit 2).");
+                        eprintln!("        The verdict is armed before the policy is read, so this would overwrite your");
+                        eprintln!("        policy and then gate on the wreckage. Nothing was written.");
+                        return 2;
+                    }
+                }
+            }
+            if is_candor_config(gp) {
+                eprintln!("candor-query gate: --gate-json {gp} is a .candor/config — refusing (exit 2). This would");
+                eprintln!("        destroy the config that configures this run. Nothing was written.");
+                return 2;
+            }
+            if gp != "-" {
+                let armed = format!(
+                    "{{\n  \"spec\": \"{}\",\n  \"ok\": false,\n  \"refused\": true,\n  \"reason\": \"the gate did not complete — this document was written when the run STARTED and was never replaced by a verdict, so the run failed, crashed or was killed before it could decide. It is NOT a verdict about the code; see the run's stderr for the cause.\"\n}}\n",
+                    candor_report::SPEC_VERSION
+                );
+                if let Err(e) = std::fs::write(gp, armed) {
+                    eprintln!("candor-query: could not arm --gate-json {gp} fail-closed ({e}) — if this run does not complete, that path may still hold a PREVIOUS run's verdict");
+                }
+            }
+        }
+    }
     let mut report_flag: Option<String> = None;
     let mut policy_flag: Option<String> = None;
     let mut gate_json: Option<String> = None;

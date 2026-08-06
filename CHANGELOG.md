@@ -6,6 +6,22 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **The `--policy`/`--gate-json` collision guard compared strings, and ran after a write.** Three
+  defects in one place: `--policy /w/P --gate-json ./P` from `/w` is one file and the guard's
+  path-component comparison missed it (policy destroyed, exit 0, `"ok": true`); the nonexistent-target
+  refusal ran BEFORE the check and it WRITES, so `candor-scan /nope --policy P --gate-json P` destroyed
+  `P` via the very refusal that exists to keep a red gate red; and `CANDOR_POLICY`/`CANDOR_CONFIG` and
+  `.candor/config` were not covered at all. Now a pre-pass ahead of every write, resolving artifacts.
+- **Arming moved ahead of the unknown-flag exit**, which SPEC §3.3 names as a broken-gate-config exit-2
+  cause that must leave a refusal; it previously exited with the previous run's green intact.
+- **`candor-query gate` never armed.** Every enumerated exit wrote a refusal, but a panic, an OOM, a CI
+  timeout or a `kill -9` left yesterday's document — enumerating exits is the approach that keeps
+  missing one. Verified by killing a run mid-flight and finding the refusal.
+- **`--out --policy P` swallowed the gate.** `--out` took the next token unconditionally, so `--policy`
+  became the prefix, the displaced bare `P` became the scan target, and the run went GATELESS at exit 0
+  while writing a report named `--policy.*`. That is the identical defect this file already recorded as
+  fixed for `--gate-json`; the dash-check is now on both.
+
 ## [0.27.0] — 2026-08-05
 
 - **A nonexistent scan target exited 0 with `ok: true`** — a typo'd path in CI was a permanent green.
