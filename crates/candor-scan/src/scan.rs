@@ -177,6 +177,12 @@ pub(crate) fn scan_main() {
     // The AS-EFF-005 baseline (spec §7 item 5), resolved once like the policy: CANDOR_BASELINE env
     // over the config `baseline` key (already home-anchored by load_candor_config). Dependency scans
     // under --deps run guard-free — a dep's internals are not this repo's ratchet.
+    // WHICH SOURCE supplied the baseline decides what a MISSING file means (see `check_baseline`):
+    // `CANDOR_BASELINE` is set unconditionally by the adopt workflow, so an absent path there is "the
+    // ratchet is not adopted yet"; a checked-in `baseline` line DECLARES this repo has one, so an absent
+    // path there was deleted or never committed — and passing green over it is a gate that stopped
+    // gating in silence.
+    let baseline_from_config = std::env::var("CANDOR_BASELINE").is_err() && cfg.contains_key("baseline");
     let baseline = std::env::var("CANDOR_BASELINE").ok().or_else(|| cfg.get("baseline").cloned());
     // ⟨unknown-ratchet⟩ OPT-IN on the AS-EFF-005 guard (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET,
     // default OFF): when ON, a NEWLY-introduced Unknown vs the baseline FAILS instead of staying advisory —
@@ -206,7 +212,7 @@ pub(crate) fn scan_main() {
     let deps_idx = load_dep_reports(deps_spec.as_deref());
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
-    let code = scan_target(&dir, prefix, want_json, include_tests, policy, baseline, &deps_idx);
+    let code = scan_target(&dir, prefix, want_json, include_tests, policy, baseline, baseline_from_config, &deps_idx);
     write_gate_json(code);
     std::process::exit(code);
 }
@@ -224,6 +230,11 @@ pub(crate) struct ScanOpts<'a> {
     /// The AS-EFF-005 baseline value (`CANDOR_BASELINE` env / config `baseline` key): a saved report's
     /// path or `--out` prefix. See `check_baseline` for the full guard contract.
     pub(crate) baseline: Option<String>,
+    /// The baseline came from a checked-in `.candor/config` line rather than `CANDOR_BASELINE`. That
+    /// decides what a MISSING file means: a declaration says this repo HAS a baseline (so an absent one
+    /// was deleted or never committed — exit 2), while the env var is set unconditionally by the adopt
+    /// workflow (so an absent path is "not adopted yet" — a note).
+    pub(crate) baseline_from_config: bool,
     pub(crate) quiet: bool,
     pub(crate) deps_idx: &'a DepIndex,
 }
@@ -319,7 +330,8 @@ fn build_type_surface(
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
 pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
-    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, baseline: baseline_value, quiet, deps_idx } = opts;
+    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, baseline: baseline_value,
+                   baseline_from_config, quiet, deps_idx } = opts;
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
     // Install this crate's cfg-feature picture (active = default closure, declared = all). A
@@ -2020,7 +2032,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // NOTE: the incomplete-analysis refusal is INSIDE the `Checked` arm below, not here. It used to
         // sit at this point — before `check_baseline` ran at all — and that ordering dropped real
         // findings. See the comment on the refusal for the measurement.
-        match check_baseline(bv, dir, &crate_name, &all, &inferred, crate::gate::unknown_ratchet()) {
+        match check_baseline(bv, dir, &crate_name, &all, &inferred, crate::gate::unknown_ratchet(), baseline_from_config) {
             BaselineOutcome::Inactive => {} // absent file: noted, exit unchanged
             BaselineOutcome::Invalid => {
                 // diagnostic already printed by check_baseline
@@ -2312,6 +2324,10 @@ pub(crate) fn scan_target(
     include_tests: bool,
     policy: Option<String>,
     baseline: Option<String>,
+    // See ScanOpts: a baseline DECLARED in `.candor/config` means something different when the file is
+    // missing than one named by `CANDOR_BASELINE`. Threaded rather than re-derived here, so the two
+    // cannot disagree about which source supplied it.
+    baseline_from_config: bool,
     deps_idx: &DepIndex,
 ) -> i32 {
     let members = workspace_members(Path::new(dir));
@@ -2325,7 +2341,7 @@ pub(crate) fn scan_target(
                        check `members`/globs; scan member crates directly to gate them");
         }
         let (code, json) = scan_one(dir, ScanOpts {
-            prefix, want_json, include_tests, policy, baseline, quiet: false, deps_idx,
+            prefix, want_json, include_tests, policy, baseline, baseline_from_config, quiet: false, deps_idx,
         });
         if let Some(b) = json {
             println!("{b}");
@@ -2343,7 +2359,7 @@ pub(crate) fn scan_target(
     for d in &dirs {
         let (code, json) = scan_one(d, ScanOpts {
             prefix: prefix.clone(), want_json, include_tests, policy: policy.clone(),
-            baseline: baseline.clone(), quiet: false, deps_idx,
+            baseline: baseline.clone(), baseline_from_config, quiet: false, deps_idx,
         });
         rc = rc.max(code);
         if let Some(b) = json {
@@ -2443,6 +2459,7 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
             include_tests: false,
             policy: None,
             baseline: None,
+            baseline_from_config: false,
             quiet: true,
             deps_idx: &no_deps,
         });
@@ -2473,5 +2490,5 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
     let idx = load_dep_reports(Some(&spec));
     // The final root scan goes through scan_target so `--deps <workspace>` fans out over members
     // too — the nested-package filter would otherwise prune them all into an empty, gate-passing report.
-    scan_target(dir, prefix, want_json, include_tests, policy, baseline, &idx)
+    scan_target(dir, prefix, want_json, include_tests, policy, baseline, false, &idx)
 }
