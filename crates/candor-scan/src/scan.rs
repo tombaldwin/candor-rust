@@ -22,26 +22,28 @@ const UNCOVERED_CALLS_NUDGE_MIN: usize = 50;
 /// Deliberately permissive: it is not the validator, it only needs the paths early enough that the
 /// collision check and the arming can both precede the first write. The real parse below still owns
 /// every diagnostic.
-fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>) {
-    let (mut gate, mut policy) = (None, None);
+fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>, Option<String>) {
+    let (mut gate, mut policy, mut target) = (None, None, None);
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
-        let takes = matches!(a.as_str(), "--gate-json" | "--policy");
-        if !takes {
-            continue;
-        }
-        let v = match it.peek() {
-            Some(v) if v.as_str() == "-" || !v.starts_with('-') => (*v).clone(),
-            _ => continue,
-        };
-        it.next();
-        if a == "--gate-json" {
-            gate = Some(v);
-        } else {
-            policy = Some(v);
+        if matches!(a.as_str(), "--gate-json" | "--policy" | "--out") {
+            let v = match it.peek() {
+                Some(v) if v.as_str() == "-" || !v.starts_with('-') => (*v).clone(),
+                _ => continue,
+            };
+            it.next();
+            match a.as_str() {
+                "--gate-json" => gate = Some(v),
+                "--policy" => policy = Some(v),
+                _ => {}
+            }
+        } else if !a.starts_with('-') && target.is_none() {
+            // The scan TARGET, needed to discover the `.candor/config` whose `policy` key may name an
+            // input this sink must not overwrite.
+            target = Some(a.clone());
         }
     }
-    (gate, policy)
+    (gate, policy, target)
 }
 
 /// SPEC §3.3.1 ⟨0.27⟩ — is this one artifact under two names?
@@ -68,6 +70,102 @@ fn same_artifact(a: &str, b: &str) -> bool {
         (Some(x), Some(y)) => x == y,
         _ => false,
     }
+}
+
+/// Every path this run READS, whatever channel it arrived through (SPEC §3.3.1 ⟨0.27⟩).
+///
+/// THE FIRST VERSION OF THIS GUARD KEYED ON THE FLAG. With the policy declared by `.candor/config` —
+/// the checked-in form, i.e. the one a CI job actually has — `--gate-json <that policy>` destroyed it
+/// and exited 0 with `"ok": true` in ALL FOUR ENGINES, because the pre-pass only looked at `--policy`
+/// and `CANDOR_POLICY`. A policy does not change what it is according to how the operator handed it over.
+///
+/// The config is read LENIENTLY here — no exit, no diagnostic — because this runs before the real config
+/// load and must not pre-empt its refusal. If it cannot be read we learn nothing from it and the load a
+/// moment later fails on its own terms. This read decides only whether a path is an INPUT.
+fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    if let Some(p) = policy_flag {
+        out.push((p.to_string(), "--policy".into()));
+    }
+    for (var, label) in [("CANDOR_POLICY", "CANDOR_POLICY"), ("CANDOR_BASELINE", "CANDOR_BASELINE"),
+                         ("CANDOR_CONFIG", "CANDOR_CONFIG")] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                out.push((v, label.into()));
+            }
+        }
+    }
+    if let Ok(d) = std::env::var("CANDOR_DEPS") {
+        for one in d.split(':').filter(|x| !x.is_empty()) {
+            out.push((one.to_string(), "a CANDOR_DEPS report".into()));
+        }
+    }
+    // …and the config's own keys, anchored the way the config layer anchors them.
+    let cfg = std::env::var("CANDOR_CONFIG")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            let mut d = std::path::Path::new(target).canonicalize().ok()?;
+            if d.is_file() {
+                d = d.parent()?.to_path_buf();
+            }
+            loop {
+                let c = d.join(".candor/config");
+                if c.exists() {
+                    return Some(c);
+                }
+                d = d.parent()?.to_path_buf();
+            }
+        });
+    if let Some(cfg) = cfg {
+        let home = cfg.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+        out.push((cfg.display().to_string(), "the discovered .candor/config".into()));
+        if let Ok(text) = std::fs::read_to_string(&cfg) {
+            for raw in text.lines() {
+                let line = raw.split('#').next().unwrap_or("").trim();
+                let mut it = line.split_whitespace();
+                let (Some(key), Some(rest)) = (it.next(), line.split_whitespace().nth(1)) else { continue };
+                let _ = rest;
+                let key = key.to_lowercase();
+                if !matches!(key.as_str(), "policy" | "baseline" | "deps") {
+                    continue;
+                }
+                let val = line[key.len()..].trim();
+                let parts: Vec<&str> = if key == "deps" {
+                    val.split([' ', '\t', ':', ',']).filter(|x| !x.is_empty()).collect()
+                } else {
+                    vec![val]
+                };
+                for one in parts {
+                    if one.is_empty() {
+                        continue;
+                    }
+                    let p = std::path::Path::new(one);
+                    let abs = if p.is_absolute() {
+                        p.to_path_buf()
+                    } else if let Some(h) = home.as_ref() {
+                        h.join(one)
+                    } else {
+                        p.to_path_buf()
+                    };
+                    out.push((abs.display().to_string(), format!("the config's `{key}`")));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Refuse the sink if it names ANY input of this run, whatever channel that input arrived through.
+fn refuse_gate_json_over_any_input(gate: &str, target: &str, policy_flag: Option<&str>) {
+    if gate == "-" {
+        return;
+    }
+    for (path, label) in run_inputs(target, policy_flag) {
+        refuse_gate_json_over_input(gate, Some(&path), &label);
+    }
+    refuse_gate_json_at_config(gate);
 }
 
 /// Refuse a `--gate-json` sink that names an INPUT of this run, having written nothing (exit 2).
@@ -132,15 +230,12 @@ pub(crate) fn scan_main() {
     // below can run before anything is written and the arming can precede EVERY other exit — including
     // the unknown-flag exit in the loop, which §3.3 names as a broken-gate-config exit-2 cause that must
     // leave a refusal behind. Arming inside the loop made the contract depend on argv ORDER.
-    let (pre_gate, pre_policy) = prescan_sink_and_inputs(&args);
+    let (pre_gate, pre_policy, pre_target) = prescan_sink_and_inputs(&args);
     if let Some(gp) = pre_gate.as_deref() {
         // Order matters and got this wrong: the nonexistent-target refusal below used to run FIRST and
         // it WRITES, so `candor-scan /nope --policy P --gate-json P` destroyed P via the very refusal
         // that exists to keep a red gate red. Every write is now downstream of this check.
-        refuse_gate_json_over_input(gp, pre_policy.as_deref(), "--policy");
-        refuse_gate_json_over_input(gp, std::env::var("CANDOR_POLICY").ok().as_deref(), "CANDOR_POLICY");
-        refuse_gate_json_over_input(gp, std::env::var("CANDOR_CONFIG").ok().as_deref(), "CANDOR_CONFIG");
-        refuse_gate_json_at_config(gp);
+        refuse_gate_json_over_any_input(gp, pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
         // ARM HERE — earlier than any exit this process can take. It used to be armed after the arg
         // loop, so the loop's own `unknown flag` exit(2) left the PREVIOUS run's green document on
         // disk; §3.3 names an unknown flag as a broken-gate-config exit-2 cause, which MUST leave a

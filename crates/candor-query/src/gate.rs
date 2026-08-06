@@ -650,14 +650,18 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // And arming WRITES, so a sink naming the policy destroys it — measured across four engines as a red
     // gate turning green with `"ok": true`.
     {
-        let (mut gate, mut policy) = (None::<&str>, None::<&str>);
+        let (mut gate, mut policy, mut report) = (None::<&str>, None::<&str>, None::<&str>);
         let mut i = 0;
         while i < args.len() {
-            let takes = args[i] == "--gate-json" || args[i] == "--policy";
+            let takes = args[i] == "--gate-json" || args[i] == "--policy" || args[i] == "--report";
             if takes {
                 if let Some(v) = args.get(i + 1) {
                     if v == "-" || !v.starts_with('-') {
-                        if args[i] == "--gate-json" { gate = Some(v) } else { policy = Some(v) }
+                        match args[i].as_str() {
+                            "--gate-json" => gate = Some(v),
+                            "--policy" => policy = Some(v),
+                            _ => report = Some(v),
+                        }
                         i += 1;
                     }
                 }
@@ -666,7 +670,12 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         }
         if let Some(gp) = gate {
             let env_policy = std::env::var("CANDOR_POLICY").ok();
-            for (other, flag) in [(policy, "--policy"), (env_policy.as_deref(), "CANDOR_POLICY")] {
+            // §3.3.1 names "a report being read (`gate --report`)" as an input. Writing the verdict
+            // there destroys the very report the gate was asked to judge — and the diagnostic then
+            // blames the report ("no `functions` array") rather than the collision, so the operator is
+            // told their report is corrupt by the run that corrupted it.
+            for (other, flag) in [(policy, "--policy"), (report, "--report"),
+                                  (env_policy.as_deref(), "CANDOR_POLICY")] {
                 if let Some(other) = other {
                     if same_artifact(gp, other) {
                         eprintln!("candor-query gate: --gate-json {gp} names the SAME FILE as {flag} {other} — refusing (exit 2).");

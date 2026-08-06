@@ -6,6 +6,19 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⚠ The collision guard keyed on the FLAG, so a policy from `.candor/config` was invisible to it** —
+  the checked-in form, i.e. the one CI actually uses. `--gate-json <that policy>` destroyed it and exited
+  0 with `"ok": true`, in all four engines, after the flag-based rows were already green. It now
+  enumerates every channel a policy can arrive through, reading the config leniently so it cannot
+  pre-empt the real load's refusal.
+- **⚠ `candor-query gate --report R --gate-json R` destroyed the report it was asked to judge**, then
+  blamed the report ("no `functions` array") rather than the collision. §3.3.1 names a report being read
+  as an input. Caught by the new conformance rows, not by hand.
+- **An unreadable config was silently "no config" on the QUERY route.** `read_to_string(..).ok()` dropped
+  whatever it declared — a policy, a baseline, an engine pin, an `unknown-alias` vocabulary — so
+  `gate --report R --policy P` with a broken `CANDOR_CONFIG` exited 1 here and 2 in java and ts. The scan
+  route already refused; §3.4's posture does not vary by verb.
+
 - **The `--policy`/`--gate-json` collision guard compared strings, and ran after a write.** Three
   defects in one place: `--policy /w/P --gate-json ./P` from `/w` is one file and the guard's
   path-component comparison missed it (policy destroyed, exit 0, `"ok": true`); the nonexistent-target
