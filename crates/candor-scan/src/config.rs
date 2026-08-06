@@ -15,7 +15,7 @@ pub(crate) const CONFIG_KEYS: [&str; 11] = ["policy", "baseline", "strict", "no-
 /// reader believes the gate is on), so an inert recognized key warns loudly instead of staying mute.
 /// `unknown-ratchet` is a boolean opt-in on the AS-EFF-005 baseline guard (a NEWLY-introduced Unknown
 /// vs the baseline FAILS instead of staying advisory); its value threads through `flag`, not `cfg`.
-pub(crate) const CONFIG_KEYS_IMPLEMENTED: [&str; 4] = ["policy", "baseline", "deps", "unknown-ratchet"];
+pub(crate) const CONFIG_KEYS_IMPLEMENTED: [&str; 5] = ["policy", "baseline", "deps", "unknown-ratchet", "engine"];
 
 /// Locate + parse `.candor/config` for the scan of `dir` (candor-spec §config): $CANDOR_CONFIG if set
 /// (its path MUST be usable — exit 2 otherwise), else the nearest `.candor/config` walking UP from the
@@ -136,6 +136,49 @@ pub(crate) fn flag(cfg: &std::collections::HashMap<String, String>, key: &str, e
         Some(v) => {
             let v = v.trim();
             v.is_empty() || v.eq_ignore_ascii_case("true") || v == "1" || v.eq_ignore_ascii_case("yes")
+        }
+    }
+}
+
+/// ⟨0.27⟩ SPEC §3.4 `engine` — THE ENGINE↔BASELINE COUPLING, enforced instead of hoped for.
+///
+/// The committed `baseline` is a snapshot of what one engine build reported, and an engine swap is
+/// baseline-invalidating. What the pin adds over the provenance checks already in place is that it is
+/// DECLARATIVE: a build id is a hash a consumer cannot write down, so the intended version lived in CI
+/// configuration, decoupled from the baseline it is married to. A declared pin also tells tooling which
+/// engine to FETCH, and it reaches a run with NO baseline configured at all.
+///
+/// TWO OF THE FIVE VERDICTS MUST NOT CHANGE THE EXIT CODE: an ABSENT pin (so the key is opt-in by
+/// construction) and an UNDETERMINED one, where §3.1's unanswerable-condition rule applies — disclosed,
+/// never scored, *including* as satisfied. Exit 2, never 1: the run is UNEVALUABLE, not violating.
+pub(crate) fn enforce_engine_pin(dir: &str) {
+    let Some(text) = candor_classify::policy::discover_config_text(std::path::Path::new(dir)) else { return };
+    let pin = candor_classify::policy::engine_pin_for(&text, "rust");
+    let running = env!("CARGO_PKG_VERSION");
+    use candor_classify::policy::PinVerdict::*;
+    match candor_classify::policy::pin_verdict(pin.as_deref(), running) {
+        Absent | Match => {}
+        Malformed => {
+            eprintln!("candor-scan: .candor/config has an `engine` line that is not an engine version.");
+            eprintln!("        want `engine <version>` (e.g. `engine v{running}`) or `engine <impl> <version>`");
+            eprintln!("        (e.g. `engine rust v{running}`) for a repo scanned by more than one engine.");
+            eprintln!("        Failing (exit 2) rather than ignoring it: a pin that cannot be read is a");
+            eprintln!("        guard the operator believes is on.");
+            std::process::exit(2);
+        }
+        Mismatch => {
+            let p = pin.unwrap_or_default();
+            eprintln!("candor-scan: .candor/config pins engine {p} but this build is candor-scan {running}.");
+            eprintln!("        The pin and the committed baseline move together — a newer engine resolves more");
+            eprintln!("        dispatch, so its report is not comparable with a baseline the pinned engine wrote.");
+            eprintln!("        Either run the pinned engine, or update the pin and regenerate the baseline in the");
+            eprintln!("        same change. Exit 2 (unevaluable), not 1 — this is not a policy violation.");
+            std::process::exit(2);
+        }
+        Undetermined => {
+            eprintln!("candor-scan: .candor/config pins an engine version, and this build does not know its own");
+            eprintln!("        release, so the pin CANNOT be checked. Disclosed, not scored — neither passed nor");
+            eprintln!("        failed.");
         }
     }
 }

@@ -168,6 +168,7 @@ pub(crate) fn scan_main() {
     // $CANDOR_CONFIG overrides discovery. FAIL-CLOSED when configured-but-unusable (exit 2 — the §6.2
     // unreadable-policy posture); only genuine absence is empty.
     let cfg = load_candor_config(&dir);
+    enforce_engine_pin(&dir);
     // The policy source is resolved HERE, once (flag wins, CANDOR_POLICY env next, the config file as the
     // floor) — never inside scan_one, so --deps dependency scans can't inherit the root gate via the env.
     let policy = policy_path
