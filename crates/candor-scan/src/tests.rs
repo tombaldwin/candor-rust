@@ -6021,7 +6021,7 @@ trait G {
         // prefix form: `<value>.<crate>.scan.json`
         std::fs::write(d.join("base.mycrate.scan.json"), report(&this_build)).unwrap();
         let pre = d.join("base").to_string_lossy().into_owned();
-        match check_baseline(&pre, ".", "mycrate", &all, &inferred, false) {
+        match check_baseline(&pre, ".", "mycrate", &all, &inferred, false, false) {
             BaselineOutcome::Checked(v) => {
                 assert_eq!(v.len(), 1, "only the real gain flags: {v:?}",
                     v = v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
@@ -6034,19 +6034,19 @@ trait G {
         }
         // direct-file form resolves the same way
         let direct = d.join("base.mycrate.scan.json").to_string_lossy().into_owned();
-        assert!(matches!(check_baseline(&direct, ".", "mycrate", &all, &inferred, false),
+        assert!(matches!(check_baseline(&direct, ".", "mycrate", &all, &inferred, false, false),
             BaselineOutcome::Checked(v) if v.len() == 1));
         // version mismatch / missing provenance / empty value → Invalid (exit 2, never evaluated)
         std::fs::write(d.join("stale.mycrate.scan.json"), report("scan-0.0.1")).unwrap();
         let stale = d.join("stale").to_string_lossy().into_owned();
-        assert!(matches!(check_baseline(&stale, ".", "mycrate", &all, &inferred, false), BaselineOutcome::Invalid));
+        assert!(matches!(check_baseline(&stale, ".", "mycrate", &all, &inferred, false, false), BaselineOutcome::Invalid));
         std::fs::write(d.join("bare.mycrate.scan.json"), r#"[{"fn":"a","inferred":["Fs"]}]"#).unwrap();
         let bare = d.join("bare").to_string_lossy().into_owned();
-        assert!(matches!(check_baseline(&bare, ".", "mycrate", &all, &inferred, false), BaselineOutcome::Invalid));
-        assert!(matches!(check_baseline("", ".", "mycrate", &all, &inferred, false), BaselineOutcome::Invalid));
+        assert!(matches!(check_baseline(&bare, ".", "mycrate", &all, &inferred, false, false), BaselineOutcome::Invalid));
+        assert!(matches!(check_baseline("", ".", "mycrate", &all, &inferred, false, false), BaselineOutcome::Invalid));
         // absent file → Inactive (note; exit unchanged)
         let absent = d.join("nosuch").to_string_lossy().into_owned();
-        assert!(matches!(check_baseline(&absent, ".", "mycrate", &all, &inferred, false), BaselineOutcome::Inactive));
+        assert!(matches!(check_baseline(&absent, ".", "mycrate", &all, &inferred, false, false), BaselineOutcome::Inactive));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -6075,13 +6075,13 @@ trait G {
         inferred.insert("x".into(), ["Unknown"].into_iter().collect()); // still Unknown — grandfathered
         inferred.insert("y".into(), ["Unknown"].into_iter().collect()); // NEW Unknown — fails under ratchet
         // ratchet OFF: an Unknown-only gain stays advisory ⇒ zero violations (byte-identical to ⟨0.16⟩).
-        match check_baseline(&pre, ".", "mycrate", &all, &inferred, false) {
+        match check_baseline(&pre, ".", "mycrate", &all, &inferred, false, false) {
             BaselineOutcome::Checked(v) => assert!(v.is_empty(), "ratchet OFF must not flag an Unknown gain: {v:?}",
                 v = v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>()),
             _ => panic!("a valid same-build baseline must be evaluated"),
         }
         // ratchet ON: exactly Y (the newly-introduced Unknown) fails; X (already Unknown) is grandfathered.
-        match check_baseline(&pre, ".", "mycrate", &all, &inferred, true) {
+        match check_baseline(&pre, ".", "mycrate", &all, &inferred, true, false) {
             BaselineOutcome::Checked(v) => {
                 assert_eq!(v.len(), 1, "ratchet ON must flag EXACTLY the new Unknown: {v:?}",
                     v = v.iter().map(|x| x.detail.clone()).collect::<Vec<_>>());
@@ -6200,7 +6200,7 @@ trait G {
         std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\n").unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
-        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, None, false, &idx);
+        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, None, &idx);
         assert_eq!(rc, 0);
         let ra = std::fs::read_to_string(format!("{prefix}.a.scan.json")).unwrap();
         let rb = std::fs::read_to_string(format!("{prefix}.b.scan.json")).unwrap();

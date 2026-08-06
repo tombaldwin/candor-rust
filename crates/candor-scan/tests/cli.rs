@@ -789,17 +789,64 @@ fn candor_config_recognized_but_unimplemented_key_warns_loudly() {
     let d = make_crate("cfginert", "pub fn pure() -> u32 { 1 }");
     std::fs::create_dir_all(d.join(".candor")).unwrap();
     std::fs::write(d.join(".candor/config"), "baseline .candor/baseline\ntaint true\nstrict 1\n").unwrap();
+    // RECORD THE BASELINE FIRST. This assertion's own message used to read "an absent baseline is a
+    // note, not a failure" — true until a baseline DECLARED in `.candor/config` became exit 2 (a
+    // checked-in declaration says the repo HAS one, so an absent file was deleted or never committed).
+    // The test was right about its intent — inert-key DISCLOSURE — and wrong about its premise, so it
+    // now supplies a real baseline instead of relying on an absent one being harmless.
+    Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .args(["--out", d.join(".candor/baseline").to_string_lossy().as_ref()])
+        .output()
+        .expect("record the baseline");
     let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run candor-scan");
     let _ = std::fs::remove_dir_all(&d);
-    assert_eq!(out.status.code(), Some(0), "inert keys don't fail the scan (and an absent baseline is a note, not a failure)");
+    assert_eq!(out.status.code(), Some(0), "inert keys don't fail the scan");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("config key 'taint' is recognized by the candor family but not implemented by candor-scan"),
         "the inert `taint` key must be disclosed loudly: {stderr}");
     assert!(stderr.contains("config key 'strict'"), "every inert recognized key is disclosed: {stderr}");
     assert!(!stderr.contains("config key 'baseline'"),
         "`baseline` is implemented now — it must not be disclosed as inert: {stderr}");
-    assert!(stderr.contains("regression guard is not active"),
-        "an absent configured baseline gets the adopt note: {stderr}");
+    assert!(!stderr.contains("regression guard is not active"),
+        "the baseline was recorded above, so the guard is ACTIVE — not the adopt note: {stderr}");
+}
+
+/// A baseline DECLARED in `.candor/config` but MISSING is exit 2, not a green pass.
+///
+/// An adopter review measured this as the second-likeliest first-commit mistake — `.candor/` committed,
+/// the baseline not — and found every engine printing a note and exiting 0, so the gate quietly stopped
+/// gating. THE SPLIT IS BY SOURCE and the sibling test below pins the other half: `CANDOR_BASELINE` is
+/// set UNCONDITIONALLY by the adopt workflow, so an absent path there still means "the ratchet is not
+/// adopted yet". Same absence, two meanings; only the source separates them.
+#[test]
+fn config_declared_baseline_that_is_missing_fails_closed() {
+    let d = make_crate("blmissing", "pub fn pure() -> u32 { 1 }");
+    std::fs::create_dir_all(d.join(".candor")).unwrap();
+    std::fs::write(d.join(".candor/config"), "baseline .candor/nope\n").unwrap();
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).output().expect("run candor-scan");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(2),
+        "a checked-in declaration whose file is absent must not pass green: {stderr}");
+    assert!(stderr.contains("declares") && stderr.contains("not there"),
+        "and it must say WHY, naming the declaration: {stderr}");
+}
+
+/// The other half: `CANDOR_BASELINE` naming a missing path stays the adopt note (exit 0). The adopt
+/// workflow sets it unconditionally, so absence there is "not adopted yet" rather than "deleted".
+#[test]
+fn env_named_baseline_that_is_missing_stays_a_note() {
+    let d = make_crate("blenv", "pub fn pure() -> u32 { 1 }");
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .env("CANDOR_BASELINE", d.join(".candor/nope.json").to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(0), "the env var's absence is not adoption yet: {stderr}");
+    assert!(stderr.contains("regression guard is not active"), "…and it says so: {stderr}");
 }
 
 // ── the AS-EFF-005 baseline regression guard (spec §7 item 5; candor-java's checkBaseline is the model) ──
