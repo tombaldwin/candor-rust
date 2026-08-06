@@ -215,6 +215,9 @@ pub(crate) fn check_baseline(
     all: &[String],
     inferred: &HashMap<String, BTreeSet<&'static str>>,
     unknown_ratchet: bool,
+    // The path came from a checked-in `.candor/config` `baseline` line rather than `CANDOR_BASELINE`.
+    // A MISSING file then means something different — see the absent branch below.
+    declared_in_config: bool,
 ) -> BaselineOutcome {
     if value.trim().is_empty() {
         eprintln!(
@@ -230,6 +233,19 @@ pub(crate) fn check_baseline(
         format!("{value}.{crate_name}.scan.json")
     };
     if !Path::new(&file).is_file() {
+        // A CHECKED-IN DECLARATION IS NOT THE SAME ABSENCE. `.candor/config` naming a baseline says this
+        // repo HAS one, so a missing file was deleted or never committed and the guard passing green
+        // over it is the gateless-green class — measured by an adopter review as the second-likeliest
+        // first-commit mistake. `CANDOR_BASELINE` is set unconditionally by the adopt workflow, so an
+        // absent path THERE means the ratchet is not adopted yet, which stays a note.
+        if declared_in_config {
+            eprintln!(
+                "candor-scan: .candor/config declares `baseline {value}` but {file} is not there — \
+                 failing (exit 2). A checked-in declaration says this repo HAS a baseline, so an absent \
+                 one was deleted or never committed. Commit it, or record one: candor-scan {dir} --out {value}"
+            );
+            return BaselineOutcome::Invalid;
+        }
         let noted = NOTED_ABSENT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
         if noted.lock().unwrap().insert(file.clone()) {
             eprintln!(

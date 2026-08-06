@@ -6200,7 +6200,7 @@ trait G {
         std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\n").unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
-        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, None, &idx);
+        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, None, false, &idx);
         assert_eq!(rc, 0);
         let ra = std::fs::read_to_string(format!("{prefix}.a.scan.json")).unwrap();
         let rb = std::fs::read_to_string(format!("{prefix}.b.scan.json")).unwrap();
