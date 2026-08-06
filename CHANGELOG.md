@@ -8,6 +8,14 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## [0.27.0] — 2026-08-05
 
+- **A bare `engine <impl>` still split the family five ways.** `engine swift` — an operator forgetting
+  the version on a qualified line — was skipped by candor-java and treated by the other four as a
+  WILDCARD pin whose version is the literal `swift`, so it exited 2 in every engine that is *not* swift:
+  one typo, a family-wide outage, on the exact property PART 33 exists to pin. The cause was arm ORDER —
+  arity was tested before ownership, so the one-token case was claimed by the wildcard arm before anyone
+  asked whose line it was. **A known qualifier now decides ownership first**, per §3.4's "whatever
+  follows it" — and nothing following it is a case of that too.
+
 - **A baseline DECLARED in `.candor/config` but missing is now exit 2, not a green pass.** An adopter
   review measured this as the second-likeliest first-commit mistake (`.candor/` committed, the baseline
   not) and found every engine printing a note and exiting **0** — the gate quietly not gating. The split
