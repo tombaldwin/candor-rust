@@ -6,6 +6,8 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+## [0.27.0] — 2026-08-05
+
 - **A baseline DECLARED in `.candor/config` but missing is now exit 2, not a green pass.** An adopter
   review measured this as the second-likeliest first-commit mistake (`.candor/` committed, the baseline
   not) and found every engine printing a note and exiting **0** — the gate quietly not gating. The split
@@ -14,7 +16,6 @@ behavioural changes (always in the soundness-increasing direction — see the §
   yet" and stays a note; a checked-in `baseline` line DECLARES that this repo has one, so an absent file
   was deleted or never committed. Verified four-way: config-declared → 2, env-named → 0.
 
-## [0.27.0] — 2026-08-05
 
 - **Panel review: the pin grammar disagreed across engines on a shared config.** Three confirmed
   divergences, each a case conformance PART 33 had not thought of, all now fixed and pinned there:
