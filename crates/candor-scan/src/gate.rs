@@ -432,6 +432,16 @@ pub(crate) static GATE_JSON_PATH: std::sync::OnceLock<Option<String>> = std::syn
 /// Unknown-ONLY gain vs the baseline FAILS (AS-EFF-005) instead of staying advisory — see `check_baseline`.
 pub(crate) static UNKNOWN_RATCHET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+/// Did the baseline path come from a checked-in `.candor/config` line rather than `CANDOR_BASELINE`?
+/// Resolved ONCE in `scan_main`, exactly as UNKNOWN_RATCHET above — a config-derived flag every
+/// `scan_one` needs, and threading it through `ScanOpts` instead meant touching ~60 test construction
+/// sites for a value none of them care about.
+pub(crate) static BASELINE_FROM_CONFIG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub(crate) fn baseline_from_config() -> bool {
+    matches!(BASELINE_FROM_CONFIG.get(), Some(true))
+}
+
 /// Whether the `unknown-ratchet` opt-in is active for this process (default OFF).
 pub(crate) fn unknown_ratchet() -> bool {
     matches!(UNKNOWN_RATCHET.get(), Some(true))
