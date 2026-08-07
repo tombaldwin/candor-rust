@@ -356,7 +356,20 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         } else if p.is_file() {
             push_file(p.to_path_buf(), &mut files);
         } else {
-            eprintln!("candor-scan: CANDOR_DEPS entry not found, skipped: {tok}");
+            // ⟨0.27⟩ SPEC §2: A CONFIGURED DEP THAT CANNOT BE READ IS UNEVALUABLE, NOT REDUCED COVERAGE.
+            // Skipping it continued the run, and the caller of that dep then serialised `inferred: []` —
+            // a ⟨0.21⟩ purity claim, published in the REPORT, about a function whose dependency the
+            // operator configured precisely so it would not be one. The coverage note travels on stderr;
+            // the claim travels in the artifact a chained consumer and `gate --report` actually read.
+            //
+            // java and swift already refused here; this engine and ts continued. One config, two
+            // meanings, on a condition CI meets routinely — a dep not yet scanned, a path that moved.
+            eprintln!("candor-scan: CANDOR_DEPS names {tok} but it is not a readable file or directory —");
+            eprintln!("        failing (exit 2, unevaluable). A configured dep that is not there is not");
+            eprintln!("        reduced coverage: its callers would serialise `inferred: []`, which is a");
+            eprintln!("        purity claim about code this scan never saw. Scan that dependency, or");
+            eprintln!("        remove it from the `deps` config / CANDOR_DEPS.");
+            std::process::exit(2);
         }
     }
     let my_version = format!("scan-{}", env!("CARGO_PKG_VERSION"));

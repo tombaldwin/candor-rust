@@ -6,6 +6,22 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⚠ A certain violation did not dominate a refusal — this engine was alone, 3-v-1.** SPEC §3.1 states
+  the order in EXIT CODES: *"violation (1) > refusal (2) > incomplete (2) … Exit 1 is not merely
+  fail-closed here, it is CERTAIN, and strictly more informative: it names the violation."* An AS-EFF-005
+  baseline regression beside a typo'd policy token exited 2 here and 1 in java, ts and swift. The narrow
+  reading a test pinned — "precedence binds the VERDICT, not the policy gate" — was also inconsistent
+  with this engine's own incomplete-analysis arm fifty lines away, which already lets a regression
+  dominate; refusal and incomplete sit at the SAME rank. Both refusal causes (unhonourable token,
+  unreadable file) now yield exit 1 when a violation is held, and the verdict carries BOTH halves —
+  keyed on the refusal being RECORDED rather than on the exit code, which is what had silently dropped
+  the `refused` marker once the exit became 1.
+- **⚠ A configured dep that cannot be read now refuses (exit 2)** — see the spec ruling. Skipping it
+  continued the run and its callers serialised `inferred: []`, a ⟨0.21⟩ purity claim published in the
+  REPORT about code the scan never saw, while the coverage note travelled only on stderr.
+
+## [0.27.0] — 2026-08-07
+
 - **CI-only: clippy 1.97's `collapsible_if` on the new gate pre-pass.** Local clippy is 1.96 and does not
   raise it, so `cargo build` and `cargo clippy` were both green here while CI failed — the nested
   `if let … { if … }` forms are flattened with `filter` rather than the lint's suggested LET-CHAIN, which
@@ -54,7 +70,6 @@ behavioural changes (always in the soundness-increasing direction — see the §
   while writing a report named `--policy.*`. That is the identical defect this file already recorded as
   fixed for `--gate-json`; the dash-check is now on both.
 
-## [0.27.0] — 2026-08-05
 
 - **A nonexistent scan target exited 0 with `ok: true`** — a typo'd path in CI was a permanent green.
 - **`--policy P --gate-json P` destroyed the policy and turned a red gate green**, because the verdict is

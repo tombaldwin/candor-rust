@@ -2063,7 +2063,17 @@ fn a_certain_baseline_regression_stays_in_the_document_when_an_unrelated_policy_
     let bad = d.join("bad.policy");
     std::fs::write(&bad, "deny Unknown[dispatch,nativ]\n").unwrap();
     let (rc, all, v) = verdict_of("badtoken", &["--policy", bad.to_string_lossy().as_ref()]);
-    assert_eq!(rc, Some(2), "an unhonourable policy still refuses: {all}");
+    // ⟨0.27⟩ EXIT 1, NOT 2 — this asserted 2, on the reading that "precedence binds the VERDICT, not the
+    // policy gate". SPEC §3.1 states the ordering in EXIT CODES: "The order is violation (1) > refusal
+    // (2) > incomplete (2) … Exit 1 is therefore not merely fail-closed here, it is CERTAIN, and it is
+    // strictly more informative than exit 2: it names the violation." java, ts and swift all exit 1 on
+    // this shape; this engine was alone, and the split was found by a cross-engine differential.
+    //
+    // The narrow reading was also inconsistent with this engine's own code: the incomplete-analysis arm
+    // fifty lines away already lets a real regression dominate, citing the same principle. Refusal and
+    // incomplete sit at the SAME rank in the ordering, so a regression cannot dominate one and not the
+    // other.
+    assert_eq!(rc, Some(1), "a certain regression DOMINATES a refusal beside it (SPEC §3.1): {all}");
     assert!(
         has_regression(&v),
         "THE FINDING: a typo in a policy token must not delete a certain baseline regression from the \
@@ -2080,7 +2090,8 @@ fn a_certain_baseline_regression_stays_in_the_document_when_an_unrelated_policy_
 
     // ── ARM 2: an UNREADABLE policy — the other refusal cause, same predicate. ──
     let (rc, all, v) = verdict_of("unreadable", &["--policy", "/nonexistent/candor.policy"]);
-    assert_eq!(rc, Some(2), "an unreadable policy still refuses: {all}");
+    // Same precedence as ARM 1, and for the same reason: the refusal CAUSE does not change the ordering.
+    assert_eq!(rc, Some(1), "a certain regression dominates this refusal too (SPEC §3.1): {all}");
     assert!(has_regression(&v), "an unreadable policy must not delete it either: {v}");
     assert_eq!(v["refused"], serde_json::json!(true), "the refusal still travels: {v}");
 

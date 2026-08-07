@@ -455,6 +455,19 @@ pub(crate) static GATE_VIOLATIONS: std::sync::OnceLock<std::sync::Mutex<Vec<Gate
 
 /// Record one scan's gate violations toward the final `--gate-json` verdict. A no-op unless the flag was
 /// given (the direct-`scan_one` test/selftest paths never record).
+/// Does this run already hold a CERTAIN violation? (SPEC §3.1 ⟨0.24⟩ precedence.)
+///
+/// The order is **violation (1) > refusal (2) > incomplete (2)**, and the first rung is forced rather
+/// than chosen: if a rule FIRED on evidence the report carries, `Reject` is upward-closed, so however
+/// the unanswerable rule would have resolved cannot un-reject it. Exit 1 is not merely fail-closed
+/// there, it is CERTAIN — and strictly more informative, because it names the violation.
+pub(crate) fn holds_violation() -> bool {
+    GATE_VIOLATIONS
+        .get()
+        .map(|m| !m.lock().map(|g| g.is_empty()).unwrap_or(true))
+        .unwrap_or(false)
+}
+
 pub(crate) fn record_gate_violations(violations: &[GateViolation]) {
     if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
@@ -715,7 +728,12 @@ pub(crate) fn write_gate_json(exit_code: i32) {
     // The fallback reason is the SAME one the pure-refusal arm uses, and it matters here for the same
     // reason: reaching this line means the run refused, so an unrecorded `why` must still produce
     // `refused: true` rather than a document that looks like an ordinary exit-2.
-    let refusal = (exit_code == 2 && unanalyzed.is_empty()).then(|| {
+    // KEYED ON THE REFUSAL BEING RECORDED, not on the exit code. It was `exit_code == 2`, and once a
+    // certain violation began dominating (§3.1's precedence) the run exits 1 — so the refusal half
+    // silently dropped out of the document, which is precisely the mirror defect the note above names:
+    // an operator reading `{ok:false, violations:[AS-EFF-005]}` with no `refused` would conclude the
+    // policy had been enforced and merely found something, when it never ran at all.
+    let refusal = (exit_code != 0 && GATE_REFUSAL.get().is_some() && unanalyzed.is_empty()).then(|| {
         GATE_REFUSAL
             .get()
             .cloned()
