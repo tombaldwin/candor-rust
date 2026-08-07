@@ -653,18 +653,21 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         let (mut gate, mut policy, mut report) = (None::<&str>, None::<&str>, None::<&str>);
         let mut i = 0;
         while i < args.len() {
+            // Flattened rather than nested: clippy's `collapsible_if` fires on the nested form from
+            // 1.97, and its suggested fix is a LET-CHAIN, which this crate's MSRV cannot use. `filter`
+            // says the same thing on every toolchain.
             let takes = args[i] == "--gate-json" || args[i] == "--policy" || args[i] == "--report";
-            if takes {
-                if let Some(v) = args.get(i + 1) {
-                    if v == "-" || !v.starts_with('-') {
-                        match args[i].as_str() {
-                            "--gate-json" => gate = Some(v),
-                            "--policy" => policy = Some(v),
-                            _ => report = Some(v),
-                        }
-                        i += 1;
-                    }
+            if let Some(v) = args
+                .get(i + 1)
+                .filter(|_| takes)
+                .filter(|v| v.as_str() == "-" || !v.starts_with('-'))
+            {
+                match args[i].as_str() {
+                    "--gate-json" => gate = Some(v),
+                    "--policy" => policy = Some(v),
+                    _ => report = Some(v),
                 }
+                i += 1;
             }
             i += 1;
         }
@@ -676,13 +679,11 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             // told their report is corrupt by the run that corrupted it.
             for (other, flag) in [(policy, "--policy"), (report, "--report"),
                                   (env_policy.as_deref(), "CANDOR_POLICY")] {
-                if let Some(other) = other {
-                    if same_artifact(gp, other) {
-                        eprintln!("candor-query gate: --gate-json {gp} names the SAME FILE as {flag} {other} — refusing (exit 2).");
-                        eprintln!("        The verdict is armed before the policy is read, so this would overwrite your");
-                        eprintln!("        policy and then gate on the wreckage. Nothing was written.");
-                        return 2;
-                    }
+                if let Some(other) = other.filter(|o| same_artifact(gp, o)) {
+                    eprintln!("candor-query gate: --gate-json {gp} names the SAME FILE as {flag} {other} — refusing (exit 2).");
+                    eprintln!("        The verdict is armed before the policy is read, so this would overwrite your");
+                    eprintln!("        policy and then gate on the wreckage. Nothing was written.");
+                    return 2;
                 }
             }
             // THE CONFIG-DECLARED POLICY. This verb's policy ladder falls back to the `policy` key of
