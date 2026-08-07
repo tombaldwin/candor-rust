@@ -211,7 +211,9 @@ pub(crate) fn scan_main() {
                     Some(v) if !v.starts_with('-') => prefix = v.clone(),
                     _ => {
                         eprintln!("candor-scan: --out requires a path prefix (a following non-flag value)");
-                        std::process::exit(2);
+                        // ⟨0.27⟩ every pre-verdict exit leaves the refusal document at the sink — the
+                        // stream sink included (SPEC §3.1); see `exit2_refused`.
+                        crate::gate::exit2_refused("--out requires a path prefix (a following non-flag value)");
                     }
                 }
             }
@@ -226,7 +228,8 @@ pub(crate) fn scan_main() {
                     Some(p) => policy_path = Some(p),
                     None => {
                         eprintln!("candor-scan: --policy requires a path argument");
-                        std::process::exit(2);
+                        // ⟨0.27⟩ the stream sink gets the refusal too — see `exit2_refused`.
+                        crate::gate::exit2_refused("--policy requires a path argument");
                     }
                 }
             }
@@ -341,7 +344,11 @@ pub(crate) fn scan_main() {
                 // literally named `--agents`; a typo'd `--polcy` would silently drop the gate.
                 if other.starts_with('-') {
                     eprintln!("candor-scan: unknown flag '{other}' (see --help)");
-                    std::process::exit(2);
+                    // ⟨0.27⟩ §3.3 names an unknown flag as a broken-gate-config exit-2 cause, and the
+                    // fail-closed document has no exempt cause AND no exempt sink: the file sink was
+                    // covered by arming, the stream sink was not — `--gate-json -` beside a typo'd flag
+                    // exited 2 with an EMPTY stdout, measured in three of four engines (swift wrote).
+                    crate::gate::exit2_refused(format!("unknown flag '{other}' (see --help)"));
                 }
                 dir = a.clone();
             }
@@ -2304,7 +2311,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
             let why = format!("policy {pp:?} could not be read; gate NOT enforced");
             eprintln!("candor-scan: {why}");
-            crate::gate::record_gate_refusal(why);
+            crate::gate::record_gate_refusal(why.clone());
+            // ⟨0.27⟩ …and the machine channel must say so even when a violation DOMINATES (SPEC §3.1's
+            // composed-document clause): the exit-1 verdict carries no `refused` key, so an `unevaluated`
+            // list is the only place a consumer can see the policy half of the gate never ran. An
+            // unreadable policy has no lines to name — ONE entry naming the whole file (candor-ts's
+            // spelling, the spec's model), never an empty list beside a violation.
+            crate::gate::record_gate_unevaluated(&[candor_report::Unevaluated {
+                rule: format!("(entire policy {pp} — unreadable, no rules parsed)"),
+                why,
+            }]);
             // ⟨0.24⟩ PRECEDENCE: A CERTAIN VIOLATION DOMINATES A REFUSAL. This returned 2
             // unconditionally, so an AS-EFF-005 baseline regression ALREADY RECORDED above was
             // downgraded by a typo'd token in the policy beside it — measured against java, ts and
@@ -2364,7 +2380,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             record_gate_vocabulary(cfg_path, &used_aliases);
         }
         if !perrs.is_empty() {
-            for e in &perrs {
+            for (_, e) in &perrs {
                 eprintln!("candor-scan: policy error — {e}");
             }
             let why = format!(
@@ -2373,10 +2389,46 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                  sits beside valid ones the rewrite NARROWS it, so the gate stops covering what the \
                  operator asked for while still looking armed. Fix the token, or define it as an \
                  `unknown-alias` in the `.candor/config` beside {pp}. Policy error(s): {}",
-                perrs.join("  ·  ")
+                perrs.iter().map(|(_, m)| m.as_str()).collect::<Vec<_>>().join("  ·  ")
             );
             eprintln!("candor-scan: {why}");
             crate::gate::record_gate_refusal(why);
+            // ⟨0.27⟩ EVERY RULE OF A REFUSED POLICY GOES UNEVALUATED, AND THE DOCUMENT SAYS SO PER RULE
+            // (SPEC §3.1's composed-document clause; candor-java `unhonouredRules` is the model). Naming
+            // only the offending line lets a consumer read `deny Fs` — absent from the list on an exit-1
+            // document — as evaluated-and-passed, a per-rule false all-clear arriving through the
+            // disclosure itself (measured in candor-ts). The unhonourable line(s) carry their specific
+            // cause; every other rule line carries the whole-policy refusal. These same entries ride the
+            // SOLE-refusal document too (the arm in `write_gate_json` reads the same accumulator).
+            let fatal_by: std::collections::BTreeMap<&str, &str> =
+                perrs.iter().map(|(r, m)| (r.as_str(), m.as_str())).collect();
+            let entries: Vec<candor_report::Unevaluated> = text
+                .lines()
+                .filter_map(|raw| {
+                    let line = raw.split('#').next().unwrap_or("").trim();
+                    if line.is_empty() {
+                        return None;
+                    }
+                    Some(match fatal_by.get(line) {
+                        Some(m) => candor_report::Unevaluated {
+                            rule: line.to_string(),
+                            why: format!(
+                                "{m} — this rule is NOT evaluated; the policy is refused rather than \
+                                 silently rewritten into a different one"
+                            ),
+                        },
+                        None => candor_report::Unevaluated {
+                            rule: line.to_string(),
+                            why: "NOT evaluated — a rule elsewhere in this policy cannot be honoured as \
+                                  written (named beside its own entry in this list), and a policy is \
+                                  evaluated as a whole or not at all: a verdict from its readable subset \
+                                  would be a verdict on a policy nobody wrote"
+                                .to_string(),
+                        },
+                    })
+                })
+                .collect();
+            crate::gate::record_gate_unevaluated(&entries);
             // …and the SAME precedence as the unreadable-policy arm above: a certain violation
             // dominates. Measured against java, ts and swift, which all exit 1 on this shape — an
             // AS-EFF-005 baseline regression recorded earlier in this function, beside a typo'd token
@@ -2403,6 +2455,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                  a typo'd layer name otherwise."
             );
         }
+        // ⟨0.27⟩ …and the SAME list rides the `--gate-json` verdict as `zeroMatch` (SPEC §4): stderr is
+        // not the machine channel, and a wrapper that reads the document could not see that a rule bound
+        // nothing — the typo'd-scope silent green, one channel over. Recorded toward the single verdict
+        // like the violations; the exit code is untouched either way.
+        crate::gate::record_gate_zero_match(&outcome.zero_match);
         let v = outcome.violations;
         // ⟨0.24⟩ WITHHELD `(rule, function)` PAIRS — SPEC §3.1. On THIS route the classifier is in the
         // loop, so a narrowing filter with nothing to read means the signature itself lacks a class set

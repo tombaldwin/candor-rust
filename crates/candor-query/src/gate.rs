@@ -1072,6 +1072,10 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
              a typo'd layer name otherwise."
         );
     }
+    // ⟨0.27⟩ …and the SAME list rides the verdict document as `zeroMatch` (SPEC §4): stderr is not the
+    // machine channel, and §3.1's byte-equality MUST means this route and the scan route must carry it
+    // identically — the shared `gate()` computes it once, both writers serialize it.
+    let zero_match = outcome.zero_match;
     let mut violations = outcome.violations;
     if violations.is_empty() && !refused.is_empty() {
         // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated. THIS is
@@ -1183,6 +1187,8 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         // BESIDE the violations and not instead of them: Lemma 2 makes a firing rule certain however
         // these would have resolved.
         &refused,
+        // ⟨0.27⟩ the zero-match disclosure, same bytes as the scan route's (SPEC §4 `zeroMatch`).
+        &zero_match,
         want_json,
         gate_json.as_deref(),
     ) {
@@ -1217,6 +1223,7 @@ fn write_verdict(
     unanalyzed: &[candor_report::UnanalyzedUnit],
     vocabulary: Option<&candor_report::GateVocabulary>,
     unevaluated: &[candor_report::Unevaluated],
+    zero_match: &[String],
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -1232,14 +1239,14 @@ fn write_verdict(
     if targets.is_empty() {
         return true;
     }
-    let json = match candor_report::gate_verdict_json_v24_refused(
+    let json = match candor_report::gate_verdict_json_v27(
         violations,
         coverage,
         analyzed_count,
         unanalyzed,
         vocabulary,
-        None,
         unevaluated,
+        zero_match,
     ) {
         Ok(j) => j,
         Err(e) => {
