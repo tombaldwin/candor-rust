@@ -2305,7 +2305,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             let why = format!("policy {pp:?} could not be read; gate NOT enforced");
             eprintln!("candor-scan: {why}");
             crate::gate::record_gate_refusal(why);
-            return (2, json_body);
+            // ⟨0.24⟩ PRECEDENCE: A CERTAIN VIOLATION DOMINATES A REFUSAL. This returned 2
+            // unconditionally, so an AS-EFF-005 baseline regression ALREADY RECORDED above was
+            // downgraded by a typo'd token in the policy beside it — measured against java, ts and
+            // swift, which all exit 1 on that shape. The violation fired on evidence the report
+            // carries; `Reject` is upward-closed, so nothing the unanswerable rule would have resolved
+            // to can un-reject it, and exit 1 is both certain and strictly more informative because it
+            // NAMES the violation.
+            //
+            // The refusal is still recorded, and `write_gate_json` already carries both halves — the
+            // violation that dominates and the refusal that says the policy never ran. Dropping the
+            // second would be the mirror defect.
+            // `guard_code` is the local the baseline arm sets; `holds_violation` covers the recorded
+            // set. BOTH are needed: `record_gate_violations` is a no-op unless `--gate-json` was
+            // requested, so keying only on it made the precedence apply on the machine-output path and
+            // not on the plain one — the same defect in the channel a human reads.
+            let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
+            return (code, json_body);
         };
         // ⟨0.19⟩ reason-class aliases (SPEC §6.2): a multi-value `unknown-alias` config key the single-value
         // cfg map can't hold — read straight from the discovered config so `Unknown[<alias>]` resolves.
@@ -2361,7 +2377,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             );
             eprintln!("candor-scan: {why}");
             crate::gate::record_gate_refusal(why);
-            return (2, json_body);
+            // …and the SAME precedence as the unreadable-policy arm above: a certain violation
+            // dominates. Measured against java, ts and swift, which all exit 1 on this shape — an
+            // AS-EFF-005 baseline regression recorded earlier in this function, beside a typo'd token
+            // in the policy. Returning 2 here downgraded a violation that had already FIRED on evidence
+            // the report carries, which §3.1 calls "byte-identical in harm" to deleting it.
+            // `guard_code` is the local the baseline arm sets; `holds_violation` covers the recorded
+            // set. BOTH are needed: `record_gate_violations` is a no-op unless `--gate-json` was
+            // requested, so keying only on it made the precedence apply on the machine-output path and
+            // not on the plain one — the same defect in the channel a human reads.
+            let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
+            return (code, json_body);
         }
         let outcome = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
         // ⟨0.27⟩ SPEC §4 — a rule whose SCOPE bound NO function is UNANSWERABLE, and is DISCLOSED rather
