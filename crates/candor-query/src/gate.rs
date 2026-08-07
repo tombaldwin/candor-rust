@@ -685,6 +685,42 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                     }
                 }
             }
+            // THE CONFIG-DECLARED POLICY. This verb's policy ladder falls back to the `policy` key of
+            // the config discovered from the CWD, and the guard checked only the flags — so the
+            // checked-in form, which is the one a CI job has, was destroyed at exit 0 while the flag
+            // form refused. The same hole the scan route closed, one route across.
+            if let Some((cfg_path, text)) = candor_classify::policy::discover_config(std::path::Path::new(".")) {
+                let home = {
+                    let parent = cfg_path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+                    if parent.file_name().and_then(|n| n.to_str()) == Some(".candor") {
+                        parent.parent().map(std::path::Path::to_path_buf).unwrap_or(parent)
+                    } else {
+                        parent
+                    }
+                };
+                if same_artifact(gp, &cfg_path.display().to_string()) {
+                    eprintln!("candor-query gate: --gate-json {gp} is the .candor/config this run reads — refusing (exit 2).");
+                    return 2;
+                }
+                for raw in text.lines() {
+                    let line = raw.split('#').next().unwrap_or("").trim();
+                    let mut it = line.splitn(2, char::is_whitespace);
+                    if it.next().map(str::to_ascii_lowercase).as_deref() != Some("policy") {
+                        continue;
+                    }
+                    let Some(v) = it.next().map(str::trim).filter(|v| !v.is_empty()) else { continue };
+                    let abs = if std::path::Path::new(v).is_absolute() {
+                        std::path::PathBuf::from(v)
+                    } else {
+                        home.join(v)
+                    };
+                    if same_artifact(gp, &abs.display().to_string()) {
+                        eprintln!("candor-query gate: --gate-json {gp} names the policy this run reads via");
+                        eprintln!("        {}'s `policy` key — refusing (exit 2). Nothing was written.", cfg_path.display());
+                        return 2;
+                    }
+                }
+            }
             if is_candor_config(gp) {
                 eprintln!("candor-query gate: --gate-json {gp} is a .candor/config — refusing (exit 2). This would");
                 eprintln!("        destroy the config that configures this run. Nothing was written.");

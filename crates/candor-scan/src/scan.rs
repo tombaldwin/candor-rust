@@ -37,9 +37,11 @@ fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>, 
                 "--policy" => policy = Some(v),
                 _ => {}
             }
-        } else if !a.starts_with('-') && target.is_none() {
-            // The scan TARGET, needed to discover the `.candor/config` whose `policy` key may name an
-            // input this sink must not overwrite.
+        } else if !a.starts_with('-') {
+            // The scan TARGET. The LAST positional wins, because that is what the real parse loop below
+            // does (`dir = a.clone()` on every bare token) — taking the FIRST here made the guard
+            // discover a different tree's config than the run reads, so with two positionals it checked
+            // the wrong pair and the policy was destroyed at exit 0.
             target = Some(a.clone());
         }
     }
@@ -96,64 +98,18 @@ fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> 
         }
     }
     if let Ok(d) = std::env::var("CANDOR_DEPS") {
-        for one in d.split(':').filter(|x| !x.is_empty()) {
+        // The SEPARATOR SET the dep loader accepts, not just `:` — a space-separated list registered as
+        // one unresolvable token, so no dep in it was protected.
+        for one in d.split([':', ',', ' ', '\t']).filter(|x| !x.is_empty()) {
             out.push((one.to_string(), "a CANDOR_DEPS report".into()));
         }
     }
-    // …and the config's own keys, anchored the way the config layer anchors them.
-    let cfg = std::env::var("CANDOR_CONFIG")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.is_file())
-        .or_else(|| {
-            let mut d = std::path::Path::new(target).canonicalize().ok()?;
-            if d.is_file() {
-                d = d.parent()?.to_path_buf();
-            }
-            loop {
-                let c = d.join(".candor/config");
-                if c.exists() {
-                    return Some(c);
-                }
-                d = d.parent()?.to_path_buf();
-            }
-        });
-    if let Some(cfg) = cfg {
-        let home = cfg.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
-        out.push((cfg.display().to_string(), "the discovered .candor/config".into()));
-        if let Ok(text) = std::fs::read_to_string(&cfg) {
-            for raw in text.lines() {
-                let line = raw.split('#').next().unwrap_or("").trim();
-                let mut it = line.split_whitespace();
-                let (Some(key), Some(rest)) = (it.next(), line.split_whitespace().nth(1)) else { continue };
-                let _ = rest;
-                let key = key.to_lowercase();
-                if !matches!(key.as_str(), "policy" | "baseline" | "deps") {
-                    continue;
-                }
-                let val = line[key.len()..].trim();
-                let parts: Vec<&str> = if key == "deps" {
-                    val.split([' ', '\t', ':', ',']).filter(|x| !x.is_empty()).collect()
-                } else {
-                    vec![val]
-                };
-                for one in parts {
-                    if one.is_empty() {
-                        continue;
-                    }
-                    let p = std::path::Path::new(one);
-                    let abs = if p.is_absolute() {
-                        p.to_path_buf()
-                    } else if let Some(h) = home.as_ref() {
-                        h.join(one)
-                    } else {
-                        p.to_path_buf()
-                    };
-                    out.push((abs.display().to_string(), format!("the config's `{key}`")));
-                }
-            }
-        }
-    }
+    // …AND THE CONFIG'S OWN KEYS, THROUGH THE ENGINE'S OWN LOADER. This used to re-derive the walk and
+    // the parse, and a review took it apart on exactly that: the home directory was computed as
+    // parent-of-parent unconditionally where the real loader only steps out of a trailing `.candor/`
+    // segment, so an out-of-tree `CANDOR_CONFIG` had its relative values anchored one level too high and
+    // the guard protected a path the run never reads. A second parser is a second set of holes.
+    out.extend(crate::config::config_inputs(target));
     out
 }
 

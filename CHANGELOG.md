@@ -6,6 +6,18 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **The sink guard now shares the loader's parse.** `config_inputs` and `discover_config_file` are
+  extracted from `load_candor_config`, so the guard asks the question the loader answers instead of
+  re-deriving it. The hand-written copy anchored an out-of-tree `CANDOR_CONFIG`'s relative values one
+  level too high and split `deps` on `:` alone, and each divergence was a file it failed to protect.
+- **⚠ `deps` was split on `:` alone in the loader too**, so a space-separated list resolved as one
+  unresolvable token — every dep after the first was neither chained nor guarded. Now the §3.4 separator
+  set (whitespace, `:`, `,`).
+- **⚠ The pre-pass took the FIRST positional as the target and the parse loop takes the LAST**, so with
+  two positionals the guard discovered a different tree's config than the run reads.
+- **⚠ `candor-query gate` did not enumerate the config-declared policy**, so the checked-in form — the
+  one a CI job has — was destroyed at exit 0 while the `--policy` form refused.
+
 - **⚠ The collision guard keyed on the FLAG, so a policy from `.candor/config` was invisible to it** —
   the checked-in form, i.e. the one CI actually uses. `--gate-json <that policy>` destroyed it and exited
   0 with `"ok": true`, in all four engines, after the flag-based rows were already green. It now
