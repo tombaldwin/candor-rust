@@ -20,6 +20,56 @@ pub(crate) const CONFIG_KEYS_IMPLEMENTED: [&str; 5] = ["policy", "baseline", "de
 /// Locate + parse `.candor/config` for the scan of `dir` (candor-spec §config): $CANDOR_CONFIG if set
 /// (its path MUST be usable — exit 2 otherwise), else the nearest `.candor/config` walking UP from the
 /// target, else the CWD's, else empty. A discovered-but-unreadable file also exits 2 (fail-closed).
+/// WHICH config file this run reads, with NO side effects (SPEC §3.4).
+///
+/// Extracted so the §3.3.1 sink guard can ask the same question the loader answers instead of
+/// re-deriving the walk. A review took the guard's own copy apart: it anchored relative values one
+/// level too high whenever `CANDOR_CONFIG` pointed outside a `.candor/` directory, so it protected a
+/// path the run never reads while the real policy went unguarded and was destroyed at exit 0.
+pub(crate) fn discover_config_file(dir: &str) -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("CANDOR_CONFIG") {
+        let pb = std::path::PathBuf::from(&p);
+        return if pb.is_file() { Some(pb) } else { None };
+    }
+    let start = std::fs::canonicalize(dir).unwrap_or_else(|_| std::path::PathBuf::from(dir));
+    let mut cur = if start.is_dir() { Some(start.as_path()) } else { start.parent() };
+    while let Some(d) = cur {
+        let cand = d.join(".candor/config");
+        if cand.exists() {
+            return Some(cand);
+        }
+        cur = d.parent();
+    }
+    let cwd = std::path::PathBuf::from(".candor/config");
+    if cwd.exists() { Some(cwd) } else { None }
+}
+
+/// Every FILE a config names, already home-anchored — for the §3.3.1 sink guard.
+///
+/// Lenient by construction: it runs before the real config load and must not pre-empt its refusal, so
+/// an unreadable config teaches it nothing rather than exiting. Shares `parse_config_text` with the
+/// loader, which is the point — a second parser is a second set of holes.
+pub(crate) fn config_inputs(dir: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(file) = discover_config_file(dir) else { return out };
+    out.push((file.display().to_string(), "the discovered .candor/config".to_string()));
+    let Ok(text) = std::fs::read_to_string(&file) else { return out };
+    let cfg = parse_config_text(&text, &file, false);
+    for key in ["policy", "baseline"] {
+        if let Some(v) = cfg.get(key) {
+            if !v.is_empty() {
+                out.push((v.clone(), format!("the config's `{key}`")));
+            }
+        }
+    }
+    if let Some(d) = cfg.get("deps") {
+        for one in d.split(':').filter(|x| !x.is_empty()) {
+            out.push((one.to_string(), "the config's `deps`".to_string()));
+        }
+    }
+    out
+}
+
 pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String, String> {
     let file: Option<std::path::PathBuf> = match std::env::var("CANDOR_CONFIG") {
         Ok(p) => {
@@ -56,6 +106,17 @@ pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String,
             std::process::exit(2);
         }
     };
+    parse_config_text(&text, &file, true)
+}
+
+/// Parse a config's TEXT into its values, home-anchored. `disclose` controls only whether unknown and
+/// unimplemented keys are announced — the VALUES are identical either way, which is what lets the sink
+/// guard reuse it without doubling every diagnostic.
+pub(crate) fn parse_config_text(
+    text: &str,
+    file: &std::path::Path,
+    disclose: bool,
+) -> std::collections::HashMap<String, String> {
     let mut cfg = std::collections::HashMap::new();
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
@@ -66,33 +127,30 @@ pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String,
         let key = it.next().unwrap_or("").to_ascii_lowercase();
         let val = it.next().unwrap_or("").trim().to_string();
         if !CONFIG_KEYS.contains(&key.as_str()) {
-            eprintln!("candor-scan: ignoring unknown config key '{key}' in {}", file.display());
+            if disclose {
+                eprintln!("candor-scan: ignoring unknown config key '{key}' in {}", file.display());
+            }
             continue;
         }
         if key == "unknown-alias" || key == "net-partner" {
-            // MULTI-VALUE keys, both extracted from the config TEXT rather than this single-value map
-            // (which cannot hold many names): ⟨0.19⟩ `unknown-alias` via parse_unknown_aliases, ⟨0.20⟩
-            // `net-partner` via parse_net_partners. `net-partner` was missing from CONFIG_KEYS entirely,
-            // so a config that set it drew "ignoring unknown config key 'net-partner'" while the value
-            // WAS in fact honoured — a FALSE disclosure, worse than a missing one in a tool whose whole
-            // contract is that its statements about itself are true. Recognized here, and skipped before
-            // the implemented-check below so it is not then mislabelled inert either.
+            // MULTI-VALUE keys, both extracted from the config TEXT rather than this single-value map.
             continue;
         }
         if !CONFIG_KEYS_IMPLEMENTED.contains(&key.as_str()) {
-            eprintln!(
-                "candor-scan: config key '{key}' is recognized by the candor family but not \
-                 implemented by candor-scan — that gate/mode is NOT active on this scan \
-                 (the nightly lint / another engine enforces it)"
-            );
+            if disclose {
+                eprintln!(
+                    "candor-scan: config key '{key}' is recognized by the candor family but not \
+                     implemented by candor-scan — that gate/mode is NOT active on this scan \
+                     (the nightly lint / another engine enforces it)"
+                );
+            }
             continue;
         }
         cfg.insert(key, val);
     }
     // SPEC §3.4: a RELATIVE path value resolves against the config's HOME directory — the directory
-    // CONTAINING the `.candor/` dir (the repo root the config travels with) — never the process CWD.
-    // So `policy .candor/gate.pol` and a root-relative `policy arch.policy` both mean what the author
-    // wrote. An out-of-tree $CANDOR_CONFIG override anchors to the file's own directory.
+    // CONTAINING the `.candor/` dir — never the process CWD. An out-of-tree $CANDOR_CONFIG override
+    // anchors to the file's own directory.
     let base = {
         let parent = file.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
         if parent.file_name().and_then(|n| n.to_str()) == Some(".candor") {
@@ -112,13 +170,18 @@ pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String,
         *p = resolve(p);
     }
     if let Some(b) = cfg.get_mut("baseline") {
-        // The AS-EFF-005 guard's report path/prefix — home-anchored like `policy`, so the checked-in
-        // `baseline .candor/baseline` means the same file no matter where the scan is run from.
         *b = resolve(b);
     }
     if let Some(d) = cfg.get_mut("deps") {
-        // CANDOR_DEPS is a `:`-separated list of files/directories; resolve each element.
-        *d = d.split(':').map(&resolve).collect::<Vec<_>>().join(":");
+        // WHITESPACE, `:` OR `,` — SPEC §3.4's separator set, and what CANDOR_DEPS accepts. Splitting on
+        // `:` alone left a space-separated list as ONE unresolvable token, so every dep after the first
+        // was neither resolved here nor protected by the sink guard that reads this.
+        *d = d
+            .split([':', ',', ' ', '\t'])
+            .filter(|x| !x.is_empty())
+            .map(&resolve)
+            .collect::<Vec<_>>()
+            .join(":");
     }
     cfg
 }
