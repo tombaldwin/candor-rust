@@ -6,6 +6,13 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **CI-only: clippy 1.97's `collapsible_if` on the new gate pre-pass.** Local clippy is 1.96 and does not
+  raise it, so `cargo build` and `cargo clippy` were both green here while CI failed — the nested
+  `if let … { if … }` forms are flattened with `filter` rather than the lint's suggested LET-CHAIN, which
+  this crate's MSRV cannot use. Behaviour verified unchanged afterwards: control gates at exit 1, and
+  sinks naming the `--policy`, the `--report` and the config-declared policy all refuse at exit 2 with
+  the file intact.
+
 - **The sink guard now shares the loader's parse.** `config_inputs` and `discover_config_file` are
   extracted from `load_candor_config`, so the guard asks the question the loader answers instead of
   re-deriving it. The hand-written copy anchored an out-of-tree `CANDOR_CONFIG`'s relative values one
