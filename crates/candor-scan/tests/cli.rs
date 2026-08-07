@@ -2081,11 +2081,22 @@ fn a_certain_baseline_regression_stays_in_the_document_when_an_unrelated_policy_
     );
     // …and the refusal is NOT swallowed by the rescue. Without this the mirror is a document reading
     // `{ok:false, violations:[AS-EFF-005]}`, from which an operator concludes the gate ran and passed.
+    //
+    // ⟨0.27⟩ THE CHANNEL CHANGED, AND THE OLD ONE IS NOW FORBIDDEN (SPEC §3.1's composed-document
+    // clause). This test asserted `refused: true` beside `violations` — but `refused` is the refusal
+    // document's DISCRIMINATOR, whose pinned meaning ("the gate is making no claim about violations")
+    // contradicts a document that carries them; measured, the four engines wrote four spellings of this
+    // one document. The disclosure travels as `unevaluated` instead: one entry PER RULE of the refused
+    // policy, the raw line verbatim, so no rule silently reads as evaluated-and-passed.
     assert_eq!(v["ok"], serde_json::json!(false), "a refused run is never ok: {v}");
-    assert_eq!(v["refused"], serde_json::json!(true), "the refusal still travels: {v}");
+    assert!(v.get("refused").is_none(), "a violations-bearing document is a VERDICT and must not carry \
+             the refusal document's discriminator (SPEC §3.1 ⟨0.27⟩): {v}");
     assert!(
-        v["reason"].as_str().is_some_and(|s| s.contains("nativ")),
-        "the reason names the token that could not be honoured: {v}"
+        v["unevaluated"].as_array().is_some_and(|a| a
+            .iter()
+            .any(|u| u["rule"] == "deny Unknown[dispatch,nativ]"
+                && u["why"].as_str().is_some_and(|s| s.contains("nativ")))),
+        "the refused rule rides `unevaluated`, verbatim, with the token named in its why: {v}"
     );
 
     // ── ARM 2: an UNREADABLE policy — the other refusal cause, same predicate. ──
@@ -2093,7 +2104,14 @@ fn a_certain_baseline_regression_stays_in_the_document_when_an_unrelated_policy_
     // Same precedence as ARM 1, and for the same reason: the refusal CAUSE does not change the ordering.
     assert_eq!(rc, Some(1), "a certain regression dominates this refusal too (SPEC §3.1): {all}");
     assert!(has_regression(&v), "an unreadable policy must not delete it either: {v}");
-    assert_eq!(v["refused"], serde_json::json!(true), "the refusal still travels: {v}");
+    assert!(v.get("refused").is_none(), "no `refused` on a verdict here either (SPEC §3.1 ⟨0.27⟩): {v}");
+    assert!(
+        v["unevaluated"].as_array().is_some_and(|a| a
+            .iter()
+            .any(|u| u["rule"].as_str().is_some_and(|s| s.contains("entire policy")))),
+        "an unreadable policy has no lines to name, so ONE entry names the whole file — an exit-1 \
+         document with violations and no `unevaluated` claims the policy ran and passed: {v}"
+    );
 
     // ── THE MIRROR, MEASURED: with NO violation to carry, a refusal is still the MINIMAL document with
     // NO `violations` key. `[]` is precisely the claim a refusal cannot make, and a fix that rescued the

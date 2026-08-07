@@ -76,7 +76,9 @@ pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String,
             let pb = std::path::PathBuf::from(&p);
             if !pb.is_file() {
                 eprintln!("candor-scan: CANDOR_CONFIG set but {p} is not a readable file — failing (exit 2)");
-                std::process::exit(2);
+                // ⟨0.27⟩ through the refusal machinery so a `--gate-json -` STREAM gets the document too
+                // (arming covers files only) — SPEC §3.1's stream-sink clause; see gate::exit2_refused.
+                crate::gate::exit2_refused(format!("CANDOR_CONFIG set but {p} is not a readable file"));
             }
             Some(pb)
         }
@@ -103,7 +105,8 @@ pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String,
         Ok(t) => t,
         Err(e) => {
             eprintln!("candor-scan: config {} exists but could not be read ({e}) — failing (exit 2)", file.display());
-            std::process::exit(2);
+            // ⟨0.27⟩ see gate::exit2_refused — the stream sink gets the refusal document too.
+            crate::gate::exit2_refused(format!("config {} exists but could not be read", file.display()));
         }
     };
     parse_config_text(&text, &file, true)

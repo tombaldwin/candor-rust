@@ -6,6 +6,17 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.27⟩ The three verdict-document cells (SPEC §3.1/§4, conformance PART 36).** (1) The composed
+  document (a certain AS-EFF-005 beside a refused policy) no longer carries `refused`/`reason` beside
+  `violations` — the refusal document's discriminator must not ride a verdict — and now discloses the
+  refusal as `unevaluated`, one entry per rule of the refused policy (this engine listed NONE; an
+  unreadable policy gets one whole-file entry). (2) The stream sink: every pre-verdict exit-2 site
+  (unknown flag, valueless `--out`/`--policy`, an unreadable config, `CANDOR_CONFIG` set-but-missing)
+  now routes through `gate::exit2_refused`, so `--gate-json -` carries the refusal document instead of
+  an empty stream — and a file sink gets the specific reason in place of the armed placeholder.
+  (3) `zeroMatch`: the §4 zero-match list now rides the verdict document on BOTH routes (scan +
+  `gate --report`), code-point sorted and deduplicated; it was stderr-only.
+
 - **⚠ A certain violation did not dominate a refusal — this engine was alone, 3-v-1.** SPEC §3.1 states
   the order in EXIT CODES: *"violation (1) > refusal (2) > incomplete (2) … Exit 1 is not merely
   fail-closed here, it is CERTAIN, and strictly more informative: it names the violation."* An AS-EFF-005

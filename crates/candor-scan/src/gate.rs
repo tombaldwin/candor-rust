@@ -39,15 +39,25 @@ pub(crate) use candor_classify::gate::net_classes_of;
 /// A SEPARATE PASS rather than a second return value from `policy_violations`, because the refusal has
 /// to happen BEFORE any of the classifier's accumulators are consulted — the point is that no verdict is
 /// produced from a rewritten policy, not that one is produced and then discarded.
+/// ⟨0.27⟩ Returns each fatal error as `(raw rule line, message)` rather than the bare message: the
+/// composed-document clause (SPEC §3.1) makes the refused policy's rules travel as `unevaluated` entries,
+/// whose `rule` field is the RAW line verbatim — so the caller needs the pair, not prose it would have to
+/// re-parse a line out of.
 pub(crate) fn policy_precheck(
     policy_text: &str,
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
-) -> (Vec<String>, UsedAliases) {
+) -> (Vec<(String, String)>, UsedAliases) {
     let p = candor_classify::policy::parse_policy_silent(policy_text, unknown_aliases);
     // ⟨0.24⟩ FATAL errors only. `ParsedPolicy::errors` now also carries the lines the parser DROPPED but
     // could survive (a malformed `forbid`, an unknown rule kind) — those are `parsepolicy`'s to report,
     // and refusing a build on them would be the opposite defect.
-    (p.fatal_messages().into_iter().map(str::to_string).collect(), p.used_aliases)
+    let fatal = p
+        .errors
+        .iter()
+        .filter(|e| e.fatal)
+        .map(|e| (e.rule.clone(), e.message.clone()))
+        .collect();
+    (fatal, p.used_aliases)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -553,6 +563,22 @@ pub(crate) fn record_gate_refusal(why: impl Into<String>) {
     let _ = GATE_REFUSAL.set(why.into());
 }
 
+/// ⟨0.27⟩ Exit 2 for a broken gate config, leaving the fail-closed refusal document at the sink —
+/// INCLUDING the stream sink (SPEC §3.1's stream-sink clause). The file sink was already covered by
+/// arming, so these early exits looked done — but `--gate-json -` is not armed (a stream has no stale
+/// previous document, and a placeholder would put two documents in the pipe), so an unknown flag or a
+/// valueless gate-adjacent flag exited 2 leaving stdout EMPTY: the consumer of the stream was thrown
+/// back to scraping stderr, the same operator mistake answered or not according to which early exit
+/// fired. Measured four-way: an unhonourable policy wrote the refusal to stdout in every engine while an
+/// unknown flag wrote it in one of four. Routing every pre-verdict exit through the one writer closes
+/// the cause split; on a FILE sink this also replaces the armed placeholder with the specific reason,
+/// which is strictly more informative and still fail-closed.
+pub(crate) fn exit2_refused(why: impl Into<String>) -> ! {
+    record_gate_refusal(why);
+    write_gate_json(2);
+    std::process::exit(2);
+}
+
 /// ⟨0.24⟩ THE RULES THIS RUN COULD NOT DECIDE (SPEC §3.1 `fc4b5f6`) — accumulated across workspace
 /// members like the violations, written once onto the verdict as `unevaluated`.
 ///
@@ -575,6 +601,23 @@ pub(crate) fn record_gate_unevaluated(items: &[candor_report::Unevaluated]) {
             g.push(it.clone());
         }
     }
+}
+
+/// ⟨0.27⟩ THE RULES WHOSE SCOPE BOUND NO FUNCTION (SPEC §4/§3.1 `zeroMatch`) — accumulated across
+/// workspace members like the violations, written once onto the verdict. A `BTreeSet` because the pinned
+/// collation is code-point sorted + deduplicated (a workspace's members all evaluate the same policy, so
+/// the same raw line arrives once per member), and `BTreeSet<String>` yields exactly that order for free.
+/// A no-op unless `--gate-json` was given, mirroring the other recorders — the stderr disclosure is
+/// printed by the scan itself either way.
+pub(crate) static GATE_ZERO_MATCH: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn record_gate_zero_match(rules: &[String]) {
+    if rules.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    let acc = GATE_ZERO_MATCH.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    acc.lock().unwrap().extend(rules.iter().cloned());
 }
 
 /// Write the structured gate verdict `{ spec, ok, violations }` (candor-spec §3.3 ⟨0.8⟩) — the machine
@@ -715,46 +758,39 @@ pub(crate) fn write_gate_json(exit_code: i32) {
             aliases: g.1.clone(),
         })
     });
-    // ⟨0.24⟩ …and when this exit-2 run refused WHILE holding a violation, the document carries BOTH: the
-    // violation that dominates (SPEC §3.1 `4c79958` — precedence binds the verdict) and the refusal that
-    // says the policy never ran. Dropping the second half would be the mirror defect: an operator reading
-    // `{ok:false, violations:[AS-EFF-005]}` would conclude the gate had been enforced and passed.
+    // ⟨0.27⟩ WHEN THIS RUN REFUSED WHILE HOLDING A VIOLATION, THE DOCUMENT IS A VERDICT AND THE REFUSAL
+    // TRAVELS AS `unevaluated` — NOT as `refused`/`reason` (SPEC §3.1's composed-document clause). This
+    // engine used to put `refused: true` beside `violations`, reasoning that dropping the refusal half
+    // would let an operator read `{ok:false, violations:[AS-EFF-005]}` as "the gate was enforced and this
+    // is all it found". The harm was real and the channel was wrong: `refused: true` is the refusal
+    // document's DISCRIMINATOR, and its pinned meaning — "the gate is making no claim about violations" —
+    // contradicts a document that carries them. A consumer keying on `refused` filed a certain violation
+    // under "no claim". The disclosure that says "the policy never ran" is the `unevaluated` list, one
+    // entry per rule of the refused policy (recorded at the refusal site), which answers the operator's
+    // actual question — WHICH rules went unenforced — instead of re-using the other document's flag.
     //
-    // NARROW BY CONSTRUCTION: `unanalyzed.is_empty()` keeps this off the incomplete-analysis path, whose
-    // `incomplete`/`unanalyzed` keys already carry the reason and whose `gate --report` counterpart has no
-    // refusal to disclose — attaching a second reason channel there would break §3.1's byte-equality MUST
-    // to say something already said.
-    //
-    // The fallback reason is the SAME one the pure-refusal arm uses, and it matters here for the same
-    // reason: reaching this line means the run refused, so an unrecorded `why` must still produce
-    // `refused: true` rather than a document that looks like an ordinary exit-2.
-    // KEYED ON THE REFUSAL BEING RECORDED, not on the exit code. It was `exit_code == 2`, and once a
-    // certain violation began dominating (§3.1's precedence) the run exits 1 — so the refusal half
-    // silently dropped out of the document, which is precisely the mirror defect the note above names:
-    // an operator reading `{ok:false, violations:[AS-EFF-005]}` with no `refused` would conclude the
-    // policy had been enforced and merely found something, when it never ran at all.
-    let refusal = (exit_code != 0 && GATE_REFUSAL.get().is_some() && unanalyzed.is_empty()).then(|| {
-        GATE_REFUSAL
-            .get()
-            .cloned()
-            .unwrap_or_else(|| "the gate config did not load (exit 2) — see stderr for the specific cause".to_string())
-    });
-    // ⟨0.24⟩ …and the rules this run could NOT decide (SPEC §3.1 `fc4b5f6`), beside the verdict rather
-    // than instead of it. On this route that is only the WITHHELD pairs; `allow`/`forbid` are evaluable
-    // here, so `gate --report`'s two whole-policy entries have no counterpart and the byte-equality MUST
-    // is untouched on every policy both routes answer in full.
+    // On a policy-free composed run (a baseline regression beside, say, an unreadable baseline sibling)
+    // there is no policy to enumerate and `unevaluated` is rightly empty; the refusal reason still
+    // reaches the human on stderr, and reaches the machine only when the run ends REFUSED (exit 2, the
+    // sole-refusal document above).
     let unevaluated: Vec<candor_report::Unevaluated> = GATE_UNEVALUATED
         .get()
         .map(|m| m.lock().unwrap().clone())
         .unwrap_or_default();
-    match candor_report::gate_verdict_json_v24_refused(
+    // ⟨0.27⟩ …and the zero-match disclosure (SPEC §4 `zeroMatch`): the same list the stderr lines carry,
+    // in the machine channel — a typo'd scope was invisible to a wrapper that reads the document.
+    let zero_match: Vec<String> = GATE_ZERO_MATCH
+        .get()
+        .map(|m| m.lock().unwrap().iter().cloned().collect())
+        .unwrap_or_default();
+    match candor_report::gate_verdict_json_v27(
         &mut violations,
         coverage.as_ref(),
         analyzed_count,
         &unanalyzed,
         vocabulary.as_ref(),
-        refusal.as_deref(),
         &unevaluated,
+        &zero_match,
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
