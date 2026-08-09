@@ -110,14 +110,8 @@ fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> 
             // <depdir>/lib.json` destroyed the operator's report at exit 0. Expanded HERE rather than
             // by making `same_artifact` directory-aware: the scan TARGET is an input too, and a verdict
             // written into the tree being scanned is ordinary usage. Only a dep directory is READ.
-            if let Ok(rd) = std::fs::read_dir(one) {
-                for e in rd.flatten() {
-                    let p = e.path();
-                    let n = p.file_name().and_then(|x| x.to_str()).unwrap_or("");
-                    if n.ends_with(".json") && !n.contains("callgraph") && !n.contains("hierarchy") {
-                        out.push((p.to_string_lossy().into_owned(), "a CANDOR_DEPS report".into()));
-                    }
-                }
+            for f in crate::deps::dep_report_files(one) {
+                out.push((f.to_string_lossy().into_owned(), "a CANDOR_DEPS report".into()));
             }
         }
     }
