@@ -98,9 +98,12 @@ fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> 
         }
     }
     if let Ok(d) = std::env::var("CANDOR_DEPS") {
-        // The SEPARATOR SET the dep loader accepts, not just `:` — a space-separated list registered as
-        // one unresolvable token, so no dep in it was protected.
-        for one in d.split([':', ',', ' ', '\t']).filter(|x| !x.is_empty()) {
+        // THE SAME SET THE LOADER USES — `crate::deps::DEP_SEPARATORS`. This comment claimed that
+        // while spelling a DIFFERENT set: it omitted `\n` and `\r`, so a newline-separated
+        // `CANDOR_DEPS` was ONE unresolvable token here and two real paths in the loader. A
+        // `--gate-json` naming one of those reports was then unguarded — arming overwrote it and the
+        // run exited 0 with `ok: true` written over the operator's own input. Measured live.
+        for one in d.split(crate::deps::DEP_SEPARATORS).filter(|x| !x.is_empty()) {
             out.push((one.to_string(), "a CANDOR_DEPS report".into()));
         }
     }
