@@ -5,6 +5,8 @@ All notable changes to candor are recorded here. Format loosely follows
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
 ## Unreleased
+## [0.27.0] — 2026-08-07
+
 
 
 
@@ -63,7 +65,6 @@ behavioural changes (always in the soundness-increasing direction — see the §
   continued the run and its callers serialised `inferred: []`, a ⟨0.21⟩ purity claim published in the
   REPORT about code the scan never saw, while the coverage note travelled only on stderr.
 
-## [0.27.0] — 2026-08-07
 
 - **CI-only: clippy 1.97's `collapsible_if` on the new gate pre-pass.** Local clippy is 1.96 and does not
   raise it, so `cargo build` and `cargo clippy` were both green here while CI failed — the nested
