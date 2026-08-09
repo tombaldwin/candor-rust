@@ -7,6 +7,11 @@ behavioural changes (always in the soundness-increasing direction — see the §
 ## Unreleased
 
 
+
+- **A root `cargo build --release` does not build the engines**, and the note now says so where the
+  workspace members are declared. This file is a package that also declares a workspace, so a root build
+  makes the dylint lint. A release binary sat eight days stale through a review because of it, and a
+  reviewer measuring that binary reported one defect already fixed and one that did not exist.
 - **A configured dep that cannot be READ now refuses, not just a missing one.** SPEC §2 binds "does not
   exist OR CANNOT BE READ" in one sentence and this engine implemented only the first clause: a dep path
   that resolved to a file which then failed to open, or held malformed JSON, was SKIPPED at exit 0 — so
