@@ -1,4 +1,8 @@
 [package]
+# Scan outputs are never part of the published crate. Four crates shipped `.candor/report.*.json`
+# stamped `spec 0.23` inside their 0.25 and 0.26 tarballs — stale self-scans, referenced by nothing,
+# and IMMUTABLE once on crates.io. This is the guard, since `git rm` alone only fixes it once.
+exclude = [".candor/**"]
 name = "candor-report"
 version = "0.27.0"
 edition = "2024"

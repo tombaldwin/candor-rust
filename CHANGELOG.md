@@ -6,6 +6,18 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+
+- **A configured dep that cannot be READ now refuses, not just a missing one.** SPEC §2 binds "does not
+  exist OR CANNOT BE READ" in one sentence and this engine implemented only the first clause: a dep path
+  that resolved to a file which then failed to open, or held malformed JSON, was SKIPPED at exit 0 — so
+  the caller of that dep serialised `inferred: []`, the ⟨0.21⟩ purity claim the refusal exists to
+  prevent, reached by a different door. java and swift already refused on both halves, making the family
+  2-v-2 on a MUST. Conformance PART 35 gained rows (d) and (e); it had been testing one clause of a
+  disjunction under a title naming both.
+
+- **Scan outputs no longer ride the published crate.** All four crates shipped tracked
+  `.candor/report.*.json` inside their tarballs — stamped `spec 0.23`, four rungs stale, referenced by
+  nothing, and immutable once on crates.io. Removed, with a Cargo `exclude` so it cannot recur.
 - **⟨0.27⟩ The three verdict-document cells (SPEC §3.1/§4, conformance PART 36).** (1) The composed
   document (a certain AS-EFF-005 beside a refused policy) no longer carries `refused`/`reason` beside
   `violations` — the refusal document's discriminator must not ride a verdict — and now discloses the
@@ -157,7 +169,10 @@ Matches candor-java's `FS_UNKNOWN` discipline. (The first version of this was di
 before release when conformance PART 31 showed the four engines disagreeing.)
 
 Measured: `std::fs::copy` → `["read","write"]`, `read_to_string` → `["read"]`, `write` → `["write"]`, a
-function that merely REACHES a writer → omitted, `OpenOptions` (direction lives in the builder chain, not
+function that merely REACHES a writer → `["write"]` (the refinement PROPAGATES, as the paragraph above
+says and conformance PART 31 pins; an earlier draft of this row said "omitted", describing the
+direct-only version that was corrected before release and contradicting its own entry), `OpenOptions`
+(direction lives in the builder chain, not
 the terminal verb) → omitted.
 
 Tests assert what the classifier refuses to say as much as what it says; both halves probed by breaking
