@@ -39,6 +39,14 @@ rustc_private = true
 # The in-tree sample/fixture crates are standalone (each its own build target) — exclude them so
 # cargo doesn't try to fold them into this workspace.
 [workspace]
+# ⚠ `cargo build --release` HERE BUILDS THE LINT, NOT THE ENGINES. This file is a PACKAGE (the dylint
+# lint above) that also declares a workspace, so a root build never touches `crates/*`. Build them with
+# `-p candor-scan` / `-p candor-query`, or from their own directories.
+#
+# This is not a style note. `target/release/candor-scan` sat eight days stale through a release review,
+# and a reviewer measuring it reported a defect that had already been fixed — and, separately, a
+# defect that did not exist. If you are about to measure this engine's behaviour, check the binary's
+# mtime first.
 members = ["crates/candor-report", "crates/candor-query", "crates/candor-classify", "crates/candor-scan"]
 # `eval` holds standalone fixture crates (and the scaled-eval harness generates more under it at
 # runtime) — exclude the whole subtree so cargo never tries to fold them into this workspace.
