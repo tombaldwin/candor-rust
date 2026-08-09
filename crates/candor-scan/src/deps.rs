@@ -309,6 +309,31 @@ pub(crate) fn declares_itself_incomplete(v: &serde_json::Value) -> bool {
 /// one of those reports destroyed it, the run exiting 0 with `ok: true` over the operator's input.
 pub(crate) const DEP_SEPARATORS: [char; 6] = [' ', '\t', '\n', '\r', ':', ','];
 
+/// Every report file a `deps` TOKEN names — the one enumeration, used by the loader below AND by the
+/// §3.3.1 sink-over-input guard in `scan.rs`.
+///
+/// SHARED BECAUSE WRITING IT TWICE WAS WRONG TWICE. The guard first registered only the directory
+/// token, so a sink inside a dep directory destroyed the operator's report at exit 0. The repair then
+/// hand-wrote a FLAT `read_dir` beside this RECURSIVE walk — and `--deps` writes one subdirectory per
+/// `name@version`, so the nested layout is the ordinary one here and the repair missed it entirely.
+/// A guard that enumerates differently from the loader is a guard over a different set of files.
+pub(crate) fn dep_report_files(tok: &str) -> Vec<std::path::PathBuf> {
+    let p = std::path::Path::new(tok);
+    let mut out = Vec::new();
+    if p.is_dir() {
+        for e in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
+            let f = e.path();
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if f.is_file() && name.ends_with(".json") && !name.contains("callgraph") {
+                out.push(f.to_path_buf());
+            }
+        }
+    } else if p.is_file() {
+        out.push(p.to_path_buf());
+    }
+    out
+}
+
 pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     let mut idx = DepIndex::default();
     let Some(spec) = spec else { return idx };
@@ -351,16 +376,11 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     // fixture and this engine's own `--deps` output use.
     for tok in spec.split(DEP_SEPARATORS).filter(|t| !t.is_empty()) {
         let p = Path::new(tok);
-        if p.is_dir() {
-            for e in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
-                let f = e.path();
-                let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if f.is_file() && name.ends_with(".json") && !name.contains("callgraph") {
-                    push_file(f.to_path_buf(), &mut files);
-                }
-            }
-        } else if p.is_file() {
-            push_file(p.to_path_buf(), &mut files);
+        let found = dep_report_files(tok);
+        if !found.is_empty() {
+            for f in found { push_file(f, &mut files); }
+        } else if p.is_dir() || p.is_file() {
+            // A readable but EMPTY dep directory is not an unresolvable token.
         } else {
             // ⟨0.27⟩ SPEC §2: A CONFIGURED DEP THAT CANNOT BE READ IS UNEVALUABLE, NOT REDUCED COVERAGE.
             // Skipping it continued the run, and the caller of that dep then serialised `inferred: []` —
