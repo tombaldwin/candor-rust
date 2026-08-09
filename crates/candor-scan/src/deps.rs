@@ -379,13 +379,28 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     // target, whereas the fallback is half 1's disclosure rather than silence.
     let mut ret_ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in &files {
+        // ⟨0.27⟩ THE SAME RULE AS THE TOKEN ARM ABOVE, and it was missing here. SPEC §2 binds the
+        // configured case with one sentence — a dep path that "does not exist OR CANNOT BE READ MUST
+        // exit 2, naming it" — and the 0.27 work implemented only the first half. A path that resolved
+        // to a file which then failed to open, or held malformed JSON, was SKIPPED at exit 0, so the
+        // caller of that dep serialised `inferred: []`: the ⟨0.21⟩ purity claim the token arm exists to
+        // prevent, reached by a different door.
+        //
+        // Found by the 0.27 go/no-go panel, which read this engine's own changelog claim ("a configured
+        // dep that cannot be read now refuses") and tested it rather than believing it. java and swift
+        // refused on both halves already; this made the family 2-v-2 on a MUST.
         let Ok(text) = std::fs::read_to_string(f) else {
-            eprintln!("candor-scan: CANDOR_DEPS report unreadable, skipped: {}", f.display());
-            continue;
+            eprintln!("candor-scan: CANDOR_DEPS report {} could not be read —", f.display());
+            eprintln!("        failing (exit 2, unevaluable). A configured dep this scan cannot read is");
+            eprintln!("        not reduced coverage: its callers would serialise `inferred: []`, a purity");
+            eprintln!("        claim about code this scan never saw.");
+            std::process::exit(2);
         };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-            eprintln!("candor-scan: CANDOR_DEPS report unparsable, skipped: {}", f.display());
-            continue;
+            eprintln!("candor-scan: CANDOR_DEPS report {} is not valid JSON —", f.display());
+            eprintln!("        failing (exit 2, unevaluable). Same reason as an unreadable one: a report");
+            eprintln!("        that cannot be parsed makes no claim, and continuing would publish one.");
+            std::process::exit(2);
         };
         // v0.2+ envelope or the v0.1 bare array; the producing version comes from the envelope.
         let version = v.pointer("/candor/version").and_then(|x| x.as_str()).unwrap_or("");
