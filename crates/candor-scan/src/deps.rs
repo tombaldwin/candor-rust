@@ -303,6 +303,12 @@ pub(crate) fn declares_itself_incomplete(v: &serde_json::Value) -> bool {
     }
 }
 
+/// The `deps` / `CANDOR_DEPS` separator set. ONE CONSTANT BECAUSE TWO SPELLINGS WERE A SILENT GREEN:
+/// the §3.3.1 sink-over-input guard carried its own list omitting `\n`/`\r`, so a newline-separated
+/// spec was one unresolvable token to the guard and two real paths here — and a `--gate-json` naming
+/// one of those reports destroyed it, the run exiting 0 with `ok: true` over the operator's input.
+pub(crate) const DEP_SEPARATORS: [char; 6] = [' ', '\t', '\n', '\r', ':', ','];
+
 pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     let mut idx = DepIndex::default();
     let Some(spec) = spec else { return idx };
@@ -343,7 +349,7 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     // the family convention one rule rather than three. Colon and comma are supersets of the spec, not
     // substitutes for it: an existing colon-separated spec keeps working, which is what every rust
     // fixture and this engine's own `--deps` output use.
-    for tok in spec.split([' ', '\t', '\n', '\r', ':', ',']).filter(|t| !t.is_empty()) {
+    for tok in spec.split(DEP_SEPARATORS).filter(|t| !t.is_empty()) {
         let p = Path::new(tok);
         if p.is_dir() {
             for e in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
