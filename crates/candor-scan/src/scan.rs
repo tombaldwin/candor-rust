@@ -105,6 +105,20 @@ fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> 
         // run exited 0 with `ok: true` written over the operator's own input. Measured live.
         for one in d.split(crate::deps::DEP_SEPARATORS).filter(|x| !x.is_empty()) {
             out.push((one.to_string(), "a CANDOR_DEPS report".into()));
+            // A DIRECTORY DEP IS EVERY REPORT INSIDE IT — the loader walks it and reads each `*.json`,
+            // so registering only the DIRECTORY left those files unnamed and `--gate-json
+            // <depdir>/lib.json` destroyed the operator's report at exit 0. Expanded HERE rather than
+            // by making `same_artifact` directory-aware: the scan TARGET is an input too, and a verdict
+            // written into the tree being scanned is ordinary usage. Only a dep directory is READ.
+            if let Ok(rd) = std::fs::read_dir(one) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    let n = p.file_name().and_then(|x| x.to_str()).unwrap_or("");
+                    if n.ends_with(".json") && !n.contains("callgraph") && !n.contains("hierarchy") {
+                        out.push((p.to_string_lossy().into_owned(), "a CANDOR_DEPS report".into()));
+                    }
+                }
+            }
         }
     }
     // …AND THE CONFIG'S OWN KEYS, THROUGH THE ENGINE'S OWN LOADER. This used to re-derive the walk and

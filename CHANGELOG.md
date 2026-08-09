@@ -8,6 +8,15 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 
 
+
+- **⚠ A `--gate-json` sink INSIDE a `deps` DIRECTORY destroyed the operator's dep report.** `deps`
+  accepts a directory — `--workspace` writes `.candor/deps/` and hands that back, so it is the common
+  spelling — and the loader walks it and reads each report inside. The §3.3.1 sink-over-input guard
+  registered only the DIRECTORY, which never equals a file within it, so `--gate-json <depdir>/lib.json`
+  was unguarded: arming destroyed the report, the run chained the wreckage and exited 0 with `ok: true`
+  written over the input. All four engines. The FILE spelling of this channel had been guarded for a
+  release; the directory spelling had not, and no row posed it. Now pinned by conformance PART 36 (b14),
+  which asserts both the refusal AND that nothing was written.
 - **A root `cargo build --release` does not build the engines**, and the note now says so where the
   workspace members are declared. This file is a package that also declares a workspace, so a root build
   makes the dylint lint. A release binary sat eight days stale through a review because of it, and a
