@@ -369,7 +369,11 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             eprintln!("        reduced coverage: its callers would serialise `inferred: []`, which is a");
             eprintln!("        purity claim about code this scan never saw. Scan that dependency, or");
             eprintln!("        remove it from the `deps` config / CANDOR_DEPS.");
-            std::process::exit(2);
+            // THROUGH THE SINK-AWARE EXIT, not `process::exit`. A raw exit leaves `--gate-json -` with
+            // ZERO bytes on stdout and a file sink holding the armed PLACEHOLDER rather than this
+            // reason — the machine channel getting nothing on the very cause the operator configured.
+            // Measured against java on the same input: 280 bytes there, 0 here.
+            crate::gate::exit2_refused(format!("configured dependency {tok} is not a readable file or directory"));
         }
     }
     let my_version = format!("scan-{}", env!("CARGO_PKG_VERSION"));
@@ -394,13 +398,13 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             eprintln!("        failing (exit 2, unevaluable). A configured dep this scan cannot read is");
             eprintln!("        not reduced coverage: its callers would serialise `inferred: []`, a purity");
             eprintln!("        claim about code this scan never saw.");
-            std::process::exit(2);
+            crate::gate::exit2_refused(format!("configured dependency report {} could not be read", f.display()));
         };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
             eprintln!("candor-scan: CANDOR_DEPS report {} is not valid JSON —", f.display());
             eprintln!("        failing (exit 2, unevaluable). Same reason as an unreadable one: a report");
             eprintln!("        that cannot be parsed makes no claim, and continuing would publish one.");
-            std::process::exit(2);
+            crate::gate::exit2_refused(format!("configured dependency report {} is not valid JSON", f.display()));
         };
         // v0.2+ envelope or the v0.1 bare array; the producing version comes from the envelope.
         let version = v.pointer("/candor/version").and_then(|x| x.as_str()).unwrap_or("");
