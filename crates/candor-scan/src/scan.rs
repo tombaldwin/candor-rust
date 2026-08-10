@@ -191,6 +191,7 @@ pub(crate) fn scan_main() {
     let mut gate_json_path: Option<String> = None;
     let mut deps_mode = false;
     let mut incremental = false;
+    let mut saw_positional = false;
     // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, and never over an input.
     //
     // This pre-pass learns the sink and this run's inputs with NO side effects, so the collision check
@@ -361,6 +362,29 @@ pub(crate) fn scan_main() {
                     // exited 2 with an EMPTY stdout, measured in three of four engines (swift wrote).
                     crate::gate::exit2_refused(format!("unknown flag '{other}' (see --help)"));
                 }
+                // A SECOND POSITIONAL IS A USAGE ERROR, NOT A SILENT TARGET REPLACEMENT. Until this
+                // check, `dir = a.clone()` ran on EVERY bare token, so the last positional silently won
+                // and `candor-scan A B` scanned B while saying nothing about A. That is a green gate over
+                // violating code, measured on a two-crate fixture: `candor-scan A --policy 'deny Fs'`
+                // exits 1, and `candor-scan A B --policy 'deny Fs'` exits 0 with `functions: []` and
+                // `analyzed.count 1` — not a disclosed gap but a positive ⟨0.21⟩ purity claim over a unit
+                // it never read. A shell glob that matches two paths, or an empty CI variable in
+                // `candor-scan "$DIR" "$EXTRA"`, is a permanent all-clear.
+                //
+                // It was known and worked AROUND rather than rejected: `prescan_sink_and_inputs` takes the
+                // LAST positional specifically to mirror this loop, with a comment explaining that taking
+                // the first "checked the wrong pair" when there were two. The right answer to two targets
+                // was never to pick one. candor-swift already refused this; found four-way by the argv
+                // combination sweep in candor/bin/probe-causes.sh and pinned by conformance PART 36 (b18).
+                if saw_positional {
+                    let why = format!(
+                        "unexpected extra argument `{a}` — the scan takes ONE target (got `{dir}` and `{a}`). \
+                         Did you mean a flag? See --help."
+                    );
+                    eprintln!("candor-scan: {why}");
+                    crate::gate::exit2_refused(why);
+                }
+                saw_positional = true;
                 dir = a.clone();
             }
         }
