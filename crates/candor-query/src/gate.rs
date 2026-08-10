@@ -650,14 +650,17 @@ fn all_gate_sinks(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--gate-json" {
-            if let Some(v) = args.get(i + 1) {
-                if v == "-" || !v.starts_with('-') {
-                    out.push(v.clone());
-                    i += 2;
-                    continue;
-                }
-            }
+        // `filter` rather than nested ifs: clippy's `collapsible_if` rejects the nesting and its
+        // suggested fix is a LET-CHAIN, which this crate's MSRV cannot use — the same reason the
+        // pre-pass below is written this way.
+        if let Some(v) = args
+            .get(i + 1)
+            .filter(|_| args[i] == "--gate-json")
+            .filter(|v| v.as_str() == "-" || !v.starts_with('-'))
+        {
+            out.push(v.clone());
+            i += 2;
+            continue;
         }
         i += 1;
     }

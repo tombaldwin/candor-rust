@@ -211,15 +211,21 @@ fn gate_json_input_collision(gate: &str, target: &str, policy: Option<&str>) -> 
     if is_gate_json_at_config(gate) {
         return true;
     }
-    for other in [policy, std::env::var("CANDOR_POLICY").ok().as_deref(),
-                  std::env::var("CANDOR_CONFIG").ok().as_deref(), Some(target)] {
-        if let Some(o) = other {
-            if same_artifact(gate, o) {
+    // Owned Strings, compared in place: borrowing them into an array outlives the bindings (E0597), and
+    // the `if let` form clippy would otherwise want here is what `unnecessary_find_map` rejects.
+    if let Some(p) = policy {
+        if same_artifact(gate, p) {
+            return true;
+        }
+    }
+    for key in ["CANDOR_POLICY", "CANDOR_CONFIG"] {
+        if let Ok(v) = std::env::var(key) {
+            if same_artifact(gate, &v) {
                 return true;
             }
         }
     }
-    false
+    same_artifact(gate, target)
 }
 
 fn refuse_gate_json_over_input(gate: &str, other: Option<&str>, flag: &str) {
