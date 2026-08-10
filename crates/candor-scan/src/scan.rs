@@ -22,6 +22,64 @@ const UNCOVERED_CALLS_NUDGE_MIN: usize = 50;
 /// Deliberately permissive: it is not the validator, it only needs the paths early enough that the
 /// collision check and the arming can both precede the first write. The real parse below still owns
 /// every diagnostic.
+/// SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names, in order and with duplicates kept.
+///
+/// `prescan_sink_and_inputs` keeps only the last, which is what the parse loop honours. That is exactly
+/// the behaviour the rung refuses: measured, three engines wrote the verdict to the LAST path and left
+/// the first holding a previous run's `{"ok": true}` while the gate fired. The stale green of the ⟨0.27⟩
+/// arming rule, reached by a spelling nobody had considered.
+fn prescan_all_gate_sinks(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        if a == "--gate-json" {
+            if let Some(v) = it.peek() {
+                if v.as_str() == "-" || !v.starts_with('-') {
+                    out.push((*v).clone());
+                    it.next();
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Two spellings of ONE path are one sink (the §3.3.1 artifact rule); two different artifacts are the
+/// ambiguity this refuses. Returns the distinct sinks, first spelling of each kept for the diagnostic.
+fn distinct_gate_sinks(all: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in all {
+        if !out.iter().any(|k| k == s || (k != "-" && s != "-" && same_artifact(k, s))) {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
+/// Refuse a repeated `--gate-json`, writing the refusal to EVERY path named (SPEC §3.3.1 ⟨0.28⟩).
+///
+/// Writing to each is the load-bearing half. The reader of a losing path has no way to learn that it
+/// lost, so leaving it untouched publishes whatever it held before — and the run that produced that
+/// state did not fail, which is what makes this worse than the refusal case arming was built for.
+fn refuse_repeated_gate_json(sinks: &[String]) -> ! {
+    let named = sinks.join(", ");
+    eprintln!("candor-scan: --gate-json given more than once ({named}) — refusing (exit 2).");
+    eprintln!("        A gate publishes ONE verdict. Naming two sinks says where it goes twice, and the");
+    eprintln!("        reader of the path that loses cannot tell it lost. Name one, or run the gate twice.");
+    let doc = candor_report::gate_refusal_json(&format!(
+        "--gate-json was given more than once ({named}) — a run publishes one verdict to one sink"
+    ))
+    .unwrap_or_else(|_| "{\"ok\":false,\"refused\":true}".to_string());
+    for s in sinks {
+        if s == "-" {
+            println!("{doc}");
+        } else if let Err(e) = std::fs::write(s, format!("{doc}\n")) {
+            eprintln!("candor-scan: could not write the refusal to --gate-json {s} ({e})");
+        }
+    }
+    std::process::exit(2)
+}
+
 fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>, Option<String>) {
     let (mut gate, mut policy, mut target) = (None, None, None);
     let mut it = args.iter().peekable();
@@ -38,10 +96,12 @@ fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>, 
                 _ => {}
             }
         } else if !a.starts_with('-') {
-            // The scan TARGET. The LAST positional wins, because that is what the real parse loop below
-            // does (`dir = a.clone()` on every bare token) — taking the FIRST here made the guard
-            // discover a different tree's config than the run reads, so with two positionals it checked
-            // the wrong pair and the policy was destroyed at exit 0.
+            // The scan TARGET. The last positional is kept, which USED to be what the parse loop did on
+            // every bare token; a second positional is now a usage error that exits 2 there. This pass
+            // still runs first, so it keeps the last — with one positional the two agree, and with two
+            // the run refuses a moment later. Taking the FIRST here would make the guard discover a
+            // different tree's config than the run reads, which is how it once checked the wrong pair
+            // and destroyed the policy at exit 0.
             target = Some(a.clone());
         }
     }
@@ -198,12 +258,27 @@ pub(crate) fn scan_main() {
     // below can run before anything is written and the arming can precede EVERY other exit — including
     // the unknown-flag exit in the loop, which §3.3 names as a broken-gate-config exit-2 cause that must
     // leave a refusal behind. Arming inside the loop made the contract depend on argv ORDER.
+    // ⟨0.28⟩ BEFORE the collision check and before arming: a repeated `--gate-json` is refused outright,
+    // and every path named gets the refusal. Ordering matters for the same reason (2) is ordered the way
+    // it is — this writes, so it must not run before the input-collision guard has a chance to refuse a
+    // sink that is an input. It is placed AFTER that guard below, not here; here we only learn the list.
+    let all_gate_sinks = prescan_all_gate_sinks(&args);
     let (pre_gate, pre_policy, pre_target) = prescan_sink_and_inputs(&args);
     if let Some(gp) = pre_gate.as_deref() {
         // Order matters and got this wrong: the nonexistent-target refusal below used to run FIRST and
         // it WRITES, so `candor-scan /nope --policy P --gate-json P` destroyed P via the very refusal
         // that exists to keep a red gate red. Every write is now downstream of this check.
         refuse_gate_json_over_any_input(gp, pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
+        // ⟨0.28⟩ …and only now, with every named sink known NOT to be an input, may the duplicate
+        // refusal write. A sink that is an input is refused having written nothing (rule 2), and that
+        // exemption outranks this one.
+        let distinct = distinct_gate_sinks(&all_gate_sinks);
+        if distinct.len() > 1 {
+            for s in &distinct {
+                refuse_gate_json_over_any_input(s, pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
+            }
+            refuse_repeated_gate_json(&distinct);
+        }
         // ARM HERE — earlier than any exit this process can take. It used to be armed after the arg
         // loop, so the loop's own `unknown flag` exit(2) left the PREVIOUS run's green document on
         // disk; §3.3 names an unknown flag as a broken-gate-config exit-2 cause, which MUST leave a
