@@ -17,6 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 ///   - ZERO effectful functions → emit nothing;
 ///   - effectful, but nothing clears the bar → the honest "nothing hidden" fallback;
 ///   - a winning reach → the single-line "most surprising reach" note + the `candor path` command.
+///
 /// `uncovered_pkgs` is the κ ledger's size — the dependency packages this scan saw calls into but cannot
 /// classify. It is the cause the run can PROVE when it is non-empty, which is why it is a parameter
 /// rather than a guess baked into the sentence below.
