@@ -319,6 +319,11 @@ pub(crate) fn scan_main() {
     let mut deps_mode = false;
     let mut incremental = false;
     let mut saw_positional = false;
+    // ⟨0.28⟩ REPORT STREAM: register whether `--json` was requested BEFORE any exit-2 can fire, so
+    // `exit2_refused` and the pre-pass sink refusals below can write the fail-closed report to stdout
+    // as the stream's only content. On this engine `--json` is stdout-only (a following non-flag token
+    // is a second positional, refused later), so a bare `args.iter().any(|a| a == "--json")` is exact.
+    let _ = crate::gate::WANT_JSON_STREAM.set(args.iter().any(|a| a == "--json"));
     // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, and never over an input.
     //
     // This pre-pass learns the sink and this run's inputs with NO side effects, so the collision check
@@ -2852,6 +2857,10 @@ pub(crate) fn scan_target(
         });
         if let Some(b) = json {
             println!("{b}");
+            // ⟨0.28⟩ Latch: a successful report went to stdout, so a later `exit2_refused` MUST NOT
+            // also write a fail-closed placeholder there — two documents on one stream is the shape
+            // the two-stream-refusal clause already exists to prevent, arriving through a different door.
+            let _ = crate::gate::REPORT_STREAM_WRITTEN.set(true);
         }
         return code;
     }
@@ -2875,6 +2884,8 @@ pub(crate) fn scan_target(
     }
     if want_json {
         println!("[{}]", bodies.join(","));
+        // ⟨0.28⟩ Latch — see the single-crate branch above.
+        let _ = crate::gate::REPORT_STREAM_WRITTEN.set(true);
     } else {
         eprintln!("candor-scan: workspace — {} package report(s) under one prefix", dirs.len());
     }
