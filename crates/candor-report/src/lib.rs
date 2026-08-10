@@ -430,10 +430,54 @@ pub fn to_report_json(candor: &ReportMeta, functions: &[ReportEntry]) -> serde_j
 /// within a filesystem, so a reader sees either the old report or the new one whole. The temp name
 /// carries the PID so two concurrent writers (unlikely, but cheap to make safe) don't collide. Falls
 /// back to nothing on error — callers already tolerate a failed write (they only `eprintln!`).
+/// ⟨0.28⟩ RESOLVE THE SINK TO ITS FINAL ARTIFACT BEFORE WRITING. `rename(2)` REPLACES a symlink rather
+/// than following it, so an `artifacts/verdict.json` symlinked into a shared directory — an ordinary CI
+/// layout — kept a previous run's `{"ok": true}` while this run's document landed on the link. A stale
+/// green with a single `--gate-json` and no operator mistake. SPEC §3.3.1 states identity about
+/// ARTIFACTS, and this family had implemented that in the comparison and nowhere in the write.
+///
+/// Follows a chain of links, and works for a DANGLING one (the target need not exist yet) — `canonicalize`
+/// cannot be used for that reason. Bounded, so a symlink cycle cannot spin here.
+pub fn resolve_sink_artifact(path: &Path) -> std::path::PathBuf {
+    let mut cur = path.to_path_buf();
+    for _ in 0..32 {
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => match std::fs::read_link(&cur) {
+                Ok(t) => {
+                    cur = if t.is_absolute() {
+                        t
+                    } else {
+                        cur.parent().map(|d| d.join(&t)).unwrap_or(t)
+                    };
+                }
+                Err(_) => return cur,
+            },
+            _ => return cur,
+        }
+    }
+    cur
+}
+
 pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    // The TEMP FILE is a sibling of the RESOLVED artifact, so the rename stays within one filesystem
+    // (rename(2) is only atomic there) and lands on the file the operator actually reads.
+    let target = resolve_sink_artifact(path);
+    // ⟨0.28⟩ A MULTIPLY-LINKED TARGET IS WRITTEN IN PLACE. `rename(2)` gives the destination a NEW inode,
+    // so it silently breaks a hard link: an operator with two names for one verdict file gets the new
+    // document at one name and a previous run's at the other — the stale green again, through the layout
+    // rather than through a flag. In place costs the atomicity window, and that is the right trade here:
+    // the reader of the OTHER name is not racing this write, they are reading a file this write was
+    // supposed to update. Single-link targets — every ordinary case — keep temp+rename.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata(&target).map(|m| m.nlink() > 1).unwrap_or(false) {
+            return std::fs::write(&target, contents);
+        }
+    }
+    let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, contents)?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, &target)
 }
 
 /// Like [`to_report_json`], with the envelope's `package` field (spec §2, 0.4-amended SHOULD):
