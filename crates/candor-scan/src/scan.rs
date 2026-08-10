@@ -2674,6 +2674,57 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
             return (code, json_body);
         }
+        // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES IS A BROKEN GATE CONFIG (SPEC §6.2) — the
+        // same refusal posture as the two branches above, and for the reason §6.2 already gives for an
+        // unreadable file: "a typo'd policy path that runs green is a gate that silently passes
+        // everything". MEASURED four-way 2026-08-10: `--policy <a README>` wrote `{"ok":true,
+        // "violations":[]}` and exited 0 on every engine — byte-identical to a gate that ran and found
+        // nothing, AND byte-identical to the no-gate-configured verdict, so the machine channel cannot
+        // tell "your code is clean" from "your gate had no rules". The per-line "ignoring policy rule"
+        // warnings go to stderr, which is not the machine channel.
+        //
+        // The line-level leniency is UNTOUCHED and still right: an unrecognized line stays
+        // ignored-with-a-warning, because silent reinterpretation is the one thing a security gate must
+        // not do, and an engine meeting a rule kind from a newer rung must not refuse the file over it.
+        // This is about what that leniency COMPOSES TO — every line ignored is a gate that asked nothing.
+        //
+        // THE CONTROL, which is what makes this a rule and not a blanket: reaching here at all means a
+        // policy was CONFIGURED (`--policy`, CANDOR_POLICY, or the config `policy` key). A run that
+        // configured no gate never enters this block and stays exit 0 — that is the honest way to say
+        // "I am not gating", and it is precisely why a configured zero-rule policy is never a legitimate
+        // expression of that intent.
+        // ALL THREE RULE VECTORS, and the first draft of this check read only `rules`. `ParsedPolicy`
+        // splits the four kinds across `rules` (deny/pure), `allow_rules` and `layer_rules`, so keying on
+        // one vector made an allow-only or layer-only policy — `allow Net api.stripe.com`, a perfectly
+        // ordinary allowlist gate — refuse as if it had no rules at all. Caught by
+        // `masking_fs_path_and_db_table_gate_fails_closed`, which gates on `allow Fs /var/app` and went
+        // from exit 1 to exit 2. A zero-rule test that reads a subset of the rule kinds is the same
+        // false-refusal shape this rung exists to prevent, pointed the other way.
+        let parsed_zr = candor_classify::policy::parse_policy_silent(&text, &unknown_aliases);
+        if parsed_zr.rules.is_empty() && parsed_zr.allow_rules.is_empty() && parsed_zr.layer_rules.is_empty() {
+            let why = format!(
+                "the policy at {pp} yielded NO RULES — refusing (exit 2, gate NOT enforced). Every line \
+                 was ignored (see the `ignoring policy rule` warnings above), the file is empty, or it \
+                 holds only comments. A gate with no rules cannot have caught anything, and reporting \
+                 `ok: true` here would be indistinguishable from a gate that ran and found nothing. If \
+                 you did not mean to gate this run, remove the `policy` setting rather than pointing it \
+                 at a file with no rules in it."
+            );
+            eprintln!("candor-scan: {why}");
+            crate::gate::record_gate_refusal(why);
+            // SPEC §3.1 — the whole-policy entry, the shape pinned for a policy with no lines to name.
+            crate::gate::record_gate_unevaluated(&[candor_report::Unevaluated {
+                rule: format!("(entire policy {pp} — no rules parsed)"),
+                why: "the configured policy yielded zero rules, so nothing was evaluated and no rule \
+                      can have passed"
+                    .to_string(),
+            }]);
+            // …and the SAME precedence as both branches above: a certain violation dominates a refusal
+            // (§3.1, `Reject` is upward-closed). No POLICY violation can exist with zero rules, but an
+            // AS-EFF-005 baseline regression is a finding from evidence this run carries and it outranks.
+            let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
+            return (code, json_body);
+        }
         let outcome = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
         // ⟨0.27⟩ SPEC §4 — a rule whose SCOPE bound NO function is UNANSWERABLE, and is DISCLOSED rather
         // than scored as satisfied. MEASURED here before the fix: `deny Fs orders` exits 1 on a real
