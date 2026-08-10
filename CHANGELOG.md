@@ -5,6 +5,38 @@ All notable changes to candor are recorded here. Format loosely follows
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
 
 ## Unreleased
+
+- **⚠ A stray second positional turned a red gate GREEN.** `dir = a.clone()` ran on every bare token, so
+  the LAST positional silently won: `candor-scan A B` scanned B and said nothing about A. Measured —
+  `candor-scan A --policy 'deny Fs'` exits 1, `candor-scan A B --policy 'deny Fs'` exits **0** with
+  `functions: []` and `analyzed.count 1`. Not a gap but a ⟨0.21⟩ purity claim over a unit never read, and
+  a shell glob matching two paths (or an empty `$EXTRA` in `candor-scan "$DIR" "$EXTRA"`) makes it
+  permanent. Now exit 2 through the gate sink. It had been reasoned about and worked AROUND rather than
+  rejected: the sink pre-pass takes the last positional *to mirror this loop*, with a comment explaining
+  that taking the first "checked the wrong pair" when there were two. The right answer to two targets was
+  never to pick one.
+- **⚠ `--gate-json -` was left EMPTY by the `gate --report` route on an unreadable config.** java and
+  swift wrote the refusal on the same input. The cause sits a crate down: `discover_config` is SHARED and
+  exits below every gate sink — its own comment records this cause being closed once before, for the EXIT
+  CODE only, which is the half that is not the machine channel. A registered refusal sink now lets the
+  shared loader reach whichever sink the process armed, and the `.candor/config` shape check is hoisted
+  above it so the new writer cannot land on an input.
+- **⟨0.28⟩ a repeated `--gate-json` is refused, and every path named gets the refusal** (SPEC §3.3.1).
+  Before this, the last sink won and the first was left exactly as found — so a previous run's
+  `{"ok": true}` survived a gate that FIRED. Two spellings of one path stay ONE sink; a sink that is an
+  input is still refused having written nothing.
+- **The mostly-Unknown note no longer guesses at a build it never saw.** `tour --report R` reads someone
+  else's report, so "missing project config" was a guess about a build it did not run; it now points at
+  the reasons the report actually carries. The scan note names the κ ledger it already prints.
+- **Property-based tests for the §6.2 policy parser** (`just props`, proptest). The family's three
+  generative fuzzers all generate CODE and check effect propagation; none generates a POLICY, which is
+  where the fail-open defects have lived. Three properties — every line honoured or disclosed, lines do
+  not interfere (across all three line endings), a typo in an `Unknown[…]` filter is always fatal — each
+  verified to FAIL against the matching broken behaviour, with shrinking to the minimal input.
+- **rust-analyzer works in this repo again**, and the file that claimed to fix it is gone. The cause was
+  never `linkedProjects`: `~/.cargo/bin/rust-analyzer` is a rustup SHIM, and neither the pinned nightly
+  nor the default stable had the component, so every request died with `Unknown binary` — a missing
+  component wearing a crash's clothes. Both toolchains have it and `rust-toolchain` now lists it.
 ## [0.27.0] — 2026-08-07
 
 
