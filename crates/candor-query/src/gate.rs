@@ -638,6 +638,15 @@ fn is_candor_config(p: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// The `--gate-json` path this run was given, so the SHARED config loader in candor-classify can refuse
+/// through it. `set_refusal_sink` takes a plain `fn` pointer and therefore cannot capture the path.
+static QUERY_GATE_JSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn refuse_via_registered_sink(reason: &str) -> ! {
+    refuse(reason, false, QUERY_GATE_JSON.get().map(String::as_str));
+    std::process::exit(2)
+}
+
 pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
     //
@@ -690,6 +699,22 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             // the config discovered from the CWD, and the guard checked only the flags — so the
             // checked-in form, which is the one a CI job has, was destroyed at exit 0 while the flag
             // form refused. The same hole the scan route closed, one route across.
+            // THE SHAPE CHECK COMES FIRST, because everything below it can WRITE. It used to sit after the
+            // config was read, which was fine while an unreadable config exited without writing — the
+            // registration below changes that, so a sink that IS the unreadable config would have been
+            // overwritten by the refusal added to protect it. §3.3.1's "never arm over an input" has to
+            // outrank every writer, including a new one.
+            if is_candor_config(gp) {
+                eprintln!("candor-query gate: --gate-json {gp} is a .candor/config — refusing (exit 2). This would");
+                eprintln!("        destroy the config that configures this run. Nothing was written.");
+                return 2;
+            }
+            // The shared config loader exits 2 on an unreadable config and cannot see this verb's sink,
+            // so register the writer before calling it. Without this the STREAM sink was left empty on
+            // exactly this cause — the earliest exit-2 cause there is, and the one the sink is least
+            // likely to be armed for (the same reason PART 36 row (b11) exists for the scan route).
+            let _ = QUERY_GATE_JSON.set(gp.to_string());
+            candor_classify::policy::set_refusal_sink(refuse_via_registered_sink);
             if let Some((cfg_path, text)) = candor_classify::policy::discover_config(std::path::Path::new(".")) {
                 let home = {
                     let parent = cfg_path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
@@ -721,11 +746,6 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                         return 2;
                     }
                 }
-            }
-            if is_candor_config(gp) {
-                eprintln!("candor-query gate: --gate-json {gp} is a .candor/config — refusing (exit 2). This would");
-                eprintln!("        destroy the config that configures this run. Nothing was written.");
-                return 2;
             }
             if gp != "-" {
                 let armed = format!(
