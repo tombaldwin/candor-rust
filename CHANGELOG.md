@@ -9,7 +9,8 @@ behavioural changes (always in the soundness-increasing direction — see the §
 - **⚠ A stray second positional turned a red gate GREEN.** `dir = a.clone()` ran on every bare token, so
   the LAST positional silently won: `candor-scan A B` scanned B and said nothing about A. Measured —
   `candor-scan A --policy 'deny Fs'` exits 1, `candor-scan A B --policy 'deny Fs'` exits **0** with
-  `functions: []` and `analyzed.count 1`. Not a gap but a ⟨0.21⟩ purity claim over a unit never read, and
+  `functions: []` and `analyzed.count 1` — the count describes the OTHER tree, which was read; A is absent from the document
+  entirely, which under ⟨0.21⟩ is a purity claim about it. And
   a shell glob matching two paths (or an empty `$EXTRA` in `candor-scan "$DIR" "$EXTRA"`) makes it
   permanent. Now exit 2 through the gate sink. It had been reasoned about and worked AROUND rather than
   rejected: the sink pre-pass takes the last positional *to mirror this loop*, with a comment explaining
@@ -28,7 +29,7 @@ behavioural changes (always in the soundness-increasing direction — see the §
 - **The mostly-Unknown note no longer guesses at a build it never saw.** `tour --report R` reads someone
   else's report, so "missing project config" was a guess about a build it did not run; it now points at
   the reasons the report actually carries. The scan note names the κ ledger it already prints.
-- **Property-based tests for the §6.2 policy parser** (`just props`, proptest). The family's three
+- **Property-based tests for the §6.2 policy parser** (`just props` — the recipe lives in the umbrella justfile, runs in seconds with no engine build, and is part of `just check`. The family's three
   generative fuzzers all generate CODE and check effect propagation; none generates a POLICY, which is
   where the fail-open defects have lived. Three properties — every line honoured or disclosed, lines do
   not interfere (across all three line endings), a typo in an `Unknown[…]` filter is always fatal — each

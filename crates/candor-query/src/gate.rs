@@ -642,6 +642,39 @@ fn is_candor_config(p: &str) -> bool {
 /// through it. `set_refusal_sink` takes a plain `fn` pointer and therefore cannot capture the path.
 static QUERY_GATE_JSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names. THE RUNG BINDS EVERY ROUTE, and this one
+/// went without it for a release: the scan CLI refused a duplicate while `gate --report` kept last-wins,
+/// so a gate that FIRED wrote red to the last sink and left the first holding a previous run's
+/// `{"ok": true}`. A route is not covered by its sibling.
+fn all_gate_sinks(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--gate-json" {
+            if let Some(v) = args.get(i + 1) {
+                if v == "-" || !v.starts_with('-') {
+                    out.push(v.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Two spellings of one path are ONE sink (§3.3.1's artifact rule); two artifacts are the ambiguity.
+fn distinct_gate_sinks(all: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in all {
+        if !out.iter().any(|k| k == s || (k != "-" && s != "-" && same_artifact(k, s))) {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
 fn refuse_via_registered_sink(reason: &str) -> ! {
     refuse(reason, false, QUERY_GATE_JSON.get().map(String::as_str));
     std::process::exit(2)
@@ -680,14 +713,37 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             }
             i += 1;
         }
+        // ⟨0.28⟩ EVERY named sink is checked, not just the one the parse honours. `gate` gets the same
+        // treatment the scan route has, and the input set includes CANDOR_CONFIG by PATH — omitting it
+        // is how `set_refusal_sink` came to overwrite an operator's config file on this route.
+        let named_sinks = distinct_gate_sinks(&all_gate_sinks(args));
         if let Some(gp) = gate {
             let env_policy = std::env::var("CANDOR_POLICY").ok();
+            let env_config = std::env::var("CANDOR_CONFIG").ok();
             // §3.3.1 names "a report being read (`gate --report`)" as an input. Writing the verdict
             // there destroys the very report the gate was asked to judge — and the diagnostic then
             // blames the report ("no `functions` array") rather than the collision, so the operator is
             // told their report is corrupt by the run that corrupted it.
+            // Checked for EVERY named sink, so a duplicate cannot smuggle an input past a guard that
+            // only ever looked at the last one.
+            for s_named in named_sinks.iter().filter(|s| s.as_str() != "-") {
+                for (other, flag) in [(policy, "--policy"), (report, "--report"),
+                                      (env_policy.as_deref(), "CANDOR_POLICY"),
+                                      (env_config.as_deref(), "CANDOR_CONFIG")] {
+                    if let Some(other) = other.filter(|o| same_artifact(s_named, o)) {
+                        eprintln!("candor-query gate: --gate-json {s_named} names the SAME FILE as {flag} {other} — refusing (exit 2).");
+                        eprintln!("        Nothing was written; give the verdict its own path.");
+                        return 2;
+                    }
+                }
+                if is_candor_config(s_named) {
+                    eprintln!("candor-query gate: --gate-json {s_named} is a .candor/config — refusing (exit 2). Nothing was written.");
+                    return 2;
+                }
+            }
             for (other, flag) in [(policy, "--policy"), (report, "--report"),
-                                  (env_policy.as_deref(), "CANDOR_POLICY")] {
+                                  (env_policy.as_deref(), "CANDOR_POLICY"),
+                                  (env_config.as_deref(), "CANDOR_CONFIG")] {
                 if let Some(other) = other.filter(|o| same_artifact(gp, o)) {
                     eprintln!("candor-query gate: --gate-json {gp} names the SAME FILE as {flag} {other} — refusing (exit 2).");
                     eprintln!("        The verdict is armed before the policy is read, so this would overwrite your");
@@ -707,6 +763,26 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             if is_candor_config(gp) {
                 eprintln!("candor-query gate: --gate-json {gp} is a .candor/config — refusing (exit 2). This would");
                 eprintln!("        destroy the config that configures this run. Nothing was written.");
+                return 2;
+            }
+            // ⟨0.28⟩ …and only now, with every named sink known NOT to be an input, may the duplicate
+            // refusal write.
+            if named_sinks.len() > 1 {
+                let list = named_sinks.join(", ");
+                eprintln!("candor-query gate: --gate-json given more than once ({list}) — refusing (exit 2).");
+                eprintln!("        A gate publishes ONE verdict. Naming two sinks says where it goes twice, and the");
+                eprintln!("        reader of the path that loses cannot tell it lost. Name one, or run the gate twice.");
+                let doc = candor_report::gate_refusal_json(&format!(
+                    "--gate-json was given more than once ({list}) — a run publishes one verdict to one sink"
+                ))
+                .unwrap_or_else(|_| "{\"ok\":false,\"refused\":true}".to_string());
+                for t in &named_sinks {
+                    if t == "-" {
+                        println!("{doc}");
+                    } else if let Err(e) = std::fs::write(t, format!("{doc}\n")) {
+                        eprintln!("candor-query gate: could not write the refusal to --gate-json {t} ({e})");
+                    }
+                }
                 return 2;
             }
             // The shared config loader exits 2 on an unreadable config and cannot see this verb's sink,

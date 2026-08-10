@@ -201,6 +201,27 @@ fn refuse_gate_json_over_any_input(gate: &str, target: &str, policy_flag: Option
 /// policy: measured, `--policy P --gate-json P` on violating code exited 0 with `ok: true` because the
 /// armed JSON replaced P and every line of it parsed as an unknown rule. The gate ran over zero rules —
 /// a machine-readable all-clear produced by deleting the question.
+/// ⟨0.28⟩ Is this sink an input? Non-exiting, because the duplicate-sink path must be able to ask the
+/// question WITHOUT taking the run down: the exemption covers the offending PATH, and every other sink
+/// named in the same argv still has a reader waiting for a verdict.
+fn gate_json_input_collision(gate: &str, target: &str, policy: Option<&str>) -> bool {
+    if gate == "-" {
+        return false;
+    }
+    if is_gate_json_at_config(gate) {
+        return true;
+    }
+    for other in [policy, std::env::var("CANDOR_POLICY").ok().as_deref(),
+                  std::env::var("CANDOR_CONFIG").ok().as_deref(), Some(target)] {
+        if let Some(o) = other {
+            if same_artifact(gate, o) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn refuse_gate_json_over_input(gate: &str, other: Option<&str>, flag: &str) {
     let Some(other) = other else { return };
     if !same_artifact(gate, other) {
@@ -219,6 +240,21 @@ fn refuse_gate_json_over_input(gate: &str, other: Option<&str>, flag: &str) {
 /// walking up from the target, so by the time its path is known the arming has already destroyed it.
 /// A check on the SHAPE needs no discovery, so it can run before the first write and it covers a config
 /// found anywhere up the tree. No legitimate run writes a gate verdict to `config` inside `.candor`.
+fn is_gate_json_at_config(gate: &str) -> bool {
+    if gate == "-" {
+        return false;
+    }
+    let p = std::path::Path::new(gate);
+    p.file_name().is_some_and(|n| n == "config")
+        && p.parent()
+            .and_then(|d| {
+                let d = if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d };
+                d.canonicalize().ok().or_else(|| Some(d.to_path_buf()))
+            })
+            .and_then(|d| d.file_name().map(|n| n == ".candor"))
+            .unwrap_or(false)
+}
+
 fn refuse_gate_json_at_config(gate: &str) {
     if gate == "-" {
         return;
@@ -268,17 +304,47 @@ pub(crate) fn scan_main() {
         // Order matters and got this wrong: the nonexistent-target refusal below used to run FIRST and
         // it WRITES, so `candor-scan /nope --policy P --gate-json P` destroyed P via the very refusal
         // that exists to keep a red gate red. Every write is now downstream of this check.
-        refuse_gate_json_over_any_input(gp, pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
-        // ⟨0.28⟩ …and only now, with every named sink known NOT to be an input, may the duplicate
-        // refusal write. A sink that is an input is refused having written nothing (rule 2), and that
-        // exemption outranks this one.
+        // ⟨0.28⟩ THE DUPLICATE CASE IS DECIDED FIRST, because the single-sink guard below exits on `gp`
+        // alone — the LAST sink — and with `--gate-json - --gate-json <the policy>` that took the run
+        // down before the STREAM could be told anything. Measured: exit 2, stdout zero bytes, while the
+        // spec requires the fail-closed document on the stream for ANY exit-2 cause. Deciding the
+        // duplicate first is what lets the exemption stay scoped to the offending PATH.
         let distinct = distinct_gate_sinks(&all_gate_sinks);
         if distinct.len() > 1 {
-            for s in &distinct {
-                refuse_gate_json_over_any_input(s, pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
+            // ⟨0.28⟩ THE INPUT EXEMPTION COVERS THE PATH, NOT THE RUN. `refuse_gate_json_over_any_input`
+            // exits 2 having written nothing, which is right for the offending path — but it used to take
+            // the whole run with it, so the OTHER named sink kept whatever it held. Measured: exit 2, the
+            // policy correctly intact, and the innocent sink still publishing a previous run's
+            // `{"ok": true}` to whoever reads it. Refuse the input FIRST (writing nothing anywhere), and
+            // let the duplicate refusal reach every path that is not an input.
+            let tgt = pre_target.as_deref().unwrap_or(".");
+            let offending: Vec<&String> = distinct
+                .iter()
+                .filter(|s| gate_json_input_collision(s, tgt, pre_policy.as_deref()))
+                .collect();
+            if !offending.is_empty() {
+                // Nothing is written to the offending path — but the OTHER sinks still get the refusal,
+                // and a `-` among them always does: a stream has no input to destroy, so (2)'s
+                // justification cannot reach it.
+                eprintln!(
+                    "candor-scan: --gate-json {} names an INPUT of this run — refusing (exit 2), and nothing was written there.",
+                    offending.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                );
+                let safe: Vec<String> = distinct
+                    .iter()
+                    .filter(|s| !offending.iter().any(|o| o == s))
+                    .cloned()
+                    .collect();
+                if !safe.is_empty() {
+                    refuse_repeated_gate_json(&safe);
+                }
+                std::process::exit(2);
             }
             refuse_repeated_gate_json(&distinct);
         }
+        // Exactly one sink: the ordinary single-sink guard. It exits 2 having written nothing, which is
+        // the whole of rule (2) when there is no other sink with a reader waiting.
+        refuse_gate_json_over_any_input(gp, pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
         // ARM HERE — earlier than any exit this process can take. It used to be armed after the arg
         // loop, so the loop's own `unknown flag` exit(2) left the PREVIOUS run's green document on
         // disk; §3.3 names an unknown flag as a broken-gate-config exit-2 cause, which MUST leave a
