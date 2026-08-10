@@ -159,9 +159,14 @@ pub(crate) fn cmd_tour(args: &[String]) -> i32 {
         let unknown = entries.iter().filter(|e| e.inferred.iter().any(|x| x == "Unknown")).count();
         if total > 0 && unknown * 3 >= total {
             println!(
+                // NO CAUSE GUESS ON THIS ROUTE. This verb reads a report someone else produced; it never
+                // saw the project, so "missing project config" is a guess about a build it did not run.
+                // `blindspots` reads the `unknownWhy` reasons the report actually carries, which is the
+                // answer this route can stand behind. Measured on the scan route in candor-ts, where the
+                // same sentence blamed a missing tsconfig on a run that had just read one.
                 "candor: no surprising reaches — but {unknown} of {total} function(s) are Unknown \
-                 (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; \
-                 unresolvable imports or missing project config are the usual cause."
+                 (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots` — \
+                 the report records a reason for each."
             );
             return 0;
         }

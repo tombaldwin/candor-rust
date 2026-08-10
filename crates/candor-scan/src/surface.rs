@@ -17,11 +17,15 @@ use std::collections::{BTreeSet, HashMap};
 ///   - ZERO effectful functions → emit nothing;
 ///   - effectful, but nothing clears the bar → the honest "nothing hidden" fallback;
 ///   - a winning reach → the single-line "most surprising reach" note + the `candor path` command.
+/// `uncovered_pkgs` is the κ ledger's size — the dependency packages this scan saw calls into but cannot
+/// classify. It is the cause the run can PROVE when it is non-empty, which is why it is a parameter
+/// rather than a guess baked into the sentence below.
 pub fn emit(
     inferred: &HashMap<String, BTreeSet<&'static str>>,
     direct: &HashMap<String, BTreeSet<&'static str>>,
     calls: &HashMap<String, BTreeSet<String>>,
     loc: &HashMap<String, String>,
+    uncovered_pkgs: usize,
 ) {
     if !candor_classify::surface::any_effectful(inferred) {
         return; // zero effectful functions — emit nothing
@@ -35,10 +39,23 @@ pub fn emit(
         let total = inferred.values().filter(|s| !s.is_empty()).count();
         let unknown = inferred.values().filter(|s| s.contains("Unknown")).count();
         if total > 0 && unknown * 3 >= total {
+            let cause = if uncovered_pkgs > 0 {
+                format!(
+                    "; the {uncovered_pkgs} package{} not covered by the classifier (named above), so \
+                     calls into them resolve to Unknown",
+                    if uncovered_pkgs == 1 { " is" } else { "s are" }
+                )
+            } else {
+                "; unresolvable imports are the usual cause".to_string()
+            };
             eprintln!(
+                // NAME THE CAUSE THAT APPLIES. This used to end "unresolvable imports or missing project
+                // config are the usual cause" unconditionally — a guess, and on the sibling engine the
+                // same shape blamed a missing tsconfig on a run that had just read one, while the real
+                // cause (packages the classifier does not cover) had already been printed two lines
+                // above. `uncovered` is that ledger; when it is non-empty it is the answer.
                 "candor: no surprising reaches — but {unknown} of {total} function(s) are Unknown \
-                 (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; \
-                 unresolvable imports or missing project config are the usual cause."
+                 (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`{cause}."
             );
             return;
         }
