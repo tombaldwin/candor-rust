@@ -335,6 +335,27 @@ pub(crate) fn scan_main() {
         // Order matters and got this wrong: the nonexistent-target refusal below used to run FIRST and
         // it WRITES, so `candor-scan /nope --policy P --gate-json P` destroyed P via the very refusal
         // that exists to keep a red gate red. Every write is now downstream of this check.
+        // ⟨0.28⟩ `--json` BESIDE `--gate-json -`: a report and a verdict cannot share one stream. Decided
+        // HERE, in the pre-pass, so the refusal is stdout's only content — refusing after the report has
+        // gone out leaves the consumer with two documents, which is the defect rather than the fix.
+        // `--json <file>` is not this case; on this engine `--json` is stdout-only, so the sink alone
+        // decides it.
+        if gp == "-" && args.iter().any(|a| a == "--json") {
+            eprintln!("candor-scan: --json and --gate-json - both name STDOUT — refusing (exit 2).");
+            eprintln!("        `--json` writes the REPORT there and `--gate-json -` the VERDICT, so this");
+            eprintln!("        would put two JSON documents on one stream and a consumer parsing it gets");
+            eprintln!("        neither. Send one to a file, or run the scan twice.");
+            // Written directly: this check runs BEFORE `GATE_JSON_PATH` is registered (arming is
+            // deliberately downstream of the input guards), so `exit2_refused` would have nowhere to put
+            // it — measured as exit 2 with a zero-byte stream, which is the very shape being fixed. `gp`
+            // is `-` here by construction, so stdout IS the sink.
+            let doc = candor_report::gate_refusal_json(
+                "--json and --gate-json - both name stdout — a report and a verdict cannot share one stream",
+            )
+            .unwrap_or_else(|_| "{\"ok\":false,\"refused\":true}".to_string());
+            println!("{doc}");
+            std::process::exit(2);
+        }
         // ⟨0.28⟩ THE DUPLICATE CASE IS DECIDED FIRST, because the single-sink guard below exits on `gp`
         // alone — the LAST sink — and with `--gate-json - --gate-json <the policy>` that took the run
         // down before the STREAM could be told anything. Measured: exit 2, stdout zero bytes, while the
