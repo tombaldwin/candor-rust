@@ -264,7 +264,12 @@ pub fn discover_config_text(start: &std::path::Path) -> Option<String> {
 /// CANONICALIZED because the two routes reach the same file from different working directories, and
 /// §3.1's byte-equality MUST is about the DOCUMENT: a relative path would differ between them for no
 /// reason other than where each was invoked.
-/// THE RUNNING BINARY'S REFUSAL WRITER, registered once at startup.
+
+/// THE RUNNING BINARY'S REFUSAL WRITER, registered by whichever entry armed a sink.
+///
+/// (The paragraphs above belong to `discover_config`, which sits below this static; inserting this doc
+/// block without a blank line silently annexed them, so rustdoc rendered the path/canonicalization
+/// rationale as a description of the sink hook.)
 ///
 /// [`discover_config`] is SHARED and sits BELOW every gate sink, so its `exit(2)` for an unreadable
 /// config could not write the refusal document `--gate-json` was promised. Measured: on the `gate`
@@ -273,7 +278,9 @@ pub fn discover_config_text(start: &std::path::Path) -> Option<String> {
 /// armed placeholder survives an exit that writes nothing — so only the stream, which cannot be
 /// pre-armed, was exposed.
 ///
-/// The comment inside `discover_config` already records this cause being fixed once, for the EXIT
+/// NOT registered at startup: `set_refusal_sink` is called by the gate entries that arm a sink, so a
+/// process that never arms one still exits 2 plainly. The comment inside `discover_config` already
+/// records this cause being fixed once, for the EXIT
 /// CODE: the scan route refused and the query route did not. That fix stopped at the exit code and
 /// left the machine channel, which is exactly the split conformance PART 35 and PART 36 exist to
 /// keep apart. A hook rather than a Result because every caller of this function wants the same
