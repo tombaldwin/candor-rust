@@ -17,3 +17,11 @@ categories = ["development-tools"]
 
 [dependencies]
 candor-report = { path = "../candor-report", version = "0.27.0" }
+
+# PROPERTY-BASED TESTING, for the one surface the family's generative fuzzers do not reach. Each engine
+# already has a soundness fuzzer (candor-rust soundness/, candor-ts fuzz.mjs, candor-agents fuzz.py) and
+# every one of them generates CODE and checks EFFECT PROPAGATION. None of them generates a POLICY, and
+# the policy parser is where this project's fail-open defects have actually lived — a rule silently
+# dropped or silently re-scoped leaves the operator reading a gate that looks armed.
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
