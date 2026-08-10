@@ -264,6 +264,37 @@ pub fn discover_config_text(start: &std::path::Path) -> Option<String> {
 /// CANONICALIZED because the two routes reach the same file from different working directories, and
 /// §3.1's byte-equality MUST is about the DOCUMENT: a relative path would differ between them for no
 /// reason other than where each was invoked.
+/// THE RUNNING BINARY'S REFUSAL WRITER, registered once at startup.
+///
+/// [`discover_config`] is SHARED and sits BELOW every gate sink, so its `exit(2)` for an unreadable
+/// config could not write the refusal document `--gate-json` was promised. Measured: on the `gate`
+/// verb route an unreadable `CANDOR_CONFIG` exited 2 with an EMPTY stream in candor-scan and
+/// candor-ts while candor-java and candor-swift wrote the refusal. The FILE sink was covered — the
+/// armed placeholder survives an exit that writes nothing — so only the stream, which cannot be
+/// pre-armed, was exposed.
+///
+/// The comment inside `discover_config` already records this cause being fixed once, for the EXIT
+/// CODE: the scan route refused and the query route did not. That fix stopped at the exit code and
+/// left the machine channel, which is exactly the split conformance PART 35 and PART 36 exist to
+/// keep apart. A hook rather than a Result because every caller of this function wants the same
+/// answer — refuse through whatever sink this process armed — and threading a new error type through
+/// all of them would create the second copy of a rule that this project keeps getting bitten by.
+static REFUSAL_SINK: std::sync::OnceLock<fn(&str) -> !> = std::sync::OnceLock::new();
+
+/// Register the process's refusal writer. Idempotent; the first registration wins.
+pub fn set_refusal_sink(f: fn(&str) -> !) {
+    let _ = REFUSAL_SINK.set(f);
+}
+
+/// Exit 2 through the registered sink when there is one, and plainly when there is not — a library
+/// consumer that never armed a sink must still get the documented exit code.
+fn refuse_unevaluable(reason: &str) -> ! {
+    if let Some(f) = REFUSAL_SINK.get() {
+        f(reason)
+    }
+    std::process::exit(2)
+}
+
 pub fn discover_config(start: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     // CONFIGURED-BUT-UNUSABLE FAILS LOUD, ON THIS ROUTE TOO. `.ok()` turned an unreadable config into
@@ -278,7 +309,7 @@ pub fn discover_config(start: &std::path::Path) -> Option<(std::path::PathBuf, S
             Err(e) => {
                 eprintln!("candor: CANDOR_CONFIG set but {} could not be read ({e}) — failing (exit 2,", p.display());
                 eprintln!("        unevaluable). A config that cannot be read is a guard the operator believes is on.");
-                std::process::exit(2);
+                refuse_unevaluable(&format!("CANDOR_CONFIG set but {} could not be read ({e})", p.display()));
             }
         }
     }
@@ -292,7 +323,7 @@ pub fn discover_config(start: &std::path::Path) -> Option<(std::path::PathBuf, S
                 Err(e) => {
                     eprintln!("candor: {} exists but could not be read ({e}) — failing (exit 2,", cand.display());
                     eprintln!("        unevaluable). Treating it as absent would run without what it declares.");
-                    std::process::exit(2);
+                    refuse_unevaluable(&format!("{} exists but could not be read ({e})", cand.display()));
                 }
             }
         }
