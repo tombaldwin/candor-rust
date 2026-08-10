@@ -251,25 +251,12 @@ pub fn discover_config_text(start: &std::path::Path) -> Option<String> {
     discover_config(start).map(|(_, t)| t)
 }
 
-/// ⟨0.24⟩ As [`discover_config_text`], but ALSO the PATH the text came from, canonicalized.
-///
-/// **WHY THE PATH IS NOW LOAD-BEARING** (SPEC §3.1): a `.candor/config` supplying `unknown-alias`
-/// vocabulary can move a verdict 0→1, and discovery walks PARENT DIRECTORIES, so a file anywhere above
-/// the policy participates — ambient, and until now invisible in the output. *"A verdict changed by a
-/// file the operator cannot see named in the output is the ambient-input failure this whole format
-/// exists to refuse; the remedy is the same one used everywhere else here — not to forbid the input, but
-/// to make it impossible for it to act unnamed."* So the gate document NAMES it, and the path has to
-/// travel out of discovery for that to be possible.
-///
-/// CANONICALIZED because the two routes reach the same file from different working directories, and
-/// §3.1's byte-equality MUST is about the DOCUMENT: a relative path would differ between them for no
-/// reason other than where each was invoked.
-
 /// THE RUNNING BINARY'S REFUSAL WRITER, registered by whichever entry armed a sink.
 ///
-/// (The paragraphs above belong to `discover_config`, which sits below this static; inserting this doc
-/// block without a blank line silently annexed them, so rustdoc rendered the path/canonicalization
-/// rationale as a description of the sink hook.)
+/// (These paragraphs once sat ABOVE this static while documenting `discover_config`, which is below it —
+/// so rustdoc rendered that function's path/canonicalization rationale as a description of this hook.
+/// They now live on the item they describe: a doc block belongs to the next item, and separating it with
+/// a blank line is not a fix — clippy's `empty_line_after_doc_comments` rejects that, and CI said so.)
 ///
 /// [`discover_config`] is SHARED and sits BELOW every gate sink, so its `exit(2)` for an unreadable
 /// config could not write the refusal document `--gate-json` was promised. Measured: on the `gate`
@@ -302,6 +289,19 @@ fn refuse_unevaluable(reason: &str) -> ! {
     std::process::exit(2)
 }
 
+/// ⟨0.24⟩ As [`discover_config_text`], but ALSO the PATH the text came from, canonicalized.
+///
+/// **WHY THE PATH IS NOW LOAD-BEARING** (SPEC §3.1): a `.candor/config` supplying `unknown-alias`
+/// vocabulary can move a verdict 0→1, and discovery walks PARENT DIRECTORIES, so a file anywhere above
+/// the policy participates — ambient, and until now invisible in the output. *"A verdict changed by a
+/// file the operator cannot see named in the output is the ambient-input failure this whole format
+/// exists to refuse; the remedy is the same one used everywhere else here — not to forbid the input, but
+/// to make it impossible for it to act unnamed."* So the gate document NAMES it, and the path has to
+/// travel out of discovery for that to be possible.
+///
+/// CANONICALIZED because the two routes reach the same file from different working directories, and
+/// §3.1's byte-equality MUST is about the DOCUMENT: a relative path would differ between them for no
+/// reason other than where each was invoked.
 pub fn discover_config(start: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     // CONFIGURED-BUT-UNUSABLE FAILS LOUD, ON THIS ROUTE TOO. `.ok()` turned an unreadable config into
