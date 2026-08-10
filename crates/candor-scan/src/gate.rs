@@ -436,6 +436,14 @@ pub(crate) fn check_baseline(
 /// Members record via `record_gate_violations`; `scan_main` writes the single final verdict.
 pub(crate) static GATE_JSON_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
+/// SPEC §3.3.1 ⟨0.28⟩ — was `--json` (the REPORT stream) requested? Set once in `scan_main` before the
+/// arg loop, so the arming rule can decide *what to write on exit-2* the same way `GATE_JSON_PATH` does
+/// for the verdict sink. Rule (4) of the ⟨0.28⟩ report-sink clause: on any exit-2 the fail-closed
+/// report is written to stdout, exactly once, as the stream's only content. An empty stream on exit-2
+/// throws a JSON consumer back to scraping stderr — the distinction that made the incomplete-analysis
+/// defect a defect. Measured on four engines, unknown-flag exit-2: stdout was 0 bytes on every one.
+pub(crate) static WANT_JSON_STREAM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 /// The `unknown-ratchet` / `CANDOR_UNKNOWN_RATCHET` opt-in (config `flag`), resolved once in `scan_main`
 /// and read at each `check_baseline` call — a process-wide mode like `GATE_JSON_PATH`, so it threads no
 /// ScanOpts through scan_target/run_with_deps. Default OFF (unset OnceLock reads `false`). When ON, an
@@ -574,9 +582,43 @@ pub(crate) fn record_gate_refusal(why: impl Into<String>) {
 /// the cause split; on a FILE sink this also replaces the armed placeholder with the specific reason,
 /// which is strictly more informative and still fail-closed.
 pub(crate) fn exit2_refused(why: impl Into<String>) -> ! {
-    record_gate_refusal(why);
+    let why = why.into();
+    record_gate_refusal(why.clone());
     write_gate_json(2);
+    // ⟨0.28⟩ REPORT STREAM: the same rule the verdict stream gets one hop upstream. If `--json` (report
+    // to stdout) was requested and stdout is not already claimed by `--gate-json -` (the two-stream case
+    // is refused earlier in `scan_main`), write the ⟨0.21⟩ Row-1 fail-closed report as stdout's only
+    // content. Without this, an unknown-flag exit-2 left stdout EMPTY on every engine — the report-sink
+    // analog of the defect ⟨0.27⟩ closed for the verdict sink.
+    write_json_stream_failclosed("refused", &why);
     std::process::exit(2);
+}
+
+/// SPEC §3.3.1 ⟨0.28⟩ (4) — the fail-closed REPORT is written to stdout as its only content on any
+/// exit-2, if `--json` (stream) was requested. Shape is the ⟨0.21⟩ Row-1 manifest-carrying empty:
+/// `functions: []` + `analyzed.count: 0` + `unanalyzed` naming the cause. A ⟨0.24⟩ consumer already
+/// reads this as *nothing was judged, no purity licence*, so no new reader logic is needed. Called
+/// from every pre-verdict exit-2 site (via `exit2_refused` and the pre-pass sink refusals).
+///
+/// A no-op if `--json` was not requested, if `--gate-json -` also claims stdout (the two-stream case
+/// is refused with a verdict document earlier), or if the report has already been printed to stdout
+/// (a completed scan on `--json`; guarded by `REPORT_STREAM_WRITTEN`).
+pub(crate) static REPORT_STREAM_WRITTEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub(crate) fn write_json_stream_failclosed(reason_key: &str, why: &str) {
+    if !matches!(WANT_JSON_STREAM.get(), Some(true)) { return; }
+    if matches!(GATE_JSON_PATH.get(), Some(Some(p)) if p == "-") { return; }
+    if matches!(REPORT_STREAM_WRITTEN.get(), Some(true)) { return; }
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ").replace('\r', " ");
+    let doc = format!(
+        "{{\n  \"candor\": {{ \"version\": \"scan-{ver}\", \"toolchain\": \"stable\", \"spec\": \"{spec}\" }},\n  \"functions\": [],\n  \"analyzed\": {{ \"count\": 0 }},\n  \"unanalyzed\": [ {{ \"path\": \"<run>\", \"reason\": \"{key}: {reason}\" }} ]\n}}",
+        ver = env!("CARGO_PKG_VERSION"),
+        spec = candor_report::SPEC_VERSION,
+        key = esc(reason_key),
+        reason = esc(why),
+    );
+    println!("{doc}");
+    let _ = REPORT_STREAM_WRITTEN.set(true);
 }
 
 /// ⟨0.24⟩ THE RULES THIS RUN COULD NOT DECIDE (SPEC §3.1 `fc4b5f6`) — accumulated across workspace
