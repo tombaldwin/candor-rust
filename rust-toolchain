@@ -1,3 +1,10 @@
 [toolchain]
 channel = "nightly-2026-06-14"
-components = ["llvm-tools-preview", "rustc-dev", "clippy"]
+# rust-analyzer is in this list for a reason that costs an hour to rediscover. `~/.cargo/bin/rust-analyzer`
+# is a rustup SHIM, so it resolves against whatever toolchain is active — and this file overrides the
+# active toolchain for the whole repo. Without the component here, every code-intelligence request in this
+# repo dies with `Unknown binary 'rust-analyzer' in official toolchain 'nightly-2026-06-14'`, which the
+# editor reports as the language server crashing rather than as a missing component. The nightly is
+# required by the dylint lint at the repo root (`rustc_private` needs `rustc-dev`), so the override is not
+# going away; provisioning the component alongside it is.
+components = ["llvm-tools-preview", "rustc-dev", "clippy", "rust-analyzer"]
