@@ -2332,7 +2332,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // and a reassuring "nothing hidden" / "most surprising reach" line ABOVE the violation lines reads as a
     // contradiction in a CI log (#18). Suppress it when gating — the gate summary + fix-gate pointer carry.
     if !quiet && policy_path.is_none() {
-        crate::surface::emit(&inferred, &direct, &calls, &loc);
+        crate::surface::emit(&inferred, &direct, &calls, &loc, coverage_ledger.len());
     }
 
     // Human gate output (the violation lines AND the ✓/count summaries) goes to STDERR whenever
@@ -2688,7 +2688,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // (after the ✓) — the pre-gate suppression at the top only exists to avoid a "nothing hidden"
             // line ABOVE a FAILING gate's violations (#18); a passing gated scan should not lose it (#8).
             if !quiet {
-                crate::surface::emit(&inferred, &direct, &calls, &loc);
+                crate::surface::emit(&inferred, &direct, &calls, &loc, coverage_ledger.len());
             }
         } else {
             eprintln!("candor-scan: {} policy violation(s) (advisory floor — a clean run is necessary, not sufficient)", v.len());
