@@ -389,6 +389,39 @@ fn attach_coverage(
     }
 }
 
+/// ⟨0.28⟩ §2 — THE ⟨0.21⟩ MANIFEST TRAVELS INTO `gains` TOO, on the same terms as `coverage` above.
+///
+/// `attach_coverage` has carried the CURRENT report's `coverage` ledger into this verb since ⟨0.15⟩,
+/// for the reason §2 gives: *a "no gains" over an uncovered dep reads clean with false confidence*.
+/// Measured, the same verb on the same report dropped `unanalyzed` — the STRONGER caveat.
+/// `coverage.uncovered` says "I could not see into this dependency"; `unanalyzed` says "I could not
+/// read this file of your own code", and `analyzed.count: 0` says "I judged nothing at all". The
+/// mechanism was here and pointed at the weaker field.
+///
+/// BOTH SIDES, because a gains answer rests on two reports. An incomplete CURRENT means the gained
+/// set may be short; an incomplete BASELINE means the comparison floor is. They are disclosed
+/// separately so a reader can tell which half is soft — collapsing them into one flag would say
+/// "something here is incomplete" and leave the reader unable to act on it.
+///
+/// Verdict-preserving: the exit code does not move. `gains` is advisory by default and `--strict`
+/// keys on the gained set, which this does not touch.
+fn attach_manifest(v: &mut serde_json::Value, cur_pre: &str, base_pre: &str) {
+    let cur = crate::completeness::report_completeness(cur_pre);
+    let base = crate::completeness::report_completeness(base_pre);
+    if cur.must_hedge() {
+        v["incomplete"] = serde_json::json!(true);
+        if !cur.unanalyzed.is_empty() {
+            v["unanalyzed"] = serde_json::json!(cur.unanalyzed);
+        }
+    }
+    if base.must_hedge() {
+        v["baselineIncomplete"] = serde_json::json!(true);
+        if !base.unanalyzed.is_empty() {
+            v["baselineUnanalyzed"] = serde_json::json!(base.unanalyzed);
+        }
+    }
+}
+
 pub(crate) fn cmd_gains(args: &[String]) -> i32 {
     // `gains <current> <baseline> [--json]` — the two-locator comparative verb (does NOT discover, like
     // `diff`). Locators resolve by the shared --report rule. The DEPRECATED old form allowed a trailing
@@ -521,6 +554,7 @@ pub(crate) fn cmd_gains(args: &[String]) -> i32 {
         // `coverage` travels into the verdict — and a dep BECOMING uncovered between scans is itself
         // a signal, disclosed as `coverageDelta`. JSON-only (the TSV is a pinned consumer surface).
         attach_coverage(&mut v, load_coverage(cur_pre), load_coverage(base_pre));
+        attach_manifest(&mut v, cur_pre, base_pre);
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
         // Advisory by default (exit 0 — gains is a diff view); `--strict` fails on ANY gained effect so a
         // supply-chain CI job can require a dependency bump introduce no new capability (mirrors
