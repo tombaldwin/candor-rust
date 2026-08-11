@@ -605,6 +605,123 @@ pub(crate) fn exit2_refused(why: impl Into<String>) -> ! {
 /// (a completed scan on `--json`; guarded by `REPORT_STREAM_WRITTEN`).
 pub(crate) static REPORT_STREAM_WRITTEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+/// SPEC §3.3.1 ⟨0.28⟩ (1) — **ARM THE `--out <prefix>` REPORT SET.**
+///
+/// The verdict sink arms by writing a placeholder to a path the run is about to own. A report PREFIX
+/// cannot do that: at parse time the run does not yet know which packages it is going to write, and a
+/// workspace fans out to one report per member. The set it DOES know is the one the PREVIOUS run left —
+/// `<prefix>.*.json` on disk — and that is exactly the set at risk of being read as current after this
+/// run fails. So arming here means REWRITING those to the ⟨0.21⟩ Row-1 manifest-carrying empty; each
+/// member that scans successfully overwrites its own with a real report a moment later.
+///
+/// Measured 2026-08-10 on a three-member workspace: `--out out --zzz-not-a-flag` exited 2 with all six
+/// files (3 reports + 3 sidecars) byte-identical to the previous good run.
+///
+/// **This also neutralises the ORPHAN, which is a separate defect found by the same measurement and is
+/// the reason to prefer this shape over a marker file.** Delete a member from the workspace and rerun:
+/// its report survives, byte-shaped exactly like a live one, with nothing saying its source is gone —
+/// and it still sets gate outcomes (measured: `deny Exec` exited 1 on a function whose crate had been
+/// removed). An orphan is definitionally a file this run does not overwrite, so rewriting the previous
+/// set first makes every orphan fall back to "no claim" for free.
+///
+/// Deleting instead is rejected for the reason §3.3.1 already gives: a consumer that treats a missing
+/// file as "nothing to report" fails open by a different route. The files stay; they stop asserting.
+///
+/// SIDECARS ARE NOT TOUCHED, deliberately — whether `.callgraph`/`.hierarchy` must arm alongside their
+/// report is an open question against §2.2 ⟨0.26⟩'s own manifest rules, and guessing it here would put a
+/// second answer in the tree.
+///
+/// **AND THE ORPHAN IS RESTORED, NOT KEPT — see [`disarm_unwritten_out_reports`].** The first version of
+/// this armer left every un-overwritten file holding the placeholder, which looked like a free fix for
+/// the orphan defect and was actually a new wrong answer: a placeholder's non-empty `unanalyzed` is the
+/// ⟨0.21⟩ incomplete-analysis trigger, so a COMPLETE scan of the remaining members began refusing with
+/// exit 2 and went on refusing until someone deleted the leftover by hand. Measured: `deny Exec` over
+/// the prefix went 1 → 2 after a member was removed. The run did not fail to analyze the deleted crate;
+/// the crate is not there. Claiming incompleteness the run did not experience is the mirror of the
+/// staleness this rung exists to close.
+pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
+    if prefix.is_empty() {
+        return;
+    }
+    let p = std::path::Path::new(prefix);
+    let (dir, stem) = match (p.parent(), p.file_name()) {
+        (Some(d), Some(f)) => (if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d }, f.to_string_lossy().into_owned()),
+        _ => return,
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let doc = OUT_ARM_DOC.get_or_init(|| format!(
+        "{{\n  \"candor\": {{ \"version\": \"scan-{ver}\", \"toolchain\": \"stable\", \"spec\": \"{spec}\" }},\n  \"functions\": [],\n  \"analyzed\": {{ \"count\": 0 }},\n  \"unanalyzed\": [ {{ \"path\": \"<run>\", \"reason\": \"armed: this report was written when the run STARTED and was never replaced, so the run failed before it could describe this package — or the package is no longer part of the scan and this file is a leftover. Either way it is NOT a claim about any code.\" }} ]\n}}\n",
+        ver = env!("CARGO_PKG_VERSION"),
+        spec = candor_report::SPEC_VERSION,
+    ));
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        // `<stem>.….json`, minus the §2.2 reserved sidecar segments.
+        if !name.starts_with(&format!("{stem}.")) || !name.ends_with(".json") {
+            continue;
+        }
+        if name.ends_with(".callgraph.json") || name.ends_with(".hierarchy.json") || name.ends_with(".locs.json") {
+            continue;
+        }
+        let full = e.path();
+        // THE ⟨0.27⟩ (2) INPUT EXEMPTION APPLIES TO THIS WRITER TOO. Arming happens before the run knows
+        // its answer, so a prefix whose expansion collides with something this run READS would destroy
+        // it — the same hazard that made `--policy P --gate-json P` a machine-readable all-clear. A
+        // policy or a chained dep report can perfectly well be named `<prefix>.something.json`.
+        let fs = full.to_string_lossy().into_owned();
+        if inputs.iter().any(|(path, _)| crate::scan::same_artifact_pub(&fs, path)) {
+            eprintln!(
+                "candor-scan: --out {prefix} would arm over {fs}, which this run READS — leaving it \
+                 untouched. Give the report set its own prefix."
+            );
+            continue;
+        }
+        // Remember the bytes BEFORE overwriting, so a run that completes can hand back anything it
+        // turned out not to own (see `disarm_unwritten_out_reports`).
+        if let Ok(prev) = std::fs::read(&full) {
+            OUT_ARMED
+                .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+                .lock()
+                .unwrap()
+                .push((full.clone(), prev));
+        }
+        let _ = std::fs::write(&full, doc);
+    }
+}
+
+/// The exact placeholder bytes, so `disarm` can tell "still armed" from "this run rewrote it".
+static OUT_ARM_DOC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// `(path, bytes-before-arming)` for every report this run armed under an `--out` prefix.
+static OUT_ARMED: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>> =
+    std::sync::OnceLock::new();
+
+/// SPEC §3.3.1 ⟨0.28⟩ — **HAND BACK WHAT THIS RUN TURNED OUT NOT TO OWN.**
+///
+/// Arming cannot know at parse time which packages the run will write, so it arms the whole previous
+/// set. Once the run has finished writing, a file STILL holding the placeholder is one the run never
+/// claimed — a leftover from a package that is no longer in the scan. That is not an incomplete
+/// analysis, and leaving the ⟨0.21⟩ placeholder there asserts one: measured, it turned a complete scan
+/// of the remaining members into a permanent exit-2 refusal that only manual deletion cleared.
+///
+/// So the previous bytes go back, and the orphan is left exactly as this run found it. **The orphan
+/// remains an open defect** — a deleted crate's report still describes code that is gone, and still
+/// reaches a gate over the prefix — and that is deliberate: it is a PRE-EXISTING defect with its own
+/// design question (delete it? mark it not-in-scan? both need a wire answer, and a prefix can legitimately
+/// be shared), and quietly resolving it inside a staleness fix would be deciding it by accident.
+///
+/// Deleting the placeholder instead of restoring is also rejected, for §3.3.1's own reason: a consumer
+/// that treats a missing file as "nothing to report" fails open by a different route.
+pub(crate) fn disarm_unwritten_out_reports() {
+    let Some(armed) = OUT_ARMED.get() else { return };
+    let Some(doc) = OUT_ARM_DOC.get() else { return };
+    for (path, prev) in armed.lock().unwrap().iter() {
+        // Only files this run left untouched since arming — anything it rewrote is a real report.
+        if std::fs::read(path).is_ok_and(|now| now == doc.as_bytes()) {
+            let _ = std::fs::write(path, prev);
+        }
+    }
+}
+
 pub(crate) fn write_json_stream_failclosed(reason_key: &str, why: &str) {
     if !matches!(WANT_JSON_STREAM.get(), Some(true)) { return; }
     if matches!(GATE_JSON_PATH.get(), Some(Some(p)) if p == "-") { return; }

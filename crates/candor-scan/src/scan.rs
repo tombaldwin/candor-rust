@@ -80,6 +80,29 @@ fn refuse_repeated_gate_json(sinks: &[String]) -> ! {
     std::process::exit(2)
 }
 
+/// `same_artifact` for the ⟨0.28⟩ `--out` armer in `gate.rs` — one resolver, not a second copy.
+pub(crate) fn same_artifact_pub(a: &str, b: &str) -> bool {
+    same_artifact(a, b)
+}
+
+/// SPEC §3.3.1 ⟨0.28⟩ — the `--out <prefix>` this argv names, side-effect free, learned early enough
+/// that the armer can run before the arg loop's own `unknown flag` exit. Mirrors the `--gate-json`
+/// pre-pass and exists for the identical reason: arming after the loop leaves the exit the rung is
+/// most often reached through — a typo'd flag — writing nothing.
+fn prescan_out_prefix(args: &[String]) -> Option<String> {
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        if a == "--out" {
+            if let Some(v) = it.peek() {
+                if !v.starts_with('-') {
+                    return Some((*v).clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>, Option<String>) {
     let (mut gate, mut policy, mut target) = (None, None, None);
     let mut it = args.iter().peekable();
@@ -409,6 +432,16 @@ pub(crate) fn scan_main() {
         let _ = GATE_JSON_PATH.set(Some(gp.to_string()));
         crate::gate::arm_gate_json();
     }
+    // ⟨0.28⟩ ARM THE REPORT SET, before the arg loop below can exit on an unknown flag. The default
+    // prefix (`<dir>/.candor/report`) is resolved from the pre-pass target for the same reason: an
+    // operator who never passes `--out` still has a previous run's reports on disk to go stale.
+    {
+        let pre_pfx = prescan_out_prefix(&args).unwrap_or_else(|| {
+            format!("{}/.candor/report", pre_target.as_deref().unwrap_or("."))
+        });
+        let inputs = run_inputs(pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
+        crate::gate::arm_out_prefix(&pre_pfx, &inputs);
+    }
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -642,6 +675,8 @@ pub(crate) fn scan_main() {
     enforce_engine_pin(&dir);
     if deps_mode {
         let code = run_with_deps(&dir, prefix, want_json, include_tests, policy, baseline);
+        // ⟨0.28⟩ the run finished writing: hand back any armed report it turned out not to own.
+        crate::gate::disarm_unwritten_out_reports();
         write_gate_json(code);
         std::process::exit(code);
     }
@@ -659,6 +694,8 @@ pub(crate) fn scan_main() {
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
     let code = scan_target(&dir, prefix, want_json, include_tests, policy, baseline, &deps_idx);
+    // ⟨0.28⟩ the run finished writing: hand back any armed report it turned out not to own.
+    crate::gate::disarm_unwritten_out_reports();
     write_gate_json(code);
     std::process::exit(code);
 }
