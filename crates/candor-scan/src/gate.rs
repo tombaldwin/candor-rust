@@ -713,7 +713,20 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
                 .unwrap()
                 .push((full.clone(), prev));
         }
-        let _ = std::fs::write(&full, doc);
+        // THE SIDECARS FOLLOW ONLY IF THE REPORT ACTUALLY ARMED. This was `let _ = write(...)` followed
+        // by an unconditional delete, so a write that FAILED (read-only tree, full disk) left the STALE
+        // report in place and removed its callgraph — strictly worse than the pre-rung state, because
+        // the half that survives is the one a gate reads while the half that made `callers` answerable
+        // is gone. candor-java's arm of this rung raised it: rust discarded a result java could see.
+        // A pair degrades together or not at all.
+        if std::fs::write(&full, doc).is_err() {
+            eprintln!(
+                "candor-scan: could not arm the report at {} — leaving it and its sidecars exactly as \
+                 they are; if this run does not complete, that path may still hold a PREVIOUS run's report",
+                full.display()
+            );
+            continue;
+        }
         // ⟨0.28⟩ …AND THIS REPORT'S §2.2 SIDECARS GO WITH IT — DELETED, not emptied.
         //
         // An armed report beside a LIVE sidecar is a pair that contradicts itself, and §2.2 gives the
