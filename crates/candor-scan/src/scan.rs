@@ -443,13 +443,26 @@ pub(crate) fn scan_main() {
         let _ = GATE_JSON_PATH.set(Some(gp.to_string()));
         crate::gate::arm_gate_json();
     }
-    // ⟨0.28⟩ ARM THE REPORT SET, before the arg loop below can exit on an unknown flag. The default
-    // prefix (`<dir>/.candor/report`) is resolved from the pre-pass target for the same reason: an
-    // operator who never passes `--out` still has a previous run's reports on disk to go stale.
-    {
-        let pre_pfx = prescan_out_prefix(&args).unwrap_or_else(|| {
-            format!("{}/.candor/report", pre_target.as_deref().unwrap_or("."))
-        });
+    // ⟨0.28⟩ ARM THE REPORT SET, before the arg loop below can exit on an unknown flag.
+    //
+    // **ONLY AN EXPLICITLY NAMED `--out`, NEVER THE DEFAULT PREFIX.** The first version armed the
+    // default `<dir>/.candor/report` too, on the reasoning that an operator who passes no `--out` still
+    // has yesterday's reports there to go stale. That reasoning is right about staleness and wrong about
+    // OWNERSHIP, and the difference destroys data: measured, `candor-scan <repo> --zzz-not-a-flag`
+    // overwrote a COMMITTED `.candor/report.<crate>.scan.json` with the placeholder — in candor-rust's
+    // own tree, which commits reports for six crates, and committed reports/baselines are the pattern
+    // this project recommends. A run that dies in argv parsing was never going to write there, and it
+    // had not been told it owned that path.
+    //
+    // ⟨0.27⟩'s arming rule never had to face this because `--gate-json` has no default: every verdict
+    // sink is named. So the rule as written — "arm at the instant the sink is known" — presumes a sink
+    // the operator NAMED, and that presumption is now explicit here. With `--out p` the operator has
+    // declared p is this run's output and arming is correct even if p is checked in; with no flag at
+    // all there is no such declaration.
+    //
+    // Found by candor-ts's arm of this rung, which tripped over it while running a conformance probe
+    // and left rust's committed report dirty.
+    if let Some(pre_pfx) = prescan_out_prefix(&args) {
         let inputs = run_inputs(pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
         crate::gate::arm_out_prefix(&pre_pfx, &inputs);
     }
