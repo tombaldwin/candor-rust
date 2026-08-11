@@ -656,14 +656,33 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
     ));
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        // `<stem>.….json`, minus the §2.2 reserved sidecar segments.
         if !name.starts_with(&format!("{stem}.")) || !name.ends_with(".json") {
             continue;
         }
-        if name.ends_with(".callgraph.json") || name.ends_with(".hierarchy.json") || name.ends_with(".locs.json") {
+        let full = e.path();
+        // ONLY FILES POSITIVELY IDENTIFIED AS §2 REPORTS — never a name denylist.
+        //
+        // The first version excluded `.callgraph`/`.hierarchy`/`.locs` by suffix and armed everything
+        // else. SPEC §2.2 ⟨0.24⟩ (the "reserved set, family-wide" paragraph) lists SEVEN reserved
+        // trailing segments — `callgraph`, `hierarchy`, `calibrated`, `layerreach`, `locs`, `gate`, and
+        // the `encountered-*` family — and records that the engines were already drifting on it, one
+        // carving out six and another two. I carved out three. Measured: this armer overwrote
+        // `<prefix>.calibrated.json`, `.layerreach.json`, `.encountered-hosts.json` and — worst —
+        // `<prefix>.gate.json`, a GATE VERDICT, each replaced by a report-shaped placeholder.
+        //
+        // The denylist-over-allowlist rule this project follows is about CLASSIFYING, where
+        // over-approximating is the safe direction. For a WRITER it inverts: over-approximating
+        // destroys a file. §2.2 says an incomplete denylist there is "loud" because an unregistered
+        // suffix merely falls back into a candidate set — here it is silent and destructive. So the
+        // safe direction is to write only what this engine positively recognises as its own report,
+        // which also cannot drift as the reserved family grows.
+        let is_report = std::fs::read_to_string(&full)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .is_some_and(|v| v.get("candor").is_some() && v.get("functions").is_some());
+        if !is_report {
             continue;
         }
-        let full = e.path();
         // THE ⟨0.27⟩ (2) INPUT EXEMPTION APPLIES TO THIS WRITER TOO. Arming happens before the run knows
         // its answer, so a prefix whose expansion collides with something this run READS would destroy
         // it — the same hazard that made `--policy P --gate-json P` a machine-readable all-clear. A
