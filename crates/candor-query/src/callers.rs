@@ -94,8 +94,23 @@ pub(crate) fn callers_via_callgraph_frontier(
         // exit 0, which reads as an authoritative "nothing calls it" for a fn that doesn't exist (corpus-audit
         // #3). Gated on a non-empty call graph so a report without one isn't misreported as "no such fn".
         if names.is_empty() {
-            if want_json { println!("{{}}"); } else { println!("candor: no call graph in the report."); }
-            return 0;
+            // ⟨0.28⟩ UNANSWERABLE MUST REACH THE MACHINE CHANNEL. This printed `{}` at exit 0, and the
+            // human arm said "no call graph in the report" — the split that makes a defect a cardinal
+            // sin. A consumer reading `direct`, or defaulting it (the fail-open idiom ⟨0.24⟩ names on
+            // every key in this format), was told NOBODY CALLS this fn: a blast radius of "safe to
+            // edit" over a pair whose honest answer is "this run judged nothing". The ⟨0.28⟩ sidecar
+            // rung turned that from a rare state into the standard one after a failed run, so the
+            // corner became the common path. Both channels now fail closed: the document names itself
+            // unanswerable AND the exit is non-zero, because a key alone still leaves `d.get("direct",
+            // [])` reading as a determined negative.
+            let why = "no call graph in the report — the §2.2 sidecar is absent, so who calls this \
+                       function is UNANSWERABLE, not empty (SPEC §3.3.1 ⟨0.28⟩)";
+            if want_json {
+                println!("{{\n  \"of\": [\"{}\"],\n  \"unanswerable\": \"{}\"\n}}", q.replace('"', "\\\""), why);
+            } else {
+                println!("candor: {why}");
+            }
+            return 2;
         }
         // Only a COMPLETE graph (the sidecar, which lists every fn incl. pure leaves) can prove a name is
         // absent. On the effect-only fallback (no sidecar), a miss is INCONCLUSIVE — a pure leaf called only
@@ -239,8 +254,23 @@ pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str,
         // exit 0, which reads as an authoritative "nothing calls it" for a fn that doesn't exist (corpus-audit
         // #3). Gated on a non-empty call graph so a report without one isn't misreported as "no such fn".
         if names.is_empty() {
-            if want_json { println!("{{}}"); } else { println!("candor: no call graph in the report."); }
-            return 0;
+            // ⟨0.28⟩ UNANSWERABLE MUST REACH THE MACHINE CHANNEL. This printed `{}` at exit 0, and the
+            // human arm said "no call graph in the report" — the split that makes a defect a cardinal
+            // sin. A consumer reading `direct`, or defaulting it (the fail-open idiom ⟨0.24⟩ names on
+            // every key in this format), was told NOBODY CALLS this fn: a blast radius of "safe to
+            // edit" over a pair whose honest answer is "this run judged nothing". The ⟨0.28⟩ sidecar
+            // rung turned that from a rare state into the standard one after a failed run, so the
+            // corner became the common path. Both channels now fail closed: the document names itself
+            // unanswerable AND the exit is non-zero, because a key alone still leaves `d.get("direct",
+            // [])` reading as a determined negative.
+            let why = "no call graph in the report — the §2.2 sidecar is absent, so who calls this \
+                       function is UNANSWERABLE, not empty (SPEC §3.3.1 ⟨0.28⟩)";
+            if want_json {
+                println!("{{\n  \"of\": [\"{}\"],\n  \"unanswerable\": \"{}\"\n}}", q.replace('"', "\\\""), why);
+            } else {
+                println!("candor: {why}");
+            }
+            return 2;
         }
         // Only a COMPLETE graph (the sidecar, which lists every fn incl. pure leaves) can prove a name is
         // absent. On the effect-only fallback (no sidecar), a miss is INCONCLUSIVE — a pure leaf called only
