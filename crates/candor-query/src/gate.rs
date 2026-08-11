@@ -977,6 +977,28 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         return refuse(&why, want_json, gate_json.as_deref());
     }
 
+    // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES (SPEC §6.2) — the same refusal posture as the
+    // branch directly above, and THE SIBLING OF candor-scan's. §6.2 states the defect was measured on
+    // this verb too, and "a route is not covered by its sibling": the scan CLI got the rung first and
+    // this route kept exiting 0 with `{"ok":true,"violations":[]}` over a README, which on the
+    // SUPPLY-CHAIN surface — a consumer pointing the gate at a report someone else produced — is the
+    // reading this rung exists to make impossible.
+    //
+    // All three rule vectors, for the reason candor-scan's commit records: keying on `rules` alone makes
+    // an allow-only policy refuse as if it had none. A `forbid`-only policy refuses on this route anyway,
+    // one branch below, for an unrelated and specific reason (a report's `calls` graph is
+    // effect-relevant), and that refusal names its own cause rather than this one.
+    if p.rules.is_empty() && p.allow_rules.is_empty() && p.layer_rules.is_empty() {
+        let why = format!(
+            "the policy at {policy_path} yielded NO RULES — refusing (exit 2, policy NOT evaluated). \
+             Every line was ignored, the file is empty, or it holds only comments. A gate with no rules \
+             cannot have caught anything, and reporting `ok: true` here would be indistinguishable from \
+             a gate that ran and found nothing. If you did not mean to gate, do not configure a policy."
+        );
+        eprintln!("candor-query gate: {why}");
+        return refuse(&why, want_json, gate_json.as_deref());
+    }
+
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
     // is gateless-green — the user believes a rule is enforced that never ran.
     //
