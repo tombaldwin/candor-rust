@@ -89,18 +89,29 @@ pub(crate) fn same_artifact_pub(a: &str, b: &str) -> bool {
 /// that the armer can run before the arg loop's own `unknown flag` exit. Mirrors the `--gate-json`
 /// pre-pass and exists for the identical reason: arming after the loop leaves the exit the rung is
 /// most often reached through — a typo'd flag — writing nothing.
+///
+/// **THE LAST `--out` WINS, BECAUSE THAT IS WHAT THE PARSE LOOP HONOURS.** The first version of this
+/// returned the FIRST occurrence, and candor-swift's arm caught it by checking its own loop instead of
+/// copying mine. Measured on `--out p1 --out p2 --zzz-not-a-flag`: `p1` was armed and **`p2` — the
+/// prefix the run would actually have written — stayed STALE**, so the rung did nothing for that argv
+/// while neutralising a set nobody was going to replace. A pre-pass that disagrees with the loop it
+/// exists to run ahead of arms the wrong thing, which is the ⟨0.27⟩ argv-order defect wearing a
+/// different flag. (Whether a REPEATED `--out` should be refused outright, the way ⟨0.28⟩ refuses a
+/// repeated `--gate-json`, is a separate spec question and is filed, not decided here.)
 fn prescan_out_prefix(args: &[String]) -> Option<String> {
+    let mut last = None;
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         if a == "--out" {
             if let Some(v) = it.peek() {
                 if !v.starts_with('-') {
-                    return Some((*v).clone());
+                    last = Some((*v).clone());
+                    it.next();
                 }
             }
         }
     }
-    None
+    last
 }
 
 fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>, Option<String>) {
