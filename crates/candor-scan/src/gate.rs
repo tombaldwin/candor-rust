@@ -676,23 +676,32 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
         // suffix merely falls back into a candidate set — here it is silent and destructive. So the
         // safe direction is to write only what this engine positively recognises as its own report,
         // which also cannot drift as the reserved family grows.
-        let is_report = std::fs::read_to_string(&full)
-            .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .is_some_and(|v| v.get("candor").is_some() && v.get("functions").is_some());
-        if !is_report {
-            continue;
-        }
-        // THE ⟨0.27⟩ (2) INPUT EXEMPTION APPLIES TO THIS WRITER TOO. Arming happens before the run knows
-        // its answer, so a prefix whose expansion collides with something this run READS would destroy
-        // it — the same hazard that made `--policy P --gate-json P` a machine-readable all-clear. A
-        // policy or a chained dep report can perfectly well be named `<prefix>.something.json`.
+        // THE ⟨0.27⟩ (2) INPUT EXEMPTION APPLIES TO THIS WRITER TOO, AND IT IS ASKED FIRST. Arming
+        // happens before the run knows its answer, so a prefix whose expansion collides with something
+        // this run READS would destroy it — the same hazard that made `--policy P --gate-json P` a
+        // machine-readable all-clear. A policy or a chained dep report can perfectly well be named
+        // `<prefix>.something.json`.
+        //
+        // ORDER MATTERS, and candor-swift's arm of this rung got it right where I had it backwards.
+        // Identification-first silently skips a `--policy <prefix>.policy.json` that is not JSON — the
+        // operator never learns their policy sat in the arming path, and losing a disclosure is the
+        // thing this project does not do. The exemption also has to OUTRANK identification for the case
+        // where the colliding input IS a valid report (a chained `CANDOR_DEPS` dep report under the same
+        // prefix): "do not touch what this run reads" is the stronger claim, whatever the file turns out
+        // to be.
         let fs = full.to_string_lossy().into_owned();
         if inputs.iter().any(|(path, _)| crate::scan::same_artifact_pub(&fs, path)) {
             eprintln!(
                 "candor-scan: --out {prefix} would arm over {fs}, which this run READS — leaving it \
                  untouched. Give the report set its own prefix."
             );
+            continue;
+        }
+        let is_report = std::fs::read_to_string(&full)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .is_some_and(|v| v.get("candor").is_some() && v.get("functions").is_some());
+        if !is_report {
             continue;
         }
         // Remember the bytes BEFORE overwriting, so a run that completes can hand back anything it
