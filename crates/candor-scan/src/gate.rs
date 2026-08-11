@@ -756,6 +756,21 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
                 if inputs.iter().any(|(path, _)| crate::scan::same_artifact_pub(&side, path)) {
                     continue;
                 }
+                // A SYMLINKED SIDECAR IS LEFT ALONE, AND SAID SO. Deleting it and later handing back the
+                // bytes (the orphan path) replaces the LINK with a regular file — a third state neither
+                // the pre-run tree nor the armed tree ever had, and it severs exactly the shared-artifact
+                // CI layout ⟨0.28⟩'s own artifact rule exists to preserve ("write THERE, leaving the link
+                // in place"). Measured on rust before this: an orphan's symlinked callgraph came back as
+                // a file. Raised by candor-swift's arm of this rung. The pairing rule covers what is left
+                // behind, which is why leaving it is the cheap side of the trade.
+                if std::fs::symlink_metadata(&side).is_ok_and(|m| m.file_type().is_symlink()) {
+                    eprintln!(
+                        "candor-scan: {side} is a §2.2 sidecar of an armed report but is a SYMLINK — \
+                         leaving it, because removing it would sever the link on restore. Its report is \
+                         armed, so treat the pair as unanswerable (SPEC §3.3.1 ⟨0.28⟩)."
+                    );
+                    continue;
+                }
                 if let Ok(prev) = std::fs::read(&side) {
                     OUT_ARMED_SIDECARS
                         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
