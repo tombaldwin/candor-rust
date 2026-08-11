@@ -714,8 +714,53 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
                 .push((full.clone(), prev));
         }
         let _ = std::fs::write(&full, doc);
+        // ⟨0.28⟩ …AND THIS REPORT'S §2.2 SIDECARS GO WITH IT — DELETED, not emptied.
+        //
+        // An armed report beside a LIVE sidecar is a pair that contradicts itself, and §2.2 gives the
+        // sidecar no provenance of its own to arbitrate with. It is not theoretical: `callers`/`whatif`/
+        // `rewire` are answered FROM THE SIDECAR, because a currently-pure function is absent from the
+        // report by §2 rule 3. Measured — baseline `f` pure with one caller `g`, new version gives `f` an
+        // effect and adds caller `h`, run exits 2 — `callers f` answered exit 0 with "reached by 1
+        // function(s) (the blast radius if it gained an effect): g". Confident, labelled the blast
+        // radius, and wrong. An agent reads it as safe-to-edit.
+        //
+        // DELETED rather than `{}`, and not by reading the report's anti-deletion rule across: no sidecar
+        // consumer treats absence as a claim (§2.2 makes it OPTIONAL, so every consumer has an absence
+        // arm and every specified arm is safe), while ⟨0.24⟩ has already ruled empty ≡ absent ≡
+        // unparseable for the hierarchy. Measured four-way on the one cell that rule does not cover — an
+        // empty-but-valid baseline callgraph — all four engines answer `origin: "unknown"`, so `{}` buys
+        // nothing the deletion does not.
+        //
+        // The reserved-segment names come from §2.2's family-wide list. Here a MISS is safe (a sidecar
+        // left behind is the pre-rung state, and the ⟨0.28⟩ pairing rule catches it consumer-side),
+        // whereas an over-reach would delete something that is not ours — the opposite of the armer
+        // above, where a miss leaves a stale report and an over-reach destroys a file. Both directions
+        // are chosen so the WRONG guess costs the least.
+        for seg in ["callgraph", "hierarchy", "locs", "calibrated", "layerreach"] {
+            let side = full.with_extension("").to_string_lossy().into_owned() + "." + seg + ".json";
+            if std::path::Path::new(&side).exists() {
+                // Never a path this run READS, on the same rule as the report itself.
+                if inputs.iter().any(|(path, _)| crate::scan::same_artifact_pub(&side, path)) {
+                    continue;
+                }
+                if let Ok(prev) = std::fs::read(&side) {
+                    OUT_ARMED_SIDECARS
+                        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+                        .lock()
+                        .unwrap()
+                        .push((std::path::PathBuf::from(&side), prev));
+                }
+                let _ = std::fs::remove_file(&side);
+            }
+        }
     }
 }
+
+/// `(path, bytes)` for every §2.2 sidecar this run DELETED while arming. Restored beside its report by
+/// [`disarm_unwritten_out_reports`] when the run turns out not to have owned that report after all —
+/// an orphan's sidecar is as much not-ours as the orphan itself.
+static OUT_ARMED_SIDECARS: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>> =
+    std::sync::OnceLock::new();
 
 /// The exact placeholder bytes, so `disarm` can tell "still armed" from "this run rewrote it".
 static OUT_ARM_DOC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -746,6 +791,19 @@ pub(crate) fn disarm_unwritten_out_reports() {
         // Only files this run left untouched since arming — anything it rewrote is a real report.
         if std::fs::read(path).is_ok_and(|now| now == doc.as_bytes()) {
             let _ = std::fs::write(path, prev);
+            // ⟨0.28⟩ …and this report's sidecars come back with it. A report the run turned out not to
+            // own is an ORPHAN, left exactly as found — and "as found" included its sidecars. Restoring
+            // the report while leaving its sidecars deleted would be a THIRD state neither the pre-run
+            // tree nor the armed tree ever had, and it would silently degrade every `callers`/`whatif`
+            // answer over that package to the absence arm with nothing saying why.
+            if let Some(sides) = OUT_ARMED_SIDECARS.get() {
+                let stem = path.with_extension("").to_string_lossy().into_owned();
+                for (sp, sprev) in sides.lock().unwrap().iter() {
+                    if sp.to_string_lossy().starts_with(&(stem.clone() + ".")) && !sp.exists() {
+                        let _ = std::fs::write(sp, sprev);
+                    }
+                }
+            }
         }
     }
 }
