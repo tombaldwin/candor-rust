@@ -112,6 +112,24 @@ pub(crate) fn cmd_tour(args: &[String]) -> i32 {
     // The header names the report's PACKAGE (from the §2 envelope) — meaningful and locator-independent,
     // so every engine and every --report form print the same crate. Falls back to the prefix basename.
     let crate_name = report_package(pre).unwrap_or_else(|| prefix_base(pre));
+
+    // ⟨0.28⟩ AND THE SAME ARGUMENT AS THE `unknown` FIELD BELOW, ONE CAUSE OVER. That field exists
+    // because `{"reaches":[]}` read as clean to the agent loop over a mostly-Unknown graph; a report
+    // that judged nothing, or names a file it could not read, produces the identical empty array from
+    // strictly less evidence, and the ⅓-Unknown threshold cannot see it (an unread file contributes no
+    // entry, so it moves neither `unknown` nor `total`). Same shape, same channels, `write_json` no-ops
+    // on a complete report so an ordinary tour is byte-identical. See [`crate::completeness`].
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("tour");
+    let (t_so_what, t_tail) = (
+        "the reaches below are ranked over only the call graph candor could see",
+        format!(
+            "A surprising reach whose path runs through an unread unit is not ranked here at all, and \
+             cannot be. {} Re-scan for the full tour.",
+            comp.gate_line()
+        ),
+    );
+
     if want_json {
         #[derive(Serialize)]
         struct Reach {
@@ -145,10 +163,12 @@ pub(crate) fn cmd_tour(args: &[String]) -> i32 {
         if total > 0 && unknown * 3 >= total {
             out["unknown"] = serde_json::json!({ "count": unknown, "total": total });
         }
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string(&out).unwrap());
         return 0;
     }
 
+    comp.print_note(t_so_what, &t_tail);
     if finds.is_empty() {
         // Effectful-but-nothing-surprising vs genuinely-pure both land here; either way the honest line
         // is the useful answer (never a manufactured surprise) — mirrors the scan-note fallback. BUT never
@@ -167,6 +187,16 @@ pub(crate) fn cmd_tour(args: &[String]) -> i32 {
                 "candor: no surprising reaches — but {unknown} of {total} function(s) are Unknown \
                  (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots` — \
                  the report records a reason for each."
+            );
+            return 0;
+        }
+        if comp.must_hedge() {
+            // "nothing hidden" is the single most reassuring sentence this binary prints, and over a
+            // report that judged nothing it is the false all-clear in plain English. The ⅓-Unknown
+            // branch above cannot catch this case for the reason given at the top of the verb.
+            println!(
+                "candor: nothing hidden in what candor COULD SEE — but see the INCOMPLETE note above; \
+                 this is NOT \"nothing is hidden\"."
             );
             return 0;
         }

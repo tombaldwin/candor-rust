@@ -563,7 +563,9 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         // OMIT-don't-falsify rule: `ok: false` would assert a boundary crossing beside an empty
         // `remedies`. `unevaluated` is not exclusive with it — a report can be both refused-on and
         // incomplete, and each says something the other does not.
-        if unanswered.is_empty() && !comp.incomplete() {
+        // ⟨0.28⟩ `must_hedge`: count-0 withdraws `ok` too (SPEC §2), on the same OMIT-don't-falsify
+        // rule, and in step with the prose branch below. The exit argument stays `incomplete()`.
+        if unanswered.is_empty() && !comp.must_hedge() {
             out["ok"] = serde_json::json!(plans.is_empty());
         }
         if !unanswered.is_empty() {
@@ -604,7 +606,7 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
          `gate --report` exits 2 over these bytes. Re-scan for a complete answer.",
     );
     if plans.is_empty() {
-        if unanswered.is_empty() && !comp.incomplete() {
+        if unanswered.is_empty() && !comp.must_hedge() {
             println!("candor fix-gate: no deny/pure boundary crossings in this report ✓");
         } else {
             // NO `✓`. The tick is the same claim in prose, over a report the gate refused to judge or
@@ -617,10 +619,25 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
             if comp.incomplete() {
                 why.push(format!("{} unit(s) were never analyzed (above)", comp.units()));
             }
+            // ⟨0.28⟩ THE THIRD CAUSE NEEDS ITS OWN CLAUSE OR THE SENTENCE READS `— , and …`. A count-0
+            // report contributes no unanalyzed UNITS (`comp.units()` is 0), so widening the branch above
+            // without widening its explanation would have produced an empty reason list under a
+            // withheld `✓` — a withdrawal that declines to say what it is withdrawing for.
+            if !comp.judged_nothing.is_empty() {
+                why.push(format!(
+                    "{} report(s) judged nothing at all (above)",
+                    comp.judged_nothing.len()
+                ));
+            }
             println!(
                 "candor fix-gate: no deny/pure boundary crossings CAN BE COMPUTED from this report — \
-                 {}, and `candor-query gate --report` refuses over these bytes.",
-                why.join(", ")
+                 {}. {}",
+                why.join(", "),
+                if unanswered.is_empty() {
+                    comp.gate_line()
+                } else {
+                    "`candor-query gate --report` refuses over these bytes."
+                }
             );
         }
         return fix_gate_exit(g.strict, false, !unanswered.is_empty(), comp.incomplete());

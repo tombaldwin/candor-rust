@@ -314,7 +314,11 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
         // computed over a universe the analysis could see all of — every ordinary run, which therefore
         // stays byte-identical. Over an incomplete report the key is ABSENT (`if (r.ok)` is falsy and
         // fails safe) and `incomplete` + the manifest say what was unread instead.
-        if comp.incomplete() {
+        // ⟨0.28⟩ `must_hedge`, not `incomplete`: `analyzed.count: 0` withdraws `ok` on the same
+        // terms (SPEC §2), and the two channels must move together — the prose `✓` below is keyed on
+        // the same predicate, and a document saying `ok: true` under a note saying INCOMPLETE is the
+        // split `ec1a441` ruled against. The EXIT CODE is untouched, here and there.
+        if comp.must_hedge() {
             comp.write_json(&mut out);
         } else {
             out["ok"] = serde_json::json!(violations.is_empty());
@@ -348,7 +352,7 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
         // The `✓` is withheld on an incomplete report for the reason `ok` is: it is a claim over a set
         // known to be partial. The weaker sentence is not a hedge for its own sake — it is the only one
         // the input licenses.
-        if comp.incomplete() {
+        if comp.must_hedge() {
             println!(
                 "  · nothing candor COULD SEE violates a `deny`/`pure` boundary — but see the INCOMPLETE \
                  note above; this is not an all-clear."
