@@ -101,6 +101,21 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
         Ok(v) => v,
         Err(c) => return c,
     };
+    // ⟨0.28⟩ THE SHARPEST INSTANCE IN SPEC §2's LIST, and the one that names this verb: over a report
+    // whose own manifest names a file it could not read, `blindspots` answered
+    // `{"sources":[],"totalUnknown":0}` — *no blind spots* — at exit 0. The unread file IS a blind spot,
+    // of the one kind this verb exists to enumerate, and it is the one kind that cannot appear in
+    // `sources` (there is no entry to carry an `unknownWhy`). See [`crate::completeness`].
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("blindspots");
+    let (bs_so_what, bs_tail) = (
+        "the Unknown source(s) below are only those inside the source candor read",
+        format!(
+            "An unread unit is a blind spot too, and it carries no `unknownWhy` to be listed under — \
+             so it is HERE and not below. {} Re-scan for the full picture.",
+            comp.gate_line()
+        ),
+    );
     let mut rev: HashMap<&str, Vec<&str>> = HashMap::new();
     for e in &entries {
         for c in &e.calls {
@@ -146,10 +161,24 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
         if want_json {
             let bc: serde_json::Map<String, serde_json::Value> =
                 ORDER.iter().map(|k| (k.to_string(), serde_json::json!(by_class[k]))).collect();
-            println!("{}", serde_json::json!({ "byClass": bc, "sources": sources_n, "totalUnknown": total_unknown }));
+            // ⟨0.28⟩ `--stats` is the same answer summarised, so it takes the same hedge. Sizing the
+            // blind-spot cost off an all-zero distribution computed over nothing is the decision this
+            // rung is here to stop.
+            let mut out =
+                serde_json::json!({ "byClass": bc, "sources": sources_n, "totalUnknown": total_unknown });
+            comp.write_json(&mut out);
+            println!("{out}");
             return 0;
         }
+        comp.print_note(bs_so_what, &bs_tail);
         if sources_n == 0 {
+            if comp.must_hedge() {
+                println!(
+                    "  no Unknown source inside what candor COULD SEE — but see the INCOMPLETE note \
+                     above; this distribution is not a measure of the whole crate."
+                );
+                return 0;
+            }
             println!("  no Unknown sources — nothing to classify (no direct-Unknown in this report).");
             return 0;
         }
@@ -201,11 +230,26 @@ pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
             sources: Vec<Source>,
             #[serde(rename = "totalUnknown")]
             total_unknown: usize,
+            /// ⟨0.28⟩ flattened, not attached to a `serde_json::Value`: `to_value` sorts, and it
+            /// re-ordered every `Source` (`{fn, why, reaches, affected}` → `{affected, fn, reaches,
+            /// why}`) on ordinary runs. Measured. See [`crate::completeness::ReportCompleteness::fields`].
+            #[serde(flatten, skip_serializing_if = "Option::is_none")]
+            completeness: Option<crate::completeness::CompletenessFields>,
         }
-        println!("{}", serde_json::to_string(&Out { sources, total_unknown }).unwrap());
+        let out = Out { sources, total_unknown, completeness: comp.fields() };
+        println!("{}", serde_json::to_string(&out).unwrap());
         return 0;
     }
+    comp.print_note(bs_so_what, &bs_tail);
     if sources.is_empty() {
+        if comp.must_hedge() {
+            // NOT "every call resolved". Over these bytes candor did not see every call.
+            println!(
+                "  no Unknown source inside what candor COULD SEE — but see the INCOMPLETE note above; \
+                 this is NOT \"no blind spots\"."
+            );
+            return 0;
+        }
         println!("  no Unknown sources — every call resolved (or no Unknown in this report).");
         return 0;
     }
@@ -243,6 +287,11 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
         Ok(m) => m,
         Err(c) => return c,
     };
+    // ⟨0.28⟩ `{"ambient":{},"contained":[]}` reads as *this codebase performs no boundary effect and so
+    // has perfect containment*, and over a report that judged nothing it is a statement about nothing.
+    // The baseline is folded in below when the ratchet runs. See [`crate::completeness`].
+    let mut comp = crate::completeness::report_completeness(cur_pre);
+    comp.warn_unreadable("containment");
     let names: Vec<&String> = cur.keys().collect();
     let pl = common_prefix_len(&names);
     // effect -> (layer -> count of functions performing it DIRECTLY)
@@ -266,6 +315,10 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
             Ok(m) => m,
             Err(c) => return c,
         };
+        // A DIFFERENCE IS UNSOUND IF EITHER SIDE IS PARTIAL — see [`ReportCompleteness::absorb`]. The two
+        // sides fail in opposite directions (missed leak vs fabricated leak), so both are read.
+        comp.absorb(crate::completeness::report_completeness(base_pre));
+        comp.warn_unreadable("containment (baseline)");
         let bnames: Vec<&String> = base.keys().collect();
         let bpl = common_prefix_len(&bnames);
         let mut base_layers: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
@@ -292,11 +345,22 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
         }
         leaks.sort();
         cleanups.sort();
+        let (rt_so_what, rt_tail) = (
+            "the leak/cleanup lists below are a difference between two partially-read trees",
+            format!(
+                "A leak in one of those unread units is MISSING from this ratchet, and one that was \
+                 always there but sat in an unread BASELINE unit would read as new. This verb's own \
+                 EXIT CODE is unchanged — the rung adds a caveat, it does not refuse. {}",
+                comp.gate_line()
+            ),
+        );
         if want_json {
-            let out = serde_json::json!({ "leaks": leaks, "cleanups": cleanups });
+            let mut out = serde_json::json!({ "leaks": leaks, "cleanups": cleanups });
+            comp.write_json(&mut out);
             println!("{}", serde_json::to_string_pretty(&out).unwrap());
             return if leaks.is_empty() { 0 } else { 1 };
         }
+        comp.print_note(rt_so_what, &rt_tail);
         if !leaks.is_empty() {
             println!("[AS-EFF-010] a boundary effect leaked into a layer it wasn't in:");
             for l in &leaks {
@@ -315,7 +379,13 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
         if leaks.is_empty() && cleanups.is_empty() {
             println!("candor containment: unchanged vs {base_pre} (no leaks, no cleanups).");
         } else if leaks.is_empty() {
-            println!("\ncandor containment: no regressions ✓");
+            // NO `✓` over a partial difference — the tick is the prose spelling of an empty `leaks`, and
+            // the note above has just said which units neither side was read over.
+            if comp.must_hedge() {
+                println!("\ncandor containment: no regression IN WHAT CANDOR COULD SEE — see the INCOMPLETE note above");
+            } else {
+                println!("\ncandor containment: no regressions ✓");
+            }
         }
         if !leaks.is_empty() {
             println!("\nfix: keep the call in its boundary layer, or refresh the baseline if intended.");
@@ -343,10 +413,19 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
             .collect();
         let ambient: BTreeMap<&str, usize> =
             AMBIENT.iter().filter_map(|e| by_eff.get(e).map(|m| (*e, m.len()))).collect();
-        let out = serde_json::json!({ "contained": contained, "ambient": ambient });
+        let mut out = serde_json::json!({ "contained": contained, "ambient": ambient });
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
+    comp.print_note(
+        "the containment percentages below are computed over only the source candor read",
+        &format!(
+            "A boundary call in an unread unit is in NOBODY's layer here, so a 100% is a share of a \
+             partial denominator. {} Re-scan before ratcheting.",
+            comp.gate_line()
+        ),
+    );
     println!("candor containment — how well each boundary effect stays in one layer");
     println!("(the signal is dispersion across layers, NOT effect count)\n");
     println!("  {:<7} {:>9} {:>7}   owner  ← leaked into", "effect", "contained", "layers");
@@ -364,7 +443,11 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
         println!("  {eff:<7} {:>8}% {:>7}   {owner} ({on}){tail}", 100 * on / tot, layers.len());
     }
     if !any {
-        println!("  (no boundary effects in the report)");
+        if comp.must_hedge() {
+            println!("  (no boundary effect in what candor COULD SEE — see the INCOMPLETE note above)");
+        } else {
+            println!("  (no boundary effects in the report)");
+        }
     }
     let amb: String = AMBIENT
         .iter()

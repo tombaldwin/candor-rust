@@ -567,6 +567,14 @@ pub(crate) fn cmd_reachable(args: &[String]) -> i32 {
         }
     }
 
+    // ⟨0.28⟩ `{"effects":{},"entryPoints":0}` is the strongest claim this tool can make — *the program
+    // performs no effect at runtime* — and over a report that judged nothing it rests on no evidence at
+    // all. It is also the one answer here that stays a determined negative on GOOD data (a library has
+    // no entry points), which is exactly why the caveat must be a KEY and not something a consumer is
+    // expected to infer from emptiness. See [`crate::completeness`].
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("reachable");
+
     if want_json {
         let effects: serde_json::Map<String, serde_json::Value> = by_eff
             .iter()
@@ -574,17 +582,33 @@ pub(crate) fn cmd_reachable(args: &[String]) -> i32 {
                 (eff.clone(), serde_json::json!({ "count": who.len(), "via": who }))
             })
             .collect();
-        let out = serde_json::json!({ "entryPoints": roots.len(), "effects": effects });
+        let mut out = serde_json::json!({ "entryPoints": roots.len(), "effects": effects });
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
 
+    comp.print_note(
+        "the runtime effect set below is a union over only the entry points candor could see",
+        &format!(
+            "An entry point in an unread unit contributes NOTHING to this union, and neither does any \
+             effect it reaches. {} Re-scan before treating this as the program's runtime surface.",
+            comp.gate_line()
+        ),
+    );
     println!(
         "candor reachable — effects the program performs at runtime (union over {} entry point{})",
         roots.len(),
         if roots.len() == 1 { "" } else { "s" }
     );
     if roots.is_empty() {
+        if comp.must_hedge() {
+            println!(
+                "  (no entry point in what candor COULD SEE — see the INCOMPLETE note above; this is \
+                 NOT \"nothing is marked runtime-invoked\")"
+            );
+            return 0;
+        }
         println!("  (no entry points in this report — nothing is marked runtime-invoked)");
         return 0;
     }

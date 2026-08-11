@@ -187,7 +187,10 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         // were ruled a day apart and looked like two cases; they are one shape and one answer.
         // MEASURED here before the change: `deny Net[unknown-host] app` over a `hosts`-only entry gave
         // `{"ok": false, …}` while `gate --report` refused outright. `fix-gate` was already right.
-        if comp.incomplete() || !unanswered.is_empty() {
+        // ⟨0.28⟩ `must_hedge`, not `incomplete`: a judged-nothing report licenses `ok` no more than an
+        // unanalyzed one does. The EXIT below still reads `incomplete()`, because ⟨0.24⟩ fixed count-0's
+        // exit at the gate's — see [`crate::completeness::ReportCompleteness::incomplete`].
+        if comp.must_hedge() || !unanswered.is_empty() {
             out.as_object_mut().unwrap().remove("ok");
             comp.write_json(&mut out);
         }
@@ -205,7 +208,7 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     );
 
     if holes.is_empty() && unanswered.is_empty() {
-        if comp.incomplete() {
+        if comp.must_hedge() {
             // NO `✓`, and not "PROVABLY" anything. The withheld tick is the same withdrawal `ok` is:
             // a claim of provable purity over a set candor is on record as not having seen.
             println!(

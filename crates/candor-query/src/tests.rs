@@ -310,6 +310,101 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── ⟨0.28⟩ the descriptive verbs' completeness re-disclosure ──────────────────────────────────
+    //
+    // The shipped ACCEPTANCE TEST for this rung is candor-spec conformance PART 40, the (artifact state
+    // × read verb) matrix, and it covers the six verbs end to end. These two tests exist for the parts
+    // PART 40 structurally CANNOT see, both of which are about the mechanism rather than a verb:
+    //
+    //   · PART 40 reads only STDOUT and classifies by key, so a change to the ORDER of the keys it does
+    //     not read is invisible to it — and the first draft of this rung re-sorted two verbs' documents
+    //     on every ordinary run by round-tripping them through `serde_json::to_value` (a BTreeMap). It
+    //     was caught by diffing output over an intact report, which is not something a suite does;
+    //   · PART 40 has no cell for "an ordinary complete report", only the intact-CONTROL cell, which
+    //     asserts the verb ANSWERED and nothing about what it answered.
+
+    /// Build a one-report fixture under a fresh temp dir and return its path. `unanalyzed`/`analyzed`
+    /// are written verbatim so a test can produce any row of SPEC §2's table.
+    fn comp_fixture(name: &str, envelope: serde_json::Value) -> String {
+        let dir = std::env::temp_dir().join(format!("candor-query-completeness-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rep = dir.join("rep.fixture.scan.json");
+        std::fs::write(&rep, envelope.to_string()).unwrap();
+        rep.to_str().unwrap().to_string()
+    }
+
+    /// A COMPLETE report must produce no disclosure at all — the property every caller relies on to stay
+    /// byte-identical, asserted on the mechanism rather than on one verb's output.
+    #[test]
+    fn a_complete_report_discloses_nothing_on_either_channel() {
+        let rep = comp_fixture(
+            "complete",
+            serde_json::json!({
+                "candor": "0.28",
+                "analyzed": { "count": 2 },
+                "functions": [{ "fn": "f", "inferred": ["Fs"], "direct": ["Fs"] }],
+            }),
+        );
+        let comp = crate::completeness::report_completeness(&rep);
+        assert!(!comp.incomplete(), "a complete report is not incomplete");
+        assert!(!comp.must_hedge(), "a complete report has nothing to hedge about");
+        assert!(comp.fields().is_none(), "no flattened disclosure on a complete report");
+        // `write_json` must leave the document EXACTLY as it found it — no `incomplete`, and no key
+        // re-ordering either, which is why this compares serialized bytes and not a `Value`.
+        let mut doc = serde_json::json!({ "effect": "Fs", "directly": [], "inherited": [] });
+        let before = serde_json::to_string(&doc).unwrap();
+        comp.write_json(&mut doc);
+        assert_eq!(serde_json::to_string(&doc).unwrap(), before, "write_json is not a no-op");
+        let mut note = Vec::new();
+        comp.write_note_for_test(&mut note, "x", "y");
+        assert!(note.is_empty(), "print_note is not a no-op");
+    }
+
+    /// `analyzed.count: 0` MUST raise the disclosure and MUST NOT raise `incomplete()`.
+    ///
+    /// The whole reason the two predicates are separate: `incomplete()` is what `unverified --strict`
+    /// and `fix-gate --strict` compute an exit 2 from, and ⟨0.24⟩ ruled count-0 *"A DISCLOSURE, NOT AN
+    /// EXIT CODE"* — `gate --report` exits 0 over these bytes, so a verb exiting 2 would claim it got
+    /// less far than the gate on identical input. Fold the count-0 arm into `incomplete()` and this
+    /// fails; nothing else in the tree would notice, because no conformance part gates a --strict
+    /// advisory verb over a judged-nothing report.
+    #[test]
+    fn judged_nothing_hedges_the_answer_without_touching_the_exit_code() {
+        let rep = comp_fixture(
+            "judged-nothing",
+            serde_json::json!({ "candor": "0.28", "analyzed": { "count": 0 }, "functions": [] }),
+        );
+        let comp = crate::completeness::report_completeness(&rep);
+        assert!(!comp.incomplete(), "count-0 must NOT reach the exit-code predicate");
+        assert!(comp.must_hedge(), "count-0 must reach the disclosure predicate");
+        let mut doc = serde_json::json!({ "reaches": [] });
+        comp.write_json(&mut doc);
+        assert_eq!(doc["incomplete"], serde_json::json!(true));
+        assert_eq!(doc["judgedNothing"].as_array().unwrap().len(), 1);
+        assert!(doc.get("unanalyzed").is_none(), "there is no unread FILE in the count-0 row");
+        // …and the prose must not send the reader to a gate that will pass and make this look like noise.
+        assert!(comp.gate_line().contains("exits 0"), "count-0 must not claim the gate refuses");
+
+        // The OTHER cause still reaches both, and still claims the refusal, which is true of it.
+        let rep = comp_fixture(
+            "unanalyzed",
+            serde_json::json!({
+                "candor": "0.28",
+                "analyzed": { "count": 3 },
+                "unanalyzed": [{ "path": "src/a.rs", "reason": "parse error" }],
+                "functions": [{ "fn": "f", "inferred": ["Fs"], "direct": ["Fs"] }],
+            }),
+        );
+        let comp = crate::completeness::report_completeness(&rep);
+        assert!(comp.incomplete() && comp.must_hedge());
+        assert!(comp.gate_line().contains("exits 2"));
+        let mut doc = serde_json::json!({ "reaches": [] });
+        comp.write_json(&mut doc);
+        assert_eq!(doc["unanalyzed"].as_array().unwrap().len(), 1);
+        assert!(doc.get("judgedNothing").is_none(), "a report with 3 analyzed units judged something");
+    }
+
     // ── `unverified --class` (SPEC §6.2 ⟨0.24⟩) ───────────────────────────────────────────────────
     // Written as EXIT-CODE assertions through `cmd_unverified --strict` (1 = holes remain, 0 = none),
     // so they exercise the shipped verb end to end — report load, `--class` parse, the transitive

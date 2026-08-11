@@ -101,6 +101,11 @@ pub(crate) struct WhereJson {
     pub(crate) effect: String,
     pub(crate) directly: Vec<String>,
     pub(crate) inherited: Vec<String>,
+    /// ⟨0.28⟩ the incompleteness disclosure, INLINE and LAST — flattened rather than attached to a
+    /// `serde_json::Value`, because `to_value` sorts and would re-order `effect`/`directly`/`inherited`
+    /// on every ordinary run. See [`crate::completeness::ReportCompleteness::fields`].
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub(crate) completeness: Option<crate::completeness::CompletenessFields>,
 }
 
 pub(crate) fn cmd_where(args: &[String]) -> i32 {
@@ -138,12 +143,42 @@ pub(crate) fn cmd_where(args: &[String]) -> i32 {
     direct.sort();
     inherit.sort();
 
+    // ⟨0.28⟩ SPEC §2: the re-disclosure binds *any* verb whose output could read as a negative finding,
+    // and `{"directly":[],"inherited":[]}` is one of the four the clause names by measurement. See
+    // [`crate::completeness`] — same reader, same two channels, no-op on a complete report.
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("where");
+
     if want_json {
-        let out = WhereJson { effect: eff.to_string(), directly: direct, inherited: inherit };
+        let out = WhereJson {
+            effect: eff.to_string(),
+            directly: direct,
+            inherited: inherit,
+            completeness: comp.fields(),
+        };
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
+    // BEFORE the answer, not after: it qualifies a NON-empty list as much as an empty one. A function in
+    // an unread file performs `eff` or not, and neither list below can say which.
+    comp.print_note(
+        &format!("the function(s) named below are only those candor could see perform {eff}"),
+        &format!(
+            "A function in one of those is ABSENT from the report, so it cannot appear in either \
+             list. {} Re-scan for a complete answer.",
+            comp.gate_line()
+        ),
+    );
     if direct.is_empty() && inherit.is_empty() {
+        if comp.must_hedge() {
+            // NOT "no function performs {eff}". That sentence is the prose spelling of the empty JSON
+            // pair, and over these bytes candor has not examined enough to say it.
+            println!(
+                "candor: no function candor COULD SEE performs {eff} — but see the INCOMPLETE note \
+                 above; this is NOT \"nothing performs {eff}\"."
+            );
+            return 0;
+        }
         println!("candor: no function performs {eff} in the report.");
         return 0;
     }
@@ -218,15 +253,60 @@ pub(crate) fn cmd_map(args: &[String]) -> i32 {
         v.0.extend(e.inferred.iter().filter(|x| *x != "Unknown").cloned());
         v.1 += 1;
     }
+    // ⟨0.28⟩ `map` answers `{}` over a report that judged nothing, and SPEC §2 names `{}` the STRONGEST
+    // determined negative there is: every key a consumer reads defaults to empty, so `d.get("db", {})`
+    // cannot tell an empty map from an unexamined one. See [`crate::completeness`].
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("map");
+
     if want_json {
         let out: BTreeMap<String, MapJson> = mods
             .iter()
             .map(|(m, (eff, n))| (m.clone(), MapJson { effects: eff.iter().cloned().collect(), functions: *n }))
             .collect();
+        // THE ONE DOCUMENT WHOSE TOP LEVEL IS A USER NAMESPACE, so the disclosure keys can in principle
+        // land on a real module (`mod incomplete`). `write_json` OVERWRITES, and a module silently
+        // replaced by a hedge is a dropped row — the shape this whole rung exists to remove. It cannot
+        // be dodged by nesting: the disclosure has to be a TOP-LEVEL key or a consumer branching on
+        // `"incomplete" in doc` never sees it. So the collision is DISCLOSED instead of hidden, loudly
+        // and by name, and the hedge still wins — a lost module row the operator has been told about
+        // beats a false all-clear nobody has.
+        let mut out = serde_json::to_value(out).unwrap();
+        // Asked of the fields ACTUALLY about to be written, not of a hardcoded name list: `unanalyzed`
+        // and `judgedNothing` are each omitted when empty, and warning that a module named `unanalyzed`
+        // was displaced when nothing displaced it is a false disclosure — the failure mode `net-partner`
+        // taught this family (a key reported ignored while being honoured), pointed the other way.
+        let written = comp.fields().map(|f| serde_json::to_value(f).unwrap()).unwrap_or_default();
+        for k in written.as_object().into_iter().flat_map(|o| o.keys()) {
+            if out.get(k).is_some() {
+                eprintln!(
+                    "candor map: this report has a module literally named `{k}`, which collides with \
+                     the ⟨0.28⟩ incompleteness disclosure this answer must carry — the disclosure wins \
+                     and that module's row is NOT in the JSON below. Its effects are in the text \
+                     output (drop --json)."
+                );
+            }
+        }
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
+    comp.print_note(
+        "the module rows below cover only the source candor read",
+        &format!(
+            "A module living wholly in one of those is MISSING from the overview, and one that is \
+             listed may be missing functions. {} Re-scan for a complete map.",
+            comp.gate_line()
+        ),
+    );
     if mods.is_empty() {
+        if comp.must_hedge() {
+            println!(
+                "candor: no effectful function candor COULD SEE — but see the INCOMPLETE note above; \
+                 this is NOT \"the code performs no effects\"."
+            );
+            return 0;
+        }
         println!("candor: no effectful functions in the report.");
         return 0;
     }
