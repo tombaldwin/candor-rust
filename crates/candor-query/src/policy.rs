@@ -500,7 +500,15 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
     while let Some(a) = it.next() {
         if a == "--report" {
             match it.next() {
-                Some(l) => report_loc = Some(resolve_locator(l)),
+                Some(l) if l == "-" || !l.starts_with('-') => report_loc = Some(resolve_locator(l)),
+                // SPEC §3.2 ⟨0.28⟩: a flag-shaped next token is "given no value" — a usage error, never
+                // a locator. Consuming it here was worse than a wrong diagnostic: `resolve_locator`
+                // failed SILENTLY (`load_coverage` returns None), so `--report` given no value dropped
+                // the coverage advisory and emitted a GREEN verdict at exit 0.
+                Some(l) => {
+                    eprintln!("candor-query: --report was given no value — the next token `{l}` is a flag, not a locator (a path really named that is spelled ./{l})");
+                    return 2;
+                }
                 None => {
                     eprintln!("candor-query: --report requires a locator argument");
                     return 2;

@@ -854,24 +854,48 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             "--json" => want_json = true,
             // candor-ts output-mode flags (#8): rust prose is the default, so accept + ignore.
             "--text" | "--human" => {}
-            "--report" => {
-                let Some(v) = args.get(i + 1) else {
+            // SPEC §3.2 ⟨0.28⟩: "given no value" MEANS the next token is flag-shaped, or the clause is
+            // unimplementable — consuming the token as a locator made this very diagnostic unreachable,
+            // and `--policy --gate-json -` read the operator's verdict sink as an unreadable policy
+            // path. Measured on this verb: exit 2 with NOTHING on the stream where the refusal document
+            // belongs (the gate sibling of conformance §3.1 (b13); the scan route was fixed an hour
+            // before this one — the sibling-route habit). The flag-shaped token is NOT consumed: the
+            // run has a broken command line, not a redefined one, so the scan of the arguments runs on
+            // (the ⟨0.24⟩ posture above) and a sink the live token names is still a sink.
+            "--report" => match args.get(i + 1) {
+                Some(v) if v == "-" || !v.starts_with('-') => {
+                    report_flag = Some(resolve_locator(v));
+                    i += 1;
+                }
+                Some(v) => {
+                    usage_error.get_or_insert_with(|| {
+                        format!("--report was given no value — the next token `{v}` is a flag, not a locator (a path really named that is spelled ./{v})")
+                    });
+                }
+                None => {
                     usage_error
                         .get_or_insert_with(|| format!("--report requires a <locator> argument ({GATE_USAGE})"));
                     break;
-                };
-                report_flag = Some(resolve_locator(v));
-                i += 1;
-            }
-            "--policy" => {
-                let Some(v) = args.get(i + 1) else {
+                }
+            },
+            // Same rule; `-` is accepted here and fails loud as an unreadable policy file a moment
+            // later — strictly narrower than refusing it in the grammar (the scan route's reasoning).
+            "--policy" => match args.get(i + 1) {
+                Some(v) if v == "-" || !v.starts_with('-') => {
+                    policy_flag = Some(v.clone());
+                    i += 1;
+                }
+                Some(v) => {
+                    usage_error.get_or_insert_with(|| {
+                        format!("--policy was given no value — the next token `{v}` is a flag, not a path (a file really named that is spelled ./{v})")
+                    });
+                }
+                None => {
                     usage_error
                         .get_or_insert_with(|| format!("--policy requires a <file> argument ({GATE_USAGE})"));
                     break;
-                };
-                policy_flag = Some(v.clone());
-                i += 1;
-            }
+                }
+            },
             "--gate-json" => {
                 // The scan path's own dash-check, so `--gate-json --policy p` cannot swallow `--policy`
                 // and run gateless-green. `-` (stream the verdict to stdout) is the one dash-shaped

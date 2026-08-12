@@ -70,7 +70,26 @@ pub(crate) fn clear_other_reports(prefix: &str, keep: &str) -> usize {
 pub(crate) fn cmd_reports(args: &[String]) -> i32 {
     let exists_only = args.iter().any(|a| a == "--exists");
     let backend = args.iter().any(|a| a == "--backend");
-    let clear_keep = args.iter().position(|a| a == "--clear-other").and_then(|i| args.get(i + 1)).cloned();
+    // SPEC §3.2 ⟨0.28⟩: `--clear-other` takes a value, so "given no value" — nothing follows, or the
+    // next token is flag-shaped — is a usage error at exit 2. It used to read the next token whatever
+    // its shape (or None), and every wrong reading was a SILENT exit-0 no-op: `--clear-other --exists`
+    // "cleared" with keep=`--exists` (removing nothing), and a trailing `--clear-other` fell through to
+    // the LIST mode as if the flag had not been typed. `-` is refused too — the value is an enum, and a
+    // dash names nothing it could keep.
+    let clear_keep = match args.iter().position(|a| a == "--clear-other") {
+        Some(i) => match args.get(i + 1) {
+            Some(v) if !v.starts_with('-') => Some(v.clone()),
+            Some(v) => {
+                eprintln!("candor-query: --clear-other was given no value — the next token `{v}` is a flag, not <scan|lint>");
+                return 2;
+            }
+            None => {
+                eprintln!("candor-query: --clear-other requires <scan|lint>");
+                return 2;
+            }
+        },
+        None => None,
+    };
     let Some(prefix) = args.iter().find(|a| !a.starts_with("--")) else {
         eprintln!("usage: candor-query reports <prefix> [--exists | --backend | --clear-other <scan|lint>]");
         return 2;
