@@ -4870,3 +4870,65 @@ fn show_and_map_emit_the_caveat_document_instead_of_their_result_when_hedging() 
     assert!(v.get("incomplete").is_none() && v.as_object().is_some_and(|o| !o.is_empty()),
         "healthy map keeps its module rows and gains no caveat key: {v}");
 }
+
+/// SPEC §2 ⟨0.28⟩: an ADVISORY verb over a CONFIGURED policy that parsed to ZERO RULES answers with
+/// the caveat document — result keys withheld, exit UNCHANGED. Measured before the fix: `whatif`,
+/// `fix-gate` and `unverified` all answered `{"ok": true, …}` at exit 0 over `# no rules yet` — the
+/// wire form of a `✓` from a gate that asked nothing, indistinguishable from a real all-clear. The
+/// caveat is §3.1's `unevaluated` with the whole-policy entry, the same spelling both gate routes put
+/// on their zero-rule REFUSAL — which stays exit 2 and now carries that entry on this route too
+/// (§6.2's "one entry naming the whole policy"; this route's refusal used to carry none).
+#[test]
+fn advisory_verbs_answer_a_zero_rule_policy_with_the_caveat_document_at_an_unchanged_exit() {
+    let f = Fixture::new("zerorule");
+    f.write_report();
+    let zero = write_policy(&f, "zero.policy", "# no rules yet\n");
+    let entry_rule = format!("(entire policy {zero} — no rules parsed)");
+
+    for argv in [
+        vec!["whatif", "inner", "Net"],
+        vec!["fix", "inner", "Fs"],
+        vec!["fix-gate"],
+        vec!["fix-gate", "--strict"],
+        vec!["unverified"],
+        vec!["unverified", "--strict"],
+    ] {
+        let mut args: Vec<&str> = argv.clone();
+        args.extend(["--report", &f.prefix, "--policy", &zero, "--json"]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(0),
+            "{argv:?}: the caveat is a disclosure, not an exit code — exit UNCHANGED (0)");
+        let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap())
+            .unwrap_or_else(|_| panic!("{argv:?} must emit a JSON caveat document on stdout"));
+        assert_eq!(v["unevaluated"][0]["rule"], serde_json::json!(entry_rule),
+            "{argv:?}: the whole-policy entry, the gate routes' own spelling: {v}");
+        for withheld in ["ok", "violations", "unverified", "remedies", "affected", "crossing"] {
+            assert!(v.get(withheld).is_none(),
+                "{argv:?}: result key `{withheld}` must be WITHHELD over a policy that asked nothing \
+                 — an empty result is the prose ✓ in wire form: {v}");
+        }
+    }
+
+    // The GATE over the same policy: refusal (exit 2) whose document now carries the same entry.
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &zero, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2), "the gate REFUSES a zero-rule policy");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["refused"], serde_json::json!(true));
+    assert_eq!(v["unevaluated"][0]["rule"], serde_json::json!(entry_rule),
+        "§6.2: the refusal's `unevaluated` carries one entry naming the whole policy — this route \
+         used to write the refusal with no `unevaluated` at all: {v}");
+
+    // INTACT-INPUT CONTROL: a policy with a real rule keeps every result key and gains no caveat.
+    let real = write_policy(&f, "real.policy", "deny Net app\n");
+    for argv in [vec!["whatif", "inner", "Net"], vec!["fix-gate"], vec!["unverified"]] {
+        let mut args: Vec<&str> = argv.clone();
+        args.extend(["--report", &f.prefix, "--policy", &real, "--json"]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(0), "{argv:?}: control exits 0");
+        let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+        assert!(v.get("ok").is_some(), "{argv:?}: control keeps `ok`: {v}");
+        assert!(v.get("unevaluated").is_none(), "{argv:?}: control gains no caveat: {v}");
+    }
+}

@@ -149,6 +149,15 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     let comp = crate::completeness::report_completeness(prefix);
     comp.warn_unreadable("unverified");
 
+    // ⟨0.28⟩ SPEC §2: a CONFIGURED policy that parsed to zero rules asked nothing — there is no
+    // pure/deny layer for a hole to pass, so an empty `unverified` list would be the prose `✓` in
+    // wire form over a gate that never asked a question. The caveat document replaces the result;
+    // the EXIT is unchanged (the same expression the result path computes, over empty finding sets).
+    if crate::policy::policy_asked_nothing(&parsed) {
+        crate::policy::emit_zero_rule_caveat("unverified", &pp, want_json, &comp);
+        return unverified_exit(strict, false, false, comp.incomplete());
+    }
+
     if want_json {
         let mut items: Vec<_> = holes
             .iter()

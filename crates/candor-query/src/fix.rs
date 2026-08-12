@@ -285,7 +285,9 @@ fn compute_remedy<'a>(
 /// Read + parse a policy, loud-failing (exit 2) on an unreadable path — the same fail-loud contract as
 /// `whatif`, so a typo'd policy never yields a confident plan against a silently-empty ruleset. Returns the
 /// deny/`pure` rules on success.
-fn load_rules(policy_path: Option<String>) -> Result<candor_classify::policy::ParsedPolicy, i32> {
+/// Returns the resolved policy PATH beside the parse — the ⟨0.28⟩ zero-rule caveat names the whole
+/// policy, so the callers need to know which file that was.
+fn load_rules(policy_path: Option<String>) -> Result<(String, candor_classify::policy::ParsedPolicy), i32> {
     let policy_path = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
     let Some(pp) = policy_path else {
         eprintln!("candor fix: a policy is required (pass a policy file or set CANDOR_POLICY) — the fix is the refactor that restores the boundary the edit crossed.");
@@ -295,7 +297,7 @@ fn load_rules(policy_path: Option<String>) -> Result<candor_classify::policy::Pa
     // from a rule the gate does not apply sends an agent to refactor a boundary the gate never asked
     // about. MEASURED — `deny Unknown[corp]` with `corp` aliased to a non-matching class produced a hoist
     // plan while the gate exited 0.
-    crate::policy::load_policy_as_the_gate_does("fix", &pp)
+    crate::policy::load_policy_as_the_gate_does("fix", &pp).map(|p| (pp, p))
 }
 
 /// ⟨0.24⟩ **A REMEDY MUST NOT REST ON EVIDENCE THE GATE REFUSED TO READ** — SPEC §3.2, candor-spec
@@ -363,7 +365,7 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
     let prefix = &prefix;
     let want_json = g.want_json;
     let policy_path = g.policy.clone();
-    let parsed = match load_rules(policy_path) {
+    let (pp_path, parsed) = match load_rules(policy_path) {
         Ok(p) => p,
         Err(c) => return c,
     };
@@ -417,6 +419,19 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
         eprintln!("candor fix: no function matching `{target}`.");
         return 2;
     };
+
+    // ⟨0.28⟩ SPEC §2's zero-rule caveat. The clause names `whatif`/`fix-gate`/`unverified` — the verbs
+    // that share the loader — and this verb shares it too (`load_rules` above): its every answer below
+    // ("does not perform", "not forbidden", a hoist plan) is an answer RELATIVE TO A POLICY, and
+    // relative to no rules there is no boundary to have crossed. Answering `crossing: false` here would
+    // be a confident no-op verdict from a gate that asked nothing — the advisory verb more confident
+    // than the gate, which refuses these bytes outright. The named-verb list is illustrative, not
+    // exhaustive (the ⟨0.24⟩ sibling-scoping lesson, recorded in SPEC §3.2). Exit 0, unchanged: both
+    // no-op arms below already answered 0, and the missing-function usage error above kept its 2.
+    if crate::policy::policy_asked_nothing(&parsed) {
+        crate::policy::emit_zero_rule_caveat("fix", &pp_path, want_json, &comp);
+        return 0;
+    }
 
     if !start.inferred.iter().any(|e| e == effect) {
         println!("candor fix: `{}` does not perform {effect} — nothing to hoist.", start.func);
@@ -500,7 +515,7 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     let prefix = &prefix;
     let want_json = g.want_json;
     let policy_path = g.policy.clone();
-    let parsed = match load_rules(policy_path) {
+    let (pp_path, parsed) = match load_rules(policy_path) {
         Ok(p) => p,
         Err(c) => return c,
     };
@@ -543,6 +558,16 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     // *"no deny/pure boundary crossings in this report ✓"*.
     let comp = crate::completeness::report_completeness(prefix);
     comp.warn_unreadable("fix-gate");
+
+    // ⟨0.28⟩ SPEC §2: a CONFIGURED policy that parsed to zero rules asked nothing — an empty `remedies`
+    // beside `ok: true` here is a claim relative to a gate that never asked a question. The caveat
+    // document replaces the result; the EXIT is unchanged (the same expression the result path
+    // computes, over empty finding sets — zero rules can produce no plan and no unanswerable pair).
+    if crate::policy::policy_asked_nothing(&parsed) {
+        crate::policy::emit_zero_rule_caveat("fix-gate", &pp_path, want_json, &comp);
+        return fix_gate_exit(g.strict, false, false, comp.incomplete());
+    }
+
     let mut plans: BTreeMap<String, RemedyPlan> = BTreeMap::new();
     for e in sorted {
         let mut effs: Vec<&String> = e.inferred.iter().collect();

@@ -56,6 +56,67 @@ pub(crate) fn load_policy_as_the_gate_does(
     Ok(p)
 }
 
+/// ⟨0.28⟩ SPEC §2: **AN ADVISORY VERB OVER A ZERO-RULE POLICY ANSWERS WITH THE CAVEAT DOCUMENT** —
+/// result keys withheld, exit UNCHANGED. Did this configured policy parse to no rules at all?
+///
+/// §6.2 makes the same condition an exit-2 REFUSAL for the GATE (`ok: true` is a claim about the code
+/// no such run is entitled to make); the advisory verbs share the loader and are ruled differently:
+/// they set no verdict, so the refusal posture is the wrong import — what they produce is an answer
+/// *relative to a policy*, and relative to no rules that answer is not a finding, it is an absence of
+/// questions. So `unverified` does not emit an empty `unverified` list over a policy that asked
+/// nothing, for the same reason ⟨0.27⟩'s refusal document must not carry `violations`. All three rule
+/// vectors, for the reason the gate's own check gives: keying on `rules` alone would treat an
+/// allow-only policy as empty.
+pub(crate) fn policy_asked_nothing(p: &candor_classify::policy::ParsedPolicy) -> bool {
+    p.rules.is_empty() && p.allow_rules.is_empty() && p.layer_rules.is_empty()
+}
+
+/// The zero-rule caveat, on BOTH channels — SPEC §2 ⟨0.28⟩.
+///
+/// The machine document is the §3.1 `unevaluated` shape with the whole-policy entry — the SAME entry,
+/// character for character, that this engine's two gate routes put on their zero-rule refusal
+/// document, so the advisory caveat and the gate's refusal cannot drift about what went unevaluated
+/// (inventing a second spelling is the mistake SPEC records making four times). No `ok`, no result
+/// keys: a consumer branching on `r.ok` gets falsy and fails safe; one that looks further learns the
+/// policy asked nothing. The report-completeness caveat rides the same document when it applies —
+/// the two disclosures are independent and each says something the other does not.
+///
+/// The EXIT is the caller's and is UNCHANGED (⟨0.24⟩: count-0 reaches both disclosure channels and
+/// stops at the exit code — the same standing ruling, one condition over).
+pub(crate) fn emit_zero_rule_caveat(
+    verb: &str,
+    policy_path: &str,
+    want_json: bool,
+    comp: &crate::completeness::ReportCompleteness,
+) {
+    let sentence = format!(
+        "candor {verb}: the policy at {policy_path} yielded NO RULES — every line was ignored, the \
+         file is empty, or it holds only comments. A policy with no rules ASKS NOTHING, so this verb \
+         has no answer to give relative to it: the result keys are withheld and this caveat stands in \
+         their place (SPEC §2 ⟨0.28⟩). `gate` refuses outright over this policy (exit 2). If you did \
+         not mean to gate, remove the policy configuration rather than pointing it at a file with no \
+         rules in it."
+    );
+    if want_json {
+        eprintln!("{sentence}");
+        let mut out = serde_json::json!({
+            "unevaluated": [ {
+                "rule": format!("(entire policy {policy_path} — no rules parsed)"),
+                "why": "the configured policy yielded zero rules, so nothing was evaluated and no \
+                        rule can have passed",
+            } ],
+        });
+        comp.write_json(&mut out);
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        println!("{sentence}");
+        comp.print_note(
+            "this run's report is ALSO incomplete — the caveat above is not the only one",
+            &format!("{} Re-scan for a complete answer.", comp.gate_line()),
+        );
+    }
+}
+
 // ── whatif ──────────────────────────────────────────────────────────────────────────────────────
 
 // ⟨0.24⟩ `whatif`'s completeness read now lives in [`crate::completeness`], with the ruling's whole
@@ -243,13 +304,14 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
     // the gate will apply: `unknown-alias` vocabulary resolved, policy errors refused. It used to call
     // bare `parse_policy`, which silently widened `deny Unknown[<alias>]` to a bare `deny Unknown` and
     // then printed the WIDENED rule back to the operator as the one that would be violated.
-    let rules = match policy_path.as_deref() {
+    let parsed = match policy_path.as_deref() {
         None => None,
         Some(p) => match load_policy_as_the_gate_does("whatif", p) {
-            Ok(pp) => Some(pp.rules),
+            Ok(pp) => Some((p.to_string(), pp)),
             Err(code) => return code,
         },
     };
+    let rules = parsed.as_ref().map(|(_, pp)| pp.rules.clone());
     // ⟨0.24⟩ `(fn, the rule's OWN source line, the condition that rule's verdict rests on)`.
     let mut violations: Vec<(&str, String, Option<String>)> = Vec::new();
     if let Some(rules) = &rules {
@@ -291,6 +353,14 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
     // `ec1a441`) — see [`crate::completeness`] for why the answer is neither `ok: true` nor `ok: false`.
     let comp = crate::completeness::report_completeness(prefix);
     comp.warn_unreadable("whatif");
+
+    // ⟨0.28⟩ SPEC §2: a CONFIGURED policy that parsed to zero rules asked nothing, so the pre-edit
+    // verdict — and the blast radius it qualifies — is withheld in favour of the caveat document.
+    // The exit is UNCHANGED (0: with no rules, no violation was ever recordable on this path).
+    if let Some((pp_path, _)) = parsed.as_ref().filter(|(_, pp)| policy_asked_nothing(pp)) {
+        emit_zero_rule_caveat("whatif", pp_path, want_json, &comp);
+        return 0;
+    }
 
     if want_json {
         let mut out = serde_json::json!({
