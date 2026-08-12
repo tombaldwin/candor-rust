@@ -217,6 +217,55 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
     Ok(out)
 }
 
+/// ⟨0.28⟩ SPEC §3.3.1 (3) — the FILES a `gate --report` locator names, by the SAME resolution the run
+/// applies (`resolve_locator` → `glob_reports`, or the discovered prefix when no `--report` was given —
+/// exactly the `report_flag.or_else(discover_report_prefix)` line in `cmd_gate`). Exists for the
+/// input-collision guard in the pre-pass there: the guard compared the sink against the raw LOCATOR
+/// token, and a locator is a PREFIX — so `--gate-json <one of the expanded siblings>` armed the refusal
+/// OVER the very report the gate was asked to judge. MEASURED on this engine 2026-08-12:
+///
+///   gate --report r --policy P --gate-json r.gatedemo.scan.json
+///       → the armed refusal replaced the operator's report, the load then failed on the wreckage
+///         ("failed to parse — corrupt input"), and the exit-2 refusal document was written over it
+///         AGAIN. The report is gone, at an exit code indistinguishable from the refusal that should
+///         have happened. The discovery spelling (no `--report`, sink = the discovered
+///         `.candor/report.<crate>.scan.json`) destroyed it identically.
+///
+/// Kept ADJACENT to `load_gate_report` so the guard and the loader cannot drift about what this verb
+/// reads — the one-list discipline candor-scan's `run_inputs` keeps, and the reason a hand-written
+/// second expansion is forbidden by the clause itself.
+///
+/// THE §2.2 SIDECARS EXPAND TOO (same clause). The gate opens no sidecar — that MUST NOT is
+/// `load_gate_report`'s — but the locator NAMES the pair, and a sink on the pair's other half is worse
+/// than the report case: the report loads fine, the gate runs green, and a REAL verdict lands on the
+/// callgraph at exit 1 (measured) — `callers`/`whatif` then read a verdict document where the graph
+/// belongs. Two exclusions from `SIDECAR_KINDS`, each because refusing it would break a legitimate
+/// spelling, not because destroying it is fine: `gate` (`<stem>.gate.json` is a verdict sink by
+/// designation — the beside-the-report layout this flag exists for), and `encountered-*` is absent from
+/// that const anyway (engine-local scan bookkeeping no query reads).
+fn gate_report_input_files(report_flag: Option<&str>) -> Vec<String> {
+    let Some(prefix) = report_flag.map(resolve_locator).or_else(discover_report_prefix) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for r in glob_reports(&prefix) {
+        let r = r.display().to_string();
+        if let Some(stem) = r.strip_suffix(".json") {
+            for kind in candor_report::SIDECAR_KINDS {
+                if kind == "gate" {
+                    continue;
+                }
+                let side = format!("{stem}.{kind}.json");
+                if Path::new(&side).is_file() {
+                    out.push(side);
+                }
+            }
+        }
+        out.push(r);
+    }
+    out
+}
+
 // ── the report route into the gate ──────────────────────────────────────────────────────────────
 
 /// The owned accumulators a [`candor_classify::gate::GateInput`] borrows. Built from a written report
@@ -723,6 +772,12 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         if let Some(gp) = gate {
             let env_policy = std::env::var("CANDOR_POLICY").ok();
             let env_config = std::env::var("CANDOR_CONFIG").ok();
+            // ⟨0.28⟩ …AND THE FILES THE LOCATOR EXPANDS TO, because the raw flag value below is not
+            // what this verb READS. A `--report` value is a PREFIX (or a discovery, when absent), and
+            // `load_gate_report` reads its expansion — so a sink naming one of the expanded files named
+            // an input by any honest reading, and the token comparison could not see it. Enumerated by
+            // `gate_report_input_files`, the loader-adjacent list; see the measurement there.
+            let report_set = gate_report_input_files(report);
             // §3.3.1 names "a report being read (`gate --report`)" as an input. Writing the verdict
             // there destroys the very report the gate was asked to judge — and the diagnostic then
             // blames the report ("no `functions` array") rather than the collision, so the operator is
@@ -739,6 +794,15 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                         return 2;
                     }
                 }
+                // ⟨0.28⟩ the expanded report set (and its §2.2 sidecars), exactly as the single-sink
+                // path asks it below — a duplicate must not smuggle an expanded input past the guard.
+                for f in &report_set {
+                    if same_artifact(s_named, f) {
+                        eprintln!("candor-query gate: --gate-json {s_named} names a file this gate reads — {f} — refusing (exit 2).");
+                        eprintln!("        Nothing was written; give the verdict its own path.");
+                        return 2;
+                    }
+                }
                 if is_candor_config(s_named) {
                     eprintln!("candor-query gate: --gate-json {s_named} is a .candor/config — refusing (exit 2). Nothing was written.");
                     return 2;
@@ -751,6 +815,20 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
                     eprintln!("candor-query gate: --gate-json {gp} names the SAME FILE as {flag} {other} — refusing (exit 2).");
                     eprintln!("        The verdict is armed before the policy is read, so this would overwrite your");
                     eprintln!("        policy and then gate on the wreckage. Nothing was written.");
+                    return 2;
+                }
+            }
+            // ⟨0.28⟩ the expanded report set: the raw `--report` comparison above is about the TOKEN
+            // the operator typed; this one is about the FILES the run will read (and their §2.2
+            // sidecars). MEASURED before this loop existed: the prefix spelling destroyed the
+            // operator's report at exit 2, and the callgraph spelling wrote a REAL verdict over the
+            // pair's other half at exit 1 — see `gate_report_input_files`.
+            for f in &report_set {
+                if same_artifact(gp, f) {
+                    eprintln!("candor-query gate: --gate-json {gp} names a file this gate reads — {f} — refusing (exit 2).");
+                    eprintln!("        The verdict is armed before the run reads its inputs, so this would overwrite");
+                    eprintln!("        that input and then gate on the wreckage. Nothing was written; give the verdict");
+                    eprintln!("        its own path.");
                     return 2;
                 }
             }

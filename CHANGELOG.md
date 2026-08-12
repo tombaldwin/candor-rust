@@ -6,6 +6,20 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.28⟩ `candor-query gate`: the input guard covers what the `--report` locator EXPANDS to** (SPEC
+  §3.3.1 (3), *"AND AN INPUT LOCATOR NAMES A SET — COMPARE THE EXPANSION, NEVER THE TOKEN"*). The gate
+  verb's pre-pass compared `--gate-json` against the raw `--report` token while `load_gate_report` reads
+  the token's expansion, so `gate --report r --policy P --gate-json r.<crate>.scan.json` destroyed the
+  operator's report at exit 2 — measured, with the diagnostic blaming the report ("failed to parse —
+  corrupt input") for the corruption the run inflicted — and the no-`--report` discovery spelling
+  destroyed the discovered `.candor/` report identically. The §2.2 sidecars are covered too:
+  `--gate-json <the callgraph>` wrote a REAL verdict over the pair's other half at exit 1, a success.
+  `gate_report_input_files` enumerates the exact files by the run's own resolution (`resolve_locator` →
+  `glob_reports`, or `discover_report_prefix`), kept adjacent to `load_gate_report` so guard and loader
+  cannot drift; `<stem>.gate.json` stays a permitted sink (the beside-the-report verdict layout — `gate`
+  is skipped from `SIDECAR_KINDS` in the walk), pinned by the control test. The scan CLI closed the same
+  vein through `run_inputs` earlier in the ⟨0.28⟩ arc; this is the QUERY route's spelling.
+
 - **⚠ A stray second positional turned a red gate GREEN.** `dir = a.clone()` ran on every bare token, so
   the LAST positional silently won: `candor-scan A B` scanned B and said nothing about A. Measured —
   `candor-scan A --policy 'deny Fs'` exits 1, `candor-scan A B --policy 'deny Fs'` exits **0** with
