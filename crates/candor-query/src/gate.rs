@@ -1098,7 +1098,22 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
              a gate that ran and found nothing. If you did not mean to gate, do not configure a policy."
         );
         eprintln!("candor-query gate: {why}");
-        return refuse(&why, want_json, gate_json.as_deref());
+        // ⟨0.28⟩ SPEC §6.2: "The `unevaluated` list carries one entry naming the whole policy" — the
+        // shape §3.1 already pins for a policy with no lines to name. This branch used to write the
+        // refusal with NO `unevaluated` at all, while candor-scan's zero-rule refusal carried exactly
+        // this entry — the two gate routes disagreeing about one document (§3.1's byte-equality MUST).
+        // Same strings as the scan route's, so the routes cannot drift.
+        return refuse_disclosing(
+            &why,
+            &[candor_report::Unevaluated {
+                rule: format!("(entire policy {policy_path} — no rules parsed)"),
+                why: "the configured policy yielded zero rules, so nothing was evaluated and no rule \
+                      can have passed"
+                    .to_string(),
+            }],
+            want_json,
+            gate_json.as_deref(),
+        );
     }
 
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
