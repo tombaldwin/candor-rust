@@ -2373,3 +2373,72 @@ fn a_sink_named_after_a_broken_flag_is_still_a_sink() {
     assert_eq!(doc["refused"], true, "{doc}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// SPEC §3.3.1 ⟨0.28⟩: **a repeated `--out` is the same rule as a repeated `--gate-json`** — refused
+/// at exit 2, with the fail-closed report written to EVERY prefix named, under the report sink's own
+/// arming rules (each prefix's previous report set rewritten to the ⟨0.21⟩ Row-1 no-claim shape, its
+/// §2.2 sidecars deleted with it, and NO hand-back — the run scanned nothing). Measured before the
+/// fix: `--out A --out B` took the LAST at exit 0, leaving `A` holding the previous run's whole
+/// per-crate report set, readable as current, with nothing saying otherwise.
+#[test]
+fn repeated_out_is_refused_and_every_named_prefix_gets_the_fail_closed_report() {
+    let d = make_crate("repout", "pub fn go() { let _ = std::fs::read(\"x\"); }");
+    let tmp = std::env::temp_dir().join(format!("candor-scan-repout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let (p1, p2) = (tmp.join("o1"), tmp.join("o2"));
+    let (p1s, p2s) = (p1.to_string_lossy().into_owned(), p2.to_string_lossy().into_owned());
+
+    // Seed both prefixes with a PREVIOUS run's real report set (report + callgraph sidecar).
+    for p in [&p1s, &p2s] {
+        let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).args(["--out", p])
+            .output().expect("seed run");
+        assert_eq!(out.status.code(), Some(0), "seeding scan must succeed");
+    }
+    let rep = |p: &str| format!("{p}.repout.scan.json");
+    let side = |p: &str| format!("{p}.repout.scan.callgraph.json");
+    assert!(std::path::Path::new(&side(&p1s)).exists(), "seed left a sidecar to observe");
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .args(["--out", &p1s, "--out", &p2s])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2),
+        "a repeated --out is refused — last-wins published a previous run's reports at the losing prefix");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("--out given more than once"), "the diagnostic names the rule: {stderr}");
+
+    // EVERY prefix named gets the fail-closed report: the previous sets are armed, not left current…
+    for p in [&p1s, &p2s] {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(rep(p)).unwrap()).unwrap();
+        assert_eq!(v["analyzed"]["count"], serde_json::json!(0),
+            "{p}: the previous report must be the Row-1 no-claim shape after the refusal: {v}");
+        assert_eq!(v["functions"], serde_json::json!([]));
+        assert!(!std::path::Path::new(&side(p)).exists(),
+            "{p}: an armed report's §2.2 sidecar goes with it — a live sidecar beside a no-claim \
+             report is a pair that contradicts itself");
+    }
+
+    // …and the run exited before scanning, so NO hand-back: the placeholders STAND (fail-closed).
+
+    // CONTROLS. (a) A single --out still scans: exit 0, a real report.
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).args(["--out", &p1s])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0), "single --out control");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(rep(&p1s)).unwrap()).unwrap();
+    assert_eq!(v["analyzed"]["count"], serde_json::json!(1), "the control writes a REAL report: {v}");
+
+    // (b) Two spellings of ONE path are ONE sink (the §3.3.1 artifact rule), not refused.
+    let out = Command::new(bin())
+        .current_dir(&tmp)
+        .arg(d.to_string_lossy().as_ref())
+        .args(["--out", "o2", "--out", "./o2"])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0),
+        "two spellings of one prefix are one sink — refusing a legal command is the mirror defect: {}",
+        String::from_utf8_lossy(&out.stderr));
+
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

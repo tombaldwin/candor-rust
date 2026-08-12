@@ -30,14 +30,21 @@ struct PreScan {
     /// The `--policy` path the loop will accept — the next token when it is value-shaped; a
     /// flag-shaped token is NOT a value and stays live (see the walk).
     policy: Option<String>,
-    /// The `--out` prefix the loop will accept — **the LAST one, because that is what the loop
-    /// honours.** The first version of the out pre-pass kept the FIRST occurrence, and candor-swift's
-    /// arm caught it by checking its own loop instead of copying: measured on `--out p1 --out p2
-    /// --zzz-not-a-flag`, `p1` was armed and `p2` — the prefix the run would actually have written —
-    /// stayed STALE. A pre-pass that disagrees with the loop it runs ahead of arms the wrong thing.
-    /// (Whether a REPEATED `--out` should be refused outright, the way ⟨0.28⟩ refuses a repeated
-    /// `--gate-json`, is a separate spec question and is filed, not decided here.)
-    out: Option<String>,
+    /// Every `--out` prefix this argv names, in order and with duplicates kept ⟨0.28⟩. The first
+    /// version of the out pre-pass kept only the FIRST occurrence, and candor-swift's arm caught it by
+    /// checking its own loop instead of copying: measured on `--out p1 --out p2 --zzz-not-a-flag`,
+    /// `p1` was armed and `p2` — the prefix the run would actually have written — stayed STALE. A
+    /// pre-pass that disagrees with the loop it runs ahead of arms the wrong thing.
+    ///
+    /// ⟨0.28⟩ SPEC §3.3.1 has since DECIDED the question an earlier note here filed: **a repeated
+    /// `--out` is the same rule as a repeated `--gate-json`** — refused at exit 2, with the
+    /// fail-closed report written to EVERY prefix named, because the two statements cannot both be
+    /// honoured and last-wins leaves the losing prefix holding a previous run's reports, readable as
+    /// current, with nothing saying otherwise. If anything the report sink is the WORSE case: this
+    /// engine fans out, so the stale set at the losing prefix is a whole per-crate report set, and a
+    /// `gate --report` over it answers from a scan that never ran. Keeping the whole list (rather
+    /// than the last) is what lets `scan_main` see the duplication at all.
+    outs: Vec<String>,
     /// The scan TARGET. The last positional is kept, which USED to be what the parse loop did on every
     /// bare token; a second positional is now a usage error that exits 2 there. This pass still runs
     /// first, so it keeps the last — with one positional the two agree, and with two the run refuses a
@@ -66,7 +73,7 @@ struct PreScan {
 /// with it: under the ⟨0.28⟩ ruling `--policy --out X` is a usage error at `--policy`, and `--out X`
 /// — parsed, not swallowed — arms X fail-closed before the refusal.
 fn prescan_argv(args: &[String]) -> PreScan {
-    let mut ps = PreScan { gate_sinks: Vec::new(), policy: None, out: None, target: None };
+    let mut ps = PreScan { gate_sinks: Vec::new(), policy: None, outs: Vec::new(), target: None };
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -88,7 +95,7 @@ fn prescan_argv(args: &[String]) -> PreScan {
             // A prefix, so even the bare `-` is refused by the loop — recorded only when non-dashed.
             "--out" => {
                 if it.peek().is_some_and(|v| !v.starts_with('-')) {
-                    ps.out = it.next().cloned();
+                    ps.outs.push(it.next().expect("peeked").clone());
                 }
             }
             _ => {
@@ -511,9 +518,38 @@ pub(crate) fn scan_main() {
     //
     // Found by candor-ts's arm of this rung, which tripped over it while running a conformance probe
     // and left rust's committed report dirty.
-    if let Some(pre_pfx) = pre.out {
+    // ⟨0.28⟩ A REPEATED `--out` IS THE SAME RULE AS A REPEATED `--gate-json` (SPEC §3.3.1): `--out A
+    // --out B` names where the reports go, twice; the two statements cannot both be honoured, and
+    // last-wins leaves `A` holding a previous run's whole per-crate report set, readable as current.
+    // Refused at exit 2, **with the fail-closed report written to every prefix named** — which under
+    // this sink's own arming rules means arming EACH prefix: the set at risk is the one the previous
+    // run left there, rewritten to the ⟨0.21⟩ Row-1 no-claim shape (the armer already asks the input
+    // exemption first, per file, and takes the §2.2 sidecars with each report). Two spellings of ONE
+    // path are one sink (`distinct_gate_sinks` is the same artifact rule — `--out` never accepts `-`,
+    // so the stream arm in it is inert here). The exit routes through `exit2_refused`, so a
+    // `--gate-json` sink registered above gets the specific refusal document and a `--json` stream
+    // gets the fail-closed report — and the run exits before ever scanning, so the hand-back never
+    // runs and the placeholders STAND, which is the fail-closed reading a run that scanned nothing is
+    // entitled to.
+    let distinct_outs = distinct_gate_sinks(&pre.outs);
+    if distinct_outs.len() > 1 {
+        let named = distinct_outs.join(", ");
+        eprintln!("candor-scan: --out given more than once ({named}) — refusing (exit 2).");
+        eprintln!("        A run writes ONE report set to ONE prefix. Naming two says where the reports");
+        eprintln!("        go twice, and the reader of the prefix that loses cannot tell it lost — it");
+        eprintln!("        goes on holding a previous run's reports as if they were current. Name one,");
+        eprintln!("        or run the scan twice.");
         let inputs = run_inputs(pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
-        crate::gate::arm_out_prefix(&pre_pfx, &inputs);
+        for p in &distinct_outs {
+            crate::gate::arm_out_prefix(p, &inputs);
+        }
+        crate::gate::exit2_refused(format!(
+            "--out was given more than once ({named}) — a run writes one report set to one prefix"
+        ));
+    }
+    if let Some(pre_pfx) = pre.outs.last() {
+        let inputs = run_inputs(pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
+        crate::gate::arm_out_prefix(pre_pfx, &inputs);
     }
     let mut it = args.iter();
     while let Some(a) = it.next() {
