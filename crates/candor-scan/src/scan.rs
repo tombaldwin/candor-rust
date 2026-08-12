@@ -205,6 +205,13 @@ fn same_artifact(a: &str, b: &str) -> bool {
 /// moment later fails on its own terms. This read decides only whether a path is an INPUT.
 fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    // ⟨0.28⟩ THE TARGET ITSELF. §3.3.1 (3) lists "the target's own source tree" beside the policy and
+    // the baseline, and this list did not — every channel was registered except the one every run has.
+    // Measured: `candor-scan src/lib.rs --gate-json src/lib.rs` replaced the operator's SOURCE FILE with
+    // the armed verdict and exited 0. EXACT-ARTIFACT registration, never containment: `same_artifact`
+    // stays exact (see its comment — a report written into `.candor/` INSIDE the tree being scanned is
+    // ordinary usage and must keep working), so this refuses only the target under its own name.
+    out.push((target.to_string(), "the scan target".into()));
     if let Some(p) = policy_flag {
         out.push((p.to_string(), "--policy".into()));
     }
@@ -263,6 +270,14 @@ fn refuse_gate_json_over_any_input(gate: &str, target: &str, policy_flag: Option
 /// ⟨0.28⟩ Is this sink an input? Non-exiting, because the duplicate-sink path must be able to ask the
 /// question WITHOUT taking the run down: the exemption covers the offending PATH, and every other sink
 /// named in the same argv still has a reader waiting for a verdict.
+///
+/// **ONE SPELLING OF THE RULE — this reads `run_inputs`, the same set the single-sink refusal loops
+/// over and the `--out` armer exempts.** The first version re-derived the set by hand and its copy
+/// omitted CANDOR_BASELINE, CANDOR_DEPS and the config's own keys, so the DUPLICATE-sink route wrote
+/// the repeated-`--gate-json` refusal OVER a chained dep report the single-sink route refused to touch
+/// — measured live: `CANDOR_DEPS=R --gate-json R` exited 2 with R intact, `--gate-json R --gate-json V`
+/// exited 2 with R replaced by the refusal document. Two spellings of one rule is how the two routes
+/// came to disagree; there is now one.
 fn gate_json_input_collision(gate: &str, target: &str, policy: Option<&str>) -> bool {
     if gate == "-" {
         return false;
@@ -270,21 +285,7 @@ fn gate_json_input_collision(gate: &str, target: &str, policy: Option<&str>) -> 
     if is_gate_json_at_config(gate) {
         return true;
     }
-    // Owned Strings, compared in place: borrowing them into an array outlives the bindings (E0597), and
-    // the `if let` form clippy would otherwise want here is what `unnecessary_find_map` rejects.
-    if let Some(p) = policy {
-        if same_artifact(gate, p) {
-            return true;
-        }
-    }
-    for key in ["CANDOR_POLICY", "CANDOR_CONFIG"] {
-        if let Ok(v) = std::env::var(key) {
-            if same_artifact(gate, &v) {
-                return true;
-            }
-        }
-    }
-    same_artifact(gate, target)
+    run_inputs(target, policy).iter().any(|(path, _)| same_artifact(gate, path))
 }
 
 fn refuse_gate_json_over_input(gate: &str, other: Option<&str>, flag: &str) {
@@ -293,9 +294,11 @@ fn refuse_gate_json_over_input(gate: &str, other: Option<&str>, flag: &str) {
         return;
     }
     eprintln!("candor-scan: --gate-json {gate} names the SAME FILE as {flag} {other} — refusing (exit 2).");
-    eprintln!("        The verdict is armed before the policy is read, so this would overwrite your");
-    eprintln!("        policy and then gate on the wreckage. Nothing was written; give the verdict its");
-    eprintln!("        own path.");
+    // "an input of this run", not "your policy": the same sentence now covers the policy, the baseline,
+    // a chained dep report, the config's own keys, and the scan target itself.
+    eprintln!("        The verdict is armed before this run reads its inputs, so this would overwrite");
+    eprintln!("        an input of this run and then gate on the wreckage. Nothing was written; give");
+    eprintln!("        the verdict its own path.");
     std::process::exit(2);
 }
 

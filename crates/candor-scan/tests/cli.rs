@@ -2127,3 +2127,77 @@ fn a_certain_baseline_regression_stays_in_the_document_when_an_unrelated_policy_
          reads as \"we looked and found none\", which is the fabrication this format refuses: {v}"
     );
 }
+// ── SPEC §3.3.1 ⟨0.28⟩ — the arming rung must never destroy an INPUT, and must never hand back what
+// the run did not re-earn. Four data-destroying defects from the adversarial review of the rung, each
+// pinned on the BYTES of the file at risk: an exit-code assertion alone cannot see these regress,
+// because every one of them already "failed" with a plausible exit 2. ──
+
+/// A helper for this section: the previous bytes of a path, asserted unchanged after a run.
+fn bytes_of(p: &std::path::Path) -> Vec<u8> {
+    std::fs::read(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+#[test]
+fn gate_json_naming_the_scan_target_is_refused_before_anything_is_written() {
+    // CRITICAL (⟨0.28⟩ (3)): the target's own source tree is an INPUT of the run, and `run_inputs` did
+    // not register it. Measured before the fix: `candor-scan src/lib.rs --gate-json src/lib.rs`
+    // replaced the operator's SOURCE FILE with the armed verdict document and exited 0 — the sink guard
+    // covered every input channel except the one every run has.
+    let d = make_crate("gatetarget", "pub fn go() {}\n");
+    let lib = d.join("src/lib.rs");
+    let before = bytes_of(&lib);
+
+    // The FILE-target spelling — the one that destroyed data (a directory target merely failed the write).
+    let out = Command::new(bin())
+        .args([lib.to_string_lossy().as_ref(), "--gate-json", lib.to_string_lossy().as_ref()])
+        .env_remove("CANDOR_BASELINE").env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(2),
+        "a gate sink naming the scan target must be refused (exit 2), not scanned: {stderr}");
+    assert!(stderr.contains("the scan target"),
+        "the refusal must name the colliding input channel: {stderr}");
+    assert_eq!(bytes_of(&lib), before,
+        "the scan target's bytes must be untouched — before the fix this file held the verdict placeholder");
+
+    // The directory-target spelling: refused for the same reason, under the same rule.
+    let out = Command::new(bin())
+        .args([d.to_string_lossy().as_ref(), "--gate-json", d.to_string_lossy().as_ref()])
+        .env_remove("CANDOR_BASELINE").env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_DEPS")
+        .output().expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(out.status.code(), Some(2), "a directory target as the sink is the same collision");
+}
+
+#[test]
+fn duplicate_gate_json_refusal_never_lands_on_a_chained_dep_report() {
+    // CRITICAL: `gate_json_input_collision` (the DUPLICATE-sink route) re-derived the input set by hand
+    // and its copy omitted CANDOR_DEPS/CANDOR_BASELINE/the config's keys — so the repeated-`--gate-json`
+    // refusal, which is deliberately written to EVERY named sink, destroyed the operator's dep report.
+    // Measured: `CANDOR_DEPS=R --gate-json R` refused with R intact (the single-sink route reads
+    // `run_inputs`), while `--gate-json R --gate-json V` wrote the refusal document OVER R. The two
+    // routes now ask one spelling of one question.
+    let d = make_crate("dupdep", "pub fn go() {}\n");
+    let dep = d.join("dep");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", dep.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "recording the dep report is a plain scan");
+    let dep_report = d.join("dep.dupdep.scan.json");
+    let before = bytes_of(&dep_report);
+    let other = d.join("other-verdict.json");
+
+    let out = Command::new(bin())
+        .args([d.to_string_lossy().as_ref(),
+               "--gate-json", dep_report.to_string_lossy().as_ref(),
+               "--gate-json", other.to_string_lossy().as_ref()])
+        .env_remove("CANDOR_BASELINE").env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG")
+        .env("CANDOR_DEPS", dep_report.to_string_lossy().as_ref())
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2), "a repeated --gate-json is refused");
+    assert_eq!(bytes_of(&dep_report), before,
+        "the dep report is an INPUT of this run — the duplicate refusal must not be written over it");
+    // …while the innocent sink still gets its refusal: its reader must be able to learn it lost.
+    let v: serde_json::Value = serde_json::from_slice(&bytes_of(&other)).expect("other sink holds JSON");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(v["refused"], serde_json::json!(true), "the non-input sink carries the refusal: {v}");
+}
+
