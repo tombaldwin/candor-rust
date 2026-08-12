@@ -908,6 +908,76 @@ fn fix_gate_strict_exits_1_on_a_crossing_advisory_otherwise() {
 }
 
 #[test]
+fn unverified_and_fix_gate_answer_a_judged_nothing_report_at_exit_0_with_the_caveat() {
+    // ⟨0.28⟩ THE TWO CAUSES `entries.is_empty()` CONFLATED, ruled in OPPOSITE directions. A report that
+    // JUDGED NOTHING (`functions: []`, `analyzed.count: 0` — the ⟨0.21⟩ Row-1 shape, the standard
+    // post-failure artifact) must be ANSWERED at exit 0 with the pinned travelling caveat
+    // (`incomplete: true` + `judgedNothing` as an ARRAY OF REPORT PATHS — SPEC §2 ⟨0.24⟩: "A DISCLOSURE,
+    // NOT AN EXIT CODE"; `gate --report` exits 0 over these bytes, so a verb exiting 2 would claim it
+    // got LESS far than the gate on identical input). A locator naming NO report at all stays a loud
+    // exit-2 refusal (§3.2). Before this fix both verbs exited 2 on BOTH causes — the outlier posture
+    // on the rung this engine's own commit `e1a341f` defined, and java/ts/swift all answer at exit 0.
+    let f = Fixture::new("judgednothing");
+    let judged_nothing = r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.28"},"package":"lib","functions":[],"analyzed":{"count":0,"digest":"0"}}"#;
+    let report_file = format!("{}.lib.scan.json", f.prefix);
+    std::fs::write(&report_file, judged_nothing).unwrap();
+    let pol = write_policy(&f, "p.policy", "deny Net app\n");
+
+    for verb in ["unverified", "fix-gate"] {
+        // JSON channel, --strict (the CI form): exit 0 and the caveat rides the document.
+        let out = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &pol, "--json", "--strict"])
+            .output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(0),
+            "{verb} --strict must ANSWER a judged-nothing report at exit 0, not refuse at 2 — \
+             count-0 is a disclosure, not an exit code (⟨0.24⟩)");
+        let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap())
+            .unwrap_or_else(|_| panic!("{verb} must emit a JSON document over a judged-nothing report"));
+        assert_eq!(v["incomplete"], serde_json::json!(true), "{verb}: the caveat flag");
+        assert_eq!(v["judgedNothing"], serde_json::json!([report_file]),
+            "{verb}: `judgedNothing` is an ARRAY OF REPORT PATHS (SPEC §2 ⟨0.28⟩), never a boolean");
+        assert!(v.get("ok").is_none(),
+            "{verb}: `ok` is withheld — a judged-nothing report licenses it no more than an unanalyzed one");
+
+        // Prose channel, --strict: the SAME exit as JSON (a literal `true` in unverified's prose branch
+        // made the two channels disagree — prose exited 2 where --json exited 0, measured), and the note
+        // must not claim the gate exits 2 over bytes the gate answers at 0.
+        let prose = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &pol, "--strict"])
+            .output().expect("run candor-query");
+        assert_eq!(prose.status.code(), Some(0),
+            "{verb} prose --strict must exit 0 like its own --json channel over identical bytes");
+        let text = String::from_utf8_lossy(&prose.stdout).into_owned();
+        assert!(text.contains("JUDGED NOTHING"), "{verb}: the prose caveat must name the cause");
+        assert!(!text.contains("`gate --report` exits 2 over these bytes"),
+            "{verb}: the note claims the gate refuses, but `gate --report` exits 0 over a \
+             judged-nothing report — the disclosure discrediting itself");
+
+        // The OTHER cause: no report at all stays a LOUD exit-2 refusal (§3.2), never an answer.
+        let none = Command::new(bin())
+            .args([verb, "--report", &format!("{}-nowhere", f.prefix), "--policy", &pol, "--json"])
+            .output().expect("run candor-query");
+        assert_eq!(none.status.code(), Some(2),
+            "{verb}: a locator naming NO report is a loud failure, not a judged-nothing answer");
+
+        // INTACT-INPUT CONTROL: a healthy report keeps `ok` and gains no caveat key — the fix must not
+        // spend the thing it protects. (Byte-level identity vs the pre-fix binary was verified out of
+        // band; this pins the key set.)
+        let healthy = Fixture::new(&format!("judgednothing-ctl-{verb}"));
+        healthy.write_report();
+        let hpol = write_policy(&healthy, "p.policy", "deny Net app\n");
+        let h = Command::new(bin())
+            .args([verb, "--report", &healthy.prefix, "--policy", &hpol, "--json", "--strict"])
+            .output().expect("run candor-query");
+        assert_eq!(h.status.code(), Some(0), "{verb}: healthy control exits 0");
+        let hv: serde_json::Value = serde_json::from_str(&String::from_utf8(h.stdout).unwrap()).unwrap();
+        assert_eq!(hv["ok"], serde_json::json!(true), "{verb}: healthy control keeps ok:true");
+        assert!(hv.get("incomplete").is_none() && hv.get("judgedNothing").is_none(),
+            "{verb}: a complete report must gain NO caveat key from this fix");
+    }
+}
+
+#[test]
 fn gains_strict_exits_1_and_rejects_silently_swallowed_policy() {
     // #3: gains is a diff view (exit 0 by default). Two fixes: (a) `--strict` fails on ANY gained effect so a
     // supply-chain CI job can require a bump introduce no new capability; (b) an unknown flag (notably a
