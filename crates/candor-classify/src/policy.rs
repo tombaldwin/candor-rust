@@ -410,6 +410,13 @@ pub struct PolicyError {
     pub rule: String,
     /// The human sentence — the same text the stderr channel carries, so the two cannot disagree.
     pub message: String,
+    /// ⟨0.28⟩ The 1-based SOURCE LINE the error sits on — SPEC §6.2 pins the verdict's `ignored`
+    /// disclosure as `[{ line, text, reason }]`, and a consumer's next action is to go to that line.
+    /// Counted over the normalized text (bare `\r` line breaks count like `\n`, matching the split).
+    pub line: usize,
+    /// ⟨0.28⟩ The source line VERBATIM — before comment-stripping and trimming, unlike `rule`, because
+    /// §6.2's `text` is "the source line, verbatim" and the operator matches it against their file.
+    pub text: String,
     /// ⟨0.24⟩ Does this error make the policy UNHONOURABLE, so every gate route must refuse (exit 2)?
     ///
     /// FATAL and REPORTED are different questions and this field is the only place they are told apart.
@@ -739,6 +746,11 @@ pub fn parse_policy_quiet(text: &str) -> ParsedPolicy {
 fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMap<String, std::collections::BTreeSet<ReasonClass>>) -> ParsedPolicy {
     macro_rules! warn_ignore { ($($a:tt)*) => { if warn { eprintln!($($a)*); } } }
     let mut out = ParsedPolicy::default();
+    // ⟨0.28⟩ The source position of the line under the cursor, for `PolicyError::{line, text}` — bound
+    // BEFORE the macro below so its body (whose free identifiers resolve at definition scope) can read
+    // them; the loop updates both per iteration. §6.2's `ignored` disclosure is `[{line, text, reason}]`.
+    let mut cur_line: usize;
+    let mut cur_text: &str;
     // ⟨0.24⟩ Record a line the parser did not honour (SPEC §3.1 `195d45a`), on the ONE list `parsepolicy`
     // reports and the gate routes filter for `fatal`. The stderr sentence and `message` are the SAME
     // string by construction — a disclosure that can drift from the one beside it is how this family
@@ -752,6 +764,8 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                 accepted: ($accepted).iter().map(|s: &&str| s.to_string()).collect(),
                 rule: ($rule).to_string(),
                 message,
+                line: cur_line,
+                text: cur_text.to_string(),
                 fatal: $fatal,
             });
         }};
@@ -768,7 +782,9 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
     } else {
         text
     };
-    for raw_line in text.lines() {
+    for (line_idx, raw_line) in text.lines().enumerate() {
+        cur_line = line_idx + 1;
+        cur_text = raw_line;
         let line = raw_line.split('#').next().unwrap_or("").trim_matches(is_ascii_ws);
         if line.is_empty() {
             continue;

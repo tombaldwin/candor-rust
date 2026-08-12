@@ -178,7 +178,7 @@ fn print_help() {
         ("state    [<root>]", "a stable content hash of the .rs tree (source-freshness key)"),
         ("reports  <prefix> [--exists|--backend|--clear-other <scan|lint>]", "list/probe/clean the report artifacts for a prefix"),
         ("locate   <lib|scan> <dir>…", "print the newest matching report file under the dirs"),
-        ("gate-verdict <parts-file> <out|-> [--report <loc>]", "assemble the gate verdict from NDJSON violation records"),
+        ("gate-verdict <parts-file> <out|-> [--report <loc>] [--policy <f>]", "assemble the gate verdict from NDJSON violation records"),
         ("engine-version <lib-path>", "print the candor-build-version tag embedded in a binary"),
         ("merge-hook <settings.json> <hook-command>", "idempotently merge candor's Stop hook into a settings file"),
         ("parsepolicy <policy-file>", "dump a parsed CANDOR_POLICY as canonical JSON (conformance)"),

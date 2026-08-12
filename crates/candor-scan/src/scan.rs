@@ -2828,7 +2828,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // Unknown`, while the same line claimed the rule was being ignored. One of those is a false
         // disclosure and the other is fail-open; the fail-open one is the common case, because a typo
         // lands beside correct tokens far more often than alone.
-        let (perrs, used_aliases) = crate::gate::policy_precheck(&text, &unknown_aliases);
+        let (perrs, used_aliases, pignored) = crate::gate::policy_precheck(&text, &unknown_aliases);
+        // ⟨0.28⟩ SPEC §6.2: the dropped lines ride the VERDICT as `ignored` — recorded here, written
+        // once by `write_gate_json` beside the violations and `zeroMatch`. The per-line stderr
+        // warnings are unchanged; this is their machine half. (On the fatal/zero-rule refusal arms
+        // below the run writes a REFUSAL document instead of a verdict, and the whole-policy
+        // `unevaluated` entry is the disclosure there — a refused run has no verdict for a dropped
+        // line to have shrunk.)
+        crate::gate::record_gate_ignored(&pignored);
         // ⟨0.24⟩ …and if that config supplied vocabulary the verdict USED, the verdict must name it
         // (SPEC §3.1). Recorded here, written once by `write_gate_json` — the same shape the violations
         // and the κ ledger take, so a workspace scan discloses it once rather than per member.

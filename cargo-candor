@@ -1001,11 +1001,13 @@ case "$cmd" in
     # can race in a parallel workspace build; this one can't. Unwritable target ⇒ exit 2, never silent.
     if [ -n "$gate_target" ]; then
       if [ "$gjson" = "-" ]; then
-        query gate-verdict "$gate_target.parts" - || { echo "candor: --gate-json verdict could not be assembled — failing closed." >&2; exit 2; }
+        # ⟨0.28⟩ --policy: the assembled verdict carries SPEC §6.2's `ignored` disclosure (the
+        # policy lines the parse dropped) — the same shared parser, over the same file.
+        query gate-verdict "$gate_target.parts" - --policy "$pol" || { echo "candor: --gate-json verdict could not be assembled — failing closed." >&2; exit 2; }
       else
         # A failed assembly may leave a partial document — RE-ARM so the sink holds the fail-closed
         # refusal, not a truncated verdict a naive reader could half-parse.
-        query gate-verdict "$gate_target.parts" "$gate_target" \
+        query gate-verdict "$gate_target.parts" "$gate_target" --policy "$pol" \
           || { arm_gate_sink "$gate_target"; echo "candor: --gate-json verdict could not be written to $gate_target — failing closed (the sink holds the refusal document)." >&2; exit 2; }
         rm -f "$gate_target.parts"
       fi
