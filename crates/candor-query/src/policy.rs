@@ -434,12 +434,35 @@ pub(crate) fn dropped_edges<'a>(
 /// effect diff (a pure fn dropping a call changes no effect) but it IS in the call graph. This surfaces it:
 /// a passing gate PLUS dropped edges = verify a fix didn't gut the feature. Reads the callgraph sidecars.
 pub(crate) fn cmd_rewire(args: &[String]) -> i32 {
-    if args.len() < 2 {
-        eprintln!("usage: candor-query rewire <cur_prefix> <base_prefix> [0|1]");
+    // Recognize `--json` (the family spelling — java/ts rewire ride the shared grammar, which takes it);
+    // tolerate candor-ts's output-mode flags; REJECT any other `-`-flag loud (exit 2) — the gains/diff
+    // rule, which this bespoke parser lacked (the sibling-route habit: the P8 sink-surface matrix found
+    // it hours after the 5cd0d61 sweep). Measured on this binary 2026-08-12: `rewire A B --report --json`
+    // ran to exit 0 — BOTH tokens vanished (only a literal `1` in the third slot meant JSON, so even the
+    // operator's plain `--json` was silently prose). §3.3.1: a typo'd or not-applicable flag stays an
+    // exit-2 error, never a silent swallow. A bare `-` stays positional, matching gains.
+    let mut want_json = false;
+    let mut pos: Vec<&String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--json" => want_json = true,
+            "--text" | "--human" => {}
+            other if other.starts_with('-') && other.len() > 1 => {
+                eprintln!("candor-query rewire: unknown flag `{other}`\n  known flags: --json");
+                return 2;
+            }
+            _ => pos.push(a),
+        }
+    }
+    if pos.len() < 2 {
+        eprintln!("usage: candor-query rewire <cur_prefix> <base_prefix> [--json]");
         return 2;
     }
-    let (cur_pre, base_pre) = (&args[0], &args[1]);
-    let want_json = args.get(2).map(|s| s == "1").unwrap_or(false);
+    let (cur_pre, base_pre) = (pos[0], pos[1]);
+    // The DEPRECATED old form spelled JSON as a `1` sentinel in the third positional slot.
+    if pos.get(2).map(|s| s.as_str()) == Some("1") {
+        want_json = true;
+    }
     let cur = load_callgraph(cur_pre);
     let base = load_callgraph(base_pre);
     if base.is_empty() {

@@ -87,8 +87,35 @@ pub(crate) fn cmd_diff(args: &[String]) -> i32 {
     // `<baseline_ver> <engine_ver>` stamps trail the two locators (the version banner). The DEPRECATED old
     // form put JSON as a `<0|1>` sentinel in the THIRD positional slot: `diff <cur> <base> <0|1> <bver>
     // <ever>` — still accepted with a stderr note.
-    let mut want_json = args.iter().any(|a| a == "--json");
-    let pos: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
+    //
+    // Recognize `--json`; tolerate candor-ts's output-mode flags; REJECT any other `-`-flag loud (exit 2)
+    // — the rule gains' parser below already carries, and this one did not (the sibling-route habit: the
+    // P8 sink-surface matrix found it hours after the 5cd0d61 sweep fixed gains). Measured on this binary
+    // 2026-08-12: `diff A B --report --json` ran to a clean exit-0 answer with
+    // `baseline_version: "--report"` — the flag fell through to the VERSION-STAMP positional slot, so the
+    // operator's broken flag pair was not just swallowed, it was published as a version banner. §3.3.1:
+    // a typo'd or not-applicable flag stays an exit-2 error, never a silent swallow. A bare `-` stays
+    // positional, matching gains.
+    let mut want_json = false;
+    let mut pos: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--json" => want_json = true,
+            // candor-ts output-mode flags (#2): tolerate for cross-engine `candor diff --text` (rust
+            // prose is the default), matching gains' parser and the shared grammar.
+            "--text" | "--human" => {}
+            other if other.starts_with('-') && other.len() > 1 => {
+                let hint = if other == "--report" {
+                    " — diff takes its two reports as POSITIONAL locators: `diff <current> <baseline>`"
+                } else {
+                    ""
+                };
+                eprintln!("candor-query diff: unknown flag `{other}`{hint}\n  known flags: --json");
+                return 2;
+            }
+            _ => pos.push(a.clone()),
+        }
+    }
     if pos.len() < 2 {
         eprintln!("usage: candor-query diff <current> <baseline> [--json] [<baseline_ver> <engine_ver>]");
         return 2;
