@@ -784,11 +784,14 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
     }
 }
 
+/// What the armer saved so the disarm can hand it back: `(path, the bytes before arming)`, guarded
+/// for the lazy `OnceLock` init. Named once so the two ledgers below cannot drift in shape.
+type ArmedBytes = std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>>;
+
 /// `(path, bytes)` for every §2.2 sidecar this run DELETED while arming. Restored beside its report by
 /// [`disarm_unwritten_out_reports`] when the run turns out not to have owned that report after all —
 /// an orphan's sidecar is as much not-ours as the orphan itself.
-static OUT_ARMED_SIDECARS: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>> =
-    std::sync::OnceLock::new();
+static OUT_ARMED_SIDECARS: ArmedBytes = std::sync::OnceLock::new();
 
 /// The exact placeholder bytes, so `disarm` can tell "still armed" from "this run rewrote it".
 static OUT_ARM_DOC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -805,8 +808,7 @@ pub(crate) fn mark_out_reports_written() {
     let _ = OUT_REPORTS_WRITTEN.set(true);
 }
 /// `(path, bytes-before-arming)` for every report this run armed under an `--out` prefix.
-static OUT_ARMED: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>> =
-    std::sync::OnceLock::new();
+static OUT_ARMED: ArmedBytes = std::sync::OnceLock::new();
 
 /// SPEC §3.3.1 ⟨0.28⟩ — **HAND BACK WHAT THIS RUN TURNED OUT NOT TO OWN.**
 ///
@@ -865,7 +867,7 @@ pub(crate) fn write_json_stream_failclosed(reason_key: &str, why: &str) {
     if !matches!(WANT_JSON_STREAM.get(), Some(true)) { return; }
     if matches!(GATE_JSON_PATH.get(), Some(Some(p)) if p == "-") { return; }
     if matches!(REPORT_STREAM_WRITTEN.get(), Some(true)) { return; }
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ").replace('\r', " ");
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
     let doc = format!(
         "{{\n  \"candor\": {{ \"version\": \"scan-{ver}\", \"toolchain\": \"stable\", \"spec\": \"{spec}\" }},\n  \"functions\": [],\n  \"analyzed\": {{ \"count\": 0 }},\n  \"unanalyzed\": [ {{ \"path\": \"<run>\", \"reason\": \"{key}: {reason}\" }} ]\n}}",
         ver = env!("CARGO_PKG_VERSION"),
