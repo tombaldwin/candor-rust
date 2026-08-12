@@ -6,6 +6,25 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.28⟩ `cargo-candor`'s gate sink stops deleting what it was pointed at, and carries the
+  fail-closed document on every exit-2 cause** (SPEC §3.3.1 (3) input exemption; §3.3 ⟨0.8⟩/⟨0.24⟩ a
+  document at the sink on EVERY exit-2; §3.2 ⟨0.28⟩ sinks in a broken argv are still sinks). The
+  `policy`/`guard --gate-json` route is not one of the seven binaries conformance PART 43 drives, and
+  measured on 2026-08-12 it had the whole family of the day's defects: the up-front `rm -f` DELETED
+  whatever the sink named — `guard .candor/base --gate-json .candor/base.app.Executable.json` destroyed
+  the baseline member and then reported "no baseline found" (its own act), the `.candor-version`
+  provenance sidecar and the policy file identically; a usage error (unknown flag, valueless
+  `--gate-json`) exited 2 with a PREVIOUS run's green verdict still at the sink, in both argv orders;
+  every post-parse exit-2 cause wrote NOTHING; and the stream form put 0 bytes on stdout. Now: the
+  input exemption is asked FIRST against the baseline locator's expansion (`<prefix>.*.json` +
+  `<prefix>.candor-version`), the policy and the config — refused having written nothing; the file
+  sink is then ARMED with the `{ok:false, refused:true}` refusal document (usage errors deferred past
+  arming, so a sink named anywhere in a broken argv still ends fail-closed); every exit-2 leaves that
+  document, the stream form prints it, and a config-load refusal — which exits before the verb can arm
+  — writes it too, under the same exemption. 21 new `ci/wrapper-smoke.sh` rows assert BYTES at the
+  artifacts (10 fail at the parent commit, each naming the destruction); the existing real-verdict
+  rows pin that a completed gate still replaces the armed document.
+
 - **⟨0.28⟩ `unverified`/`fix-gate` ANSWER a judged-nothing report at exit 0 with the pinned caveat,
   instead of refusing at exit 2** (SPEC §2 ⟨0.24⟩, *"A DISCLOSURE, NOT AN EXIT CODE"*). Both verbs
   guarded on `entries.is_empty()`, which conflated two causes SPEC rules in opposite directions: over

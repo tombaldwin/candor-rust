@@ -149,6 +149,106 @@ is_scan_report() { [ "$(cq reports "$1" --backend 2>/dev/null)" = scan ]; }
 # keeps the lint's files (incl. its last-good report on a build failure) and drops only the scan ones.
 clear_scan_reports() { cq reports "$1" --clear-other lint >/dev/null 2>&1 || true; }
 
+# ── the §3.3 gate-sink integrity helpers (`guard` + `policy` --gate-json) ──────────────────────────
+# This wrapper used to `rm -f` the sink up front and re-`rm` it at each exit-2 site. MEASURED
+# 2026-08-12, three defects in one mechanism:
+#   · `guard .candor/base --gate-json .candor/base.app.Executable.json` DELETED the baseline member
+#     and then reported "no baseline found" — exit 2 diagnosing its own act; the `.candor-version`
+#     provenance sidecar was destroyed identically (SPEC §3.3.1 (3): a sink naming an INPUT is refused
+#     having written NOTHING — and the baseline is a LOCATOR naming a SET, so the comparison is against
+#     the EXPANSION the loader reads, never the token; candor-scan fixed this class as
+#     `baseline_artifact_files`).
+#   · a usage error (unknown flag, valueless --gate-json) exited 2 with a PREVIOUS run's green verdict
+#     still at the sink — the stale green ⟨0.27⟩ arming exists to destroy (SPEC §3.2 ⟨0.28⟩: the sinks
+#     named elsewhere in a broken argv are still sinks).
+#   · every post-parse exit-2 cause (no baseline, no provenance, engine/baseline version skew, a build
+#     failure, GUARD-UNAVAILABLE, a missing policy) deleted the sink and wrote NOTHING, and the stream
+#     form `--gate-json -` put 0 bytes on stdout — where §3.3 ⟨0.8⟩/⟨0.24⟩ requires the fail-closed
+#     refusal document on EVERY exit-2 cause.
+
+# The fail-closed refusal document: ok:false + refused:true and NO `violations` key (§3.1 ⟨0.27⟩ — an
+# empty array there is precisely the claim a refused run cannot make). $1 = reason (keep it free of
+# JSON metacharacters; every caller passes a fixed literal).
+refusal_doc() { printf '{ "spec": "0.27", "ok": false, "refused": true, "reason": "%s" }\n' "$1"; }
+
+# Exact-artifact sameness (§3.3.1 (3)): device+inode (`-ef`) when both exist — never a comparison of
+# the tokens the operator typed — falling back to normalized-path equality for a not-yet-existing sink.
+abs_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac; }
+same_artifact() {
+  { [ -e "$1" ] && [ -e "$2" ] && [ "$1" -ef "$2" ]; } && return 0
+  [ "$(abs_path "$1")" = "$(abs_path "$2")" ]
+}
+
+# THE INPUT EXEMPTION, ASKED FIRST (before arming, before any write): a sink naming an input of this
+# run is refused with exit 2 having written NOTHING to that path. $1=sink $2=input $3=label.
+refuse_sink_over_input() {
+  [ -n "$1" ] && [ "$1" != "-" ] || return 0
+  [ -n "$2" ] || return 0
+  if same_artifact "$1" "$2"; then
+    echo "candor: --gate-json $1 names the same file as $3 $2 — writing the verdict there would" >&2
+    echo "candor: destroy the input this run reads. Nothing was written; give --gate-json a different path." >&2
+    exit 2
+  fi
+}
+
+# ⟨0.27⟩ ARM the file sink as soon as it is parsed, accepted and exemption-checked: every later exit
+# then leaves the fail-closed refusal document in place — never silence, never a previous run's green.
+# A sink that cannot be armed cannot be honoured: fail closed rather than run with a dead sink.
+arm_gate_sink() {
+  refusal_doc "the gate did not complete — this document was written when the run STARTED and was never replaced by a verdict" > "$1" \
+    || { echo "candor: cannot write --gate-json $1 — failing closed (exit 2)." >&2; exit 2; }
+  rm -f "$1.parts"
+}
+
+# Every exit-2 after the sink block: the FILE sink already holds the armed refusal document; the STREAM
+# form cannot be armed, so the document is printed here as stdout's only content. $1 = reason.
+gate_exit2() {
+  [ "${gjson:-}" = "-" ] && refusal_doc "$1"
+  [ -n "${gate_target:-}" ] && rm -f "$gate_target.parts" 2>/dev/null
+  exit 2
+}
+
+# A CONFIG-LOAD refusal happens BEFORE the verb can arm its sink — the ⟨0.27⟩ "armed after config load"
+# window, measured here 2026-08-12: `CANDOR_CONFIG=/no/such cargo candor policy p --gate-json g.json`
+# exited 2 with a PREVIOUS run's green verdict still at g.json. Called from load_config's exit-2 paths
+# with the verb's argv: if a gate verb named a --gate-json sink, leave the refusal document there
+# instead. The input exemption still comes FIRST, over what is knowable WITHOUT the config — the config
+# path, the positional tokens (a policy file, a baseline prefix and its expansion) and the CANDOR_*
+# env inputs; a sink naming any of those is left alone (the refusal on stderr is already loud, and NOT
+# writing is the fail-safe direction for a file this run cannot fully identify).
+config_refusal_document() {
+  case "${cmd:-}" in guard|policy) ;; *) return 0 ;; esac
+  local args=("$@") sink="" i v a f
+  for ((i=0; i<${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "--gate-json" ] && [ $((i+1)) -lt ${#args[@]} ]; then
+      v="${args[$((i+1))]}"
+      { [ "$v" = "-" ] || [ "${v#-}" = "$v" ]; } && sink="$v"
+    fi
+  done
+  [ -n "$sink" ] || return 0
+  if [ "$sink" = "-" ]; then refusal_doc "the configuration could not be read — the gate could not be evaluated"; return 0; fi
+  case "$sink" in /*) ;; *) sink="$PWD/$sink" ;; esac
+  # positional tokens = argv minus flags minus each accepted --gate-json value
+  local positionals=()
+  for ((i=0; i<${#args[@]}; i++)); do
+    a="${args[$i]}"
+    if [ "$a" = "--gate-json" ]; then
+      v="${args[$((i+1))]:-}"
+      if [ -n "$v" ] && { [ "$v" = "-" ] || [ "${v#-}" = "$v" ]; }; then i=$((i+1)); fi
+      continue
+    fi
+    case "$a" in -*|"") ;; *) positionals+=("$a") ;; esac
+  done
+  for a in ${positionals[@]+"${positionals[@]}"} "${CANDOR_POLICY:-}" "${CANDOR_BASELINE:-}" "${CANDOR_CONFIG:-}"; do
+    [ -n "$a" ] || continue
+    for f in "$a" "$a".*.json "$a.candor-version"; do
+      [ -e "$f" ] || continue
+      same_artifact "$sink" "$f" && return 0
+    done
+  done
+  refusal_doc "the configuration could not be read — the gate could not be evaluated" > "$sink" 2>/dev/null || true
+}
+
 # ── .candor/config (candor-spec §3.4): the checked-in floor under the CANDOR_* env wiring ──────────
 # Discovery is anchored to the project being analyzed: walk UP from $PWD to the nearest
 # `.candor/config`; a set $CANDOR_CONFIG overrides discovery entirely. Grammar matches candor-scan's
@@ -162,13 +262,14 @@ clear_scan_reports() { cq reports "$1" --clear-other lint >/dev/null 2>&1 || tru
 # it is silently dropping a gate); unknown keys warn. A RELATIVE path value resolves against the
 # config's HOME directory — the directory CONTAINING `.candor/`, i.e. the repo root the config travels
 # with (SPEC §3.4) — never the process CWD.
-CFG_POLICY=""; CFG_BASELINE=""
+CFG_POLICY=""; CFG_BASELINE=""; CFG_FILE=""
 load_config() {
   local f="" d text line key val cfgdir
   if [ -n "${CANDOR_CONFIG:-}" ]; then
     f="$CANDOR_CONFIG"
     if [ ! -f "$f" ] || [ ! -r "$f" ]; then
       echo "candor: CANDOR_CONFIG=$f is not a readable file — failing closed (exit 2)." >&2
+      config_refusal_document "$@"
       exit 2
     fi
   else
@@ -180,8 +281,10 @@ load_config() {
     done
   fi
   [ -n "$f" ] || return 0
+  CFG_FILE="$f"   # remembered for the gate-sink input exemption — the config is an input of this run
   if ! text="$(cat "$f" 2>/dev/null)"; then
     echo "candor: config $f exists but could not be read — failing closed (exit 2)." >&2
+    config_refusal_document "$@"
     exit 2
   fi
   # The anchor for RELATIVE path values (SPEC §3.4): the config's HOME directory — the directory
@@ -205,6 +308,7 @@ load_config() {
         # falsy (candor-scan and the family fail the same way).
         if [ -z "$val" ]; then
           echo "candor: $f names 'policy' with an EMPTY value — the gate cannot be evaluated; failing closed (exit 2)." >&2
+          config_refusal_document "$@"
           exit 2
         fi
         CFG_POLICY="$(rel "$val")" ;;
@@ -239,7 +343,7 @@ cmd="${1:-audit}"; shift || true
 # must never fail on a broken config before they can help fix it.
 case "$cmd" in
   setup|install|-h|--help|help|scan) : ;;
-  *) load_config ;;
+  *) load_config "$@" ;;
 esac
 
 # Resolve (building on first use) the lint dylib — UNLESS the command doesn't need it. `setup` is the
@@ -410,15 +514,21 @@ case "$cmd" in
     # refresh). The aligned family posture (candor-java matches): do NOT evaluate, say it once, exit 2.
     # Args: an optional baseline prefix + `--gate-json <path|->` (the §3.3 structured verdict, spec
     # ⟨0.8⟩ — same shape as candor-scan's flag; `-` streams it to stdout).
-    pre=""; gjson=""
+    pre=""; gjson=""; usage_err=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --gate-json)
-          shift
-          { [ "$#" -gt 0 ] && { [ "$1" = "-" ] || [ "${1#-}" = "$1" ]; }; } \
-            || { echo "candor: --gate-json requires a path argument" >&2; exit 2; }
-          gjson="$1" ;;
-        -*) echo "candor: unknown flag '$1' for guard" >&2; exit 2 ;;
+          # SPEC §3.2 ⟨0.28⟩: a value-taking flag whose next token is flag-shaped was GIVEN NO VALUE —
+          # a usage error, and the token stays LIVE (it may itself name a sink; the sinks named in a
+          # broken argv are still sinks). The error is DEFERRED past the sink block below so the sink
+          # is armed before this run exits — a refusal that writes nothing leaves a previous run's
+          # green verdict on disk (measured here: unknown-flag exit 2 kept `ok: true` at the sink).
+          if [ "$#" -ge 2 ] && { [ "$2" = "-" ] || [ "${2#-}" = "$2" ]; }; then
+            gjson="$2"; shift
+          else
+            [ -n "$usage_err" ] || usage_err="--gate-json requires a path argument"
+          fi ;;
+        -*) [ -n "$usage_err" ] || usage_err="unknown flag '$1' for guard" ;;
         *)  pre="$1" ;;
       esac
       shift
@@ -426,14 +536,27 @@ case "$cmd" in
     [ -n "$pre" ] || pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
     # The verdict target the ENGINE writes to (CANDOR_GATE_JSON; empty = not requested — the engine
     # ignores an empty var). `-` streams: the engine writes a temp file, the final assembly prints it.
-    # Cleared UP FRONT so any exit-2 path below can never leave a STALE verdict from a previous run
-    # lying around looking current (the §3.3 verdict/exit-code agreement).
+    # File form: the INPUT EXEMPTION is asked first (§3.3.1 (3) — the baseline locator names a SET, so
+    # the sink is compared against the loader's expansion, `$pre.*.json` + `$pre.candor-version`, never
+    # the token), then the sink is ARMED with the fail-closed refusal document so every exit-2 below
+    # leaves that document — never silence, never a previous run's verdict.
     gate_target=""; gtmp=""
     if [ -n "$gjson" ]; then
       case "$gjson" in -|/*) ;; *) gjson="$PWD/$gjson" ;; esac
+      if [ "$gjson" != "-" ]; then
+        for _in in "$pre" "$pre".*.json "$pre.candor-version"; do
+          [ -e "$_in" ] || continue    # non-matching globs stay literal under bash; -e skips them
+          refuse_sink_over_input "$gjson" "$_in" "the baseline (the '$pre' locator expands to it)"
+        done
+        [ -n "$CFG_FILE" ] && refuse_sink_over_input "$gjson" "$CFG_FILE" "the .candor/config"
+      fi
       gtmp="$(mktemp -d)"
-      if [ "$gjson" = "-" ]; then gate_target="$gtmp/gate.json"; else gate_target="$gjson"; fi
-      rm -f "$gate_target" "$gate_target.parts"
+      if [ "$gjson" = "-" ]; then gate_target="$gtmp/gate.json"; rm -f "$gate_target.parts"
+      else gate_target="$gjson"; arm_gate_sink "$gate_target"; fi
+    fi
+    if [ -n "$usage_err" ]; then
+      echo "candor: $usage_err" >&2
+      gate_exit2 "$usage_err"
     fi
     # No baseline AT ALL (never snapshotted, a typo'd prefix) is the same invalid-gate-input class as a
     # stale one: the engine would warn "guard NOT active" and exit 0 — an unbounded fail-open window.
@@ -441,7 +564,7 @@ case "$cmd" in
     if ! report_exists "$pre"; then
       echo "candor: no baseline found at '$pre.*' — the guard cannot evaluate (never a silent pass)." >&2
       echo "candor: create one with 'cargo candor snapshot $pre', commit the baseline.* files, re-run." >&2
-      exit 2
+      gate_exit2 "no baseline found — the guard could not evaluate"
     fi
     ev="$(engine_ver)"; bv=""
     [ -f "$pre.candor-version" ] && bv="$(cat "$pre.candor-version" 2>/dev/null)"
@@ -451,14 +574,14 @@ case "$cmd" in
     if [ -z "$bv" ] && ls "$pre".*.json >/dev/null 2>&1; then
       echo "candor: the baseline $pre has no .candor-version provenance sidecar — unverifiable (§2.1)." >&2
       echo "candor: Refresh with 'cargo candor snapshot $pre' (writes the sidecar), then commit both." >&2
-      exit 2
+      gate_exit2 "the baseline has no provenance sidecar — unverifiable"
     fi
     if [ -n "$bv" ] && [ "$bv" != "$ev" ]; then
       echo "candor: the baseline is @$bv but the engine is @$ev — an engine swap is" >&2
       echo "candor: baseline-invalidating, so the gate cannot evaluate (exit 2; never a silent skip," >&2
       echo "candor: never a bogus AS-EFF-005 wave). Refresh deliberately with 'cargo candor update'" >&2
       echo "candor: (or 'cargo candor snapshot $pre'), review the effect delta, then commit both." >&2
-      exit 2
+      gate_exit2 "the baseline was made by another engine build — the gate could not evaluate"
     fi
     # dylint emits AS-EFF-005 only when the crate recompiles, so a warm `target/dylint` (a prior
     # audit/diff in the same job) would emit NOTHING and the guard would FAIL OPEN — passing a real
@@ -473,20 +596,22 @@ case "$cmd" in
     else
       # dylint itself failed (the crate didn't build) — the guard could NOT run, so do not pass silently.
       printf '%s\n' "$out" >&2
-      [ -n "$gate_target" ] && { rm -f "$gate_target" "$gate_target.parts"; echo "candor: --gate-json not written — the gate did not complete (exit 2)." >&2; }
+      [ -n "$gate_target" ] && [ "$gjson" != "-" ] \
+        && echo "candor: --gate-json $gate_target holds the fail-closed refusal document — the gate did not complete (exit 2)." >&2
       echo "candor: guard could NOT run (the crate failed to build under dylint) — failing closed, not a pass." >&2
-      exit 2
+      gate_exit2 "the crate failed to build under dylint — the guard could not run"
     fi
     # A per-crate baseline gap (a NEW workspace member, a renamed crate — the prefix has files, but not
     # for this crate) is disclosed by the engine as a GUARD-UNAVAILABLE sentinel line: the guard could
     # not evaluate that crate, so it must NOT pass silently — exit 2 (not-evaluated), not 0 and not a
     # bogus AS-EFF-005.
     if grep -q '^GUARD-UNAVAILABLE ' "$vio" 2>/dev/null; then
-      [ -n "$gate_target" ] && { rm -f "$gate_target" "$gate_target.parts"; echo "candor: --gate-json not written — the gate did not complete (exit 2)." >&2; }
+      [ -n "$gate_target" ] && [ "$gjson" != "-" ] \
+        && echo "candor: --gate-json $gate_target holds the fail-closed refusal document — the gate did not complete (exit 2)." >&2
       echo "candor: a crate's baseline files could not be loaded (see above) — the guard could NOT" >&2
       echo "candor: evaluate that crate; failing closed. Refresh with 'cargo candor snapshot $pre'" >&2
       echo "candor: and commit the baseline.* files." >&2
-      exit 2
+      gate_exit2 "a crate's baseline files could not be loaded — the guard could not evaluate"
     fi
     # Final §3.3 verdict assembly, ONCE, over every crate's records — the engine's per-crate assembly
     # can race in a parallel workspace build; this one can't. Unwritable target ⇒ exit 2, never silent.
@@ -495,7 +620,10 @@ case "$cmd" in
         query gate-verdict "$gate_target.parts" - || { echo "candor: --gate-json verdict could not be assembled — failing closed." >&2; exit 2; }
         rm -rf "$gtmp"
       else
-        query gate-verdict "$gate_target.parts" "$gate_target" || { echo "candor: --gate-json verdict could not be written to $gate_target — failing closed." >&2; exit 2; }
+        # A failed assembly may leave a partial document — RE-ARM so the sink holds the fail-closed
+        # refusal, not a truncated verdict a naive reader could half-parse.
+        query gate-verdict "$gate_target.parts" "$gate_target" \
+          || { arm_gate_sink "$gate_target"; echo "candor: --gate-json verdict could not be written to $gate_target — failing closed (the sink holds the refusal document)." >&2; exit 2; }
         rm -f "$gate_target.parts"
       fi
     fi
@@ -782,15 +910,18 @@ case "$cmd" in
     # architectural-invariant gate an agent can't self-check.
     # Args: an optional policy file + `--gate-json <path|->` (the §3.3 structured verdict, spec ⟨0.8⟩ —
     # same shape as candor-scan's flag; `-` streams it to stdout).
-    pol=""; gjson=""
+    pol=""; gjson=""; usage_err=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --gate-json)
-          shift
-          { [ "$#" -gt 0 ] && { [ "$1" = "-" ] || [ "${1#-}" = "$1" ]; }; } \
-            || { echo "candor: --gate-json requires a path argument" >&2; exit 2; }
-          gjson="$1" ;;
-        -*) echo "candor: unknown flag '$1' for policy" >&2; exit 2 ;;
+          # SPEC §3.2 ⟨0.28⟩ — same deferred-usage-error shape as `guard` (the sibling-route habit is
+          # how this class survives: a rule applied where the author is working and not to its sibling).
+          if [ "$#" -ge 2 ] && { [ "$2" = "-" ] || [ "${2#-}" = "$2" ]; }; then
+            gjson="$2"; shift
+          else
+            [ -n "$usage_err" ] || usage_err="--gate-json requires a path argument"
+          fi ;;
+        -*) [ -n "$usage_err" ] || usage_err="unknown flag '$1' for policy" ;;
         *)  pol="$1" ;;
       esac
       shift
@@ -800,7 +931,28 @@ case "$cmd" in
     [ -n "$pol" ] || pol="${CANDOR_POLICY:-}"
     [ -n "$pol" ] || pol="${CFG_POLICY:-}"
     [ -n "$pol" ] || pol=".candor/policy"
-    [ -f "$pol" ] || { echo "candor: no policy at '$pol'. Rules: 'deny Net Db domain', 'pure parse', 'allow Net in billing api.stripe.com', 'forbid domain -> infra'." >&2; exit 2; }
+    # The §3.3 verdict sink: INPUT EXEMPTION first (§3.3.1 (3) — the policy and the config are inputs;
+    # the old up-front `rm -f` here deleted whatever the sink named, including the policy that
+    # configures the gate), then ARM the file form so every exit-2 below leaves the fail-closed
+    # refusal document — including the missing-policy exit, which used to leave a previous run's green
+    # verdict at the sink.
+    gate_target=""; gtmp=""
+    if [ -n "$gjson" ]; then
+      case "$gjson" in -|/*) ;; *) gjson="$PWD/$gjson" ;; esac
+      if [ "$gjson" != "-" ]; then
+        [ -e "$pol" ] && refuse_sink_over_input "$gjson" "$pol" "the policy"
+        [ -n "$CFG_FILE" ] && refuse_sink_over_input "$gjson" "$CFG_FILE" "the .candor/config"
+      fi
+      if [ "$gjson" != "-" ]; then gate_target="$gjson"; arm_gate_sink "$gate_target"; fi
+    fi
+    if [ -n "$usage_err" ]; then
+      echo "candor: $usage_err" >&2
+      gate_exit2 "$usage_err"
+    fi
+    if [ ! -f "$pol" ]; then
+      echo "candor: no policy at '$pol'. Rules: 'deny Net Db domain', 'pure parse', 'allow Net in billing api.stripe.com', 'forbid domain -> infra'." >&2
+      gate_exit2 "no policy file — the gate could not evaluate"
+    fi
     # Workspace-scale, one command. First SNAPSHOT every crate's report (dylint lints all workspace
     # members in one pass), so a boundary can see effects/hosts that physically live in a SIBLING crate.
     # Then ENFORCE with those siblings loaded read-only (CANDOR_REPORTS) — host allowlists and effect
@@ -815,7 +967,7 @@ case "$cmd" in
     if ! report_exists "$tmp/r"; then
       echo "candor: policy NOT evaluated — the report snapshot produced no reports (did the crate" >&2
       echo "candor: build?). Failing closed (exit 2); run 'cargo candor audit --all' to see errors." >&2
-      exit 2
+      gate_exit2 "the report snapshot produced no reports — the policy could not be evaluated"
     fi
     # The snapshot warmed cargo's check cache; the CANDOR_* env vars aren't part of cargo's build
     # fingerprint, so a plain re-run would be a cache hit that never re-emits diagnostics. Clear
@@ -826,14 +978,9 @@ case "$cmd" in
     # a dylint output-stream change can't silently turn the gate green. We still print the human text.
     # Fresh file per run (engine appends; a stale one would false-fail). `: >` truncates/creates.
     vio="$tmp/violations"; : > "$vio"
-    # The §3.3 verdict target (empty = not requested; the engine ignores an empty CANDOR_GATE_JSON).
-    # Cleared up front so an exit-2 path can never leave a STALE verdict from a previous run.
-    gate_target=""
-    if [ -n "$gjson" ]; then
-      case "$gjson" in -|/*) ;; *) gjson="$PWD/$gjson" ;; esac
-      if [ "$gjson" = "-" ]; then gate_target="$tmp/gate.json"; else gate_target="$gjson"; fi
-      rm -f "$gate_target" "$gate_target.parts"
-    fi
+    # The FILE sink was exemption-checked and ARMED right after the parse (top of this verb); only the
+    # stream form's engine-side temp target is assigned here, once $tmp exists.
+    if [ "$gjson" = "-" ]; then gate_target="$tmp/gate.json"; rm -f "$gate_target.parts"; fi
     rc=0
     out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" CANDOR_GATE_JSON="$gate_target" cargo dylint --lib-path "$LIB" 2>&1)" || rc=$?
     printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]|\[AS-EFF-009\]' >&2 || true
@@ -844,10 +991,11 @@ case "$cmd" in
     # `guard`: fail closed.
     if [ "$rc" -ne 0 ]; then
       printf '%s\n' "$out" >&2
-      [ -n "$gate_target" ] && { rm -f "$gate_target" "$gate_target.parts"; echo "candor: --gate-json not written — the gate did not complete (exit 2)." >&2; }
+      [ -n "$gate_target" ] && [ "$gjson" != "-" ] \
+        && echo "candor: --gate-json $gate_target holds the fail-closed refusal document — the gate did not complete (exit 2)." >&2
       echo "candor: policy NOT evaluated (cargo dylint exited $rc — a build failure, or the engine's" >&2
       echo "candor: unreadable-policy fail-closed exit) — failing closed (exit 2), not a pass." >&2
-      exit 2
+      gate_exit2 "cargo dylint failed — the policy could not be evaluated"
     fi
     # Final §3.3 verdict assembly, ONCE, over every crate's records — the engine's per-crate assembly
     # can race in a parallel workspace build; this one can't. Unwritable target ⇒ exit 2, never silent.
@@ -855,7 +1003,10 @@ case "$cmd" in
       if [ "$gjson" = "-" ]; then
         query gate-verdict "$gate_target.parts" - || { echo "candor: --gate-json verdict could not be assembled — failing closed." >&2; exit 2; }
       else
-        query gate-verdict "$gate_target.parts" "$gate_target" || { echo "candor: --gate-json verdict could not be written to $gate_target — failing closed." >&2; exit 2; }
+        # A failed assembly may leave a partial document — RE-ARM so the sink holds the fail-closed
+        # refusal, not a truncated verdict a naive reader could half-parse.
+        query gate-verdict "$gate_target.parts" "$gate_target" \
+          || { arm_gate_sink "$gate_target"; echo "candor: --gate-json verdict could not be written to $gate_target — failing closed (the sink holds the refusal document)." >&2; exit 2; }
         rm -f "$gate_target.parts"
       fi
     fi
