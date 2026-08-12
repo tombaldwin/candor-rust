@@ -4797,3 +4797,76 @@ fn gate_json_naming_the_reports_sidecar_is_refused_and_a_gate_json_sibling_still
     assert_eq!(std::fs::read(f.report_path()).unwrap(), report_before,
         "…and the reports the gate read are byte-identical after the control run");
 }
+
+// ── ⟨0.28⟩ Phase 1, Rung A: the disclosure envelope for the two pinned shapes that cannot carry it ──
+
+/// SPEC §2 ⟨0.28⟩ (Rung A): a verb whose pinned shape cannot carry the caveat emits the CAVEAT DOCUMENT
+/// INSTEAD of its result document. `show` is pinned to a TOP-LEVEL ARRAY and `map`'s top level is a USER
+/// NAMESPACE (module names), so neither may carry a reserved key — over a hedging report each answers
+/// `{ "incomplete": true, … }` and nothing else. Measured before the fix: `show --json` answered the bare
+/// array with no caveat anywhere, and `map --json` merged the caveat keys INTO the module namespace
+/// (the collision hazard the ruling rejects). Healthy output is pinned byte-shaped by the control arm
+/// (byte-level identity vs the pre-fix binary was verified out of band).
+#[test]
+fn show_and_map_emit_the_caveat_document_instead_of_their_result_when_hedging() {
+    // Cause 1: a non-empty `unanalyzed` manifest.
+    let f = Fixture::new("runga-unanalyzed");
+    let report = r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.28"},"package":"rpt",
+        "analyzed":{"count":2,"digest":"d"},
+        "unanalyzed":[{"path":"src/gen.rs","reason":"parse error"}],
+        "functions":[
+          {"fn":"inner","loc":"s:1","inferred":["Fs"],"direct":["Fs"],"hash":"h1"},
+          {"fn":"outer","loc":"s:2","inferred":["Fs"],"hash":"h2","calls":["inner"]}]}"#;
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    // Cause 2: a report that judged nothing (`analyzed.count: 0`, the standard post-failure artifact).
+    let j = Fixture::new("runga-judged");
+    let judged = r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.28"},"package":"lib","functions":[],"analyzed":{"count":0,"digest":"0"}}"#;
+    let judged_file = format!("{}.lib.scan.json", j.prefix);
+    std::fs::write(&judged_file, judged).unwrap();
+
+    // `show` hedging: the caveat document REPLACES the array — an OBJECT, not `[]` and not the rows.
+    let out = Command::new(bin()).args(["show", "inner", "--report", &f.prefix, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0), "the hedge is a disclosure, not an exit code");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.is_object(),
+        "show hedging must emit the CAVEAT DOCUMENT instead of its array — an array here is the \
+         pre-⟨0.28⟩ silent wrong answer: {v}");
+    assert_eq!(v["incomplete"], serde_json::json!(true));
+    assert_eq!(v["unanalyzed"][0]["path"], serde_json::json!("src/gen.rs"));
+
+    // `map` hedging over the judged-nothing report: the caveat document, and NOT `{}` — the strongest
+    // determined negative there is, asserted about code nobody examined.
+    let out = Command::new(bin()).args(["map", "--report", &j.prefix, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["incomplete"], serde_json::json!(true), "map hedging emits the caveat document: {v}");
+    assert_eq!(v["judgedNothing"], serde_json::json!([judged_file]));
+
+    // …and `map` hedging must not carry a single MODULE row beside the caveat: the caveat REPLACES the
+    // result, it does not accompany one (the merged shape displaced real modules by reserved key).
+    let out = Command::new(bin()).args(["map", "--report", &f.prefix, "--json"])
+        .output().expect("run candor-query");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+    assert!(keys.iter().all(|k| ["incomplete", "unanalyzed", "judgedNothing"].contains(&k.as_str())),
+        "map hedging carries ONLY caveat keys — a module row beside the hedge is the merged shape the \
+         ruling replaced: {keys:?}");
+
+    // INTACT-INPUT CONTROL: a healthy report keeps the pinned shapes exactly — `show` a top-level ARRAY,
+    // `map` an object of module rows with no caveat key.
+    let h = Fixture::new("runga-healthy");
+    h.write_report();
+    let out = Command::new(bin()).args(["show", "inner", "--report", &h.prefix, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.is_array() && v[0]["fn"] == serde_json::json!("inner"),
+        "healthy show keeps its pinned top-level array: {v}");
+    let out = Command::new(bin()).args(["map", "--report", &h.prefix, "--json"])
+        .output().expect("run candor-query");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.get("incomplete").is_none() && v.as_object().is_some_and(|o| !o.is_empty()),
+        "healthy map keeps its module rows and gains no caveat key: {v}");
+}
