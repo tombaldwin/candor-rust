@@ -4932,3 +4932,73 @@ fn advisory_verbs_answer_a_zero_rule_policy_with_the_caveat_document_at_an_uncha
         assert!(v.get("unevaluated").is_none(), "{argv:?}: control gains no caveat: {v}");
     }
 }
+
+/// SPEC §3.1 ⟨0.28⟩ pins `crossing` on `fix`: a boolean PRESENT EXACTLY WHEN THE VERB ANSWERED —
+/// `true` beside a plan, `false` with a `reason` on the determined-negative arms, ABSENT when the verb
+/// refused. Measured before the fix: this engine emitted no such key, and answered the no-crossing arm
+/// as PROSE ON STDOUT under `--json` ("…the boundary isn't crossed, nothing to fix.") — the §3.3.1
+/// purity violation the ruling exists to close ("stdout MUST then be pure JSON").
+#[test]
+fn fix_json_pins_crossing_present_iff_answered_and_stdout_stays_pure_json() {
+    let f = Fixture::new("crossing");
+    f.write_report();
+    let deny = write_policy(&f, "deny.policy", "deny Fs\n");
+    let other = write_policy(&f, "other.policy", "deny Net elsewhere\n");
+
+    // (1) ANSWERED, crossing found: `crossing: true` beside the plan.
+    let out = Command::new(bin())
+        .args(["fix", "outer", "Fs", "--report", &f.prefix, "--policy", &deny, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["crossing"], serde_json::json!(true), "a plan carries crossing: true: {v}");
+    assert!(v.get("deniedSpan").is_some(), "…beside the plan, not instead of it: {v}");
+
+    // (2) ANSWERED, no crossing: a DOCUMENT (not prose) with crossing:false + the pinned reason.
+    let out = Command::new(bin())
+        .args(["fix", "inner", "Fs", "--report", &f.prefix, "--policy", &other, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0), "the no-crossing arm's exit is unchanged (0)");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|_| panic!(
+        "the no-crossing arm printed PROSE on a --json stdout (the §3.3.1 purity violation this \
+         ruling closes): {stdout}"));
+    assert_eq!(v["crossing"], serde_json::json!(false));
+    assert_eq!(v["reason"], serde_json::json!("not-forbidden"),
+        "the ts/swift reason token on the false arm: {v}");
+
+    // (3) ANSWERED, target does not perform the effect: the other false arm and its reason token.
+    let out = Command::new(bin())
+        .args(["fix", "inner", "Net", "--report", &f.prefix, "--policy", &deny, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["crossing"], serde_json::json!(false));
+    assert_eq!(v["reason"], serde_json::json!("does-not-perform"), "{v}");
+
+    // (4) REFUSED (an unanswerable narrowed rule): `crossing` is ABSENT — the MCP contract's
+    // check-`refused`-first ordering depends on the key not existing here.
+    let g = Fixture::new("crossing-refused");
+    std::fs::write(format!("{}.app.scan.json", g.prefix),
+        r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.28"},"package":"app",
+            "analyzed":{"count":1,"digest":"x"},
+            "functions":[{"fn":"app::noClass","loc":"s:1","inferred":["Net"],"direct":["Net"],"hosts":["h.example"],"hash":"a#n"}]}"#).unwrap();
+    let narrow = write_policy(&g, "narrow.policy", "deny Net[unknown-host] app\n");
+    let out = Command::new(bin())
+        .args(["fix", "app::noClass", "Net", "--report", &g.prefix, "--policy", &narrow, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.get("crossing").is_none(),
+        "a refused fix must carry NO crossing key — neither boolean is a statement there: {v}");
+    assert!(v.get("unevaluated").is_some(), "…and says which rule stopped it: {v}");
+
+    // (5) fix-gate's remedies do NOT gain the key: §3.1 pins their shape separately without it.
+    let out = Command::new(bin())
+        .args(["fix-gate", "--report", &f.prefix, "--policy", &deny, "--json"])
+        .output().expect("run candor-query");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let remedies = v["remedies"].as_array().expect("deny Fs over the Fs fixture yields a remedy");
+    assert!(!remedies.is_empty() && remedies.iter().all(|r| r.get("crossing").is_none()),
+        "`crossing` is `fix`'s key — a remedies entry must not gain it: {v}");
+}
