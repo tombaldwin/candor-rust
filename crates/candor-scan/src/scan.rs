@@ -17,31 +17,77 @@ use crate::*;
 /// ADVISORY ONLY: one stderr line. It never touches the report, the gate verdict, or the exit code.
 const UNCOVERED_CALLS_NUDGE_MIN: usize = 50;
 
-/// Learn `--gate-json` and `--policy` from argv with NO side effects (SPEC §3.3.1 ⟨0.27⟩).
-///
-/// Deliberately permissive: it is not the validator, it only needs the paths early enough that the
-/// collision check and the arming can both precede the first write. The real parse below still owns
-/// every diagnostic.
-/// SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names, in order and with duplicates kept.
-///
-/// `prescan_sink_and_inputs` keeps only the last, which is what the parse loop honours. That is exactly
-/// the behaviour the rung refuses: measured, three engines wrote the verdict to the LAST path and left
-/// the first holding a previous run's `{"ok": true}` while the gate fired. The stale green of the ⟨0.27⟩
-/// arming rule, reached by a spelling nobody had considered.
-fn prescan_all_gate_sinks(args: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut it = args.iter().peekable();
+/// SPEC §3.3.1 ⟨0.27⟩/⟨0.28⟩ — everything the arming and the collision guards need from argv, learned
+/// in ONE side-effect-free walk (`prescan_argv`) early enough to precede the first write. It is not the
+/// validator — the parse loop below still owns every diagnostic.
+struct PreScan {
+    /// Every `--gate-json` this argv names, in order and with duplicates kept ⟨0.28⟩.
+    /// `distinct_gate_sinks` reduces them; the parse loop honours the LAST. Keeping only the last here
+    /// is exactly the behaviour the rung refuses: measured, three engines wrote the verdict to the last
+    /// path and left the first holding a previous run's `{"ok": true}` while the gate fired — the stale
+    /// green of the ⟨0.27⟩ arming rule, reached by a spelling nobody had considered.
+    gate_sinks: Vec<String>,
+    /// The `--policy` path the loop will accept — the NEXT token whatever its shape (see the walk).
+    policy: Option<String>,
+    /// The `--out` prefix the loop will accept — **the LAST one, because that is what the loop
+    /// honours.** The first version of the out pre-pass kept the FIRST occurrence, and candor-swift's
+    /// arm caught it by checking its own loop instead of copying: measured on `--out p1 --out p2
+    /// --zzz-not-a-flag`, `p1` was armed and `p2` — the prefix the run would actually have written —
+    /// stayed STALE. A pre-pass that disagrees with the loop it runs ahead of arms the wrong thing.
+    /// (Whether a REPEATED `--out` should be refused outright, the way ⟨0.28⟩ refuses a repeated
+    /// `--gate-json`, is a separate spec question and is filed, not decided here.)
+    out: Option<String>,
+    /// The scan TARGET. The last positional is kept, which USED to be what the parse loop did on every
+    /// bare token; a second positional is now a usage error that exits 2 there. This pass still runs
+    /// first, so it keeps the last — with one positional the two agree, and with two the run refuses a
+    /// moment later. Taking the FIRST here would make the guard discover a different tree's config than
+    /// the run reads, which is how it once checked the wrong pair and destroyed the policy at exit 0.
+    target: Option<String>,
+}
+
+/// **THE PRE-PASS CONSUMES A VALUE EXACTLY WHERE THE PARSE LOOP DOES — that agreement is the entire
+/// contract, and each divergence from it has been a measured defect.** The loop takes the token after
+/// `--out`, `--policy` and `--gate-json` as that flag's VALUE unconditionally: `--policy` accepts even
+/// a flag-shaped one, the other two consume it and then refuse the run. The previous pre-passes (three
+/// separate walks) instead SKIPPED a flag-shaped value, leaving it live as a flag — so `--policy --out
+/// X` armed `X.*.json` while the loop consumed `--out` as the policy path and refused `X` as a second
+/// positional: X's previous reports became permanent placeholders under an `--out` the parse never
+/// accepted, with SPEC (1)'s *"`--out` has been parsed and accepted"* precondition false for that
+/// argv. The same skew ran through the gate-sink walk (`--out --gate-json V` registered V as a sink
+/// the loop never accepts). Three copies of the grammar had drifted from the loop the same way, which
+/// is why there is now ONE walk feeding every pre-pass consumer.
+fn prescan_argv(args: &[String]) -> PreScan {
+    let mut ps = PreScan { gate_sinks: Vec::new(), policy: None, out: None, target: None };
+    let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--gate-json" {
-            if let Some(v) = it.peek() {
-                if v.as_str() == "-" || !v.starts_with('-') {
-                    out.push((*v).clone());
-                    it.next();
+        match a.as_str() {
+            // Consumed either way; RECORDED only when the loop would accept it (`-` or non-flag —
+            // a flag-shaped value takes the run down in the loop, accepting nothing).
+            "--gate-json" => {
+                if let Some(v) = it.next() {
+                    if v == "-" || !v.starts_with('-') {
+                        ps.gate_sinks.push(v.clone());
+                    }
+                }
+            }
+            // The loop takes the next token as the path WHATEVER its shape.
+            "--policy" => ps.policy = it.next().cloned(),
+            // Consumed either way; recorded only when non-flag (the loop refuses the rest).
+            "--out" => {
+                if let Some(v) = it.next() {
+                    if !v.starts_with('-') {
+                        ps.out = Some(v.clone());
+                    }
+                }
+            }
+            _ => {
+                if !a.starts_with('-') {
+                    ps.target = Some(a.clone());
                 }
             }
         }
     }
-    out
+    ps
 }
 
 /// Two spellings of ONE path are one sink (the §3.3.1 artifact rule); two different artifacts are the
@@ -83,63 +129,6 @@ fn refuse_repeated_gate_json(sinks: &[String]) -> ! {
 /// `same_artifact` for the ⟨0.28⟩ `--out` armer in `gate.rs` — one resolver, not a second copy.
 pub(crate) fn same_artifact_pub(a: &str, b: &str) -> bool {
     same_artifact(a, b)
-}
-
-/// SPEC §3.3.1 ⟨0.28⟩ — the `--out <prefix>` this argv names, side-effect free, learned early enough
-/// that the armer can run before the arg loop's own `unknown flag` exit. Mirrors the `--gate-json`
-/// pre-pass and exists for the identical reason: arming after the loop leaves the exit the rung is
-/// most often reached through — a typo'd flag — writing nothing.
-///
-/// **THE LAST `--out` WINS, BECAUSE THAT IS WHAT THE PARSE LOOP HONOURS.** The first version of this
-/// returned the FIRST occurrence, and candor-swift's arm caught it by checking its own loop instead of
-/// copying mine. Measured on `--out p1 --out p2 --zzz-not-a-flag`: `p1` was armed and **`p2` — the
-/// prefix the run would actually have written — stayed STALE**, so the rung did nothing for that argv
-/// while neutralising a set nobody was going to replace. A pre-pass that disagrees with the loop it
-/// exists to run ahead of arms the wrong thing, which is the ⟨0.27⟩ argv-order defect wearing a
-/// different flag. (Whether a REPEATED `--out` should be refused outright, the way ⟨0.28⟩ refuses a
-/// repeated `--gate-json`, is a separate spec question and is filed, not decided here.)
-fn prescan_out_prefix(args: &[String]) -> Option<String> {
-    let mut last = None;
-    let mut it = args.iter().peekable();
-    while let Some(a) = it.next() {
-        if a == "--out" {
-            if let Some(v) = it.peek() {
-                if !v.starts_with('-') {
-                    last = Some((*v).clone());
-                    it.next();
-                }
-            }
-        }
-    }
-    last
-}
-
-fn prescan_sink_and_inputs(args: &[String]) -> (Option<String>, Option<String>, Option<String>) {
-    let (mut gate, mut policy, mut target) = (None, None, None);
-    let mut it = args.iter().peekable();
-    while let Some(a) = it.next() {
-        if matches!(a.as_str(), "--gate-json" | "--policy" | "--out") {
-            let v = match it.peek() {
-                Some(v) if v.as_str() == "-" || !v.starts_with('-') => (*v).clone(),
-                _ => continue,
-            };
-            it.next();
-            match a.as_str() {
-                "--gate-json" => gate = Some(v),
-                "--policy" => policy = Some(v),
-                _ => {}
-            }
-        } else if !a.starts_with('-') {
-            // The scan TARGET. The last positional is kept, which USED to be what the parse loop did on
-            // every bare token; a second positional is now a usage error that exits 2 there. This pass
-            // still runs first, so it keeps the last — with one positional the two agree, and with two
-            // the run refuses a moment later. Taking the FIRST here would make the guard discover a
-            // different tree's config than the run reads, which is how it once checked the wrong pair
-            // and destroyed the policy at exit 0.
-            target = Some(a.clone());
-        }
-    }
-    (gate, policy, target)
 }
 
 /// SPEC §3.3.1 ⟨0.27⟩ — is this one artifact under two names?
@@ -415,8 +404,10 @@ pub(crate) fn scan_main() {
     // and every path named gets the refusal. Ordering matters for the same reason (2) is ordered the way
     // it is — this writes, so it must not run before the input-collision guard has a chance to refuse a
     // sink that is an input. It is placed AFTER that guard below, not here; here we only learn the list.
-    let all_gate_sinks = prescan_all_gate_sinks(&args);
-    let (pre_gate, pre_policy, pre_target) = prescan_sink_and_inputs(&args);
+    let pre = prescan_argv(&args);
+    let (all_gate_sinks, pre_policy, pre_target) = (pre.gate_sinks, pre.policy, pre.target);
+    // The sink the parse loop will honour is the LAST accepted one — same rule as `--out` below.
+    let pre_gate = all_gate_sinks.last().cloned();
     if let Some(gp) = pre_gate.as_deref() {
         // Order matters and got this wrong: the nonexistent-target refusal below used to run FIRST and
         // it WRITES, so `candor-scan /nope --policy P --gate-json P` destroyed P via the very refusal
@@ -509,7 +500,7 @@ pub(crate) fn scan_main() {
     //
     // Found by candor-ts's arm of this rung, which tripped over it while running a conformance probe
     // and left rust's committed report dirty.
-    if let Some(pre_pfx) = prescan_out_prefix(&args) {
+    if let Some(pre_pfx) = pre.out {
         let inputs = run_inputs(pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
         crate::gate::arm_out_prefix(&pre_pfx, &inputs);
     }
@@ -3049,7 +3040,7 @@ pub(crate) fn scan_target(
         // ⟨0.28⟩ Latch — see the single-crate branch above.
         let _ = crate::gate::REPORT_STREAM_WRITTEN.set(true);
     } else {
-eprintln!("candor-scan: workspace — {} package report(s) under one prefix", dirs.len());
+        eprintln!("candor-scan: workspace — {} package report(s) under one prefix", dirs.len());
     }
     // ⟨0.28⟩ Every member's write phase is over — the loop above has no early exit — so the disarm
     // hand-back is licensed. See mark_out_reports_written.

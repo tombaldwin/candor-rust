@@ -2127,6 +2127,7 @@ fn a_certain_baseline_regression_stays_in_the_document_when_an_unrelated_policy_
          reads as \"we looked and found none\", which is the fabrication this format refuses: {v}"
     );
 }
+
 // ── SPEC §3.3.1 ⟨0.28⟩ — the arming rung must never destroy an INPUT, and must never hand back what
 // the run did not re-earn. Four data-destroying defects from the adversarial review of the rung, each
 // pinned on the BYTES of the file at risk: an exit-code assertion alone cannot see these regress,
@@ -2288,3 +2289,30 @@ fn a_deps_run_that_fails_before_scanning_leaves_the_placeholders_standing() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+#[test]
+fn an_out_consumed_as_another_flags_value_arms_nothing() {
+    // CRITICAL (SPEC (1): "--out has been parsed and accepted"): the parse loop takes the token after
+    // `--policy` as its value WHATEVER its shape, and the out pre-pass did not model that — so
+    // `--policy --out X` armed `X.*.json` while the loop consumed `--out` as the policy path and then
+    // refused. Measured: exit 2 every time (the argv can never succeed), so X's previous reports were
+    // PERMANENT placeholders under an `--out` the parse never accepted.
+    let d = make_crate("prepassout", "pub fn go() {}\n");
+    let pre = d.join("X");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "the previous good run records its report");
+    let report = d.join("X.prepassout.scan.json");
+    let before = bytes_of(&report);
+
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--policy", "--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(2), "the displaced prefix is a second positional — a usage error");
+    assert_eq!(bytes_of(&report), before,
+        "an --out the loop consumed as a VALUE was never accepted, so nothing may be armed under it");
+
+    // The sibling skew in the gate-sink walk: `--out --gate-json V` — the loop consumes `--gate-json`
+    // as --out's (refused) value, so V is never a sink and must receive nothing.
+    let v = d.join("V.json");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", "--gate-json", v.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(2), "a valueless --out refuses");
+    assert!(!v.exists(), "V was never accepted as a sink — writing the refusal there is the same defect");
+    let _ = std::fs::remove_dir_all(&d);
+}
