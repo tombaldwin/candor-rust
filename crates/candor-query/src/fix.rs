@@ -433,7 +433,27 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
         return 0;
     }
 
+    // ⟨0.28⟩ SPEC §3.1 pins `crossing`: a boolean, PRESENT EXACTLY WHEN THE VERB ANSWERED, absent when
+    // it refused, `reason` on the `false` arm. This engine emitted no such key — it answered the
+    // determined-negative arms as PROSE ON STDOUT UNDER `--json` (measured: `fix <fn> <Eff>` printed
+    // "…the boundary isn't crossed, nothing to fix." as stdout's only content), which §3.3.1
+    // independently forbids ("stdout MUST then be pure JSON"). The two arms below are ANSWERS, so under
+    // `--json` each is now a document: `{fn, effect, crossing: false, reason}` with the completeness
+    // fields riding it, `reason` the ts/swift token pair ("does-not-perform" / "not-forbidden"). The
+    // refused arm above keeps NO `crossing` key (the MCP contract's check-`refused`-first ordering),
+    // and the plan arm below gains `crossing: true`. Exit 0 on both `false` arms, unchanged.
     if !start.inferred.iter().any(|e| e == effect) {
+        if want_json {
+            let mut out = serde_json::json!({
+                "fn": start.func,
+                "effect": effect,
+                "crossing": false,
+                "reason": "does-not-perform",
+            });
+            comp.write_json(&mut out);
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            return 0;
+        }
         println!("candor fix: `{}` does not perform {effect} — nothing to hoist.", start.func);
         return 0;
     }
@@ -478,6 +498,20 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
         return 0;
     }
     let Some(layer) = denied_layer(&start.func, effect, rules) else {
+        // The other `crossing: false` arm — see the note above. "not-forbidden" is a claim the rule
+        // fired and missed, which the answered-refused split above already guards: an unanswerable
+        // rule on this function took the `unevaluated` arm before reaching here.
+        if want_json {
+            let mut out = serde_json::json!({
+                "fn": start.func,
+                "effect": effect,
+                "crossing": false,
+                "reason": "not-forbidden",
+            });
+            comp.write_json(&mut out);
+            println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            return 0;
+        }
         println!(
             "candor fix: `{}` performs {effect}, but no policy forbids it there — the boundary isn't crossed, nothing to fix.",
             start.func
@@ -490,6 +524,9 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
 
     if want_json {
         let mut out = plan.to_json();
+        // ⟨0.28⟩ `crossing: true` beside the plan — here in `fix` ONLY, never on `fix-gate`'s
+        // `remedies` entries, whose shape §3.1 pins separately without it.
+        out["crossing"] = serde_json::json!(true);
         comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
