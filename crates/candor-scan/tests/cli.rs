@@ -533,6 +533,51 @@ fn gate_json_rejects_a_flag_shaped_value_and_dash_stays_pure() {
 }
 
 #[test]
+fn flag_shaped_policy_value_is_refused_and_the_swallowed_sink_still_gets_the_document() {
+    // Conformance §3.1 (b13), SPEC §3.2 ⟨0.28⟩ "given no value" ruling. `--policy --gate-json -`:
+    // the loop used to consume `--gate-json` as the policy FILENAME, so the verdict sink the operator
+    // named was never a sink — measured on this engine as exit 2 with NOTHING on the stream where the
+    // fail-closed refusal document belongs. A flag-shaped token after a value-taking flag is a usage
+    // error at exit 2, and the sinks named elsewhere in that argv are STILL SINKS: the run has a
+    // broken command line, not a redefined one. BOTH halves are asserted — the exit-code half alone
+    // passes against the broken behaviour, which also exited 2.
+    let d = make_crate("polflagval", "pub fn go() {}");
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg("--gate-json").arg("-")
+        // The conformance row runs env-scrubbed (`env -u …`); a CANDOR_POLICY in the harness
+        // environment must not turn this into a different run.
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_BASELINE")
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2), "a flag-shaped --policy value is a usage error");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|_| panic!("the `--gate-json -` stream sink must carry the refusal document \
+                                    (it was swallowed as the policy filename), got stdout:\n{stdout}"));
+    assert_eq!(doc["ok"], false, "fail-closed to a naive reader: {doc}");
+    assert_eq!(doc["refused"], true, "a refusal, not a verdict: {doc}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("--policy") && stderr.contains("--gate-json"),
+            "stderr names the flag given no value AND the token that is not one: {stderr}");
+
+    // The FILE spelling of the same sink: armed by the pre-pass even though it appears after the
+    // broken flag, so the refusal replaces any previous run's green rather than leaving it current.
+    let gp = d.join("verdict.json");
+    std::fs::write(&gp, "{\"ok\": true}\n").unwrap(); // a previous run's green — must not survive
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg("--gate-json").arg(gp.to_string_lossy().as_ref())
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_BASELINE")
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2));
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&gp).expect("sink written")).expect("valid JSON");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(doc["ok"], false, "the stale green was replaced by the refusal: {doc}");
+    assert_eq!(doc["refused"], true, "{doc}");
+}
+
+#[test]
 fn candor_config_drives_the_gate_env_overrides_and_typo_fails_closed() {
     // .candor/config (candor-spec §config): the checked-in floor under the env vars.
     let d = make_crate("cfggate", "pub fn go() { std::process::Command::new(\"sh\").status().unwrap(); }");
@@ -2290,29 +2335,41 @@ fn a_deps_run_that_fails_before_scanning_leaves_the_placeholders_standing() {
 }
 
 #[test]
-fn an_out_consumed_as_another_flags_value_arms_nothing() {
-    // CRITICAL (SPEC (1): "--out has been parsed and accepted"): the parse loop takes the token after
-    // `--policy` as its value WHATEVER its shape, and the out pre-pass did not model that — so
-    // `--policy --out X` armed `X.*.json` while the loop consumed `--out` as the policy path and then
-    // refused. Measured: exit 2 every time (the argv can never succeed), so X's previous reports were
-    // PERMANENT placeholders under an `--out` the parse never accepted.
+fn a_sink_named_after_a_broken_flag_is_still_a_sink() {
+    // SPEC §3.2 ⟨0.28⟩, the "given no value" ruling — and the successor to a test that pinned the
+    // OPPOSITE. While the loop consumed a flag-shaped token as a value, `--policy --out X` meant
+    // *policy = the file named `--out`*, so X really was never accepted and this test asserted
+    // nothing could be armed under it. The ruling overturned the premise: a flag-shaped token after
+    // a value-taking flag is NOT a value (usage error, exit 2), so `--out X` here is parsed as
+    // itself — the run has a broken command line, not a redefined one — and X IS this run's declared
+    // prefix. What must stand under it after the refusal is the fail-closed placeholder, never the
+    // previous run's green.
     let d = make_crate("prepassout", "pub fn go() {}\n");
     let pre = d.join("X");
     let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
     assert_eq!(rc, Some(0), "the previous good run records its report");
     let report = d.join("X.prepassout.scan.json");
-    let before = bytes_of(&report);
+    let stale_green = bytes_of(&report);
 
-    let (rc, _, _) = scan_with_baseline(&d, None, &["--policy", "--out", pre.to_string_lossy().as_ref()]);
-    assert_eq!(rc, Some(2), "the displaced prefix is a second positional — a usage error");
-    assert_eq!(bytes_of(&report), before,
-        "an --out the loop consumed as a VALUE was never accepted, so nothing may be armed under it");
+    let (rc, _, stderr) = scan_with_baseline(&d, None, &["--policy", "--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(2), "--policy was given no value (the next token is a flag): {stderr}");
+    assert!(stderr.contains("--policy"), "the refusal names the broken flag, not the sink: {stderr}");
+    let now = bytes_of(&report);
+    assert_ne!(now, stale_green,
+        "X is still this run's --out prefix — the previous run's green must not stand as current");
+    assert!(String::from_utf8_lossy(&now).contains("\"reason\": \"armed:"),
+        "what stands is the armed placeholder — a non-claim, not a stale claim: {}",
+        String::from_utf8_lossy(&now));
 
-    // The sibling skew in the gate-sink walk: `--out --gate-json V` — the loop consumes `--gate-json`
-    // as --out's (refused) value, so V is never a sink and must receive nothing.
+    // The verdict-sink sibling: `--out --gate-json V` — `--gate-json V` stays live past the broken
+    // `--out`, so V is a sink and the fail-closed refusal document MUST reach it (it used to be
+    // swallowed as --out's value and received nothing — conformance §3.1 (b13)'s file spelling).
     let v = d.join("V.json");
-    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", "--gate-json", v.to_string_lossy().as_ref()]);
-    assert_eq!(rc, Some(2), "a valueless --out refuses");
-    assert!(!v.exists(), "V was never accepted as a sink — writing the refusal there is the same defect");
+    let (rc, _, stderr) = scan_with_baseline(&d, None, &["--out", "--gate-json", v.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(2), "a valueless --out refuses: {stderr}");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&v).expect("V holds the refusal")).expect("valid JSON");
+    assert_eq!(doc["ok"], false, "fail-closed at the sink the broken command line still named: {doc}");
+    assert_eq!(doc["refused"], true, "{doc}");
     let _ = std::fs::remove_dir_all(&d);
 }
