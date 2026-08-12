@@ -146,8 +146,17 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
             "--strict" => strict = true,
             "--include-unknown" => include_unknown = true,
             "--stats" => stats = true,
+            // SPEC §3.2 ⟨0.28⟩ (each value-taking flag below): "given no value" MEANS the next token is
+            // flag-shaped, or the clause is unimplementable — consuming the token as the value made the
+            // diagnostic unreachable and silently reinterpreted a flag (`--report --json` used to read
+            // *locator = the file named `--json`*, so the query it named ran in TEXT mode against a
+            // wrong-diagnostic exit — "no report files at prefix `--json`" — instead of a usage error
+            // naming the mistake). The §6.2 unknown-flag rule one position over: usage error, exit 2. A
+            // bare `-` stays a value and fails loud downstream (an unreadable file / unknown class);
+            // `./--weird` spells a file genuinely named like a flag. These verbs write no --gate-json
+            // sink, so the exit is immediate — there is nothing to arm.
             "--class" => {
-                if let Some(v) = args.get(i + 1) {
+                if let Some(v) = args.get(i + 1).filter(|v| v.as_str() == "-" || !v.starts_with('-')) {
                     // SPEC §6.2 ⟨0.24⟩: `--class` takes ONE comma-separated list and is NOT REPEATABLE — a
                     // second occurrence is a usage error, not a union. Neither of the two plausible silent
                     // readings is safe: last-wins (what this did) DROPS the first list, and a union would
@@ -164,6 +173,12 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
                     }
                     class = Some(v.clone());
                     i += 1;
+                } else if let Some(v) = args.get(i + 1) {
+                    eprintln!(
+                        "candor-query: --class was given no value — the next token `{v}` is a flag, not a <class,…> list\n  accepted: {}",
+                        crate::containment::CLASS_TOKENS
+                    );
+                    std::process::exit(2);
                 } else {
                     eprintln!(
                         "candor-query: --class requires a <class,…> argument\n  accepted: {}",
@@ -173,9 +188,12 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
                 }
             }
             "--report" => {
-                if let Some(v) = args.get(i + 1) {
+                if let Some(v) = args.get(i + 1).filter(|v| v.as_str() == "-" || !v.starts_with('-')) {
                     report = Some(resolve_locator(v));
                     i += 1;
+                } else if let Some(v) = args.get(i + 1) {
+                    eprintln!("candor-query: --report was given no value — the next token `{v}` is a flag, not a locator (a path really named that is spelled ./{v})");
+                    std::process::exit(2);
                 } else {
                     // A `--report` with no value is a LOUD failure (SPEC §3.3.1), never a silent
                     // fall-through to discovery against a DIFFERENT report — that would answer a query
@@ -185,9 +203,12 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
                 }
             }
             "--policy" => {
-                if let Some(v) = args.get(i + 1) {
+                if let Some(v) = args.get(i + 1).filter(|v| v.as_str() == "-" || !v.starts_with('-')) {
                     policy = Some(v.clone());
                     i += 1;
+                } else if let Some(v) = args.get(i + 1) {
+                    eprintln!("candor-query: --policy was given no value — the next token `{v}` is a flag, not a path (a file really named that is spelled ./{v})");
+                    std::process::exit(2);
                 } else {
                     // A `--policy` with no value is a LOUD failure (exit 2), exactly like `--report` above —
                     // never a warn-and-continue that leaves `policy = None`. Continuing silently gated against

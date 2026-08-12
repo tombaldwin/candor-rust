@@ -398,6 +398,36 @@ fn gate_verdict_corrupt_record_fails_closed() {
     assert!(!outfile.exists(), "no partial verdict may be written");
 }
 
+#[test]
+fn gate_verdict_flag_shaped_report_value_is_a_usage_error_not_a_green_verdict() {
+    // SPEC §3.2 ⟨0.28⟩ "given no value": `--report` used to consume the next token WHATEVER its shape.
+    // Measured on this verb: `gate-verdict <parts> - --report --json` exited 0 and printed the CLEAN
+    // verdict `{"ok": true}` — `resolve_locator("--json")` failed SILENTLY inside the coverage loader,
+    // so a mistyped `--report` dropped the coverage advisory and shipped a green verdict. A flag-shaped
+    // next token is a usage error at exit 2, never a locator.
+    let f = Fixture::new("gv-b13");
+    let out = Command::new(bin())
+        .arg("gate-verdict").arg(f.dir.join("nosuch.parts").to_string_lossy().as_ref()).arg("-")
+        .arg("--report").arg("--json")
+        .output().expect("run");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2), "--report was given no value — a usage error:\n{stderr}");
+    assert!(!stdout.contains("\"ok\""), "no verdict of any colour may be emitted, got:\n{stdout}");
+    assert!(stderr.contains("--report") && stderr.contains("--json"),
+            "stderr names the flag given no value AND the token that is not one: {stderr}");
+    // The boundary: a REAL locator after --report still rides through (the ⟨0.15⟩ advisory path) — the
+    // clean verdict of gate_verdict_absent_parts_is_the_clean_verdict is unaffected by the refusal.
+    f.write_report();
+    let out = Command::new(bin())
+        .arg("gate-verdict").arg(f.dir.join("nosuch.parts").to_string_lossy().as_ref()).arg("-")
+        .arg("--report").arg(f.report_path())
+        .output().expect("run");
+    assert_eq!(out.status.code(), Some(0), "a value-shaped --report locator is unaffected");
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
+    assert_eq!(v["ok"], true);
+}
+
 // ── reports --exists/--backend, engine-version, diff ──────────────────────────────────────────────
 
 #[test]
@@ -413,6 +443,29 @@ fn reports_exists_and_backend_probe() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "scan",
                "a `.scan.json` report probes as the scan backend");
+}
+
+#[test]
+fn reports_clear_other_given_no_value_is_a_usage_error_not_a_silent_no_op() {
+    // SPEC §3.2 ⟨0.28⟩ "given no value": `--clear-other` used to read the next token whatever its
+    // shape, or fall through when nothing followed — and BOTH wrong readings were a silent exit-0.
+    // Measured: `reports <p> --clear-other --exists` "cleared" with keep=`--exists` (removing nothing,
+    // probing nothing), and a trailing `--clear-other` listed the reports as if the flag had not been
+    // typed. Exit 2, both spellings — and the report files must survive the refusal.
+    let f = Fixture::new("rp-b13");
+    f.write_report();
+    for extra in [&["--clear-other", "--exists"][..], &["--clear-other"][..]] {
+        let out = Command::new(bin()).arg("reports").arg(&f.prefix).args(extra).output().expect("run");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(2), "{extra:?} is a usage error, never a silent no-op:\n{stderr}");
+        assert!(stderr.contains("--clear-other"), "the refusal names the broken flag: {stderr}");
+        assert!(std::path::Path::new(&f.report_path()).exists(),
+                "a refused clear must not have removed anything");
+    }
+    // The boundary: a value-shaped keep still clears. keep=lint drops the scan report (+ its sidecar).
+    let out = Command::new(bin()).arg("reports").arg(&f.prefix).args(["--clear-other", "lint"]).output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!std::path::Path::new(&f.report_path()).exists(), "keep=lint clears the scan report");
 }
 
 #[test]
@@ -3074,6 +3127,108 @@ fn gate_report_grammar_is_loud() {
     let bad = gate_fixture(&f.dir, "corrupt", "{ not json at all", None);
     let (rc, _, err) = run_gate(&bad, &p, &[]);
     assert_eq!(rc, 2, "a corrupt report is corrupt input, not an effect-free package:\n{err}");
+}
+
+#[test]
+fn gate_flag_shaped_policy_value_is_refused_and_the_swallowed_sink_still_gets_the_document() {
+    // Conformance §3.1 (b13)'s gate-verb sibling, SPEC §3.2 ⟨0.28⟩ "given no value". The loop used to
+    // consume `--gate-json` as the policy FILENAME, so the verdict sink the operator named was never a
+    // sink — measured on this verb as exit 2 with NOTHING on the stream ("unexpected argument `-`"),
+    // where the fail-closed refusal document belongs. A flag-shaped token after a value-taking flag is
+    // a usage error at exit 2, and the sinks named elsewhere in that argv are STILL SINKS: the run has
+    // a broken command line, not a redefined one. BOTH halves are asserted — the exit-code half alone
+    // passes against the broken behaviour, which also exited 2.
+    let f = Fixture::new("gate-b13");
+    let loc = gate_fixture(
+        &f.dir,
+        "r",
+        r#"{"candor":{"version":"handwritten","spec":"0.23"},"package":"app",
+            "analyzed":{"count":1,"digest":"0"},
+            "functions":[{"fn":"app.egress","inferred":["Net"],"direct":["Net"],
+                          "hosts":["e.com"],"netClass":["unknown-host"]}]}"#,
+        None,
+    );
+    // The conformance rows run env-scrubbed; a CANDOR_POLICY in the harness environment must not turn
+    // this into a different run (the policy ladder would resolve it and gate for real).
+    let run = |args: &[&str]| -> (Option<i32>, String, String) {
+        let out = Command::new(bin())
+            .args(args)
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_REPORT")
+            .output().expect("run candor-query");
+        (out.status.code(),
+         String::from_utf8_lossy(&out.stdout).into_owned(),
+         String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    // The STREAM spelling: `--policy --gate-json -` — the refusal document belongs on stdout.
+    let (rc, stdout, stderr) = run(&["gate", "--report", &loc, "--policy", "--gate-json", "-"]);
+    assert_eq!(rc, Some(2), "a flag-shaped --policy value is a usage error:\n{stderr}");
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
+        panic!("the `--gate-json -` stream sink must carry the refusal document \
+                (it was swallowed as the policy filename), got stdout:\n{stdout}")
+    });
+    assert_eq!(doc["ok"], false, "fail-closed to a naive reader: {doc}");
+    assert_eq!(doc["refused"], true, "a refusal, not a verdict: {doc}");
+    assert!(stderr.contains("--policy") && stderr.contains("--gate-json"),
+            "stderr names the flag given no value AND the token that is not one: {stderr}");
+    // The FILE spelling of the same sink: a previous run's green must not survive as current — the
+    // refusal (not merely the armed placeholder) replaces it.
+    let g = f.dir.join("verdict.json");
+    std::fs::write(&g, "{\"ok\": true}\n").unwrap();
+    let gs = g.to_string_lossy().into_owned();
+    let (rc, _, stderr) = run(&["gate", "--report", &loc, "--policy", "--gate-json", &gs]);
+    assert_eq!(rc, Some(2), "{stderr}");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&g).expect("sink written")).expect("valid JSON");
+    assert_eq!(doc["ok"], false, "the stale green was replaced by the refusal: {doc}");
+    assert_eq!(doc["refused"], true, "{doc}");
+    assert!(doc["reason"].as_str().unwrap_or("").contains("--policy"),
+            "the document carries the usage cause, not the armed placeholder: {doc}");
+    // The boundaries: a bare `-` stays a legitimate VALUE (`--gate-json -` is the stream form), and a
+    // normal `--policy <file>` is unaffected — the same argv with the mistake repaired gates for real.
+    let p = pol(&f.dir, "denyfs", "deny Fs\n");
+    let (rc, stdout, stderr) =
+        run(&["gate", "--report", &loc, "--policy", &p.to_string_lossy(), "--gate-json", "-"]);
+    assert_eq!(rc, Some(0), "deny Fs over a Net-only report passes:\n{stderr}");
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim()).expect("the stream verdict");
+    assert_eq!(doc["ok"], true, "a real verdict, not a refusal: {doc}");
+    assert!(doc.get("refused").is_none(), "{doc}");
+}
+
+/// SPEC §3.2 ⟨0.28⟩ on the QUERY grammar (the `gate` loop's sibling — the route the b13 conformance row
+/// never drives): `--report`/`--policy`/`--class` used to consume a flag-shaped next token as the value,
+/// so `--report --json` ran against *locator = the file named `--json`* — exit 2 with the WRONG cause
+/// ("no report files at prefix `--json`"), the "given no value" diagnostic unreachable, and the `--json`
+/// the operator asked for silently gone. Usage error at exit 2, naming both tokens. These verbs write no
+/// `--gate-json` sink, so there is no document half here — the boundary rows are the second half instead.
+#[test]
+fn query_verbs_refuse_a_flag_shaped_value_for_every_value_taking_flag() {
+    let f = Fixture::new("grammar-b13");
+    f.write_report();
+    let rp = f.report_path();
+    for (args, flag) in [
+        (vec!["where", "Fs", "--report", "--json"], "--report"),
+        (vec!["whatif", "outer", "Fs", "--report", rp.as_str(), "--policy", "--json"], "--policy"),
+        (vec!["blindspots", "--report", rp.as_str(), "--class", "--json"], "--class"),
+    ] {
+        let out = Command::new(bin())
+            .args(&args)
+            .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_REPORT")
+            .output().expect("run candor-query");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(2), "{args:?} must be a usage error:\n{stderr}");
+        assert!(stderr.contains("given no value") && stderr.contains(flag) && stderr.contains("--json"),
+                "{args:?} must name {flag} AND the flag-shaped token, got:\n{stderr}");
+    }
+    // The boundary: the same commands with the value supplied still answer. `--json` reaches the output
+    // mode instead of being eaten as a locator.
+    let out = Command::new(bin())
+        .args(["where", "Fs", "--report", &f.report_path(), "--json"])
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_REPORT")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0), "a value-shaped --report is unaffected");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("--json reached the output mode");
+    assert!(v.is_object() || v.is_array(), "{v}");
 }
 
 /// ⟨0.24⟩ **`unverified` AND `fix-gate` MUST READ THE NARROWING FILTER THE GATE READS** — SPEC §6.2,
