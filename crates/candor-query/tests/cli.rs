@@ -4623,3 +4623,107 @@ fn gains_names_which_report_judged_nothing_on_either_side() {
         assert!(v.get(k).is_none(), "an intact pair must not carry `{k}`: {v}");
     }
 }
+
+// ── SPEC §3.3.1 (3) ⟨0.28⟩ — the gate's input guard covers what the `--report` locator EXPANDS to,
+// never just the token the operator typed. MEASURED before the fix (2026-08-12), all three at the
+// bytes, because every spelling here also "failed" with a plausible exit code:
+//
+//   gate --report r --policy P --gate-json r.<crate>.scan.json
+//       → exit 2, and the operator's REPORT held the armed refusal document — the guard compared the
+//         sink against the raw token `r`, the loader read the token's expansion, and the sink destroyed
+//         the expansion. The diagnostic then blamed the report ("failed to parse — corrupt input") —
+//         the run reporting the corpse of the file it killed.
+//   the discovery spelling (no --report, sink = the discovered .candor report) — destroyed identically.
+//   gate … --gate-json r.<crate>.scan.callgraph.json
+//       → exit 1 and a REAL VERDICT over the §2.2 sidecar: the report loads fine, the gate runs green,
+//         and the pair is destroyed one half at a time AT A SUCCESS EXIT — worse than the report case.
+// ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn gate_json_naming_an_expanded_report_is_refused_with_the_report_intact() {
+    let f = Fixture::new("gatelocator");
+    f.write_report();
+    let policy = f.dir.join("policy");
+    std::fs::write(&policy, "deny Fs\n").unwrap();
+    let report = f.report_path();
+    let before = std::fs::read(&report).unwrap();
+
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", policy.to_string_lossy().as_ref(),
+               "--gate-json", &report])
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_REPORT")
+        .output().expect("run candor-query");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(2),
+        "a sink naming one of the locator's expanded reports is refused: {stderr}");
+    assert!(stderr.contains("names a file this gate reads"),
+        "the refusal names the collision, not a downstream parse failure: {stderr}");
+    assert_eq!(std::fs::read(&report).unwrap(), before,
+        "the report's BYTES are untouched — before the fix this file held the armed refusal document");
+}
+
+#[test]
+fn gate_json_naming_a_discovered_report_is_refused_with_the_report_intact() {
+    // The no-`--report` spelling: the reports this gate is about to read from the discovered
+    // `.candor/` are inputs just the same — nothing in argv names them at all.
+    let f = Fixture::new("gatediscovery");
+    let candor = f.dir.join(".candor");
+    std::fs::create_dir_all(&candor).unwrap();
+    let report = candor.join("report.rpt.scan.json");
+    std::fs::write(&report,
+        r#"{"candor":{"version":"t","spec":"0.28"},"package":"rpt","functions":[{"fn":"inner","loc":"s:1","inferred":["Fs"],"hash":"h","paths":["/x"]}]}"#).unwrap();
+    let policy = f.dir.join("policy");
+    std::fs::write(&policy, "deny Fs\n").unwrap();
+    let before = std::fs::read(&report).unwrap();
+
+    let out = Command::new(bin())
+        .args(["gate", "--policy", "policy", "--gate-json", ".candor/report.rpt.scan.json"])
+        .current_dir(&f.dir)
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_REPORT")
+        .output().expect("run candor-query");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(2), "the discovered report is an input: {stderr}");
+    assert_eq!(std::fs::read(&report).unwrap(), before,
+        "the discovered report's bytes are untouched — this spelling destroyed it before the fix");
+}
+
+#[test]
+fn gate_json_naming_the_reports_sidecar_is_refused_and_a_gate_json_sibling_still_gates() {
+    let f = Fixture::new("gatesidecar");
+    f.write_report();
+    let policy = f.dir.join("policy");
+    std::fs::write(&policy, "deny Fs\n").unwrap();
+    let sidecar = format!("{}.rpt.scan.callgraph.json", f.prefix);
+    let side_before = std::fs::read(&sidecar).unwrap();
+
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", policy.to_string_lossy().as_ref(),
+               "--gate-json", &sidecar])
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_REPORT")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2),
+        "the pair's other half is part of what the locator names — before the fix this exited 1, a \
+         SUCCESS, with a real verdict where the callgraph belonged");
+    assert_eq!(std::fs::read(&sidecar).unwrap(), side_before, "the sidecar's bytes are untouched");
+
+    // THE CONTROL, and it is load-bearing: `<report-stem>.gate.json` is a sibling matching
+    // `<stem>.*.json` — the exact file a fix that guarded "everything sharing the stem" would refuse —
+    // and it is the recommended beside-the-report verdict layout. It must still gate, with a REAL
+    // verdict: over-refusal here is the plausible-but-wrong fix (the ⟨0.24⟩ count-0 lesson).
+    let sink = format!("{}.rpt.scan.gate.json", f.prefix);
+    let report_before = std::fs::read(f.report_path()).unwrap();
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", policy.to_string_lossy().as_ref(),
+               "--gate-json", &sink])
+        .env_remove("CANDOR_POLICY").env_remove("CANDOR_CONFIG").env_remove("CANDOR_REPORT")
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(1),
+        "deny Fs over the Fs fixture is a VIOLATION verdict, never a refusal — a guard that reddens \
+         the beside-the-report layout has not implemented the rule, it has broken the default");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sink).unwrap()).expect("a real verdict document");
+    assert!(v.get("refused").is_none() && v["violations"].as_array().is_some_and(|a| !a.is_empty()),
+        "the sink carries the verdict, not the armed placeholder: {v}");
+    assert_eq!(std::fs::read(f.report_path()).unwrap(), report_before,
+        "…and the reports the gate read are byte-identical after the control run");
+}
