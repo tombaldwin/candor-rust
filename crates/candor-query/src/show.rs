@@ -41,7 +41,22 @@ pub(crate) fn cmd_show(args: &[String]) -> i32 {
     let mut fns: Vec<ReportEntry> = all.into_iter().filter(|e| q_match(&e.func, q, tier)).collect();
     fns.sort_by(|a, b| a.func.cmp(&b.func));
 
+    // ⟨0.28⟩ SPEC §2 (Rung A): `show`'s pinned shape is a TOP-LEVEL ARRAY, which has nowhere to put a
+    // completeness key — so over a hedging report the verb emits the CAVEAT DOCUMENT INSTEAD of its
+    // result document. Not the array with the caveat omitted (today's shape: `[]` over a report whose
+    // own manifest names a file it could not read — *nothing performs this effect*, asserted about code
+    // nobody examined), and not an empty array of the pinned shape. The type change is LOUD on purpose:
+    // a consumer iterating the array gets a TypeError, not a silent zero-iteration loop, and that is
+    // the one case where breaking a consumer is the CORRECT outcome — it was being lied to. Healthy
+    // output stays byte-identical: `fields()` is `None` unless there is something to disclose.
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("show");
+
     if want_json {
+        if let Some(caveat) = comp.fields() {
+            println!("{}", serde_json::to_string_pretty(&caveat).unwrap());
+            return 0;
+        }
         let out: Vec<ShowJson> = fns
             .iter()
             .map(|e| ShowJson {
@@ -57,7 +72,26 @@ pub(crate) fn cmd_show(args: &[String]) -> i32 {
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
+    // The HUMAN half of the same disclosure — prose has no shape problem, so the findings still ship
+    // under the note (a no-op on a complete report, so an ordinary run stays byte-identical).
+    comp.print_note(
+        &format!("the function(s) shown below are only those candor could see match `{q}`"),
+        &format!(
+            "A function in one of those is ABSENT from the report, so it cannot be shown here. {} \
+             Re-scan for a complete answer.",
+            comp.gate_line()
+        ),
+    );
     if fns.is_empty() {
+        if comp.must_hedge() {
+            // NOT the "pure functions are omitted" sentence: over these bytes an absent function is not
+            // evidence of purity — that is the ⟨0.21⟩ convention this report cannot back.
+            println!(
+                "candor: no effectful function candor COULD SEE matching `{q}` — but see the INCOMPLETE \
+                 note above; absence from this report is NOT a purity claim here."
+            );
+            return 0;
+        }
         println!("candor: no effectful function matching `{q}` (pure functions are omitted from the report).");
         return 0;
     }
@@ -260,34 +294,22 @@ pub(crate) fn cmd_map(args: &[String]) -> i32 {
     comp.warn_unreadable("map");
 
     if want_json {
+        // ⟨0.28⟩ SPEC §2 (Rung A): `map`'s top level is a USER NAMESPACE — its keys are the operator's
+        // own module names, and an npm scoped package is spelled `@scope/name`, so no reserved-key
+        // convention is safe here. The ruling closes the cell the previous shape left open: over a
+        // hedging report the verb emits the CAVEAT DOCUMENT INSTEAD of the module map. This replaces the
+        // earlier merge-and-disclose-collisions shape, whose hedge keys could displace a real module
+        // named `incomplete`/`unanalyzed`/`judgedNothing` — a dropped row is exactly the defect the rung
+        // exists to remove, and the caveat-instead shape needs no collision handling at all. Healthy
+        // output stays byte-identical: `fields()` is `None` unless there is something to disclose.
+        if let Some(caveat) = comp.fields() {
+            println!("{}", serde_json::to_string_pretty(&caveat).unwrap());
+            return 0;
+        }
         let out: BTreeMap<String, MapJson> = mods
             .iter()
             .map(|(m, (eff, n))| (m.clone(), MapJson { effects: eff.iter().cloned().collect(), functions: *n }))
             .collect();
-        // THE ONE DOCUMENT WHOSE TOP LEVEL IS A USER NAMESPACE, so the disclosure keys can in principle
-        // land on a real module (`mod incomplete`). `write_json` OVERWRITES, and a module silently
-        // replaced by a hedge is a dropped row — the shape this whole rung exists to remove. It cannot
-        // be dodged by nesting: the disclosure has to be a TOP-LEVEL key or a consumer branching on
-        // `"incomplete" in doc` never sees it. So the collision is DISCLOSED instead of hidden, loudly
-        // and by name, and the hedge still wins — a lost module row the operator has been told about
-        // beats a false all-clear nobody has.
-        let mut out = serde_json::to_value(out).unwrap();
-        // Asked of the fields ACTUALLY about to be written, not of a hardcoded name list: `unanalyzed`
-        // and `judgedNothing` are each omitted when empty, and warning that a module named `unanalyzed`
-        // was displaced when nothing displaced it is a false disclosure — the failure mode `net-partner`
-        // taught this family (a key reported ignored while being honoured), pointed the other way.
-        let written = comp.fields().map(|f| serde_json::to_value(f).unwrap()).unwrap_or_default();
-        for k in written.as_object().into_iter().flat_map(|o| o.keys()) {
-            if out.get(k).is_some() {
-                eprintln!(
-                    "candor map: this report has a module literally named `{k}`, which collides with \
-                     the ⟨0.28⟩ incompleteness disclosure this answer must carry — the disclosure wins \
-                     and that module's row is NOT in the JSON below. Its effects are in the text \
-                     output (drop --json)."
-                );
-            }
-        }
-        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
