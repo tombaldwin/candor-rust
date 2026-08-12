@@ -27,7 +27,8 @@ struct PreScan {
     /// path and left the first holding a previous run's `{"ok": true}` while the gate fired — the stale
     /// green of the ⟨0.27⟩ arming rule, reached by a spelling nobody had considered.
     gate_sinks: Vec<String>,
-    /// The `--policy` path the loop will accept — the NEXT token whatever its shape (see the walk).
+    /// The `--policy` path the loop will accept — the next token when it is value-shaped; a
+    /// flag-shaped token is NOT a value and stays live (see the walk).
     policy: Option<String>,
     /// The `--out` prefix the loop will accept — **the LAST one, because that is what the loop
     /// honours.** The first version of the out pre-pass kept the FIRST occurrence, and candor-swift's
@@ -46,38 +47,48 @@ struct PreScan {
 }
 
 /// **THE PRE-PASS CONSUMES A VALUE EXACTLY WHERE THE PARSE LOOP DOES — that agreement is the entire
-/// contract, and each divergence from it has been a measured defect.** The loop takes the token after
-/// `--out`, `--policy` and `--gate-json` as that flag's VALUE unconditionally: `--policy` accepts even
-/// a flag-shaped one, the other two consume it and then refuse the run. The previous pre-passes (three
-/// separate walks) instead SKIPPED a flag-shaped value, leaving it live as a flag — so `--policy --out
-/// X` armed `X.*.json` while the loop consumed `--out` as the policy path and refused `X` as a second
-/// positional: X's previous reports became permanent placeholders under an `--out` the parse never
-/// accepted, with SPEC (1)'s *"`--out` has been parsed and accepted"* precondition false for that
-/// argv. The same skew ran through the gate-sink walk (`--out --gate-json V` registered V as a sink
-/// the loop never accepts). Three copies of the grammar had drifted from the loop the same way, which
-/// is why there is now ONE walk feeding every pre-pass consumer.
+/// contract, and each divergence from it has been a measured defect.** The shared grammar (SPEC §3.2
+/// ⟨0.28⟩, the "given no value" ruling): a value-taking flag consumes the next token only when it is
+/// VALUE-SHAPED (`-`, or not `-`-prefixed — `--out` refuses even the bare `-`, it is a prefix). A
+/// flag-shaped token is NOT a value: the loop refuses the run there at exit 2, and this walk leaves
+/// the token LIVE so the flags after the broken one are still parsed — the run has a broken command
+/// line, not a redefined one, so a sink named there is still a sink. The previous shape of this
+/// agreement had the loop consuming the flag-shaped token as the value (`--policy --gate-json -` read
+/// policy = the file named `--gate-json`), which both swallowed the operator's sink AND made the
+/// loop's own "given no value" diagnostic unreachable — no argv could produce it. Measured after the
+/// pre-pass/loop alignment: exit 2 with NOTHING on the stream where the `--gate-json -` refusal
+/// document belongs (conformance §3.1 (b13)).
+///
+/// The history that produced the alignment stands: the previous pre-passes (three separate walks) had
+/// drifted from the loop, so `--policy --out X` armed `X.*.json` while the loop consumed `--out` as
+/// the policy path — X's previous reports became permanent placeholders under an `--out` the parse
+/// never accepted. ONE walk feeds every pre-pass consumer, and the loop now agrees token-for-token
+/// with it: under the ⟨0.28⟩ ruling `--policy --out X` is a usage error at `--policy`, and `--out X`
+/// — parsed, not swallowed — arms X fail-closed before the refusal.
 fn prescan_argv(args: &[String]) -> PreScan {
     let mut ps = PreScan { gate_sinks: Vec::new(), policy: None, out: None, target: None };
-    let mut it = args.iter();
+    let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
-            // Consumed either way; RECORDED only when the loop would accept it (`-` or non-flag —
-            // a flag-shaped value takes the run down in the loop, accepting nothing).
+            // Consumed and recorded only when the loop would accept it (`-` or non-flag); a
+            // flag-shaped token stays LIVE — the loop refuses the run at this flag, and whatever the
+            // live token names (another sink, say) must still be honoured by that refusal.
             "--gate-json" => {
-                if let Some(v) = it.next() {
-                    if v == "-" || !v.starts_with('-') {
-                        ps.gate_sinks.push(v.clone());
-                    }
+                if it.peek().is_some_and(|v| v.as_str() == "-" || !v.starts_with('-')) {
+                    ps.gate_sinks.push(it.next().expect("peeked").clone());
                 }
             }
-            // The loop takes the next token as the path WHATEVER its shape.
-            "--policy" => ps.policy = it.next().cloned(),
-            // Consumed either way; recorded only when non-flag (the loop refuses the rest).
+            // Same shape rule as `--gate-json` (`-` is accepted here and fails loud as an unreadable
+            // policy file a moment later — strictly narrower than refusing it in the grammar).
+            "--policy" => {
+                if it.peek().is_some_and(|v| v.as_str() == "-" || !v.starts_with('-')) {
+                    ps.policy = it.next().cloned();
+                }
+            }
+            // A prefix, so even the bare `-` is refused by the loop — recorded only when non-dashed.
             "--out" => {
-                if let Some(v) = it.next() {
-                    if !v.starts_with('-') {
-                        ps.out = Some(v.clone());
-                    }
+                if it.peek().is_some_and(|v| !v.starts_with('-')) {
+                    ps.out = it.next().cloned();
                 }
             }
             _ => {
@@ -512,12 +523,18 @@ pub(crate) fn scan_main() {
                 // swallowed `--policy` as the prefix, so the displaced bare `P` became the scan target
                 // and the run went GATELESS — exit 0, no gate, writing a report named `--policy.*`.
                 // A valueless gate-adjacent flag must fail, never silently drop the gate.
+                // The flag-shaped case names the token (SPEC §3.2 ⟨0.28⟩ "given no value"): the
+                // operator typed a flag where a prefix belongs, and `./--weird` is the escape hatch.
                 match it.next() {
                     Some(v) if !v.starts_with('-') => prefix = v.clone(),
-                    _ => {
-                        eprintln!("candor-scan: --out requires a path prefix (a following non-flag value)");
+                    Some(v) if v != "-" => {
+                        eprintln!("candor-scan: --out was given no value — the next token '{v}' is a flag, not a prefix (a path really named that is spelled ./{v})");
                         // ⟨0.27⟩ every pre-verdict exit leaves the refusal document at the sink — the
                         // stream sink included (SPEC §3.1); see `exit2_refused`.
+                        crate::gate::exit2_refused(format!("--out was given no value (the next token '{v}' is a flag)"));
+                    }
+                    _ => {
+                        eprintln!("candor-scan: --out requires a path prefix (a following non-flag value)");
                         crate::gate::exit2_refused("--out requires a path prefix (a following non-flag value)");
                     }
                 }
@@ -529,11 +546,22 @@ pub(crate) fn scan_main() {
                 // A valueless trailing `--policy` (no path follows) must ERROR, not silently fall
                 // back to no-gate — matching the strict posture of a set-but-unreadable policy.
                 // Silently dropping the gate would let a violation ship under an intended-gated run.
+                // A FLAG-SHAPED next token is the same case (SPEC §3.2 ⟨0.28⟩): "given no value" MEANS
+                // the next token is flag-shaped, or the clause is unimplementable — consuming it as a
+                // filename made this very diagnostic unreachable, and `--policy --gate-json -` read
+                // the operator's verdict sink as an unreadable policy path. Measured on this engine:
+                // exit 2 with NOTHING on the stream where the refusal document belongs (conformance
+                // §3.1 (b13)). The pre-pass leaves the flag-shaped token LIVE, so the sink it names
+                // was already armed when this refusal fires and `exit2_refused` reaches it.
                 match it.next().cloned() {
-                    Some(p) => policy_path = Some(p),
+                    Some(p) if p == "-" || !p.starts_with('-') => policy_path = Some(p),
+                    Some(p) => {
+                        eprintln!("candor-scan: --policy was given no value — the next token '{p}' is a flag, not a path (a file really named that is spelled ./{p})");
+                        // ⟨0.27⟩ the stream sink gets the refusal too — see `exit2_refused`.
+                        crate::gate::exit2_refused(format!("--policy was given no value (the next token '{p}' is a flag)"));
+                    }
                     None => {
                         eprintln!("candor-scan: --policy requires a path argument");
-                        // ⟨0.27⟩ the stream sink gets the refusal too — see `exit2_refused`.
                         crate::gate::exit2_refused("--policy requires a path argument");
                     }
                 }
@@ -546,9 +574,16 @@ pub(crate) fn scan_main() {
                 // `-` (stream the verdict to stdout) stays valid.
                 match it.next().cloned() {
                     Some(p) if p == "-" || !p.starts_with('-') => gate_json_path = Some(p),
-                    _ => {
-                        eprintln!("candor-scan: --gate-json requires a path argument");
-                        std::process::exit(2);
+                    Some(p) => {
+                        eprintln!("candor-scan: --gate-json was given no value — the next token '{p}' is a flag, not a path (a file really named that is spelled ./{p})");
+                        // Through `exit2_refused`, not a bare exit(2): another `--gate-json` in the
+                        // same argv may already have armed a sink, and a broken command line does not
+                        // un-name it — the refusal document must still reach it (SPEC §3.2 ⟨0.28⟩).
+                        crate::gate::exit2_refused(format!("--gate-json was given no value (the next token '{p}' is a flag)"));
+                    }
+                    None => {
+                        eprintln!("candor-scan: --gate-json requires a path argument (or `-` for stdout)");
+                        crate::gate::exit2_refused("--gate-json requires a path argument (or `-` for stdout)");
                     }
                 }
             }
