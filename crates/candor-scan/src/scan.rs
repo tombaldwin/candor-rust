@@ -219,6 +219,18 @@ fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> 
                          ("CANDOR_CONFIG", "CANDOR_CONFIG")] {
         if let Ok(v) = std::env::var(var) {
             if !v.is_empty() {
+                // A BASELINE VALUE IS A NAME FOR A SET OF FILES, and only the raw string was registered.
+                // `check_baseline` resolves a non-file value to `<value>.<crate>.scan.json` and reads
+                // `<report>.callgraph.json` beside it, and `same_artifact("base", "base.app.scan.json")`
+                // is false — so `CANDOR_BASELINE=base --out base --zzz-not-a-flag` exited 2 having
+                // replaced the ratchet's baseline, a file this run READS, with the placeholder. The dep-
+                // DIRECTORY lesson (below) un-applied to its sibling channel: register what the value
+                // RESOLVES TO, not the value's spelling.
+                if var == "CANDOR_BASELINE" {
+                    for f in baseline_artifact_files(&v) {
+                        out.push((f, "a CANDOR_BASELINE report".into()));
+                    }
+                }
                 out.push((v, label.into()));
             }
         }
@@ -247,6 +259,38 @@ fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> 
     // segment, so an out-of-tree `CANDOR_CONFIG` had its relative values anchored one level too high and
     // the guard protected a path the run never reads. A second parser is a second set of holes.
     out.extend(crate::config::config_inputs(target));
+    out
+}
+
+/// ⟨0.28⟩ The on-disk artifacts a baseline VALUE resolves to, for the sink guards above.
+///
+/// One rule for both spellings, and it is ARMING'S OWN GLOB — `<stem>.` prefix, `.json` suffix, in the
+/// value's parent directory — so the set this registers and the set `arm_out_prefix` would touch line
+/// up exactly. The stem strips a trailing `.json` from the value's file name first: a prefix `base`
+/// picks up `base.app.scan.json` and its `base.app.scan.callgraph.json` sidecar, and a direct file
+/// `base.json` picks up the `base.callgraph.json` that `check_baseline` derives beside it. Only files
+/// that EXIST are returned, which is the whole population at risk: a path with nothing at it has
+/// nothing for arming to destroy, and a placeholder landing there fails `check_baseline`'s provenance
+/// check LOUDLY (exit 2) rather than comparing silently.
+pub(crate) fn baseline_artifact_files(value: &str) -> Vec<String> {
+    let p = std::path::Path::new(value);
+    let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return Vec::new();
+    };
+    let stem = name.strip_suffix(".json").unwrap_or(&name);
+    if stem.is_empty() {
+        return Vec::new();
+    }
+    let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        if f.starts_with(&format!("{stem}.")) && f.ends_with(".json") {
+            out.push(dir.join(&f).to_string_lossy().into_owned());
+        }
+    }
+    out.sort();
     out
 }
 

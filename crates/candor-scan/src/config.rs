@@ -58,6 +58,15 @@ pub(crate) fn config_inputs(dir: &str) -> Vec<(String, String)> {
     for key in ["policy", "baseline"] {
         if let Some(v) = cfg.get(key) {
             if !v.is_empty() {
+                // ⟨0.28⟩ the same expansion the env channel gets: a baseline value names a SET of files
+                // (`<value>.<crate>.scan.json` + callgraph sidecars), and registering only the spelling
+                // left every one of them destroyable. A `baseline` line in a checked-in config is the
+                // same input as CANDOR_BASELINE arriving through a different door.
+                if key == "baseline" {
+                    for f in crate::scan::baseline_artifact_files(v) {
+                        out.push((f, "a config `baseline` report".to_string()));
+                    }
+                }
                 out.push((v.clone(), format!("the config's `{key}`")));
             }
         }
