@@ -5002,3 +5002,61 @@ fn fix_json_pins_crossing_present_iff_answered_and_stdout_stays_pure_json() {
     assert!(!remedies.is_empty() && remedies.iter().all(|r| r.get("crossing").is_none()),
         "`crossing` is `fix`'s key — a remedies entry must not gain it: {v}");
 }
+
+/// SPEC §6.2 ⟨0.28⟩: the VERDICT document carries `ignored: [{line, text, reason}]` — the policy
+/// lines the parse DROPPED — omitted when nothing was dropped. Distinct from `unevaluated` (rules
+/// that PARSED and could not be answered): a consumer that sees neither is entitled to believe the
+/// policy on disk is the policy that ran. Measured before the fix: all engines warned per dropped
+/// line on stderr while the verdict said nothing — a 9-of-10-dropped policy was a 90%-gateless green.
+/// `ok` and the exit code do not consult it (line-level leniency unchanged).
+#[test]
+fn gate_verdict_documents_carry_the_dropped_policy_lines_as_ignored() {
+    let f = Fixture::new("ignored");
+    f.write_report();
+    let dropped = write_policy(&f, "dropped.policy",
+        "# a comment\ndeny Fs\nfrobnicate the walrus  # typo\nforbid glued->arrow\n");
+
+    // `gate --report … --json`: the verdict names each dropped line with its 1-based source line and
+    // the VERBATIM text (comment included — the operator matches it against their file).
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &dropped, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(1),
+        "deny Fs still fires — a dropped line never changes ok or the exit");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    let ig = v["ignored"].as_array().unwrap_or_else(|| panic!(
+        "the verdict must carry the dropped lines as `ignored` — stderr is not the machine channel: {v}"));
+    assert_eq!(ig.len(), 2, "two dropped lines, the comment is not one: {v}");
+    assert_eq!(ig[0]["line"], serde_json::json!(3));
+    assert_eq!(ig[0]["text"], serde_json::json!("frobnicate the walrus  # typo"),
+        "`text` is the source line VERBATIM, before comment-stripping: {v}");
+    assert!(ig[0]["reason"].as_str().unwrap().contains("unknown rule kind"), "{v}");
+    assert_eq!(ig[1]["line"], serde_json::json!(4));
+    assert!(!v["violations"].as_array().unwrap().is_empty(),
+        "the firing rule still fires beside the disclosure");
+
+    // gate-verdict --policy: the assembled (lint-route) verdict carries the same disclosure.
+    let parts = f.dir.join("parts.ndjson");
+    std::fs::write(&parts, "{\"rule\":\"AS-EFF-006\",\"fn\":\"f\",\"effects\":[\"Net\"],\"detail\":\"d\"}\n").unwrap();
+    let out = Command::new(bin())
+        .args(["gate-verdict", parts.to_string_lossy().as_ref(), "-", "--policy", &dropped])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["ignored"].as_array().map(Vec::len), Some(2),
+        "the assembled verdict route is not covered by its sibling: {v}");
+
+    // CONTROL: a clean policy's verdict has NO `ignored` key on either route (byte-level identity vs
+    // the pre-change binary was verified out of band; this pins the key's absence).
+    let clean = write_policy(&f, "clean.policy", "deny Fs\n");
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &clean, "--json"])
+        .output().expect("run candor-query");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.get("ignored").is_none(), "a clean policy's verdict stays byte-identical: {v}");
+    let out = Command::new(bin())
+        .args(["gate-verdict", parts.to_string_lossy().as_ref(), "-", "--policy", &clean])
+        .output().expect("run candor-query");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.get("ignored").is_none(), "{v}");
+}

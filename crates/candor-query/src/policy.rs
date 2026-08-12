@@ -588,10 +588,29 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
     // are computed exactly as before; without the flag, or with a fully-covered report, the output is
     // byte-identical to the pre-⟨0.15⟩ verdict.
     let mut report_loc: Option<String> = None;
+    // ⟨0.28⟩ optional `--policy <file>`: the policy the LINT route gated with, re-read through the
+    // SHARED parser so the assembled verdict can carry SPEC §6.2's `ignored` disclosure — the lines
+    // the parse dropped. The lint's own parse warned per line on stderr during the dylint pass; this
+    // is that fact's machine half, and re-deriving it from the same text through the same parser
+    // cannot disagree with it. VERDICT-PRESERVING: ok/violations/exit are computed exactly as before,
+    // and a clean policy (or no flag) leaves the document byte-identical.
+    let mut policy_loc: Option<String> = None;
     let mut pos: Vec<&str> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--report" {
+        if a == "--policy" {
+            match it.next() {
+                Some(l) if l == "-" || !l.starts_with('-') => policy_loc = Some(l.clone()),
+                Some(l) => {
+                    eprintln!("candor-query: --policy was given no value — the next token `{l}` is a flag, not a path (a file really named that is spelled ./{l})");
+                    return 2;
+                }
+                None => {
+                    eprintln!("candor-query: --policy requires a file argument");
+                    return 2;
+                }
+            }
+        } else if a == "--report" {
             match it.next() {
                 Some(l) if l == "-" || !l.starts_with('-') => report_loc = Some(resolve_locator(l)),
                 // SPEC §3.2 ⟨0.28⟩: a flag-shaped next token is "given no value" — a usage error, never
@@ -612,7 +631,7 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
         }
     }
     let (Some(parts), Some(out)) = (pos.first().copied(), pos.get(1).copied()) else {
-        eprintln!("usage: candor-query gate-verdict <parts-file> <out-file|-> [--report <locator>]");
+        eprintln!("usage: candor-query gate-verdict <parts-file> <out-file|-> [--report <locator>] [--policy <file>]");
         return 2;
     };
     let mut violations: Vec<candor_report::GateViolation> = Vec::new();
@@ -642,7 +661,33 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
         packages.sort();
         candor_report::GateCoverage { uncovered: packages.len(), packages }
     });
-    let json = match candor_report::gate_verdict_json_with_coverage(&mut violations, coverage.as_ref()) {
+    // ⟨0.28⟩ the dropped-line disclosure (SPEC §6.2), from the same parse the gate routes use. A
+    // CONFIGURED-but-unreadable policy fails loud (§6.2's unreadable-policy posture) — this verb is
+    // assembling that gate's verdict, and assembling it as if no policy existed would publish a
+    // verdict for a gate whose policy nobody can read.
+    let ignored: Vec<candor_report::IgnoredLine> = match policy_loc.as_deref() {
+        None => Vec::new(),
+        Some(pl) => {
+            let Ok(text) = std::fs::read_to_string(pl) else {
+                eprintln!("candor-query: gate-verdict --policy {pl} could not be read — failing (exit 2)");
+                return 2;
+            };
+            let aliases = candor_classify::policy::discover_config_text(std::path::Path::new(pl))
+                .map(|t| candor_classify::policy::parse_unknown_aliases(&t))
+                .unwrap_or_default();
+            candor_classify::policy::parse_policy_silent(&text, &aliases)
+                .errors
+                .iter()
+                .filter(|e| !e.fatal)
+                .map(|e| candor_report::IgnoredLine {
+                    line: e.line,
+                    text: e.text.clone(),
+                    reason: e.message.clone(),
+                })
+                .collect()
+        }
+    };
+    let json = match candor_report::gate_verdict_json_with_coverage_v28(&mut violations, coverage.as_ref(), &ignored) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("candor-query: could not serialize the gate verdict ({e})");

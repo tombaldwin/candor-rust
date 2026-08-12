@@ -1079,6 +1079,23 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         return refuse(&why, want_json, gate_json.as_deref());
     }
 
+    // ⟨0.28⟩ SPEC §6.2: THE LINES THE PARSE DROPPED ride the verdict document as `ignored` —
+    // `[{line, text, reason}]`, distinct from `unevaluated` (rules that PARSED and could not be
+    // answered). Survivable errors only: a fatal error refused just above, and the zero-rule arm below
+    // refuses too, so this list reaches only VERDICT documents. Omitted when empty (byte-identity on a
+    // clean policy). Same reader as candor-scan's route (`ParsedPolicy::errors`, `fatal == false`), so
+    // §3.1's byte-equality MUST holds for this key as well.
+    let ignored: Vec<candor_report::IgnoredLine> = p
+        .errors
+        .iter()
+        .filter(|e| !e.fatal)
+        .map(|e| candor_report::IgnoredLine {
+            line: e.line,
+            text: e.text.clone(),
+            reason: e.message.clone(),
+        })
+        .collect();
+
     // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES (SPEC §6.2) — the same refusal posture as the
     // branch directly above, and THE SIBLING OF candor-scan's. §6.2 states the defect was measured on
     // this verb too, and "a route is not covered by its sibling": the scan CLI got the rung first and
@@ -1427,6 +1444,8 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         &refused,
         // ⟨0.27⟩ the zero-match disclosure, same bytes as the scan route's (SPEC §4 `zeroMatch`).
         &zero_match,
+        // ⟨0.28⟩ the dropped-line disclosure, same bytes as the scan route's (SPEC §6.2 `ignored`).
+        &ignored,
         want_json,
         gate_json.as_deref(),
     ) {
@@ -1462,6 +1481,7 @@ fn write_verdict(
     vocabulary: Option<&candor_report::GateVocabulary>,
     unevaluated: &[candor_report::Unevaluated],
     zero_match: &[String],
+    ignored: &[candor_report::IgnoredLine],
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -1477,7 +1497,7 @@ fn write_verdict(
     if targets.is_empty() {
         return true;
     }
-    let json = match candor_report::gate_verdict_json_v27(
+    let json = match candor_report::gate_verdict_json_v28(
         violations,
         coverage,
         analyzed_count,
@@ -1485,6 +1505,7 @@ fn write_verdict(
         vocabulary,
         unevaluated,
         zero_match,
+        ignored,
     ) {
         Ok(j) => j,
         Err(e) => {

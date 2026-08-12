@@ -2505,3 +2505,42 @@ fn gate_json_naming_parsed_source_under_the_target_is_refused_and_candor_layout_
     let _ = std::fs::remove_file(&outside);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// SPEC §6.2 ⟨0.28⟩: the scan route's `--gate-json` verdict carries `ignored: [{line, text, reason}]`
+/// for every policy line the parse dropped, omitted when nothing was dropped. The per-line stderr
+/// warnings are unchanged — this is their machine half, and before the fix the verdict document was
+/// silent while stderr warned (a route is not covered by its sibling: candor-query gate is pinned in
+/// its own crate's tests).
+#[test]
+fn scan_gate_json_carries_dropped_policy_lines_as_ignored() {
+    let d = make_crate("ignoredscan", "pub fn go() { let _ = std::fs::read(\"x\"); }");
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Exec\nfrobnicate the walrus\n").unwrap();
+    let sink = d.join("v.json");
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .args(["--policy", pp.to_string_lossy().as_ref(), "--gate-json", sink.to_string_lossy().as_ref()])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0),
+        "a dropped line changes NEITHER ok NOR the exit — the leniency is unchanged, only disclosed: {}",
+        String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&sink).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(true));
+    let ig = v["ignored"].as_array().unwrap_or_else(|| panic!(
+        "the verdict must carry the dropped line — stderr is not the machine channel: {v}"));
+    assert_eq!(ig[0]["line"], serde_json::json!(2));
+    assert_eq!(ig[0]["text"], serde_json::json!("frobnicate the walrus"));
+    assert!(ig[0]["reason"].as_str().unwrap().contains("unknown rule kind"), "{v}");
+
+    // CONTROL: a clean policy's verdict has no `ignored` key (byte-identity pinned out of band).
+    std::fs::write(&pp, "deny Exec\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .args(["--policy", pp.to_string_lossy().as_ref(), "--gate-json", sink.to_string_lossy().as_ref()])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&sink).unwrap()).unwrap();
+    assert!(v.get("ignored").is_none(), "a clean policy's verdict stays byte-identical: {v}");
+    let _ = std::fs::remove_dir_all(&d);
+}

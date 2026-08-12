@@ -792,12 +792,27 @@ pub fn gate_verdict_json_with_coverage(
     violations: &mut [GateViolation],
     coverage: Option<&GateCoverage>,
 ) -> serde_json::Result<String> {
+    gate_verdict_json_with_coverage_v28(violations, coverage, &[])
+}
+
+/// ⟨0.28⟩ [`gate_verdict_json_with_coverage`] plus the §6.2 `ignored` disclosure, for the assembled
+/// (lint-route) verdict `candor-query gate-verdict` writes — that route's verdict has no `analyzed`
+/// envelope, so it cannot ride [`gate_verdict_json_v28`]. Empty ⇒ the key is omitted and the document
+/// is byte-identical to the pre-⟨0.28⟩ form.
+pub fn gate_verdict_json_with_coverage_v28(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    ignored: &[IgnoredLine],
+) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     #[derive(Serialize)]
     struct Verdict<'a> {
         spec: &'static str,
         ok: bool,
         violations: &'a [GateViolation],
+        /// ⟨0.28⟩ SPEC §6.2 — the policy lines the parse dropped; omitted when nothing was.
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        ignored: &'a [IgnoredLine],
         #[serde(skip_serializing_if = "Option::is_none")]
         coverage: Option<&'a GateCoverage>,
     }
@@ -805,6 +820,7 @@ pub fn gate_verdict_json_with_coverage(
         spec: SPEC_VERSION,
         ok: violations.is_empty(),
         violations,
+        ignored,
         coverage,
     })
 }
@@ -891,6 +907,30 @@ pub struct Unevaluated {
     pub why: String,
 }
 
+/// ⟨0.28⟩ ONE POLICY LINE THE PARSE DROPPED (SPEC §6.2's `ignored` disclosure).
+///
+/// **THE DEFECT.** The line-level leniency is correct — an unrecognized or malformed line is
+/// ignored-with-a-warning, never silently reinterpreted — but every engine's warning went to stderr
+/// while the verdict document stayed silent, so a machine consumer reading `{ok: true, violations: []}`
+/// could not see that the gate it was reading was SMALLER than the gate that was written. The refusal
+/// fires only at ZERO survivors, so a 9-of-10-dropped policy was a 90%-gateless green with nothing on
+/// the machine channel at every fraction below 100%.
+///
+/// DISTINCT from [`Unevaluated`], and the distinction is load-bearing: `unevaluated` carries rules that
+/// PARSED and could not be answered; this carries text that never became a rule at all. A consumer that
+/// sees neither is entitled to believe the policy on disk is the policy that ran.
+///
+/// Omitted from the verdict when nothing was dropped, so a clean policy's verdict stays byte-identical.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct IgnoredLine {
+    /// The 1-based source line in the policy file.
+    pub line: usize,
+    /// The source line, VERBATIM (before comment-stripping and trimming).
+    pub text: String,
+    /// Why the parse dropped it — the same sentence the stderr warning carries.
+    pub reason: String,
+}
+
 /// [`gate_verdict_json_full`] plus the ⟨0.24⟩ `policyVocabulary` disclosure. Appended LAST so that every
 /// verdict without ambient vocabulary — which is nearly all of them — stays byte-identical.
 pub fn gate_verdict_json_v24(
@@ -901,6 +941,27 @@ pub fn gate_verdict_json_v24(
     vocabulary: Option<&GateVocabulary>,
 ) -> serde_json::Result<String> {
     gate_verdict_json_v27(violations, coverage, analyzed_count, unanalyzed, vocabulary, &[], &[])
+}
+
+/// ⟨0.28⟩ [`gate_verdict_json_v27`] plus the §6.2 `ignored` disclosure: the policy lines the parse
+/// DROPPED, `[{line, text, reason}]`, omitted when nothing was dropped (a clean policy's verdict is
+/// byte-identical to the v27 form). It rides VERDICT documents only, like `zeroMatch` — the refusal
+/// document has its own whole-policy `unevaluated` entry, and a refused run has no verdict for a
+/// dropped line to have shrunk. Disclosure only: `ok` and the exit code do not consult it.
+#[allow(clippy::too_many_arguments)]
+pub fn gate_verdict_json_v28(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+    vocabulary: Option<&GateVocabulary>,
+    unevaluated: &[Unevaluated],
+    zero_match: &[String],
+    ignored: &[IgnoredLine],
+) -> serde_json::Result<String> {
+    gate_verdict_json_impl(
+        violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
+    )
 }
 
 /// ⟨0.27⟩ [`gate_verdict_json_v24`] plus the two disclosure lists a composed verdict can carry beside its
@@ -935,6 +996,22 @@ pub fn gate_verdict_json_v27(
     unevaluated: &[Unevaluated],
     zero_match: &[String],
 ) -> serde_json::Result<String> {
+    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[])
+}
+
+/// The ONE verdict writer behind [`gate_verdict_json_v27`]/[`gate_verdict_json_v28`] — a single field
+/// list, so the two rungs cannot drift on shape.
+#[allow(clippy::too_many_arguments)]
+fn gate_verdict_json_impl(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+    vocabulary: Option<&GateVocabulary>,
+    unevaluated: &[Unevaluated],
+    zero_match: &[String],
+    ignored: &[IgnoredLine],
+) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     #[derive(Serialize)]
     struct Count {
@@ -956,6 +1033,10 @@ pub fn gate_verdict_json_v27(
         /// `ok` and the exit code are computed without consulting it.
         #[serde(rename = "zeroMatch", skip_serializing_if = "<[_]>::is_empty")]
         zero_match: &'a [String],
+        /// ⟨0.28⟩ SPEC §6.2 — the policy lines the parse DROPPED (see [`IgnoredLine`]). Disclosure
+        /// only, omitted when nothing was dropped.
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        ignored: &'a [IgnoredLine],
         #[serde(skip_serializing_if = "Option::is_none")]
         coverage: Option<&'a GateCoverage>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -974,6 +1055,7 @@ pub fn gate_verdict_json_v27(
         violations,
         unevaluated,
         zero_match,
+        ignored,
         coverage,
         incomplete,
         unanalyzed,

@@ -46,7 +46,7 @@ pub(crate) use candor_classify::gate::net_classes_of;
 pub(crate) fn policy_precheck(
     policy_text: &str,
     unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
-) -> (Vec<(String, String)>, UsedAliases) {
+) -> (Vec<(String, String)>, UsedAliases, Vec<candor_report::IgnoredLine>) {
     let p = candor_classify::policy::parse_policy_silent(policy_text, unknown_aliases);
     // ⟨0.24⟩ FATAL errors only. `ParsedPolicy::errors` now also carries the lines the parser DROPPED but
     // could survive (a malformed `forbid`, an unknown rule kind) — those are `parsepolicy`'s to report,
@@ -57,7 +57,20 @@ pub(crate) fn policy_precheck(
         .filter(|e| e.fatal)
         .map(|e| (e.rule.clone(), e.message.clone()))
         .collect();
-    (fatal, p.used_aliases)
+    // ⟨0.28⟩ …and the SURVIVABLE dropped lines, third: SPEC §6.2 puts them on the verdict document as
+    // `ignored` (they are not fatal — the rest of the policy means what it says — but every one of
+    // them is a gate that asked nothing, and only the verdict can tell its consumer so).
+    let ignored = p
+        .errors
+        .iter()
+        .filter(|e| !e.fatal)
+        .map(|e| candor_report::IgnoredLine {
+            line: e.line,
+            text: e.text.clone(),
+            reason: e.message.clone(),
+        })
+        .collect();
+    (fatal, p.used_aliases, ignored)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -903,6 +916,30 @@ pub(crate) fn record_gate_unevaluated(items: &[candor_report::Unevaluated]) {
     }
 }
 
+/// ⟨0.28⟩ SPEC §6.2 — THE POLICY LINES THE PARSE DROPPED, toward the verdict's `ignored` disclosure.
+/// The line-level leniency is unchanged (an unrecognized line is ignored-with-a-warning); this is what
+/// that leniency COMPOSES TO on the machine channel: every line ignored is a gate that asked nothing,
+/// and a verdict that omits them claims the policy on disk is the policy that ran. Distinct from
+/// `unevaluated` (rules that PARSED and could not be answered). A no-op unless `--gate-json` was
+/// given, mirroring the other recorders; deduplicated by line number for the workspace case, where the
+/// same policy text is parsed once but a future second parse must not double-report.
+pub(crate) static GATE_IGNORED: std::sync::OnceLock<
+    std::sync::Mutex<Vec<candor_report::IgnoredLine>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn record_gate_ignored(items: &[candor_report::IgnoredLine]) {
+    if items.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    let acc = GATE_IGNORED.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut g = acc.lock().unwrap();
+    for it in items {
+        if !g.iter().any(|e| e.line == it.line) {
+            g.push(it.clone());
+        }
+    }
+}
+
 /// ⟨0.27⟩ THE RULES WHOSE SCOPE BOUND NO FUNCTION (SPEC §4/§3.1 `zeroMatch`) — accumulated across
 /// workspace members like the violations, written once onto the verdict. A `BTreeSet` because the pinned
 /// collation is code-point sorted + deduplicated (a workspace's members all evaluate the same policy, so
@@ -1083,7 +1120,14 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .get()
         .map(|m| m.lock().unwrap().iter().cloned().collect())
         .unwrap_or_default();
-    match candor_report::gate_verdict_json_v27(
+    // ⟨0.28⟩ …and the policy lines the parse DROPPED (SPEC §6.2 `ignored`): the same facts the per-line
+    // stderr warnings carry, on the machine channel — omitted when nothing was dropped, so a clean
+    // policy's verdict is byte-identical.
+    let ignored: Vec<candor_report::IgnoredLine> = GATE_IGNORED
+        .get()
+        .map(|m| m.lock().unwrap().clone())
+        .unwrap_or_default();
+    match candor_report::gate_verdict_json_v28(
         &mut violations,
         coverage.as_ref(),
         analyzed_count,
@@ -1091,6 +1135,7 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         vocabulary.as_ref(),
         &unevaluated,
         &zero_match,
+        &ignored,
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
