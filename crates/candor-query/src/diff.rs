@@ -408,16 +408,30 @@ fn attach_coverage(
 fn attach_manifest(v: &mut serde_json::Value, cur_pre: &str, base_pre: &str) {
     let cur = crate::completeness::report_completeness(cur_pre);
     let base = crate::completeness::report_completeness(base_pre);
+    // `judgedNothing` RIDES BESIDE the incomplete flag on both sides — the family ruling (3-of-4
+    // majority shape: an ARRAY of report paths, the shape `CompletenessFields` already gives every
+    // other verb). The first version of this emitted the flag alone, which collapses SPEC §2's two
+    // causes into one bit: `incomplete: true` cannot say WHICH report judged nothing, and a count-0
+    // report legitimately carries no `unanalyzed` to name it either (the facade/`pub use` package —
+    // there is no unread file, the scan just reached no conclusion). Naming the path is what lets a
+    // supply-chain reviewer tell "the baseline comparison floor is soft" from "this particular
+    // baseline report asserts nothing at all".
     if cur.must_hedge() {
         v["incomplete"] = serde_json::json!(true);
         if !cur.unanalyzed.is_empty() {
             v["unanalyzed"] = serde_json::json!(cur.unanalyzed);
+        }
+        if !cur.judged_nothing.is_empty() {
+            v["judgedNothing"] = serde_json::json!(cur.judged_nothing);
         }
     }
     if base.must_hedge() {
         v["baselineIncomplete"] = serde_json::json!(true);
         if !base.unanalyzed.is_empty() {
             v["baselineUnanalyzed"] = serde_json::json!(base.unanalyzed);
+        }
+        if !base.judged_nothing.is_empty() {
+            v["baselineJudgedNothing"] = serde_json::json!(base.judged_nothing);
         }
     }
 }
