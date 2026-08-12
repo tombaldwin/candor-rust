@@ -4386,3 +4386,51 @@ fn the_advisory_verbs_read_the_same_report_set_the_gate_does() {
     assert_eq!(v["ok"], serde_json::json!(true), "the sibling's manifest is not pulled in:\n{v:#}");
     assert_eq!(out.status.code().unwrap_or(-1), 0, "{v:#}");
 }
+
+#[test]
+fn gains_names_which_report_judged_nothing_on_either_side() {
+    // ⟨0.28⟩ family ruling on the `gains` disclosure split (rust/swift emitted `baselineIncomplete`
+    // alone; java carried `baselineJudgedNothing: [paths]`; ts a bare boolean): the key is CARRIED and
+    // its shape is the ARRAY OF REPORT PATHS — the 3-of-4 majority shape `judgedNothing` already has in
+    // every other verb, and the one that says WHICH report asserts nothing, which the flag alone
+    // cannot. A count-0 report is the standard post-⟨0.28⟩ arming artifact AND the legitimate facade
+    // package, and it carries no `unanalyzed` to name itself by — so without this key the document
+    // discloses "the floor is soft" with nothing for the reviewer to go look at.
+    let f = Fixture::new("gainsjudged");
+    let base_pre = format!("{}.base", f.prefix);
+    let cur_pre = format!("{}.cur", f.prefix);
+    let judged_nothing = r#"{"candor":{"version":"t","spec":"0.28"},"package":"lib","functions":[],"analyzed":{"count":0,"digest":"0"}}"#;
+    let intact = r#"{"candor":{"version":"t","spec":"0.28"},"package":"lib","functions":[{"fn":"lib::f","loc":"s:1","inferred":["Fs"],"hash":"h"}],"analyzed":{"count":1,"digest":"0"}}"#;
+    let base_file = format!("{base_pre}.lib.scan.json");
+    let cur_file = format!("{cur_pre}.lib.scan.json");
+
+    // Baseline judged nothing, current intact: the BASELINE side names its report.
+    std::fs::write(&base_file, judged_nothing).unwrap();
+    std::fs::write(&cur_file, intact).unwrap();
+    let out = Command::new(bin()).args(["gains", &cur_pre, &base_pre, "--json"]).output().expect("run");
+    assert_eq!(out.status.code(), Some(0), "gains stays advisory — the manifest is a disclosure, not an exit code");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["baselineIncomplete"], serde_json::json!(true), "the flag still rides: {v}");
+    assert_eq!(v["baselineJudgedNothing"], serde_json::json!([base_file.clone()]),
+        "the ARRAY-OF-PATHS shape, naming WHICH baseline report judged nothing: {v}");
+    assert!(v.get("incomplete").is_none() && v.get("judgedNothing").is_none(),
+        "the intact CURRENT side carries no hedge — the two sides fail differently and are disclosed separately: {v}");
+
+    // The mirror, for symmetry: a judged-nothing CURRENT names its report under the current-side key.
+    std::fs::write(&base_file, intact).unwrap();
+    std::fs::write(&cur_file, judged_nothing).unwrap();
+    let out = Command::new(bin()).args(["gains", &cur_pre, &base_pre, "--json"]).output().expect("run");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v}");
+    assert_eq!(v["judgedNothing"], serde_json::json!([cur_file]),
+        "the same treatment on the current side — `incomplete: true` alone cannot name the report: {v}");
+    assert!(v.get("baselineJudgedNothing").is_none(), "the intact BASELINE side stays clean: {v}");
+
+    // Control: two intact reports carry NONE of these keys (the prior rung's byte-identical guarantee).
+    std::fs::write(&cur_file, intact).unwrap();
+    let out = Command::new(bin()).args(["gains", &cur_pre, &base_pre, "--json"]).output().expect("run");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    for k in ["incomplete", "judgedNothing", "baselineIncomplete", "baselineJudgedNothing"] {
+        assert!(v.get(k).is_none(), "an intact pair must not carry `{k}`: {v}");
+    }
+}
