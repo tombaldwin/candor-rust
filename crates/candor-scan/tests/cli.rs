@@ -2442,3 +2442,66 @@ fn repeated_out_is_refused_and_every_named_prefix_gets_the_fail_closed_report() 
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// SPEC §3.3.1 ⟨0.28⟩: **a sink under the scan target that bears an extension this engine parses is
+/// refused**, having written nothing — the residual the exact-artifact rule left. Measured before the
+/// fix: `candor-scan . --policy P --gate-json src/lib.rs` replaced the operator's SOURCE FILE with the
+/// armed verdict, then reported the file it had just destroyed as a parse failure. EXACT scope, never
+/// containment: `<dir>/.candor/verdict.json` is under the target and not source — the recommended
+/// layout — and a `.rs` sink OUTSIDE the target is not this rule; both are pinned as controls.
+#[test]
+fn gate_json_naming_parsed_source_under_the_target_is_refused_and_candor_layout_still_works() {
+    let d = make_crate("srcsink", "pub fn go() { let _ = std::fs::read(\"x\"); }");
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Exec\n").unwrap();
+    let src = d.join("src/lib.rs");
+    let before = std::fs::read(&src).unwrap();
+
+    // (1) The defect route, single sink: refused at exit 2, source byte-identical.
+    let out = Command::new(bin())
+        .current_dir(&d)
+        .args([".", "--policy", "candor.policy", "--gate-json", "src/lib.rs"])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2),
+        "a .rs sink under the target must be refused — arming would overwrite source the run is \
+         about to parse: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read(&src).unwrap(), before,
+        "NOTHING is written to the refused sink — before the fix the verdict replaced the source file");
+
+    // (2) The duplicate route shares the predicate: the source path is exempt (nothing written),
+    // the innocent sink still gets the duplicate refusal document.
+    let v2 = d.join("v2.json");
+    let out = Command::new(bin())
+        .current_dir(&d)
+        .args([".", "--policy", "candor.policy", "--gate-json", "src/lib.rs",
+               "--gate-json", v2.to_string_lossy().as_ref()])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(std::fs::read(&src).unwrap(), before, "source intact on the duplicate route too");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&v2).unwrap()).unwrap();
+    assert_eq!(v["refused"], serde_json::json!(true), "the other named sink learns it lost: {v}");
+
+    // (3) CONTROL — the recommended layout: a NON-source sink under the target still gates for real.
+    let out = Command::new(bin())
+        .current_dir(&d)
+        .args([".", "--policy", "candor.policy", "--gate-json", ".candor/verdict.json"])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0),
+        "a verdict into .candor/ INSIDE the tree being scanned is ordinary usage — a rule that \
+         refuses any sink under the target refuses the default: {}",
+        String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(d.join(".candor/verdict.json")).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(true), "a REAL verdict, not the armed placeholder: {v}");
+
+    // (4) CONTROL — a .rs sink OUTSIDE the target is not this rule (it is nobody's input).
+    let outside = std::env::temp_dir().join(format!("candor-scan-outside-{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&outside);
+    let out = Command::new(bin())
+        .current_dir(&d)
+        .args([".", "--policy", "candor.policy", "--gate-json", outside.to_string_lossy().as_ref()])
+        .output().expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(0), "a .rs path outside the target is a legal (odd) sink");
+    let _ = std::fs::remove_file(&outside);
+    let _ = std::fs::remove_dir_all(&d);
+}
