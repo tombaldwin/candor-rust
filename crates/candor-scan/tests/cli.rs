@@ -2201,3 +2201,53 @@ fn duplicate_gate_json_refusal_never_lands_on_a_chained_dep_report() {
     assert_eq!(v["refused"], serde_json::json!(true), "the non-input sink carries the refusal: {v}");
 }
 
+#[test]
+fn a_failing_run_never_arms_the_prefix_form_baseline_it_reads() {
+    // CRITICAL (the dep-DIRECTORY lesson un-applied to its sibling): `run_inputs` registered the raw
+    // CANDOR_BASELINE string, but a prefix value RESOLVES to `<value>.<crate>.scan.json` (+ the
+    // callgraph sidecar `check_baseline` reads beside it), and `same_artifact("base",
+    // "base.app.scan.json")` is false. Measured: `CANDOR_BASELINE=base candor-scan . --out base
+    // --zzz-not-a-flag` exited 2 having replaced the ratchet's baseline — a file this run READS — with
+    // the placeholder. Permanently: the argv never stops failing, so no later run rewrites it.
+    let d = make_crate("blarm", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "recording the baseline is a plain scan");
+    let report = d.join("base.blarm.scan.json");
+    let sidecar = d.join("base.blarm.scan.callgraph.json");
+    let (report_before, sidecar_before) = (bytes_of(&report), bytes_of(&sidecar));
+
+    let (rc, _, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()),
+        &["--out", pre.to_string_lossy().as_ref(), "--zzz-not-a-flag"]);
+    assert_eq!(rc, Some(2), "the unknown flag still refuses: {stderr}");
+    assert_eq!(bytes_of(&report), report_before,
+        "the baseline report this run READS must survive a failing argv — before the fix it held the placeholder");
+    assert_eq!(bytes_of(&sidecar), sidecar_before,
+        "…and the callgraph sidecar `check_baseline` reads beside it, which no channel registered at all");
+    assert!(stderr.contains("would arm over"),
+        "the skip is DISCLOSED, not silent — the operator learns their baseline sat in the arming path: {stderr}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_baseline_update_workflow_still_writes_fresh_reports_over_the_skipped_arming() {
+    // The workflow this repo's own error text prescribes ("Commit it, or record one: candor-scan {dir}
+    // --out {value}"): CANDOR_BASELINE=X with --out X. Arming must SKIP the baseline files (they are
+    // inputs) with the existing diagnostic — `arm_out_prefix` uses `continue` + a warning rather than
+    // exiting precisely so this composes — and the completed run must still write its new reports.
+    let d = make_crate("blupdate", "pub fn go() { let _ = std::fs::read(\"/x\"); }");
+    let pre = d.join("base");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+
+    let (rc, _, stderr) = scan_with_baseline(&d, Some(pre.to_string_lossy().as_ref()),
+        &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "re-recording over an unchanged crate is a clean run: {stderr}");
+    assert!(stderr.contains("would arm over"), "the input skip is disclosed on the update too: {stderr}");
+    let v: serde_json::Value = serde_json::from_slice(&bytes_of(&d.join("base.blupdate.scan.json")))
+        .expect("the update wrote a fresh report");
+    let _ = std::fs::remove_dir_all(&d);
+    assert_eq!(v["analyzed"]["count"], serde_json::json!(1),
+        "the run's OWN write phase is unaffected by the arming skip — a real report, not a placeholder: {v}");
+}
+
