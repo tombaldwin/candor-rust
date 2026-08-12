@@ -309,7 +309,54 @@ fn refuse_gate_json_over_any_input(gate: &str, target: &str, policy_flag: Option
     for (path, label) in run_inputs(target, policy_flag) {
         refuse_gate_json_over_input(gate, Some(&path), &label);
     }
+    if gate_json_is_parsed_source_under_target(gate, target) {
+        eprintln!(
+            "candor-scan: --gate-json {gate} lies under the scan target {target} and bears an \
+             extension this engine parses (.rs) — refusing (exit 2), and nothing was written there."
+        );
+        eprintln!("        Arming writes at parse time, BEFORE the file walk, so this would overwrite a");
+        eprintln!("        source file this run is about to read and then scan the wreckage. A non-source");
+        eprintln!("        sink under the target ({target}/.candor/verdict.json, say) is the recommended");
+        eprintln!("        layout and is permitted; give the verdict a path that is not source.");
+        std::process::exit(2);
+    }
     refuse_gate_json_at_config(gate);
+}
+
+/// ⟨0.28⟩ SPEC §3.3.1: **a sink that lies UNDER the scan target AND bears an extension this engine
+/// parses is refused** — the residual the exact-artifact rule deliberately left. The exact-artifact
+/// registration in `run_inputs` catches `--gate-json <target>` itself; it cannot catch
+/// `--gate-json src/lib.rs` while scanning `.`, because the file set the run will parse is not known
+/// at the moment arming happens (arming precedes the walk, and deferring it would uncover the
+/// argv-error exits the arming rule exists for). MEASURED here before the fix:
+/// `candor-scan . --policy P --gate-json src/lib.rs` replaced the operator's SOURCE FILE with the
+/// armed verdict, then reported the file it had just destroyed as a parse failure (exit 2, the
+/// self-describing arm — candor-ts's spelling of the same defect exited 0, reported as SUCCESS).
+///
+/// NOT containment in general: `<dir>/.candor/report.json` is under the target and is NOT a source
+/// file, so the recommended layout stays permitted — that control is what separates this from the
+/// containment fix the ruling explicitly rejects ("one engine tried containment and it took 33 tests
+/// with it"). An engine knows its own source extensions before it knows its file list; `.rs` is the
+/// whole of this engine's parse set (see the walk's extension check in this file).
+fn gate_json_is_parsed_source_under_target(gate: &str, target: &str) -> bool {
+    if gate == "-" {
+        return false;
+    }
+    let g = std::path::Path::new(gate);
+    if g.extension().and_then(|e| e.to_str()) != Some("rs") {
+        return false;
+    }
+    // The target must resolve (a nonexistent target is its own refusal a moment later, having written
+    // nothing — this check runs before arming). The sink may not exist yet — resolve its parent and
+    // re-append the name, the same shape `same_artifact` uses.
+    let Ok(t) = std::path::Path::new(target).canonicalize() else {
+        return false;
+    };
+    let resolved = g.canonicalize().ok().or_else(|| {
+        let parent = g.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        Some(parent.canonicalize().ok()?.join(g.file_name()?))
+    });
+    resolved.is_some_and(|r| r.starts_with(&t))
 }
 
 /// Refuse a `--gate-json` sink that names an INPUT of this run, having written nothing (exit 2).
@@ -334,6 +381,12 @@ fn gate_json_input_collision(gate: &str, target: &str, policy: Option<&str>) -> 
         return false;
     }
     if is_gate_json_at_config(gate) {
+        return true;
+    }
+    // ⟨0.28⟩ a parsed-source file under the target is an input by the same reading — asked here too,
+    // so the DUPLICATE-sink route cannot write its refusal document over source the single-sink route
+    // refuses to touch (the two-spellings-of-one-rule drift this predicate exists to prevent).
+    if gate_json_is_parsed_source_under_target(gate, target) {
         return true;
     }
     run_inputs(target, policy).iter().any(|(path, _)| same_artifact(gate, path))
