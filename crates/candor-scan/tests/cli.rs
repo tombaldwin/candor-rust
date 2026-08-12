@@ -2251,3 +2251,40 @@ fn the_baseline_update_workflow_still_writes_fresh_reports_over_the_skipped_armi
         "the run's OWN write phase is unaffected by the arming skip — a real report, not a placeholder: {v}");
 }
 
+#[test]
+fn a_deps_run_that_fails_before_scanning_leaves_the_placeholders_standing() {
+    // CRITICAL: `run_with_deps` RETURNS 2 on a missing Cargo.lock, and the disarm hand-back ran
+    // whenever control returned — so a run that failed before writing ANYTHING restored the previous
+    // run's green reports, the precise state the arming exists to destroy (⟨0.24⟩: "not left holding a
+    // previous run's answer"). The hand-back is now licensed by the write phase completing, not by
+    // being reached.
+    let d = make_crate("depsarm", "pub fn go() {}\n"); // make_crate writes no Cargo.lock
+    let pre = d.join("pre");
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0), "the previous good run records its report");
+    let report = d.join("pre.depsarm.scan.json");
+    let stale_green = bytes_of(&report);
+
+    let (rc, _, stderr) = scan_with_baseline(&d, None,
+        &["--deps", "--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(2), "--deps without a Cargo.lock refuses: {stderr}");
+    let now = bytes_of(&report);
+    assert_ne!(now, stale_green,
+        "a run that failed before its write phase must NOT hand the previous run's report back");
+    assert!(String::from_utf8_lossy(&now).contains("\"reason\": \"armed:"),
+        "what stands is the armed placeholder — a non-claim, not a stale claim: {}",
+        String::from_utf8_lossy(&now));
+
+    // The control: a COMPLETED run over the same prefix still hands back what it did not own (the
+    // orphan rule) — the license keys on the write phase, not on the exit code.
+    let orphan = d.join("pre.gone.scan.json");
+    std::fs::write(&orphan,
+        "{\n  \"candor\": { \"version\": \"scan-x\", \"toolchain\": \"stable\", \"spec\": \"0.27\" },\n  \"functions\": []\n}\n").unwrap();
+    let orphan_before = bytes_of(&orphan);
+    let (rc, _, _) = scan_with_baseline(&d, None, &["--out", pre.to_string_lossy().as_ref()]);
+    assert_eq!(rc, Some(0));
+    assert_eq!(bytes_of(&orphan), orphan_before,
+        "a completed run still restores the orphan it armed but did not overwrite");
+    let _ = std::fs::remove_dir_all(&d);
+}
+

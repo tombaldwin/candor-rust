@@ -3021,6 +3021,9 @@ pub(crate) fn scan_target(
             // the two-stream-refusal clause already exists to prevent, arriving through a different door.
             let _ = crate::gate::REPORT_STREAM_WRITTEN.set(true);
         }
+        // ⟨0.28⟩ The write phase is over (scan_one's report write precedes every return it has), which
+        // is the license `disarm_unwritten_out_reports` requires — see mark_out_reports_written.
+        crate::gate::mark_out_reports_written();
         return code;
     }
     let prefix = if prefix.is_empty() { format!("{dir}/.candor/report") } else { prefix };
@@ -3046,8 +3049,11 @@ pub(crate) fn scan_target(
         // ⟨0.28⟩ Latch — see the single-crate branch above.
         let _ = crate::gate::REPORT_STREAM_WRITTEN.set(true);
     } else {
-        eprintln!("candor-scan: workspace — {} package report(s) under one prefix", dirs.len());
+eprintln!("candor-scan: workspace — {} package report(s) under one prefix", dirs.len());
     }
+    // ⟨0.28⟩ Every member's write phase is over — the loop above has no early exit — so the disarm
+    // hand-back is licensed. See mark_out_reports_written.
+    crate::gate::mark_out_reports_written();
     rc
 }
 

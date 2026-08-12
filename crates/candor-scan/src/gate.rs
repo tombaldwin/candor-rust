@@ -792,6 +792,18 @@ static OUT_ARMED_SIDECARS: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::
 
 /// The exact placeholder bytes, so `disarm` can tell "still armed" from "this run rewrote it".
 static OUT_ARM_DOC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// ⟨0.28⟩ Latched by `scan_target` once the run has FINISHED ITS WRITE PHASE over the target — the
+/// license [`disarm_unwritten_out_reports`] requires before it hands anything back. See that fn for
+/// why the license is this and not "control returned".
+static OUT_REPORTS_WRITTEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The run scanned its whole target and wrote (or streamed) a report per member. Only `scan_target`
+/// calls this, at its exits — it is the one place both the plain and `--deps` routes funnel through,
+/// so a route that dies BEFORE reaching it (a missing `Cargo.lock`, or any early return a future
+/// change adds to `run_with_deps`) never acquires the license and the placeholders stand.
+pub(crate) fn mark_out_reports_written() {
+    let _ = OUT_REPORTS_WRITTEN.set(true);
+}
 /// `(path, bytes-before-arming)` for every report this run armed under an `--out` prefix.
 static OUT_ARMED: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>> =
     std::sync::OnceLock::new();
@@ -812,7 +824,20 @@ static OUT_ARMED: std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, 
 ///
 /// Deleting the placeholder instead of restoring is also rejected, for §3.3.1's own reason: a consumer
 /// that treats a missing file as "nothing to report" fails open by a different route.
+///
+/// **LICENSED BY [`mark_out_reports_written`], NOT BY BEING CALLED.** This used to run whenever control
+/// came back to `scan_main`, and `run_with_deps` RETURNS 2 on a missing `Cargo.lock` instead of
+/// exiting — so a `--deps` run that failed before writing anything handed the previous run's green
+/// reports back, which is precisely the state this rung exists to destroy (⟨0.24⟩: "not left holding a
+/// previous run's answer"). Gating on the call site would fix one spelling and leave the next early
+/// `return` to re-open it silently; the license is keyed on the thing the hand-back actually requires —
+/// THIS run wrote its report set, so a file still holding the placeholder is one the run did not own —
+/// and only `scan_target`'s exits grant it. The orphan hand-back on a COMPLETED run (exit 0, 1 or a
+/// gate refusal's 2 — all after the write phase) is unchanged.
 pub(crate) fn disarm_unwritten_out_reports() {
+    if !matches!(OUT_REPORTS_WRITTEN.get(), Some(true)) {
+        return;
+    }
     let Some(armed) = OUT_ARMED.get() else { return };
     let Some(doc) = OUT_ARM_DOC.get() else { return };
     for (path, prev) in armed.lock().unwrap().iter() {
