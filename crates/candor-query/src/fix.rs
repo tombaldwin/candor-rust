@@ -506,11 +506,14 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     };
     let rules = &parsed.rules;
 
-    let entries = load_entries(prefix);
-    if entries.is_empty() {
-        eprintln!("candor fix-gate: no report for `{prefix}` — scan the crate first.");
-        return 2;
-    }
+    // ⟨0.28⟩ THROUGH THE LOUD LOADER, NOT A BARE EMPTINESS CHECK — same repair as `cmd_unverified`,
+    // where the full note lives. A judged-nothing report (`functions: []`, `analyzed.count: 0`) is a
+    // DISCLOSURE, not an exit code (SPEC §2 ⟨0.24⟩): it answers below at exit 0 with `incomplete: true`
+    // + `judgedNothing`, while a missing or net-corrupt report stays a loud exit 2 in the loader.
+    let entries = match crate::load::load_entries_loud(prefix) {
+        Ok(e) => e,
+        Err(code) => return code,
+    };
     let by_name: HashMap<&str, &ReportEntry> = entries.iter().map(|e| (e.func.as_str(), e)).collect();
     let rev = reverse_graph(&entries);
 
@@ -602,8 +605,14 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     // call survived the entire suite: the `✓` below IS the prose `ok: true`.
     comp.print_note(
         "the remedies below are computed over a universe candor cannot fully see",
-        "A crossing in one of those is INVISIBLE here, and so is a caller a hoist would target. \
-         `gate --report` exits 2 over these bytes. Re-scan for a complete answer.",
+        // ⟨0.28⟩ `gate_line()`, for the reason its doc gives: "exits 2" is FALSE of a judged-nothing-
+        // only report, and a note that mis-states the gate discredits itself. Byte-identical on the
+        // `unanalyzed` arm.
+        &format!(
+            "A crossing in one of those is INVISIBLE here, and so is a caller a hoist would target. \
+             {} Re-scan for a complete answer.",
+            comp.gate_line()
+        ),
     );
     if plans.is_empty() {
         if unanswered.is_empty() && !comp.must_hedge() {

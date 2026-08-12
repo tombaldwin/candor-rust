@@ -19,7 +19,6 @@
 //! unverified pass at all — that absence is exactly what the verb would have to report.
 
 use crate::grammar::{parse, report_or_discover, Shape};
-use crate::load::load_entries;
 use candor_classify::policy::{rule_and_upgrade, unverified_hole_rule, PolicyRule};
 use candor_report::ReportEntry;
 
@@ -54,11 +53,18 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let rules = &parsed.rules;
-    let entries = load_entries(prefix);
-    if entries.is_empty() {
-        eprintln!("candor unverified: no report for `{prefix}` — scan the crate first.");
-        return 2;
-    }
+    // ⟨0.28⟩ THROUGH THE LOUD LOADER, NOT A BARE EMPTINESS CHECK. `entries.is_empty()` conflated two
+    // causes that SPEC rules in OPPOSITE directions: *no report file at all* (§3.2's "no report is a
+    // loud failure" — exit 2, and `load_entries_loud` also keeps a net-corrupt report loud) and *a
+    // well-formed report that JUDGED NOTHING* (`functions: []`, `analyzed.count: 0` — SPEC §2 ⟨0.24⟩:
+    // "A DISCLOSURE, NOT AN EXIT CODE"). This verb exited 2 over the second, claiming it got LESS far
+    // than `gate --report` on identical bytes — the mirror of the over-claim `unverified_exit` exists
+    // to prevent, and the outlier posture on the rung commit `e1a341f` defined: the count-0 cause
+    // reaches both disclosure channels (via `report_completeness` below) and STOPS at the exit code.
+    let entries = match crate::load::load_entries_loud(prefix) {
+        Ok(e) => e,
+        Err(code) => return code,
+    };
 
     // A hole: a function that is Unknown, sits in a deny/pure scope, and PASSES that rule (carries none of its
     // forbidden real effects). The predicate is `unverified_hole_rule` — the SAME one candor-scan's gate note
@@ -203,8 +209,14 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     // prose `ok: true`. Printed FIRST, so it qualifies the lists below as much as the verdict.
     comp.print_note(
         "the functions named below are only those candor could see",
-        "A function in one of those is ABSENT from the report, so it cannot be named here at all. \
-         `gate --report` exits 2 over these bytes. Re-scan for a complete answer.",
+        // ⟨0.28⟩ `gate_line()`, not a fixed "exits 2" claim: the two causes get OPPOSITE answers from
+        // the gate, and over a judged-nothing-only report the old sentence sent the reader to a CI job
+        // that passes. Byte-identical on the `unanalyzed` arm — `gate_line()` IS the old sentence there.
+        &format!(
+            "A function in one of those is ABSENT from the report, so it cannot be named here at all. \
+             {} Re-scan for a complete answer.",
+            comp.gate_line()
+        ),
     );
 
     if holes.is_empty() && unanswered.is_empty() {
@@ -215,7 +227,12 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
                 "candor unverified: nothing candor COULD SEE is an unverified hole — but see the \
                  INCOMPLETE note above; this is NOT the provably-clean all-clear."
             );
-            return unverified_exit(strict, false, false, true);
+            // ⟨0.28⟩ `comp.incomplete()`, NOT a literal `true`: `must_hedge()` is the trigger for the
+            // WITHDRAWAL above, but the exit follows the gate, and a judged-nothing-only report is the
+            // arm ⟨0.24⟩ ruled "a disclosure, not an exit code". The literal made this verb's two
+            // channels disagree about one run — prose `--strict` exited 2 where `--json --strict`
+            // exited 0 over identical bytes (measured).
+            return unverified_exit(strict, false, false, comp.incomplete());
         }
         println!("candor unverified: every function in a pure/deny layer is PROVABLY clean (no Unknown holes) ✓");
         return 0;

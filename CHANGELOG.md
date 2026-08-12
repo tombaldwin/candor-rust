@@ -6,6 +6,22 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.28⟩ `unverified`/`fix-gate` ANSWER a judged-nothing report at exit 0 with the pinned caveat,
+  instead of refusing at exit 2** (SPEC §2 ⟨0.24⟩, *"A DISCLOSURE, NOT AN EXIT CODE"*). Both verbs
+  guarded on `entries.is_empty()`, which conflated two causes SPEC rules in opposite directions: over
+  a ⟨0.21⟩ Row-1 report (`functions: []`, `analyzed.count: 0` — the standard post-failure artifact)
+  they exited 2 with *"no report … scan the crate first"*, claiming they got LESS far than
+  `gate --report` (exit 0) on identical bytes — the outlier posture on the rung this engine's own
+  `e1a341f` defined, with java/ts/swift all answering at exit 0. Both now load through
+  `load_entries_loud` (no-report and net-corrupt stay loud exit-2 refusals) and answer with
+  `incomplete: true` + `judgedNothing` (the array of report paths) on both channels. Two adjacent
+  channel-consistency repairs rode along: `unverified`'s prose all-clear branch hard-coded
+  `incomplete = true` into its strict exit, so prose `--strict` exited 2 where `--json --strict`
+  exited 0 over the same judged-nothing bytes (measured); and both verbs' INCOMPLETE notes closed
+  with a fixed *"`gate --report` exits 2 over these bytes"*, which is false of the count-0 cause —
+  they now take `gate_line()`, byte-identical on the `unanalyzed` arm. Output over intact,
+  unanalyzed-declaring, and unreadable-sibling reports is byte-identical to before on every channel.
+
 - **⟨0.28⟩ `candor-query gate`: the input guard covers what the `--report` locator EXPANDS to** (SPEC
   §3.3.1 (3), *"AND AN INPUT LOCATOR NAMES A SET — COMPARE THE EXPANSION, NEVER THE TOKEN"*). The gate
   verb's pre-pass compared `--gate-json` against the raw `--report` token while `load_gate_report` reads
