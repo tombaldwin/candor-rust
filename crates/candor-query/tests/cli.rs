@@ -506,6 +506,40 @@ fn diff_reports_a_gained_effect() {
 }
 
 #[test]
+fn diff_and_rewire_reject_a_flag_they_do_not_take_loud() {
+    // SPEC §3.3.1: "a typo'd or a not-applicable flag stays an exit-2 error, never a silent swallow" —
+    // the rule gains' bespoke parser carries and these two bespoke parsers did not (the P8 sink-surface
+    // matrix, 2026-08-12). Measured pre-fix: `diff A B --report --json` ran to a clean exit-0 answer
+    // with `baseline_version: "--report"` (the flag fell through to the version-stamp slot and was
+    // PUBLISHED), and `rewire A B --report --json` dropped BOTH tokens at exit 0. An exit-code check
+    // alone would pass on a wrong-cause refusal, so each refusal must also NAME the flag.
+    let f = Fixture::new("df-rw-flags");
+    f.write_report();
+    let rep = f.report_path();
+    // Every flag the family's --help derives as value-taking, plus a plain typo — not just the pair the
+    // failing matrix row happened to use (the sibling-route habit).
+    for flag in ["--report", "--policy", "--class", "--clear-other", "--gate-json", "--polciy"] {
+        let d = Command::new(bin()).args(["diff", &rep, &rep, flag, "--json"]).output().expect("run");
+        let de = String::from_utf8_lossy(&d.stderr).into_owned();
+        assert_eq!(d.status.code(), Some(2), "diff {flag} --json must be a usage error, not a clean answer:\n{de}");
+        assert!(de.contains(flag), "diff's refusal names the broken flag `{flag}`: {de}");
+        let r = Command::new(bin()).args(["rewire", &f.prefix, &f.prefix, flag, "--json"]).output().expect("run");
+        let re = String::from_utf8_lossy(&r.stderr).into_owned();
+        assert_eq!(r.status.code(), Some(2), "rewire {flag} --json must be a usage error, not a clean answer:\n{re}");
+        assert!(re.contains(flag), "rewire's refusal names the broken flag `{flag}`: {re}");
+    }
+    // The boundary, so the reject cannot over-reach: `--json` is honoured, `--text` (candor-ts's
+    // output-mode flag, #2) is tolerated, and rewire's `--json` now actually selects JSON (pre-fix it
+    // was silently prose — only a literal `1` in the third slot meant JSON).
+    let ok = Command::new(bin()).args(["diff", &rep, &rep, "--json", "--text"]).output().expect("run");
+    assert_eq!(ok.status.code(), Some(0), "--json/--text stay accepted: {}", String::from_utf8_lossy(&ok.stderr));
+    let rj = Command::new(bin()).args(["rewire", &f.prefix, &f.prefix, "--json"]).output().expect("run");
+    assert_eq!(rj.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&rj.stdout).contains("\"dropped\""),
+            "rewire --json emits the JSON shape, not prose");
+}
+
+#[test]
 fn whatif_unknown_effect_exits_2() {
     // A typo'd/lowercase effect (`net`) matches no deny rule and would print a false-green verdict —
     // it must be rejected as a usage error (exit 2).
