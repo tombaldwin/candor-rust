@@ -977,6 +977,112 @@ fn unverified_and_fix_gate_answer_a_judged_nothing_report_at_exit_0_with_the_cav
     }
 }
 
+/// ⟨0.28⟩ SPEC §2 — **THE THIRD ROW IS NOT THE FIRST ROW**, end to end through the shipped binary.
+///
+/// A report carrying NO `analyzed` key (§2's row 3, a pre-⟨0.21⟩ producer) hedges under the pinned
+/// `noManifest` key, NOT under `judgedNothing` — which ⟨0.28⟩ defines as *reports declaring
+/// `analyzed.count: 0`*, something a row-3 report does not do. MEASURED before the split: every verb
+/// below listed it under `judgedNothing` and the prose called it *"JUDGED NOTHING (`analyzed.count:
+/// 0`)"* — a false disclosure, which this family rates worse than a missing one.
+///
+/// The two CONTROLS are load-bearing and are asserted in the same test, because the failure mode of a
+/// half-done fix is a RENAME (row 1 moves too) and the failure mode of an over-done one is a feature
+/// that has been disabled (row 2 hedges as well, withdrawing legitimate all-pure claims).
+#[test]
+fn a_report_with_no_analyzed_manifest_hedges_as_row_three_across_every_verb() {
+    let f = Fixture::new("nomanifest");
+    let pol = write_policy(&f, "p.policy", "deny Net app\n");
+    let mk = |suffix: &str, body: &str| {
+        let pre = format!("{}.{suffix}", f.prefix);
+        std::fs::write(format!("{pre}.lib.scan.json"), body).unwrap();
+        (pre.clone(), format!("{pre}.lib.scan.json"))
+    };
+    let (row3, row3_file) =
+        mk("row3", r#"{"candor":{"version":"t","spec":"0.20"},"package":"lib","functions":[]}"#);
+    let (row1, row1_file) = mk("row1",
+        r#"{"candor":{"version":"t","spec":"0.28"},"package":"lib","functions":[],"analyzed":{"count":0,"digest":"0"}}"#);
+    let (row2, _) = mk("row2",
+        r#"{"candor":{"version":"t","spec":"0.28"},"package":"lib","functions":[],"analyzed":{"count":7,"digest":"0"}}"#);
+
+    let json = |args: &[&str]| -> (i32, serde_json::Value) {
+        let out = Command::new(bin()).args(args).output().expect("run candor-query");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        (out.status.code().unwrap(),
+         serde_json::from_str(&text).unwrap_or_else(|e| panic!("{args:?}: not JSON ({e}):\n{text}")))
+    };
+
+    for verb in [
+        vec!["where", "Fs"],
+        vec!["blindspots"],
+        vec!["reachable"],
+        vec!["map"],
+        vec!["unverified"],
+        vec!["fix-gate"],
+    ] {
+        let mut a = verb.clone();
+        a.extend(["--report", &row3, "--policy", &pol, "--json"]);
+        let (rc, v) = json(&a);
+        assert_eq!(rc, 0, "{verb:?}: row 3 is a DISCLOSURE, not an exit code — the gate exits 0 too");
+        assert_eq!(v["incomplete"], serde_json::json!(true),
+                   "{verb:?}: row 3's own instruction is `no manifest, no claim`: {v}");
+        assert_eq!(v["noManifest"], serde_json::json!([row3_file]),
+                   "{verb:?}: SPEC §2 pins `noManifest: [\"<report path>\", …]` verbatim: {v}");
+        assert!(v.get("judgedNothing").is_none(),
+                "{verb:?}: the report DECLARES nothing — filing it under `judgedNothing` asserts an \
+                 `analyzed.count: 0` that is not on the wire, and makes one key mean two things: {v}");
+
+        // CONTROL, ROW 1: `analyzed.count: 0` keeps `judgedNothing` and never becomes `noManifest`.
+        let mut a = verb.clone();
+        a.extend(["--report", &row1, "--policy", &pol, "--json"]);
+        let (rc, v) = json(&a);
+        assert_eq!(rc, 0);
+        assert_eq!(v["judgedNothing"], serde_json::json!([row1_file]),
+                   "{verb:?}: the split goes both ways or it is a rename: {v}");
+        assert!(v.get("noManifest").is_none(), "{verb:?}: row 1 HAS a manifest; it declares 0: {v}");
+
+        // CONTROL, ROW 2: `count: 7` + `functions: []` is a legitimate all-pure claim §2 rule 3
+        // requires a consumer to BELIEVE. A fix that hedges all three rows has disabled the feature.
+        let mut a = verb.clone();
+        a.extend(["--report", &row2, "--policy", &pol, "--json"]);
+        let (rc, v) = json(&a);
+        assert_eq!(rc, 0);
+        assert!(v.get("incomplete").is_none() && v.get("noManifest").is_none()
+                    && v.get("judgedNothing").is_none(),
+                "{verb:?}: row 2 MUST NOT hedge — over 1997 JVM dependency jars a predicate keyed on \
+                 `functions` being empty would withdraw 104 real claims to catch 6: {v}");
+    }
+
+    // The PROSE channel stops asserting `analyzed.count: 0` about a report that declares nothing, and
+    // points at row 3's repair (a producer that emits a manifest) rather than row 1's (a scan that
+    // reaches a conclusion). Both channels or neither — the mutant that survived a whole suite once was
+    // exactly one channel going quiet.
+    let out = Command::new(bin()).args(["map", "--report", &row3]).output().expect("run");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.contains("NO `analyzed` manifest"), "the prose must name the real cause:\n{text}");
+    assert!(!text.contains("JUDGED NOTHING") && !text.contains("analyzed.count: 0"),
+            "…and must not re-assert row 1's claim in prose after removing it from the wire:\n{text}");
+
+    // `gains` rests on TWO reports and discloses each side separately, `baseline`-prefixed (SPEC §2).
+    let (_, v) = json(&["gains", &row3, &row1, "--json"]);
+    assert_eq!(v["noManifest"], serde_json::json!([row3_file]), "{v}");
+    assert_eq!(v["baselineJudgedNothing"], serde_json::json!([row1_file]), "{v}");
+    assert!(v.get("judgedNothing").is_none() && v.get("baselineNoManifest").is_none(), "{v}");
+    let (_, v) = json(&["gains", &row1, &row3, "--json"]);
+    assert_eq!(v["judgedNothing"], serde_json::json!([row1_file]), "{v}");
+    assert_eq!(v["baselineNoManifest"], serde_json::json!([row3_file]), "{v}");
+
+    // THE OTHER ROW-3 CONTROL: manifest-less but it LISTS a function. It judged something and said so
+    // the only way a pre-⟨0.21⟩ producer could, so it is not hedging at all — the standing SPEC §2's
+    // manifest-absent row has always given it, and `report_judged_nothing` still decides that.
+    let (row3full, _) = mk("row3full",
+        r#"{"candor":{"version":"t","spec":"0.20"},"package":"lib","functions":[{"fn":"app.reads","inferred":["Fs"],"direct":["Fs"]}]}"#);
+    let (rc, v) = json(&["where", "Fs", "--report", &row3full, "--json"]);
+    assert_eq!(rc, 0);
+    assert_eq!(v["directly"], serde_json::json!(["app.reads"]), "{v}");
+    assert!(v.get("incomplete").is_none() && v.get("noManifest").is_none(),
+            "a manifest-less report that LISTS entries is not hedging: {v}");
+}
+
 #[test]
 fn gains_strict_exits_1_and_rejects_silently_swallowed_policy() {
     // #3: gains is a diff view (exit 0 by default). Two fixes: (a) `--strict` fails on ANY gained effect so a

@@ -6,6 +6,47 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.28⟩ the third row is not the first row: `noManifest`** (SPEC §2, *"AND THE THIRD ROW IS NOT THE
+  FIRST ROW — measured, two engines report it as one"*). §2's ⟨0.24⟩ table has THREE rows, and this
+  engine filed the third under the first's name. MEASURED on the release build over
+  `{"candor":…,"functions":[]}` with **no `analyzed` key at all** (a pre-⟨0.21⟩ producer): `where`,
+  `blindspots`, `map`, `reachable`, `unverified`, `fix-gate` and `gains` all emitted
+  `judgedNothing: ["<path>"]`, and the prose said the report *"say[s] they JUDGED NOTHING
+  (`analyzed.count: 0`)"*. **The report declares nothing.** The hedge was the right DIRECTION — row 3's
+  own instruction is *no manifest, no claim* — but the disclosure was FALSE, and this family rates a
+  false disclosure worse than a missing one (§3.4's `net-partner` finding: an engine reported "ignoring
+  unknown config key" *while honouring it*). It was also a hole in ⟨0.28⟩'s own pin, which defines
+  `judgedNothing` as *reports declaring `analyzed.count: 0`*: a row-3 report is not one, so the key
+  meant two things and lost the distinction the table exists to draw. The REPAIRS differ — row 1 wants a
+  scan that reaches a conclusion, row 3 wants a producer that emits a manifest at all.
+
+  Row 3 now carries its own SPEC-pinned key, `noManifest: ["<report path>", …]`, on every document the
+  caveat rides (`CompletenessFields`, the Rung A caveat document for `show`/`map`, the advisory verbs,
+  and `gains` on both sides — `noManifest` / `baselineNoManifest`), with its own sentence on the human
+  channel and its own clause in `fix-gate`'s withheld-`✓` reason list. It raises `incomplete` like its
+  siblings, is omitted when empty, and — like `judgedNothing` — reaches `must_hedge()` and **not**
+  `incomplete()`, so no exit code moves.
+
+  **THE SPLIT ADDS A PREDICATE, IT DOES NOT INVERT ONE.** `candor_report::report_judged_nothing` is not
+  only a disclosure predicate: candor-scan's chained join (`DepIndex::judged_nothing_pkgs` → the κ
+  ledger's coverage exemption) and `gate --report` read it to decide COVERAGE, and an absent manifest
+  must keep granting NONE — that is row 3's own instruction. Making it answer `false` for a
+  manifest-less report to fix the LABEL would have turned every pre-⟨0.21⟩ report into a covered one: a
+  silent under-report introduced by a disclosure fix. So a second, disclosure-only
+  `report_has_no_manifest` chooses the KEY for a hedge that was already happening, and a test asserts
+  the coverage predicate is unmoved (the mutant that inverts it fails there and in candor-scan's own
+  shape table). The gate's stderr note is untouched: it already named both conditions honestly
+  (*"`analyzed.count` is 0, or absent with no entries"*).
+
+  **BOTH CONTROLS ARE ASSERTED.** Row 1 (`analyzed.count: 0`) keeps `judgedNothing` and never becomes
+  `noManifest` — the split goes both ways or it is a rename. Row 2 (`count: 7`, `functions: []`) is a
+  legitimate all-pure claim §2 rule 3 requires a consumer to BELIEVE and MUST NOT hedge; a fix that
+  hedges all three rows has disabled the feature rather than implemented the rule (over 1997 JVM
+  dependency jars, a predicate keyed on `functions` being empty withdraws 104 real claims to catch 6).
+  A manifest-less report that LISTS functions keeps its standing too. Measured before/after across ten
+  verb invocations per row: every row-1, row-2, manifest-less-with-entries and intact-report block
+  **byte-identical**, only the row-3 block changed.
+
 - **⟨0.28⟩ `cargo-candor`'s gate sink stops deleting what it was pointed at, and carries the
   fail-closed document on every exit-2 cause** (SPEC §3.3.1 (3) input exemption; §3.3 ⟨0.8⟩/⟨0.24⟩ a
   document at the sink on EVERY exit-2; §3.2 ⟨0.28⟩ sinks in a broken argv are still sinks). The

@@ -451,6 +451,15 @@ fn attach_manifest(v: &mut serde_json::Value, cur_pre: &str, base_pre: &str) {
         if !cur.judged_nothing.is_empty() {
             v["judgedNothing"] = serde_json::json!(cur.judged_nothing);
         }
+        // ⟨0.28⟩ SPEC §2's THIRD ROW rides here too, under its own pinned name — the `baseline`-prefixed
+        // half below likewise. Not folded into the key above: the reader of a supply-chain diff is
+        // deciding whether to trust the comparison, and "this report reached no conclusion" and "this
+        // report came from a producer that emits no manifest" are different facts with different
+        // repairs. The prefixed spelling is §2's own convention for this verb's second side, applied —
+        // candor-ts derives `baselineNoManifest` mechanically from the same one key set.
+        if !cur.no_manifest.is_empty() {
+            v["noManifest"] = serde_json::json!(cur.no_manifest);
+        }
     }
     if base.must_hedge() {
         v["baselineIncomplete"] = serde_json::json!(true);
@@ -459,6 +468,9 @@ fn attach_manifest(v: &mut serde_json::Value, cur_pre: &str, base_pre: &str) {
         }
         if !base.judged_nothing.is_empty() {
             v["baselineJudgedNothing"] = serde_json::json!(base.judged_nothing);
+        }
+        if !base.no_manifest.is_empty() {
+            v["baselineNoManifest"] = serde_json::json!(base.no_manifest);
         }
     }
 }

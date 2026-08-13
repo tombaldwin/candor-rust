@@ -700,6 +700,16 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
                     comp.judged_nothing.len()
                 ));
             }
+            // ⟨0.28⟩ …AND THE FOURTH, for the same reason the third needed one: SPEC §2's row 3 raises
+            // `must_hedge` and contributes to NEITHER count above, so a row-3-only report would have
+            // withheld the `✓` and then listed no reason for it. Its own clause, not a fourth spelling
+            // of "judged nothing" — the report declares nothing at all.
+            if !comp.no_manifest.is_empty() {
+                why.push(format!(
+                    "{} report(s) carry NO `analyzed` manifest at all (above)",
+                    comp.no_manifest.len()
+                ));
+            }
             println!(
                 "candor fix-gate: no deny/pure boundary crossings CAN BE COMPUTED from this report — \
                  {}. {}",

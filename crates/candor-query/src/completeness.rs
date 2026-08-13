@@ -104,6 +104,10 @@ pub(crate) struct CompletenessFields {
     pub(crate) unanalyzed: Vec<candor_report::UnanalyzedUnit>,
     #[serde(rename = "judgedNothing", skip_serializing_if = "Vec::is_empty")]
     pub(crate) judged_nothing: Vec<String>,
+    /// ⟨0.28⟩ SPEC §2 row 3, pinned verbatim in the rung that introduced it:
+    /// `"noManifest": [ "<report path>", … ]  // consulted reports carrying no `analyzed` key`.
+    #[serde(rename = "noManifest", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) no_manifest: Vec<String>,
 }
 
 /// The manifest as far as it could be READ, unioned across the reports under a locator.
@@ -120,6 +124,24 @@ pub(crate) struct ReportCompleteness {
     /// unsupportable, and only the union of the two covers the post-failure artifact (which carries
     /// both) and the facade/`pub use` report (which carries only this).
     pub(crate) judged_nothing: Vec<String>,
+    /// ⟨0.28⟩ SPEC §2 — **THE THIRD ROW IS NOT THE FIRST ROW.** The reports under this locator that
+    /// carry **NO `analyzed` KEY AT ALL** — §2's row 3, a pre-⟨0.21⟩ producer.
+    ///
+    /// MEASURED on this engine 2026-08-13 over `{"candor":…,"functions":[]}` with no `analyzed` key:
+    /// every query verb listed the file under `judgedNothing` and the note said it *"say[s] they JUDGED
+    /// NOTHING (`analyzed.count: 0`)"*. **The report declares nothing.** The HEDGE is the right
+    /// direction — row 3's own instruction is *no manifest, no claim* — but the disclosure is FALSE, and
+    /// this family rates a false disclosure worse than a missing one (§3.4's `net-partner` finding: an
+    /// engine reported "ignoring unknown config key" *while honouring it*).
+    ///
+    /// A SEPARATE FIELD, NOT A RE-LABEL, because `judgedNothing` is pinned to *"reports declaring
+    /// `analyzed.count: 0`"*: filing row 3 there makes one key mean two things and loses the distinction
+    /// the table exists to draw. The REPAIRS differ — row 1 wants a scan that reaches a conclusion, row 3
+    /// wants a producer that emits a manifest at all.
+    ///
+    /// It raises [`Self::must_hedge`] exactly as its two siblings do and, like them, stops at the exit
+    /// code: [`Self::incomplete`] does not read it.
+    pub(crate) no_manifest: Vec<String>,
 }
 
 impl ReportCompleteness {
@@ -148,8 +170,13 @@ impl ReportCompleteness {
     /// to. `write_json`/`print_note` are keyed on it too, so a caller cannot get the JSON half's trigger
     /// and the prose half's trigger to disagree — the mutant that survived the whole suite (`ec1a441`)
     /// was exactly one channel going quiet.
+    ///
+    /// ⟨0.28⟩ `no_manifest` (SPEC §2 row 3) is an arm of THIS and not of [`Self::incomplete`], for the
+    /// identical reason `judged_nothing` is: the gate exits 0 over a manifest-less report too, so a verb
+    /// exiting 2 there would claim it got LESS far than the gate on the same bytes. The row-3 split
+    /// re-routes a hedge that was already happening; it must not also move an exit code.
     pub(crate) fn must_hedge(&self) -> bool {
-        self.incomplete() || !self.judged_nothing.is_empty()
+        self.incomplete() || !self.judged_nothing.is_empty() || !self.no_manifest.is_empty()
     }
 
     /// How many units the reports say were not analysed — readable manifest entries plus files whose
@@ -171,9 +198,19 @@ impl ReportCompleteness {
     ///
     /// The count-0 sentence is the more urgent one anyway, and says so: nothing downstream fails closed
     /// on these bytes, so this note is the only thing standing between the reader and an empty answer.
+    ///
+    /// ⟨0.28⟩ **AND A ROW-3-ONLY HEDGE GETS THE SAME EXIT REPORTED WITHOUT THE WRONG NOUN.** The gate
+    /// exits 0 over a manifest-less report too (its own note names both conditions — *"`analyzed.count`
+    /// is 0, or absent with no entries"*), so the urgency is identical; but calling the report
+    /// *judged-nothing* in a sentence printed under the row-3 disclosure would re-assert, in prose, the
+    /// exact claim the split was made to stop making.
     pub(crate) fn gate_line(&self) -> &'static str {
         if self.incomplete() {
             "`gate --report` exits 2 over these bytes."
+        } else if self.judged_nothing.is_empty() {
+            "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a report carrying \
+             no `analyzed` manifest (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole \
+             of the warning."
         } else {
             "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing \
              report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning."
@@ -190,6 +227,7 @@ impl ReportCompleteness {
         self.unanalyzed.extend(other.unanalyzed);
         self.unreadable.extend(other.unreadable);
         self.judged_nothing.extend(other.judged_nothing);
+        self.no_manifest.extend(other.no_manifest);
     }
 
     /// The stderr disclosure for a `unanalyzed` key that is present and unreadable. Named per file and
@@ -254,6 +292,12 @@ impl ReportCompleteness {
             // a scan that reached a conclusion. Omitted when empty, so a document raised by `unanalyzed`
             // alone stays byte-identical to a pre-⟨0.28⟩ one.
             judged_nothing: self.judged_nothing.clone(),
+            // ⟨0.28⟩ SPEC §2 row 3, pinned as `noManifest` in the rung that introduced it. Its own key
+            // rather than a third member of `judgedNothing`, because that key is defined as "reports
+            // declaring `analyzed.count: 0`" and a row-3 report declares nothing — and because the two
+            // send the reader to different repairs. Omitted when empty like the other two, so a document
+            // raised by either sibling alone is byte-identical to its pre-row-3 form.
+            no_manifest: self.no_manifest.clone(),
         })
     }
 
@@ -292,7 +336,13 @@ impl ReportCompleteness {
         }
         // ⟨0.28⟩ The unanalyzed-only sentence is UNCHANGED, character for character: that is the case
         // every existing caller was measured and reviewed on, and the count-0 arm is additive.
-        let head = match (self.incomplete(), self.judged_nothing.len()) {
+        //
+        // ⟨0.28⟩ …and SPEC §2's THIRD ROW gets its OWN clause, appended, for the same reason: the
+        // sentence above was FALSE of it. A manifest-less report does not "say it judged nothing" — it
+        // says nothing, and a reader sent to re-run a scan that already reached a conclusion goes to the
+        // wrong repair. Appended rather than folded into the existing arms so the two measured wordings
+        // stay character-for-character what they were when no row-3 report is present.
+        let mut head = match (self.incomplete(), self.judged_nothing.len()) {
             (true, 0) => format!(
                 "the report(s) under this locator declare {} unit(s) candor could not analyze,",
                 self.units()
@@ -302,10 +352,27 @@ impl ReportCompleteness {
                  report(s) that judged nothing at all,",
                 self.units()
             ),
+            // Reachable only with a row-3 report in hand: `must_hedge` gated the early return above, and
+            // with no unanalyzed unit, no unreadable file and no count-0 report, `no_manifest` is the
+            // only arm left that could have raised it.
+            (false, 0) => String::new(),
             (false, n) => format!(
                 "{n} report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`),"
             ),
         };
+        if let n @ 1.. = self.no_manifest.len() {
+            if head.is_empty() {
+                head = format!(
+                    "{n} report(s) under this locator carry NO `analyzed` manifest at all (SPEC §2 row \
+                     3, a pre-⟨0.21⟩ producer),"
+                );
+            } else {
+                head.pop(); // the clause comma, so the joined sentence reads `…, and N report(s) …,`
+                head.push_str(&format!(
+                    ", and {n} report(s) carrying NO `analyzed` manifest at all,"
+                ));
+            }
+        }
         writeln!(w, "  ⚠ INCOMPLETE — {head}")?;
         writeln!(w, "      so {so_what}:")?;
         for u in &self.unanalyzed {
@@ -319,6 +386,14 @@ impl ReportCompleteness {
                 w,
                 "      {p} — `analyzed.count: 0`: this report judged NOTHING, so it names no function \
                  at all and its silence is not a purity claim"
+            )?;
+        }
+        for p in &self.no_manifest {
+            writeln!(
+                w,
+                "      {p} — NO `analyzed` manifest at all (SPEC §2 row 3, a pre-⟨0.21⟩ producer): it \
+                 DECLARES nothing about what was judged, so its silence licenses no purity claim \
+                 either. Re-scan with a current engine so the report carries its manifest"
             )?;
         }
         writeln!(w, "      {tail}")
@@ -343,8 +418,12 @@ impl ReportCompleteness {
 /// the hedge on every run and train the reader to ignore it — the same reason the vocabulary disclosure
 /// is omitted when no alias was used.
 pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
-    let mut out =
-        ReportCompleteness { unanalyzed: Vec::new(), unreadable: Vec::new(), judged_nothing: Vec::new() };
+    let mut out = ReportCompleteness {
+        unanalyzed: Vec::new(),
+        unreadable: Vec::new(),
+        judged_nothing: Vec::new(),
+        no_manifest: Vec::new(),
+    };
     for path in glob_reports(prefix) {
         let p = path.display().to_string();
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -369,8 +448,20 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         // use, so a report cannot be judged-nothing on one route and not the other. Reading the file a
         // second time is the price of keeping the predicate in one place — cheap against six call sites
         // each threading raw report text.
+        //
+        // ⟨0.28⟩ …AND THEN SPLIT BY WHICH ROW OF SPEC §2's TABLE IT IS, which is a SECOND question asked
+        // of the same file, never an edit to the answer above. `report_judged_nothing` decides COVERAGE
+        // on two other routes (candor-scan's chained join, `gate --report`), where a manifest-less
+        // report must keep granting none — row 3's own instruction is *no manifest, no claim*. Flipping
+        // it here to correct a LABEL would make every pre-⟨0.21⟩ report read as covered: a silent
+        // under-report introduced by a disclosure fix. So the hedge stands and only its KEY is chosen,
+        // by the disclosure-only `report_has_no_manifest`.
         if candor_report::report_judged_nothing(&text) {
-            out.judged_nothing.push(p);
+            if candor_report::report_has_no_manifest(&text) {
+                out.no_manifest.push(p);
+            } else {
+                out.judged_nothing.push(p);
+            }
         }
     }
     out
