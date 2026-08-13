@@ -405,6 +405,130 @@
         assert!(doc.get("judgedNothing").is_none(), "a report with 3 analyzed units judged something");
     }
 
+    /// ⟨0.28⟩ SPEC §2 — **THE THIRD ROW IS NOT THE FIRST ROW.** A report carrying NO `analyzed` key
+    /// hedges under `noManifest`, NEVER under `judgedNothing`.
+    ///
+    /// MEASURED on this engine before the split, over `{"candor":…,"functions":[]}` with no `analyzed`
+    /// key: `where`, `blindspots`, `map`, `reachable`, `unverified`, `fix-gate` and `gains` all filed it
+    /// under `judgedNothing`, and the note said it *"say[s] they JUDGED NOTHING (`analyzed.count: 0`)"*.
+    /// **The report declares nothing.** The hedge is the right direction — row 3's instruction is *no
+    /// manifest, no claim* — but the disclosure is FALSE, and this family rates a false disclosure worse
+    /// than a missing one. It is also a hole in ⟨0.28⟩'s own pin, which defines `judgedNothing` as
+    /// *reports declaring `analyzed.count: 0`*: a row-3 report is not one, and the two want different
+    /// repairs (row 1: a scan that reaches a conclusion; row 3: a producer that emits a manifest).
+    ///
+    /// THE SPLIT GOES BOTH WAYS OR IT IS A RENAME, so row 1 is asserted here too — and row 2 is the
+    /// CONTROL that makes either meaningful: `count: n>0` with `functions: []` is a legitimate all-pure
+    /// claim §2 rule 3 requires a consumer to BELIEVE, and a fix that hedges all three has disabled the
+    /// feature rather than implemented the rule (measured over 1997 JVM dependency jars: it would
+    /// withdraw 104 real claims to catch 6).
+    #[test]
+    fn a_report_with_no_analyzed_manifest_is_row_three_not_row_one() {
+        // ROW 3: no `analyzed` key at all, and nothing listed.
+        let rep = comp_fixture(
+            "no-manifest",
+            serde_json::json!({ "candor": "0.20", "functions": [] }),
+        );
+        let comp = crate::completeness::report_completeness(&rep);
+        assert!(!comp.incomplete(), "row 3 must NOT reach the exit-code predicate — the gate exits 0");
+        assert!(comp.must_hedge(), "row 3 must reach the disclosure predicate — no manifest, no claim");
+        let mut doc = serde_json::json!({ "reaches": [] });
+        comp.write_json(&mut doc);
+        assert_eq!(doc["incomplete"], serde_json::json!(true));
+        assert_eq!(doc["noManifest"], serde_json::json!([rep]),
+                   "SPEC §2 pins `noManifest: [\"<report path>\", …]` verbatim: {doc}");
+        assert!(doc.get("judgedNothing").is_none(),
+                "a row-3 report DECLARES nothing — saying it declared `analyzed.count: 0` is a FALSE \
+                 disclosure, and one key meaning two things loses the distinction §2's table draws: {doc}");
+        // …and the human channel stops asserting it too, on both the per-file line and the gate line.
+        let mut note = Vec::new();
+        comp.write_note_for_test(&mut note, "x", "y");
+        let note = String::from_utf8(note).unwrap();
+        assert!(note.contains("NO `analyzed` manifest"), "the prose must name the real cause: {note}");
+        assert!(!note.contains("analyzed.count: 0") && !note.contains("JUDGED NOTHING"),
+                "…and must not send the reader to row 1's repair: {note}");
+
+        // ROW 1: `analyzed.count: 0` stays `judgedNothing` and never becomes `noManifest`.
+        let rep1 = comp_fixture(
+            "no-manifest-row1",
+            serde_json::json!({ "candor": "0.28", "analyzed": { "count": 0 }, "functions": [] }),
+        );
+        let c1 = crate::completeness::report_completeness(&rep1);
+        let mut d1 = serde_json::json!({ "reaches": [] });
+        c1.write_json(&mut d1);
+        assert_eq!(d1["judgedNothing"], serde_json::json!([rep1]), "{d1}");
+        assert!(d1.get("noManifest").is_none(), "the split goes both ways or it is a rename: {d1}");
+
+        // ROW 2, THE CONTROL: `count: 7`, `functions: []` — an all-pure claim, and it MUST NOT hedge.
+        let rep2 = comp_fixture(
+            "no-manifest-row2",
+            serde_json::json!({ "candor": "0.28", "analyzed": { "count": 7 }, "functions": [] }),
+        );
+        let c2 = crate::completeness::report_completeness(&rep2);
+        assert!(!c2.must_hedge(), "row 2 is a legitimate all-pure claim §2 rule 3 requires a consumer \
+                                   to BELIEVE — hedging all three rows disables the feature");
+        assert!(c2.fields().is_none());
+
+        // AND THE OTHER CONTROL: manifest-less but it LISTS functions. It judged something and said so
+        // the only way a pre-⟨0.21⟩ producer could, so it keeps the standing §2's row 3 gives it.
+        let rep3 = comp_fixture(
+            "no-manifest-with-entries",
+            serde_json::json!({
+                "candor": "0.20",
+                "functions": [{ "fn": "f", "inferred": ["Fs"], "direct": ["Fs"] }],
+            }),
+        );
+        let c3 = crate::completeness::report_completeness(&rep3);
+        assert!(!c3.must_hedge(), "a manifest-less report that LISTS entries is not hedging at all");
+
+        // A LOCATOR NAMING ONE OF EACH discloses them under SEPARATE keys — the whole point of the split.
+        let dir = std::env::temp_dir().join("candor-query-completeness-no-manifest-both");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rep.aa.scan.json"),
+                       r#"{"candor":"0.28","analyzed":{"count":0},"functions":[]}"#).unwrap();
+        std::fs::write(dir.join("rep.bb.scan.json"), r#"{"candor":"0.20","functions":[]}"#).unwrap();
+        let both = crate::completeness::report_completeness(dir.join("rep").to_str().unwrap());
+        let mut db = serde_json::json!({ "reaches": [] });
+        both.write_json(&mut db);
+        assert_eq!(db["judgedNothing"].as_array().unwrap().len(), 1, "{db}");
+        assert_eq!(db["noManifest"].as_array().unwrap().len(), 1, "{db}");
+        assert!(db["judgedNothing"][0].as_str().unwrap().ends_with("rep.aa.scan.json"), "{db}");
+        assert!(db["noManifest"][0].as_str().unwrap().ends_with("rep.bb.scan.json"), "{db}");
+    }
+
+    /// ⟨0.28⟩ **THE TRAP THE ROW-3 SPLIT SETS, PINNED.** [`candor_report::report_judged_nothing`] is not
+    /// only a disclosure predicate — it is what candor-scan's chained join
+    /// (`DepIndex::judged_nothing_pkgs` → the κ ledger's coverage exemption) and `gate --report` read to
+    /// decide COVERAGE, and row 3's own instruction is *no manifest, no claim*: an absent manifest must
+    /// keep granting NONE. The tempting fix for the false label — make that predicate answer `false`
+    /// for a manifest-less report — would turn every pre-⟨0.21⟩ report into a COVERED one, a silent
+    /// under-report introduced by a disclosure fix. So the split adds a SECOND predicate and this asserts
+    /// the first is unmoved.
+    #[test]
+    fn the_row_three_split_does_not_move_the_coverage_predicate() {
+        let row3 = r#"{"candor":"0.20","package":"legacy","functions":[]}"#;
+        assert!(candor_report::report_judged_nothing(row3),
+                "an absent manifest must STILL grant no coverage — row 3 is `no manifest, no claim`");
+        assert!(candor_report::report_has_no_manifest(row3), "…and it is row 3, not row 1");
+        let row1 = r#"{"candor":"0.28","package":"facade","analyzed":{"count":0},"functions":[]}"#;
+        assert!(candor_report::report_judged_nothing(row1));
+        assert!(!candor_report::report_has_no_manifest(row1), "row 1 HAS a manifest; it declares 0");
+        let row2 = r#"{"candor":"0.28","package":"pure","analyzed":{"count":7},"functions":[]}"#;
+        assert!(!candor_report::report_judged_nothing(row2), "the row-2 control: a believed all-pure claim");
+        assert!(!candor_report::report_has_no_manifest(row2));
+        // A manifest-less report that LISTS entries judged something: not row-3-hedged (the disclosure
+        // ANDs the two predicates), and it grants coverage exactly as it did before this rung.
+        let row3_full = r#"{"candor":"0.20","package":"legacy","functions":[{"fn":"f","inferred":["Fs"]}]}"#;
+        assert!(!candor_report::report_judged_nothing(row3_full));
+        assert!(candor_report::report_has_no_manifest(row3_full));
+        // Unparsable text: `report_judged_nothing` fails CLOSED because it decides coverage; the row-3
+        // predicate answers `false`, because a file whose bytes cannot be read did not "carry no
+        // manifest" — the `unreadable` arm is the actionable disclosure for it.
+        assert!(candor_report::report_judged_nothing("{not json"));
+        assert!(!candor_report::report_has_no_manifest("{not json"));
+    }
+
     // ── `unverified --class` (SPEC §6.2 ⟨0.24⟩) ───────────────────────────────────────────────────
     // Written as EXIT-CODE assertions through `cmd_unverified --strict` (1 = holes remain, 0 = none),
     // so they exercise the shipped verb end to end — report load, `--class` parse, the transitive

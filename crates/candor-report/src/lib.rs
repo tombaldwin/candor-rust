@@ -737,6 +737,40 @@ pub fn report_judged_nothing(text: &str) -> bool {
     claims_to_have_judged_nothing(&val, has_entries)
 }
 
+/// ⟨0.28⟩ SPEC §2 — **THE THIRD ROW IS NOT THE FIRST ROW.** Does this report carry NO ⟨0.21⟩ `analyzed`
+/// manifest at all?
+///
+/// **A SECOND, DISCLOSURE-ONLY PREDICATE, AND IT IS NOT AN INVERSION OF THE ONE ABOVE.** §2's three-row
+/// table distinguishes `analyzed.count: 0` (row 1 — *nothing was judged*, a claim the report MAKES) from
+/// `analyzed` ABSENT (row 3 — a pre-⟨0.21⟩ producer, which makes no claim at all). Both HEDGE, and
+/// [`report_judged_nothing`] keeps saying so for both: it is what the chained join
+/// (candor-scan `load_dep_reports`) and `gate --report` read to decide COVERAGE, and row 3's own
+/// instruction is *no manifest, no claim* — an absent manifest must keep granting NO coverage. Making
+/// that predicate answer `false` here to fix a LABEL would turn every pre-⟨0.21⟩ report into a covered
+/// one: a silent under-report introduced by a disclosure fix.
+///
+/// So this asks a different question — *is there a manifest?* — and only the DISCLOSURE path
+/// (`crate::report_judged_nothing`'s caller in candor-query's `completeness`) consults it, to route a
+/// hedge that is already happening to the right key. `judgedNothing` is PINNED to *"reports declaring
+/// `analyzed.count: 0`"*, which a row-3 report is not, and the two want different repairs: row 1 wants a
+/// scan that reaches a conclusion, row 3 wants a producer that emits a manifest at all.
+///
+/// A legacy BARE ARRAY report has no envelope and therefore no manifest either — row 3 as well. It is
+/// only ever HEDGED when it also lists nothing (the caller ANDs this with
+/// [`report_judged_nothing`]); a manifest-less report that LISTS entries judged something and said so the
+/// only way it could, and keeps the standing §2's manifest-absent row gives it.
+///
+/// Unparsable text answers `false`: a file whose bytes cannot be read did not "carry no manifest", it
+/// carried nothing readable, and the `unreadable` arm is the actionable disclosure for it. (The opposite
+/// posture from [`report_judged_nothing`], which fails CLOSED because it decides coverage.)
+pub fn report_has_no_manifest(text: &str) -> bool {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(text) else { return false };
+    if val.is_array() {
+        return true; // legacy bare array: no envelope, so no manifest either
+    }
+    val.is_object() && val.get("analyzed").is_none()
+}
+
 /// One structured gate violation (candor-spec §3.3 ⟨0.8⟩), shared by every backend so the verdict
 /// shape is defined ONCE: `effects` is the specific effect set the violation concerns — the denied
 /// set (006), the allow rule's effect (008), the gained set (005), or `[]` (009 layer-flow, no single
