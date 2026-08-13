@@ -23,8 +23,18 @@ cargo +stable clippy -p candor-report -p candor-query -p candor-classify -p cand
                                          # because stable clippy cannot compile the rustc_private lib.
 ```
 
-Both are gated in CI, so neither result needs qualifying. If a nightly bump adds a lint, the
-whole-workspace leg is where it surfaces.
+Both are gated in CI, so neither result needs qualifying — **provided you ran both.** Running only the
+first is not evidence, and the failure is quiet: the pinned nightly's clippy exits 0 on two adjacent
+`#[test]` attributes where CI's STABLE leg errors with `duplicate-macro-attributes`. That cost a CI
+round-trip on 2026-08-03, and the same commit carried the worse half — a stranded `#[test]` that
+SILENTLY DISABLED a liveness test, which local `cargo test` could not see either, because a duplicated
+attribute registers the test twice and the total stays flat.
+
+So: a green nightly leg means the rustc_private lib and `build.rs` are clean, and nothing more. **The
+stable leg is the authority on what an adopter actually compiles**, and a local run that skipped it
+should be reported as "nightly clippy clean", never as "clippy clean".
+
+If a nightly bump adds a lint, the whole-workspace leg is where it surfaces.
 
 
 Try it on a real project with the wrapper (put this repo on `PATH`): `cargo candor audit`.
