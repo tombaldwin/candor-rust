@@ -4,7 +4,16 @@
 You are working in a Rust project. **candor** tells you, for every function, which side effects it
 performs — network, filesystem, database, subprocess, env, clock, IPC, logging, randomness,
 clipboard — *including effects inherited transitively from functions it calls*. Use it instead of
-tracing call chains by hand or guessing what code does.
+tracing call chains by hand or guessing what code does. The language-agnostic consumption contract is
+[candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md); this file is
+the Rust-specific production + query surface.
+
+> **If the repository is not Rust-only, start at the umbrella:**
+> [candor/AGENTS.md](https://github.com/tombaldwin/candor/blob/main/AGENTS.md). `candor` is one
+> command in front of every engine (Rust, JVM, TypeScript, Swift, agent fleets) — it picks the right
+> one per target, `candor update` installs and upgrades them, and `candor doctor` checks that every
+> installed engine agrees on a spec version. A polyglot repo scanned with this engine alone gets an
+> answer about its Rust and nothing that says so.
 
 > **This document ships inside the tools.** `candor-scan --agents` (and `candor-query --agents`)
 > print the contract for the *installed* version — always prefer that over a vendored or fetched
