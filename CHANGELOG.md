@@ -8,6 +8,15 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## [0.28.0] — 2026-08-14
 
+- **`cargo-candor` no longer hardcodes the spec version into its refusal document.** `refusal_doc()`
+  wrote a literal floor, so a bump left the wrapper stamping the OLD contract onto every refusal it
+  writes while the engines declared the new one. It now derives from the installed engine, and OMITS the
+  key when the engine cannot be asked — `refusal_doc` runs on GUARD-UNAVAILABLE, so it must not depend on
+  running one, and §2.1 reads an absent `spec` as predating the field rather than asserting a version.
+  Found by release-preflight, not by a test.
+- **`ci/wrapper-smoke.sh` placeholder verdicts drop their `spec` key** — those fixtures assert that a
+  stale document gets REPLACED, so the version was scenery that had to be bumped every floor.
+
 - **Two verdict-spec assertions now DERIVE the floor** from `candor_report::SPEC_VERSION` instead of
   comparing one literal to another. They could only ever fail on a floor bump — the moment they are least
   informative — and they put this crate on the edit list for every rung. The `candor-report` canary stays
