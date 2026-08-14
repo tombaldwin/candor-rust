@@ -169,7 +169,30 @@ clear_scan_reports() { cq reports "$1" --clear-other lint >/dev/null 2>&1 || tru
 # The fail-closed refusal document: ok:false + refused:true and NO `violations` key (§3.1 ⟨0.27⟩ — an
 # empty array there is precisely the claim a refused run cannot make). $1 = reason (keep it free of
 # JSON metacharacters; every caller passes a fixed literal).
-refusal_doc() { printf '{ "spec": "0.27", "ok": false, "refused": true, "reason": "%s" }\n' "$1"; }
+#
+# The spec string is DERIVED from the installed engine, never written here. It used to be a hardcoded
+# literal at the previous floor, so a bump would have left this wrapper stamping the OLD contract onto
+# every refusal it writes
+# while all four engines declared the new one — a document whose entire job is to be believed,
+# misdeclaring the contract it conforms to. Found by release-preflight, not by a test.
+#
+# The fallback is the load-bearing half: refusal_doc is called on GUARD-UNAVAILABLE, i.e. exactly when
+# the engine may be missing or unbuildable, so it cannot depend on running one. When the binary cannot
+# be asked, the key is OMITTED rather than guessed — §2.1 reads an absent `spec` as "predates the field",
+# which is a smaller and truer claim than a stale literal.
+engine_spec() {
+  local s; s="$(find_scan 2>/dev/null || true)"
+  [ -n "$s" ] || return 1
+  "$s" --version 2>/dev/null | sed -n 's/.*(spec \([0-9][0-9.]*\)).*/\1/p' | head -1
+}
+refusal_doc() {
+  local spec; spec="$(engine_spec || true)"
+  if [ -n "$spec" ]; then
+    printf '{ "spec": "%s", "ok": false, "refused": true, "reason": "%s" }\n' "$spec" "$1"
+  else
+    printf '{ "ok": false, "refused": true, "reason": "%s" }\n' "$1"
+  fi
+}
 
 # Exact-artifact sameness (§3.3.1 (3)): device+inode (`-ef`) when both exist — never a comparison of
 # the tokens the operator typed — falling back to normalized-path equality for a not-yet-existing sink.
