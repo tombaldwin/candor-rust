@@ -6,6 +6,13 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+## [0.28.0] — 2026-08-14
+
+- **Two verdict-spec assertions now DERIVE the floor** from `candor_report::SPEC_VERSION` instead of
+  comparing one literal to another. They could only ever fail on a floor bump — the moment they are least
+  informative — and they put this crate on the edit list for every rung. The `candor-report` canary stays
+  a literal on purpose: its job is to notice the constant changed, so deriving it would make it vacuous.
+
 - **⟨0.28⟩ the third row is not the first row: `noManifest`** (SPEC §2, *"AND THE THIRD ROW IS NOT THE
   FIRST ROW — measured, two engines report it as one"*). §2's ⟨0.24⟩ table has THREE rows, and this
   engine filed the third under the first's name. MEASURED on the release build over
