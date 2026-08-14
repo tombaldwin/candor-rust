@@ -4,7 +4,7 @@
 # and IMMUTABLE once on crates.io. This is the guard, since `git rm` alone only fixes it once.
 exclude = [".candor/**"]
 name = "candor-report"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Shared candor report types + parsing (no rustc_private) — used by the lint and the CLI."
