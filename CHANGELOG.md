@@ -6,7 +6,11 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
-## [0.28.0] — 2026-08-14
+## [0.28.1] — 2026-08-15
+
+_Post-release review fixes. 0.28.0 shipped, then a high-effort review of that work found
+defects in it — three of them a defect of the same class as the fix that introduced them. The
+spec floor is UNCHANGED at 0.28: no contract moved, so this is a build-version patch._
 
 - **Review follow-ups on the refusal-document derivation.** It read the version from **candor-scan**,
   but the verdict that replaces that document at the same sink is written by **candor-query** — two
@@ -18,6 +22,8 @@ behavioural changes (always in the soundness-increasing direction — see the §
   asserts BOTH branches (the derived value, and the omitted key when no engine is resolvable); the key
   was asserted by nothing, and the same change had stripped `spec` from these fixtures, so a fresh clone
   with no engine built would have written every refusal without it and stayed green.
+
+## [0.28.0] — 2026-08-14
 
 - **`cargo-candor` no longer hardcodes the spec version into its refusal document.** `refusal_doc()`
   wrote a literal floor, so a bump left the wrapper stamping the OLD contract onto every refusal it
