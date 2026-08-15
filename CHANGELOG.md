@@ -12,6 +12,19 @@ _A cardinal-sin fix. 0.28.1's body-less-declaration pass reopened, in two shapes
 written to close — both found by a max-effort review of that patch, both live on npm and crates.io
 until this release. The spec floor is unchanged at 0.28._
 
+- **⚠ The self-gate printed OK over a crate it had not judged — a false all-clear, and the FOURTH
+  engine, missed when the other three's fix was described as covering "all three".** It compared the
+  report's `functions` against the denylist and read neither `unanalyzed` nor `analyzed.count`. Over a
+  crate whose sources fail to parse that asks "did anything we ANALYSED reach a denied effect", gets
+  "no", and reports clean — while the engine had disclosed the gap plainly (`analyzed.count: 0`, a
+  populated `unanalyzed`). The ⟨0.21⟩ completeness manifest is now checked FIRST and exits 2 naming the
+  files; falsified both ways. Note the review's stated cause — "never captures the scan exit code" — was
+  wrong: `candor-scan` exits 0 on unparseable source, so the exit code was never the signal. The exit
+  code is captured too, but the vacuous check was the defect.
+
+- **`ls | grep` in the report lookup replaced with a glob loop** — an unmatched glob stays literal, so
+  the `-e` guard is what distinguishes "no report" from "a file named callgraph".
+
 - **Version-aligned only, no functional change.** The cardinal-sin fix this release carries is in
   candor-ts; `release-preflight` [4] requires every engine's build version to agree, so this arm
   moves with the family. The spec floor is unchanged at 0.28.
