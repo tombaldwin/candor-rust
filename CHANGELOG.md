@@ -8,6 +8,17 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## [0.28.0] — 2026-08-14
 
+- **Review follow-ups on the refusal-document derivation.** It read the version from **candor-scan**,
+  but the verdict that replaces that document at the same sink is written by **candor-query** — two
+  independent newest-by-mtime binary searches, so the armed refusal and the real verdict could declare
+  different spec versions. Same misdeclaration class, one step sideways. Now derived from candor-query.
+  The engine call is also CACHED before first use: `refusal_doc … > "$sink"` truncates the sink and then
+  runs the body, so forking inside it widened the 0-byte window from a shell builtin to a process exec —
+  in the tool whose ⟨0.28⟩ rung is "a sink is armed before every exit". And `ci/wrapper-smoke.sh` now
+  asserts BOTH branches (the derived value, and the omitted key when no engine is resolvable); the key
+  was asserted by nothing, and the same change had stripped `spec` from these fixtures, so a fresh clone
+  with no engine built would have written every refusal without it and stayed green.
+
 - **`cargo-candor` no longer hardcodes the spec version into its refusal document.** `refusal_doc()`
   wrote a literal floor, so a bump left the wrapper stamping the OLD contract onto every refusal it
   writes while the engines declared the new one. It now derives from the installed engine, and OMITS the

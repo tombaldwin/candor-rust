@@ -126,6 +126,26 @@ if grep -q '"refused": true' stale.json && grep -q '"ok": false' stale.json && !
 else
   bad "…sink content wrong: $(cat stale.json 2>/dev/null)"
 fi
+
+# THE SPEC KEY ON THAT DOCUMENT, and both of its branches. `refusal_doc` derives the version from the
+# installed candor-query rather than hardcoding it — a literal here meant the wrapper stamped the OLD
+# contract onto every refusal after a floor bump. Nothing asserted the key at all, and the same change
+# that introduced the derivation stripped `spec` out of these fixtures, so a fresh clone with no engine
+# built would have written every refusal without it and this suite would have stayed green.
+DECLARED_SPEC="$("$(dirname "$CC")/target/debug/candor-query" --version 2>/dev/null | sed -n 's/.*(spec \([0-9][0-9.]*\)).*/\1/p' | head -1)"
+[ -n "$DECLARED_SPEC" ] || DECLARED_SPEC="$(candor-query --version 2>/dev/null | sed -n 's/.*(spec \([0-9][0-9.]*\)).*/\1/p' | head -1)"
+if [ -n "$DECLARED_SPEC" ]; then
+  grep -q "\"spec\": \"$DECLARED_SPEC\"" stale.json \
+    && ok "…and it declares the spec the ENGINE declares ($DECLARED_SPEC), not a literal frozen at some past floor" \
+    || bad "…refusal document's spec is not the engine's $DECLARED_SPEC: $(cat stale.json 2>/dev/null)"
+else
+  # The OTHER branch, and it must be asserted rather than assumed: with no engine resolvable the key is
+  # OMITTED, never guessed. §2.1 reads an absent `spec` as predating the field — a smaller, truer claim
+  # than a stale literal. Reaching here at all means no engine was found, which is itself worth saying.
+  ! grep -q '"spec"' stale.json \
+    && ok "no engine resolvable: the refusal OMITS spec rather than guessing one" \
+    || bad "no engine resolvable, yet the refusal carries a spec: $(cat stale.json 2>/dev/null)"
+fi
 printf '{"ok":true,"violations":[]}\n' > stale.json
 rc=0; "$CC" guard --frobnicate --gate-json stale.json >/dev/null 2>&1 || rc=$?
 assert_rc "…the other argv order too (sink parsed after the broken flag)" 2 "$rc"

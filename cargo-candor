@@ -78,7 +78,7 @@ find_lib() {
 stash() { # <file> <subdir>
   case "$1" in "$CANDOR_CACHE"/*) return 0 ;; esac
   [ -n "$1" ] || return 0
-  local dest="$CANDOR_CACHE/$2/$(basename -- "$1")"
+  local dest; dest="$CANDOR_CACHE/$2/$(basename -- "$1")"   # split: `local x=$(…)` masks the exit status
   if [ "$1" -nt "$dest" ]; then
     mkdir -p "$CANDOR_CACHE/$2" && cp -f "$1" "$dest" 2>/dev/null || true
   fi
@@ -180,13 +180,28 @@ clear_scan_reports() { cq reports "$1" --clear-other lint >/dev/null 2>&1 || tru
 # the engine may be missing or unbuildable, so it cannot depend on running one. When the binary cannot
 # be asked, the key is OMITTED rather than guessed — §2.1 reads an absent `spec` as "predates the field",
 # which is a smaller and truer claim than a stale literal.
+# candor-QUERY, not candor-scan: the verdict that REPLACES this refusal at the same sink is written by
+# `query gate-verdict`. `find_scan` and `find_query` are independent newest-by-mtime searches over
+# target/release, target/debug and ~/.candor/bin, so deriving from the scanner let the armed refusal and
+# the real verdict at one sink declare different spec versions — the same misdeclaration this function
+# exists to remove, moved one step sideways. Both print the identical `(spec X)` shape.
 engine_spec() {
-  local s; s="$(find_scan 2>/dev/null || true)"
-  [ -n "$s" ] || return 1
-  "$s" --version 2>/dev/null | sed -n 's/.*(spec \([0-9][0-9.]*\)).*/\1/p' | head -1
+  local q; q="$(find_query 2>/dev/null || true)"
+  [ -n "$q" ] || return 1
+  "$q" --version 2>/dev/null | sed -n 's/.*(spec \([0-9][0-9.]*\)).*/\1/p' | head -1
+}
+# The spec is resolved ONCE, at first use, and cached. `refusal_doc … > "$sink"` truncates the sink and
+# only then runs the body — so forking an engine inside it widened the window in which the sink is 0
+# bytes from a shell builtin to a process exec. In the tool whose whole ⟨0.28⟩ rung is "a sink is armed
+# before every exit", a kill in that window leaves exactly the silence the arming exists to prevent.
+_SPEC_CACHE=""
+_SPEC_RESOLVED=""
+engine_spec_cached() {
+  [ -n "$_SPEC_RESOLVED" ] || { _SPEC_CACHE="$(engine_spec || true)"; _SPEC_RESOLVED=1; }
+  printf '%s' "$_SPEC_CACHE"
 }
 refusal_doc() {
-  local spec; spec="$(engine_spec || true)"
+  local spec; spec="$(engine_spec_cached)"
   if [ -n "$spec" ]; then
     printf '{ "spec": "%s", "ok": false, "refused": true, "reason": "%s" }\n' "$spec" "$1"
   else
