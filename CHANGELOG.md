@@ -22,8 +22,36 @@ behavioural changes (always in the soundness-increasing direction — see the §
   the neighbouring `resolves` comment already gives.
   Two rows, one of them the control that an exclusion-free crate still emits the empty list. The reason
   STRING is asserted, not the key's presence.
-  Next, and the half that makes this actionable: the PEEK — read those files and warn when they hold an
-  effect the policy denies. No verdict change either way.
+- **⟨0.29⟩ …and the PEEK, which is the half that makes it actionable.** candor now READS the files it
+  excluded and says so when they hold an effect the policy DENIES:
+
+  ```
+  candor-scan: ⚠ build::main performs Exec — OUTSIDE this scan's scope (build-script),
+                 so the gate did NOT judge it.
+               build.rs
+               The verdict below does not account for it. A build script runs on every `cargo build`.
+  candor-scan: policy ✓
+  exit 0
+  ```
+
+  **The verdict does not move** — exit code unchanged, `violations` untouched, the function absent from
+  `functions`. A file the gate declined to judge must not decide an exit code; the finding rides the
+  report as `outOfScope`, its own kind.
+
+  It is a RECURSIVE `scan_one` with the file selection inverted, not a hand-written second pass, and that
+  is the design constraint rather than a convenience: a bespoke walk over `build.rs` would be a SECOND
+  OPINION, and a drifted second opinion reported as a warning is worse than no warning — the reader
+  cannot tell a real finding from two code paths disagreeing. Reusing the entry point makes "same
+  classifier, different file set" true by construction. One flag, one walk, so the two file sets are
+  exact complements and no file can fall between them; a peek never peeks again.
+
+  **Three bounds, each a way this would otherwise become noise, and each pinned:** `deny Exec` finds it;
+  `deny Net` over the same tree says nothing; no policy says nothing and OMITS the key rather than
+  emitting an empty list, because nothing was asked and `[]` would be a claim.
+
+  The bound test needed a second fixture. The first execs `curl http://…`, which the classifier reads as
+  Net as well as Exec — so the `deny Net` row reported two findings and looked like a broken bound when
+  the bound was correct and the fixture could not test it. An argument-free `ls` isolates Exec.
 
 - **⟨0.29⟩ `unverified` and `fix-gate` certified over a policy the gate had refused.** SPEC §3.1's
   answerability MUST binds every verb reading a §2 report, and the `forbid`/`allow` refusal lived INLINE

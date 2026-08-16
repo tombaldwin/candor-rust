@@ -901,6 +901,16 @@ pub(crate) struct ScanOpts<'a> {
     pub(crate) baseline: Option<String>,
     pub(crate) quiet: bool,
     pub(crate) deps_idx: &'a DepIndex,
+    /// ⟨0.29⟩ THE PEEK. When true this run INVERTS the file selection: it analyzes exactly the files a
+    /// normal run excludes, and nothing else. Set only by the recursive call `scan_one` makes on itself,
+    /// so the peek goes through the IDENTICAL parse / Pass A / Pass B / classifier pipeline as the gate.
+    ///
+    /// That identity is the whole design constraint. A hand-written second pass over `build.rs` would be
+    /// a SECOND OPINION, and a drifted second opinion reported as a warning is worse than no warning —
+    /// the operator cannot tell a real finding from a disagreement between two code paths. Reusing the
+    /// entry point makes "same classifier, different file set" true by construction rather than by
+    /// review. It also means a peek NEVER peeks again: this flag suppresses the recursion.
+    pub(crate) peek_excluded: bool,
 }
 
 /// ⟨typeSurface.returns⟩ THE PRODUCER. `{crate}#{fn qual}` -> `{crate}#{type qual}`, both FULLY
@@ -994,7 +1004,7 @@ fn build_type_surface(
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
 pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
-    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, baseline: baseline_value, quiet, deps_idx } = opts;
+    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, baseline: baseline_value, quiet, deps_idx, peek_excluded } = opts;
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
     // Install this crate's cfg-feature picture (active = default closure, declared = all). A
@@ -1021,6 +1031,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // drift from what actually happened; deriving it afterwards would be a second walk that could
     // disagree with this one.
     let mut excluded: Vec<(String, &'static str)> = Vec::new();
+    // When peeking, every `continue` below becomes a KEEP and every keep becomes a skip — one flag, one
+    // walk, so the two file sets are exact complements and no file can fall between them.
+    let peeking = peek_excluded;
 
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
@@ -1062,6 +1075,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 .is_some_and(|s| s == "target" || (s.starts_with('.') && s != "." && s != ".."))
         }) {
             excluded.push((rel.to_string_lossy().into_owned(), "build-output"));
+            if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }
             continue;
         }
         // The Cargo BUILD SCRIPT is `<crate-root>/build.rs` — it runs at COMPILE time (ring's build.rs
@@ -1071,6 +1085,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // (an A/B found `git2::Repository::clone` reporting no `Net` because its module had vanished).
         if is_build_script(rel) {
             excluded.push((rel.to_string_lossy().into_owned(), "build-script"));
+            if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }
             continue;
         }
         // Cargo's non-library compilation targets (tests/, benches/, examples/) — and the common nonstandard
@@ -1086,6 +1101,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             })
         {
             excluded.push((rel.to_string_lossy().into_owned(), "non-library-target"));
+            if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }
             continue;
         }
         // A `#[cfg(test)] mod tests;` FILE module is invisible here — its test-ness is declared at the
@@ -1096,9 +1112,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                 if is_test_file_stem(stem) {
                     excluded.push((rel.to_string_lossy().into_owned(), "test-module"));
+                    if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }
                     continue;
                 }
             }
+        }
+        if peeking {
+            continue;   // an in-scope file is exactly what the peek is NOT about
         }
         paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned()));
     }
@@ -2577,6 +2597,83 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // substance from the comment at each `continue` — a consumer reads it to decide whether the exclusion
     // matches the question they are asking, so paraphrasing it into something vaguer would defeat the
     // block. Counts, never file lists: `build-output` covers `target/`, which is unbounded.
+    // ── ⟨0.29⟩ THE PEEK ────────────────────────────────────────────────────────────────────────────
+    // Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
+    // policy DENIES. The gate's verdict does not move — see `OutOfScopeFinding` — because a file the
+    // gate declined to judge must not decide an exit code.
+    //
+    // A RECURSIVE `scan_one`, not a hand-written second pass. That is the design constraint, not an
+    // implementation convenience: a bespoke walk over `build.rs` would be a SECOND OPINION, and a
+    // drifted second opinion reported as a warning is worse than no warning — the reader cannot tell a
+    // real finding from a disagreement between two code paths. Reusing the entry point makes "same
+    // classifier, different file set" true by construction. `peek_excluded` suppresses recursion, so a
+    // peek never peeks.
+    //
+    // POLICY-SCOPED, AND BOUNDED BY THE POLICY, which is what keeps it quiet: no policy ⇒ no peek ⇒ not
+    // one new line; `deny Net` ⇒ nothing said about an `Exec` in the test tree. Without that bound the
+    // noise floor is "everything you excluded", and a gate that prints noise is one people scroll past.
+    let out_of_scope: Option<Vec<candor_report::OutOfScopeFinding>> = policy_path
+        .as_ref()
+        .and_then(|pp| std::fs::read_to_string(pp).ok())
+        .map(|text| {
+            let parsed = candor_classify::policy::parse_policy(&text);
+            let denied: std::collections::BTreeSet<String> = parsed
+                .rules
+                .iter()
+                .flat_map(|r| r.effects.iter().map(|e| e.to_string()))
+                .collect();
+            if denied.is_empty() || excluded.is_empty() {
+                return Vec::new();
+            }
+            let class_of: std::collections::BTreeMap<&str, &str> =
+                excluded.iter().map(|(p, c)| (p.as_str(), *c)).collect();
+            let (_, peeked) = scan_one(dir, ScanOpts {
+                prefix: format!("{prefix}.peek"),
+                want_json: true,
+                include_tests,
+                policy: None,          // the peek ASKS nothing; it only reports what it saw
+                baseline: None,
+                quiet: true,
+                deps_idx,
+                peek_excluded: true,
+            });
+            let Some(body) = peeked else { return Vec::new() };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Vec::new() };
+            let mut out = Vec::new();
+            for f in v["functions"].as_array().into_iter().flatten() {
+                let hits: Vec<String> = f["inferred"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.as_str())
+                    .filter(|e| denied.contains(*e))
+                    .map(String::from)
+                    .collect();
+                if hits.is_empty() {
+                    continue;
+                }
+                let loc = f["loc"].as_str().unwrap_or("");
+                let path = loc.split(':').next().unwrap_or("").to_string();
+                let class = class_of
+                    .iter()
+                    .find(|(p, _)| !path.is_empty() && path.ends_with(*p))
+                    .map(|(_, c)| (*c).to_string())
+                    .unwrap_or_else(|| "excluded".to_string());
+                out.push(candor_report::OutOfScopeFinding {
+                    func: f["fn"].as_str().unwrap_or("").to_string(),
+                    path,
+                    effects: hits,
+                    reason: format!(
+                        "OUTSIDE this scan's scope ({class}) — the gate did NOT judge it. \
+                         The effect is real; the verdict above does not account for it."
+                    ),
+                    class,
+                });
+            }
+            out.sort_by(|a, b| (&a.path, &a.func).cmp(&(&b.path, &b.func)));
+            out
+        });
+
     let excluded_classes: Vec<candor_report::ExcludedClass> = {
         let mut by_class: std::collections::BTreeMap<&'static str, usize> =
             std::collections::BTreeMap::new();
@@ -2609,7 +2706,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     };
     let body = candor_report::to_packaged_report_json_typed(
         &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
-        Some(&type_surface), &excluded_classes)
+        Some(&type_surface), &excluded_classes, out_of_scope.as_deref())
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave
@@ -2807,6 +2904,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // backend under-reports (a missed effect can pass), so this is a floor, never the sound gate
     // (that's the nightly engine / the JVM engine). It still catches every boundary crossing the
     // scan CAN see, deterministically, with zero extra install.
+    // ⟨0.29⟩ SAY IT ON STDERR, ABOVE THE VERDICT. The report block is for machines; an operator reading
+    // `policy ✓` needs to know, in the same breath, that a file this scan did not judge holds the effect
+    // they denied. Printed BEFORE the verdict so the two are read together — a caveat below a green tick
+    // is a caveat nobody reaches.
+    if !quiet {
+        if let Some(oos) = out_of_scope.as_ref() {
+            for f in oos.iter() {
+                eprintln!(
+                    "candor-scan: ⚠ {} performs {} — OUTSIDE this scan's scope ({}), so the gate did NOT judge it.",
+                    f.func, f.effects.join("+"), f.class
+                );
+                if !f.path.is_empty() {
+                    eprintln!("             {}", f.path);
+                }
+            }
+            if !oos.is_empty() {
+                eprintln!(
+                    "             The verdict below does not account for {}. A build script runs on every \
+                     `cargo build`; tests and examples run in CI.",
+                    if oos.len() == 1 { "it".to_string() } else { format!("these {}", oos.len()) }
+                );
+            }
+        }
+    }
     if let Some(pp) = policy_path {
         let Ok(text) = std::fs::read_to_string(&pp) else {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
@@ -3179,7 +3300,7 @@ pub(crate) fn scan_target(
                        check `members`/globs; scan member crates directly to gate them");
         }
         let (code, json) = scan_one(dir, ScanOpts {
-            prefix, want_json, include_tests, policy, baseline, quiet: false, deps_idx,
+            prefix, want_json, include_tests, policy, baseline, quiet: false, deps_idx, peek_excluded: false,
         });
         if let Some(b) = json {
             println!("{b}");
@@ -3204,7 +3325,7 @@ pub(crate) fn scan_target(
     for d in &dirs {
         let (code, json) = scan_one(d, ScanOpts {
             prefix: prefix.clone(), want_json, include_tests, policy: policy.clone(),
-            baseline: baseline.clone(), quiet: false, deps_idx,
+            baseline: baseline.clone(), quiet: false, deps_idx, peek_excluded: false,
         });
         rc = rc.max(code);
         if let Some(b) = json {
@@ -3310,7 +3431,7 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
             policy: None,
             baseline: None,
             quiet: true,
-            deps_idx: &no_deps,
+            deps_idx: &no_deps, peek_excluded: false,
         });
         scanned += 1;
     }
