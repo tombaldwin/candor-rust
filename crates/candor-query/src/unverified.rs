@@ -137,7 +137,16 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     // **NOT SUBJECT TO `--class`.** That filter selects holes by REASON CLASS, and the whole content of
     // an entry here is that the class evidence is the thing missing — narrowing it away would be the
     // absence-keyed relaxation this rung exists to close, arriving through a flag.
-    let unanswered = crate::gate::unanswerable_pairs(&parsed, &sig);
+    let mut unanswered = crate::gate::unanswerable_pairs(&parsed, &sig);
+    // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY KINDS, for the same reason and by the same shared function as
+    // `fix-gate`. `unanswerable_pairs` walks `deny` rules only, so a `forbid`-only policy left this set
+    // empty and the verb printed *"every function in a pure/deny layer is PROVABLY clean (no Unknown
+    // holes) ✓"* at exit 0 — measured — over a policy nothing had evaluated. The claim is relative to a
+    // gate that never ran, which is exactly what this verb's ⟨0.24⟩ disclosure exists to prevent one
+    // level down. No `func`: the kind is unanswerable over the whole report, not at one function.
+    unanswered.extend(crate::gate::whole_policy_refusals(&parsed, &pp).into_iter().map(|u| {
+        crate::gate::Unanswerable { rule: u.rule, func: String::new(), why: u.why }
+    }));
 
     // ⟨0.24⟩ **AND WHAT THE PRODUCING SCAN COULD NOT SEE AT ALL** — SPEC §3.2, candor-spec `ec1a441`.
     // The two disclosures are independent and both are needed: `unanswered` is a function candor DID
@@ -268,15 +277,37 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
         println!();
     }
     if !unanswered.is_empty() {
-        println!(
-            "candor unverified — {} function(s) the GATE COULD NOT JUDGE over this report (`candor-query \
-             gate --report` refuses on them, SPEC §3.1):\n",
-            unanswered.len()
-        );
-        for u in &unanswered {
-            println!("  `{}`  (in `{}`)", u.func, u.rule);
-            println!("     {}", u.why);
-            println!();
+        // ⟨0.29⟩ COUNT RULES AND FUNCTIONS SEPARATELY. Every entry used to name a function, so the header
+        // said "N function(s)" and each line printed `` `func` (in `rule`) ``. The whole-policy kinds
+        // (`forbid`, `allow`) are unanswerable over the REPORT, not at a function, so they carry an empty
+        // `func` — and printing them through the old shape produced a bare ```` `` ```` and a count of
+        // functions that included something that is not one. A refusal rendered as an empty name is worse
+        // than no line: it reads as a bug in the tool, and the reader stops believing the block.
+        let (whole, per_fn): (Vec<_>, Vec<_>) =
+            unanswered.iter().partition(|u| u.func.is_empty());
+        if !per_fn.is_empty() {
+            println!(
+                "candor unverified — {} function(s) the GATE COULD NOT JUDGE over this report \
+                 (`candor-query gate --report` refuses on them, SPEC §3.1):\n",
+                per_fn.len()
+            );
+            for u in &per_fn {
+                println!("  `{}`  (in `{}`)", u.func, u.rule);
+                println!("     {}", u.why);
+                println!();
+            }
+        }
+        if !whole.is_empty() {
+            println!(
+                "candor unverified — {} POLICY RULE(S) the GATE COULD NOT EVALUATE over this report at \
+                 all (SPEC §3.1 answerability — not a property of any one function):\n",
+                whole.len()
+            );
+            for u in &whole {
+                println!("  `{}`", u.rule);
+                println!("     {}", u.why);
+                println!();
+            }
         }
     }
     if !holes.is_empty() {
