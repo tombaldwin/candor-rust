@@ -377,7 +377,7 @@ pub struct LayerRule {
     pub raw: String,
 }
 
-/// ⟨0.29⟩ One `only <A> -> <B> [<C> …]` PERMISSION rule (AS-EFF-009): a function in scope `A` may reach
+/// ⟨0.29⟩ One `only <A> -> <B> [<C> …]` PERMISSION rule (AS-EFF-011): a function in scope `A` may reach
 /// `A` itself and the listed scopes, and NOTHING else.
 ///
 /// **`forbid` FAILS OPEN; `only` FAILS SAFE, and that is the whole reason the form exists.** A dependency

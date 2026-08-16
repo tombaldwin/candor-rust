@@ -393,7 +393,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 });
             }
         }
-        // ⟨0.29⟩ AS-EFF-009 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else.
+        // ⟨0.29⟩ AS-EFF-011 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else.
         //
         // The same walk as `forbid` above with the test INVERTED, and the inversion is the point rather
         // than the code. `forbid` fails OPEN — what you did not prohibit is permitted — so a leaf package
@@ -432,7 +432,13 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
             }
             if let Some(h) = hit {
                 out.push(GateViolation {
-                    rule: "AS-EFF-009".into(),
+                    // ⟨0.29⟩ ITS OWN CODE, not `forbid`'s. A rule code is the handle a CI suppression, a
+                    // dashboard link and an alert filter key on, and these two are opposite constructs —
+                    // must-not-reach versus must-be-on-the-list. Sharing 009 would make every existing
+                    // `forbid` suppression silently start muting `only` violations its author never
+                    // accepted: a fail-open change to an operator's config, made by us and invisible to
+                    // them, which is the argument this form is built on turned on the tool.
+                    rule: "AS-EFF-011".into(),
                     func: q.clone(),
                     effects: Vec::new(),
                     detail: format!(
