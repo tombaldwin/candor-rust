@@ -2636,15 +2636,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let out_of_scope: Option<Vec<candor_report::OutOfScopeFinding>> = policy_path
         .as_ref()
         .and_then(|pp| std::fs::read_to_string(pp).ok())
-        .map(|text| {
+        .and_then(|text| {
             let parsed = candor_classify::policy::parse_policy(&text);
+            // ⟨0.29⟩ A REFUSED POLICY LEAVES THE KEY ABSENT (SPEC §2). `and_then`, not `map`, because the
+            // distinction this returns is present-vs-absent and `map` cannot express it. The peek is a
+            // producer reading the policy, so §3.1 binds it exactly as it binds the gate: over a policy
+            // no route will honour, `outOfScope: []` claims a look taken against rules that never stood —
+            // and the denied set it would have looked for is the parser's SALVAGE of an unhonourable
+            // file, which is the rewriting `fatal_messages` exists to refuse. candor-java already
+            // withheld here; this engine, candor-ts and candor-swift did not.
+            if !parsed.fatal_messages().is_empty() {
+                return None;
+            }
             let denied: std::collections::BTreeSet<String> = parsed
                 .rules
                 .iter()
                 .flat_map(|r| r.effects.iter().map(|e| e.to_string()))
                 .collect();
             if denied.is_empty() || excluded.is_empty() {
-                return Vec::new();
+                return Some(Vec::new());   // the policy STOOD — asked-and-clear, key present
             }
             let class_of: std::collections::BTreeMap<&str, &str> =
                 excluded.iter().map(|(p, c)| (p.as_str(), *c)).collect();
@@ -2658,8 +2668,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 deps_idx,
                 peek_excluded: true,
             });
-            let Some(body) = peeked else { return Vec::new() };
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Vec::new() };
+            let Some(body) = peeked else { return Some(Vec::new()) };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Some(Vec::new()) };
             peek_read = true;   // the recursion returned a report this run could read — see `peek_read`
             for u in v["unanalyzed"].as_array().into_iter().flatten() {
                 let path = u["path"].as_str().unwrap_or("");
@@ -2706,7 +2716,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 });
             }
             out.sort_by(|a, b| (&a.path, &a.func).cmp(&(&b.path, &b.func)));
-            out
+            Some(out)
         });
 
     let excluded_classes: Vec<candor_report::ExcludedClass> = {
