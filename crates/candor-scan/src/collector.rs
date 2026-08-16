@@ -668,7 +668,7 @@ impl<'a> CallCollector<'a> {
     /// `.into()`) and edge to `Target::from` ONLY when `Target` locally `impl From`. A None/unknown target
     /// → NO edge (no flood — the overwhelming case is std `From` like `String: From<&str>`, never local).
     /// CONST-STRING PROPAGATION (SPEC §1 static-host): recover a host literal from a call's args when the
-    /// URL is built from a `const` rather than written inline. Used ONLY as a FALLBACK when `first_str_lit`
+    /// URL is built from a `const` rather than written inline. Used ONLY as a FALLBACK when `positional_str_lit`
     /// found no inline literal — the inline path is unchanged. Resolves exactly three sound shapes for the
     /// FIRST relevant value expr and NOTHING else (never a guess):
     ///   • a bare const/local path         `post(API_BASE)`            → the const's / local's literal;

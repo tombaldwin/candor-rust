@@ -2623,7 +2623,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // ⟨0.26⟩ partial-manifest failure inside the rung built to prevent it: the flag exists precisely so
     // `[]` cannot overclaim, and deriving it from a lookup table made it incapable of doing that job.
     // It is an OUTCOME now, set only where the recursion returned a report this run could parse.
+    // ⟨0.29⟩ …AND DID IT READ THEM ALL? A report the parent could parse is not the same fact as every
+    // excluded file having been opened. The child publishes its own `unanalyzed` (the ⟨0.21⟩ completeness
+    // manifest) and the parent read only `functions`, so an excluded file that FAILED TO PARSE inside the
+    // peek produced `peeked: true` beside `outOfScope: []` — the same overclaim one paragraph up, one
+    // level down, and the child's stderr warning is the only reason a human could notice at all while the
+    // machine consumer reads the opposite. `peeked` is per CLASS, so the answer is too: a class is peeked
+    // only when no file of that class went unread.
     let mut peek_read = false;
+    let mut peek_unread: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut peek_unattributed = false;
     let out_of_scope: Option<Vec<candor_report::OutOfScopeFinding>> = policy_path
         .as_ref()
         .and_then(|pp| std::fs::read_to_string(pp).ok())
@@ -2652,6 +2661,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             let Some(body) = peeked else { return Vec::new() };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Vec::new() };
             peek_read = true;   // the recursion returned a report this run could read — see `peek_read`
+            for u in v["unanalyzed"].as_array().into_iter().flatten() {
+                let path = u["path"].as_str().unwrap_or("");
+                match class_of
+                    .iter()
+                    .find(|(p, _)| !path.is_empty() && path.ends_with(*p))
+                {
+                    Some((_, c)) => { peek_unread.insert((*c).to_string()); }
+                    // The peek walks ONLY excluded files, so an unread path that matches no exclusion is a
+                    // file this code cannot attribute. Fail closed across every class rather than let one
+                    // unattributable file leave all of them claiming completeness.
+                    None => peek_unattributed = true,
+                }
+            }
             let mut out = Vec::new();
             for f in v["functions"].as_array().into_iter().flatten() {
                 let hits: Vec<String> = f["inferred"]
@@ -2701,8 +2723,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 // The peek is THIS walk with the selection inverted, so it reads every class this engine
                 // excludes — but only if it RAN. `peek_read` is false when no policy was configured, when
                 // the policy denied nothing, or when the recursion produced nothing readable, and in each
-                // of those cases no file of any class was opened.
-                peeked: peek_read,
+                // of those cases no file of any class was opened. `peek_unread` subtracts the classes the
+                // peek RAN over and could not read — parse failures are per file, so the claim is per class.
+                peeked: peek_read && !peek_unattributed && !peek_unread.contains(class),
                 reason: match class {
                     "build-script" => "the Cargo build script runs at COMPILE time, not as the crate's \
                          runtime behaviour, so this scan does not judge it — but it runs on every \
