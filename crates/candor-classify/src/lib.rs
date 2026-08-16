@@ -1831,6 +1831,27 @@ pub fn is_fs_path_arg(leaf: &str) -> bool {
     )
 }
 
+/// ⟨0.29⟩ HOW MANY LEADING ARGUMENTS OF AN `Fs` PATH-TAKING CALL ARE PATHS.
+///
+/// **THE DEFECT THIS EXISTS FOR.** The literal harvester took the first string literal found ANYWHERE in
+/// the argument list, so `fs::write(user_path, "/tmp/lit")` published `paths: ["/tmp/lit"]` — the BYTES
+/// BEING WRITTEN — as the destination surface, and `allow Fs /tmp/lit` certified a write to an
+/// attacker-controlled path at exit 0. Measured on candor-scan and candor-ts; candor-java and
+/// candor-swift read the path POSITION and fail closed correctly. Removing the sibling literal made the
+/// same call fail closed, which is what identified the mechanism: any literal in the call, in any
+/// position, defeated the runtime-path incompleteness marker.
+///
+/// So the surface is read from the PATH POSITIONS and nowhere else, and every one of them must be a
+/// literal for the surface to be complete. Two-path operations are the reason this is an arity and not a
+/// boolean: `fs::copy("/safe", user_path)` has a literal at position 0 and still writes somewhere
+/// nobody can see, so requiring only position 0 would leave the identical hole one argument along.
+pub fn fs_path_arity(leaf: &str) -> usize {
+    match leaf {
+        "copy" | "rename" | "hard_link" | "soft_link" | "symlink" | "symlink_file" | "symlink_dir" => 2,
+        _ => 1,
+    }
+}
+
 /// The masking guard (AS-EFF-008), the `Db` analog of `is_net_establishing`: whether a `Db`-classified
 /// call takes the raw SQL QUERY as a string argument (so a missing literal leaves the table
 /// structurally INVISIBLE — a runtime-built query — and the surface is incomplete, fail-closed). An
