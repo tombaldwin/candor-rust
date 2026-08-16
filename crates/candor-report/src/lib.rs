@@ -285,6 +285,45 @@ pub struct UnanalyzedUnit {
     pub reason: String,
 }
 
+/// ⟨0.29⟩ ONE CLASS OF FILE THE SCAN DELIBERATELY DID NOT OPEN — the report's missing DENOMINATOR.
+///
+/// `analyzed.count` is a numerator: how many functions were judged. The SCOPE that produced it — which
+/// files the engine chose not to look at, and why — appeared nowhere, so a consumer could not tell
+/// whether the answer was to the question they asked. Every exclusion here is DELIBERATE and was already
+/// documented in a code comment; that is precisely why nobody measured what it costs. `deny Exec` over a
+/// crate whose `build.rs` runs `curl | sh` was GREEN, on a file that runs on every `cargo build`.
+///
+/// A CLASS with a COUNT, never a file list: the excluded set includes `target/`, which is unbounded, and
+/// a gate that routinely prints thousands of paths is one people learn to scroll past.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ExcludedClass {
+    /// A stable machine token — `build-script`, `non-library-target`, `test-module`, `build-output`.
+    pub class: String,
+    pub count: usize,
+    /// WHY, in the engine's own words. A consumer reads this to decide whether the exclusion matches the
+    /// question they are asking; conformance asserts on this VALUE, not on the key's presence.
+    pub reason: String,
+}
+
+/// ⟨0.29⟩ AN EFFECT FOUND IN A FILE THE GATE DID NOT JUDGE.
+///
+/// Emitted only when a policy is configured, and only for effects that policy DENIES — so a project with
+/// no policy sees nothing, and one with `deny Net` is not told about `Exec` in its test tree. That bound
+/// is what keeps this from becoming the noise it would otherwise be.
+///
+/// NEVER A `violation`. Folding these in would move verdicts and make an exit code depend on a file the
+/// gate declined to judge — the opposite of what this rung promises. Same classifier, different file set,
+/// non-binding result.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct OutOfScopeFinding {
+    #[serde(rename = "fn")]
+    pub func: String,
+    pub path: String,
+    pub effects: Vec<String>,
+    pub class: String,
+    pub reason: String,
+}
+
 /// ⟨0.22⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed-universe summary. `count` = the functions candor
 /// formed an effect judgment for (effectful + pure) = the §2.2 callgraph node set — so a consumer reading
 /// the bare envelope computes `count − |functions|` = the pure count and tells analyzed-pure from
@@ -356,6 +395,16 @@ pub struct Report {
     /// with nothing to declare stays byte-identical to a pre-rung one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolves: Vec<String>,
+    /// ⟨0.29⟩ THE SCOPE — what this scan chose not to open, by class. See [`ExcludedClass`].
+    /// NOT `skip_serializing_if`: an EMPTY list is a positive statement ("I looked and excluded nothing"),
+    /// and ⟨0.27⟩ requires it to be emitted. Absence of the key must mean "this producer cannot answer",
+    /// which is the ⟨0.26⟩ reading — a partial manifest answers worse than an absent one.
+    #[serde(default)]
+    pub excluded: Vec<ExcludedClass>,
+    /// ⟨0.29⟩ what the PEEK found in those files. Omitted when no policy was configured (nothing was
+    /// asked); empty when a policy was configured and the excluded files were clean under it.
+    #[serde(rename = "outOfScope", default, skip_serializing_if = "Option::is_none")]
+    pub out_of_scope: Option<Vec<OutOfScopeFinding>>,
     pub functions: Vec<ReportEntry>,
 }
 
@@ -500,7 +549,7 @@ pub fn to_packaged_report_json_with_coverage(
     functions: &[ReportEntry],
     coverage: Option<&Coverage>,
 ) -> serde_json::Result<String> {
-    to_packaged_report_json_full(candor, package, functions, coverage, &[], None)
+    to_packaged_report_json_full(candor, package, functions, coverage, &[], None, &[])
 }
 
 /// ⟨proposed — Gap 2⟩ Like [`to_packaged_report_json_with_coverage`], additionally carrying the
@@ -513,6 +562,7 @@ pub fn to_packaged_report_json_full(
     coverage: Option<&Coverage>,
     unanalyzed: &[UnanalyzedUnit],
     analyzed: Option<&Analyzed>,
+    excluded: &[ExcludedClass],
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
@@ -533,10 +583,17 @@ pub fn to_packaged_report_json_full(
         /// unreadable in another, which is worse than not declaring at all.
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         resolves: &'a [&'a str],
+        /// ⟨0.29⟩ THE SCOPE. NOT `skip_serializing_if`: an empty list is a positive statement — "I
+        /// looked and excluded nothing" — and ⟨0.27⟩ requires it emitted. Absence of the key must mean
+        /// "this producer cannot answer" (⟨0.26⟩: a partial manifest answers worse than an absent one).
+        /// Emitted by BOTH writers for the reason the `resolves` comment above already gives: a
+        /// declaration on only one report path makes the same engine's omissions readable in one report
+        /// and unreadable in another, which is worse than not declaring at all.
+        excluded: &'a [ExcludedClass],
         functions: &'a [ReportEntry],
     }
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, functions,
+        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, excluded, functions,
     })
 }
 
@@ -552,6 +609,7 @@ pub fn to_packaged_report_json_typed(
     unanalyzed: &[UnanalyzedUnit],
     analyzed: Option<&Analyzed>,
     type_surface: Option<&TypeSurface>,
+    excluded: &[ExcludedClass],
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
@@ -571,11 +629,18 @@ pub fn to_packaged_report_json_typed(
         /// an omitted `fs` ("reached, kind undetermined") from an engine that never computes kinds.
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         resolves: &'a [&'a str],
+        /// ⟨0.29⟩ THE SCOPE. NOT `skip_serializing_if`: an empty list is a positive statement — "I
+        /// looked and excluded nothing" — and ⟨0.27⟩ requires it emitted. Absence of the key must mean
+        /// "this producer cannot answer" (⟨0.26⟩: a partial manifest answers worse than an absent one).
+        /// Emitted by BOTH writers for the reason the `resolves` comment above already gives: a
+        /// declaration on only one report path makes the same engine's omissions readable in one report
+        /// and unreadable in another, which is worse than not declaring at all.
+        excluded: &'a [ExcludedClass],
         functions: &'a [ReportEntry],
     }
     let ts = type_surface.filter(|t| !t.returns.is_empty());
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, type_surface: ts,
+        candor, package, coverage, analyzed, unanalyzed, excluded, type_surface: ts,
         resolves: RESOLVES, functions,
     })
 }
@@ -1178,13 +1243,13 @@ mod tests {
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         // present: a parse failure travels
         let units = vec![UnanalyzedUnit { path: "src/broken.rs".into(), reason: "source failed to read/parse".into() }];
-        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None).unwrap();
+        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None, &[]).unwrap();
         assert!(json.contains("\"unanalyzed\""), "unanalyzed must serialize when non-empty");
         let KeyRead::Present(parsed) = report_unanalyzed(&json) else { panic!("must read back") };
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].path, "src/broken.rs");
         // empty: omitted entirely (a complete scan is byte-identical to a pre-rung report)
-        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None).unwrap();
+        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None, &[]).unwrap();
         assert!(!clean.contains("unanalyzed"), "an empty unanalyzed must be omitted");
         assert_eq!(report_unanalyzed(&clean), KeyRead::Absent, "…and reads back as ABSENT, not as corrupt");
     }
@@ -1369,6 +1434,8 @@ mod tests {
             unanalyzed: vec![],
             type_surface: None,
             resolves: vec![],
+            excluded: vec![],
+            out_of_scope: None,
             functions: vec![ReportEntry {
                 func: "f".into(),
                 inferred: vec!["Db".into(), "Unknown".into()],
@@ -1441,15 +1508,15 @@ mod tests {
         // consumer that ignores the field is unaffected (tier-1 additive).
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         let e = [ReportEntry { func: "f".into(), inferred: vec!["Net".into()], ..Default::default() }];
-        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None).unwrap();
+        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None, &[]).unwrap();
         let empty = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                  Some(&TypeSurface::default())).unwrap();
+                                                  Some(&TypeSurface::default()), &[]).unwrap();
         assert_eq!(old, empty, "an empty type surface must not change one byte of the report");
         assert!(report_type_surface(&old).is_none(), "absence must parse as nothing, never an error");
         let mut returns = std::collections::BTreeMap::new();
         returns.insert("dep#sync::build".to_string(), "dep#sync::Client".to_string());
         let full = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                 Some(&TypeSurface { returns })).unwrap();
+                                                 Some(&TypeSurface { returns }), &[]).unwrap();
         let back = report_type_surface(&full).expect("typeSurface must round-trip");
         assert_eq!(back.returns.get("dep#sync::build").map(String::as_str), Some("dep#sync::Client"),
                    "both ids stay FULLY QUALIFIED on the wire — the leaf form is the reverted defect");

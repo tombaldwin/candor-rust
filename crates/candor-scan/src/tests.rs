@@ -3676,6 +3676,65 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             .collect()
     }
 
+    /// ⟨0.29⟩ THE SCOPE IS IN THE REPORT — the missing DENOMINATOR.
+    ///
+    /// `analyzed.count` is a numerator; the scan's file-selection decisions produced it and appeared
+    /// nowhere, so a consumer could not tell whether the answer was to the question they asked. Every
+    /// exclusion is deliberate and was already documented in a comment — which is exactly why nobody
+    /// measured that `deny Exec` over a crate whose `build.rs` runs `curl | sh` was GREEN, on a file that
+    /// runs on every `cargo build`.
+    ///
+    /// Asserts the REASON STRING, not the key's presence: a block whose reasons a consumer cannot read
+    /// is a count, and a count does not tell you whether the exclusion matches your question.
+    #[test]
+    fn the_report_declares_what_the_scan_chose_not_to_open() {
+        let d = std::env::temp_dir().join(format!("candor-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("examples")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"scope\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub fn add(a: i32) -> i32 { a + 1 }\n").unwrap();
+        std::fs::write(d.join("build.rs"),
+            "fn main() { std::process::Command::new(\"curl\").status().unwrap(); }\n").unwrap();
+        std::fs::write(d.join("examples/e.rs"), "fn main() {}\n").unwrap();
+        let idx = load_dep_reports(None);
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+            include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+        });
+        assert_eq!(rc, 0);
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let ex = v["excluded"].as_array().expect("`excluded` must be present, even when empty (⟨0.27⟩)");
+        let find = |c: &str| ex.iter().find(|e| e["class"].as_str() == Some(c)).cloned();
+
+        let bs = find("build-script").expect("the build script must be declared as excluded");
+        assert_eq!(bs["count"].as_u64(), Some(1));
+        let why = bs["reason"].as_str().unwrap_or("");
+        assert!(why.contains("COMPILE time") && why.contains("cargo build"),
+                "the reason must say WHY and what it costs, not just name the class: {why}");
+
+        let nl = find("non-library-target").expect("examples/ must be declared as excluded");
+        assert_eq!(nl["count"].as_u64(), Some(1));
+
+        // …and the build script is genuinely NOT in the analyzed set — otherwise the block would be
+        // describing an exclusion that did not happen, which is a different and worse kind of wrong.
+        let fns: Vec<&str> = v["functions"].as_array().into_iter().flatten()
+            .filter_map(|f| f["fn"].as_str()).collect();
+        assert!(!fns.iter().any(|f| f.contains("build")),
+                "build.rs was scanned after all — the exclusion block would be fiction: {fns:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// THE CONTROL. A crate with nothing to exclude must still EMIT the key, as an empty list — ⟨0.27⟩'s
+    /// zero-match rule, and ⟨0.26⟩'s reading that an absent key means "this producer cannot answer".
+    /// Without this row the test above passes against an engine that declares exclusions it invented.
+    #[test]
+    fn a_crate_with_nothing_excluded_still_declares_an_empty_scope() {
+        let v = scan_fixture("scope-empty", "pub fn add(a: i32) -> i32 { a + 1 }\n");
+        let ex = v["excluded"].as_array().expect("the key must be emitted even with nothing to say");
+        assert!(ex.is_empty(), "nothing was excluded, so the list must be empty: {ex:?}");
+    }
+
     #[test]
     fn implicit_stringification_through_a_bound_reaches_the_local_formatter() {
         // THE IMPLICIT-STRINGIFICATION VEIN (candor-spec/SOUNDNESS-VEIN-implicit-stringify.md) — a
