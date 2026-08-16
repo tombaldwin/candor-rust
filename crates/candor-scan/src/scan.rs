@@ -1015,6 +1015,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // read/parse failures keeps the survivors' relative order — so `parsed` is byte-identical to the old
     // sequential push, and the report's fn order (which derives from it) does not move.
     let mut paths: Vec<(std::path::PathBuf, String)> = Vec::new();
+    // ⟨0.29⟩ THE SCOPE, RECORDED AS IT IS DECIDED. Each `continue` below is a deliberate exclusion with a
+    // written rationale — and that is exactly why none of them was measured: a limitation in a comment
+    // reads as considered. Recording the decision at the point it is MADE is the only place it cannot
+    // drift from what actually happened; deriving it afterwards would be a second walk that could
+    // disagree with this one.
+    let mut excluded: Vec<(String, &'static str)> = Vec::new();
+
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
         // A nested directory carrying its own Cargo.toml is a DIFFERENT package (Cargo's own
@@ -1054,6 +1061,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 .to_str()
                 .is_some_and(|s| s == "target" || (s.starts_with('.') && s != "." && s != ".."))
         }) {
+            excluded.push((rel.to_string_lossy().into_owned(), "build-output"));
             continue;
         }
         // The Cargo BUILD SCRIPT is `<crate-root>/build.rs` — it runs at COMPILE time (ring's build.rs
@@ -1062,6 +1070,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // is `RepoBuilder` — the whole clone/fetch NETWORK surface), and dropping it silently under-reports
         // (an A/B found `git2::Repository::clone` reporting no `Net` because its module had vanished).
         if is_build_script(rel) {
+            excluded.push((rel.to_string_lossy().into_owned(), "build-script"));
             continue;
         }
         // Cargo's non-library compilation targets (tests/, benches/, examples/) — and the common nonstandard
@@ -1076,6 +1085,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 )
             })
         {
+            excluded.push((rel.to_string_lossy().into_owned(), "non-library-target"));
             continue;
         }
         // A `#[cfg(test)] mod tests;` FILE module is invisible here — its test-ness is declared at the
@@ -1085,6 +1095,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         if !include_tests {
             if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                 if is_test_file_stem(stem) {
+                    excluded.push((rel.to_string_lossy().into_owned(), "test-module"));
                     continue;
                 }
             }
@@ -2562,9 +2573,43 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // `let c = deplib::build()` because `build` is PURE and therefore absent from this report entirely —
     // publishing its return type is the only way that key can ever be formed.
     let type_surface = build_type_surface(&crate_name, &fns, &entries);
+    // ⟨0.29⟩ THE SCOPE, aggregated by class. The REASON is the engine's own rationale, verbatim in
+    // substance from the comment at each `continue` — a consumer reads it to decide whether the exclusion
+    // matches the question they are asking, so paraphrasing it into something vaguer would defeat the
+    // block. Counts, never file lists: `build-output` covers `target/`, which is unbounded.
+    let excluded_classes: Vec<candor_report::ExcludedClass> = {
+        let mut by_class: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        for (_, class) in &excluded {
+            *by_class.entry(class).or_insert(0) += 1;
+        }
+        by_class
+            .into_iter()
+            .map(|(class, count)| candor_report::ExcludedClass {
+                class: class.to_string(),
+                count,
+                reason: match class {
+                    "build-script" => "the Cargo build script runs at COMPILE time, not as the crate's \
+                         runtime behaviour, so this scan does not judge it — but it runs on every \
+                         `cargo build`"
+                        .to_string(),
+                    "non-library-target" => "tests/, benches/ and examples/ describe what the crate's \
+                         HARNESS does, not what the crate does; --include-tests keeps them"
+                        .to_string(),
+                    "test-module" => "a `tests.rs`/`*_test.rs` file module is a #[cfg(test)] tree whose \
+                         test-ness is declared at the `mod` site, invisible when walking files"
+                        .to_string(),
+                    "build-output" => "target/ and hidden directories hold build artifacts and tooling, \
+                         not library code"
+                        .to_string(),
+                    other => format!("excluded by the scanner ({other})"),
+                },
+            })
+            .collect()
+    };
     let body = candor_report::to_packaged_report_json_typed(
         &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
-        Some(&type_surface))
+        Some(&type_surface), &excluded_classes)
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave

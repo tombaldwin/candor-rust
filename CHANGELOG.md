@@ -6,6 +6,25 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.29⟩ the report now declares WHAT THE SCAN CHOSE NOT TO OPEN** — the missing denominator.
+  `analyzed.count` is a numerator, and the file-selection decisions that produced it appeared nowhere, so
+  a consumer could not tell whether the answer was to the question they asked. The new `excluded` block
+  carries one entry per class (`build-script`, `non-library-target`, `test-module`, `build-output`) with a
+  count and the engine's own reason.
+  **Every one of these exclusions is deliberate and was already documented in a code comment — which is
+  exactly why none of them was measured.** `deny Exec` over a crate whose `build.rs` runs `curl | sh` is
+  green today, on a file that runs on every `cargo build` whether or not anyone calls the library. The
+  exclusion is right for "what does this library do when I call it" and wrong for "what does building this
+  crate do to my machine"; the operator chose neither, and the choice was not in the artifact.
+  The block is recorded AT THE POINT EACH EXCLUSION IS DECIDED, not derived afterwards — a second walk
+  could disagree with the first. It is emitted even when EMPTY (⟨0.27⟩: zero-match is a positive
+  statement; ⟨0.26⟩: an absent key must mean "cannot answer"), and by BOTH report writers, for the reason
+  the neighbouring `resolves` comment already gives.
+  Two rows, one of them the control that an exclusion-free crate still emits the empty list. The reason
+  STRING is asserted, not the key's presence.
+  Next, and the half that makes this actionable: the PEEK — read those files and warn when they hold an
+  effect the policy denies. No verdict change either way.
+
 - **⟨0.29⟩ `unverified` and `fix-gate` certified over a policy the gate had refused.** SPEC §3.1's
   answerability MUST binds every verb reading a §2 report, and the `forbid`/`allow` refusal lived INLINE
   in `gate --report`. `unanswerable_pairs` walks `deny` rules only, so a `forbid`-only policy left the
