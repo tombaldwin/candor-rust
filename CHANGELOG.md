@@ -6,6 +6,14 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.29⟩ `peeked` on every `excluded` entry.** An empty `outOfScope` says "I read the excluded files
+  and none held an effect this policy denies", and it may make that claim only about the classes it
+  actually read. This engine answers `true` throughout — its peek is one walk with the selection INVERTED,
+  so the two file sets are exact complements by construction — but the flag is not decoration and it is
+  not a constant across the family: **candor-java cannot read a `.java` that was never compiled** (it
+  reads bytecode), and **candor-swift does not read `.build/`**. Without the field their `[]` would
+  certify files nobody opened, which is the ⟨0.26⟩ partial-manifest failure exactly — a partial answer
+  being worse than an absent one. Added while porting this rung to those two arms.
 - **⟨0.29⟩ the report now declares WHAT THE SCAN CHOSE NOT TO OPEN** — the missing denominator.
   `analyzed.count` is a numerator, and the file-selection decisions that produced it appeared nowhere, so
   a consumer could not tell whether the answer was to the question they asked. The new `excluded` block

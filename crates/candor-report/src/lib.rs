@@ -300,6 +300,18 @@ pub struct ExcludedClass {
     /// A stable machine token — `build-script`, `non-library-target`, `test-module`, `build-output`.
     pub class: String,
     pub count: usize,
+    /// ⟨0.29⟩ Does THE PEEK read this class? The load-bearing half of the pair with [`OutOfScopeFinding`]:
+    /// an empty `outOfScope` says "I read the excluded files and none held an effect this policy denies",
+    /// and it may make that claim only about the classes it actually read.
+    ///
+    /// TRUE FOR EVERY CLASS THIS ENGINE EXCLUDES, because the peek is one walk with the selection
+    /// INVERTED — the two file sets are exact complements by construction. It is not a constant across
+    /// the family, which is why it is a field rather than an assumption: candor-java cannot read a
+    /// `.java` that was never compiled (it reads bytecode), and candor-swift does not read `.build/`.
+    /// Without it their `[]` would certify files nobody opened — the ⟨0.26⟩ partial-manifest failure, a
+    /// partial answer being worse than an absent one.
+    #[serde(default)]
+    pub peeked: bool,
     /// WHY, in the engine's own words. A consumer reads this to decide whether the exclusion matches the
     /// question they are asking; conformance asserts on this VALUE, not on the key's presence.
     pub reason: String,

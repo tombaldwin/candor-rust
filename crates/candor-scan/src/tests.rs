@@ -3709,6 +3709,12 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
 
         let bs = find("build-script").expect("the build script must be declared as excluded");
         assert_eq!(bs["count"].as_u64(), Some(1));
+        // ⟨0.29⟩ …and the peek reads every class THIS engine excludes, because the peek is this walk with
+        // the selection inverted. The flag is not decoration: candor-java answers false for a `.java` it
+        // cannot compile, candor-swift for `.build/`, and without it their empty `outOfScope` would
+        // certify files nobody opened. The false case is pinned in the engines that have one.
+        assert_eq!(bs["peeked"].as_bool(), Some(true),
+                   "the peek reads the build script, and the block must say so: {bs}");
         let why = bs["reason"].as_str().unwrap_or("");
         assert!(why.contains("COMPILE time") && why.contains("cargo build"),
                 "the reason must say WHY and what it costs, not just name the class: {why}");
