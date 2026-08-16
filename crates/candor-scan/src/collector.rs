@@ -471,6 +471,7 @@ impl<'a> CallCollector<'a> {
                 path,
                 leaf: "next".to_string(),
                 str_arg: None,
+                path_lits_partial: false,
                 typed: false,
                 method: false,
                 is_macro: false,
@@ -490,6 +491,7 @@ impl<'a> CallCollector<'a> {
             path: format!("{ty_leaf}::{method}"),
             leaf: method.to_string(),
             str_arg: None,
+            path_lits_partial: false,
             typed: false,
             method: false,
             is_macro: false,
@@ -547,7 +549,7 @@ impl<'a> CallCollector<'a> {
         if segs.len() >= 2 && !matches!(segs[0], "crate" | "self" | "super" | "") {
             self.calls.push(Call {
                 path: format!("{}::{}::{}", segs[0], ty_leaf, method),
-                leaf: method.to_string(), str_arg: None,
+                leaf: method.to_string(), str_arg: None, path_lits_partial: false,
                 typed: false, method: false, is_macro: false,
             });
         }
@@ -1204,7 +1206,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
                         // Inline literal, else const-string propagation (`reqwest::get(API_BASE)` /
                         // `Client::post(format!("{}/x", API_BASE))`) — SPEC §1 static-host, same refinement.
-                        let str_arg = first_str_lit(&node.args).or_else(|| self.resolve_host_arg(&node.args));
+                        let str_arg = positional_str_lit(&node.args, 0).or_else(|| self.resolve_host_arg(&node.args));
                         // (R53 UFCS-dispatch edge REVERTED after code review: pushing a typed `T::method` edge
                         // from a UFCS `Trait::method(&t)` / `<T as Trait>::method` could resolve to T's
                         // *inherent* `method` when the call actually runs the trait method — candor keys both
@@ -1214,7 +1216,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // `Trait::method` edge below resolving to the default body; the override case is left
                         // an honest under-report. The `&self`-only filter on `LocalTrait.methods` is kept — it
                         // is independently sound and sharpens the R36 trait-default CHA.)
-                        self.calls.push(Call { path, leaf, str_arg, typed: false, method, is_macro: false });
+                        // ⟨0.29⟩ A TWO-PATH Fs OPERATION MUST HAVE A LITERAL IN *BOTH* POSITIONS.
+                        // `fs::copy("/safe", user_path)` has one at position 0 and still writes somewhere
+                        // nobody can see, so reading position 0 alone would leave the same hole one
+                        // argument along. Recorded here, where the argument list is in hand.
+                        let path_lits_partial = candor_classify::is_fs_path_arg(&leaf)
+                            && candor_classify::fs_path_arity(&leaf) == 2
+                            && positional_str_lit(&node.args, 1).is_none();
+                        self.calls.push(Call { path, leaf, str_arg, typed: false, method,
+                                               is_macro: false, path_lits_partial });
                     }
                 }
             }
@@ -1230,7 +1240,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // Inline literal first (unchanged); fall back to const-string propagation so `post(API_BASE)` /
         // `post(format!("{}/x", API_BASE))` / `post(url)` recover a statically-known host (SPEC §1). The
         // resolved literal flows through the SAME Net/Llm/Db host refinement in scan.rs as an inline one.
-        let str_arg = first_str_lit(&node.args).or_else(|| self.resolve_host_arg(&node.args));
+        let str_arg = positional_str_lit(&node.args, 0).or_else(|| self.resolve_host_arg(&node.args));
         // IMPLICIT ITERATOR FORCING via a consuming combinator: `it.count()`, `it.collect()`,
         // `it.for_each(..)`, `it.fold(..)`, … each drive `Iterator::next` to completion. When `it`
         // is a CONCRETE LOCAL type with a local `impl Iterator` (incl. a builder `build().count()`
@@ -1268,7 +1278,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.charge_coercion(&node.receiver, "Read", "read");
         }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
-        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false });
+        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false });
         // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver is a local bound from
         // a cross-crate call whose return type we never learned — `let c = deplib::build(); c.fetch()`.
         // No key is formed, so no question is asked of the chained report, so its silence licenses
@@ -1324,6 +1334,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     path: format!("{root}::<untyped>::{rest}::{leaf}"),
                     leaf: leaf.clone(),
                     str_arg: None,
+                    path_lits_partial: false,
                     typed: false,
                     method: false,
                     is_macro: false,
@@ -1354,7 +1365,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // anti-pattern, so skipping the typed clone resolution is the safe choice (no fabrication).
             if (!matches!(cr, "std" | "core" | "alloc") || std_path_recv) && leaf != "clone" {
                 let path = format!("{ty}::{leaf}");
-                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true, is_macro: false });
+                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true, is_macro: false, path_lits_partial: false });
             }
         } else {
             // DISPATCH-typed receiver (`&dyn T` / `impl T` / `X: T` / a `Box<dyn T>` field): no
@@ -1417,6 +1428,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             path: format!("{full}::{leaf}"),
                             leaf: leaf.clone(),
                             str_arg: str_arg.clone(),
+                            path_lits_partial: false,
                             typed: true,
                             method: true,
                             is_macro: false,
@@ -1476,6 +1488,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                         path: format!("{ty}::{leaf}"),
                                         leaf: leaf.clone(),
                                         str_arg: str_arg.clone(),
+                                        path_lits_partial: false,
                                         typed: true,
                                         method: true,
                                         is_macro: false,
@@ -1504,6 +1517,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 path: format!("{ty}::{leaf}"),
                                 leaf: leaf.clone(),
                                 str_arg: str_arg.clone(),
+                                path_lits_partial: false,
                                 typed: true,
                                 method: true,
                                 is_macro: false,
@@ -1574,7 +1588,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let name = path_to_string(&p.path);
                         let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, self.uses));
                         let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
-                        self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false });
+                        self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false });
                     }
                 }
             }
@@ -1784,7 +1798,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.calls.push(Call {
                             path: format!("{cr}::{LAZY_UNIT_PREFIX}::{key}"),
                             leaf: name.clone(), str_arg: None,
-                            typed: false, method: false, is_macro: false,
+                            typed: false, method: false, is_macro: false, path_lits_partial: false,
                         });
                         // DROP GLUE across the boundary. Naming a dependency's type as a value (`let _g =
                         // deplib::Guard;`) binds it here, so its `Drop::drop` runs at scope exit — an
@@ -1799,7 +1813,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.calls.push(Call {
                             path: format!("{cr}::{DROP_MARKER}::{key}"),
                             leaf: "drop".to_string(), str_arg: None,
-                            typed: false, method: false, is_macro: false,
+                            typed: false, method: false, is_macro: false, path_lits_partial: false,
                         });
                     }
                 }
@@ -1831,7 +1845,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let qual = lazy_qual(&mp, &name);
                         // Not a macro/typed/method.
                         if self.forced_lazies.insert(qual.clone()) {
-                            self.calls.push(Call { path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false });
+                            self.calls.push(Call { path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false });
                         }
                     }
                 }
@@ -2128,6 +2142,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     path: format!("{ty_leaf}::<construct>"),
                                     leaf: "<construct>".to_string(),
                                     str_arg: None,
+                                    path_lits_partial: false,
                                     typed: false,
                                     method: false,
                                     is_macro: false,
@@ -2249,7 +2264,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         if mpath.contains("::") {
-            self.calls.push(Call { path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true });
+            self.calls.push(Call { path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
+                            path_lits_partial: false,
+                        });
         }
         // syn does not parse a macro's body, so every call hidden inside one is invisible by default —
         // a real miss on crates that route effectful calls through a macro (git2 wraps EVERY libgit2 FFI

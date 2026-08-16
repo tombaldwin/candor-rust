@@ -2083,6 +2083,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 // literal can't certify it (the masking evasion). Establishing-allowlist via the SHARED
                 // predicate (is_net_establishing / is_cmd_naming_method) — same as the deep engine — so a
                 // USE-verb (`stream.write()`) whose host was fixed at `connect` never false-positives.
+                // ⟨0.29⟩ …or a two-path Fs op whose SECOND path is a runtime value: `str_arg` covers
+                // position 0, and `copy`/`rename`/`symlink*` write to position 1.
+                if c.path_lits_partial && eff == "Fs" {
+                    incomplete.entry(f.qual.clone()).or_default().insert("Fs");
+                }
                 if c.str_arg.is_none() {
                     if eff == "Net" && candor_classify::is_net_establishing(&c.leaf) {
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");

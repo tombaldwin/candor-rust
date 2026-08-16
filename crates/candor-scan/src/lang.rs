@@ -878,6 +878,26 @@ fn root_glob(uses: &HashMap<String, String>) -> Option<&str> {
     Some(first)
 }
 
+/// ⟨0.29⟩ The string literal at ARGUMENT POSITION `idx`, or None when that argument is anything else.
+///
+/// `first_str_lit` below scans the WHOLE list and returns the first literal it finds, which is the right
+/// answer for nothing and was the wrong answer for a security gate: `fs::write(user_path, "/tmp/lit")`
+/// yielded the CONTENTS as the path surface, so an allowlist certified a write to a runtime destination.
+/// A call's meaningful literal is at a KNOWN position — the path, the host, the command, the query are
+/// all argument 0 — so read that position and let the absence of a literal there mean what it should.
+pub(crate) fn positional_str_lit(
+    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+    idx: usize,
+) -> Option<String> {
+    match args.iter().nth(idx) {
+        Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })) => {
+            let v = s.value();
+            if v.trim().is_empty() { None } else { Some(v) }
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn first_str_lit(args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>) -> Option<String> {
     for a in args {
         if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = a {

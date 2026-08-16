@@ -16,7 +16,11 @@ pub(crate) struct Call {
     #[serde(rename = "l")]
     pub(crate) leaf: String,            // last segment
     #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
-    pub(crate) str_arg: Option<String>, // first string-literal argument (host/cmd/path detail)
+    /// ⟨0.29⟩ the string literal at ARGUMENT POSITION 0 — the host, command, path or query. It was "the
+    /// first literal found anywhere in the argument list", which read `fs::write(user_path, "/tmp/lit")`
+    /// as writing to `/tmp/lit` when that string is the DATA, so `allow Fs /tmp/lit` certified a write to
+    /// a runtime-controlled destination at exit 0.
+    pub(crate) str_arg: Option<String>,
     /// Synthesized from receiver-type inference (`reqwest::Client::send` from `client.send()`). Used for
     /// external-crate classification ONLY — excluded from local call-graph edges, since its `Type::method`
     /// tail could spuriously link to a same-named LOCAL method the call doesn't actually target.
@@ -36,6 +40,12 @@ pub(crate) struct Call {
     /// local fn, fabricating that fn's effect onto a pure caller (the same hazard the `typed` flag guards).
     #[serde(rename = "mac", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) is_macro: bool,
+    /// ⟨0.29⟩ A two-path `Fs` call (`copy`/`rename`/`hard_link`/`symlink*`) whose SECOND path argument is
+    /// not a literal. Position 0 alone is not the surface for these: `fs::copy("/safe", user_path)` reads
+    /// fully determined while writing somewhere nobody can see, so the marker travels with the call and
+    /// the scan treats the surface as incomplete.
+    #[serde(rename = "pp", default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) path_lits_partial: bool,
 }
 
 /// One function the scan found: its module-qualified name, where, and the calls in its body.
