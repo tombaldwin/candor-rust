@@ -6,6 +6,12 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.29⟩ `resolves` now declares `incomplete`** (SPEC §2.1). An absent `incomplete` is overloaded
+  between "this producer does not compute undetermined locators" and "it computed them and found none" —
+  exactly the ambiguity `resolves` was built for, one field over from the `fs` case that motivated it. A
+  producer that computes the surface declares it; one that does not MUST NOT, since listing it would turn
+  "unimplemented" into a false "nothing undetermined". Pinned by conformance PART 50, which checks the
+  declaration BEFORE reading any absence as meaningful.
 - **⟨0.29⟩ `only <A> -> <B> [<C> …]` — the PERMISSION form (SPEC §6.2, AS-EFF-009).** A function in scope
   `A` may reach `A` itself and the listed scopes, and nothing else. **`forbid` FAILS OPEN — a dependency
   you forgot to prohibit is silently permitted — so "this package is a leaf" could only be spelled as an
