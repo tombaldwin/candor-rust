@@ -549,12 +549,15 @@ pub fn to_packaged_report_json_with_coverage(
     functions: &[ReportEntry],
     coverage: Option<&Coverage>,
 ) -> serde_json::Result<String> {
-    to_packaged_report_json_full(candor, package, functions, coverage, &[], None, &[])
+    to_packaged_report_json_full(candor, package, functions, coverage, &[], None, &[], None)
 }
 
 /// ⟨proposed — Gap 2⟩ Like [`to_packaged_report_json_with_coverage`], additionally carrying the
 /// `unanalyzed` list (the target source the scan couldn't see). An empty slice omits the field, so a
 /// complete scan's report is byte-identical to a pre-rung one (the wire-compatibility contract).
+#[allow(clippy::too_many_arguments)]   // the report envelope has that many optional blocks; a struct
+                                       // parameter would only move the arity, and the typed sibling
+                                       // already carries the same allow for the same reason.
 pub fn to_packaged_report_json_full(
     candor: &ReportMeta,
     package: &str,
@@ -563,6 +566,7 @@ pub fn to_packaged_report_json_full(
     unanalyzed: &[UnanalyzedUnit],
     analyzed: Option<&Analyzed>,
     excluded: &[ExcludedClass],
+    out_of_scope: Option<&[OutOfScopeFinding]>,
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
@@ -590,10 +594,15 @@ pub fn to_packaged_report_json_full(
         /// declaration on only one report path makes the same engine's omissions readable in one report
         /// and unreadable in another, which is worse than not declaring at all.
         excluded: &'a [ExcludedClass],
+        /// ⟨0.29⟩ what the PEEK found. `None` (omitted) when no policy was configured — nothing was
+        /// asked, so an empty list would be a claim. `Some([])` when a policy WAS configured and the
+        /// excluded files were clean under it, which is a real answer and must be emitted.
+        #[serde(rename = "outOfScope", skip_serializing_if = "Option::is_none")]
+        out_of_scope: Option<&'a [OutOfScopeFinding]>,
         functions: &'a [ReportEntry],
     }
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, excluded, functions,
+        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, excluded, out_of_scope, functions,
     })
 }
 
@@ -610,6 +619,7 @@ pub fn to_packaged_report_json_typed(
     analyzed: Option<&Analyzed>,
     type_surface: Option<&TypeSurface>,
     excluded: &[ExcludedClass],
+    out_of_scope: Option<&[OutOfScopeFinding]>,
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
@@ -636,11 +646,16 @@ pub fn to_packaged_report_json_typed(
         /// declaration on only one report path makes the same engine's omissions readable in one report
         /// and unreadable in another, which is worse than not declaring at all.
         excluded: &'a [ExcludedClass],
+        /// ⟨0.29⟩ what the PEEK found. `None` (omitted) when no policy was configured — nothing was
+        /// asked, so an empty list would be a claim. `Some([])` when a policy WAS configured and the
+        /// excluded files were clean under it, which is a real answer and must be emitted.
+        #[serde(rename = "outOfScope", skip_serializing_if = "Option::is_none")]
+        out_of_scope: Option<&'a [OutOfScopeFinding]>,
         functions: &'a [ReportEntry],
     }
     let ts = type_surface.filter(|t| !t.returns.is_empty());
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, excluded, type_surface: ts,
+        candor, package, coverage, analyzed, unanalyzed, excluded, out_of_scope, type_surface: ts,
         resolves: RESOLVES, functions,
     })
 }
@@ -1243,13 +1258,13 @@ mod tests {
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         // present: a parse failure travels
         let units = vec![UnanalyzedUnit { path: "src/broken.rs".into(), reason: "source failed to read/parse".into() }];
-        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None, &[]).unwrap();
+        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None, &[], None).unwrap();
         assert!(json.contains("\"unanalyzed\""), "unanalyzed must serialize when non-empty");
         let KeyRead::Present(parsed) = report_unanalyzed(&json) else { panic!("must read back") };
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].path, "src/broken.rs");
         // empty: omitted entirely (a complete scan is byte-identical to a pre-rung report)
-        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None, &[]).unwrap();
+        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None, &[], None).unwrap();
         assert!(!clean.contains("unanalyzed"), "an empty unanalyzed must be omitted");
         assert_eq!(report_unanalyzed(&clean), KeyRead::Absent, "…and reads back as ABSENT, not as corrupt");
     }
@@ -1508,15 +1523,15 @@ mod tests {
         // consumer that ignores the field is unaffected (tier-1 additive).
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         let e = [ReportEntry { func: "f".into(), inferred: vec!["Net".into()], ..Default::default() }];
-        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None, &[]).unwrap();
+        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None, &[], None).unwrap();
         let empty = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                  Some(&TypeSurface::default()), &[]).unwrap();
+                                                  Some(&TypeSurface::default()), &[], None).unwrap();
         assert_eq!(old, empty, "an empty type surface must not change one byte of the report");
         assert!(report_type_surface(&old).is_none(), "absence must parse as nothing, never an error");
         let mut returns = std::collections::BTreeMap::new();
         returns.insert("dep#sync::build".to_string(), "dep#sync::Client".to_string());
         let full = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                 Some(&TypeSurface { returns }), &[]).unwrap();
+                                                 Some(&TypeSurface { returns }), &[], None).unwrap();
         let back = report_type_surface(&full).expect("typeSurface must round-trip");
         assert_eq!(back.returns.get("dep#sync::build").map(String::as_str), Some("dep#sync::Client"),
                    "both ids stay FULLY QUALIFIED on the wire — the leaf form is the reverted defect");

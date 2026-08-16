@@ -671,7 +671,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
         for _ in 0..6 {
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
-                baseline: None, quiet: true, deps_idx: &idx,
+                baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             outs.push(body.unwrap());
@@ -786,7 +786,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
-                baseline: None, quiet: true, deps_idx: &idx,
+                baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             rc
         };
@@ -854,7 +854,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
-                baseline: None, quiet: true, deps_idx: &idx,
+                baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             rc
         };
@@ -958,7 +958,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
-                baseline: None, quiet: true, deps_idx: ix,
+                baseline: None, quiet: true, deps_idx: ix, peek_excluded: false,
             });
             rc
         };
@@ -1730,7 +1730,7 @@ pub fn go() { helper(); }
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None,
-            quiet: true, deps_idx: &DepIndex::default(),
+            quiet: true, deps_idx: &DepIndex::default(), peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -1887,7 +1887,7 @@ pub fn by_ordinary_call() { deplib::io::fetch(); }
 ").unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -1942,7 +1942,7 @@ pub fn by_ordinary_call() { deplib::io::fetch(); }
         std::fs::write(d.join("src/lib.rs"), src).unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2211,7 +2211,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2269,7 +2269,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None,
-                quiet: true, deps_idx,
+                quiet: true, deps_idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2383,7 +2383,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
                  fn inner(h: &dyn alpha::Handler) { h.go(); } let _ = inner; h.go(); }\n").unwrap();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
-            include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2442,7 +2442,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2492,7 +2492,7 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2576,7 +2576,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -2673,7 +2673,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -2751,7 +2751,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -2793,7 +2793,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2860,7 +2860,7 @@ impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PUR
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2935,7 +2935,7 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -2987,7 +2987,7 @@ pub struct Plain; impl Plain { pub fn go(&self) {} }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3033,7 +3033,7 @@ struct O; impl Other for O { fn base(&self) { let _ = fs::write("/z","!"); } }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3081,7 +3081,7 @@ pub struct Plain; impl Plain { pub fn go(&self) {} }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3147,7 +3147,7 @@ pub fn nested_concrete(xs: Vec<Option<Plain>>) { for x in xs { if let Some(d) = 
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3198,7 +3198,7 @@ pub fn via_pure(p: &Pure) { p.d(); }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3245,7 +3245,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3373,7 +3373,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -3428,7 +3428,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -3485,7 +3485,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -3519,7 +3519,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3659,7 +3659,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let idx = load_dep_reports(None);
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3700,7 +3700,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
-            include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -3722,6 +3722,66 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             .filter_map(|f| f["fn"].as_str()).collect();
         assert!(!fns.iter().any(|f| f.contains("build")),
                 "build.rs was scanned after all — the exclusion block would be fiction: {fns:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ⟨0.29⟩ THE PEEK — an effect in a file the gate did not judge is REPORTED, and changes no verdict.
+    ///
+    /// Three rows in one, because the bounds are the whole design and each is a way this becomes noise:
+    /// `deny Exec` finds it; `deny Net` over the SAME tree says nothing (bounded by the policy); no
+    /// policy at all says nothing (policy-scoped). And the exit code does not move in any of them.
+    ///
+    /// THE FIXTURE EXECS `ls`, NOT `curl`, AND THAT IS THE POINT. The first version used
+    /// `Command::new("curl").arg("http://…")`, which the classifier reads as Net AS WELL AS Exec — so
+    /// the `deny Net` row found two "Exec" findings and looked like a broken bound. The fixture could
+    /// not test the thing it claimed to. An argument-free `ls` isolates Exec.
+    #[test]
+    fn the_peek_reports_a_denied_effect_outside_the_scope_without_moving_the_verdict() {
+        let d = std::env::temp_dir().join(format!("candor-peek-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"peek\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub fn add(a: i32) -> i32 { a + 1 }\n").unwrap();
+        std::fs::write(d.join("build.rs"),
+            "fn main() { std::process::Command::new(\"ls\").status().unwrap(); }\n").unwrap();
+        std::fs::write(d.join("exec.pol"), "deny Exec\n").unwrap();
+        std::fs::write(d.join("net.pol"), "deny Net\n").unwrap();
+        let idx = load_dep_reports(None);
+        let run = |pol: Option<&str>, tag: &str| -> (i32, serde_json::Value) {
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join(format!("out/{tag}")).to_string_lossy().into_owned(),
+                want_json: true, include_tests: false,
+                policy: pol.map(|p| d.join(p).to_string_lossy().into_owned()),
+                baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
+            });
+            (rc, serde_json::from_str(&body.unwrap()).unwrap())
+        };
+
+        let (rc, v) = run(Some("exec.pol"), "a");
+        let oos = v["outOfScope"].as_array().expect("a configured policy must answer, even with []");
+        assert_eq!(oos.len(), 1, "the build script's Exec must be reported: {oos:?}");
+        assert_eq!(oos[0]["class"].as_str(), Some("build-script"));
+        assert_eq!(oos[0]["effects"][0].as_str(), Some("Exec"));
+        assert!(oos[0]["reason"].as_str().unwrap_or("").contains("did NOT judge"),
+                "the reason must say the gate did not judge it: {:?}", oos[0]["reason"]);
+        // THE VERDICT DOES NOT MOVE. This is the promise of the chosen rung: a file the gate declined to
+        // judge must not decide an exit code, and must not appear among `violations`.
+        assert_eq!(rc, 0, "an out-of-scope finding must not change the exit code");
+        assert!(v["functions"].as_array().into_iter().flatten()
+                    .all(|f| f["fn"].as_str() != Some("build::main")),
+                "the out-of-scope function must NOT be folded into the report's functions");
+
+        // BOUNDED BY THE POLICY: the same tree under `deny Net` says nothing about an Exec.
+        let (rc_net, v_net) = run(Some("net.pol"), "b");
+        assert_eq!(v_net["outOfScope"].as_array().map(|a| a.len()), Some(0),
+                   "`deny Net` must not report an Exec in an excluded file: {:?}", v_net["outOfScope"]);
+        assert_eq!(rc_net, 0);
+
+        // POLICY-SCOPED: no policy, no peek, and the key is ABSENT rather than empty — nothing was
+        // asked, so an empty list would be a claim (⟨0.26⟩: absence means "cannot answer").
+        let (_, v_none) = run(None, "c");
+        assert!(v_none.get("outOfScope").is_none(),
+                "with no policy the key must be absent, not empty: {:?}", v_none.get("outOfScope"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -4287,7 +4347,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let idx = load_dep_reports(None);
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false,
-                policy: Some(pp.to_string_lossy().into_owned()), baseline: None, quiet: true, deps_idx: &idx,
+                policy: Some(pp.to_string_lossy().into_owned()), baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             let _ = std::fs::remove_dir_all(&d);
             rc
@@ -4356,7 +4416,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false,
                 policy: if with_policy { Some(pp.to_string_lossy().into_owned()) } else { None },
-                baseline: None, quiet: true, deps_idx: &idx,
+                baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             let _ = std::fs::remove_dir_all(&d);
             rc
@@ -4387,7 +4447,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -4446,7 +4506,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -4610,7 +4670,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -4677,7 +4737,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -4737,7 +4797,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -4811,7 +4871,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -4873,7 +4933,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -4915,7 +4975,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -4954,7 +5014,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -5023,7 +5083,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -5099,7 +5159,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             "#).unwrap();
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -5176,7 +5236,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None,
-                quiet: true, deps_idx,
+                quiet: true, deps_idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -5269,7 +5329,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
@@ -5689,7 +5749,7 @@ trait G {
         let idx = DepIndex::default();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
-            baseline: None, quiet: true, deps_idx: &idx,
+            baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
@@ -6015,7 +6075,7 @@ trait G {
         let idx = DepIndex::default();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
-            baseline: None, quiet: true, deps_idx: &idx,
+            baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(rc, 0);
@@ -6289,7 +6349,7 @@ trait G {
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: prefix.clone(), want_json: false, include_tests: false,
-            policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let rep = std::fs::read_to_string(format!("{prefix}.outer.scan.json")).unwrap();
@@ -6313,7 +6373,7 @@ trait G {
         let outdir = d.join("out");
         let prefix = outdir.join("r").to_string_lossy().into_owned();
         let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: false, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: false, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         // no temp turds: every output file ends in `.json`, never `.tmp.<pid>`.
@@ -6374,7 +6434,7 @@ trait G {
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -6418,7 +6478,7 @@ trait G {
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -6463,7 +6523,7 @@ trait G {
             std::fs::write(d.join("src/lib.rs"), src).unwrap();
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -6746,7 +6806,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
-            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx,
+            prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -7008,7 +7068,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let idx = DepIndex::default();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
-                baseline: None, quiet: true, deps_idx: &idx,
+                baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -7050,7 +7110,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let idx = DepIndex::default();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
-                baseline: None, quiet: true, deps_idx: &idx,
+                baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
             });
             assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
             let v = serde_json::from_str(&body.unwrap()).unwrap();
@@ -7122,7 +7182,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
             prefix: out.to_string(), want_json: true, include_tests: false,
             policy: Some(policy.to_string()), baseline: None, quiet: true,
-            deps_idx: &DepIndex::default(),
+            deps_idx: &DepIndex::default(), peek_excluded: false,
         });
         INCREMENTAL.with(|c| c.set(false));
         std::env::remove_var("CANDOR_PANIC_ON_FILE");
@@ -7347,7 +7407,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         std::env::set_var("CANDOR_PANIC_ON_FILE", "src/bad.rs");
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, quiet: true,
-            deps_idx: &DepIndex::default(),
+            deps_idx: &DepIndex::default(), peek_excluded: false,
         });
         std::env::remove_var("CANDOR_PANIC_ON_FILE");
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
@@ -7552,7 +7612,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None,
-            quiet: true, deps_idx: &DepIndex::default(),
+            quiet: true, deps_idx: &DepIndex::default(), peek_excluded: false,
         });
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
