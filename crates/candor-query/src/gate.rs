@@ -1251,6 +1251,18 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     let mut p = p;
     p.allow_rules.clear();
     p.layer_rules.clear();
+    // ⟨0.29⟩ …AND THE PERMISSION FORM. This line was MISSING for one build: `only` was disclosed as
+    // unanswerable by `whole_policy_refusals` above and then evaluated anyway, so the gate printed
+    // `[AS-EFF-009] model::leaks reaches infra::db_read` beside its own statement that the rule could not
+    // be evaluated — a rule evaluated from a report, which is the §3.1 MUST this removal exists to
+    // enforce. The comment above asks "what code now runs that never ran"; the mirror question is what
+    // code STOPS running when a kind is added, and the answer here was "nothing, because nobody told it".
+    //
+    // Found by the conformance row, and only after that row was made non-vacuous twice: with an
+    // `only`-only policy every engine refuses before evaluating anything, and over a wholly PURE fixture
+    // the report carries no call graph to walk. It took an answerable rule beside it AND an effect in the
+    // tree before the leak could show itself. The same defect shipped in the java arm for one build.
+    p.only_rules.clear();
     let p = p;
 
     let Some(prefix) = report_flag.or_else(discover_report_prefix) else {
