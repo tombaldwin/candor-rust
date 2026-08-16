@@ -528,12 +528,28 @@ echo "== watch (background report freshness) =="
 WV=$(mktemp -d)/wv; mkdir -p "$WV/src"
 printf '[package]\nname="wv"\nversion="0.1.0"\nedition="2021"\n' > "$WV/Cargo.toml"
 printf 'fn worker(){ let _=std::fs::read("/tmp/x"); }\nfn main(){ worker(); }\n' > "$WV/src/main.rs"
+# TRAPPED, because `cargo-candor watch` is an INFINITE LOOP and this script had no trap at all (zero, in
+# the whole file). The happy-path `kill` below sits behind two 90-iteration `sleep 1` polls, so a SIGTERM
+# anywhere in that ~180-second window — a CI step timeout, a plain `kill`, anything that is not the tty's
+# Ctrl-C, which signals the whole process GROUP and hid this — left the watcher re-scanning a fixture tree
+# that the `rm -rf` below also never ran. The sibling harness in candor-ts had the same hole; both are the
+# child-lifetime shape the ⟨0.29⟩ work closed in the test driver first.
+#
+# `kill` the pid AND `pkill -P` its children: bash execs a lone command in a subshell but does not promise
+# to, and a watcher that spawns a scan has a grandchild either way.
 ( cd "$WV"; CANDOR_WATCH_INTERVAL=1 "$ROOT/cargo-candor" watch >/dev/null 2>&1 ) & WPID=$!
+_watch_cleanup() {
+  [ -n "${WPID:-}" ] && { pkill -P "$WPID" 2>/dev/null; kill "$WPID" 2>/dev/null; }
+  pkill -f "cargo-candor watch" 2>/dev/null
+  [ -n "${WV:-}" ] && rm -rf "$(dirname "$WV")" 2>/dev/null
+  return 0
+}
+trap '_watch_cleanup' EXIT INT TERM HUP
 for _ in $(seq 1 90); do ls "$WV"/.candor/report.*.*.json >/dev/null 2>&1 && break; sleep 1; done   # initial report
 printf 'fn worker(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn main(){ worker(); }\n' > "$WV/src/main.rs"
 seen=no
 for _ in $(seq 1 90); do grep -q Net "$WV"/.candor/report.*.*.json 2>/dev/null && { seen=yes; break; }; sleep 1; done
-kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null
+kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null; WPID=""
 want "watch auto-refreshed the report after an edit (worker gained Net)" "$seen" "yes"
 rm -rf "$(dirname "$WV")"
 
