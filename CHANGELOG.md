@@ -6,6 +6,24 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⚠ ⟨0.29⟩ `only`'s PERMITTED scopes were matched with the fail-OPEN matcher.** `scope_matches` makes
+  the last segment a PREFIX of its name-segment, so `util` matches `utilities`. For `deny`/`pure`/`forbid`
+  that widening is FAIL-CLOSED — a scope matching more forbids more. For the `to` list of an `only` rule it
+  is the exact inverse. MEASURED: `only model -> util` let `model::go` reach `utilities_untrusted::exfil`
+  at `policy ✓`, while `forbid model -> util` charged AS-EFF-009 on the identical reach — the matcher that
+  keeps every other rule kind safe silently widening the one form whose entire purpose is to fail safe.
+  Permitted scopes now match by EXACT segment run (`scope_matches_permitted`); the `from` side keeps the
+  prefix rule, since matching more there CONSTRAINS more. Found by review, four-way.
+- **⚠ ⟨0.29⟩ `excluded[].peeked` was a property of the CLASS, not of whether a peek ran.** It was a
+  constant, so a scan with no policy — or one whose peek produced nothing readable — published
+  `peeked: true` beside an absent or empty `outOfScope`, which reads as "I looked and found nothing" about
+  files nobody opened. That is the ⟨0.26⟩ partial-manifest failure inside the rung built to prevent it: the
+  flag exists precisely so `[]` cannot overclaim, and a lookup table cannot do that job. It is an OUTCOME
+  now. Four-way; found by review.
+- **⟨0.29⟩ `parsepolicy` publishes `only`.** The §6.2 grammar WITNESS omitted the new rule kind while
+  candor-java emitted it, so the verb whose whole purpose is letting a consumer diff what an engine made of
+  a policy could not show the difference. Conformance PART 4's battery gained `only` lines and its
+  comparison a fourth key — it read three and stopped, which is why it stayed green over the divergence.
 - **⟨0.29⟩ `resolves` now declares `incomplete`** (SPEC §2.1). An absent `incomplete` is overloaded
   between "this producer does not compute undetermined locators" and "it computed them and found none" —
   exactly the ambiguity `resolves` was built for, one field over from the `fs` case that motivated it. A

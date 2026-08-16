@@ -613,6 +613,37 @@ fn name_segments(s: &str) -> Vec<&str> {
 /// into segments (on `::` or `.`); the scope matches a contiguous run of name-segments where every
 /// segment except the last matches exactly and the last is a prefix. So `domain` matches
 /// `app::domain::h`, `com.acme.domain.h`, and `domain_logic` but not `subdomain`.
+/// ⟨0.29⟩ SCOPE MATCHING FOR A **PERMISSION**, where the prefix rule is FAIL-OPEN.
+///
+/// [`scope_matches`]'s last segment is a PREFIX of its name-segment, so `util` matches `utilities`. For
+/// `deny`/`pure`/`forbid` that widening is FAIL-CLOSED — a scope that matches more forbids more — and it
+/// is why the rule exists. For the `to` list of an `only` rule it is the exact inverse: a permitted scope
+/// that matches more PERMITS more, so the matcher that keeps every other rule kind safe silently widens
+/// the one form whose entire purpose is to fail safe.
+///
+/// MEASURED on the shipped ⟨0.29⟩ implementation, before this function existed:
+///
+/// ```text
+/// only model -> util          `model::go` reaching `utilities_untrusted::exfil`  →  policy ✓
+/// forbid model -> util        the identical reach                                 →  AS-EFF-009
+/// ```
+///
+/// The operator wrote a complete permission list and the matcher quietly extended it to anything sharing
+/// a prefix with an entry. So a `to` scope matches by EXACT segment run, with no prefix on the last —
+/// `only a -> util` permits `util::x` and `crate::util::x`, and does NOT permit `utilities_untrusted::x`.
+///
+/// THE `from` SIDE KEEPS THE PREFIX RULE, deliberately: `from` selects which functions the rule BINDS, so
+/// matching more constrains more, which is the safe direction. The asymmetry is the point — each side
+/// takes the matcher whose over-approximation errs toward the gate firing.
+pub fn scope_matches_permitted(name: &str, scope: &str) -> bool {
+    let segs = name_segments(name);
+    let parts = name_segments(scope);
+    if parts.is_empty() || parts.len() > segs.len() {
+        return false;
+    }
+    segs.windows(parts.len()).any(|w| w == parts.as_slice())
+}
+
 pub fn scope_matches(name: &str, scope: &str) -> bool {
     let segs = name_segments(name);
     let parts = name_segments(scope);

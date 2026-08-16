@@ -193,6 +193,16 @@ pub(crate) fn cmd_parsepolicy(args: &[String]) -> i32 {
     deny.sort_by_key(|v| v.to_string());
     allow.sort_by_key(|v| v.to_string());
     forbid.sort_by_key(|v| v.to_string());
+    // ⟨0.29⟩ THE PERMISSION FORM RIDES THE WITNESS TOO. `parsepolicy` is the §6.2 GRAMMAR WITNESS — the
+    // verb that exists so a consumer can diff what an engine made of a policy — so a rule kind missing
+    // from it is a kind the diff cannot see. Omitting `only` here while candor-java emitted it made the
+    // two disagree about what the same file MEANS, which is exactly what this verb is for catching.
+    let mut only: Vec<serde_json::Value> = p
+        .only_rules
+        .iter()
+        .map(|r| serde_json::json!({ "from": r.from, "to": r.to }))
+        .collect();
+    only.sort_by_key(|v| v.to_string());
     // ⟨0.24⟩ EVERY LINE THE PARSE DID NOT HONOUR (SPEC §3.1 `195d45a`/`901f14d`).
     //
     // MEASURED 2026-07-28 on the conformance battery: java 10, ts 4, **rust 0** — this verb emitted no
@@ -224,7 +234,7 @@ pub(crate) fn cmd_parsepolicy(args: &[String]) -> i32 {
             })
         })
         .collect();
-    let mut doc = serde_json::json!({ "deny": deny, "allow": allow, "forbid": forbid });
+    let mut doc = serde_json::json!({ "deny": deny, "allow": allow, "forbid": forbid, "only": only });
     if !errors.is_empty() {
         doc["errors"] = serde_json::Value::Array(errors);
     }

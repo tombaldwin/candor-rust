@@ -207,7 +207,9 @@ codes are `candor-scan --policy`'s exactly: 0 clean, 1 violation, 2 refused. It 
 and nothing else: an entry ABSENT from the report is candor's purity claim, and `gate` will not
 back-fill it from the callgraph sidecar or a chained dep. Rules whose evidence the report cannot
 carry are REFUSED (exit 2) rather than evaluated on partial evidence — `forbid A -> B` (a report's
-`calls` is effect-relevant, so a crossing into a pure unit is invisible), `allow <E> …` (the
+`calls` is effect-relevant, so a crossing into a pure unit is invisible), `only A -> B …` (it asks
+whether EVERYTHING reached is on a list, so an omitted crossing turns a green into a claim of
+completeness), `allow <E> …` (the
 AS-EFF-008 completeness marker is not a gate-usable wire fact), and a class-scoped `deny` over an
 entry whose scoping field is absent. Gate those at scan time instead. A report whose `analyzed.count`
 is **0** is refused too: it judged nothing, so an absent entry in it is not a purity claim and a green
