@@ -394,7 +394,28 @@ impl Candor {
             );
             std::process::exit(2);
         }
-        let ParsedPolicy { rules: policy, allow_rules, layer_rules, errors: _, used_aliases: _ } = parsed_policy;
+        // ⟨0.29⟩ THIS ENGINE CANNOT ANSWER `only`, SO IT REFUSES RATHER THAN RUNS GREEN. Its layering
+        // pass computes, per function, the set of scopes named as some rule's `to` and asks whether one
+        // is reached (`compute_layer_violations`) — which answers "does A reach B" and cannot answer
+        // "is everything A reaches on this list", because the scopes NOT named by a rule are exactly the
+        // ones it never accumulates. Silently ignoring the rule would be a green gate over an unenforced
+        // permission — the fail-open shape `only` exists to remove — so it takes the could-not-evaluate
+        // exit the family gives any rule whose evidence a route does not have.
+        if !parsed_policy.only_rules.is_empty() {
+            eprintln!(
+                "candor: this engine cannot evaluate an `only` rule (exit 2) — its layering pass \
+                 accumulates only the scopes some rule NAMES, and `only` asks about the ones it does \
+                 not. Refusing rather than reporting a green gate over an unenforced permission rule. \
+                 Gate `only` with candor-scan: candor-scan . --policy <file>"
+            );
+            for r in &parsed_policy.only_rules {
+                eprintln!("        unevaluated: {}", r.raw.trim());
+            }
+            std::process::exit(2);
+        }
+        let ParsedPolicy {
+            rules: policy, allow_rules, layer_rules, only_rules: _, errors: _, used_aliases: _
+        } = parsed_policy;
         Self {
             direct: HashMap::new(),
             fs_direct: HashMap::new(),

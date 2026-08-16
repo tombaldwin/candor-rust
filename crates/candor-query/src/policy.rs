@@ -68,7 +68,7 @@ pub(crate) fn load_policy_as_the_gate_does(
 /// vectors, for the reason the gate's own check gives: keying on `rules` alone would treat an
 /// allow-only policy as empty.
 pub(crate) fn policy_asked_nothing(p: &candor_classify::policy::ParsedPolicy) -> bool {
-    p.rules.is_empty() && p.allow_rules.is_empty() && p.layer_rules.is_empty()
+    p.rules.is_empty() && p.allow_rules.is_empty() && p.layer_rules.is_empty() && p.only_rules.is_empty()
 }
 
 /// The zero-rule caveat, on BOTH channels — SPEC §2 ⟨0.28⟩.

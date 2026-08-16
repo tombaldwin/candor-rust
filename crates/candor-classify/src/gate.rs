@@ -392,6 +392,54 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 });
             }
         }
+        // ⟨0.29⟩ AS-EFF-009 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else.
+        //
+        // The same walk as `forbid` above with the test INVERTED, and the inversion is the point rather
+        // than the code. `forbid` fails OPEN — what you did not prohibit is permitted — so a leaf package
+        // can only be protected by enumerating what it must not reach, and that list does not cover a
+        // package added tomorrow. `only` fails SAFE: the dependency you forgot to permit is a violation,
+        // loudly, on the day it appears.
+        //
+        // THE WALK STOPS AT A PERMITTED SCOPE. A permitted callee's own dependencies are governed by the
+        // rules about IT; descending past it would make `only` demand the transitive closure of everything
+        // you permit, which is the same enumeration-that-rots one level down. `from` IS descended through
+        // — a fn in A calling another fn in A that reaches infra is still A reaching infra.
+        for r in &p.only_rules {
+            if !scope_matches(q, &r.from) {
+                continue;
+            }
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            let mut stack: Vec<&str> =
+                gi.calls.get(q).map(|cs| cs.iter().map(String::as_str).collect()).unwrap_or_default();
+            let mut hit: Option<&str> = None;
+            while let Some(n) = stack.pop() {
+                if !seen.insert(n) {
+                    continue;
+                }
+                if r.to.iter().any(|t| scope_matches(n, t)) {
+                    continue; // permitted, and its own callees are not this rule's business
+                }
+                if !scope_matches(n, &r.from) {
+                    hit = Some(n);
+                    break;
+                }
+                if let Some(cs) = gi.calls.get(n) {
+                    stack.extend(cs.iter().map(String::as_str));
+                }
+            }
+            if let Some(h) = hit {
+                out.push(GateViolation {
+                    rule: "AS-EFF-009".into(),
+                    func: q.clone(),
+                    effects: Vec::new(),
+                    detail: format!(
+                        "`{q}` reaches `{h}`, which this permission rule does not permit: `{}`",
+                        r.raw
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
     }
     // Sort by (rule, detail) — identical order to the old rendered-line sort (the "[rule] detail" render
     // puts the constant '[' first and all AS-EFF codes are same-length), without allocating two Strings
@@ -414,6 +462,13 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
     for r in &p.layer_rules {
         zero.entry(r.raw.as_str()).or_insert(0);
     }
+    // ⟨0.29⟩ an `only` rule binds nothing when NEITHER endpoint names anything in this tree — the same
+    // typo channel `forbid` has, and the more dangerous one to leave silent: a `forbid` that binds
+    // nothing merely fails to prohibit, while an `only` that binds nothing withholds a promise the
+    // operator believes they made.
+    for r in &p.only_rules {
+        zero.entry(r.raw.as_str()).or_insert(0);
+    }
     if !zero.is_empty() {
         let mut names: std::collections::BTreeSet<&str> =
             gi.all.iter().map(|q| q.as_str()).collect();
@@ -428,6 +483,16 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
             }
             for r in &p.layer_rules {
                 if scope_matches(n, &r.from) || scope_matches(n, &r.to) {
+                    *zero.entry(r.raw.as_str()).or_insert(0) += 1;
+                }
+            }
+            // ON `from` ONLY, and deliberately NOT on either endpoint the way a `forbid` counts. A
+            // `forbid`'s subject is the pair; an `only`'s subject is `from` — it is a promise ABOUT that
+            // scope — so a rule whose destinations all exist while its `from` names nothing has bound
+            // nothing at all, and is exactly the typo that leaves an operator believing a leaf is
+            // protected. Counting the destinations would hide it behind a scope that happens to resolve.
+            for r in &p.only_rules {
+                if scope_matches(n, &r.from) {
                     *zero.entry(r.raw.as_str()).or_insert(0) += 1;
                 }
             }

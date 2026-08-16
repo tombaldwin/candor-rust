@@ -6,6 +6,29 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.29⟩ `only <A> -> <B> [<C> …]` — the PERMISSION form (SPEC §6.2, AS-EFF-009).** A function in scope
+  `A` may reach `A` itself and the listed scopes, and nothing else. **`forbid` FAILS OPEN — a dependency
+  you forgot to prohibit is silently permitted — so "this package is a leaf" could only be spelled as an
+  enumeration of what it must not reach, a list that does not cover a package added tomorrow and says
+  nothing about it.** That is the allowlist hazard this project refuses everywhere in the analysis, living
+  in the policy language instead. `only` fails SAFE: the dependency you forgot to permit is a loud
+  violation on the day it appears. Found by pointing candor's own architecture gate at candor, where the
+  natural `forbid io.poly.candor.model -> io.poly.candor` self-fires at 58 violations.
+  - **The walk STOPS at a permitted scope** — a permitted callee's own dependencies are governed by the
+    rules about IT. Descending past it would demand the transitive closure of everything you permit, which
+    is the same enumeration-that-rots one level down. `A -> A` is implicit; `from` IS descended through.
+  - **Zero-match is measured on `from`, not on either endpoint the way `forbid` counts.** A `forbid`'s
+    subject is the pair; an `only`'s subject is the scope it makes a promise about, so a rule whose
+    destinations all resolve while its `from` names nothing has bound nothing — and that is precisely the
+    typo that leaves an operator believing a leaf is protected.
+  - **Refused on report routes**, exit 2, like `forbid` and for a stricter reason: `forbid` asks whether
+    one named crossing is present, `only` asks whether EVERY reached scope is on a list, so a report that
+    omits a crossing turns a green into a claim of COMPLETENESS. All three report verbs refuse through the
+    one shared helper.
+  - **The NIGHTLY engine refuses it (exit 2) rather than running green.** Its layering pass accumulates
+    only the scopes some rule NAMES, so it can answer "does A reach B" and cannot answer "is everything A
+    reaches on this list". Silently ignoring the rule would be a green gate over an unenforced permission —
+    the exact fail-open shape the form exists to remove.
 - **⟨0.29⟩ `peeked` on every `excluded` entry.** An empty `outOfScope` says "I read the excluded files
   and none held an effect this policy denies", and it may make that claim only about the classes it
   actually read. This engine answers `true` throughout — its peek is one walk with the selection INVERTED,

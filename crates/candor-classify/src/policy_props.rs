@@ -31,7 +31,7 @@ fn is_meaningful(line: &str) -> bool {
 }
 
 fn honoured_count(p: &ParsedPolicy) -> usize {
-    p.rules.len() + p.allow_rules.len() + p.layer_rules.len()
+    p.rules.len() + p.allow_rules.len() + p.layer_rules.len() + p.only_rules.len()
 }
 
 /// A vocabulary deliberately mixing VALID tokens with near-misses, because the defects above were all

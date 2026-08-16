@@ -533,6 +533,24 @@ pub(crate) fn whole_policy_refusals(
             why: why.clone(),
         }));
     }
+    // ⟨0.29⟩ `only` IS AS UNANSWERABLE AS `forbid`, and for a STRICTER reason. Both match on NAME, which
+    // a report's effect-relevant wire cannot settle — but `forbid` asks whether one named crossing is
+    // present, while `only` asks whether EVERY reached scope is on a list. A report that omits a crossing
+    // makes `forbid` read green; it makes `only` read green too, and there the green is a claim of
+    // COMPLETENESS. Refusing both from one place is what stops the next route inheriting only half.
+    if !p.only_rules.is_empty() {
+        let why = format!(
+            "`gate --report` cannot evaluate an `only` rule — it asks whether EVERYTHING a scope reaches \
+             is on a list, and a report carries an effect-relevant call surface rather than the complete \
+             dependency graph a NAME-matching rule needs. Answering it here would certify completeness \
+             from evidence that is not complete. Gate permissions at scan time: candor-scan . --policy \
+             {policy_path}"
+        );
+        policy_refusals.extend(p.only_rules.iter().map(|r| candor_report::Unevaluated {
+            rule: r.raw.trim().to_string(),
+            why: why.clone(),
+        }));
+    }
     if !p.allow_rules.is_empty() {
         let effects: BTreeSet<&str> = p.allow_rules.iter().map(|r| r.effect).collect();
         let why = format!(
@@ -1152,7 +1170,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // an allow-only policy refuse as if it had none. A `forbid`-only policy refuses on this route anyway,
     // one branch below, for an unrelated and specific reason (a report's `calls` graph is
     // effect-relevant), and that refusal names its own cause rather than this one.
-    if p.rules.is_empty() && p.allow_rules.is_empty() && p.layer_rules.is_empty() {
+    if p.rules.is_empty() && p.allow_rules.is_empty() && p.layer_rules.is_empty() && p.only_rules.is_empty() {
         let why = format!(
             "the policy at {policy_path} yielded NO RULES — refusing (exit 2, policy NOT evaluated). \
              Every line was ignored, the file is empty, or it holds only comments. A gate with no rules \
