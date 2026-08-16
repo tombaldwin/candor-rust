@@ -378,7 +378,11 @@ pub fn fnv1a_hex(sorted_quals: &[String]) -> String {
 /// "undetermined", which is the exact inversion the field exists to prevent. So this constant is the one
 /// place to change when an optional surface is implemented, and adding a name here without the
 /// implementation is a defect, not an aspiration.
-pub const RESOLVES: &[&str] = &["fs"];
+/// ⟨0.29⟩ `incomplete` joins the list. It is an optional per-function refinement surface whose absence is
+/// overloaded exactly the way `fs`'s was — "this producer does not compute undetermined locators" vs
+/// "computed them and found none" — which is the ambiguity this field exists to remove. It earns the
+/// declaration by the same rule that governs the list: this engine computes it, so it says so.
+pub const RESOLVES: &[&str] = &["fs", "incomplete"];
 
 /// The v0.2 self-describing report: a provenance header plus the function entries.
 #[derive(Serialize, Deserialize, Clone, Debug)]
