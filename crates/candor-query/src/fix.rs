@@ -583,7 +583,17 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     // rebuilding one, and takes the ANSWERABILITY set off the same object.
     let sig = crate::gate::report_signature(&entries);
     let reason_acc = &sig.reason_classes;
-    let unanswered = crate::gate::unanswerable_pairs(&parsed, &sig);
+    let mut unanswered = crate::gate::unanswerable_pairs(&parsed, &sig);
+    // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY KINDS. `unanswerable_pairs` walks `p.rules`, i.e. `deny` only, so a
+    // policy whose rules were ALL `forbid` produced an EMPTY refusal set and this verb printed
+    // *"no deny/pure boundary crossings in this report ✓"* at exit 0 — measured — over a policy nothing
+    // had evaluated. `gate --report` refused the same policy correctly; the rule lived inline in the gate
+    // and the advisory siblings reading the same report never saw it. `whole_policy_refusals` is now
+    // shared, and these entries carry no `func` because the kind is unanswerable for the whole report,
+    // not at one function.
+    unanswered.extend(crate::gate::whole_policy_refusals(&parsed, &pp_path).into_iter().map(|u| {
+        crate::gate::Unanswerable { rule: u.rule, func: String::new(), why: u.why }
+    }));
     // ⟨0.24⟩ …and what the producing scan could not SEE AT ALL (SPEC §3.2 `ec1a441`, and
     // [`crate::completeness`] for the reasoning). Independent of `unanswered`: that is a function candor
     // analyzed and the gate could not JUDGE, this is source the scan never read, so there is no function

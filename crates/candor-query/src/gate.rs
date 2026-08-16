@@ -506,6 +506,51 @@ pub(crate) struct Unanswerable {
 /// law being enforced is a COMPARISON between verbs, so it is checked by construction rather than by
 /// three authors agreeing.
 ///
+/// ⟨0.29⟩ THE TWO WHOLE-POLICY UNANSWERABLE KINDS, as a function so every report route shares one.
+///
+/// `forbid` and `allow` cannot be answered from a §2 report (SPEC §3.1 ⟨0.24⟩ ANSWERABILITY). This lived
+/// INLINE in `gate --report` and only there, so the advisory verbs that read the same report never saw it:
+/// MEASURED, `candor-query fix-gate --report <r> --policy <forbid-only>` printed
+/// `no deny/pure boundary crossings in this report ✓` at exit 0, and `unverified` printed
+/// `every function in a pure/deny layer is PROVABLY clean ✓` — a green over a policy whose only rule had
+/// been evaluated by nothing. candor-java, the reference engine, disclosed and withheld `ok` on both;
+/// rust, ts and swift did not. Extracted rather than copied so the fourth caller inherits it.
+pub(crate) fn whole_policy_refusals(
+    p: &candor_classify::policy::ParsedPolicy,
+    policy_path: &str,
+) -> Vec<candor_report::Unevaluated> {
+    let mut policy_refusals: Vec<candor_report::Unevaluated> = Vec::new();
+    if !p.layer_rules.is_empty() {
+        let why = format!(
+            "`gate --report` cannot evaluate a `forbid` rule — a report's `calls` graph is \
+             EFFECT-RELEVANT (only callees with a non-empty effect set are written), so a crossing into a \
+             wholly PURE unit is invisible in it, while `forbid` matches on NAME. The rule would read \
+             green over a crossing a scan fails on. Gate layering at scan time: candor-scan . --policy \
+             {policy_path}"
+        );
+        policy_refusals.extend(p.layer_rules.iter().map(|r| candor_report::Unevaluated {
+            rule: r.raw.trim().to_string(),
+            why: why.clone(),
+        }));
+    }
+    if !p.allow_rules.is_empty() {
+        let effects: BTreeSet<&str> = p.allow_rules.iter().map(|r| r.effect).collect();
+        let why = format!(
+            "`gate --report` cannot evaluate an `allow {}` rule — the AS-EFF-008 surface-completeness \
+             marker does not ride the report wire as a gate-usable fact, so a benign visible literal \
+             beside a runtime-computed endpoint would be CERTIFIED here and flagged by a scan. \
+             (`netClass: unknown-host` is NOT that marker — it also names a merely unrecognised host.) \
+             Gate allowlists at scan time: candor-scan . --policy {policy_path}",
+            effects.into_iter().collect::<Vec<_>>().join("`/`")
+        );
+        policy_refusals.extend(p.allow_rules.iter().map(|r| candor_report::Unevaluated {
+            rule: r.raw.trim().to_string(),
+            why: why.clone(),
+        }));
+    }
+    policy_refusals
+}
+
 /// See [`unanswerable_scoped_filters`] above for the whole argument about WHEN a scoped filter is
 /// unanswerable and why the refusal is minimal.
 pub(crate) fn unanswerable_pairs(
@@ -1158,35 +1203,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     // answers *how many* when the operator's question is *which*. The reason genuinely IS a property of
     // the kind, so the same `why` repeats across that kind's entries; what must not repeat is the `rule`,
     // and that is the field a consumer joins on.
-    let mut policy_refusals: Vec<candor_report::Unevaluated> = Vec::new();
-    if !p.layer_rules.is_empty() {
-        let why = format!(
-            "`gate --report` cannot evaluate a `forbid` rule — a report's `calls` graph is \
-             EFFECT-RELEVANT (only callees with a non-empty effect set are written), so a crossing into a \
-             wholly PURE unit is invisible in it, while `forbid` matches on NAME. The rule would read \
-             green over a crossing a scan fails on. Gate layering at scan time: candor-scan . --policy \
-             {policy_path}"
-        );
-        policy_refusals.extend(p.layer_rules.iter().map(|r| candor_report::Unevaluated {
-            rule: r.raw.trim().to_string(),
-            why: why.clone(),
-        }));
-    }
-    if !p.allow_rules.is_empty() {
-        let effects: BTreeSet<&str> = p.allow_rules.iter().map(|r| r.effect).collect();
-        let why = format!(
-            "`gate --report` cannot evaluate an `allow {}` rule — the AS-EFF-008 surface-completeness \
-             marker does not ride the report wire as a gate-usable fact, so a benign visible literal \
-             beside a runtime-computed endpoint would be CERTIFIED here and flagged by a scan. \
-             (`netClass: unknown-host` is NOT that marker — it also names a merely unrecognised host.) \
-             Gate allowlists at scan time: candor-scan . --policy {policy_path}",
-            effects.into_iter().collect::<Vec<_>>().join("`/`")
-        );
-        policy_refusals.extend(p.allow_rules.iter().map(|r| candor_report::Unevaluated {
-            rule: r.raw.trim().to_string(),
-            why: why.clone(),
-        }));
-    }
+    let policy_refusals = whole_policy_refusals(&p, &policy_path);
     // The human line is DERIVED from the same pair the document carries, so the two channels cannot
     // disagree about which rule went unanswered — the split that produced the false disposition claim
     // `8b97e5c` removed.

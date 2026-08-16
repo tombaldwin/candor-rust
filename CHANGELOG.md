@@ -6,6 +6,19 @@ behavioural changes (always in the soundness-increasing direction — see the §
 
 ## Unreleased
 
+- **⟨0.29⟩ `unverified` and `fix-gate` certified over a policy the gate had refused.** SPEC §3.1's
+  answerability MUST binds every verb reading a §2 report, and the `forbid`/`allow` refusal lived INLINE
+  in `gate --report`. `unanswerable_pairs` walks `deny` rules only, so a `forbid`-only policy left the
+  refusal set empty and these verbs printed *"no deny/pure boundary crossings in this report ✓"* and
+  *"every function in a pure/deny layer is PROVABLY clean ✓"* at exit 0 — a green relative to a gate that
+  evaluated nothing. Measured four-way: candor-java disclosed and withheld `ok`; rust, ts and swift did
+  not. Extracted as `gate::whole_policy_refusals` and shared, so the fourth caller inherits it.
+  `--strict` now reaches the could-not-evaluate 2 on all four engines. Pinned by conformance PART 47.
+- `unverified` counts RULES and FUNCTIONS separately. The whole-policy kinds are unanswerable over the
+  report rather than at a function, so they carry no function name — and the old renderer printed a bare
+  `` `` `` and folded them into a count of "function(s)". A refusal rendered as an empty identifier reads
+  as a bug in the tool, and the reader stops believing the block.
+
 ## [0.28.2] — 2026-08-15
 
 _A cardinal-sin fix. 0.28.1's body-less-declaration pass reopened, in two shapes, the hole it was
