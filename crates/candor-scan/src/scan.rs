@@ -2685,6 +2685,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             .map(|(class, count)| candor_report::ExcludedClass {
                 class: class.to_string(),
                 count,
+                // TRUE for every class this engine excludes: the peek is THIS walk with the selection
+                // inverted, so what it reads and what this block declares are exact complements. Two of
+                // the other engines answer false for some of theirs — see `ExcludedClass::peeked`.
+                peeked: true,
                 reason: match class {
                     "build-script" => "the Cargo build script runs at COMPILE time, not as the crate's \
                          runtime behaviour, so this scan does not judge it — but it runs on every \
