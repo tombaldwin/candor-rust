@@ -377,6 +377,35 @@ pub struct LayerRule {
     pub raw: String,
 }
 
+/// ⟨0.29⟩ One `only <A> -> <B> [<C> …]` PERMISSION rule (AS-EFF-009): a function in scope `A` may reach
+/// `A` itself and the listed scopes, and NOTHING else.
+///
+/// **`forbid` FAILS OPEN; `only` FAILS SAFE, and that is the whole reason the form exists.** A dependency
+/// you forgot to prohibit is silently permitted, so "this package is a leaf" can only be spelled by
+/// enumerating what it must not reach — a list that does not cover a package added later, and nothing says
+/// so. That is the allowlist hazard this project refuses everywhere in the analysis, living in the POLICY
+/// LANGUAGE instead. Under `only`, a dependency you forgot to permit is a loud violation.
+///
+/// Found by pointing candor's own architecture gate at candor: the natural
+/// `forbid io.poly.candor.model -> io.poly.candor` SELF-FIRES at 58 violations, because a scope matches a
+/// contiguous run of segments and `model` sits under the very prefix it is trying to protect itself from.
+///
+/// THE WALK STOPS AT A PERMITTED SCOPE, and that is a semantic decision rather than an optimisation: a
+/// permitted callee's own dependencies are governed by the rules about IT, not by this one. Descending
+/// past it would make `only` require the transitive closure of everything you permit — which is the
+/// enumeration-that-rots this form exists to replace, one level down.
+#[derive(Debug, Clone)]
+pub struct OnlyRule {
+    /// The scope being constrained. It may always reach ITSELF: an explicit `A -> A` would be noise, and
+    /// without the implicit permission the form is unusable for exactly the case it exists for.
+    pub from: String,
+    /// The scopes `from` may reach. At least one — `only A ->` with nothing after the arrow is DROPPED as
+    /// malformed rather than read as "A may reach nothing at all", which is a different rule (and one a
+    /// reader is far more likely to have typed by accident than to have meant).
+    pub to: Vec<String>,
+    pub raw: String,
+}
+
 /// ⟨0.24⟩ ONE POLICY LINE THE PARSER DID NOT HONOUR AS WRITTEN (SPEC §3.1 `901f14d` / `195d45a`).
 ///
 /// **THE DEFECT.** `parsepolicy` emitted **no `errors` key at all** (measured 2026-07-28 on the
@@ -439,6 +468,11 @@ pub struct ParsedPolicy {
     pub rules: Vec<PolicyRule>,
     pub allow_rules: Vec<AllowRule>,
     pub layer_rules: Vec<LayerRule>,
+    /// ⟨0.29⟩ the `only <A> -> <B> …` permission rules — see [`OnlyRule`]. Kept in their own list rather
+    /// than folded into `layer_rules` because the two read OPPOSITE ways: a `forbid` names what must not
+    /// happen, an `only` names the complete set of what may, so a route that handled one as the other
+    /// would inverse the verdict rather than approximate it.
+    pub only_rules: Vec<OnlyRule>,
     /// ⟨0.24⟩ POLICY ERRORS — a policy that cannot be honoured AS WRITTEN (SPEC §6.2). Non-empty ⇒ every
     /// gate route MUST refuse: exit 2, the unreadable-policy posture. Not a warning list: the rules in
     /// `rules` are what the text would mean if the error were tolerated, and tolerating it is the defect.
@@ -1041,16 +1075,39 @@ fn parse_policy_impl(text: &str, warn: bool, aliases: &std::collections::BTreeMa
                     raw: line.to_string(),
                 });
             }
+            // ⟨0.29⟩ `only <A> -> <B> [<C> …]` — the PERMISSION form. Everything after the arrow is a
+            // scope, so the rule takes a LIST where `forbid` takes one destination; that is the whole
+            // ergonomic difference, and it is why the tail is not read left-to-right for anything else.
+            "only" => {
+                let a = toks.next().unwrap_or("");
+                let arrow = toks.next().unwrap_or("");
+                let to: Vec<String> = toks.map(str::to_string).collect();
+                if a.is_empty() || arrow != "->" || to.is_empty() {
+                    let msg = format!(
+                        "`only` is malformed (want `only <scope> -> <scope> [<scope> …]`): {line}"
+                    );
+                    warn_ignore!("candor: ignoring permission rule ({msg})");
+                    // Same witness as `forbid`: whatever sat in the ARROW position, since `->` must be
+                    // its own token and `only glued->arrow` finds nothing there.
+                    not_honoured!(false, PolicyError::KIND_RULE_KIND, arrow, ["->"], line, msg);
+                    continue;
+                }
+                out.only_rules.push(OnlyRule {
+                    from: a.to_string(),
+                    to,
+                    raw: line.to_string(),
+                });
+            }
             other => {
                 let msg = format!(
-                    "unknown rule kind `{other}` (accepted: allow, deny, forbid, pure): {line}"
+                    "unknown rule kind `{other}` (accepted: allow, deny, forbid, only, pure): {line}"
                 );
                 warn_ignore!("candor: ignoring policy rule ({msg})");
                 not_honoured!(
                     false,
                     PolicyError::KIND_RULE_KIND,
                     other,
-                    ["allow", "deny", "forbid", "pure"],
+                    ["allow", "deny", "forbid", "only", "pure"],
                     line,
                     msg
                 );
@@ -1288,6 +1345,30 @@ mod tests {
         assert_eq!(p.layer_rules.len(), 2);
         assert_eq!((p.layer_rules[0].from.as_str(), p.layer_rules[0].to.as_str()), ("domain", "infra"));
         assert_eq!((p.layer_rules[1].from.as_str(), p.layer_rules[1].to.as_str()), ("app::web", "app::db"));
+    }
+
+    /// ⟨0.29⟩ `only <A> -> <B> [<C> …]` — the PERMISSION form. The tail is a LIST, which is the whole
+    /// ergonomic difference from `forbid`; a missing arrow or an EMPTY tail is dropped rather than read
+    /// as "A may reach nothing", a rule far likelier to be a typo than an intention.
+    #[test]
+    fn parses_the_only_permission_form_and_drops_the_malformed() {
+        let p = parse_policy(
+            "only model -> util\n\
+             only  app::web  ->  app::db  app::dto \n\
+             only model util\n\
+             only model ->\n\
+             only\n",
+        );
+        assert_eq!(p.only_rules.len(), 2, "the two well-formed lines, and only those");
+        assert_eq!(p.only_rules[0].from.as_str(), "model");
+        assert_eq!(p.only_rules[0].to, vec!["util".to_string()]);
+        assert_eq!(p.only_rules[1].from.as_str(), "app::web");
+        assert_eq!(p.only_rules[1].to, vec!["app::db".to_string(), "app::dto".to_string()],
+                   "every token after the arrow is a permitted scope");
+        // …and an `only` line is a RULE for the zero-rule refusal: a policy holding one is ARMED, so a
+        // route that counted only deny/allow/forbid would call this file empty and refuse a live gate.
+        assert!(!p.rules.is_empty() || !p.only_rules.is_empty(),
+                "an only-only policy must not read as a zero-rule file");
     }
 
     #[test]

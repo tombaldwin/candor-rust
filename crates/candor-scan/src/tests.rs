@@ -3731,6 +3731,62 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// ⟨0.29⟩ THE `only` PERMISSION FORM — `forbid` FAILS OPEN, `only` FAILS SAFE.
+    ///
+    /// `forbid` can state a prohibition but not a permission, so "this package is a leaf" is spelled by
+    /// enumerating what it must not reach — an ALLOWLIST in the unsafe direction, because a package added
+    /// tomorrow is not on the list and nothing says so. That is the hazard this project refuses everywhere
+    /// in the analysis, sitting in the policy language. Under `only`, the dependency you forgot to permit
+    /// is a violation on the day it appears.
+    ///
+    /// THE WALK STOPS AT A PERMITTED SCOPE, and the third row is what pins it. A permitted callee's own
+    /// dependencies are governed by the rules about IT; descending past it would make `only` demand the
+    /// transitive closure of everything you permit — the same enumeration-that-rots, one level down, which
+    /// would make the form useless for the case it exists for.
+    #[test]
+    fn the_only_form_permits_a_list_and_fails_on_what_it_omits() {
+        let d = std::env::temp_dir().join(format!("candor-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"lf\"\n").unwrap();
+        // `model` reaches `util` (permitted) and `infra` (not). `util` itself reaches `deep` — which no
+        // rule permits, and which is NOT model's business.
+        std::fs::write(d.join("src/lib.rs"), concat!(
+            "pub mod model {\n",
+            "  pub fn shape() -> u32 { crate::util::helper() }\n",
+            "  pub fn leaks() -> u32 { crate::infra::db_read() }\n",
+            "}\n",
+            "pub mod util { pub fn helper() -> u32 { crate::deep::inner() } }\n",
+            "pub mod infra { pub fn db_read() -> u32 { 9 } }\n",
+            "pub mod deep { pub fn inner() -> u32 { 1 } }\n",
+        )).unwrap();
+        let idx = load_dep_reports(None);
+        let run = |rule: &str| -> i32 {
+            let p = d.join("candor.policy");
+            std::fs::write(&p, format!("{rule}\n")).unwrap();
+            let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+                include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
+                baseline: None, quiet: true, deps_idx: &idx, peek_excluded: false,
+            });
+            rc
+        };
+        assert_eq!(run("only model -> util"), 1,
+                   "`infra` is reached and not permitted — the whole point of the form");
+        assert_eq!(run("only model -> util infra"), 0,
+                   "the tail is a LIST: permitting both leaves the rule satisfied");
+        // THE STOP RULE. `util` is permitted; `util` reaches `deep`, which nothing permits. If the walk
+        // descended past a permitted scope this would fire, and `only` would require the transitive
+        // closure of everything you allow — unusable for a leaf, which is the case it exists for.
+        assert_eq!(run("only model -> util infra"), 0,
+                   "a permitted callee's OWN dependencies are governed by the rules about IT");
+        // …and the implicit self-permission: model calling model is not a crossing.
+        assert_eq!(run("only model -> nosuch"), 1);
+        assert_eq!(run("only deep -> nosuch"), 0,
+                   "`deep` reaches nothing at all, so an empty permission list is satisfied — \
+                    A -> A is implicit and `deep` has no other callee");
+    }
+
     /// ⟨0.29⟩ THE PEEK — an effect in a file the gate did not judge is REPORTED, and changes no verdict.
     ///
     /// Three rows in one, because the bounds are the whole design and each is a way this becomes noise:

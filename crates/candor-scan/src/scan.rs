@@ -3101,7 +3101,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // from exit 1 to exit 2. A zero-rule test that reads a subset of the rule kinds is the same
         // false-refusal shape this rung exists to prevent, pointed the other way.
         let parsed_zr = candor_classify::policy::parse_policy_silent(&text, &unknown_aliases);
-        if parsed_zr.rules.is_empty() && parsed_zr.allow_rules.is_empty() && parsed_zr.layer_rules.is_empty() {
+        if parsed_zr.rules.is_empty() && parsed_zr.allow_rules.is_empty() && parsed_zr.layer_rules.is_empty()
+            && parsed_zr.only_rules.is_empty() {
             let why = format!(
                 "the policy at {pp} yielded NO RULES — refusing (exit 2, gate NOT enforced). Every line \
                  was ignored (see the `ignoring policy rule` warnings above), the file is empty, or it \
