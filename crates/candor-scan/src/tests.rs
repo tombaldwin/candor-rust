@@ -3709,12 +3709,14 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
 
         let bs = find("build-script").expect("the build script must be declared as excluded");
         assert_eq!(bs["count"].as_u64(), Some(1));
-        // ⟨0.29⟩ …and the peek reads every class THIS engine excludes, because the peek is this walk with
-        // the selection inverted. The flag is not decoration: candor-java answers false for a `.java` it
-        // cannot compile, candor-swift for `.build/`, and without it their empty `outOfScope` would
-        // certify files nobody opened. The false case is pinned in the engines that have one.
-        assert_eq!(bs["peeked"].as_bool(), Some(true),
-                   "the peek reads the build script, and the block must say so: {bs}");
+        // ⟨0.29⟩ `peeked` IS AN OUTCOME, and this scan configures NO POLICY — so no peek ran, nothing was
+        // read, and `false` is the honest answer even for a class the peek is willing to read. The row
+        // asserted `true` here while the flag was a per-class constant, which is precisely the overclaim
+        // the flag exists to prevent: `peeked: true` beside an absent `outOfScope` reads as "I looked and
+        // found nothing" about files nobody opened. The TRUE case belongs where a read happens, and is
+        // asserted in the peek test below.
+        assert_eq!(bs["peeked"].as_bool(), Some(false),
+                   "no policy ⇒ no peek ⇒ no class may claim to have been read: {bs}");
         let why = bs["reason"].as_str().unwrap_or("");
         assert!(why.contains("COMPILE time") && why.contains("cargo build"),
                 "the reason must say WHY and what it costs, not just name the class: {why}");
@@ -3823,6 +3825,11 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let oos = v["outOfScope"].as_array().expect("a configured policy must answer, even with []");
         assert_eq!(oos.len(), 1, "the build script's Exec must be reported: {oos:?}");
         assert_eq!(oos[0]["class"].as_str(), Some("build-script"));
+        // ⟨0.29⟩ …and NOW the class may say it was read, because on this run it was.
+        let ex = v["excluded"].as_array().expect("`excluded` rides every report");
+        let bs = ex.iter().find(|e| e["class"].as_str() == Some("build-script")).expect("declared");
+        assert_eq!(bs["peeked"].as_bool(), Some(true),
+                   "the peek READ this class on this run, so the flag must say so: {bs}");
         assert_eq!(oos[0]["effects"][0].as_str(), Some("Exec"));
         assert!(oos[0]["reason"].as_str().unwrap_or("").contains("did NOT judge"),
                 "the reason must say the gate did not judge it: {:?}", oos[0]["reason"]);

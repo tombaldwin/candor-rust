@@ -15,7 +15,8 @@
 //! any test that could be written. Do NOT re-implement the matching on the report side — the §6.2
 //! clause that mandates the verb was written about exactly that mistake.
 
-use crate::policy::{literal_allowed, reason_class_matches, scope_matches, ParsedPolicy, PolicyRule};
+use crate::policy::{literal_allowed, reason_class_matches, scope_matches, scope_matches_permitted,
+                    ParsedPolicy, PolicyRule};
 use candor_report::GateViolation;
 use std::collections::{BTreeSet, HashMap};
 
@@ -416,7 +417,9 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 if !seen.insert(n) {
                     continue;
                 }
-                if r.to.iter().any(|t| scope_matches(n, t)) {
+                // ⟨0.29⟩ EXACT segment match on a PERMITTED scope — see `scope_matches_permitted`. The
+                // shared prefix matcher is fail-CLOSED for every other rule kind and fail-OPEN here.
+                if r.to.iter().any(|t| scope_matches_permitted(n, t)) {
                     continue; // permitted, and its own callees are not this rule's business
                 }
                 if !scope_matches(n, &r.from) {

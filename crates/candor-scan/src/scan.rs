@@ -2612,6 +2612,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // POLICY-SCOPED, AND BOUNDED BY THE POLICY, which is what keeps it quiet: no policy ⇒ no peek ⇒ not
     // one new line; `deny Net` ⇒ nothing said about an `Exec` in the test tree. Without that bound the
     // noise floor is "everything you excluded", and a gate that prints noise is one people scroll past.
+    // ⟨0.29⟩ DID THE PEEK ACTUALLY READ THESE FILES? `peeked` was a static fact about the exclusion
+    // CLASS, so a peek that never ran — or ran and produced nothing readable — still published
+    // `peeked: true` beside `outOfScope: []`, which is byte-identical to a clean peek. That is the
+    // ⟨0.26⟩ partial-manifest failure inside the rung built to prevent it: the flag exists precisely so
+    // `[]` cannot overclaim, and deriving it from a lookup table made it incapable of doing that job.
+    // It is an OUTCOME now, set only where the recursion returned a report this run could parse.
+    let mut peek_read = false;
     let out_of_scope: Option<Vec<candor_report::OutOfScopeFinding>> = policy_path
         .as_ref()
         .and_then(|pp| std::fs::read_to_string(pp).ok())
@@ -2639,6 +2646,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             });
             let Some(body) = peeked else { return Vec::new() };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Vec::new() };
+            peek_read = true;   // the recursion returned a report this run could read — see `peek_read`
             let mut out = Vec::new();
             for f in v["functions"].as_array().into_iter().flatten() {
                 let hits: Vec<String> = f["inferred"]
@@ -2685,10 +2693,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             .map(|(class, count)| candor_report::ExcludedClass {
                 class: class.to_string(),
                 count,
-                // TRUE for every class this engine excludes: the peek is THIS walk with the selection
-                // inverted, so what it reads and what this block declares are exact complements. Two of
-                // the other engines answer false for some of theirs — see `ExcludedClass::peeked`.
-                peeked: true,
+                // The peek is THIS walk with the selection inverted, so it reads every class this engine
+                // excludes — but only if it RAN. `peek_read` is false when no policy was configured, when
+                // the policy denied nothing, or when the recursion produced nothing readable, and in each
+                // of those cases no file of any class was opened.
+                peeked: peek_read,
                 reason: match class {
                     "build-script" => "the Cargo build script runs at COMPILE time, not as the crate's \
                          runtime behaviour, so this scan does not judge it — but it runs on every \
