@@ -46,6 +46,12 @@ pub(crate) struct Call {
     /// the scan treats the surface as incomplete.
     #[serde(rename = "pp", default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) path_lits_partial: bool,
+    /// ⟨0.29⟩ The literal at the SECOND path position of a two-path Fs op (`copy`/`rename`/`symlink*`).
+    /// `str_arg` carries position 0; both are destinations the gate must see. Publishing only the first
+    /// while calling the surface COMPLETE certified the second: `copy("/tmp/lit", "/tmp/dst")` under
+    /// `allow Fs /tmp/lit` exited 0 while writing `/tmp/dst`. candor-java and candor-swift publish both.
+    #[serde(rename = "p2", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) path_lit2: Option<String>,
 }
 
 /// One function the scan found: its module-qualified name, where, and the calls in its body.

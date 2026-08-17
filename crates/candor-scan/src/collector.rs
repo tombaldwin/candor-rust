@@ -471,7 +471,7 @@ impl<'a> CallCollector<'a> {
                 path,
                 leaf: "next".to_string(),
                 str_arg: None,
-                path_lits_partial: false,
+                path_lits_partial: false, path_lit2: None,
                 typed: false,
                 method: false,
                 is_macro: false,
@@ -491,7 +491,7 @@ impl<'a> CallCollector<'a> {
             path: format!("{ty_leaf}::{method}"),
             leaf: method.to_string(),
             str_arg: None,
-            path_lits_partial: false,
+            path_lits_partial: false, path_lit2: None,
             typed: false,
             method: false,
             is_macro: false,
@@ -549,7 +549,7 @@ impl<'a> CallCollector<'a> {
         if segs.len() >= 2 && !matches!(segs[0], "crate" | "self" | "super" | "") {
             self.calls.push(Call {
                 path: format!("{}::{}::{}", segs[0], ty_leaf, method),
-                leaf: method.to_string(), str_arg: None, path_lits_partial: false,
+                leaf: method.to_string(), str_arg: None, path_lits_partial: false, path_lit2: None,
                 typed: false, method: false, is_macro: false,
             });
         }
@@ -1220,11 +1220,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // `fs::copy("/safe", user_path)` has one at position 0 and still writes somewhere
                         // nobody can see, so reading position 0 alone would leave the same hole one
                         // argument along. Recorded here, where the argument list is in hand.
-                        let path_lits_partial = candor_classify::is_fs_path_arg(&leaf)
-                            && candor_classify::fs_path_arity(&leaf) == 2
-                            && positional_str_lit(&node.args, 1).is_none();
+                        let two_path = candor_classify::is_fs_path_arg(&leaf)
+                            && candor_classify::fs_path_arity(&leaf) == 2;
+                        let path_lit2 = if two_path { positional_str_lit(&node.args, 1) } else { None };
+                        let path_lits_partial = two_path && path_lit2.is_none();
                         self.calls.push(Call { path, leaf, str_arg, typed: false, method,
-                                               is_macro: false, path_lits_partial });
+                                               is_macro: false, path_lits_partial, path_lit2 });
                     }
                 }
             }
@@ -1278,7 +1279,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.charge_coercion(&node.receiver, "Read", "read");
         }
         // Leaf-only call: feeds the intra-crate call graph and bare-leaf classification.
-        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false });
+        self.calls.push(Call { path: leaf.clone(), leaf: leaf.clone(), str_arg: str_arg.clone(), typed: false, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
         // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver is a local bound from
         // a cross-crate call whose return type we never learned — `let c = deplib::build(); c.fetch()`.
         // No key is formed, so no question is asked of the chained report, so its silence licenses
@@ -1334,7 +1335,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     path: format!("{root}::<untyped>::{rest}::{leaf}"),
                     leaf: leaf.clone(),
                     str_arg: None,
-                    path_lits_partial: false,
+                    path_lits_partial: false, path_lit2: None,
                     typed: false,
                     method: false,
                     is_macro: false,
@@ -1365,7 +1366,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // anti-pattern, so skipping the typed clone resolution is the safe choice (no fabrication).
             if (!matches!(cr, "std" | "core" | "alloc") || std_path_recv) && leaf != "clone" {
                 let path = format!("{ty}::{leaf}");
-                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true, is_macro: false, path_lits_partial: false });
+                self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
             }
         } else {
             // DISPATCH-typed receiver (`&dyn T` / `impl T` / `X: T` / a `Box<dyn T>` field): no
@@ -1428,7 +1429,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             path: format!("{full}::{leaf}"),
                             leaf: leaf.clone(),
                             str_arg: str_arg.clone(),
-                            path_lits_partial: false,
+                            path_lits_partial: false, path_lit2: None,
                             typed: true,
                             method: true,
                             is_macro: false,
@@ -1488,7 +1489,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                         path: format!("{ty}::{leaf}"),
                                         leaf: leaf.clone(),
                                         str_arg: str_arg.clone(),
-                                        path_lits_partial: false,
+                                        path_lits_partial: false, path_lit2: None,
                                         typed: true,
                                         method: true,
                                         is_macro: false,
@@ -1517,7 +1518,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 path: format!("{ty}::{leaf}"),
                                 leaf: leaf.clone(),
                                 str_arg: str_arg.clone(),
-                                path_lits_partial: false,
+                                path_lits_partial: false, path_lit2: None,
                                 typed: true,
                                 method: true,
                                 is_macro: false,
@@ -1588,7 +1589,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let name = path_to_string(&p.path);
                         let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, self.uses));
                         let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
-                        self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false });
+                        self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                     }
                 }
             }
@@ -1798,7 +1799,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.calls.push(Call {
                             path: format!("{cr}::{LAZY_UNIT_PREFIX}::{key}"),
                             leaf: name.clone(), str_arg: None,
-                            typed: false, method: false, is_macro: false, path_lits_partial: false,
+                            typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None,
                         });
                         // DROP GLUE across the boundary. Naming a dependency's type as a value (`let _g =
                         // deplib::Guard;`) binds it here, so its `Drop::drop` runs at scope exit — an
@@ -1813,7 +1814,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.calls.push(Call {
                             path: format!("{cr}::{DROP_MARKER}::{key}"),
                             leaf: "drop".to_string(), str_arg: None,
-                            typed: false, method: false, is_macro: false, path_lits_partial: false,
+                            typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None,
                         });
                     }
                 }
@@ -1845,7 +1846,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let qual = lazy_qual(&mp, &name);
                         // Not a macro/typed/method.
                         if self.forced_lazies.insert(qual.clone()) {
-                            self.calls.push(Call { path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false });
+                            self.calls.push(Call { path: qual, leaf: name.clone(), str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                         }
                     }
                 }
@@ -2142,7 +2143,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     path: format!("{ty_leaf}::<construct>"),
                                     leaf: "<construct>".to_string(),
                                     str_arg: None,
-                                    path_lits_partial: false,
+                                    path_lits_partial: false, path_lit2: None,
                                     typed: false,
                                     method: false,
                                     is_macro: false,
@@ -2265,7 +2266,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         if mpath.contains("::") {
             self.calls.push(Call { path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
-                            path_lits_partial: false,
+                            path_lits_partial: false, path_lit2: None,
                         });
         }
         // syn does not parse a macro's body, so every call hidden inside one is invisible by default —

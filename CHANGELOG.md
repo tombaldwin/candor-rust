@@ -9,6 +9,14 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ a two-path `Fs` op with a literal in BOTH positions published only the first — and called
+  the surface COMPLETE.** `std::fs::copy("/tmp/lit", "/tmp/dst")` under `allow Fs /tmp/lit` answered
+  `policy ✓` at exit 0 while writing `/tmp/dst`. A false all-clear assembled from two correct-looking
+  halves: the right completeness verdict attached to half a surface. candor-java and candor-swift
+  published both all along. `Call.path_lit2` now carries the second position and `paths` gets both.
+  Found by GENERATING a case per `std::fs` path-taking leaf × each literal position (52 cases) rather
+  than by re-reading the fix — the previous entry's fix was written and reviewed without noticing this.
+  Conformance PART 51 gained the `twoLit` row, calibrated by reverting.
 - **⟨0.29⟩ ⚠ an `Fs` path literal came from ANYWHERE in the call, not the path POSITION.** MEASURED:
   ``std::fs::write(user_path, "/tmp/lit")`` published `paths: ["/tmp/lit"]` — the BYTES BEING WRITTEN — so `allow Fs /tmp/lit`
   answered `policy ✓` at exit 0 over a write to a runtime-controlled destination, where candor-java and
