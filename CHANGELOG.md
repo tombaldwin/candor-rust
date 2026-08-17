@@ -24,7 +24,8 @@ after upgrading; review policies and regenerate baselines with the new build.
   `incomplete: true` / exit 2, the peek turning a deliberate exclusion into a failed gate. Pinned in-tree
   (`the_peek_does_not_inflate_the_gate_verdicts_analyzed_count`) as well as in CI, with the control that
   `analyzed.count` stays non-zero — an equality satisfied by counting nothing is the manifest deleted
-  rather than corrected. **candor-ts, candor-swift and candor-java were probed and are clean**: java's
+  rather than corrected. Self-review of the fix moved its guard onto `peeking`, the local every
+  other peek branch already reads — two spellings of one condition being the shape that goes green quietly. **candor-ts, candor-swift and candor-java were probed and are clean**: java's
   peek runs on its own thread-local context by construction.
 
 - **⟨0.29⟩ REVIEW FIX — the positional-literal rung lost the locator for two Net verbs.** Replacing
