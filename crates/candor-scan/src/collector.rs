@@ -1206,7 +1206,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
                         // Inline literal, else const-string propagation (`reqwest::get(API_BASE)` /
                         // `Client::post(format!("{}/x", API_BASE))`) — SPEC §1 static-host, same refinement.
-                        let str_arg = positional_str_lit(&node.args, 0).or_else(|| self.resolve_host_arg(&node.args));
+                        let str_arg = positional_str_lit(&node.args, 0)
+                            // ⟨0.29⟩ …or argument 1 for the two Net verbs whose locator lives there
+                            // (`request(Method, url)`, `send_to(buf, addr)`) — see `is_net_host_arg1`.
+                            // Gated on the VERB, never a blanket "try the next argument": a blanket
+                            // fallback is the literal-anywhere hazard this rung removed.
+                            .or_else(|| if candor_classify::is_net_host_arg1(&leaf) {
+                                positional_str_lit(&node.args, 1)
+                            } else { None })
+                            .or_else(|| self.resolve_host_arg(&node.args));
                         // (R53 UFCS-dispatch edge REVERTED after code review: pushing a typed `T::method` edge
                         // from a UFCS `Trait::method(&t)` / `<T as Trait>::method` could resolve to T's
                         // *inherent* `method` when the call actually runs the trait method — candor keys both
@@ -1241,7 +1249,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // Inline literal first (unchanged); fall back to const-string propagation so `post(API_BASE)` /
         // `post(format!("{}/x", API_BASE))` / `post(url)` recover a statically-known host (SPEC §1). The
         // resolved literal flows through the SAME Net/Llm/Db host refinement in scan.rs as an inline one.
-        let str_arg = positional_str_lit(&node.args, 0).or_else(|| self.resolve_host_arg(&node.args));
+        let str_arg = positional_str_lit(&node.args, 0)
+                            // ⟨0.29⟩ …or argument 1 for the two Net verbs whose locator lives there
+                            // (`request(Method, url)`, `send_to(buf, addr)`) — see `is_net_host_arg1`.
+                            // Gated on the VERB, never a blanket "try the next argument": a blanket
+                            // fallback is the literal-anywhere hazard this rung removed.
+                            .or_else(|| if candor_classify::is_net_host_arg1(&leaf) {
+                                positional_str_lit(&node.args, 1)
+                            } else { None })
+                            .or_else(|| self.resolve_host_arg(&node.args));
         // IMPLICIT ITERATOR FORCING via a consuming combinator: `it.count()`, `it.collect()`,
         // `it.for_each(..)`, `it.fold(..)`, … each drive `Iterator::next` to completion. When `it`
         // is a CONCRETE LOCAL type with a local `impl Iterator` (incl. a builder `build().count()`
