@@ -7,7 +7,7 @@ Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, ha
 Both found by generating fixtures against the std API surface rather than reading the tables. Filed
 rather than patched because each turns on a contract question that should be answered once, not guessed.
 
-- **`[P2]` A socket METHOD on a typed receiver is not classified at all.** Measured, all 14 probed:
+- **`[P3]` A socket METHOD on a typed receiver is not classified by the SYNTACTIC FLOOR.** Measured, all 14 probed:
   `UdpSocket::{send_to,recv_from,send,recv,peek_from,peek}` and `TcpStream::{read,write,write_all,
   read_to_end,read_to_string,peek,flush,shutdown}` on a parameter typed `&UdpSocket` / `&mut TcpStream`
   report the enclosing function PURE, while the control `TcpStream::connect(dst)` in the same file is
@@ -15,13 +15,23 @@ rather than patched because each turns on a contract question that should be ans
   charges `Net` on the identical shape. The same is true of `File::write_all` on a `&mut File`, so it is
   not Net-specific — it is the receiver-typing route for std types generally.
 
-  **NOT filed as a cardinal sin, and the reason matters.** `candor-scan` is the STABLE SYNTACTIC backend
-  and says so on every run: *"advisory floor — the syntactic backend under-reports; the nightly engine is
-  the sound gate"*, and a violating run prints *"a clean run is necessary, not sufficient"*. Under that
-  contract an unresolved receiver is a disclosed limitation, not a false all-clear. The open question is
-  whether the DEEP engine (`cargo candor`, rustc-driver) resolves these — if it does, this is a
-  documented floor gap and the priority is low; if it does not, it is a real hole in the sound gate and
-  the priority is P0. **Measure the deep engine before acting.** The classifier itself is already correct
+  **NOT a cardinal sin, and the reason matters.** `candor-scan` is the STABLE SYNTACTIC backend and says
+  so on every run: *"advisory floor — the syntactic backend under-reports; the nightly engine is the sound
+  gate"*, and a violating run prints *"a clean run is necessary, not sufficient"*. Under that contract an
+  unresolved receiver is a disclosed limitation, not a false all-clear.
+
+  **THE DEEP ENGINE WAS THEN MEASURED, which is what this entry asked for, and it ANSWERS CORRECTLY**
+  (`cargo candor` @3f5bb87 on the same fixture):
+
+      udp_send        { Net }      ← candor-scan said PURE; `deny Net` CHARGES it here
+      control_connect { Net }
+      tcp_write       { Unknown }  ← disclosed as unresolved, NOT silently pure (AS-EFF-003 / deny Unknown)
+      file_write      { Unknown }
+
+  So the sound gate is sound, and where it cannot resolve a trait-method receiver it says so rather than
+  certifying. **This is therefore a FLOOR-PRECISION item, not a soundness one — P3, not P0.** The value in
+  closing it is that `candor-scan` is what runs on stock cargo in CI, so the advisory floor is quieter
+  than it needs to be for the most common socket shapes. The classifier is already correct
   (`std::net::UdpSocket::*` → Net, with a pure-accessor denylist), so any fix belongs in receiver typing.
 
 - **`[P3]` A BIND address is published into `hosts`, a DESTINATION surface.** `UdpSocket::bind("0.0.0.0:0")`
