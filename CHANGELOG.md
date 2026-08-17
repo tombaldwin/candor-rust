@@ -9,6 +9,16 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ a LOCAL BIND literal certified a REMOTE destination.** `UdpSocket::bind("0.0.0.0:0")` put
+  `0.0.0.0:0` into `hosts` — the destination surface `allow Net` gates on — and, because a literal had
+  been captured, nothing marked the surface incomplete. MEASURED: `bind("0.0.0.0:0")` followed by
+  `send_to(b"secrets", dst)` with a runtime `dst` answered `policy ✓` at exit 0 under `allow Net 0.0.0.0`.
+  A local listen address certifying a send nobody can see — the masking evasion AS-EFF-008 exists to
+  close, through a verb whose literal is not a destination at all. `is_net_binding` now marks the surface
+  incomplete for `bind`/`listen`/`accept`, whether or not a literal was captured, because a server that
+  binds and accepts talks to whoever connects: its destination set is not statically knowable even in
+  principle. The address is still PUBLISHED (an operator can see what the service listens on), matching
+  candor-java, which already published and hedged. A real destination literal still certifies.
 - **⟨0.29⟩ `gate --report`'s `allow` refusal stated a premise this rung made false.** The message said the
   AS-EFF-008 surface-completeness marker *"does not ride the report wire"*. It rides now: `incomplete` is
   published per function and declared in `resolves`. MEASURED — reports carry

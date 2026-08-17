@@ -2096,6 +2096,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 if let (Some(p2), "Fs") = (&c.path_lit2, eff) {
                     paths.entry(f.qual.clone()).or_default().insert(p2.clone());
                 }
+                // ⟨0.29⟩ A BIND/LISTEN LITERAL IS NOT A DESTINATION and must never certify one — see
+                // `is_net_binding`. Marked whether or not the bind captured a literal, because the
+                // address it names is LOCAL: capturing it is what let `allow Net 0.0.0.0` answer exit 0
+                // over a `send_to` to a runtime endpoint.
+                if eff == "Net" && candor_classify::is_net_binding(&c.leaf) {
+                    incomplete.entry(f.qual.clone()).or_default().insert("Net");
+                }
                 if c.str_arg.is_none() {
                     if eff == "Net" && candor_classify::is_net_establishing(&c.leaf) {
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");

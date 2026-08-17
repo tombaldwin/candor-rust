@@ -1787,6 +1787,31 @@ pub fn is_net_establishing(method: &str) -> bool {
     )
 }
 
+/// ⟨0.29⟩ A LOCAL BIND/LISTEN VERB — the address it names is where the process LISTENS, never a
+/// destination it reaches.
+///
+/// **MEASURED, and it is a false all-clear rather than a naming quibble.** `UdpSocket::bind("0.0.0.0:0")`
+/// put `0.0.0.0:0` into `hosts`, the DESTINATION surface `allow Net` gates on (§2), and — because a
+/// literal had been captured — nothing marked the surface incomplete. So:
+///
+/// ```text
+/// let s = UdpSocket::bind("0.0.0.0:0")?;   // local
+/// s.send_to(b"secrets", dst);              // destination is a RUNTIME value
+/// allow Net 0.0.0.0   ->   policy ✓, exit 0
+/// ```
+///
+/// A local listen address certified a send to an endpoint nobody can see. That is the masking evasion
+/// AS-EFF-008 exists to close, reached through a verb whose literal is not a destination at all.
+///
+/// **A BIND CANNOT BE CERTIFIED, EVER**, which is why this marks the surface incomplete rather than
+/// merely withholding the literal: a server that binds and accepts talks to whoever connects, so its
+/// destination set is not statically knowable even in principle. candor-java already behaves this way —
+/// it publishes the bind address AND hedges — and matching the reference engine keeps the informative
+/// half (an operator can still see what the service listens on) while making it non-certifying.
+pub fn is_net_binding(method: &str) -> bool {
+    matches!(method, "bind" | "listen" | "bind_to_device" | "incoming" | "accept")
+}
+
 /// The masking guard (AS-EFF-008), the `Fs` analog of `is_net_establishing`: whether an `Fs`-classified
 /// call takes the filesystem PATH as a string argument (so a missing literal leaves the path
 /// structurally INVISIBLE — a runtime-built path — and the surface is incomplete, fail-closed). An
