@@ -236,9 +236,25 @@ pub fn parse_net_partners(config_text: &str) -> BTreeSet<String> {
             continue;
         }
         let val = it.next().unwrap_or("").trim();
-        if !val.is_empty() {
-            out.insert(host_part(val).to_ascii_lowercase());
+        if val.is_empty() {
+            continue;
         }
+        // ⟨0.29⟩ A MALFORMED VALUE IS DISCLOSED, NOT SILENTLY KEPT AS JUNK. The grammar is
+        // `net-partner <host>`; the `=` spelling an operator reaches for by habit
+        // (`net-partner = partner.example`) parsed as the HOST `"= partner.example"`, which entered the
+        // set and matched nothing for the rest of the run. The direction is SAFE — the gate stays armed,
+        // so nothing is certified that should not be — which is precisely why it sat unnoticed: the
+        // operator believes a partner is declared, the verdict disagrees, and no line connects the two.
+        // ⟨0.28⟩ gave POLICY files an `ignored` block for exactly this; config files had none.
+        if val.contains(char::is_whitespace) || val.starts_with('=') {
+            eprintln!(
+                "candor: net-partner takes a bare host — `net-partner <host>`, one per line; \
+                 '{val}' is not one and was IGNORED (an '=' or extra words is the usual cause) — {}",
+                raw.trim()
+            );
+            continue;
+        }
+        out.insert(host_part(val).to_ascii_lowercase());
     }
     out
 }
