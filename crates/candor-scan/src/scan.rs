@@ -2088,6 +2088,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 if c.path_lits_partial && eff == "Fs" {
                     incomplete.entry(f.qual.clone()).or_default().insert("Fs");
                 }
+                // ⟨0.29⟩ …and when it IS a literal, PUBLISH it. `str_arg` carries position 0 only, so a
+                // `copy("/tmp/lit", "/tmp/dst")` published half its surface and — both positions being
+                // literal — called it COMPLETE. `allow Fs /tmp/lit` then answered exit 0 over a write to
+                // `/tmp/dst`. Marking it incomplete would be sound but needlessly blind: candor-java and
+                // candor-swift publish both, and the destination is right there in the source.
+                if let (Some(p2), "Fs") = (&c.path_lit2, eff) {
+                    paths.entry(f.qual.clone()).or_default().insert(p2.clone());
+                }
                 if c.str_arg.is_none() {
                     if eff == "Net" && candor_classify::is_net_establishing(&c.leaf) {
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
