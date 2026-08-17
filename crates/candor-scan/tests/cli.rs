@@ -2544,3 +2544,66 @@ fn scan_gate_json_carries_dropped_policy_lines_as_ignored() {
     assert!(v.get("ignored").is_none(), "a clean policy's verdict stays byte-identical: {v}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// ⟨0.29⟩ THE NET LOCATOR CAN LIVE AT ARGUMENT 1, AND A BIND ADDRESS IS NOT A DESTINATION.
+///
+/// Two certify-direction fixes that shipped with NO test and were caught by a release panel for exactly
+/// that — this project's own rule is that the OVER-CHARGE CONTROL is the deliverable and the second
+/// fixture gets written first, and both commits broke it. Pinned here together because they are the same
+/// hazard from opposite sides: one restores a capture that a fix had deleted, the other removes a capture
+/// that was never a destination.
+///
+/// (a) `positional_str_lit(args, 0)` became the universal default when `first_str_lit` was removed. That
+/// is right for `Fs`/`Db`/`Exec`, whose locator is argument 0, and WRONG for `reqwest::Client::request`,
+/// whose signature is `(Method, url)` — the URL stopped being captured and the call could no longer be
+/// certified. The direction was safe, so nothing failed; the surface simply disappeared.
+///
+/// (b) `UdpSocket::bind("0.0.0.0:0")` put a LOCAL address into `hosts`, the DESTINATION surface `allow
+/// Net` gates on, and being a captured literal it made the surface look complete — so `allow Net 0.0.0.0`
+/// certified a `send_to` to a runtime endpoint. Withholding the literal is the whole fix: an empty
+/// surface fails closed on its own (asserted below), which is why no extra `incomplete` hedge is needed —
+/// the first attempt added one and cost every UDP client its certification.
+#[test]
+fn the_net_locator_position_and_the_bind_address_rule() {
+    let d = make_crate(
+        "netlocator",
+        "use std::net::{UdpSocket, TcpStream};
+         pub fn arg1_lit(c: &reqwest::Client) { let _ = c.request(reqwest::Method::GET, \"https://api.example.com/v1\"); }
+         pub fn arg1_runtime(c: &reqwest::Client, u: &str) { let _ = c.request(reqwest::Method::GET, u); }
+         pub fn arg0_lit(c: &reqwest::Client) { let _ = c.get(\"https://api.example.com/v1\"); }
+         pub fn bind_then_dest() { let _ = UdpSocket::bind(\"0.0.0.0:0\"); let _ = TcpStream::connect(\"api.example.com:443\"); }
+         pub fn bind_only() { let _ = UdpSocket::bind(\"0.0.0.0:0\"); }
+",
+    );
+    let out = Command::new(bin())
+        .args([d.to_string_lossy().as_ref(), "--out", d.join("rep").to_string_lossy().as_ref()])
+        .output()
+        .expect("run candor-scan");
+    assert!(out.status.success(), "scan failed: {}", String::from_utf8_lossy(&out.stderr));
+    let rep = std::fs::read_dir(&d).unwrap().filter_map(Result::ok).map(|e| e.path())
+        .find(|p| p.to_string_lossy().contains("rep.") && p.to_string_lossy().ends_with(".scan.json")
+                  && !p.to_string_lossy().contains("callgraph"))
+        .expect("a report");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(rep).unwrap()).unwrap();
+    let hosts = |name: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter()
+            .find(|f| f["fn"].as_str() == Some(name))
+            .and_then(|f| f["hosts"].as_array().cloned())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    // (a) the locator at argument 1 is captured — the regression this pins.
+    assert_eq!(hosts("arg1_lit"), vec!["api.example.com"],
+               "`request(Method, url)` puts its URL at argument 1; reading only position 0 silently \
+                deleted this surface and the call could no longer be certified");
+    // …and the OVER-CHARGE CONTROL: a runtime URL in that same position fabricates nothing.
+    assert!(hosts("arg1_runtime").is_empty(),
+            "a RUNTIME argument-1 url must capture no host — the position rule must not become \
+             'try the next argument until something sticks', which is the literal-anywhere hazard again");
+    assert_eq!(hosts("arg0_lit"), vec!["api.example.com"], "the ordinary argument-0 verb still captures");
+    // (b) a bind address never enters the destination surface, and does not suppress a real one.
+    assert_eq!(hosts("bind_then_dest"), vec!["api.example.com:443"],
+               "a LOCAL bind address must not appear in `hosts`, and must not cost the function the \
+                certification of its actual, visible destination");
+    assert!(hosts("bind_only").is_empty(), "a bind alone names no destination");
+}

@@ -34,7 +34,7 @@ rather than patched because each turns on a contract question that should be ans
   than it needs to be for the most common socket shapes. The classifier is already correct
   (`std::net::UdpSocket::*` → Net, with a pure-accessor denylist), so any fix belongs in receiver typing.
 
-- **`[P3]` A BIND address is published into `hosts`, a DESTINATION surface.** `UdpSocket::bind("0.0.0.0:0")`
+- ~~**`[P3]` A BIND address is published into `hosts`, a DESTINATION surface.**~~ **CLOSED 2026-08-17** — the bind literal is withheld from `hosts` and no hedge is added (an empty surface fails closed on its own, measured four-way); pinned by `the_net_locator_position_and_the_bind_address_rule`. Original filing: `UdpSocket::bind("0.0.0.0:0")`
   puts `0.0.0.0:0` in `hosts`, so `allow Net 0.0.0.0` reads as *"may talk to 0.0.0.0"* when the code binds
   locally and sends anywhere. Measured three-way and there is NO consensus to copy: candor-ts publishes
   nothing for `server.listen(8080, "127.0.0.1")`; candor-java publishes `127.0.0.1` AND marks

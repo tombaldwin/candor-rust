@@ -13,7 +13,12 @@ after upgrading; review policies and regenerate baselines with the new build.
   `first_str_lit` ("the first literal ANYWHERE") with `positional_str_lit(args, 0)` as the UNIVERSAL
   default was right for `Fs`/`Db`/`Exec`, whose locator is argument 0 — but `is_net_establishing` already
   listed two verbs whose locator is not: `reqwest::Client::request(Method, url)` and
-  `UdpSocket::send_to(buf, addr)`. MEASURED: `c.request(Method::GET, "https://api.example.com/v1")`
+  `UdpSocket::send_to(buf, addr)`. **MEASURED FOR `request` ONLY, and the first version of this entry
+  overclaimed by listing both** — `send_to` is a METHOD on a receiver this stable backend does not type
+  (`s.send_to(…)` is not classified at all here, the disclosed floor gap), so its arg-1 literal is still
+  not captured and the fix reaches it only in the deep engine. `send_to` stays in the table because the
+  position is right and the deep engine can use it; the claim about what was measured is now accurate.
+  MEASURED: `c.request(Method::GET, "https://api.example.com/v1")`
   published NO `hosts` and could not be certified, while `c.get(<same url>)` certified normally. The
   direction was SAFE (an uncaptured locator fails closed), which is why only a review found it: the gate
   stayed sound and quietly stopped being USABLE. `is_net_host_arg1` now names those two verbs, gated on
@@ -24,10 +29,19 @@ after upgrading; review policies and regenerate baselines with the new build.
   an EMPTY host surface would otherwise certify. **Measured, that assumption is false**: a `Net` function
   with no captured host fails closed on its own ("performs Net with no visible literal", four-way). The
   hedge bought no soundness and cost real precision — an ordinary client (`bind("0.0.0.0:0")` beside a
-  visible `connect("api.example.com:443")`) could not be certified by `allow Net api.example.com`, and
-  since `UdpSocket` has no constructor but `bind`, that is every UDP client. Now the literal is simply
-  withheld: the original false all-clear stays closed (`bind` + `send_to(runtime)` → empty surface → exit
-  1), a pure listener still fails closed, and the visible-destination client certifies.
+  visible `connect("api.example.com:443")`) could not be certified by `allow Net api.example.com`. Now the
+  literal is simply withheld: the original false all-clear stays closed (`bind` + `send_to(runtime)` →
+  empty surface → exit 1), a pure listener still fails closed, and **a client whose destination is visible
+  to this backend certifies** — measured on the `bind` + `connect(<literal>)` shape.
+
+  **WHAT THIS DOES NOT FIX, corrected after a release panel measured it: a UDP send still cannot be
+  certified under `allow Net` on the stable backend.** An earlier draft of this entry said "that is every
+  UDP client", which is false. `s.send_to(buf, "203.0.113.9:53")` is a METHOD on a receiver this syntactic
+  backend does not type, so the call is not classified `Net` at all and its literal destination is never
+  captured — the restored argument-1 rule cannot reach it. The run fails closed and prints the advisory-floor
+  banner, and `cargo candor` (the sound gate) charges it; but an operator who adds that address to their
+  allowlist will not turn the build green, so the honest statement is that UDP sends are outside what this
+  backend can certify today. Tracked as the receiver-typing floor gap in BACKLOG.md.
 - **⟨0.29⟩ `forbid`/`only` stop at the SCAN BOUNDARY, and now say so.** Both are matched over the call
   graph; a chained dependency contributes EFFECTS, not EDGES, so a function calling into a dep has an
   empty adjacency and the crossing is invisible to them. MEASURED with a dep chained:
