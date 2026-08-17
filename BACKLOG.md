@@ -2,6 +2,37 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+## ⟨0.29⟩ hardening round, 2026-08-17 — two MEASURED gaps, deliberately not fixed here
+
+Both found by generating fixtures against the std API surface rather than reading the tables. Filed
+rather than patched because each turns on a contract question that should be answered once, not guessed.
+
+- **`[P2]` A socket METHOD on a typed receiver is not classified at all.** Measured, all 14 probed:
+  `UdpSocket::{send_to,recv_from,send,recv,peek_from,peek}` and `TcpStream::{read,write,write_all,
+  read_to_end,read_to_string,peek,flush,shutdown}` on a parameter typed `&UdpSocket` / `&mut TcpStream`
+  report the enclosing function PURE, while the control `TcpStream::connect(dst)` in the same file is
+  `Net`. `deny Net` is therefore GREEN over `fn f(s: &UdpSocket, …) { s.send_to(b, dst) }`; candor-java
+  charges `Net` on the identical shape. The same is true of `File::write_all` on a `&mut File`, so it is
+  not Net-specific — it is the receiver-typing route for std types generally.
+
+  **NOT filed as a cardinal sin, and the reason matters.** `candor-scan` is the STABLE SYNTACTIC backend
+  and says so on every run: *"advisory floor — the syntactic backend under-reports; the nightly engine is
+  the sound gate"*, and a violating run prints *"a clean run is necessary, not sufficient"*. Under that
+  contract an unresolved receiver is a disclosed limitation, not a false all-clear. The open question is
+  whether the DEEP engine (`cargo candor`, rustc-driver) resolves these — if it does, this is a
+  documented floor gap and the priority is low; if it does not, it is a real hole in the sound gate and
+  the priority is P0. **Measure the deep engine before acting.** The classifier itself is already correct
+  (`std::net::UdpSocket::*` → Net, with a pure-accessor denylist), so any fix belongs in receiver typing.
+
+- **`[P3]` A BIND address is published into `hosts`, a DESTINATION surface.** `UdpSocket::bind("0.0.0.0:0")`
+  puts `0.0.0.0:0` in `hosts`, so `allow Net 0.0.0.0` reads as *"may talk to 0.0.0.0"* when the code binds
+  locally and sends anywhere. Measured three-way and there is NO consensus to copy: candor-ts publishes
+  nothing for `server.listen(8080, "127.0.0.1")`; candor-java publishes `127.0.0.1` AND marks
+  `incomplete: [Net]`. Whether a local bind belongs in a destination surface is a SPEC question (§2
+  `hosts`), and it should be settled in the spec before any engine moves — changing one engine to match
+  another here would just relocate the divergence.
+
+
 > **AUDIT 2026-08-05 — this file had not been touched since 2026-07-09 and four of its claims are
 > contradicted by the code.** Checked against the repo, not against the file's own prose, which is the
 > method the umbrella backlog's audit note prescribes after that one found 8 of 13 headings wrong.
