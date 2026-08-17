@@ -555,9 +555,13 @@ pub(crate) fn whole_policy_refusals(
         let effects: BTreeSet<&str> = p.allow_rules.iter().map(|r| r.effect).collect();
         let why = format!(
             "`gate --report` cannot evaluate an `allow {}` rule — the AS-EFF-008 surface-completeness \
-             marker does not ride the report wire as a gate-usable fact, so a benign visible literal \
-             beside a runtime-computed endpoint would be CERTIFIED here and flagged by a scan. \
-             (`netClass: unknown-host` is NOT that marker — it also names a merely unrecognised host.) \
+             marker WAS said not to ride the report wire; ⟨0.29⟩ made it ride, but only when the \
+             producing report declares `incomplete` in `resolves`. This verb refuses UNIFORMLY \
+             rather than answering per-report, because an engine that evaluated where its \
+             siblings refuse would SPLIT THE VERB — a benign visible literal beside a \
+             runtime-computed endpoint would be CERTIFIED here and flagged by a scan. \
+             (`netClass: unknown-host` is NOT that marker — it also names a merely \
+             unrecognised host.) \
              Gate allowlists at scan time: candor-scan . --policy {policy_path}",
             effects.into_iter().collect::<Vec<_>>().join("`/`")
         );
