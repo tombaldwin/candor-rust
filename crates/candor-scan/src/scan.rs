@@ -2639,7 +2639,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // a deliberate exclusion into a failed gate, which is a verdict change in the loudest possible form.
     // The peek reads its own unanalyzed set out of the returned report body (see `peek_unread` below),
     // never out of this global, so nothing downstream loses information.
-    if !opts.peek_excluded {
+    if !peeking {
         crate::gate::record_gate_analyzed(analyzed.count, &unanalyzed_units);
     }
     // ⟨typeSurface.returns⟩ THE PRODUCER (DEP-RECEIVER-TYPING-DESIGN.md half 2). A consumer cannot type
