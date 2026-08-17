@@ -1819,6 +1819,11 @@ pub fn is_net_establishing(method: &str) -> bool {
 /// `c.request(Method::GET, "https://api.example.com/v1")` published NO `hosts` at all and could not be
 /// certified, while `c.get("https://api.example.com/v1")` certified normally.
 ///
+/// ⟨0.29⟩ MEASURED FOR `request` ONLY. `send_to` is a METHOD on a receiver the STABLE syntactic backend
+/// does not type, so `s.send_to(buf, "203.0.113.9:53")` is not classified at all there and its arg-1
+/// literal is still uncaptured on the floor; the position is right and the deep engine can use it. Said
+/// plainly because the first version of this fix's changelog listed both verbs as measured.
+///
 /// The direction is SAFE — an uncaptured locator fails closed, it never certifies something invisible —
 /// which is exactly why it needed a review to find: the gate stayed sound and quietly stopped being
 /// USABLE for a common shape. candor-ts avoided this by making its resolver verb-aware in the same rung;

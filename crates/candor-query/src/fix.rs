@@ -661,13 +661,25 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         for u in unanswered.iter().filter(|u| seen.insert(u.rule.as_str())) {
             let n = unanswered.iter().filter(|o| o.rule == u.rule).count();
+            // ⟨0.29⟩ A WHOLE-POLICY REFUSAL HAS NO FUNCTION, and rendering its empty `func` as `` ` ` ``
+            // printed "No remedy is computed for ``" — a bare empty identifier that reads as a bug in the
+            // tool. That is the SAME rendering defect this rung already fixed in `unverified`, on the
+            // sibling verb, and it sits on the first stop of the path every newly-failing AS-EFF-008 user
+            // is pointed at ("→ candor-query fix-gate names the remedy for each"). Found by a
+            // release-panel consumer-impact review, which is where a user-facing string of this kind is
+            // supposed to be caught. When the refusal is whole-policy, name the RULE instead.
+            let subject = if u.func.is_empty() {
+                "this rule on any function".to_string()
+            } else {
+                format!("`{}`", u.func)
+            };
             eprintln!(
-                "candor fix-gate: `{}` — {} No remedy is computed for `{}`{}: a hoist plan for a boundary \
+                "candor fix-gate: `{}` — {} No remedy is computed for {}{}: a hoist plan for a boundary \
                  the gate could not adjudicate is a confident instruction resting on a guess. \
                  `candor unverified` names them all.",
                 u.rule,
                 u.why,
-                u.func,
+                subject,
                 if n > 1 { format!(" or the {} other function(s) this rule cannot be evaluated on", n - 1) } else { String::new() }
             );
         }
