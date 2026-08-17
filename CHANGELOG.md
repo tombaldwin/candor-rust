@@ -11,6 +11,22 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.29.0] — 2026-08-17
 
+- **⚠ ⟨0.29⟩ CI FIX — the peek's nested scan was counted into the verdict it may not change.** The peek
+  re-enters `scan_one` over the EXCLUDED files to answer `outOfScope`; `record_gate_analyzed` accumulates
+  (`+= count`) into a process-global, so the peek's units landed in the `--gate-json` verdict — while the
+  peek writes no report, so `gate --report` could never reach the same number. MEASURED on
+  `crates/candor-query`: the scan route said `analyzed.count 276`, the report it had just written said
+  129, and `ci/gate-equivalence.sh` failed **20 of 54** §3.1 byte-equality rows. The scan route was wrong
+  twice over: `analyzed.count` is IN the verdict document, so inflating it IS the verdict change the peek
+  promises not to make; and the count is the ⟨0.21⟩ completeness manifest, so it told a consumer 276 units
+  were judged when 129 were — the over-claim direction. `unanalyzed` is suppressed on the same branch and
+  is the sharper half: an excluded file that failed to parse would otherwise have pushed the run to
+  `incomplete: true` / exit 2, the peek turning a deliberate exclusion into a failed gate. Pinned in-tree
+  (`the_peek_does_not_inflate_the_gate_verdicts_analyzed_count`) as well as in CI, with the control that
+  `analyzed.count` stays non-zero — an equality satisfied by counting nothing is the manifest deleted
+  rather than corrected. **candor-ts, candor-swift and candor-java were probed and are clean**: java's
+  peek runs on its own thread-local context by construction.
+
 - **⟨0.29⟩ REVIEW FIX — the positional-literal rung lost the locator for two Net verbs.** Replacing
   `first_str_lit` ("the first literal ANYWHERE") with `positional_str_lit(args, 0)` as the UNIVERSAL
   default was right for `Fs`/`Db`/`Exec`, whose locator is argument 0 — but `is_net_establishing` already
