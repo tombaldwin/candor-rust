@@ -3189,6 +3189,35 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             return (code, json_body);
         }
         let outcome = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
+        // ⟨0.29⟩ THE NAME RULES STOP AT THE SCAN BOUNDARY, AND NOW SAY SO. `forbid A -> B` and
+        // `only A -> B …` match over the call graph; a chained dependency contributes EFFECTS, not EDGES,
+        // so a function calling into a dep has an EMPTY adjacency and the crossing is invisible to them.
+        // MEASURED with a dep chained: `only model -> util` answered `policy ✓` over
+        // `model::via_dep() -> deplib::infra::db_read()` while a LOCAL unpermitted scope in the same run
+        // fired AS-EFF-011 — the rule was armed; the boundary was the gap.
+        //
+        // WORSE FOR `only` THAN `forbid`: `forbid` asks whether ONE named crossing is present, so a missed
+        // dep crossing under-reports one prohibition; `only` asserts A reaches the listed scopes AND
+        // NOTHING ELSE — a COMPLETENESS claim — and exists because `forbid` fails open. A package that
+        // calls a third-party library is not a leaf, and without this the gate called it one.
+        //
+        // DISCLOSURE, NOT A VERDICT CHANGE. Making the rules cross needs dep-report EDGES and would force
+        // operators to enumerate third-party scopes in an `only` list — the enumeration-that-rots that form
+        // was designed to escape. The ⟨0.29⟩ `outOfScope` posture: say what was not judged, leave the exit
+        // code alone.
+        if !deps_idx.crates.is_empty() {
+            let np = candor_classify::policy::parse_policy(&text);
+            let named = np.layer_rules.len() + np.only_rules.len();
+            if named > 0 {
+                eprintln!(
+                    "candor-scan: ⚠ {named} name-matching rule(s) (`forbid`/`only`) were matched over \
+                     THIS scan's call graph only — a chained dependency contributes effects, not call \
+                     edges, so a crossing INTO a dependency is invisible to them. `deny`/`allow` still \
+                     cross (effects propagate); an `only` rule cannot certify that a package is a leaf \
+                     when it calls into one of its dependencies."
+                );
+            }
+        }
         // ⟨0.27⟩ SPEC §4 — a rule whose SCOPE bound NO function is UNANSWERABLE, and is DISCLOSED rather
         // than scored as satisfied. MEASURED here before the fix: `deny Fs orders` exits 1 on a real
         // violation and `deny Fs ordrs` exits 0 in silence, so a one-character typo in a layer name is a
