@@ -2607,3 +2607,67 @@ fn the_net_locator_position_and_the_bind_address_rule() {
                 certification of its actual, visible destination");
     assert!(hosts("bind_only").is_empty(), "a bind alone names no destination");
 }
+
+/// ⟨0.29⟩ THE PEEK IS A NESTED SCAN, AND IT MUST NOT COUNT TOWARD THE VERDICT IT IS FORBIDDEN TO CHANGE.
+///
+/// The peek re-enters `scan_one` over the EXCLUDED files to answer `outOfScope`. `record_gate_analyzed`
+/// accumulates (`+= count`) into a process-global, so the peek's units were landing in the --gate-json
+/// verdict — while the peek writes no report, so `gate --report` could never reach the same number.
+///
+/// MEASURED on `crates/candor-query`: the scan route wrote `analyzed.count 276`, the report it had just
+/// produced said 129, and `ci/gate-equivalence.sh` failed 20 of its 54 §3.1 byte-equality rows. The scan
+/// route was the wrong one twice: `analyzed.count` is IN the verdict, so inflating it IS the verdict
+/// change the peek promises not to make; and the count is the ⟨0.21⟩ completeness manifest, so it told a
+/// consumer 276 units were judged when 129 were — the OVER-CLAIM direction.
+///
+/// This row is in-tree because the CI equivalence script needs BOTH binaries and takes minutes; the
+/// property itself needs only this one. It asserts the two numbers the two routes read AGREE, at their
+/// source, so the defect cannot come back through some other consumer of the accumulator.
+#[test]
+fn the_peek_does_not_inflate_the_gate_verdicts_analyzed_count() {
+    let d = make_crate("exclcount", "pub fn go() { std::fs::read(\"/etc/hosts\").unwrap(); }");
+    // build.rs is EXCLUDED (`build-script`), which is what arms the peek: it runs only when the policy
+    // denies something AND the run excluded files. Its function is the bait — before the fix its unit
+    // was counted into the verdict, and it must not be counted after it either.
+    std::fs::write(d.join("build.rs"), "fn main() { std::fs::read(\"/etc/passwd\").unwrap(); }").unwrap();
+    let pol = d.join("candor.policy");
+    std::fs::write(&pol, "deny Net\n").unwrap();          // denies SOMETHING (arms the peek), matches nothing
+    let gate = d.join("verdict.json");
+    let out = Command::new(bin())
+        .args([d.to_string_lossy().as_ref(),
+               "--out", d.join("rep").to_string_lossy().as_ref(),
+               "--policy", pol.to_string_lossy().as_ref(),
+               "--gate-json", gate.to_string_lossy().as_ref()])
+        .output()
+        .expect("run candor-scan");
+
+    let rep_path = std::fs::read_dir(&d).unwrap().filter_map(Result::ok).map(|e| e.path())
+        .find(|p| p.to_string_lossy().contains("rep.") && p.to_string_lossy().ends_with(".scan.json")
+                  && !p.to_string_lossy().contains("callgraph") && !p.to_string_lossy().contains("peek"))
+        .expect("the scan wrote a report");
+    let rep: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(rep_path).unwrap()).unwrap();
+    let verdict: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&gate).unwrap()).unwrap();
+
+    // THE PEEK MUST HAVE RUN, or this row asserts nothing: without an exclusion to walk there is no
+    // nested scan, and the counts would agree for the boring reason.
+    assert!(rep.get("excluded").and_then(|e| e.as_array()).map(|a| !a.is_empty()).unwrap_or(false),
+            "the fixture excluded nothing, so the peek never ran and this row is vacuous: {rep}");
+
+    let rep_count = rep["analyzed"]["count"].as_u64().expect("the report carries analyzed.count");
+    let verdict_count = verdict["analyzed"]["count"].as_u64().expect("the verdict carries analyzed.count");
+    assert_eq!(
+        verdict_count, rep_count,
+        "the --gate-json verdict counts {verdict_count} analyzed units while the report this same run \
+         wrote counts {rep_count} — the peek's nested scan is accumulating into the verdict. §3.1 makes \
+         `gate --report` reproduce this document byte-for-byte, and it can only ever see the report's \
+         number, so the two routes are now two gates. stderr: {}",
+        String::from_utf8_lossy(&out.stderr));
+
+    // THE CONTROL. `analyzed.count` must still be a real count — a fix that zeroed it, or that skipped
+    // `record_gate_analyzed` entirely, passes the equality above and deletes the manifest.
+    assert!(verdict_count > 0,
+            "analyzed.count is {verdict_count} — the counts agree because nothing is counted, which is \
+             the ⟨0.21⟩ manifest deleted rather than corrected");
+}

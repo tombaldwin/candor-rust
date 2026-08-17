@@ -2619,7 +2619,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         sorted.sort();
         candor_report::Analyzed { count: sorted.len(), digest: candor_report::fnv1a_hex(&sorted) }
     };
-    crate::gate::record_gate_analyzed(analyzed.count, &unanalyzed_units);
+    // …BUT NOT FROM THE PEEK, WHICH IS A NESTED SCAN OF FILES THIS RUN EXCLUDED.
+    //
+    // The ⟨0.29⟩ peek re-enters `scan_one` over the excluded set to answer `outOfScope`, and its
+    // contract is stated in the commit that added it: READ THE EXCLUDED FILES, CHANGE NO VERDICT.
+    // `record_gate_analyzed` accumulates (`+= count`) into a process-global, so the peek's units were
+    // landing in the --gate-json verdict — while the peek writes no report, so `gate --report` could
+    // never see them. MEASURED on `crates/candor-query`: the scan route said `analyzed.count 276`, the
+    // report it had just written said 129, and CI's §3.1 byte-equality row failed on 20 of 54 rows.
+    //
+    // The scan route is the WRONG one, twice over. `analyzed.count` is IN the verdict document, so
+    // inflating it IS a verdict change — the peek breaking its own contract. And the count is the ⟨0.21⟩
+    // completeness manifest, "every fn candor formed a judgment for": the peek forms no judgment the
+    // gate uses, so counting its units tells a consumer 276 things were judged when 129 were. That is
+    // the over-claim direction, which is the one that matters.
+    //
+    // `unanalyzed_units` is suppressed on the same branch and it is the sharper half: an excluded file
+    // that fails to parse would otherwise push the RUN to `incomplete: true` / exit 2 — the peek turning
+    // a deliberate exclusion into a failed gate, which is a verdict change in the loudest possible form.
+    // The peek reads its own unanalyzed set out of the returned report body (see `peek_unread` below),
+    // never out of this global, so nothing downstream loses information.
+    if !opts.peek_excluded {
+        crate::gate::record_gate_analyzed(analyzed.count, &unanalyzed_units);
+    }
     // ⟨typeSurface.returns⟩ THE PRODUCER (DEP-RECEIVER-TYPING-DESIGN.md half 2). A consumer cannot type
     // `let c = deplib::build()` because `build` is PURE and therefore absent from this report entirely —
     // publishing its return type is the only way that key can ever be formed.
