@@ -1808,6 +1808,25 @@ pub fn is_net_establishing(method: &str) -> bool {
 /// destination set is not statically knowable even in principle. candor-java already behaves this way —
 /// it publishes the bind address AND hedges — and matching the reference engine keeps the informative
 /// half (an operator can still see what the service listens on) while making it non-certifying.
+/// ⟨0.29⟩ The Net verbs whose LOCATOR is at argument **1**, not 0 — the rust analogue of candor-ts's
+/// `NET_URL_ARG1_MEMBERS`.
+///
+/// **A REGRESSION FOUND IN REVIEW, and the direction matters.** The positional-literal rung replaced
+/// `first_str_lit` ("the first string literal ANYWHERE in the call") with `positional_str_lit(args, 0)`
+/// as the UNIVERSAL default. That is right for `Fs`/`Db`/`Exec`, whose locator is always argument 0 —
+/// but `is_net_establishing` already listed two verbs whose locator is not: `reqwest::Client::request`
+/// takes `(Method, url)` and `UdpSocket::send_to` takes `(buf, addr)`. MEASURED after the swap:
+/// `c.request(Method::GET, "https://api.example.com/v1")` published NO `hosts` at all and could not be
+/// certified, while `c.get("https://api.example.com/v1")` certified normally.
+///
+/// The direction is SAFE — an uncaptured locator fails closed, it never certifies something invisible —
+/// which is exactly why it needed a review to find: the gate stayed sound and quietly stopped being
+/// USABLE for a common shape. candor-ts avoided this by making its resolver verb-aware in the same rung;
+/// this is that discipline arriving one engine late.
+pub fn is_net_host_arg1(method: &str) -> bool {
+    matches!(method, "request" | "send_to")
+}
+
 pub fn is_net_binding(method: &str) -> bool {
     matches!(method, "bind" | "listen" | "bind_to_device" | "incoming" | "accept")
 }

@@ -9,6 +9,25 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⟨0.29⟩ REVIEW FIX — the positional-literal rung lost the locator for two Net verbs.** Replacing
+  `first_str_lit` ("the first literal ANYWHERE") with `positional_str_lit(args, 0)` as the UNIVERSAL
+  default was right for `Fs`/`Db`/`Exec`, whose locator is argument 0 — but `is_net_establishing` already
+  listed two verbs whose locator is not: `reqwest::Client::request(Method, url)` and
+  `UdpSocket::send_to(buf, addr)`. MEASURED: `c.request(Method::GET, "https://api.example.com/v1")`
+  published NO `hosts` and could not be certified, while `c.get(<same url>)` certified normally. The
+  direction was SAFE (an uncaptured locator fails closed), which is why only a review found it: the gate
+  stayed sound and quietly stopped being USABLE. `is_net_host_arg1` now names those two verbs, gated on
+  the VERB — never a blanket "try the next argument", which would be the literal-anywhere hazard again.
+  candor-ts made its resolver verb-aware in the same rung; this is that discipline arriving one engine late.
+- **⟨0.29⟩ REVIEW FIX — the bind hedge was an over-charge built on an unmeasured assumption.** The first
+  fix withheld the bind literal from `hosts` AND marked the surface `incomplete` unconditionally, assuming
+  an EMPTY host surface would otherwise certify. **Measured, that assumption is false**: a `Net` function
+  with no captured host fails closed on its own ("performs Net with no visible literal", four-way). The
+  hedge bought no soundness and cost real precision — an ordinary client (`bind("0.0.0.0:0")` beside a
+  visible `connect("api.example.com:443")`) could not be certified by `allow Net api.example.com`, and
+  since `UdpSocket` has no constructor but `bind`, that is every UDP client. Now the literal is simply
+  withheld: the original false all-clear stays closed (`bind` + `send_to(runtime)` → empty surface → exit
+  1), a pure listener still fails closed, and the visible-destination client certifies.
 - **⟨0.29⟩ `forbid`/`only` stop at the SCAN BOUNDARY, and now say so.** Both are matched over the call
   graph; a chained dependency contributes EFFECTS, not EDGES, so a function calling into a dep has an
   empty adjacency and the crossing is invisible to them. MEASURED with a dep chained:

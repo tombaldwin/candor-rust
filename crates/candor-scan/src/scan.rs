@@ -2096,13 +2096,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 if let (Some(p2), "Fs") = (&c.path_lit2, eff) {
                     paths.entry(f.qual.clone()).or_default().insert(p2.clone());
                 }
-                // ⟨0.29⟩ A BIND/LISTEN LITERAL IS NOT A DESTINATION and must never certify one — see
-                // `is_net_binding`. Marked whether or not the bind captured a literal, because the
-                // address it names is LOCAL: capturing it is what let `allow Net 0.0.0.0` answer exit 0
-                // over a `send_to` to a runtime endpoint.
-                if eff == "Net" && candor_classify::is_net_binding(&c.leaf) {
-                    incomplete.entry(f.qual.clone()).or_default().insert("Net");
-                }
                 if c.str_arg.is_none() {
                     if eff == "Net" && candor_classify::is_net_establishing(&c.leaf) {
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
@@ -2124,6 +2117,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                         // (`connect`/`open`/`begin`) whose query is built structurally (no maskable string).
                         incomplete.entry(f.qual.clone()).or_default().insert("Db");
                     }
+                }
+                // ⟨0.29⟩ A BIND/LISTEN ADDRESS IS LOCAL — it never enters `hosts`, the DESTINATION
+                // surface `allow Net` gates on (§2). MEASURED before this: `UdpSocket::bind("0.0.0.0:0")`
+                // put `0.0.0.0:0` in `hosts` and, being a captured literal, made the surface look
+                // complete — so `allow Net 0.0.0.0` answered `policy ✓` at exit 0 over a `send_to` to a
+                // RUNTIME endpoint. A local listen address certifying a remote send.
+                //
+                // WITHHOLDING THE LITERAL IS THE WHOLE FIX, and the first attempt got that wrong: it also
+                // marked the surface `incomplete` unconditionally, on the assumption that an EMPTY host
+                // surface would otherwise certify. **Measured, that assumption is false** — a `Net`
+                // function with no captured host fails closed on its own ("performs Net with no visible
+                // literal", four-way). The extra hedge bought no soundness and cost real precision: a
+                // review fixture of an ordinary client — `bind("0.0.0.0:0")` beside a visible
+                // `connect("api.example.com:443")` — could not be certified by `allow Net api.example.com`
+                // even though its destination is right there. `UdpSocket` has no constructor but `bind`,
+                // so that is every UDP client. Withhold the literal; add no hedge.
+                if eff == "Net" && candor_classify::is_net_binding(&c.leaf) {
+                    continue;
                 }
                 if let Some(s) = &c.str_arg {
                     match eff {
