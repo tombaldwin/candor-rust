@@ -9,6 +9,17 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ A workspace root that is ALSO a member was scanned TWICE.** `members = ["sub", "."]` is legal and
+  real — bollard v0.16.1 ships it — and `workspace_members` dedupes STRINGS, so `.` survives as
+  `<root>/.`: a different string, the same directory as the root pushed beside it. Two symptoms, both
+  over-claims: `record_gate_analyzed` fired twice, so the `--gate-json` verdict said `analyzed.count
+  856` where its own three reports summed to **592** (breaking SPEC §3.1 — `gate --report` only ever
+  sees the reports, so the routes could not agree); and `--json` emitted the same package twice in its
+  array. The report FILES were unharmed, the second write being identical, which is why nothing else
+  noticed. Deduped by CANONICAL path. Found by the corpus round's new §3.1 oracle over THIRD-PARTY
+  trees — the in-repo gate-equivalence fixtures cannot reach it, because candor's own workspace does
+  not list its root as a member.
+
 ## [0.29.0] — 2026-08-17
 
 - **⚠ ⟨0.29⟩ CI FIX — the peek's nested scan was counted into the verdict it may not change.** The peek

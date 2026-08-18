@@ -2671,3 +2671,68 @@ fn the_peek_does_not_inflate_the_gate_verdicts_analyzed_count() {
             "analyzed.count is {verdict_count} — the counts agree because nothing is counted, which is \
              the ⟨0.21⟩ manifest deleted rather than corrected");
 }
+
+
+/// A WORKSPACE ROOT THAT IS ALSO A MEMBER MUST BE SCANNED ONCE.
+///
+/// `members = ["sub", "."]` is legal and real — bollard v0.16.1 ships it. `workspace_members` dedupes
+/// STRINGS, so `.` survives as `<root>/.`: a different string, the same directory as the root pushed
+/// beside it. `scan_one` then ran twice over one package, and the two symptoms were:
+///   · `record_gate_analyzed` fired twice, so the --gate-json verdict OVER-CLAIMED. On bollard it said
+///     `analyzed.count 856` where its own three reports summed to 592, which also breaks SPEC §3.1:
+///     `gate --report` can only ever see the reports, so the two routes stopped agreeing.
+///   · `--json` emitted the same package TWICE in its array.
+/// The report FILES were unharmed — the second write is identical — which is why nothing else noticed.
+///
+/// Found by the corpus round's §3.1 oracle over THIRD-PARTY trees; the in-repo gate-equivalence
+/// fixtures cannot reach it, because candor's own workspace does not list its root as a member.
+#[test]
+fn a_workspace_root_that_is_also_a_member_is_scanned_once() {
+    let d = std::env::temp_dir().join(format!("candor-wsdup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::create_dir_all(d.join("sub/src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"),
+        "[package]\nname = \"rootpkg\"\n\n[workspace]\nmembers = [\"sub\", \".\"]\n").unwrap();
+    std::fs::write(d.join("src/lib.rs"),
+        "pub fn go() { let _ = std::fs::read(\"/etc/passwd\"); }\n").unwrap();
+    std::fs::write(d.join("sub/Cargo.toml"), "[package]\nname = \"subpkg\"\n").unwrap();
+    std::fs::write(d.join("sub/src/lib.rs"),
+        "pub fn sub_go() { let _ = std::fs::read(\"/etc/hosts\"); }\n").unwrap();
+
+    // (1) --json must carry each package ONCE.
+    let out = Command::new(bin()).args([d.to_string_lossy().as_ref(), "--json"]).output().expect("scan");
+    let docs: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json emits a JSON array over a workspace");
+    let names: Vec<String> = docs.as_array().expect("an array").iter()
+        .map(|x| x["package"].as_str().unwrap_or("").to_string()).collect();
+    let mut uniq = names.clone(); uniq.sort(); uniq.dedup();
+    assert_eq!(names.len(), uniq.len(),
+               "`--json` emitted a package twice over a workspace whose root is also a member: {names:?}");
+
+    // (2) …and the VERDICT must count what the REPORTS contain, or §3.1 byte-equality is gone.
+    let pol = d.join("candor.policy");
+    std::fs::write(&pol, "deny Fs\n").unwrap();
+    let gate = d.join("verdict.json");
+    Command::new(bin())
+        .args([d.to_string_lossy().as_ref(),
+               "--out", d.join("rep").to_string_lossy().as_ref(),
+               "--policy", pol.to_string_lossy().as_ref(),
+               "--gate-json", gate.to_string_lossy().as_ref()])
+        .output().expect("scan");
+    let mut sum = 0u64;
+    for e in std::fs::read_dir(&d).unwrap().filter_map(Result::ok) {
+        let p = e.path(); let n = p.to_string_lossy().to_string();
+        if n.contains("rep.") && n.ends_with(".scan.json") && !n.contains("callgraph") {
+            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            sum += v["analyzed"]["count"].as_u64().unwrap_or(0);
+        }
+    }
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&gate).unwrap()).unwrap();
+    let verdict = v["analyzed"]["count"].as_u64().unwrap();
+    assert_eq!(verdict, sum,
+               "the verdict counts {verdict} analyzed units while its own reports hold {sum} — the root \
+                was scanned twice, so `gate --report` (which sees only the reports) can never agree");
+    assert!(sum > 0, "the fixture analyzed nothing — this row would pass for the wrong reason");
+    let _ = std::fs::remove_dir_all(&d);
+}
