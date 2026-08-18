@@ -36,6 +36,10 @@ struct GateReport {
     /// ⟨0.21⟩ the target source the producing scan could NOT analyze. Non-empty ⇒ the gate cannot be
     /// green over it, the same verdict the scan reached from the same fact.
     unanalyzed: Vec<candor_report::UnanalyzedUnit>,
+    /// ⟨0.30⟩ the peek's findings, carried BY the report — this route cannot peek (it has no target,
+    /// only a document), which is exactly why the field rides the report and why §3.1's byte-equality
+    /// holds here by construction rather than by two authors agreeing.
+    out_of_scope: Vec<candor_report::OutOfScopeFinding>,
     /// ⟨0.15⟩ the κ ledger's package NAMES, unioned across reports — the verdict's advisory note.
     coverage_packages: BTreeSet<String>,
     /// ⟨0.24⟩ The PACKAGES under this locator whose report says it JUDGED NOTHING (SPEC §2's
@@ -97,6 +101,7 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
         entries: Vec::new(),
         analyzed_count: 0,
         unanalyzed: Vec::new(),
+        out_of_scope: Vec::new(),
         coverage_packages: BTreeSet::new(),
         judged_nothing_pkgs: Vec::new(),
     };
@@ -195,6 +200,17 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
             "a list of `{ path, reason }`",
             "the EMPTY list — and `unanalyzed` non-emptiness IS the fail-closed trigger, so that default \
              turns this verb's exit 2 into `policy ✓`",
+            Vec::new()
+        ));
+        // ⟨0.30⟩ read STRICTLY for `unanalyzed`'s reason — the empty default is the claim "I looked and
+        // nothing was there", which is the safe-LOOKING value. ABSENT stays absent (⟨0.26⟩ cannot-answer):
+        // a report produced with no policy was never asked, and must not become exit 2 on contact.
+        out.out_of_scope.extend(strict!(
+            candor_report::report_out_of_scope(&text),
+            "outOfScope",
+            "a list of `{ fn, path, effects, class, reason }`",
+            "the EMPTY list — and ⟨0.30⟩ makes `outOfScope` non-emptiness a fail-closed trigger, so that \
+             default turns this verb's exit 2 into `policy ✓`",
             Vec::new()
         ));
         let cov: candor_report::Coverage = strict!(
@@ -1497,6 +1513,9 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         &zero_match,
         // ⟨0.28⟩ the dropped-line disclosure, same bytes as the scan route's (SPEC §6.2 `ignored`).
         &ignored,
+        // ⟨0.30⟩ the peek's findings, off the REPORT — same bytes as the scan route's, which is what
+        // makes §3.1 byte-equality hold on a route that cannot peek for itself.
+        &rep.out_of_scope,
         want_json,
         gate_json.as_deref(),
     ) {
@@ -1511,6 +1530,17 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             "candor-query gate: NOT certified — the report declares {} unit(s) candor could not analyze; \
              a gate cannot be green over unanalyzed code",
             rep.unanalyzed.len()
+        );
+        2
+    } else if !rep.out_of_scope.is_empty() {
+        // ⟨0.30⟩ the SCOPE half of the same posture, and the same exit. Named separately from the
+        // `unanalyzed` arm above because the repairs differ: that one wants a scan that can read a file,
+        // this one wants a scan whose selector reaches the code the policy is about.
+        eprintln!(
+            "candor-query gate: NOT certified — the report names {} function(s) OUTSIDE the scan's scope \
+             performing an effect this policy denies; the gate did not judge them, so the verdict is \
+             incomplete rather than a pass",
+            rep.out_of_scope.len()
         );
         2
     } else {
@@ -1533,6 +1563,7 @@ fn write_verdict(
     unevaluated: &[candor_report::Unevaluated],
     zero_match: &[String],
     ignored: &[candor_report::IgnoredLine],
+    out_of_scope: &[candor_report::OutOfScopeFinding],
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -1548,7 +1579,7 @@ fn write_verdict(
     if targets.is_empty() {
         return true;
     }
-    let json = match candor_report::gate_verdict_json_v28(
+    let json = match candor_report::gate_verdict_json_v30(
         violations,
         coverage,
         analyzed_count,
@@ -1557,6 +1588,7 @@ fn write_verdict(
         unevaluated,
         zero_match,
         ignored,
+        out_of_scope,
     ) {
         Ok(j) => j,
         Err(e) => {

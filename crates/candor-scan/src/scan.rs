@@ -3339,6 +3339,26 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
             return (2, json_body);
         }
+        // ⟨0.30⟩ THE SCOPE HALF OF THE SAME POSTURE. `had_parse_failure` above is "I opened this file and
+        // could not read it"; this is "I never opened it, and when the peek looked afterwards it performed
+        // the effect this policy denies". Both mean the gate could not see enough of the tree to certify
+        // it, so both are exit 2. Reverses ⟨0.29⟩'s "the verdict does not move" on the measurement that
+        // the peek resolves a CONCRETE denied effect rather than uncertainty.
+        //
+        // EXIT 2, NOT 1: these functions are not in `violations` and not in `functions`, because the gate
+        // did not judge them — exit 1 would claim "I judged your code and it breaks the policy", false in
+        // the other direction. `v.is_empty()` keeps the ⟨0.24⟩ precedence: a certain violation dominates.
+        let oos_findings = out_of_scope.as_deref().unwrap_or(&[]);
+        crate::gate::record_gate_out_of_scope(oos_findings);
+        if !oos_findings.is_empty() && v.is_empty() {
+            eprintln!(
+                "candor-scan: policy NOT enforced — {} function(s) OUTSIDE this scan's scope perform an \
+                 effect this policy denies (named above); the gate did not judge them, so the verdict is \
+                 incomplete rather than a pass",
+                oos_findings.len()
+            );
+            return (2, json_body);
+        }
         // ⟨0.24⟩ A SOLE WITHHOLDING is a refusal (SPEC §3.1). Ordered AFTER the violation exit so the
         // precedence holds — a rule that fired on carried evidence dominates, and `v.is_empty()` is the
         // whole of the condition. Never `policy ✓`: the operator asked for a rule that did not run.

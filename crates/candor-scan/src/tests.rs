@@ -3800,7 +3800,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// the `deny Net` row found two "Exec" findings and looked like a broken bound. The fixture could
     /// not test the thing it claimed to. An argument-free `ls` isolates Exec.
     #[test]
-    fn the_peek_reports_a_denied_effect_outside_the_scope_without_moving_the_verdict() {
+    fn the_peek_reports_a_denied_effect_outside_the_scope_and_the_verdict_goes_incomplete() {
         let d = std::env::temp_dir().join(format!("candor-peek-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src")).unwrap();
@@ -3833,9 +3833,13 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert_eq!(oos[0]["effects"][0].as_str(), Some("Exec"));
         assert!(oos[0]["reason"].as_str().unwrap_or("").contains("did NOT judge"),
                 "the reason must say the gate did not judge it: {:?}", oos[0]["reason"]);
-        // THE VERDICT DOES NOT MOVE. This is the promise of the chosen rung: a file the gate declined to
-        // judge must not decide an exit code, and must not appear among `violations`.
-        assert_eq!(rc, 0, "an out-of-scope finding must not change the exit code");
+        // ⟨0.30⟩ THE VERDICT IS INCOMPLETE. ⟨0.29⟩ asserted the opposite here — "a file the gate declined
+        // to judge must not decide an exit code" — and ⟨0.30⟩ reverses that half on the measurement that
+        // the peek resolves a CONCRETE denied effect rather than uncertainty (axios: 37 functions
+        // `performs Net`, exit 0, `policy ✓`).
+        assert_eq!(rc, 2, "a peeked function performing the denied effect makes the verdict incomplete");
+        // …and the STRUCTURAL half of ⟨0.29⟩ is UNCHANGED, which is why the code is 2 and not 1: the gate
+        // did not judge this unit, so claiming a violation over it would be false in the other direction.
         assert!(v["functions"].as_array().into_iter().flatten()
                     .all(|f| f["fn"].as_str() != Some("build::main")),
                 "the out-of-scope function must NOT be folded into the report's functions");
