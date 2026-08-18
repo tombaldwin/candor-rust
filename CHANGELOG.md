@@ -9,6 +9,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.29.1] — 2026-08-18
+
 - **⚠ A workspace root that is ALSO a member was scanned TWICE.** `members = ["sub", "."]` is legal and
   real — bollard v0.16.1 ships it — and `workspace_members` dedupes STRINGS, so `.` survives as
   `<root>/.`: a different string, the same directory as the root pushed beside it. Two symptoms, both
