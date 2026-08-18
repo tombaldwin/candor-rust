@@ -3449,6 +3449,28 @@ pub(crate) fn scan_target(
         dirs.push(dir.to_string()); // the workspace manifest also declares a root package
     }
     dirs.extend(members);
+    // DEDUPE BY CANONICAL PATH — the root can also be a MEMBER, spelled differently.
+    //
+    // `members = ["codegen/swagger", "codegen/proto", "."]` is a real and legal layout (bollard ships
+    // it), and `workspace_members` dedupes STRINGS: `.` survives as `<root>/.`, which is a different
+    // string and the same directory as the `<root>` pushed just above. `scan_one` then ran twice over
+    // one package and:
+    //   · called `record_gate_analyzed` twice, so the --gate-json verdict said `analyzed.count 856`
+    //     where its own three reports summed to 592 — an over-claim of 264, and §3.1 byte-equality
+    //     against `gate --report` broken, since that route can only ever see the reports;
+    //   · pushed the same body into `bodies` twice, so `--json` emitted the package TWICE in its array.
+    // The report FILES were unharmed (the second write is identical), which is why nothing else noticed.
+    //
+    // MEASURED on bollard v0.16.1 by the corpus round's §3.1 oracle over third-party trees — the
+    // in-repo gate-equivalence fixtures cannot reach it, because candor's own workspace does not list
+    // its root as a member.
+    {
+        let mut seen = std::collections::HashSet::new();
+        dirs.retain(|d| {
+            let key = std::fs::canonicalize(d).unwrap_or_else(|_| std::path::PathBuf::from(d));
+            seen.insert(key)
+        });
+    }
     let mut rc = 0;
     let mut bodies: Vec<String> = Vec::new();
     for d in &dirs {
