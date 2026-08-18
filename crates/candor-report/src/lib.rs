@@ -745,6 +745,19 @@ pub fn report_unanalyzed(text: &str) -> KeyRead<Vec<UnanalyzedUnit>> {
     read_key(text, "unanalyzed")
 }
 
+/// ⟨0.30⟩ Read a report's `outOfScope` peek findings — the functions a policy-configured scan looked at
+/// AFTER excluding them and found performing an effect that policy DENIES. Non-empty makes the verdict
+/// INCOMPLETE (exit 2), so this rides the STRICT path for `unanalyzed`'s reason: coerced to its empty
+/// default, corrupt input becomes the claim *"I looked and nothing was there"*, which is the
+/// safe-LOOKING value and the wrong one.
+///
+/// ABSENT is NOT empty and must stay `Absent`: ⟨0.26⟩ makes an absent key *"this producer cannot
+/// answer"*, and a report produced with no policy was never asked the question — a pre-⟨0.30⟩ report
+/// must not become exit 2 on contact.
+pub fn report_out_of_scope(text: &str) -> KeyRead<Vec<OutOfScopeFinding>> {
+    read_key(text, "outOfScope")
+}
+
 /// ⟨0.15 staged⟩ Parse a report's `coverage` envelope field (spec §2). `None` when the field is
 /// absent (a fully-covered scan, or any pre-⟨0.15⟩ report), the text isn't a JSON object, or the
 /// field doesn't deserialize — absence of the ledger is never an error, just "no disclosure
@@ -1091,6 +1104,30 @@ pub fn gate_verdict_json_v28(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
+        &[],
+    )
+}
+
+/// ⟨0.30⟩ [`gate_verdict_json_v28`] plus the `outOfScope` findings — the peeked functions performing an
+/// effect the policy DENIES. Non-empty makes the verdict INCOMPLETE (`ok:false`, `incomplete:true`,
+/// exit 2), reversing ⟨0.29⟩'s "an out-of-scope finding MUST NOT move the verdict" on the measurement
+/// that the peek resolves a CONCRETE denied effect rather than uncertainty. Omitted when empty, so a
+/// clean verdict stays byte-identical to the v28 form.
+#[allow(clippy::too_many_arguments)]
+pub fn gate_verdict_json_v30(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+    vocabulary: Option<&GateVocabulary>,
+    unevaluated: &[Unevaluated],
+    zero_match: &[String],
+    ignored: &[IgnoredLine],
+    out_of_scope: &[OutOfScopeFinding],
+) -> serde_json::Result<String> {
+    gate_verdict_json_impl(
+        violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
+        out_of_scope,
     )
 }
 
@@ -1126,11 +1163,12 @@ pub fn gate_verdict_json_v27(
     unevaluated: &[Unevaluated],
     zero_match: &[String],
 ) -> serde_json::Result<String> {
-    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[])
+    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[])
 }
 
 /// The ONE verdict writer behind [`gate_verdict_json_v27`]/[`gate_verdict_json_v28`] — a single field
 /// list, so the two rungs cannot drift on shape.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn gate_verdict_json_impl(
     violations: &mut [GateViolation],
@@ -1141,6 +1179,7 @@ fn gate_verdict_json_impl(
     unevaluated: &[Unevaluated],
     zero_match: &[String],
     ignored: &[IgnoredLine],
+    out_of_scope: &[OutOfScopeFinding],
 ) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     #[derive(Serialize)]
@@ -1173,11 +1212,19 @@ fn gate_verdict_json_impl(
         incomplete: bool,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         unanalyzed: &'a [UnanalyzedUnit],
+        /// ⟨0.30⟩ SPEC §2 — the peeked functions performing an effect this policy DENIES. They are the
+        /// SECOND cause of `incomplete` (the first is `unanalyzed`), and they are never `violations`:
+        /// the gate did not judge them, so exit 2 says "I could not see enough", not "you violated".
+        #[serde(rename = "outOfScope", skip_serializing_if = "<[_]>::is_empty")]
+        out_of_scope: &'a [OutOfScopeFinding],
         // §3.1 ⟨0.24⟩ pins the WIRE key as `policyVocabulary`; the local binding keeps the short name.
         #[serde(rename = "policyVocabulary", skip_serializing_if = "Option::is_none")]
         vocabulary: Option<&'a GateVocabulary>,
     }
-    let incomplete = !unanalyzed.is_empty();
+    // ⟨0.30⟩ EITHER cause suppresses `ok`. `unanalyzed` is "I opened this file and could not read it";
+    // `out_of_scope` is "I never opened it, and when I peeked afterwards it performed the denied effect".
+    // Both mean the gate could not see enough of this tree to certify it.
+    let incomplete = !unanalyzed.is_empty() || !out_of_scope.is_empty();
     serde_json::to_string_pretty(&Verdict {
         spec: SPEC_VERSION,
         ok: violations.is_empty() && !incomplete,
@@ -1189,6 +1236,7 @@ fn gate_verdict_json_impl(
         coverage,
         incomplete,
         unanalyzed,
+        out_of_scope,
         vocabulary,
     })
 }

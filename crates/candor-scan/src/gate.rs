@@ -560,6 +560,27 @@ pub(crate) static GATE_ANALYZED: std::sync::OnceLock<std::sync::Mutex<usize>> = 
 pub(crate) static GATE_UNANALYZED: std::sync::OnceLock<std::sync::Mutex<Vec<candor_report::UnanalyzedUnit>>> =
     std::sync::OnceLock::new();
 
+/// ⟨0.30⟩ The peek's findings, for the verdict document. Kept SEPARATE from the exit-code decision on
+/// purpose: this accumulator is gated on `--gate-json` being set (as its siblings are), and an exit code
+/// must not depend on whether a machine-readable sink was requested. scan.rs decides the exit from the
+/// local value; this only feeds the document.
+pub(crate) static GATE_OUT_OF_SCOPE: std::sync::OnceLock<
+    std::sync::Mutex<Vec<candor_report::OutOfScopeFinding>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn record_gate_out_of_scope(findings: &[candor_report::OutOfScopeFinding]) {
+    if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    if !findings.is_empty() {
+        GATE_OUT_OF_SCOPE
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .extend(findings.iter().cloned());
+    }
+}
+
 pub(crate) fn record_gate_analyzed(count: usize, unanalyzed: &[candor_report::UnanalyzedUnit]) {
     if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
@@ -1037,7 +1058,17 @@ pub(crate) fn write_gate_json(exit_code: i32) {
     // (rule, detail), the same order the console prints — so the verdict is deterministic and
     // byte-comparable across backends. Members already record in that order per crate.
     let mut violations = acc.lock().unwrap().clone();
-    if exit_code == 2 && unanalyzed.is_empty() && violations.is_empty() {
+    // ⟨0.30⟩ the peeked functions performing a denied effect — the second `incomplete` cause.
+    let out_of_scope: Vec<candor_report::OutOfScopeFinding> = GATE_OUT_OF_SCOPE
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .clone();
+    // ⟨0.30⟩ …AND the run established no out-of-scope finding. Without this conjunct a ⟨0.30⟩ exit 2 —
+    // which HAS a faithful verdict to emit — would be written as a config REFUSAL document, losing the
+    // findings and telling the operator their policy failed to load. Same conflation the ⟨0.24⟩ note
+    // above records for `violations`, one cause later.
+    if exit_code == 2 && unanalyzed.is_empty() && violations.is_empty() && out_of_scope.is_empty() {
         let why = GATE_REFUSAL.get().cloned().unwrap_or_else(|| {
             "the gate config did not load (exit 2) — see stderr for the specific cause".to_string()
         });
@@ -1127,7 +1158,7 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .get()
         .map(|m| m.lock().unwrap().clone())
         .unwrap_or_default();
-    match candor_report::gate_verdict_json_v28(
+    match candor_report::gate_verdict_json_v30(
         &mut violations,
         coverage.as_ref(),
         analyzed_count,
@@ -1136,6 +1167,7 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         &unevaluated,
         &zero_match,
         &ignored,
+        &out_of_scope,
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
