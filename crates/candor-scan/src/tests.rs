@@ -8146,7 +8146,13 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
 
         // …and the guarded form is what both gates use. Counted, not merely present: if a gate is deleted
         // this drops and the test says so rather than passing on the survivor.
-        assert_eq!(count(scan, "if had_parse_failure && v.is_empty() {"), 2,
+        // ⟨0.30⟩ COUNT THE PREFIX, NOT THE WHOLE LINE. The guard may be STRONGER than the two-conjunct
+        // form and one site now is: the policy gate also asks `guard_code != 1 && !holds_violation()`,
+        // because `v` is that gate's OWN list and a violation recorded by the baseline producer was
+        // invisible to it (measured — a regression plus one unparseable file plus a CLEAN policy exited 2
+        // while the verdict carried the violation). Pinning the exact string would have made the correct
+        // fix look like a deleted gate.
+        assert_eq!(count(scan, "if had_parse_failure && v.is_empty()"), 2,
                    "expected exactly TWO incomplete-refusal sites — the policy gate and the AS-EFF-005 \
                     baseline guard. A third gate is fine, but it has to be added HERE too, which is the \
                     whole point of counting");
