@@ -2801,7 +2801,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     effects: hits,
                     reason: format!(
                         "OUTSIDE this scan's scope ({class}) — the gate did NOT judge it. \
-                         The effect is real; the verdict above does not account for it."
+                         The effect is real, and the verdict above is INCOMPLETE because of it \u{2014} the \
+                         gate did not judge this unit, so it cannot certify the tree."
                     ),
                     class,
                 });
@@ -3063,7 +3064,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             if !oos.is_empty() {
                 eprintln!(
-                    "             The verdict below does not account for {}. A build script runs on every \
+                    "             The verdict below is INCOMPLETE because of {}: the gate did not judge \
+                     that code, so it cannot certify this tree. A build script runs on every \
                      `cargo build`; tests and examples run in CI.",
                     if oos.len() == 1 { "it".to_string() } else { format!("these {}", oos.len()) }
                 );
