@@ -482,7 +482,16 @@ pub(crate) fn unknown_ratchet() -> bool {
 /// writing the verdict per member let the LAST member overwrite the first's violations — `gate.json` said
 /// `ok: true` while the process exited 1 (a clean final member masked an earlier violator), violating the
 /// §3.3 "verdict MUST agree with the exit code" rule. So members only RECORD here; `scan_main` writes ONCE.
-pub(crate) static GATE_VIOLATIONS: std::sync::OnceLock<std::sync::Mutex<Vec<GateViolation>>> = std::sync::OnceLock::new();
+// ⟨0.30⟩ THREAD-LOCAL, not a process global. Workspace members are scanned SEQUENTIALLY on one thread
+// (`for d in &dirs`), so a thread-local accumulates across them exactly as the global did — while giving
+// each `cargo test` thread its own, which a process static cannot. That distinction is what let the sink
+// guard below be removed: recording unconditionally is correct, and only turned into a race because the
+// state was shared by every test in the binary. The peek runs on its own thread and records no
+// violations (it scans with no policy), so nothing is lost by the split.
+thread_local! {
+    pub(crate) static GATE_VIOLATIONS: std::cell::RefCell<Vec<GateViolation>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// Record one scan's gate violations toward the final `--gate-json` verdict. A no-op unless the flag was
 /// given (the direct-`scan_one` test/selftest paths never record).
@@ -493,33 +502,17 @@ pub(crate) static GATE_VIOLATIONS: std::sync::OnceLock<std::sync::Mutex<Vec<Gate
 /// the unanswerable rule would have resolved cannot un-reject it. Exit 1 is not merely fail-closed
 /// there, it is CERTAIN — and strictly more informative, because it names the violation.
 pub(crate) fn holds_violation() -> bool {
-    GATE_VIOLATIONS
-        .get()
-        .map(|m| !m.lock().map(|g| g.is_empty()).unwrap_or(true))
-        .unwrap_or(false)
+    GATE_VIOLATIONS.with(|v| !v.borrow().is_empty())
 }
 
 pub(crate) fn record_gate_violations(violations: &[GateViolation]) {
-    // ⟨0.30⟩ KNOWN LIMITATION — the sink guard below makes `holds_violation` blind without `--gate-json`,
-    // so the ⟨0.30⟩ exit arm's precedence check answers differently with and without a machine sink
-    // (MEASURED on `clap` under `pure`: exit 1 with the flag, 2 without). Recording unconditionally FIXES
-    // that and was tried: it turns a latent race on this process-global into an active one, because
-    // `cargo test` runs tests in parallel threads and one test's violations then suppress another's
-    // ⟨0.30⟩ exit. The real repair is per-RUN violation state threaded through `scan_one` rather than a
-    // process static — a refactor with its own risk, not a line to change under a release. Pinned as a
-    // failing row by the generated policy matrix so it cannot be forgotten.
-    // The original reasoning follows: this returned early unless `--gate-json` was set, on the ground
-    // that the accumulator exists to build that document. It does — and it is ALSO the only cross-member
-    // record of "has any producer found a violation", which `holds_violation` answers and which the
-    // ⟨0.30⟩ exit arm must ask (a workspace member's peek fires while a DIFFERENT member holds the
-    // violation, so the local `v` and `guard_code` cannot see it). Gated, that made the exit code depend
-    // on whether a machine-readable sink was requested — MEASURED on `clap` under `pure`: exit 1 with
-    // `--gate-json`, exit 2 without, same tree. An exit code must never depend on a sink being asked for.
-    if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
-        return;
-    }
-    let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
-    acc.lock().unwrap().extend(violations.iter().cloned());
+    // ⟨0.30⟩ UNCONDITIONAL. This returned early unless `--gate-json` was set, so `holds_violation` was
+    // blind without it and the ⟨0.30⟩ precedence check answered differently with and without a machine
+    // sink — MEASURED on `clap` under `pure`: exit 1 with the flag, 2 without, same tree. An exit code
+    // must never depend on a sink being requested. Safe to record always now that the accumulator is
+    // thread-local: the first attempt at this kept the process global and turned a latent race into an
+    // active one, because `cargo test` runs tests in parallel threads.
+    GATE_VIOLATIONS.with(|v| v.borrow_mut().extend(violations.iter().cloned()));
 }
 
 /// ⟨0.30⟩ Clear the per-RUN gate accumulators. These are process statics with no reset, which a CLI never
@@ -527,9 +520,7 @@ pub(crate) fn record_gate_violations(violations: &[GateViolation]) {
 /// stale violation from an earlier run would suppress a later run's ⟨0.30⟩ exit. Called by `scan_main`;
 /// a test driving `scan_one` directly calls it for the same isolation.
 pub(crate) fn reset_gate_run_state() {
-    if let Some(m) = GATE_VIOLATIONS.get() {
-        m.lock().unwrap().clear();
-    }
+    GATE_VIOLATIONS.with(|v| v.borrow_mut().clear());
     if let Some(m) = GATE_OUT_OF_SCOPE.get() {
         m.lock().unwrap().clear();
     }
@@ -1083,11 +1074,11 @@ pub(crate) fn write_gate_json(exit_code: i32) {
     // accumulator instead of on any one producer is what makes the fix general: it covers the
     // baseline-regression-then-unreadable-policy case, the baseline-regression-then-unhonourable-policy
     // case, and the baseline-regression-then-sole-withholding case, without naming any of them.
-    let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    // ⟨0.30⟩ read from the thread-local (see its declaration for why it is no longer a process global).
     // The shared serializer (candor_report::gate_verdict_json_v24) also fixes the violation ORDER —
     // (rule, detail), the same order the console prints — so the verdict is deterministic and
     // byte-comparable across backends. Members already record in that order per crate.
-    let mut violations = acc.lock().unwrap().clone();
+    let mut violations = GATE_VIOLATIONS.with(|v| v.borrow().clone());
     // ⟨0.30⟩ the peeked functions performing a denied effect — the second `incomplete` cause.
     let out_of_scope: Vec<candor_report::OutOfScopeFinding> = GATE_OUT_OF_SCOPE
         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
