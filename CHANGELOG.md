@@ -11,6 +11,13 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.30.0] — 2026-08-19
 
+- **CI: the realworld-oracle jobs have a deadline.** Both hung for 3h45m with no log output on a commit
+  whose only change was deleting a duplicate clippy attribute; their normal runtime is ~5 minutes.
+  Neither declared `timeout-minutes`, so GitHub's 6-hour default applied and a stuck runner would have
+  blocked the release gate for most of a working day while looking like a slow job. Now 30 minutes.
+- Dropped a duplicate `#[allow(clippy::too_many_arguments)]` the ⟨0.30⟩ signature change introduced;
+  `cargo test` does not run clippy, so CI's `-D warnings` was the first thing that could see it.
+
 - **Spec floor 0.30.** The declaration this build emits as `candor.spec` moves with the family; see
   candor-spec's changelog for the rung.
 
