@@ -4,7 +4,7 @@
 # and IMMUTABLE once on crates.io. This is the guard, since `git rm` alone only fixes it once.
 exclude = [".candor/**"]
 name = "candor-classify"
-version = "0.29.1"
+version = "0.30.0"
 edition = "2021"
 description = "candor's curated effect classifier (crate+path -> effect) — pure, stable Rust."
 license = "MIT OR Apache-2.0"
@@ -16,7 +16,7 @@ keywords = ["candor", "effects", "classifier", "capabilities", "audit"]
 categories = ["development-tools"]
 
 [dependencies]
-candor-report = { path = "../candor-report", version = "0.29.1" }
+candor-report = { path = "../candor-report", version = "0.30.0" }
 
 # PROPERTY-BASED TESTING, for the one surface the family's generative fuzzers do not reach. Each engine
 # already has a soundness fuzzer (candor-rust soundness/, candor-ts fuzz.mjs, candor-agents fuzz.py) and
