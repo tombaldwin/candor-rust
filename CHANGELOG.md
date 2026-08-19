@@ -11,6 +11,11 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.30.0] — 2026-08-19
 
+- **Every CI workflow now declares `timeout-minutes`.** Two hung for 3h45m with no output and were given
+  a deadline; the four siblings were not, and `ci.yml` then hung for 54 minutes against an ~11-minute
+  normal runtime. Fixing the workflows that failed and not the ones beside them is the habit this repo
+  keeps measuring in its own analysis.
+
 - Moved the `GATE_VIOLATIONS` doc comment onto the static itself: making the accumulator `thread_local!`
   left it attached to a MACRO invocation, which rustdoc does not document and clippy rejects under
   `-D warnings`. `cargo test` does not run clippy, so CI was again the first thing that could see it.
