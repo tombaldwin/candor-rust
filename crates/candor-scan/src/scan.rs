@@ -2696,12 +2696,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             if !parsed.fatal_messages().is_empty() {
                 return None;
             }
-            let denied: std::collections::BTreeSet<String> = parsed
-                .rules
-                .iter()
-                .flat_map(|r| r.effects.iter().map(|e| e.to_string()))
-                .collect();
-            if denied.is_empty() || excluded.is_empty() {
+            // ⟨0.30⟩ THE TRIGGER IS "ARE THERE DENY RULES", and the matcher below is the GATE'S OWN.
+            // This flattened the rules into a set of effect NAMES, which §6.2 already forbids ("THE GATE
+            // AND THE DISCLOSURE MUST APPLY THE SAME RULE, AND SHOULD SHARE THE SAME CODE") and which was
+            // wrong in BOTH directions once ⟨0.30⟩ made the block verdict-bearing — both MEASURED
+            // four-way in review:
+            //
+            //   UNDER-REPORT: `pure` is a rule with an EMPTY effect list meaning "every effect except
+            //   Unknown". Flattened it contributed NOTHING, so the set was empty, the peek never ran, and
+            //   the STRICTEST policy passed at exit 0 while the weaker `deny Exec` exited 2 on the same
+            //   tree. A four-way false all-clear.
+            //
+            //   OVER-CHARGE: `deny Net[known-partner]` denies one destination class; the name set held
+            //   bare "Net", so a peeked fn reaching an UNKNOWN host — which that rule does not deny —
+            //   turned the verdict red while the identical code IN scope passed. Rule SCOPES were dropped
+            //   identically.
+            if parsed.rules.is_empty() || excluded.is_empty() {
                 return Some(Vec::new());   // the policy STOOD — asked-and-clear, key present
             }
             let class_of: std::collections::BTreeMap<&str, &str> =
@@ -2734,14 +2744,47 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             let mut out = Vec::new();
             for f in v["functions"].as_array().into_iter().flatten() {
-                let hits: Vec<String> = f["inferred"]
+                let inferred: Vec<&str> = f["inferred"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .filter_map(|e| e.as_str())
-                    .filter(|e| denied.contains(*e))
+                    .collect();
+                let qual = f["fn"].as_str().unwrap_or("");
+                let net_classes: Vec<String> = f["netClass"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.as_str())
                     .map(String::from)
                     .collect();
+                let reason_classes: std::collections::BTreeSet<String> = f["unknownWhy"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.as_str())
+                    .map(String::from)
+                    .collect();
+                // ⟨0.30⟩ the gate's own firing decision, per (rule, function) — scope test here, exactly
+                // as `candor_classify::gate` does it, then `rule_hits` for what the rule charges.
+                let mut hit_set: std::collections::BTreeSet<String> = Default::default();
+                for r in &parsed.rules {
+                    if let Some(sc) = &r.scope {
+                        if !candor_classify::policy::scope_matches(qual, sc) {
+                            continue;
+                        }
+                    }
+                    let rh = candor_classify::gate::rule_hits(
+                        r,
+                        &inferred,
+                        if reason_classes.is_empty() { None } else { Some(&reason_classes) },
+                        &net_classes,
+                    );
+                    for h in rh.hits {
+                        hit_set.insert(h.to_string());
+                    }
+                }
+                let hits: Vec<String> = hit_set.into_iter().collect();
                 if hits.is_empty() {
                     continue;
                 }
@@ -3027,6 +3070,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
         }
     }
+    // ⟨0.30⟩ ARM THE RECORDER BEFORE ANY EXIT CAN RETURN. This sat beside the ⟨0.30⟩ exit arm, BELOW the
+    // parse-failure `return (2, …)`, so a scan with BOTH an unparseable file and a peek finding wrote a
+    // `--gate-json` verdict with no `outOfScope` while the REPORT carried it and `gate --report` re-emitted
+    // it — the two routes' documents were not byte-equal, which is §3.1's own acceptance test. Same class
+    // as the ⟨0.24⟩ "record the violations FIRST" fix one cause over: a document written on the way out of
+    // an early return is a document missing whatever had not been recorded yet. (Review, MEASURED.)
+    crate::gate::record_gate_out_of_scope(out_of_scope.as_deref().unwrap_or(&[]));
     if let Some(pp) = policy_path {
         let Ok(text) = std::fs::read_to_string(&pp) else {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
@@ -3349,7 +3399,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // did not judge them — exit 1 would claim "I judged your code and it breaks the policy", false in
         // the other direction. `v.is_empty()` keeps the ⟨0.24⟩ precedence: a certain violation dominates.
         let oos_findings = out_of_scope.as_deref().unwrap_or(&[]);
-        crate::gate::record_gate_out_of_scope(oos_findings);
         if !oos_findings.is_empty() && v.is_empty() {
             eprintln!(
                 "candor-scan: policy NOT enforced — {} function(s) OUTSIDE this scan's scope perform an \
