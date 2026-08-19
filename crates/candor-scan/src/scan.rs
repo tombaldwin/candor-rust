@@ -450,6 +450,8 @@ fn refuse_gate_json_at_config(gate: &str) {
 }
 
 pub(crate) fn scan_main() {
+    // ⟨0.30⟩ a RUN starts with no inherited verdict state — see `reset_gate_run_state`.
+    crate::gate::reset_gate_run_state();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = ".".to_string();
     let mut prefix = String::new();
@@ -2652,7 +2654,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // block. Counts, never file lists: `build-output` covers `target/`, which is unbounded.
     // ── ⟨0.29⟩ THE PEEK ────────────────────────────────────────────────────────────────────────────
     // Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
-    // policy DENIES. The gate's verdict does not move — see `OutOfScopeFinding` — because a file the
+    // policy DENIES. ⟨0.30⟩ THE GATE'S VERDICT DOES MOVE — a non-empty block is `ok:false,
+    // incomplete:true` at exit 2 (see the exit arm below) — though never as a VIOLATION, because a file the
     // gate declined to judge must not decide an exit code.
     //
     // A RECURSIVE `scan_one`, not a hand-written second pass. That is the design constraint, not an
@@ -3399,9 +3402,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         //
         // EXIT 2, NOT 1: these functions are not in `violations` and not in `functions`, because the gate
         // did not judge them — exit 1 would claim "I judged your code and it breaks the policy", false in
-        // the other direction. `v.is_empty()` keeps the ⟨0.24⟩ precedence: a certain violation dominates.
+        // the other direction. A certain violation dominates (SPEC §3.3(c)) — and that is asked of the
+        // SHARED accumulator, not of `v`. `v` is the POLICY gate's own list; the AS-EFF-005 baseline guard
+        // is a different producer that runs earlier, so `v.is_empty()` was true on runs that had already
+        // recorded certain violations. MEASURED on `clap` under `pure`: 0.29.1 exits 1, this exited 2 with
+        // 27 violations sitting in the verdict — "I could not evaluate" over a tree it had just judged.
+        // The ⟨0.24⟩ note in `write_gate_json` records this exact conflation one cause over; it was read
+        // while writing this line and the wrong predicate was used anyway.
         let oos_findings = out_of_scope.as_deref().unwrap_or(&[]);
-        if !oos_findings.is_empty() && v.is_empty() {
+        if !oos_findings.is_empty() && v.is_empty() && guard_code != 1 && !crate::gate::holds_violation() {
             eprintln!(
                 "candor-scan: policy NOT enforced — {} function(s) OUTSIDE this scan's scope perform an \
                  effect this policy denies (named above); the gate did not judge them, so the verdict is \

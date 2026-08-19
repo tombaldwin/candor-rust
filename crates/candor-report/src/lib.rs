@@ -323,9 +323,14 @@ pub struct ExcludedClass {
 /// no policy sees nothing, and one with `deny Net` is not told about `Exec` in its test tree. That bound
 /// is what keeps this from becoming the noise it would otherwise be.
 ///
-/// NEVER A `violation`. Folding these in would move verdicts and make an exit code depend on a file the
-/// gate declined to judge — the opposite of what this rung promises. Same classifier, different file set,
-/// non-binding result.
+/// NEVER A `violation`, and that distinction is why ⟨0.30⟩'s exit code is 2 rather than 1: the gate did
+/// not JUDGE these units, so reporting them as violations would be false in the other direction.
+///
+/// ⟨0.30⟩ THEY ARE NO LONGER NON-BINDING. ⟨0.29⟩ shipped this as pure disclosure — "the exit code MUST be
+/// what it would have been without it" — on the assumption that the peek surfaces UNCERTAINTY. Measured
+/// on published 0.29.1 it resolves a CONCRETE denied effect and names the function (axios: 37 functions
+/// `performs Net`, exit 0, `policy ✓`), so a non-empty block now makes the verdict `ok:false`,
+/// `incomplete:true` at exit 2. Same classifier, different file set — that part is unchanged.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct OutOfScopeFinding {
     #[serde(rename = "fn")]
