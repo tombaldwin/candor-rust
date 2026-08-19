@@ -54,7 +54,7 @@ vocabulary ⟨0.21⟩ already defines. A real violation (exit 1) still dominates
 **What does NOT change.** The block is bounded to effects your policy DENIES, so the trigger is never
 "you excluded something" but "you excluded something that does the thing you forbade". Across 27 real
 packages this flips 6 and leaves 14 green — every one of those with an empty peek, because the scan read
-them in full. **Measured more broadly since:** across 35 real projects and 4 realistic policies
+them in full. **Measured more broadly since:** across 37 real projects and 4 realistic policies
 (`deny Net`/`Exec`/`Fs`, `pure`), **16 flip at least one gate**; of 96 gates green under 0.29.1, **31 now
 exit 2**. Verified by reading the named code, **29 of those 31 are genuine** — serde's `build.rs` running
 `rustc`, clap's completion tests spawning shells, alamofire launching `/usr/bin/leaks`, axios's 160 unread
@@ -65,10 +65,11 @@ nothing under such a root to peek. A present-and-empty `outOfScope` stays exit 0
 **If this turns your gate red.** Read the `⚠` lines: each names a function, its file, and the effect.
 The verdict document carries the same list under `outOfScope` for machine consumers. Then one of:
 
-- **Bring the files into the scan** so the gate judges them properly — `--include-tests` (rust, ts) or
+- **Bring the files into the scan** so the gate judges them properly — `--include-tests` (rust) or
   `--allow-js` (ts). Expect the truth rather than a pass: axios under `--allow-js` exits 1 with 27
-  genuine violations. **There is no flag for every class**: nothing brings a rust `build.rs` or a swift
-  harness target into scope, so those need one of the options below.
+  genuine violations. **There is no flag for every class**: nothing brings a rust `build.rs`, a swift
+  harness target, or a **ts test file** into scope — candor-ts filters test paths unconditionally and
+  has no `--include-tests` — so those need one of the options below.
 - **Scope the rule** so it does not reach the excluded code (`deny Exec src`) — measured working on rust
   and swift for exactly the build-script and test-target cases above.
 - **Address the effect**, which is the point of the gate.
@@ -82,6 +83,12 @@ through a helper can be charged `Net`, because `tty.WriteStream` extends `net.So
 of the 31 measured flips (execa under `deny Net`). It predates this rung — ⟨0.30⟩ only makes it
 verdict-bearing — and it is a classifier fix with its own risk, so it is being made separately rather
 than folded into a release.
+
+**The finding states what candor CONCLUDED, not what is true.** The reason string reads *"candor's
+analysis reaches this effect"*, not *"the effect is real"*. For 29 of the 31 measured flips the stronger
+wording would have been accurate; for the 2 above it would not, and this family rates a FALSE disclosure
+worse than a missing one. A finding that asserts ground truth makes a claim the analysis cannot support.
+No verdict changes, and the `did NOT judge` phrase PART 48 pins is untouched.
 
 ### Fixed — found by an adversarial review of the rung above, before release
 
