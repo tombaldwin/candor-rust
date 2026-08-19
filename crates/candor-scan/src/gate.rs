@@ -482,8 +482,10 @@ pub(crate) fn unknown_ratchet() -> bool {
 // (`for d in &dirs`), so a thread-local accumulates across them exactly as the global did — while giving
 // each `cargo test` thread its own, which a process static cannot. That distinction is what let the sink
 // guard below be removed: recording unconditionally is correct, and only turned into a race because the
-// state was shared by every test in the binary. The peek runs on its own thread and records no
-// violations (it scans with no policy), so nothing is lost by the split.
+// state was shared by every test in the binary. The peek is a SAME-THREAD recursive `scan_one` call
+// and records no violations (it scans with no policy), so nothing is lost by the split — an earlier
+// version of this comment said it ran on its own thread, which would have mattered the moment
+// someone made that true and the peek began recording.
 thread_local! {
     /// Violations ACCUMULATED across `scan_one` calls. A `[workspace]` root runs the gate once per
     /// member; writing the verdict per member let the LAST member overwrite the first's violations —

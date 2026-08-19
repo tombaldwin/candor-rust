@@ -2804,8 +2804,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                     effects: hits,
                     reason: format!(
                         "OUTSIDE this scan's scope ({class}) — the gate did NOT judge it. \
-                         The effect is real, and the verdict above is INCOMPLETE because of it \u{2014} the \
-                         gate did not judge this unit, so it cannot certify the tree."
+                         candor's ANALYSIS of that file reaches this effect, so the verdict above is \
+                         INCOMPLETE rather than a pass (an analysis result, not a claim about what the \
+                         code does at runtime)."
                     ),
                     class,
                 });
@@ -3109,9 +3110,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // violation that dominates and the refusal that says the policy never ran. Dropping the
             // second would be the mirror defect.
             // `guard_code` is the local the baseline arm sets; `holds_violation` covers the recorded
-            // set. BOTH are needed: `record_gate_violations` is a no-op unless `--gate-json` was
-            // requested, so keying only on it made the precedence apply on the machine-output path and
-            // not on the plain one — the same defect in the channel a human reads.
+            // set. BOTH are needed: `guard_code` is this member's, `holds_violation` is the run's.
+            // (Until ⟨0.30⟩ `record_gate_violations` was also a no-op without `--gate-json`, which made
+            // the precedence apply on the machine-output path and not the plain one; recording is now
+            // unconditional, and the accumulator thread-local so that is safe.)
             let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
             return (code, json_body);
         };
@@ -3218,9 +3220,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // in the policy. Returning 2 here downgraded a violation that had already FIRED on evidence
             // the report carries, which §3.1 calls "byte-identical in harm" to deleting it.
             // `guard_code` is the local the baseline arm sets; `holds_violation` covers the recorded
-            // set. BOTH are needed: `record_gate_violations` is a no-op unless `--gate-json` was
-            // requested, so keying only on it made the precedence apply on the machine-output path and
-            // not on the plain one — the same defect in the channel a human reads.
+            // set. BOTH are needed: `guard_code` is this member's, `holds_violation` is the run's.
+            // (Until ⟨0.30⟩ `record_gate_violations` was also a no-op without `--gate-json`, which made
+            // the precedence apply on the machine-output path and not the plain one; recording is now
+            // unconditional, and the accumulator thread-local so that is safe.)
             let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
             return (code, json_body);
         }
@@ -3390,7 +3393,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // below, and either way the verdict now carries what was actually found alongside
         // `incomplete`/`unanalyzed`. `write_gate_json` still writes NO document for the other exit-2
         // cause — a gate CONFIG that never loaded — where there is nothing faithful to say.
-        if had_parse_failure && v.is_empty() {
+        // ⟨0.30⟩ THE SAME THREE CONJUNCTS AS THE SCOPE ARM BELOW. This keyed on `v` alone — the POLICY
+        // gate's own list — so a run holding a CERTAIN violation from another producer still returned 2.
+        // MEASURED: a function gaining `Fs` against a frozen baseline, plus one unparseable file, plus a
+        // clean `deny Net` policy → exit 2 while the verdict carried `violations:[AS-EFF-005]`. Adding a
+        // CLEAN policy downgraded a certain violation from 1 to 2, and the document then disagreed with
+        // the exit code. The note three lines above describes this exact conflation, and the sibling arm
+        // twenty lines below was given the conjuncts while this one was not — the sibling-route habit,
+        // inside the fix for it.
+        if had_parse_failure && v.is_empty() && guard_code != 1 && !crate::gate::holds_violation() {
             eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
             return (2, json_body);
         }

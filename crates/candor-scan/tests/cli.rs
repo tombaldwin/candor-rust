@@ -467,6 +467,66 @@ fn gate_json_valueless_fails_closed() {
 }
 
 #[test]
+fn a_violation_dominates_incomplete_in_either_member_order_and_without_a_sink() {
+    // ⟨0.30⟩ TWO defects with one symptom, neither of which had a row.
+    //
+    // (1) Member exit codes aggregated with `rc.max(code)`, and 2 > 1 — so one member's "could not
+    //     evaluate" displaced another member's CERTAIN violation, against §3.3's "a real violation
+    //     (exit 1) still dominates". Which member won depended on the WALK ORDER, so both orders are
+    //     asserted here: a row that only tried one would have passed throughout.
+    //
+    // (2) The precedence check read a violation record that was only populated when `--gate-json` was
+    //     requested, so the exit code differed with and without a machine sink. An output channel must
+    //     never decide a verdict, so every case is run both ways and the codes compared.
+    for (first, second) in [("a_viol", "z_bad"), ("a_bad", "z_viol")] {
+        let d = std::env::temp_dir()
+            .join(format!("candor-scan-cli-prec-{}-{first}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(first).join("src")).unwrap();
+        std::fs::create_dir_all(d.join(second).join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            format!("[workspace]\nmembers = [\"{first}\", \"{second}\"]\n")).unwrap();
+        // one member holds a CERTAIN violation, the other cannot be fully analysed
+        let (viol, bad) = if first.ends_with("viol") { (first, second) } else { (second, first) };
+        std::fs::write(d.join(viol).join("Cargo.toml"),
+            format!("[package]\nname = \"{viol}\"\n")).unwrap();
+        std::fs::write(d.join(viol).join("src/lib.rs"),
+            "pub fn fetch() { let _ = std::net::TcpStream::connect(\"x:80\"); }\n").unwrap();
+        std::fs::write(d.join(bad).join("Cargo.toml"),
+            format!("[package]\nname = \"{bad}\"\n")).unwrap();
+        std::fs::write(d.join(bad).join("src/lib.rs"), "pub fn ok() -> u32 { 1 }\n").unwrap();
+        std::fs::write(d.join(bad).join("src/broken.rs"), "pub fn x( {{{\n").unwrap();
+        let pp = d.join("candor.policy");
+        std::fs::write(&pp, "deny Net\n").unwrap();
+
+        let gp = d.join("gate.json");
+        let with_sink = Command::new(bin())
+            .arg(d.to_string_lossy().as_ref())
+            .arg("--policy").arg(pp.to_string_lossy().as_ref())
+            .arg("--gate-json").arg(gp.to_string_lossy().as_ref())
+            .output().expect("run candor-scan");
+        let without_sink = Command::new(bin())
+            .arg(d.to_string_lossy().as_ref())
+            .arg("--policy").arg(pp.to_string_lossy().as_ref())
+            .output().expect("run candor-scan");
+
+        let verdict: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&gp).expect("gate.json")).expect("JSON");
+        let _ = std::fs::remove_dir_all(&d);
+
+        assert_eq!(with_sink.status.code(), Some(1),
+            "members [{first}, {second}]: a certain violation must dominate an incomplete member \
+             whichever order they are walked in");
+        assert_eq!(without_sink.status.code(), with_sink.status.code(),
+            "members [{first}, {second}]: the exit code changed with --gate-json — a machine sink is an \
+             output channel and must not decide a verdict");
+        assert_eq!(verdict["ok"], false, "ok must agree with the exit code");
+        assert!(!verdict["violations"].as_array().unwrap().is_empty(),
+            "the verdict must CARRY the violation it exited 1 for, not just report incompleteness");
+    }
+}
+
+#[test]
 fn gate_json_workspace_accumulates_across_members() {
     // The workspace bug the spec review caught: the gate runs per member, and a per-member verdict write
     // let a clean LAST member overwrite an earlier violator's — gate.json said ok:true while the process
