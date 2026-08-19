@@ -478,10 +478,6 @@ pub(crate) fn unknown_ratchet() -> bool {
     matches!(UNKNOWN_RATCHET.get(), Some(true))
 }
 
-/// Violations ACCUMULATED across `scan_one` calls. A `[workspace]` root runs the gate once per member;
-/// writing the verdict per member let the LAST member overwrite the first's violations — `gate.json` said
-/// `ok: true` while the process exited 1 (a clean final member masked an earlier violator), violating the
-/// §3.3 "verdict MUST agree with the exit code" rule. So members only RECORD here; `scan_main` writes ONCE.
 // ⟨0.30⟩ THREAD-LOCAL, not a process global. Workspace members are scanned SEQUENTIALLY on one thread
 // (`for d in &dirs`), so a thread-local accumulates across them exactly as the global did — while giving
 // each `cargo test` thread its own, which a process static cannot. That distinction is what let the sink
@@ -489,6 +485,11 @@ pub(crate) fn unknown_ratchet() -> bool {
 // state was shared by every test in the binary. The peek runs on its own thread and records no
 // violations (it scans with no policy), so nothing is lost by the split.
 thread_local! {
+    /// Violations ACCUMULATED across `scan_one` calls. A `[workspace]` root runs the gate once per
+    /// member; writing the verdict per member let the LAST member overwrite the first's violations —
+    /// `gate.json` said `ok: true` while the process exited 1 (a clean final member masked an earlier
+    /// violator), violating the §3.3 "verdict MUST agree with the exit code" rule. So members only
+    /// RECORD here; `scan_main` writes ONCE.
     pub(crate) static GATE_VIOLATIONS: std::cell::RefCell<Vec<GateViolation>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
