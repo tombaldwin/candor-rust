@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Install strace
+        timeout-minutes: 5  # a network install; a hung mirror must not spend the job's budget
         run: sudo apt-get update && sudo apt-get install -y strace
       - name: Real-world dynamic oracle (syscall ground truth — Fs/Net/Exec)
         run: bash soundness/realworld/run.sh
