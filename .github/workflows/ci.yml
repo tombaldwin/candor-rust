@@ -116,6 +116,9 @@ jobs:
       # `path <fn> <TAB>` effect completion, so a completion regression can't ship silently. (zsh is
       # installed to exercise its lane; the test skips it gracefully if absent.)
       - name: Shell completion contract
+        # 10 rather than the 5 the pure install steps get: this step installs zsh AND runs the
+        # completion suite, so the deadline has to cover work as well as a mirror.
+        timeout-minutes: 10
         run: |
           sudo apt-get install -y -qq zsh >/dev/null 2>&1 || true
           bash completions/test.sh
@@ -249,6 +252,7 @@ jobs:
       # trusts nothing about how the crate was generated. Catches a program that demonstrably performs
       # an effect candor predicts nowhere.
       - name: Install strace
+        timeout-minutes: 5  # a network install; a hung mirror must not spend the job's budget
         run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
       - name: Soundness dynamic oracle
         run: bash soundness/oracle.sh 40
