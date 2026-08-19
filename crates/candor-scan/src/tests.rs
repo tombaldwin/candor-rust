@@ -3811,6 +3811,10 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         std::fs::write(d.join("exec.pol"), "deny Exec\n").unwrap();
         std::fs::write(d.join("net.pol"), "deny Net\n").unwrap();
         let idx = load_dep_reports(None);
+        // ⟨0.30⟩ tests share a process, and the gate accumulators are process statics recorded
+        // unconditionally since the sink-independence fix — so an earlier test's violation would suppress
+        // this one's ⟨0.30⟩ exit. `scan_main` does this per run; a direct `scan_one` caller does it here.
+        crate::gate::reset_gate_run_state();
         let run = |pol: Option<&str>, tag: &str| -> (i32, serde_json::Value) {
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: d.join(format!("out/{tag}")).to_string_lossy().into_owned(),

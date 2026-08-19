@@ -500,11 +500,39 @@ pub(crate) fn holds_violation() -> bool {
 }
 
 pub(crate) fn record_gate_violations(violations: &[GateViolation]) {
+    // ⟨0.30⟩ KNOWN LIMITATION — the sink guard below makes `holds_violation` blind without `--gate-json`,
+    // so the ⟨0.30⟩ exit arm's precedence check answers differently with and without a machine sink
+    // (MEASURED on `clap` under `pure`: exit 1 with the flag, 2 without). Recording unconditionally FIXES
+    // that and was tried: it turns a latent race on this process-global into an active one, because
+    // `cargo test` runs tests in parallel threads and one test's violations then suppress another's
+    // ⟨0.30⟩ exit. The real repair is per-RUN violation state threaded through `scan_one` rather than a
+    // process static — a refactor with its own risk, not a line to change under a release. Pinned as a
+    // failing row by the generated policy matrix so it cannot be forgotten.
+    // The original reasoning follows: this returned early unless `--gate-json` was set, on the ground
+    // that the accumulator exists to build that document. It does — and it is ALSO the only cross-member
+    // record of "has any producer found a violation", which `holds_violation` answers and which the
+    // ⟨0.30⟩ exit arm must ask (a workspace member's peek fires while a DIFFERENT member holds the
+    // violation, so the local `v` and `guard_code` cannot see it). Gated, that made the exit code depend
+    // on whether a machine-readable sink was requested — MEASURED on `clap` under `pure`: exit 1 with
+    // `--gate-json`, exit 2 without, same tree. An exit code must never depend on a sink being asked for.
     if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
     let acc = GATE_VIOLATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
     acc.lock().unwrap().extend(violations.iter().cloned());
+}
+
+/// ⟨0.30⟩ Clear the per-RUN gate accumulators. These are process statics with no reset, which a CLI never
+/// noticed (one run per process) and which now matters twice: recording is unconditional above, and a
+/// stale violation from an earlier run would suppress a later run's ⟨0.30⟩ exit. Called by `scan_main`;
+/// a test driving `scan_one` directly calls it for the same isolation.
+pub(crate) fn reset_gate_run_state() {
+    if let Some(m) = GATE_VIOLATIONS.get() {
+        m.lock().unwrap().clear();
+    }
+    if let Some(m) = GATE_OUT_OF_SCOPE.get() {
+        m.lock().unwrap().clear();
+    }
 }
 
 /// ⟨0.15 staged⟩ Uncovered packages ACCUMULATED across `scan_one` calls (workspace members union, like
@@ -567,6 +595,8 @@ pub(crate) static GATE_UNANALYZED: std::sync::OnceLock<std::sync::Mutex<Vec<cand
 pub(crate) static GATE_OUT_OF_SCOPE: std::sync::OnceLock<
     std::sync::Mutex<Vec<candor_report::OutOfScopeFinding>>,
 > = std::sync::OnceLock::new();
+
+
 
 pub(crate) fn record_gate_out_of_scope(findings: &[candor_report::OutOfScopeFinding]) {
     if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
