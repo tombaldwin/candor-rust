@@ -1169,7 +1169,6 @@ pub fn gate_verdict_json_v27(
 /// The ONE verdict writer behind [`gate_verdict_json_v27`]/[`gate_verdict_json_v28`] — a single field
 /// list, so the two rungs cannot drift on shape.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn gate_verdict_json_impl(
     violations: &mut [GateViolation],
     coverage: Option<&GateCoverage>,
