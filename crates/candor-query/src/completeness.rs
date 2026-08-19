@@ -142,6 +142,15 @@ pub(crate) struct ReportCompleteness {
     /// It raises [`Self::must_hedge`] exactly as its two siblings do and, like them, stops at the exit
     /// code: [`Self::incomplete`] does not read it.
     pub(crate) no_manifest: Vec<String>,
+    /// ⟨0.30⟩ The peek's findings carried by the reports under this locator — functions OUTSIDE the
+    /// scan's scope performing an effect the policy DENIES. An arm of [`Self::incomplete`] because
+    /// ⟨0.24⟩ binds it: *"AN ADVISORY VERB MUST NEVER BE LESS SENSITIVE TO INCOMPLETENESS THAN THE GATE
+    /// OVER THE SAME BYTES"*, and *"THE SAME RULE BINDS EVERY ADVISORY VERB THAT ANSWERS `ok` —
+    /// `unverified`, `fix-gate`, and any later sibling"*. ⟨0.30⟩ made the gate exit 2 on this cause and
+    /// left these verbs behind: MEASURED, `gate --report` exited 2 over a report whose peek had resolved
+    /// a denied effect while `unverified --strict` printed *"every function in a pure/deny layer is
+    /// PROVABLY clean ✓"* at exit 0 — the rung's own false all-clear, moved sideways into the sibling.
+    pub(crate) out_of_scope: Vec<candor_report::OutOfScopeFinding>,
 }
 
 impl ReportCompleteness {
@@ -157,7 +166,7 @@ impl ReportCompleteness {
     /// mirror of the over-claim the strict exit exists to prevent. So the count-0 cause reaches the two
     /// DISCLOSURE channels via [`Self::must_hedge`] and stops at the exit code.
     pub(crate) fn incomplete(&self) -> bool {
-        !self.unanalyzed.is_empty() || !self.unreadable.is_empty()
+        !self.unanalyzed.is_empty() || !self.unreadable.is_empty() || !self.out_of_scope.is_empty()
     }
 
     /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where
@@ -423,6 +432,7 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         unreadable: Vec::new(),
         judged_nothing: Vec::new(),
         no_manifest: Vec::new(),
+        out_of_scope: Vec::new(),
     };
     for path in glob_reports(prefix) {
         let p = path.display().to_string();
@@ -438,6 +448,16 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
                 // unreadable `unanalyzed` key, and `report_judged_nothing` also fails closed on
                 // unparsable text — so asking both would list one file twice, under two causes, for one
                 // fault. The `unreadable` arm is the stronger and more actionable of the two here.
+                out.unreadable.push(Unreadable { path: p, key_present: true });
+                continue;
+            }
+        }
+        // ⟨0.30⟩ the peek's findings, read as strictly as `unanalyzed` above — an unreadable key is
+        // corrupt input, never its permissive empty value, because non-emptiness is a fail-closed trigger.
+        match candor_report::report_out_of_scope(&text) {
+            candor_report::KeyRead::Present(o) => out.out_of_scope.extend(o),
+            candor_report::KeyRead::Absent => {}
+            candor_report::KeyRead::Corrupt => {
                 out.unreadable.push(Unreadable { path: p, key_present: true });
                 continue;
             }
