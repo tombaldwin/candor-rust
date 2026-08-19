@@ -11,6 +11,10 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.30.0] — 2026-08-19
 
+- Moved the `GATE_VIOLATIONS` doc comment onto the static itself: making the accumulator `thread_local!`
+  left it attached to a MACRO invocation, which rustdoc does not document and clippy rejects under
+  `-D warnings`. `cargo test` does not run clippy, so CI was again the first thing that could see it.
+
 - **CI: the realworld-oracle jobs have a deadline.** Both hung for 3h45m with no log output on a commit
   whose only change was deleting a duplicate clippy attribute; their normal runtime is ~5 minutes.
   Neither declared `timeout-minutes`, so GitHub's 6-hour default applied and a stuck runner would have
