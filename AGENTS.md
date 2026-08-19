@@ -264,3 +264,12 @@ The check in step 5 can be a permanent guard rather than a manual habit: commit 
 CI fail any PR that makes a function gain an effect. That's a *team* decision (it changes everyone's
 PR flow), so it's not part of this setup — suggest it to the maintainer if candor proves useful, and
 point them at the project README's "CI guardrail" section and `examples/candor-guard.yml`.
+
+- **⟨0.30⟩ A GREEN GATE CAN NOW EXIT 2 — read `outOfScope` before you trust a pass.** When a policy is
+  configured, candor also reads the files the scan EXCLUDED (test files, build scripts, archives under the
+  root, files outside the build's program) and reports any that perform an effect the policy DENIES, under
+  the report's `outOfScope` key. A non-empty block makes the verdict `ok:false`, `incomplete:true`, exit 2
+  — *"I could not see enough of this tree to certify it"*, which is NOT the same as "your code violates":
+  those functions are never in `violations`, because the gate did not judge them. Branch on `incomplete`
+  to tell the two apart. An absent key means the producer was never asked (no policy at scan time), and an
+  empty one means asked-and-clear.
