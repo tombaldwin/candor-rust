@@ -3558,7 +3558,14 @@ pub(crate) fn scan_target(
             prefix: prefix.clone(), want_json, include_tests, policy: policy.clone(),
             baseline: baseline.clone(), quiet: false, deps_idx, peek_excluded: false,
         });
-        rc = rc.max(code);
+        // ⟨0.30⟩ SPEC PRECEDENCE, NOT NUMERIC MAX. `rc.max(code)` makes 2 beat 1, so one member's
+        // "I could not evaluate" displaced another member's CERTAIN violation — the inverse of §3.3's
+        // "a real violation (exit 1) still dominates". Latent while exit 2 was rare (a parse failure);
+        // ⟨0.30⟩ made it reachable on any workspace with an excluded file, and MEASURED on `regex` under
+        // `pure`: 198 violations printed, verdict carrying all 198, and the run exited 2. The order the
+        // members happen to be walked in decided it, which is why no per-member check can: the arm
+        // returns before later members have recorded anything.
+        rc = if rc == 1 || code == 1 { 1 } else { rc.max(code) };
         if let Some(b) = json {
             bodies.push(b);
         }
