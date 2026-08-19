@@ -19,6 +19,13 @@ concurrency:
 jobs:
   oracle-deep:
     runs-on: ubuntu-latest
+    # A DEADLINE, because this job produced NO log output for 3h45m against a ~5min normal
+    # runtime (2026-08-19, on a commit whose only change was deleting a duplicate attribute).
+    # With no `timeout-minutes` GitHub's 6-hour default applies, so a hung runner blocks the
+    # release gate — preflight [10] reads CI green on HEAD — for most of a working day while
+    # looking indistinguishable from a slow job. The engines' own peek carries a 120s deadline
+    # for the same reason: hanging is the one failure that stops the check completing at all.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       # Stable toolchain to build/install the dylint runner + linker; the LINT itself builds with the
