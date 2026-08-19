@@ -25,6 +25,13 @@ concurrency:
 jobs:
   calibrate:
     runs-on: ubuntu-latest
+    # ⟨0.30⟩ A DEADLINE. Two SIBLING workflows hung for 3h45m with no output on 2026-08-19 and
+    # were given one; this file was not, and then hung for 54 minutes against an ~11-minute
+    # normal runtime. With no `timeout-minutes` GitHub's 6-hour default applies, so a stuck
+    # runner blocks the release gate (preflight [10] reads CI green on HEAD) while looking
+    # exactly like a slow job. Fixing the two that had failed and not their siblings is the
+    # habit this repo keeps measuring.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
