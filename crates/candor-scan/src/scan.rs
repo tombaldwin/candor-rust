@@ -2668,9 +2668,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // a deliberate exclusion into a failed gate, which is a verdict change in the loudest possible form.
     // The peek reads its own unanalyzed set out of the returned report body (see `peek_unread` below),
     // never out of this global, so nothing downstream loses information.
-    if !peeking {
-        crate::gate::record_gate_analyzed(analyzed.count, &unanalyzed_units);
-    }
+    crate::gate::record_gate_analyzed(analyzed.count, &unanalyzed_units);
     // ⟨typeSurface.returns⟩ THE PRODUCER (DEP-RECEIVER-TYPING-DESIGN.md half 2). A consumer cannot type
     // `let c = deplib::build()` because `build` is PURE and therefore absent from this report entirely —
     // publishing its return type is the only way that key can ever be formed.
@@ -2746,7 +2744,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
             let class_of: std::collections::BTreeMap<&str, &str> =
                 excluded.iter().map(|(p, c)| (p.as_str(), *c)).collect();
-            let (_, peeked) = scan_one(dir, ScanOpts {
+            // ⟨0.31⟩ NOTHING THE PEEK SEES MAY REACH THE VERDICT — see `while_peeking` in gate.rs.
+            // The peek's findings are not lost: it RETURNS a report body and this frame reads it, which
+            // is how `outOfScope` has always worked. The peek is a source of data, never a writer of
+            // verdict state.
+            let (_, peeked) = crate::gate::while_peeking(|| scan_one(dir, ScanOpts {
                 prefix: format!("{prefix}.peek"),
                 want_json: true,
                 include_tests,
@@ -2758,7 +2760,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 quiet: true,
                 deps_idx,
                 peek_excluded: true,
-            });
+            }));
             let Some(body) = peeked else { return Some(Vec::new()) };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Some(Vec::new()) };
             peek_read = true;   // the recursion returned a report this run could read — see `peek_read`
@@ -2906,9 +2908,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // equality breaks, because `gate --report` reads the report and can only ever answer `null`. And the
     // disclosure over-claims in the direction that matters: it says an ambient declaration moved this
     // run's classification when the gate judged nothing that used it.
-    if !peeking {
-        crate::gate::record_gate_net_partners(net_partners_record.as_ref());
-    }
+    crate::gate::record_gate_net_partners(net_partners_record.as_ref());
     let body = candor_report::to_packaged_report_json_typed(
         &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
         Some(&type_surface), &excluded_classes, out_of_scope.as_deref(),

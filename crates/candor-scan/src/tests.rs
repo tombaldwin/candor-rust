@@ -8221,69 +8221,57 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     }
 
     #[test]
-    fn every_gate_accumulator_says_what_it_does_inside_the_peek() {
-        // ⟨0.31⟩ THE PEEK IS A CARVED-OUT BRANCH OF `scan_one`, AND EVERY ACCUMULATOR MUST BE DIFFED
-        // AGAINST THE GENERAL PATH. It re-enters `scan_one` over the files this scan EXCLUDED, so any
-        // `record_gate_*` it reaches files the excluded set's facts into the run's verdict — while the
-        // peek writes no report, so `gate --report` can never see them and §3.1 byte-equality breaks.
+    fn no_gate_accumulator_can_record_from_inside_the_peek() {
+        // ⟨0.31⟩ THE PEEK MUST WRITE NO VERDICT STATE. It re-enters `scan_one` over the files the scan
+        // EXCLUDED, so anything it records is carried by the scan route and by no other — the peek writes
+        // no report, so `gate --report` cannot reproduce it. That is a §3.1 route-equality break and an
+        // over-claim at once, since the gate judged none of those files.
         //
-        // This has now happened TWICE, to two different keys:
-        //   · `analyzed`    — MEASURED on `crates/candor-query`: scan route said 276, the report it had
-        //                     just written said 129, and CI's byte-equality row failed on 20 of 54 rows.
-        //   · `netPartners` — MEASURED the day the ⟨0.31⟩ key landed, on a crate whose ONLY mention of
-        //                     the declared partner was in `build.rs`: the verdict named
-        //                     `partner.example`, the report said null. Both halves of the failure the
-        //                     first net-partner attempt was reverted for.
+        // THIS HAS HAPPENED TWICE, and the second time is why the guard moved:
+        //   · `analyzed`    — MEASURED on `crates/candor-query`: scan route 276, the report it had just
+        //                     written 129, and CI's byte-equality row failed on 20 of 54 rows. Fixed with
+        //                     a guard at that ONE call site.
+        //   · `netPartners` — MEASURED the day the ⟨0.31⟩ key landed, on a crate whose only mention of
+        //                     the declared partner was in `build.rs`. Written months after the first fix,
+        //                     by someone with no reason to think about a peek, and reproducing it exactly.
         //
-        // So this is a RATCHET, not a pin on those two lines. A new accumulator added later is exactly
-        // the shape that fails this way, and the author has no reason to think about a peek. Every call
-        // site must therefore be either peek-guarded or named below with a reason it does not need to be.
+        // A per-site guard asks the author to think about a peek at the moment they are thinking about
+        // something else. The suppression is central now: `while_peeking` sets a thread-local for the
+        // duration of the recursive call and every recorder returns early on it, so the default is safe
+        // rather than correct-when-remembered. Nothing is lost — the peek RETURNS a report body and the
+        // outer frame reads it, which is how `outOfScope` has always worked.
         //
-        // The peek passing `policy: None` is what discharges most of them — but that is a fact about a
-        // DIFFERENT function, so it is written down here rather than left to be re-derived. Note what it
-        // does NOT discharge: `netPartners` comes from `partners_used` + `discover_config(dir)`, and the
-        // peek scans the same `dir`. Config-derived keys are the dangerous ones.
+        // So this pins the two halves of that invariant: the wrapper is applied, and no recorder can
+        // escape it.
+        let gate = include_str!("gate.rs");
         let scan = include_str!("scan.rs");
-        let lines: Vec<&str> = scan.lines().collect();
-        // name -> why this site is safe without a `!peeking` guard
-        let discharged: &[(&str, &str)] = &[
-            ("record_gate_refusal",
-             "a refusal is not an accumulation, and the peek scans a dir the outer run already opened"),
-            ("record_gate_violations",
-             "policy-derived: the peek runs with `policy: None`, so it evaluates no rule and finds none"),
-            ("record_gate_unevaluated",
-             "policy-derived: an unevaluable RULE, and the peek has no rules"),
-            ("record_gate_ignored",
-             "policy-derived: a dropped policy LINE, and the peek reads no policy text"),
-            ("record_gate_zero_match",
-             "policy-derived: a rule that bound nothing, and the peek has no rules"),
-            ("record_gate_vocabulary",
-             "reached only inside the policy-text branch, which `policy: None` does not enter"),
-            ("record_gate_coverage",
-             "the dep-coverage advisory, computed before the peek and not fed by it"),
-            ("record_gate_out_of_scope",
-             "this key IS the peek's product — the outer run records what the peek returned to it"),
-        ];
+
+        assert!(scan.contains("crate::gate::while_peeking(|| scan_one("),
+                "the recursive peek call is no longer wrapped in `while_peeking`. Every gate accumulator \
+                 is now reachable from inside the peek, and the two keys above are what that looks like: \
+                 a verdict naming things the report cannot carry.");
+
         let mut unguarded: Vec<String> = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
-            let Some(col) = line.find("record_gate_") else { continue };
-            if line.trim_start().starts_with("//") { continue }
-            let name: String = line[col..].chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-            // the definition site and doc references live in gate.rs; here only calls matter
-            if !line[col + name.len()..].starts_with('(') { continue }
-            let guarded = lines[i.saturating_sub(3)..i].iter().any(|l| l.contains("if !peeking"));
-            if guarded || discharged.iter().any(|(n, _)| *n == name) { continue }
-            unguarded.push(format!("{} at scan.rs:{}", name, i + 1));
+        for (i, line) in gate.lines().enumerate() {
+            let Some(m) = line.find("pub(crate) fn record_gate_") else { continue };
+            let name: String = line[m + "pub(crate) fn ".len()..]
+                .chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            // the guard must be the FIRST thing the body does — a recorder that mutates before checking
+            // has already done the damage the check exists to prevent.
+            let body_starts = gate.lines().nth(i + 1).unwrap_or("");
+            if !body_starts.contains("recording_suppressed()") {
+                unguarded.push(format!("{name} (gate.rs:{})", i + 1));
+            }
         }
         assert!(unguarded.is_empty(),
-                "these gate accumulators are reached inside the ⟨0.30⟩ peek with no `if !peeking` guard \
-                 and no stated reason they are safe: {unguarded:?}.\nThe peek re-enters `scan_one` over \
-                 the EXCLUDED files, so whatever this records lands in the run's verdict while the report \
-                 it wrote cannot carry it — that is a §3.1 byte-equality break and an over-claim in the \
-                 disclosure. Either wrap the call in `if !peeking {{ … }}`, or add it to `discharged` \
-                 above WITH the reason it cannot be reached or cannot differ. Do not add it blind: \
-                 `analyzed` and `netPartners` both got here, and both were measured wrong.");
+                "these gate accumulators do not check `recording_suppressed()` as their FIRST action, so \
+                 the ⟨0.30⟩ peek can record through them: {unguarded:?}.\nThe peek walks the files this \
+                 scan deliberately did NOT judge. Whatever they record lands in the run's verdict while \
+                 the report it wrote cannot carry it — a §3.1 byte-equality break and an over-claiming \
+                 disclosure. Add the check, or if this recorder genuinely must fire from inside a peek, \
+                 say why HERE rather than removing the line.");
+        assert!(unguarded.is_empty() && gate.contains("fn while_peeking<T>"),
+                "`while_peeking` itself is gone — the wrapper the check above depends on");
     }
 
     #[test]
