@@ -2894,7 +2894,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             }
         })
     };
-    crate::gate::record_gate_net_partners(net_partners_record.as_ref());
+    // …AND NOT FROM THE PEEK, for the same reason `record_gate_analyzed` above is guarded — this is the
+    // identical defect one key over. The peek runs with `policy: None`, but `net_partners_record` does not
+    // come from the policy: it comes from `partners_used` plus `discover_config(dir)`, and the peek scans
+    // the SAME dir, so it finds the same config and accumulates any partner host reached from a file this
+    // scan deliberately excluded. MEASURED on a crate whose only mention of the declared partner is in
+    // `build.rs`: the verdict said `netPartners: [{hosts: ["partner.example"]}]` while the report it had
+    // just written said `null`.
+    //
+    // Both halves of that are the failure the FIRST net-partner attempt was reverted for. §3.1 route
+    // equality breaks, because `gate --report` reads the report and can only ever answer `null`. And the
+    // disclosure over-claims in the direction that matters: it says an ambient declaration moved this
+    // run's classification when the gate judged nothing that used it.
+    if !peeking {
+        crate::gate::record_gate_net_partners(net_partners_record.as_ref());
+    }
     let body = candor_report::to_packaged_report_json_typed(
         &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
         Some(&type_surface), &excluded_classes, out_of_scope.as_deref(),
