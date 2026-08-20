@@ -9,6 +9,15 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`partner_for` — one matcher for the partner decision, ahead of the ⟨0.31⟩ `netPartners` port.** A pure
+  extraction, no behaviour change: `net_dest_class` now calls it rather than repeating the match inline.
+  It exists because the reverted 2026-08-17 `net-partner` disclosure re-implemented that match against a
+  normaliser that KEEPS the port, so an observed `partner.example:443` never equalled a declared
+  `partner.example` and the disclosure was silently empty on every real run while the verdicts it reported
+  on had flipped. With one function and two callers, a differently-normalised disclosure is unwritable
+  rather than merely discouraged. The rest of the port — accumulating what participated, and recording
+  `{config, hosts}` in the envelope for both routes to copy — is open work; see candor/BACKLOG.md.
+
 - **⚠ ⟨0.31⟩ AN UNEVALUABLE TARGET IS A REFUSAL, NOT A CLEAN SCAN — verdict-affecting.** A target that
   exists but holds no `.rs` this engine can read now exits **2** with no report, where it answered
   `policy ✓` at exit 0. That was a permanent green for a typo'd CI path, a module that moved, or an
