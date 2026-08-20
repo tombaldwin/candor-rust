@@ -1698,13 +1698,36 @@ pub fn net_dest_class(host_literal: &str, partners: &std::collections::BTreeSet<
     if is_telemetry_host(host_literal) {
         return "known-telemetry";
     }
-    let host = policy::host_part(host_literal).to_ascii_lowercase();
-    let partner_match = partners.contains(&host)
-        || partners.iter().any(|p| host.ends_with(&format!(".{p}")));
-    if partner_match || is_model_host(host_literal) {
+    if partner_for(host_literal, partners).is_some() || is_model_host(host_literal) {
         return "known-partner";
     }
     "unknown-host"
+}
+
+/// ⟨0.31⟩ WHICH declared partner a host matched, or `None` — the SAME match `net_dest_class` decides on,
+/// extracted so the DISCLOSURE and the DECISION cannot use different rules.
+///
+/// That is not a stylistic preference. The reverted first attempt at the `net-partner` disclosure
+/// re-implemented this match against a normaliser that KEEPS the port, so an observed
+/// `partner.example:443` never equalled a declared `partner.example` and the disclosure came back
+/// SILENTLY EMPTY on every real run — while the verdicts it was reporting on had flipped. A disclosure
+/// normalised differently from the decision it reports can only be wrong, and one function with two
+/// callers is what makes writing one impossible.
+pub fn partner_for(
+    host_literal: &str,
+    partners: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    if partners.is_empty() {
+        return None;
+    }
+    let host = policy::host_part(host_literal).to_ascii_lowercase();
+    if partners.contains(&host) {
+        return Some(host);
+    }
+    partners
+        .iter()
+        .find(|p| host.ends_with(&format!(".{p}")))
+        .cloned()
 }
 
 /// ⟨0.20⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
