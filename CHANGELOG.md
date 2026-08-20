@@ -9,6 +9,29 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ ⟨0.31⟩ AN UNEVALUABLE TARGET IS A REFUSAL, NOT A CLEAN SCAN — verdict-affecting.** A target that
+  exists but holds no `.rs` this engine can read now exits **2** with no report, where it answered
+  `policy ✓` at exit 0. That was a permanent green for a typo'd CI path, a module that moved, or an
+  unbuilt tree — and this engine already refused a target that does not EXIST for exactly that stated
+  reason. candor-ts, candor-swift and candor-java all refused this shape already; ⟨0.31⟩ writes the cause
+  into §3.3 (the fourth) and brings this engine into line.
+
+  **Bounded three ways.** *Per-invocation, never per-member*: a workspace with one live member and one
+  scaffolded one stays green, and the empty member still publishes its ⟨0.24⟩ count-0 report. *After the
+  ⟨0.30⟩ peek*: if an excluded file holds a denied effect, that finding is the answer — reported, with
+  `outOfScope`, exit 2 through the scope cause. *Before any envelope*: §3.1's byte-equality binds any
+  report a scan produced, so the refusal writes none.
+
+  It supersedes ⟨0.24⟩'s judged-nothing ruling for **the scan route's own target only** — a report handed
+  to `gate --report`, or chained as a dependency, stays verdict-preserving.
+
+  Two earlier attempts at this fix were reverted, and the regression guard that caught both is now a
+  test: keying on the gate's analyzed accumulator made a NORMAL crate exit 2, and keying on `paths` read
+  a HashMap of Fs path literals that SHADOWS the walk's file list 450 lines below it — same identifier,
+  two meanings. The count is captured at the walk now, under its own name.
+
+## Unreleased
+
 - **The ⟨0.30⟩ gate state's sequential assumption is pinned by a test.** `GATE_VIOLATIONS` is a
   thread-local that accumulates across `scan_one` calls, which is correct only while workspace members are
   scanned sequentially on one thread. That was documented beside the declaration and pinned by nothing.

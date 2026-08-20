@@ -902,6 +902,13 @@ pub(crate) struct ScanOpts<'a> {
     /// path or `--out` prefix. See `check_baseline` for the full guard contract.
     pub(crate) baseline: Option<String>,
     pub(crate) quiet: bool,
+    /// ⟨0.31⟩ TRUE when this call is one MEMBER of a workspace invocation. The unevaluable-target
+    /// refusal is PER-INVOCATION, not per-member: a workspace with one live member and one scaffolded
+    /// one must stay green, and a member that judged nothing must still publish its ⟨0.24⟩ count-0
+    /// report — the wire table at SPEC §2 defines that shape and a per-member refusal would delete it.
+    /// The same rule holds elsewhere for the same reason: swift `binary`/`system` targets carry zero
+    /// sources by design, a maven aggregator has no classes, and a ts solution root unions its members.
+    pub(crate) ws_member: bool,
     pub(crate) deps_idx: &'a DepIndex,
     /// ⟨0.29⟩ THE PEEK. When true this run INVERTS the file selection: it analyzes exactly the files a
     /// normal run excludes, and nothing else. Set only by the recursive call `scan_one` makes on itself,
@@ -1006,7 +1013,7 @@ fn build_type_surface(
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
 pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
-    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, baseline: baseline_value, quiet, deps_idx, peek_excluded } = opts;
+    let ScanOpts { prefix, want_json, include_tests, policy: policy_path, baseline: baseline_value, quiet, ws_member, deps_idx, peek_excluded } = opts;
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
     // Install this crate's cfg-feature picture (active = default closure, declared = all). A
@@ -1124,6 +1131,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         }
         paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned()));
     }
+
+    // ⟨0.31⟩ THE WALK-ADMITTED FILE COUNT, captured HERE and under its own name.
+    //
+    // `paths` is SHADOWED ~450 lines below by an unrelated `HashMap<String, BTreeSet<String>>` of Fs path
+    // literals, and the unevaluable-target refusal lives past that point. Reading `paths.is_empty()` there
+    // asks "did this crate record any Fs path literals", which is true of every clean crate — measured:
+    // it made a normal crate with a real `src/lib.rs` exit 2, the third attempt at this fix failing the
+    // same regression row as the second. Same identifier, two meanings, 450 lines apart.
+    let walk_admitted_files = paths.len();
 
     // ── PARSE + Pass A + Pass B, with an OPTIONAL per-file cache (`--incremental`) ──────────────────
     // The non-incremental path is the original: parallel parse every file, run Pass A then Pass B over
@@ -2725,6 +2741,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 include_tests,
                 policy: None,          // the peek ASKS nothing; it only reports what it saw
                 baseline: None,
+                // ⟨0.31⟩ the peek analyses the INVERSE file set, so an unevaluable-target refusal is
+                // meaningless here and would refuse the very look that names the finding.
+                ws_member: true,
                 quiet: true,
                 deps_idx,
                 peek_excluded: true,
@@ -2861,6 +2880,43 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     let json_body = if want_json {
         Some(body.clone())
     } else {
+        // ⟨0.31⟩ AN UNEVALUABLE TARGET IS A REFUSAL, NOT A CLEAN SCAN.
+        //
+        // The walk admitted NOTHING this engine can read — no `.rs` under the target at all. This engine
+        // answered `policy ✓` at exit 0 here, which is a permanent green for a typo'd CI path; candor-ts,
+        // candor-swift and candor-java all refuse the same shape. This engine ALREADY refuses a target
+        // that does not exist, for the reason its own comment gives ("a typo'd path in CI is a PERMANENT
+        // GREEN") — an existing path holding nothing readable is that same green one step along.
+        //
+        // THREE PLACEMENT CONSTRAINTS, each of which broke a previous attempt at this fix:
+        //
+        //  1. AFTER THE PEEK. `out_of_scope` is computed above; if the ⟨0.30⟩ peek named a denied effect
+        //     in an excluded file (a `build.rs` running `curl`), that finding is the answer and the run
+        //     reports it and exits 2 through the scope arm, WITH a report carrying `outOfScope`.
+        //  2. BEFORE THE ENVELOPE. §3.1's byte-equality is quantified over "any report a scan produced",
+        //     so a refusal that leaves a report hands `gate --report` an answer that disagrees with this
+        //     exit code. Attempt #1 exited 2 after the verdict was written and broke exactly that
+        //     (`scan --policy` 2 vs `gate --report` 0). Returning here writes no report at all.
+        //  3. THE WALK'S FILE SET, not an analyzed count. Attempt #2 keyed on `gate::GATE_ANALYZED` and
+        //     made a NORMAL crate with a real `src/lib.rs` exit 2 — that accumulator is not populated on
+        //     the simple path and answers a different question. `paths` is what the walk admitted.
+        //
+        // PER-INVOCATION, NOT PER-MEMBER (`ws_member`): a workspace with one live member and one
+        // scaffolded one stays green, and a member that judged nothing still publishes its ⟨0.24⟩
+        // count-0 report. A per-member refusal would delete that shape and redden a benign layout — the
+        // same reason swift does not refuse per `binary` target and java does not per aggregator module.
+        if walk_admitted_files == 0
+            && !ws_member
+            && out_of_scope.as_deref().map_or(true, |o| o.is_empty())
+        {
+            if !quiet {
+                eprintln!("candor-scan: no Rust sources under {dir}");
+                eprintln!("        candor-scan reads `.rs` files — point it at a crate or workspace \
+                           directory containing them. Exit 2 (unevaluable): a target this engine cannot \
+                           read is not a clean scan.");
+            }
+            return (2, None);
+        }
         let prefix = if prefix.is_empty() { format!("{dir}/.candor/report") } else { prefix };
         if let Some(parent) = Path::new(&prefix).parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -3520,7 +3576,7 @@ pub(crate) fn scan_target(
                        check `members`/globs; scan member crates directly to gate them");
         }
         let (code, json) = scan_one(dir, ScanOpts {
-            prefix, want_json, include_tests, policy, baseline, quiet: false, deps_idx, peek_excluded: false,
+            prefix, want_json, include_tests, policy, baseline, ws_member: false, quiet: false, deps_idx, peek_excluded: false,
         });
         if let Some(b) = json {
             println!("{b}");
@@ -3567,7 +3623,7 @@ pub(crate) fn scan_target(
     for d in &dirs {
         let (code, json) = scan_one(d, ScanOpts {
             prefix: prefix.clone(), want_json, include_tests, policy: policy.clone(),
-            baseline: baseline.clone(), quiet: false, deps_idx, peek_excluded: false,
+            baseline: baseline.clone(), quiet: false, ws_member: true, deps_idx, peek_excluded: false,
         });
         // ⟨0.30⟩ SPEC PRECEDENCE, NOT NUMERIC MAX. `rc.max(code)` makes 2 beat 1, so one member's
         // "I could not evaluate" displaced another member's CERTAIN violation — the inverse of §3.3's
@@ -3679,6 +3735,7 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
             include_tests: false,
             policy: None,
             baseline: None,
+            ws_member: true,   // ⟨0.31⟩ a nested sub-scan, not the invocation's own target
             quiet: true,
             deps_idx: &no_deps, peek_excluded: false,
         });
