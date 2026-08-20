@@ -452,6 +452,9 @@ fn refuse_gate_json_at_config(gate: &str) {
 pub(crate) fn scan_main() {
     // ⟨0.30⟩ a RUN starts with no inherited verdict state — see `reset_gate_run_state`.
     crate::gate::reset_gate_run_state();
+    // ⟨0.31⟩ …and a run is ONE THREAD. This is the only mint outside tests; everything below carries it
+    // by reference. See the note on `gate::RunToken` for what breaks if that stops being true.
+    let run_tok = crate::gate::begin_run();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = ".".to_string();
     let mut prefix = String::new();
@@ -862,7 +865,7 @@ pub(crate) fn scan_main() {
     // verdict is armed fail-closed.
     enforce_engine_pin(&dir);
     if deps_mode {
-        let code = run_with_deps(&dir, prefix, want_json, include_tests, policy, baseline);
+        let code = run_with_deps(&dir, prefix, want_json, include_tests, policy, baseline, &run_tok);
         // ⟨0.28⟩ the run finished writing: hand back any armed report it turned out not to own.
         crate::gate::disarm_unwritten_out_reports();
         write_gate_json(code);
@@ -881,7 +884,7 @@ pub(crate) fn scan_main() {
     let deps_idx = load_dep_reports(deps_spec.as_deref());
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
-    let code = scan_target(&dir, prefix, want_json, include_tests, policy, baseline, &deps_idx);
+    let code = scan_target(&dir, prefix, want_json, include_tests, policy, baseline, &deps_idx, &run_tok);
     // ⟨0.28⟩ the run finished writing: hand back any armed report it turned out not to own.
     crate::gate::disarm_unwritten_out_reports();
     write_gate_json(code);
@@ -1012,7 +1015,8 @@ fn build_type_surface(
 /// One crate scan, end to end (parse -> passes -> report -> receipt -> policy gate). Returns the
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
-pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
+pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
+    -> (i32, Option<String>) {
     let ScanOpts { prefix, want_json, include_tests, policy: policy_path, baseline: baseline_value, quiet, ws_member, deps_idx, peek_excluded } = opts;
     let root = Path::new(dir);
     let crate_name = read_crate_name(root).unwrap_or_else(|| "crate".to_string());
@@ -2760,7 +2764,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 quiet: true,
                 deps_idx,
                 peek_excluded: true,
-            }));
+            }, run));
             let Some(body) = peeked else { return Some(Vec::new()) };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Some(Vec::new()) };
             peek_read = true;   // the recursion returned a report this run could read — see `peek_read`
@@ -3099,7 +3103,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                         println!("{line}");
                     }
                 }
-                record_gate_violations(&v); // toward the final --gate-json verdict
+                record_gate_violations(&v, run); // toward the final --gate-json verdict
                 // A configured guard over INCOMPLETE analysis must not certify: the unparsed file's
                 // effects are absent, so a clean compare over it is a false-pure. But **a real
                 // regression still dominates** (SPEC §3.3.1: *"A configured gate over
@@ -3210,7 +3214,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // (Until ⟨0.30⟩ `record_gate_violations` was also a no-op without `--gate-json`, which made
             // the precedence apply on the machine-output path and not the plain one; recording is now
             // unconditional, and the accumulator thread-local so that is safe.)
-            let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
+            let code = if guard_code == 1 || crate::gate::holds_violation(run) { 1 } else { 2 };
             return (code, json_body);
         };
         // ⟨0.19⟩ reason-class aliases (SPEC §6.2): a multi-value `unknown-alias` config key the single-value
@@ -3320,7 +3324,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // (Until ⟨0.30⟩ `record_gate_violations` was also a no-op without `--gate-json`, which made
             // the precedence apply on the machine-output path and not the plain one; recording is now
             // unconditional, and the accumulator thread-local so that is safe.)
-            let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
+            let code = if guard_code == 1 || crate::gate::holds_violation(run) { 1 } else { 2 };
             return (code, json_body);
         }
         // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES IS A BROKEN GATE CONFIG (SPEC §6.2) — the
@@ -3372,7 +3376,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // …and the SAME precedence as both branches above: a certain violation dominates a refusal
             // (§3.1, `Reject` is upward-closed). No POLICY violation can exist with zero rules, but an
             // AS-EFF-005 baseline regression is a finding from evidence this run carries and it outranks.
-            let code = if guard_code == 1 || crate::gate::holds_violation() { 1 } else { 2 };
+            let code = if guard_code == 1 || crate::gate::holds_violation(run) { 1 } else { 2 };
             return (code, json_body);
         }
         let outcome = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
@@ -3475,7 +3479,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
                 println!("{line}");
             }
         }
-        record_gate_violations(&v); // toward the final --gate-json verdict (written once, by scan_main)
+        record_gate_violations(&v, run); // toward the final --gate-json verdict (written once, by scan_main)
         // A configured gate over INCOMPLETE analysis (a source file failed to parse) must NOT report
         // green: the unparsed file's effects are absent, so a `policy ✓` over it is a false-pure. Fail
         // exit 2 (mirroring the unreadable-policy posture) — never exit 0/1 with a clean-looking ✓.
@@ -3497,7 +3501,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // the exit code. The note three lines above describes this exact conflation, and the sibling arm
         // twenty lines below was given the conjuncts while this one was not — the sibling-route habit,
         // inside the fix for it.
-        if had_parse_failure && v.is_empty() && guard_code != 1 && !crate::gate::holds_violation() {
+        if had_parse_failure && v.is_empty() && guard_code != 1 && !crate::gate::holds_violation(run) {
             eprintln!("candor-scan: policy NOT enforced — source failed to parse (see above); gate cannot be green over unanalyzed code");
             return (2, json_body);
         }
@@ -3517,7 +3521,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // The ⟨0.24⟩ note in `write_gate_json` records this exact conflation one cause over; it was read
         // while writing this line and the wrong predicate was used anyway.
         let oos_findings = out_of_scope.as_deref().unwrap_or(&[]);
-        if !oos_findings.is_empty() && v.is_empty() && guard_code != 1 && !crate::gate::holds_violation() {
+        if !oos_findings.is_empty() && v.is_empty() && guard_code != 1 && !crate::gate::holds_violation(run) {
             eprintln!(
                 "candor-scan: policy NOT enforced — {} function(s) OUTSIDE this scan's scope perform an \
                  effect this policy denies (named above); the gate did not judge them, so the verdict is \
@@ -3604,6 +3608,10 @@ pub(crate) fn scan_target(
     policy: Option<String>,
     baseline: Option<String>,
     deps_idx: &DepIndex,
+    // ⟨0.31⟩ carried, never minted here: the `[workspace]` member loop below is the exact place the
+    // one-run-one-thread invariant lives, and `RunToken` is !Send so parallelising it will not compile.
+    // See the note on `gate::RunToken`.
+    run: &crate::gate::RunToken,
 ) -> i32 {
     let members = workspace_members(Path::new(dir));
     if members.is_empty() {
@@ -3617,7 +3625,7 @@ pub(crate) fn scan_target(
         }
         let (code, json) = scan_one(dir, ScanOpts {
             prefix, want_json, include_tests, policy, baseline, ws_member: false, quiet: false, deps_idx, peek_excluded: false,
-        });
+        }, run);
         if let Some(b) = json {
             println!("{b}");
             // ⟨0.28⟩ Latch: a successful report went to stdout, so a later `exit2_refused` MUST NOT
@@ -3664,7 +3672,7 @@ pub(crate) fn scan_target(
         let (code, json) = scan_one(d, ScanOpts {
             prefix: prefix.clone(), want_json, include_tests, policy: policy.clone(),
             baseline: baseline.clone(), quiet: false, ws_member: true, deps_idx, peek_excluded: false,
-        });
+        }, run);
         // ⟨0.30⟩ SPEC PRECEDENCE, NOT NUMERIC MAX. `rc.max(code)` makes 2 beat 1, so one member's
         // "I could not evaluate" displaced another member's CERTAIN violation — the inverse of §3.3's
         // "a real violation (exit 1) still dominates". Latent while exit 2 was rare (a parse failure);
@@ -3694,7 +3702,9 @@ pub(crate) fn scan_target(
 /// `~/.cargo/registry/src/<index>/` into `<dir>/.candor/deps/`, then scan the root crate chained
 /// over those reports (plus anything CANDOR_DEPS already names). Path/git/workspace deps have no
 /// registry checkout and are skipped with a note — chain them by scanning them yourself.
-pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_tests: bool, policy: Option<String>, baseline: Option<String>) -> i32 {
+pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_tests: bool,
+                            policy: Option<String>, baseline: Option<String>,
+                            run: &crate::gate::RunToken) -> i32 {
     let lock = match std::fs::read_to_string(format!("{dir}/Cargo.lock")) {
         Ok(t) => t,
         Err(_) => {
@@ -3778,7 +3788,7 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
             ws_member: true,   // ⟨0.31⟩ a nested sub-scan, not the invocation's own target
             quiet: true,
             deps_idx: &no_deps, peek_excluded: false,
-        });
+        }, run);
         scanned += 1;
     }
     if prior_chain.is_none() {
@@ -3806,5 +3816,5 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
     let idx = load_dep_reports(Some(&spec));
     // The final root scan goes through scan_target so `--deps <workspace>` fans out over members
     // too — the nested-package filter would otherwise prune them all into an empty, gate-passing report.
-    scan_target(dir, prefix, want_json, include_tests, policy, baseline, &idx)
+    scan_target(dir, prefix, want_json, include_tests, policy, baseline, &idx, run)
 }

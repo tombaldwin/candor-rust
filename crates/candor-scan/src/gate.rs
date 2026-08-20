@@ -519,6 +519,43 @@ thread_local! {
     static IN_PEEK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// ⟨0.31⟩ PROOF THAT ONE SCAN RUN IS ONE THREAD.
+///
+/// `GATE_VIOLATIONS` is a **thread-local** while nine sibling accumulators are process-globals, and that
+/// asymmetry is not an oversight — the thread-local exists because `cargo test` runs tests on parallel
+/// threads and a process-global violation list let them contaminate each other. But it makes the
+/// `[workspace]` member loop load-bearing in a way nothing about the loop says: members must scan
+/// **sequentially on one thread**, or each worker accumulates into its own list and cross-member
+/// violations are silently lost. The symptom is a WRONG EXIT CODE — one member's certain violation
+/// vanishing behind another's "could not evaluate" — with no panic, no diff, and no failing fixture.
+///
+/// Three sequential loops in this family were parallelised for speed in one night. This one must not be
+/// without moving the state first, and a comment saying so is not a mechanism.
+///
+/// So `scan_one` takes `&RunToken`, and the token is neither `Send` nor `Sync`: a `par_iter()` over the
+/// members captures it and **fails to compile**. The author's next move is to construct one inside the
+/// closure — which lands them on this comment, because [`begin_run`] is the only way to make one and
+/// there is exactly one call to it outside tests (pinned by
+/// `exactly_one_run_token_is_minted_outside_tests`).
+///
+/// It is a forcing function, not a proof. What it converts is a silent runtime under-report into a
+/// compile error at the exact line that would cause it.
+pub(crate) struct RunToken {
+    /// A raw pointer is neither Send nor Sync, and carrying it by `PhantomData` costs nothing at
+    /// runtime — `RunToken` is zero-sized. Deliberately NOT `Clone`: a clone per worker would be the
+    /// same defect wearing the token's clothes.
+    _one_thread: std::marker::PhantomData<*const ()>,
+}
+
+/// Mint the token for THIS run. Exactly one call outside tests, in `scan_main`, above the member loop.
+///
+/// If you are here because a parallel iterator would not compile: the fix is not a second token. It is
+/// to move the per-run accumulators out of `thread_local!` and into state threaded through `scan_one`,
+/// so that workers merge instead of diverging. Read the note on [`RunToken`] first.
+pub(crate) fn begin_run() -> RunToken {
+    RunToken { _one_thread: std::marker::PhantomData }
+}
+
 /// Run `f` with every gate accumulator suppressed. Restores the PREVIOUS value rather than clearing, so
 /// this composes if a peek is ever nested inside another.
 pub(crate) fn while_peeking<T>(f: impl FnOnce() -> T) -> T {
@@ -541,11 +578,17 @@ pub(crate) fn recording_suppressed() -> bool {
 /// than chosen: if a rule FIRED on evidence the report carries, `Reject` is upward-closed, so however
 /// the unanswerable rule would have resolved cannot un-reject it. Exit 1 is not merely fail-closed
 /// there, it is CERTAIN — and strictly more informative, because it names the violation.
-pub(crate) fn holds_violation() -> bool {
+/// …and so does the READ, for the same reason: a precedence decision taken against another thread's
+/// (empty) accumulator is how a certain violation silently becomes "could not evaluate".
+pub(crate) fn holds_violation(_run: &RunToken) -> bool {
     GATE_VIOLATIONS.with(|v| !v.borrow().is_empty())
 }
 
-pub(crate) fn record_gate_violations(violations: &[GateViolation]) {
+/// ⟨0.31⟩ TAKES THE RUN TOKEN, and that is the whole point of the token rather than a formality.
+/// `GATE_VIOLATIONS` is the thread-local this protects, so the proof that a run is one thread belongs
+/// exactly HERE — at the write — not at some outer function boundary that merely happens to forward it.
+/// Requiring it means no caller can reach the accumulator from a thread that did not carry the token in.
+pub(crate) fn record_gate_violations(violations: &[GateViolation], _run: &RunToken) {
     if recording_suppressed() { return; }   // ⟨0.31⟩ the peek writes no verdict state
     // ⟨0.30⟩ UNCONDITIONAL. This returned early unless `--gate-json` was set, so `holds_violation` was
     // blind without it and the ⟨0.30⟩ precedence check answered differently with and without a machine

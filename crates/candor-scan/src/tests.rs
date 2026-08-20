@@ -672,7 +672,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             outs.push(body.unwrap());
         }
@@ -787,7 +787,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             rc
         };
         assert_eq!(run("deny Unknown"), 1, "the bare rule must still bite — the Unknown IS there");
@@ -855,7 +855,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             rc
         };
         // CONTROL A — the classified call ALONE. `unresolved` must not fire (nothing here is reasonless).
@@ -959,7 +959,7 @@ pub fn helper() { let _ = std::process::Command::new(\"b\").status(); }
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
                 baseline: None, ws_member: false, quiet: true, deps_idx: ix, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             rc
         };
         // (1) THE CHAIN-EXPLAINED ARM. The dependency published the edge AND the reason at its end, so
@@ -1731,7 +1731,7 @@ pub fn go() { helper(); }
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None,
             ws_member: false, quiet: true, deps_idx: &DepIndex::default(), peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let _ = std::fs::remove_dir_all(&d);
@@ -1888,7 +1888,7 @@ pub fn by_ordinary_call() { deplib::io::fetch(); }
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let _ = std::fs::remove_dir_all(&d);
@@ -1943,7 +1943,7 @@ pub fn by_ordinary_call() { deplib::io::fetch(); }
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let v = serde_json::from_str(&body.unwrap()).unwrap();
         let _ = std::fs::remove_dir_all(&d);
@@ -2212,7 +2212,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -2270,7 +2270,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None,
                 ws_member: false, quiet: true, deps_idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -2384,7 +2384,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
             include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let find = |n: &str| v["functions"].as_array().into_iter().flatten()
@@ -2443,7 +2443,7 @@ pub fn unknown_method() -> u8 { let c = deplib::build(); c.pure_ping() }
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -2493,7 +2493,7 @@ struct R(Rc<Inner>); impl R { pub fn run(&self) { self.0.doit(); } }
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -2577,7 +2577,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -2674,7 +2674,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -2752,7 +2752,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -2794,7 +2794,7 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -2861,7 +2861,7 @@ impl PReg { pub fn field_pure(&self) { for x in &self.xs { x.go(); } } }  // PUR
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -2936,7 +2936,7 @@ pub fn named_eff(items: &[i32]) { items.iter().for_each(helper_eff); }
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -2988,7 +2988,7 @@ pub struct Plain; impl Plain { pub fn go(&self) {} }
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -3034,7 +3034,7 @@ struct O; impl Other for O { fn base(&self) { let _ = fs::write("/z","!"); } }
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -3082,7 +3082,7 @@ pub struct Plain; impl Plain { pub fn go(&self) {} }
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -3148,7 +3148,7 @@ pub fn nested_concrete(xs: Vec<Option<Plain>>) { for x in xs { if let Some(d) = 
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -3199,7 +3199,7 @@ pub fn via_pure(p: &Pure) { p.d(); }
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -3246,7 +3246,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -3374,7 +3374,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -3429,7 +3429,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -3486,7 +3486,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -3520,7 +3520,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -3660,7 +3660,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let idx = load_dep_reports(None);
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let _ = std::fs::remove_dir_all(&d);
@@ -3701,7 +3701,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
             include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let ex = v["excluded"].as_array().expect("`excluded` must be present, even when empty (⟨0.27⟩)");
@@ -3770,7 +3770,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
                 include_tests: false, policy: Some(p.to_string_lossy().into_owned()),
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             rc
         };
         assert_eq!(run("only model -> util"), 1,
@@ -3821,7 +3821,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 want_json: true, include_tests: false,
                 policy: pol.map(|p| d.join(p).to_string_lossy().into_owned()),
                 baseline: None, quiet: true, ws_member: false, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             (rc, serde_json::from_str(&body.unwrap()).unwrap())
         };
 
@@ -4425,7 +4425,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false,
                 policy: Some(pp.to_string_lossy().into_owned()), baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             let _ = std::fs::remove_dir_all(&d);
             rc
         };
@@ -4494,7 +4494,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 prefix, want_json: true, include_tests: false,
                 policy: if with_policy { Some(pp.to_string_lossy().into_owned()) } else { None },
                 baseline: None, quiet: true, ws_member: false, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             let _ = std::fs::remove_dir_all(&d);
             rc
         };
@@ -4525,7 +4525,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -4584,7 +4584,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let idx = load_dep_reports(None);
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -4748,7 +4748,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -4815,7 +4815,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -4875,7 +4875,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -4949,7 +4949,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -5011,7 +5011,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -5053,7 +5053,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -5092,7 +5092,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -5161,7 +5161,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -5237,7 +5237,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -5314,7 +5314,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None,
                 ws_member: false, quiet: true, deps_idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -5407,7 +5407,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let body = body.expect("want_json returns the report body");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -5827,7 +5827,7 @@ trait G {
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
             baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
         serde_json::from_str(&body.unwrap()).unwrap()
@@ -6153,7 +6153,7 @@ trait G {
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: String::new(), want_json: true, include_tests: false, policy: None,
             baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(rc, 0);
         let body = body.unwrap();
@@ -6396,7 +6396,7 @@ trait G {
         std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\n").unwrap();
         let idx = load_dep_reports(None);
         let prefix = d.join("out/r").to_string_lossy().into_owned();
-        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, None, &idx);
+        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, None, &idx, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let ra = std::fs::read_to_string(format!("{prefix}.a.scan.json")).unwrap();
         let rb = std::fs::read_to_string(format!("{prefix}.b.scan.json")).unwrap();
@@ -6427,7 +6427,7 @@ trait G {
         let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix: prefix.clone(), want_json: false, include_tests: false,
             policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let rep = std::fs::read_to_string(format!("{prefix}.outer.scan.json")).unwrap();
         assert!(rep.contains("outer_eff"), "the parent's own fn must report: {rep}");
@@ -6451,7 +6451,7 @@ trait G {
         let prefix = outdir.join("r").to_string_lossy().into_owned();
         let (rc, _) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: false, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         // no temp turds: every output file ends in `.json`, never `.tmp.<pid>`.
         let leftovers: Vec<String> = std::fs::read_dir(&outdir).unwrap()
@@ -6512,7 +6512,7 @@ trait G {
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -6556,7 +6556,7 @@ trait G {
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -6601,7 +6601,7 @@ trait G {
             let prefix = d.join("out/r").to_string_lossy().into_owned();
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0);
             let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -6884,7 +6884,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let _ = std::fs::remove_dir_all(&d);
@@ -6943,7 +6943,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"nl\"\n").unwrap();
         std::fs::write(d.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
-        let rc = run_with_deps(&d.to_string_lossy(), String::new(), true, false, None, None);
+        let rc = run_with_deps(&d.to_string_lossy(), String::new(), true, false, None, None, &crate::gate::begin_run());
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(rc, 2, "--deps without Cargo.lock must fail closed");
     }
@@ -7146,7 +7146,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
             let v = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -7188,7 +7188,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
                 prefix: String::new(), want_json: true, include_tests: false, policy: None,
                 baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
             let v = serde_json::from_str(&body.unwrap()).unwrap();
             let _ = std::fs::remove_dir_all(&d);
@@ -7260,7 +7260,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             prefix: out.to_string(), want_json: true, include_tests: false,
             policy: Some(policy.to_string()), baseline: None, ws_member: false, quiet: true,
             deps_idx: &DepIndex::default(), peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         INCREMENTAL.with(|c| c.set(false));
         std::env::remove_var("CANDOR_PANIC_ON_FILE");
         (rc, serde_json::from_str(&body.unwrap()).unwrap())
@@ -7485,7 +7485,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true,
             deps_idx: &DepIndex::default(), peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         std::env::remove_var("CANDOR_PANIC_ON_FILE");
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let _ = std::fs::remove_dir_all(&d);
@@ -7690,7 +7690,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
             prefix, want_json: true, include_tests: false, policy: None, baseline: None,
             ws_member: false, quiet: true, deps_idx: &DepIndex::default(), peek_excluded: false,
-        });
+        }, &crate::gate::begin_run());
         assert_eq!(rc, 0);
         let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
         let entries = v["functions"].as_array().cloned().unwrap_or_default();
@@ -8206,7 +8206,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 prefix: String::new(), want_json: false, include_tests: false,
                 policy: Some(d.join("pol").to_string_lossy().into_owned()),
                 baseline: None, quiet: true, ws_member: false, deps_idx: &idx, peek_excluded: false,
-            });
+            }, &crate::gate::begin_run());
             let wrote = std::fs::read_dir(d.join(".candor")).map(|mut e| e.any(|f| f
                 .map(|f| f.file_name().to_string_lossy().starts_with("report.")).unwrap_or(false)))
                 .unwrap_or(false);
@@ -8272,6 +8272,46 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                  say why HERE rather than removing the line.");
         assert!(unguarded.is_empty() && gate.contains("fn while_peeking<T>"),
                 "`while_peeking` itself is gone — the wrapper the check above depends on");
+    }
+
+    #[test]
+    fn exactly_one_run_token_is_minted_outside_tests() {
+        // ⟨0.31⟩ `RunToken` makes "one scan run is one thread" a COMPILE-TIME fact rather than a rule in
+        // a comment: it is neither Send nor Sync, so a `par_iter()` or a `thread::scope` over the
+        // `[workspace]` member loop captures it and fails to build, pointing at the note on the type.
+        //
+        // VERIFIED, not assumed — and the first attempt to verify it was VACUOUS. A probe spawning a
+        // thread whose body was `let _ = run;` compiled happily, because under edition-2021 precise
+        // capture `let _ = x` does not use the value and the closure captured nothing. The property was
+        // fine; the probe was testing air. It only failed once the body genuinely used the token.
+        //
+        // The guarantee rests on two things this pins, because both are one careless edit from gone:
+        //   · the token is !Send/!Sync — it carries `PhantomData<*const ()>` and derives no Clone. A
+        //     `#[derive(Clone)]` would let a worker mint its own copy, which is the same defect wearing
+        //     the token's clothes.
+        //   · `begin_run()` is called EXACTLY ONCE outside tests. The whole forcing function is that an
+        //     author who parallelises must write a second mint, and lands on the note explaining why
+        //     that reintroduces the silent cross-member violation loss.
+        let gate = include_str!("gate.rs");
+        let scan = include_str!("scan.rs");
+
+        assert!(gate.contains("_one_thread: std::marker::PhantomData<*const ()>"),
+                "RunToken no longer carries a !Send/!Sync marker, so `&RunToken` can cross a thread \
+                 again and the member loop can be parallelised without a compile error");
+        assert!(!gate.contains("derive(Clone)]\npub(crate) struct RunToken")
+                && !gate.contains("impl Clone for RunToken"),
+                "RunToken became Clone — a worker can now mint its own and the compile error is gone");
+
+        let mints = scan.matches("gate::begin_run()").count();
+        assert_eq!(mints, 1,
+                   "expected exactly ONE `begin_run()` in scan.rs (in `scan_main`, above the member \
+                    loop) and found {mints}. A second mint is how this protection is removed: it is \
+                    what an author parallelising the loop writes to make the borrow checker quiet, and \
+                    it hands each worker its own thread-local violation list. Read the note on \
+                    `gate::RunToken` before adding one.");
+        assert!(scan.contains("fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)"),
+                "`scan_one` no longer takes the run token, so nothing carries the invariant into the \
+                 place that depends on it");
     }
 
     #[test]
