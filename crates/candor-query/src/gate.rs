@@ -211,10 +211,15 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
         // ⟨0.31⟩ the producer's ambient-partner provenance, carried through verbatim. ABSENT is the
         // ordinary case (no partner participated) and must stay absent — this key is additive, so a
         // pre-rung report reads exactly as it did before.
-        if let candor_report::KeyRead::Present(np) = candor_report::report_net_partners(&text) {
-            if !out.net_partners.iter().any(|e| *e == np) {
+        // A `match` with a guard rather than nested `if`s: the nested form trips
+        // `clippy::collapsible_if` on a newer stable than this repo's floor, and the collapsed form
+        // needs let-chains. This shape needs neither, and `contains` is what `clippy::manual_contains`
+        // asks for over `iter().any(|e| *e == np)`.
+        match candor_report::report_net_partners(&text) {
+            candor_report::KeyRead::Present(np) if !out.net_partners.contains(&np) => {
                 out.net_partners.push(np);
             }
+            _ => {}
         }
         out.out_of_scope.extend(strict!(
             candor_report::report_out_of_scope(&text),
