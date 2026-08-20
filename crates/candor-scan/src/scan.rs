@@ -2444,6 +2444,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
     // ⟨0.20⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the config `net-partner` hosts, read
     // here (before the entries) so the report's per-fn `netClass` carries known-partner — the SAME set the
     // gate resolves from `.candor/config`. Empty when no config declares partners (telemetry-only asserts).
+    // ⟨0.31⟩ the declared partners that actually MOVED a classification in this run — see the envelope key.
+    let mut partners_used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let net_partners = candor_classify::policy::discover_config_text(std::path::Path::new(dir))
         .map(|t| candor_classify::policy::parse_net_partners(&t))
         .unwrap_or_default();
@@ -2546,6 +2548,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             // host-literal match for the visible hosts; fail-closed unknown-host when the Net surface is masked
             // (`incomplete` has Net) OR carries no visible host (a runtime endpoint). Empty when no Net.
             net_class: if inf.contains("Net") {
+                // ⟨0.31⟩ record WHICH declared partner participated, at the point the class is decided.
+                // `partner_for` is the function `net_dest_class` itself asks, so the disclosure and the
+                // decision cannot use different rules — the reverted first attempt re-matched against a
+                // normaliser that keeps the port and came back silently empty on every real run.
+                for h in hostsacc.get(q).into_iter().flatten() {
+                    if let Some(p) = candor_classify::partner_for(h, &net_partners) {
+                        partners_used.insert(p);
+                    }
+                }
                 crate::gate::net_classes_of(q, &hostsacc, &incompleteacc, &net_partners)
             } else {
                 Vec::new()
@@ -2870,9 +2881,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
             })
             .collect()
     };
+    // ⟨0.31⟩ the provenance of an ambient `net-partner` that moved a classification. Omitted when nothing
+    // participated, so a project declaring no partners — or declaring some that never matched — stays
+    // byte-identical to a pre-rung report: a declaration that changed nothing is not provenance.
+    let net_partners_record = if partners_used.is_empty() {
+        None
+    } else {
+        candor_classify::policy::discover_config(std::path::Path::new(dir)).map(|(cfg, _)| {
+            candor_report::NetPartners {
+                config: cfg.to_string_lossy().into_owned(),
+                hosts: partners_used.iter().cloned().collect(),
+            }
+        })
+    };
+    crate::gate::record_gate_net_partners(net_partners_record.as_ref());
     let body = candor_report::to_packaged_report_json_typed(
         &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
-        Some(&type_surface), &excluded_classes, out_of_scope.as_deref())
+        Some(&type_surface), &excluded_classes, out_of_scope.as_deref(),
+        net_partners_record.as_ref())
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single
     // crate, or wraps N members in a JSON array) rather than printed here — printing per-call gave

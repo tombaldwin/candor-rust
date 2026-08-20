@@ -592,6 +592,27 @@ pub(crate) static GATE_OUT_OF_SCOPE: std::sync::OnceLock<
 
 
 
+/// ⟨0.31⟩ The ambient `net-partner` provenance for the verdict document — same storage shape as
+/// `GATE_OUT_OF_SCOPE` beside it, and fed only when a `--gate-json` sink was asked for.
+pub(crate) static GATE_NET_PARTNERS: std::sync::OnceLock<
+    std::sync::Mutex<Vec<candor_report::NetPartners>>,
+> = std::sync::OnceLock::new();
+
+/// ⟨0.31⟩ Record what an ambient `net-partner` moved, for the verdict. A LIST because a workspace scans
+/// several members and each anchors its own config; a single crate contributes one record.
+pub(crate) fn record_gate_net_partners(rec: Option<&candor_report::NetPartners>) {
+    if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
+        return;
+    }
+    if let Some(r) = rec {
+        let m = GATE_NET_PARTNERS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        let mut g = m.lock().unwrap();
+        if !g.iter().any(|e| e == r) {
+            g.push(r.clone());
+        }
+    }
+}
+
 pub(crate) fn record_gate_out_of_scope(findings: &[candor_report::OutOfScopeFinding]) {
     if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
@@ -1182,7 +1203,12 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .get()
         .map(|m| m.lock().unwrap().clone())
         .unwrap_or_default();
-    match candor_report::gate_verdict_json_v30(
+    // ⟨0.31⟩ the ambient partner provenance the producer recorded, carried into the verdict.
+    let net_partners: Vec<candor_report::NetPartners> = GATE_NET_PARTNERS
+        .get()
+        .map(|m| m.lock().unwrap().clone())
+        .unwrap_or_default();
+    match candor_report::gate_verdict_json_v31(
         &mut violations,
         coverage.as_ref(),
         analyzed_count,
@@ -1192,6 +1218,7 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         &zero_match,
         &ignored,
         &out_of_scope,
+        &net_partners,
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {

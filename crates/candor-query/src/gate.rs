@@ -40,6 +40,8 @@ struct GateReport {
     /// only a document), which is exactly why the field rides the report and why §3.1's byte-equality
     /// holds here by construction rather than by two authors agreeing.
     out_of_scope: Vec<candor_report::OutOfScopeFinding>,
+    /// ⟨0.31⟩ one record per report that carried the key — a prefix can match several.
+    net_partners: Vec<candor_report::NetPartners>,
     /// ⟨0.15⟩ the κ ledger's package NAMES, unioned across reports — the verdict's advisory note.
     coverage_packages: BTreeSet<String>,
     /// ⟨0.24⟩ The PACKAGES under this locator whose report says it JUDGED NOTHING (SPEC §2's
@@ -102,6 +104,7 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
         analyzed_count: 0,
         unanalyzed: Vec::new(),
         out_of_scope: Vec::new(),
+        net_partners: Vec::new(),
         coverage_packages: BTreeSet::new(),
         judged_nothing_pkgs: Vec::new(),
     };
@@ -205,6 +208,14 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
         // ⟨0.30⟩ read STRICTLY for `unanalyzed`'s reason — the empty default is the claim "I looked and
         // nothing was there", which is the safe-LOOKING value. ABSENT stays absent (⟨0.26⟩ cannot-answer):
         // a report produced with no policy was never asked, and must not become exit 2 on contact.
+        // ⟨0.31⟩ the producer's ambient-partner provenance, carried through verbatim. ABSENT is the
+        // ordinary case (no partner participated) and must stay absent — this key is additive, so a
+        // pre-rung report reads exactly as it did before.
+        if let candor_report::KeyRead::Present(np) = candor_report::report_net_partners(&text) {
+            if !out.net_partners.iter().any(|e| *e == np) {
+                out.net_partners.push(np);
+            }
+        }
         out.out_of_scope.extend(strict!(
             candor_report::report_out_of_scope(&text),
             "outOfScope",
@@ -1516,6 +1527,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         // ⟨0.30⟩ the peek's findings, off the REPORT — same bytes as the scan route's, which is what
         // makes §3.1 byte-equality hold on a route that cannot peek for itself.
         &rep.out_of_scope,
+        &rep.net_partners,
         want_json,
         gate_json.as_deref(),
     ) {
@@ -1564,6 +1576,8 @@ fn write_verdict(
     zero_match: &[String],
     ignored: &[candor_report::IgnoredLine],
     out_of_scope: &[candor_report::OutOfScopeFinding],
+    // ⟨0.31⟩ the producer's ambient-partner provenance, copied — never recomputed here.
+    net_partners: &[candor_report::NetPartners],
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -1579,7 +1593,7 @@ fn write_verdict(
     if targets.is_empty() {
         return true;
     }
-    let json = match candor_report::gate_verdict_json_v30(
+    let json = match candor_report::gate_verdict_json_v31(
         violations,
         coverage,
         analyzed_count,
@@ -1589,6 +1603,7 @@ fn write_verdict(
         zero_match,
         ignored,
         out_of_scope,
+        net_partners,
     ) {
         Ok(j) => j,
         Err(e) => {
