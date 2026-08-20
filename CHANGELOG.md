@@ -9,6 +9,22 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **One scan run is one thread, and now the compiler says so.** `GATE_VIOLATIONS` is a thread-local
+  while nine sibling accumulators are process-globals — the asymmetry is deliberate (`cargo test` runs on
+  parallel threads and a process-global violation list let tests contaminate each other), but it made the
+  `[workspace]` member loop load-bearing in a way nothing about the loop said. Parallelise it and each
+  worker accumulates into its own list, so cross-member violations are silently lost and the symptom is a
+  wrong exit code — one member's certain violation vanishing behind another's "could not evaluate", with
+  no panic and no failing fixture. Three sequential loops in this family were parallelised for speed in
+  one night.
+
+  `scan_one` takes a `RunToken` that is neither `Send` nor `Sync`, so a parallel iterator over the
+  members captures it and does not compile, landing the author on the note that explains why. The token
+  is required by `record_gate_violations` and `holds_violation` themselves rather than only at an outer
+  boundary, so the proof sits at the write and the read — no caller can reach the accumulator from a
+  thread that did not carry it in. It is a forcing function rather than a proof: what it converts is a
+  silent runtime under-report into a compile error at the line that would cause it.
+
 - **⚠ §3.1 route equality broke on ORDER, not content.** Found by the corpus round on **ripgrep under
   `deny Fs`**: `scan --policy` and `gate --report` both exit 1 and both carry the same 16 `outOfScope`
   findings, byte-identical entry for entry — but `examples::walk::main` sits at the front on one route and
