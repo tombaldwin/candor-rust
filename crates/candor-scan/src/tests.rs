@@ -8169,6 +8169,34 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     }
 
     #[test]
+    fn workspace_members_are_scanned_sequentially_because_the_gate_state_is_thread_local() {
+        // ⟨0.30⟩ `GATE_VIOLATIONS` is a THREAD-LOCAL that accumulates across `scan_one` calls, and that
+        // is correct ONLY because a `[workspace]` root scans its members sequentially on one thread. The
+        // gate.rs note beside the declaration says so. Nothing pinned it.
+        //
+        // The failure mode if someone parallelises that loop is the reason this is a test rather than a
+        // comment: each rayon worker gets its OWN thread-local, so cross-member accumulation silently
+        // stops. The symptom is a WRONG EXIT CODE — one member's certain violation lost behind another's
+        // "could not evaluate" — not a crash, not a panic, and not a diff any fixture would show.
+        //
+        // Written 2026-08-20, the night three other sequential loops in this family WERE parallelised
+        // for speed. This one must not be, or must thread the state through `scan_one`'s signature first.
+        let scan = include_str!("scan.rs");
+        let start = scan.find("for d in &dirs {").expect(
+            "the workspace member loop `for d in &dirs {` is gone — if it was renamed, update this test; \
+             if it was parallelised, read the note at GATE_VIOLATIONS in gate.rs first");
+        // The loop body, generously bounded: enough to cover the call and the rc aggregation.
+        let body = &scan[start..scan.len().min(start + 4000)];
+        for parallel in ["par_iter", "par_bridge", "into_par_iter", "thread::spawn", "scope(|"] {
+            assert!(!body.contains(parallel),
+                    "`{parallel}` appears in the workspace member loop. GATE_VIOLATIONS is a thread-local \
+                     that accumulates ACROSS members, so a parallel loop gives each worker its own and \
+                     cross-member accumulation stops — silently, as a wrong exit code. Thread the gate \
+                     state through `scan_one` explicitly before making this loop parallel.");
+        }
+    }
+
+    #[test]
     fn coverage_has_exactly_one_anchor_and_exactly_one_consumer() {
         let deps = include_str!("deps.rs");
         let scan = include_str!("scan.rs");
