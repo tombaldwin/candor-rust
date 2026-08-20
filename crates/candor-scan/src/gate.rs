@@ -970,7 +970,32 @@ static OUT_REPORTS_WRITTEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new
 /// calls this, at its exits — it is the one place both the plain and `--deps` routes funnel through,
 /// so a route that dies BEFORE reaching it (a missing `Cargo.lock`, or any early return a future
 /// change adds to `run_with_deps`) never acquires the license and the placeholders stand.
+/// ⟨0.31⟩ Set when a scan REFUSED before it reached its write phase, which withdraws the license above.
+///
+/// `mark_out_reports_written`'s comment states its premise: "scan_one's report write precedes every
+/// return it has". ⟨0.31⟩'s unevaluable-target refusal added a return that does NOT — it returns
+/// `(2, None)` above the report write — and `scan_target` latched the license anyway, because the
+/// route did not die, it returned normally.
+///
+/// MEASURED: a target holding no readable file, with `--out` naming a prefix that already held a
+/// previous run's GREEN report. The refusal armed the placeholder correctly, `scan_target` then
+/// granted the hand-back license, and `disarm` restored the green byte-for-byte — after which
+/// `candor-query gate --report` answered `policy ✓` at exit 0 over it. A false green, produced by the
+/// rung whose entire purpose is turning that green red.
+static REFUSED_BEFORE_WRITE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The run refused before writing anything, so nothing it armed may be handed back.
+pub(crate) fn note_refused_before_write() {
+    let _ = REFUSED_BEFORE_WRITE.set(true);
+}
+
 pub(crate) fn mark_out_reports_written() {
+    // A run that refused before writing never had a write phase to finish, so it never earns the
+    // license — whatever it armed IS its answer, and handing the previous run's report back would
+    // republish a verdict this run explicitly declined to make.
+    if matches!(REFUSED_BEFORE_WRITE.get(), Some(true)) {
+        return;
+    }
     let _ = OUT_REPORTS_WRITTEN.set(true);
 }
 /// `(path, bytes-before-arming)` for every report this run armed under an `--out` prefix.

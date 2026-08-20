@@ -9,6 +9,24 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ The unevaluable-target refusal handed a PREVIOUS run's green report back.** With `--out` naming a
+  prefix that already held a green report, the refusal armed its fail-closed placeholder correctly — and
+  then `scan_target` granted the hand-back licence anyway, so the stale green was restored byte-for-byte
+  and `candor-query gate --report` certified it at exit 0. A false green produced by the rung whose
+  purpose is turning that green red, and §3.3.1 ⟨0.28⟩ is explicit: a refusal writes the fail-closed
+  report to every prefix named.
+
+  The cause is stated in the latch's own comment — "scan_one's report write precedes every return it
+  has" — which ⟨0.31⟩ falsified by adding a return above the write phase. The route did not die, so it
+  never lost the licence the way an early exit would. A run that refuses before writing now withdraws it
+  explicitly.
+
+- **The refusal document named the wrong cause.** `--gate-json` on this path reported "the gate config
+  did not load (exit 2)" — affirmatively false, since the config loaded and the TARGET is what could not
+  be read, sending the reader to debug the wrong file. ⟨0.24⟩ pins that field as a string naming the
+  cause, and this family rates a false disclosure worse than a missing one. It now names the target and
+  carries the remedy.
+
 ## [0.31.0] — 2026-08-20
 
 - **One scan run is one thread, and now the compiler says so.** `GATE_VIOLATIONS` is a thread-local
