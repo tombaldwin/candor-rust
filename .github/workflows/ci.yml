@@ -16,6 +16,10 @@ jobs:
     # exactly like a slow job. Fixing the two that had failed and not their siblings is the
     # habit this repo keeps measuring.
     timeout-minutes: 45
+    # ONE place for the pinned dylint version — the cache key and the install command both read it.
+    # See the trap spelled out at the cache step: two spellings can drift, and the drift is silent.
+    env:
+      DYLINT_VERSION: 6.0.1
     steps:
       - uses: actions/checkout@v6
 
@@ -35,14 +39,41 @@ jobs:
             target
           key: ${{ runner.os }}-candor-v2-${{ hashFiles('Cargo.lock') }}
 
+      # 150s of this job — 24.5%, measured 2026-08-20 — spent rebuilding two binaries pinned to an exact
+      # version that changes a few times a year. Cached on that version.
+      #
+      # THE VERSION IS WRITTEN ONCE, in the job's env. Spelling it in both the cache key and the install
+      # command is the obvious way and it is a trap: bump the command without the key and the cache
+      # serves the OLD binary under the new number, so CI lints with a version nobody chose and nothing
+      # says so. Hence one variable — and the check below, which refuses a binary whose own --version
+      # disagrees, so a stale or partial cache fails loudly instead of quietly linting with the wrong
+      # tool. Fail-closed: no cache, a corrupt cache, or a version mismatch all end in a real install.
+      - name: Cache dylint binaries
+        id: dylint-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-dylint
+            ~/.cargo/bin/dylint-link
+          key: ${{ runner.os }}-dylint-${{ env.DYLINT_VERSION }}
       - name: Install dylint
         # +stable: build the runner with stable, not the nightly pinned for the lint.
-        # PINNED to the exact versions matching Cargo.toml's dylint_linting (6.0.1): an unpinned
-        # install lets a runner major bump land mid-arc and change behavior under CI's feet —
-        # bump deliberately, together with the dylint_linting dependency.
+        # PINNED to the exact versions matching Cargo.toml's dylint_linting: an unpinned install lets a
+        # runner major bump land mid-arc and change behavior under CI's feet — bump deliberately,
+        # together with the dylint_linting dependency.
+        if: steps.dylint-cache.outputs.cache-hit != 'true'
         run: |
-          cargo +stable install cargo-dylint --version 6.0.1
-          cargo +stable install dylint-link --version 6.0.1
+          cargo +stable install cargo-dylint --version "$DYLINT_VERSION"
+          cargo +stable install dylint-link --version "$DYLINT_VERSION"
+      - name: The dylint on PATH is the version this job pinned
+        # Runs on the cached path AND the freshly-installed one, because the failure this guards against
+        # (a cache serving a different build than the number claims) is invisible everywhere else.
+        run: |
+          got=$(cargo-dylint --version 2>&1 | tr -d '\r')
+          case "$got" in
+            *"$DYLINT_VERSION"*) echo "cargo-dylint: $got" ;;
+            *) echo "::error::cargo-dylint reports '$got', not $DYLINT_VERSION — the cache is serving a build this job did not pin. Bump the key or clear the cache."; exit 1 ;;
+          esac
 
       # --workspace so the no-rustc_private crates build too: candor-query is a member but NOT a
       # dependency of the lint, so a bare `cargo build` would never compile it.
