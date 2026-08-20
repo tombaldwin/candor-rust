@@ -1250,6 +1250,23 @@ fn gate_verdict_json_impl(
     net_partners: &[NetPartners],
 ) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
+    // ⟨0.31⟩ …AND `outOfScope` FOR THE SAME REASON, which nothing was doing. §3.1 is BYTE equality, so
+    // the ORDER of this list is part of the contract, and the two routes arrive at it differently: the
+    // scan route accumulates across workspace members in the order it scans them, while `gate --report`
+    // reads one report per package in the order the locator expands. Same findings, different sequence,
+    // unequal documents.
+    //
+    // MEASURED on ripgrep under `deny Fs` (corpus round, 2026-08-20): both routes exit 1 and both carry
+    // the same 16 findings, but `examples::walk::main` sits at the front on one route and the back on the
+    // other. Byte-identical entries, unequal documents — the diff is pure sequence. Sorting HERE is what
+    // makes them agree regardless of how each got there, which is the same reason `violations` is sorted
+    // on the line above rather than at each call site.
+    let mut out_of_scope_sorted = out_of_scope.to_vec();
+    out_of_scope_sorted.sort_by(|a, b| {
+        (a.path.as_str(), a.func.as_str(), a.class.as_str(), &a.effects)
+            .cmp(&(b.path.as_str(), b.func.as_str(), b.class.as_str(), &b.effects))
+    });
+    let out_of_scope = &out_of_scope_sorted[..];
     #[derive(Serialize)]
     struct Count {
         count: usize,
@@ -1388,6 +1405,42 @@ pub fn report_version(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_verdict_does_not_depend_on_the_order_the_findings_arrived_in() {
+        // §3.1 is BYTE equality between `scan --policy` and `gate --report`, so the ORDER of
+        // `outOfScope` is part of the contract — and the two routes cannot be relied on to build the
+        // list the same way. The scan route accumulates across workspace members as it scans them; the
+        // gate route reads one report per package in whatever order the locator expands. Same findings,
+        // different sequence, unequal documents, and a §3.1 violation that no fixture in this repo could
+        // show because candor's own crates do not have that shape.
+        //
+        // FOUND BY THE CORPUS ROUND on ripgrep under `deny Fs`: both routes exit 1 and both carry the
+        // same 16 findings, with `examples::walk::main` at the front on one route and the back on the
+        // other. `bin/corpus.sh` is not run by any CI workflow, so this test is the part that is.
+        let mk = |func: &str, path: &str| OutOfScopeFinding {
+            func: func.into(), path: path.into(), effects: vec!["Fs".into()],
+            class: "non-library-target".into(), reason: "outside this scan's scope".into(),
+        };
+        let a = [mk("examples::walk::main", "examples/walk.rs"),
+                 mk("tests::misc::x", "tests/misc.rs"),
+                 mk("tests::util::y", "tests/util.rs")];
+        let mut b = a.to_vec();
+        b.reverse();
+
+        let render = |oos: &[OutOfScopeFinding]| {
+            gate_verdict_json_impl(&mut [], None, 1, &[], None, &[], &[], &[], oos, &[]).unwrap()
+        };
+        assert_eq!(render(&a), render(&b),
+                   "the same findings in a different order produced different verdict documents. That is \
+                    a §3.1 byte-equality break between the scan and gate routes, and it is invisible to \
+                    every other check here: both documents are correct, complete and equally readable — \
+                    they simply are not equal.");
+        // …and not by collapsing the list to nothing, which would satisfy the assertion above while
+        // deleting the disclosure.
+        assert!(render(&a).contains("examples::walk::main") && render(&a).contains("tests::misc::x"),
+                "every finding must still be present: {}", render(&a));
+    }
 
     #[test]
     fn unanalyzed_round_trips_and_omits_when_empty() {
