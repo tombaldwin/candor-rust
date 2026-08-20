@@ -9,6 +9,16 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **CI: the pinned dylint binaries are cached — 150s of a 613s job, measured.** `cargo install
+  cargo-dylint` + `dylint-link` ran on every push to rebuild two binaries pinned to an exact version
+  that changes a few times a year. The version now lives in ONE place (the job's `env`), because
+  spelling it in both the cache key and the install command is a trap: bump the command without the key
+  and the cache serves the OLD binary under the new number, silently linting with a version nobody
+  chose. A following step refuses to continue if `cargo-dylint --version` disagrees with the pin, so a
+  stale or partial cache fails loudly rather than quietly.
+
+## Unreleased
+
 ## [0.30.0] — 2026-08-19
 
 - **Every CI workflow now declares `timeout-minutes`.** Two hung for 3h45m with no output and were given
