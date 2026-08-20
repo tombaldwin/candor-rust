@@ -341,6 +341,21 @@ pub struct OutOfScopeFinding {
     pub reason: String,
 }
 
+/// ⟨0.31⟩ The ambient `net-partner` declaration that MOVED a `netClass` — the config file that declared
+/// it, and the declared hosts that actually PARTICIPATED in this scan.
+///
+/// `hosts` is what participated, not what was declared: a config listing twenty partners of which one
+/// matched discloses the one, because a list of everything written down buries the line that moved the
+/// verdict. Recorded by the PRODUCER because `gate --report` cannot compute it — `net-partner` anchors at
+/// the TARGET and that route has no target, so re-classifying through the consumer's own config would make
+/// the verdict depend on the reader's working directory (the re-derivation ⟨0.24⟩ forbids). Both routes
+/// copy this one record, which is what makes §3.1's byte-equality hold instead of break.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetPartners {
+    pub config: String,
+    pub hosts: Vec<String>,
+}
+
 /// ⟨0.22⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed-universe summary. `count` = the functions candor
 /// formed an effect judgment for (effectful + pure) = the §2.2 callgraph node set — so a consumer reading
 /// the bare envelope computes `count − |functions|` = the pure count and tells analyzed-pure from
@@ -426,6 +441,11 @@ pub struct Report {
     /// asked); empty when a policy was configured and the excluded files were clean under it.
     #[serde(rename = "outOfScope", default, skip_serializing_if = "Option::is_none")]
     pub out_of_scope: Option<Vec<OutOfScopeFinding>>,
+    /// ⟨0.31⟩ Omitted when nothing participated, so a project declaring no partners — or declaring some
+    /// that never matched — is byte-identical to a pre-rung report. A declaration that changed nothing is
+    /// not provenance.
+    #[serde(rename = "netPartners", default, skip_serializing_if = "Option::is_none")]
+    pub net_partners: Option<NetPartners>,
     pub functions: Vec<ReportEntry>,
 }
 
@@ -570,7 +590,7 @@ pub fn to_packaged_report_json_with_coverage(
     functions: &[ReportEntry],
     coverage: Option<&Coverage>,
 ) -> serde_json::Result<String> {
-    to_packaged_report_json_full(candor, package, functions, coverage, &[], None, &[], None)
+    to_packaged_report_json_full(candor, package, functions, coverage, &[], None, &[], None, None)
 }
 
 /// ⟨proposed — Gap 2⟩ Like [`to_packaged_report_json_with_coverage`], additionally carrying the
@@ -588,6 +608,7 @@ pub fn to_packaged_report_json_full(
     analyzed: Option<&Analyzed>,
     excluded: &[ExcludedClass],
     out_of_scope: Option<&[OutOfScopeFinding]>,
+    net_partners: Option<&NetPartners>,
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
@@ -620,10 +641,14 @@ pub fn to_packaged_report_json_full(
         /// excluded files were clean under it, which is a real answer and must be emitted.
         #[serde(rename = "outOfScope", skip_serializing_if = "Option::is_none")]
         out_of_scope: Option<&'a [OutOfScopeFinding]>,
+        /// ⟨0.31⟩ after `outOfScope`, before `functions` — one position, both engines' writers, so the
+        /// key order a consumer sees does not depend on which engine produced the report.
+        #[serde(rename = "netPartners", skip_serializing_if = "Option::is_none")]
+        net_partners: Option<&'a NetPartners>,
         functions: &'a [ReportEntry],
     }
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, excluded, out_of_scope, functions,
+        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, excluded, out_of_scope, net_partners, functions,
     })
 }
 
@@ -641,6 +666,7 @@ pub fn to_packaged_report_json_typed(
     type_surface: Option<&TypeSurface>,
     excluded: &[ExcludedClass],
     out_of_scope: Option<&[OutOfScopeFinding]>,
+    net_partners: Option<&NetPartners>,
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
     struct Out<'a> {
@@ -672,12 +698,16 @@ pub fn to_packaged_report_json_typed(
         /// excluded files were clean under it, which is a real answer and must be emitted.
         #[serde(rename = "outOfScope", skip_serializing_if = "Option::is_none")]
         out_of_scope: Option<&'a [OutOfScopeFinding]>,
+        /// ⟨0.31⟩ same position as the untyped writer puts it — after `outOfScope`, before `functions` —
+        /// so key order does not depend on which writer produced the report.
+        #[serde(rename = "netPartners", skip_serializing_if = "Option::is_none")]
+        net_partners: Option<&'a NetPartners>,
         functions: &'a [ReportEntry],
     }
     let ts = type_surface.filter(|t| !t.returns.is_empty());
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, excluded, out_of_scope, type_surface: ts,
-        resolves: RESOLVES, functions,
+        candor, package, coverage, analyzed, unanalyzed, excluded, out_of_scope, net_partners,
+        type_surface: ts, resolves: RESOLVES, functions,
     })
 }
 
@@ -761,6 +791,14 @@ pub fn report_unanalyzed(text: &str) -> KeyRead<Vec<UnanalyzedUnit>> {
 /// must not become exit 2 on contact.
 pub fn report_out_of_scope(text: &str) -> KeyRead<Vec<OutOfScopeFinding>> {
     read_key(text, "outOfScope")
+}
+
+/// ⟨0.31⟩ Parse a report's `netPartners` envelope field — the ambient `net-partner` provenance the
+/// PRODUCER recorded. Read, never recomputed: this route has no target to anchor `net-partner` at, and
+/// re-classifying the report's hosts through the consumer's own config is the re-derivation ⟨0.24⟩
+/// forbids — it would make the verdict depend on the reader's working directory.
+pub fn report_net_partners(text: &str) -> KeyRead<NetPartners> {
+    read_key(text, "netPartners")
 }
 
 /// ⟨0.15 staged⟩ Parse a report's `coverage` envelope field (spec §2). `None` when the field is
@@ -1109,7 +1147,7 @@ pub fn gate_verdict_json_v28(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        &[],
+        &[], &[],
     )
 }
 
@@ -1132,7 +1170,32 @@ pub fn gate_verdict_json_v30(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        out_of_scope,
+        out_of_scope, &[],
+    )
+}
+
+/// ⟨0.31⟩ [`gate_verdict_json_v30`] plus the `netPartners` disclosure: the ambient `net-partner`
+/// declarations that MOVED a classification, copied from the report the producer wrote.
+///
+/// A LIST because a `--report` prefix can match several reports (a workspace writes one per member) and
+/// each anchors its own config; a single report carries a single record. Omitted when empty, so every
+/// verdict without ambient partner vocabulary — nearly all of them — stays byte-identical to the v30 form.
+#[allow(clippy::too_many_arguments)]
+pub fn gate_verdict_json_v31(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+    vocabulary: Option<&GateVocabulary>,
+    unevaluated: &[Unevaluated],
+    zero_match: &[String],
+    ignored: &[IgnoredLine],
+    out_of_scope: &[OutOfScopeFinding],
+    net_partners: &[NetPartners],
+) -> serde_json::Result<String> {
+    gate_verdict_json_impl(
+        violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
+        out_of_scope, net_partners,
     )
 }
 
@@ -1168,7 +1231,7 @@ pub fn gate_verdict_json_v27(
     unevaluated: &[Unevaluated],
     zero_match: &[String],
 ) -> serde_json::Result<String> {
-    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[])
+    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[], &[])
 }
 
 /// The ONE verdict writer behind [`gate_verdict_json_v27`]/[`gate_verdict_json_v28`] — a single field
@@ -1184,6 +1247,7 @@ fn gate_verdict_json_impl(
     zero_match: &[String],
     ignored: &[IgnoredLine],
     out_of_scope: &[OutOfScopeFinding],
+    net_partners: &[NetPartners],
 ) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     #[derive(Serialize)]
@@ -1224,6 +1288,11 @@ fn gate_verdict_json_impl(
         // §3.1 ⟨0.24⟩ pins the WIRE key as `policyVocabulary`; the local binding keeps the short name.
         #[serde(rename = "policyVocabulary", skip_serializing_if = "Option::is_none")]
         vocabulary: Option<&'a GateVocabulary>,
+        /// ⟨0.31⟩ the ambient `net-partner` declarations that moved a classification — copied from the
+        /// report, never recomputed: `gate --report` has no target to anchor `net-partner` at, and
+        /// re-classifying through the consumer's own config is the re-derivation ⟨0.24⟩ forbids.
+        #[serde(rename = "netPartners", skip_serializing_if = "<[_]>::is_empty")]
+        net_partners: &'a [NetPartners],
     }
     // ⟨0.30⟩ EITHER cause suppresses `ok`. `unanalyzed` is "I opened this file and could not read it";
     // `out_of_scope` is "I never opened it, and when I peeked afterwards it performed the denied effect".
@@ -1241,6 +1310,7 @@ fn gate_verdict_json_impl(
         incomplete,
         unanalyzed,
         out_of_scope,
+        net_partners,
         vocabulary,
     })
 }
@@ -1326,13 +1396,13 @@ mod tests {
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         // present: a parse failure travels
         let units = vec![UnanalyzedUnit { path: "src/broken.rs".into(), reason: "source failed to read/parse".into() }];
-        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None, &[], None).unwrap();
+        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None, &[], None, None).unwrap();
         assert!(json.contains("\"unanalyzed\""), "unanalyzed must serialize when non-empty");
         let KeyRead::Present(parsed) = report_unanalyzed(&json) else { panic!("must read back") };
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].path, "src/broken.rs");
         // empty: omitted entirely (a complete scan is byte-identical to a pre-rung report)
-        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None, &[], None).unwrap();
+        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None, &[], None, None).unwrap();
         assert!(!clean.contains("unanalyzed"), "an empty unanalyzed must be omitted");
         assert_eq!(report_unanalyzed(&clean), KeyRead::Absent, "…and reads back as ABSENT, not as corrupt");
     }
@@ -1519,6 +1589,7 @@ mod tests {
             resolves: vec![],
             excluded: vec![],
             out_of_scope: None,
+            net_partners: None,
             functions: vec![ReportEntry {
                 func: "f".into(),
                 inferred: vec!["Db".into(), "Unknown".into()],
@@ -1591,15 +1662,15 @@ mod tests {
         // consumer that ignores the field is unaffected (tier-1 additive).
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         let e = [ReportEntry { func: "f".into(), inferred: vec!["Net".into()], ..Default::default() }];
-        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None, &[], None).unwrap();
+        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None, &[], None, None).unwrap();
         let empty = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                  Some(&TypeSurface::default()), &[], None).unwrap();
+                                                  Some(&TypeSurface::default()), &[], None, None).unwrap();
         assert_eq!(old, empty, "an empty type surface must not change one byte of the report");
         assert!(report_type_surface(&old).is_none(), "absence must parse as nothing, never an error");
         let mut returns = std::collections::BTreeMap::new();
         returns.insert("dep#sync::build".to_string(), "dep#sync::Client".to_string());
         let full = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                 Some(&TypeSurface { returns }), &[], None).unwrap();
+                                                 Some(&TypeSurface { returns }), &[], None, None).unwrap();
         let back = report_type_surface(&full).expect("typeSurface must round-trip");
         assert_eq!(back.returns.get("dep#sync::build").map(String::as_str), Some("dep#sync::Client"),
                    "both ids stay FULLY QUALIFIED on the wire — the leaf form is the reverted defect");
