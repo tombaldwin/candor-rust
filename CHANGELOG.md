@@ -9,6 +9,14 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **The ⟨0.30⟩ gate state's sequential assumption is pinned by a test.** `GATE_VIOLATIONS` is a
+  thread-local that accumulates across `scan_one` calls, which is correct only while workspace members are
+  scanned sequentially on one thread. That was documented beside the declaration and pinned by nothing.
+  If the loop is ever parallelised, each worker gets its own thread-local and cross-member accumulation
+  stops **silently — as a wrong exit code**, one member's certain violation lost behind another's "could
+  not evaluate". The test reads the loop region and names the remedy (thread the state through
+  `scan_one` first). Calibrated: it fails when `par_iter` is injected into that region.
+
 - **CI: the pinned dylint binaries are cached — 150s of a 613s job, measured.** `cargo install
   cargo-dylint` + `dylint-link` ran on every push to rebuild two binaries pinned to an exact version
   that changes a few times a year. The version now lives in ONE place (the job's `env`), because
