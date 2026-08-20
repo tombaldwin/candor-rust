@@ -9,6 +9,20 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⟨0.31⟩ `netPartners` is now emitted — the ambient config that moved a verdict is named in it.** Under
+  `deny Net[unknown-host]`, a call to `partner.example` exits 1; adding `net-partner partner.example` to an
+  ambient `.candor/config` exits 0 with `ok: true`, and nothing named the file, its path, or the host. The
+  report envelope carries `netPartners: { config, hosts }` — which config declared partners and which of
+  them **participated** — and both `scan --policy` and `gate --report` put the list of those records in the
+  verdict. Verified byte-equal across the two routes.
+
+  The verdict writer gains `gate_verdict_json_v31`; the older wrappers pass an empty list, so every verdict
+  without ambient partner vocabulary stays byte-identical. `gate --report` **copies** the producer's record
+  rather than recomputing it — that route has no target to anchor `net-partner` at, and re-classifying
+  through the consumer's own config would make a verdict depend on the reader's working directory, which
+  is the constraint that reverted the first attempt at this disclosure. Additive: no declaration, or a
+  declaration that never matched, carries the key nowhere.
+
 - **`partner_for` — one matcher for the partner decision, ahead of the ⟨0.31⟩ `netPartners` port.** A pure
   extraction, no behaviour change: `net_dest_class` now calls it rather than repeating the match inline.
   It exists because the reverted 2026-08-17 `net-partner` disclosure re-implemented that match against a
