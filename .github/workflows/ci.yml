@@ -69,7 +69,12 @@ jobs:
         # Runs on the cached path AND the freshly-installed one, because the failure this guards against
         # (a cache serving a different build than the number claims) is invisible everywhere else.
         run: |
-          got=$(cargo-dylint --version 2>&1 | tr -d '\r')
+          # `cargo dylint --version`, NOT `cargo-dylint --version`. It is a cargo SUBCOMMAND binary: it
+          # reads argv as `cargo <COMMAND>`, so calling it directly makes it reject `--version` as an
+          # unexpected argument. The first run of this guard did exactly that and failed the job —
+          # fail-closed and therefore harmless, but the message accused the cache of serving the wrong
+          # build when the invocation was simply wrong. A guard that cries wolf gets deleted.
+          got=$(cargo dylint --version 2>&1 | tr -d '\r')
           case "$got" in
             *"$DYLINT_VERSION"*) echo "cargo-dylint: $got" ;;
             *) echo "::error::cargo-dylint reports '$got', not $DYLINT_VERSION — the cache is serving a build this job did not pin. Bump the key or clear the cache."; exit 1 ;;
