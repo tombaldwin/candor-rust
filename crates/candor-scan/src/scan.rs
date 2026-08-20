@@ -2959,6 +2959,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                            directory containing them. Exit 2 (unevaluable): a target this engine cannot \
                            read is not a clean scan.");
             }
+            // ⟨0.31⟩ THIS RETURN IS ABOVE THE REPORT WRITE, and two things depend on saying so.
+            //
+            // (1) `scan_target` latches `mark_out_reports_written()` after `scan_one` returns, on the
+            // stated premise that "the report write precedes every return it has". This return breaks
+            // that premise, and the cost was measured: with `--out` naming a prefix that already held a
+            // previous GREEN report, the placeholder armed correctly, the license was granted anyway,
+            // and `disarm` handed the stale green back — after which `gate --report` certified it at
+            // exit 0. §3.3.1 ⟨0.28⟩ is explicit that a refusal writes the fail-closed report to every
+            // prefix named.
+            //
+            // (2) The refusal DOCUMENT needs the real cause. Without this the `--gate-json` reason fell
+            // through to "the gate config did not load (exit 2)" — affirmatively false here, since the
+            // config loaded fine and the TARGET is what could not be read. ⟨0.24⟩ pins that reason as
+            // a string naming the cause, and this family rates a false disclosure worse than a missing
+            // one: an operator reading it debugs the wrong file.
+            crate::gate::note_refused_before_write();
+            crate::gate::record_gate_refusal(format!(
+                "no Rust sources under {dir} — candor-scan reads `.rs` files; point it at a crate or \
+                 workspace directory containing them. Exit 2 (unevaluable): a target this engine \
+                 cannot read is not a clean scan."
+            ));
             return (2, None);
         }
         let prefix = if prefix.is_empty() { format!("{dir}/.candor/report") } else { prefix };
