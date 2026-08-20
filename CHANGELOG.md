@@ -9,6 +9,24 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ The ⟨0.30⟩ peek no longer feeds `netPartners`.** MEASURED on a crate whose only mention of the
+  declared partner was in `build.rs`: the `--gate-json` verdict said `netPartners:
+  [{hosts:["partner.example"]}]` while the report it had just written said `null`. Both halves of that are
+  the failure the first net-partner attempt was reverted for — `gate --report` reads the report and can
+  only ever answer `null`, so the two routes diverge, and the disclosure claims an ambient config moved a
+  classification the gate never made.
+
+  The peek re-enters the scanner with `policy: None`, which discharges the policy-derived accumulators.
+  `netPartners` is not one: it comes from the participating hosts plus the discovered config, and the peek
+  walks the same target. **Target-derived keys are the ones `policy: None` does not cover** — the same
+  defect hit `analyzed`, which reported 276 against the report's 129. So the fix is a ratchet rather than
+  a guard: a test enumerates every gate accumulator in the scanner and requires each to be peek-guarded or
+  named with a reason it is safe, because a new key's author has no reason to think about a peek.
+
+- **Two clippy lints CI's newer stable catches and the pinned nightly does not.** The repo pins
+  `nightly-2026-06-14`, so a bare `cargo clippy` runs June's lints while CI also runs July's `+stable`.
+  `verify-local.sh` runs both legs now.
+
 - **⟨0.31⟩ `netPartners` is now emitted — the ambient config that moved a verdict is named in it.** Under
   `deny Net[unknown-host]`, a call to `partner.example` exits 1; adding `net-partner partner.example` to an
   ambient `.candor/config` exits 0 with `ok: true`, and nothing named the file, its path, or the host. The
@@ -53,8 +71,6 @@ after upgrading; review policies and regenerate baselines with the new build.
   a HashMap of Fs path literals that SHADOWS the walk's file list 450 lines below it — same identifier,
   two meanings. The count is captured at the walk now, under its own name.
 
-## Unreleased
-
 - **The ⟨0.30⟩ gate state's sequential assumption is pinned by a test.** `GATE_VIOLATIONS` is a
   thread-local that accumulates across `scan_one` calls, which is correct only while workspace members are
   scanned sequentially on one thread. That was documented beside the declaration and pinned by nothing.
@@ -70,8 +86,6 @@ after upgrading; review policies and regenerate baselines with the new build.
   and the cache serves the OLD binary under the new number, silently linting with a version nobody
   chose. A following step refuses to continue if `cargo-dylint --version` disagrees with the pin, so a
   stale or partial cache fails loudly rather than quietly.
-
-## Unreleased
 
 ## [0.30.0] — 2026-08-19
 
