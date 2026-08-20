@@ -9,6 +9,22 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ §3.1 route equality broke on ORDER, not content.** Found by the corpus round on **ripgrep under
+  `deny Fs`**: `scan --policy` and `gate --report` both exit 1 and both carry the same 16 `outOfScope`
+  findings, byte-identical entry for entry — but `examples::walk::main` sits at the front on one route and
+  the back on the other, so the documents are unequal. §3.1 is byte equality, so the order of that list is
+  part of the contract, and the two routes cannot be relied on to build it the same way: the scan route
+  accumulates across cargo workspace members as it scans them, while `gate --report` reads one report per
+  package in the order the locator expands.
+
+  This is the hardest shape a route-equality break can take. Both documents are correct, complete and
+  equally readable; nothing is missing and nothing is over-claimed. No assertion about content can see it.
+
+  Sorted in the one verdict writer both routes go through, beside the `violations` sort that was already
+  there for exactly this reason. Pinned by a test that renders the same findings in two orders — and that
+  also asserts they are still all PRESENT, since collapsing the list to nothing would satisfy
+  order-independence while deleting the disclosure.
+
 - **⚠ The ⟨0.30⟩ peek no longer feeds `netPartners`.** MEASURED on a crate whose only mention of the
   declared partner was in `build.rs`: the `--gate-json` verdict said `netPartners:
   [{hosts:["partner.example"]}]` while the report it had just written said `null`. Both halves of that are
