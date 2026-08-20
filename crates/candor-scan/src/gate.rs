@@ -496,6 +496,43 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// ⟨0.31⟩ IS THIS FRAME INSIDE THE ⟨0.30⟩ PEEK? The peek re-enters `scan_one` over the files the
+    /// scan EXCLUDED, and **nothing it sees may reach the verdict**. It writes no report, so anything it
+    /// records is carried by the scan route and by no other: `gate --report` reads the report and cannot
+    /// reproduce it. That is a §3.1 route-equality break AND an over-claim, since the gate judged none
+    /// of those files.
+    ///
+    /// A CHOKE POINT RATHER THAN A GUARD PER CALL SITE, because per-site guards were tried and the class
+    /// came back. `analyzed` was guarded after being measured at 276 against the report's 129; the
+    /// ⟨0.31⟩ `netPartners` key was written months later by someone (me) who had no reason to think
+    /// about a peek, and reproduced the defect exactly. The recording sites are where the author's
+    /// attention ISN'T. Suppressing centrally makes the default safe instead of making it correct only
+    /// when remembered.
+    ///
+    /// This does not lose the peek's findings, and the existing `outOfScope` shape is why: the peek
+    /// RETURNS a report body, and the OUTER frame reads it and records what it decides to. That is the
+    /// architecture this enforces — the peek is a source of data, never a writer of verdict state.
+    ///
+    /// Thread-local, and correct because the peek is a SAME-THREAD recursive call (see the note at
+    /// `GATE_VIOLATIONS`). If the peek is ever moved to its own thread it becomes trivially true instead.
+    static IN_PEEK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with every gate accumulator suppressed. Restores the PREVIOUS value rather than clearing, so
+/// this composes if a peek is ever nested inside another.
+pub(crate) fn while_peeking<T>(f: impl FnOnce() -> T) -> T {
+    let prev = IN_PEEK.with(|p| p.replace(true));
+    let out = f();
+    IN_PEEK.with(|p| p.set(prev));
+    out
+}
+
+/// Would a `record_gate_*` call right here land in a verdict this run publishes?
+pub(crate) fn recording_suppressed() -> bool {
+    IN_PEEK.with(|p| p.get())
+}
+
 /// Record one scan's gate violations toward the final `--gate-json` verdict. A no-op unless the flag was
 /// given (the direct-`scan_one` test/selftest paths never record).
 /// Does this run already hold a CERTAIN violation? (SPEC §3.1 ⟨0.24⟩ precedence.)
@@ -509,6 +546,7 @@ pub(crate) fn holds_violation() -> bool {
 }
 
 pub(crate) fn record_gate_violations(violations: &[GateViolation]) {
+    if recording_suppressed() { return; }   // ⟨0.31⟩ the peek writes no verdict state
     // ⟨0.30⟩ UNCONDITIONAL. This returned early unless `--gate-json` was set, so `holds_violation` was
     // blind without it and the ⟨0.30⟩ precedence check answered differently with and without a machine
     // sink — MEASURED on `clap` under `pure`: exit 1 with the flag, 2 without, same tree. An exit code
@@ -541,6 +579,7 @@ pub(crate) static GATE_COVERAGE: std::sync::OnceLock<std::sync::Mutex<std::colle
 /// re-discloses the gap, VERDICT-PRESERVING). A no-op unless `--gate-json` was given, mirroring
 /// `record_gate_violations`.
 pub(crate) fn record_gate_coverage(ledger: &[(String, usize)]) {
+    if recording_suppressed() { return; }   // ⟨0.31⟩ the peek writes no verdict state
     if ledger.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
@@ -562,6 +601,7 @@ pub(crate) static GATE_VOCABULARY: std::sync::OnceLock<std::sync::Mutex<(String,
     std::sync::OnceLock::new();
 
 pub(crate) fn record_gate_vocabulary(config: &std::path::Path, aliases: &UsedAliases) {
+    if recording_suppressed() { return; }   // ⟨0.31⟩ the peek writes no verdict state
     if aliases.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
@@ -601,6 +641,7 @@ pub(crate) static GATE_NET_PARTNERS: std::sync::OnceLock<
 /// ⟨0.31⟩ Record what an ambient `net-partner` moved, for the verdict. A LIST because a workspace scans
 /// several members and each anchors its own config; a single crate contributes one record.
 pub(crate) fn record_gate_net_partners(rec: Option<&candor_report::NetPartners>) {
+    if recording_suppressed() { return; }
     if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
@@ -614,6 +655,7 @@ pub(crate) fn record_gate_net_partners(rec: Option<&candor_report::NetPartners>)
 }
 
 pub(crate) fn record_gate_out_of_scope(findings: &[candor_report::OutOfScopeFinding]) {
+    if recording_suppressed() { return; }
     if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
@@ -627,6 +669,7 @@ pub(crate) fn record_gate_out_of_scope(findings: &[candor_report::OutOfScopeFind
 }
 
 pub(crate) fn record_gate_analyzed(count: usize, unanalyzed: &[candor_report::UnanalyzedUnit]) {
+    if recording_suppressed() { return; }
     if !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
@@ -647,6 +690,7 @@ pub(crate) fn record_gate_analyzed(count: usize, unanalyzed: &[candor_report::Un
 pub(crate) static GATE_REFUSAL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub(crate) fn record_gate_refusal(why: impl Into<String>) {
+    if recording_suppressed() { return; }   // ⟨0.31⟩ the peek writes no verdict state
     let _ = GATE_REFUSAL.set(why.into());
 }
 
@@ -970,6 +1014,7 @@ pub(crate) static GATE_UNEVALUATED: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 pub(crate) fn record_gate_unevaluated(items: &[candor_report::Unevaluated]) {
+    if recording_suppressed() { return; }   // ⟨0.31⟩ the peek writes no verdict state
     if items.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
@@ -994,6 +1039,7 @@ pub(crate) static GATE_IGNORED: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 pub(crate) fn record_gate_ignored(items: &[candor_report::IgnoredLine]) {
+    if recording_suppressed() { return; }   // ⟨0.31⟩ the peek writes no verdict state
     if items.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }
@@ -1016,6 +1062,7 @@ pub(crate) static GATE_ZERO_MATCH: std::sync::OnceLock<std::sync::Mutex<std::col
     std::sync::OnceLock::new();
 
 pub(crate) fn record_gate_zero_match(rules: &[String]) {
+    if recording_suppressed() { return; }   // ⟨0.31⟩ the peek writes no verdict state
     if rules.is_empty() || !matches!(GATE_JSON_PATH.get(), Some(Some(_))) {
         return;
     }

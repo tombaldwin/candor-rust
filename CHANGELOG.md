@@ -18,10 +18,15 @@ after upgrading; review policies and regenerate baselines with the new build.
 
   The peek re-enters the scanner with `policy: None`, which discharges the policy-derived accumulators.
   `netPartners` is not one: it comes from the participating hosts plus the discovered config, and the peek
-  walks the same target. **Target-derived keys are the ones `policy: None` does not cover** — the same
-  defect hit `analyzed`, which reported 276 against the report's 129. So the fix is a ratchet rather than
-  a guard: a test enumerates every gate accumulator in the scanner and requires each to be peek-guarded or
-  named with a reason it is safe, because a new key's author has no reason to think about a peek.
+  walks the same target. **Target-derived keys are the ones `policy: None` does not cover** — and the same
+  defect hit `analyzed` two rungs earlier, which reported 276 against the report's 129.
+
+  That first fix was a guard at the one call site, and the class came back anyway: `netPartners` was
+  written months later by someone with no reason to think about a peek. So the suppression is central now
+  — the recursive call runs inside `while_peeking`, and every gate accumulator returns early while it is
+  set, making the default safe instead of correct-when-remembered. Nothing is lost, because the peek
+  RETURNS a report body that the outer frame reads; that is how `outOfScope` has always worked, and it is
+  the architecture this enforces. The peek is a source of data, never a writer of verdict state.
 
 - **Two clippy lints CI's newer stable catches and the pinned nightly does not.** The repo pins
   `nightly-2026-06-14`, so a bare `cargo clippy` runs June's lints while CI also runs July's `+stable`.
