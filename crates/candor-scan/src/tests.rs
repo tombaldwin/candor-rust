@@ -8221,6 +8221,72 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     }
 
     #[test]
+    fn every_gate_accumulator_says_what_it_does_inside_the_peek() {
+        // ⟨0.31⟩ THE PEEK IS A CARVED-OUT BRANCH OF `scan_one`, AND EVERY ACCUMULATOR MUST BE DIFFED
+        // AGAINST THE GENERAL PATH. It re-enters `scan_one` over the files this scan EXCLUDED, so any
+        // `record_gate_*` it reaches files the excluded set's facts into the run's verdict — while the
+        // peek writes no report, so `gate --report` can never see them and §3.1 byte-equality breaks.
+        //
+        // This has now happened TWICE, to two different keys:
+        //   · `analyzed`    — MEASURED on `crates/candor-query`: scan route said 276, the report it had
+        //                     just written said 129, and CI's byte-equality row failed on 20 of 54 rows.
+        //   · `netPartners` — MEASURED the day the ⟨0.31⟩ key landed, on a crate whose ONLY mention of
+        //                     the declared partner was in `build.rs`: the verdict named
+        //                     `partner.example`, the report said null. Both halves of the failure the
+        //                     first net-partner attempt was reverted for.
+        //
+        // So this is a RATCHET, not a pin on those two lines. A new accumulator added later is exactly
+        // the shape that fails this way, and the author has no reason to think about a peek. Every call
+        // site must therefore be either peek-guarded or named below with a reason it does not need to be.
+        //
+        // The peek passing `policy: None` is what discharges most of them — but that is a fact about a
+        // DIFFERENT function, so it is written down here rather than left to be re-derived. Note what it
+        // does NOT discharge: `netPartners` comes from `partners_used` + `discover_config(dir)`, and the
+        // peek scans the same `dir`. Config-derived keys are the dangerous ones.
+        let scan = include_str!("scan.rs");
+        let lines: Vec<&str> = scan.lines().collect();
+        // name -> why this site is safe without a `!peeking` guard
+        let discharged: &[(&str, &str)] = &[
+            ("record_gate_refusal",
+             "a refusal is not an accumulation, and the peek scans a dir the outer run already opened"),
+            ("record_gate_violations",
+             "policy-derived: the peek runs with `policy: None`, so it evaluates no rule and finds none"),
+            ("record_gate_unevaluated",
+             "policy-derived: an unevaluable RULE, and the peek has no rules"),
+            ("record_gate_ignored",
+             "policy-derived: a dropped policy LINE, and the peek reads no policy text"),
+            ("record_gate_zero_match",
+             "policy-derived: a rule that bound nothing, and the peek has no rules"),
+            ("record_gate_vocabulary",
+             "reached only inside the policy-text branch, which `policy: None` does not enter"),
+            ("record_gate_coverage",
+             "the dep-coverage advisory, computed before the peek and not fed by it"),
+            ("record_gate_out_of_scope",
+             "this key IS the peek's product — the outer run records what the peek returned to it"),
+        ];
+        let mut unguarded: Vec<String> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(col) = line.find("record_gate_") else { continue };
+            if line.trim_start().starts_with("//") { continue }
+            let name: String = line[col..].chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            // the definition site and doc references live in gate.rs; here only calls matter
+            if !line[col + name.len()..].starts_with('(') { continue }
+            let guarded = lines[i.saturating_sub(3)..i].iter().any(|l| l.contains("if !peeking"));
+            if guarded || discharged.iter().any(|(n, _)| *n == name) { continue }
+            unguarded.push(format!("{} at scan.rs:{}", name, i + 1));
+        }
+        assert!(unguarded.is_empty(),
+                "these gate accumulators are reached inside the ⟨0.30⟩ peek with no `if !peeking` guard \
+                 and no stated reason they are safe: {unguarded:?}.\nThe peek re-enters `scan_one` over \
+                 the EXCLUDED files, so whatever this records lands in the run's verdict while the report \
+                 it wrote cannot carry it — that is a §3.1 byte-equality break and an over-claim in the \
+                 disclosure. Either wrap the call in `if !peeking {{ … }}`, or add it to `discharged` \
+                 above WITH the reason it cannot be reached or cannot differ. Do not add it blind: \
+                 `analyzed` and `netPartners` both got here, and both were measured wrong.");
+    }
+
+    #[test]
     fn workspace_members_are_scanned_sequentially_because_the_gate_state_is_thread_local() {
         // ⟨0.30⟩ `GATE_VIOLATIONS` is a THREAD-LOCAL that accumulates across `scan_one` calls, and that
         // is correct ONLY because a `[workspace]` root scans its members sequentially on one thread. The
