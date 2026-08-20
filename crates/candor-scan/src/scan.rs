@@ -2907,7 +2907,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts) -> (i32, Option<String>) {
         // same reason swift does not refuse per `binary` target and java does not per aggregator module.
         if walk_admitted_files == 0
             && !ws_member
-            && out_of_scope.as_deref().map_or(true, |o| o.is_empty())
+            && out_of_scope.as_deref().is_none_or(|o| o.is_empty())
         {
             if !quiet {
                 eprintln!("candor-scan: no Rust sources under {dir}");
