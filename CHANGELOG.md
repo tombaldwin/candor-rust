@@ -9,6 +9,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.31.0] — 2026-08-20
+
 - **One scan run is one thread, and now the compiler says so.** `GATE_VIOLATIONS` is a thread-local
   while nine sibling accumulators are process-globals — the asymmetry is deliberate (`cargo test` runs on
   parallel threads and a process-global violation list let tests contaminate each other), but it made the
