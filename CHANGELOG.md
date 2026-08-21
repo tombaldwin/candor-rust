@@ -9,6 +9,20 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⟨0.32⟩ A refusal now records itself beside the reports it would have written.** Scan a tree green,
+  change it so it now violates, then refuse for any reason: `gate --report <tree>` answered `policy ✓` at
+  exit 0 off the previous run's bytes, because a run given no `--out` writes to its default prefix and
+  §3.3.1's arming rules only cover a prefix the operator NAMED.
+
+  Arming the default prefix is not the fix and this engine has the scar — a run that died in argv parsing
+  once replaced a COMMITTED report in this repository. So the refusal is written BESIDE the reports at
+  `<prefix>.refused.json` and overwrites nothing; `gate --report` consults it and declines to certify;
+  a run that completes its write phase removes it.
+
+  Because it destroys nothing it is written during argv parsing, the earliest moment the prefix is known
+  — which is what covers the argv-death case arming cannot reach. The first version latched the prefix
+  downstream and the marker was absent on exactly that case.
+
 - **⚠ The report hand-back restored its own placeholder, leaving a permanent exit 2.** Reachable in three
   ordinary steps and MEASURED on a two-member workspace: scan both members; delete one and let any
   refusal happen (an unknown flag will do), which correctly arms the orphan; then scan the remaining

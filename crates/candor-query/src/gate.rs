@@ -90,6 +90,22 @@ struct GateReport {
 /// corrupt rule — a report that cannot be parsed is corrupt input, not an effect-free package, and a
 /// policy gated over the resulting empty map would PASS. Never a silently-empty "no violations".
 fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
+    // ⟨0.32⟩ FIRST: did the most recent attempt over these reports REFUSE? SPEC §3.3.1 ⟨0.32⟩.
+    //
+    // Checked BEFORE the reports are read, because the answer does not depend on them: they may parse
+    // perfectly and describe real code, and still be the output of a scan whose successor refused. That
+    // is the whole shape — `gate --report <tree>` answering `policy ✓` at exit 0 off a previous run's
+    // bytes after a refusal it has no way to see. This verb cannot compute it, so the refusing run
+    // wrote it down.
+    if let Some(m) = candor_report::refusal_marker_for(prefix) {
+        let why = format!(
+            "the most recent scan over `{}` REFUSED — these reports are from an earlier run and this \
+             verb will not certify them. Cause: {}. Re-scan `{}`; a completing run clears the marker.",
+            m.prefix, m.reason, if m.target.is_empty() { "the target" } else { &m.target }
+        );
+        eprintln!("candor-query gate: {why}");
+        return Err(why);
+    }
     let paths = glob_reports(prefix);
     if paths.is_empty() {
         let why = format!(

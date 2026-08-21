@@ -58,6 +58,62 @@ pub const SIDECAR_KINDS: [&str; 6] =
 /// segments, and a `<type>` that is not a reserved [`SIDECAR_KINDS`] name — shared by the lint's
 /// cross-crate loader and the CLI's queries, so the two can never disagree about which files are
 /// reports.
+/// ⟨0.32⟩ A refusal marker left beside a report set — SPEC §3.3.1 ⟨0.32⟩.
+#[derive(Debug, Clone)]
+pub struct RefusalMarker {
+    pub prefix: String,
+    pub target: String,
+    pub reason: String,
+}
+
+/// ⟨0.32⟩ IS THE MOST RECENT ATTEMPT OVER THESE REPORTS A REFUSAL?
+///
+/// A consumer cannot work this out for itself. The hazard is an EVENT — a refusal that happened AFTER
+/// these bytes were written — witnessed only by the run that refused. No function of the report and the
+/// tree recovers it: `analyzed.digest` is over the sorted analyzed-qual set, so a changed body under an
+/// unchanged name is byte-identical. So the refusing run writes it down, and this reads it.
+///
+/// Resolved for all three §3.3.1 locator forms. The DIRECT-FILE case is why the marker carries its own
+/// `prefix`: that locator accepts any `.json` name whatever its dot-segments, so the prefix cannot be
+/// recovered from the filename — the marker is found by scanning the file's directory and asking which
+/// recorded prefix covers it. Without that, two prefixes sharing a directory would make one refusal
+/// refuse the other's reports, which is a false red rather than a missed one but still wrong.
+pub fn refusal_marker_for(locator: &str) -> Option<RefusalMarker> {
+    fn parse(path: &Path) -> Option<RefusalMarker> {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        if v.get("refused")?.as_bool() != Some(true) {
+            return None;
+        }
+        Some(RefusalMarker {
+            prefix: v.get("prefix")?.as_str()?.to_string(),
+            target: v.get("target").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+            reason: v.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+        })
+    }
+    let p = Path::new(locator);
+    if locator.ends_with(".json") && p.is_file() {
+        let dir = p.parent()?;
+        let me = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let f = entry.path();
+            if !f.to_string_lossy().ends_with(".refused.json") {
+                continue;
+            }
+            if let Some(m) = parse(&f) {
+                let covered = std::fs::canonicalize(Path::new(&m.prefix))
+                    .map(|c| me.starts_with(&c))
+                    .unwrap_or(false)
+                    || me.to_string_lossy().starts_with(m.prefix.trim_start_matches("./"));
+                if covered {
+                    return Some(m);
+                }
+            }
+        }
+        return None;
+    }
+    parse(Path::new(&format!("{locator}.refused.json")))
+}
+
 pub fn report_files(prefix: &str) -> Vec<ReportFile> {
     let p = Path::new(prefix);
     // A locator that is an existing FILE ending `.json` is a DIRECT single-report reference (SPEC
