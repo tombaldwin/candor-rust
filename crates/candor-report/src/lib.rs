@@ -374,6 +374,18 @@ pub struct ExcludedClass {
     /// partial answer being worse than an absent one.
     #[serde(default)]
     pub peeked: bool,
+    /// ⟨0.33⟩ TRUE when the files of this class are COPIES of code this same scan already judged — a
+    /// jar or archive under a build tree is a derived copy of what was just analysed, so the class
+    /// hides nothing and does not make the verdict INCOMPLETE.
+    ///
+    /// ONLY THE PRODUCER MAY SET IT. A consumer must not infer it from the class token: those tokens
+    /// are engine-chosen (the clause above), and the same concept is spelled `build-output` here and
+    /// `build-output-archive` by candor-java — so a consumer carrying its own list of "derived" names
+    /// gates another engine's report differently from the engine that wrote it. The distinction is not
+    /// cosmetic either: `build-script` is `build.rs`, code that RUNS at build time and can perform any
+    /// effect, and it must fail closed; `build-output` must not.
+    #[serde(rename = "judgedElsewhere", default, skip_serializing_if = "std::ops::Not::not")]
+    pub judged_elsewhere: bool,
     /// WHY, in the engine's own words. A consumer reads this to decide whether the exclusion matches the
     /// question they are asking; conformance asserts on this VALUE, not on the key's presence.
     pub reason: String,
@@ -1376,6 +1388,10 @@ fn gate_verdict_json_impl(
     // ⟨0.30⟩ EITHER cause suppresses `ok`. `unanalyzed` is "I opened this file and could not read it";
     // `out_of_scope` is "I never opened it, and when I peeked afterwards it performed the denied effect".
     // Both mean the gate could not see enough of this tree to certify it.
+    // ⟨0.33⟩ THE THIRD CAUSE — a class this scan did not READ — is NOT wired here yet. It needs the
+    // `excluded` slice, which this function does not receive, so threading it through the public
+    // wrappers is the port's first step. The struct field is in place and round-trips; the VERDICT
+    // still ignores it, which is why candor-rust does not yet implement the rung.
     let incomplete = !unanalyzed.is_empty() || !out_of_scope.is_empty();
     serde_json::to_string_pretty(&Verdict {
         spec: SPEC_VERSION,
