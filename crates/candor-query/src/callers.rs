@@ -446,6 +446,21 @@ pub(crate) fn cmd_path(args: &[String]) -> i32 {
         Ok(v) => v,
         Err(c) => return c,
     };
+    // A TYPO'D EFFECT NAME IS A LOUD ERROR HERE TOO. `where` has refused an unknown effect since the
+    // corpus audit; `path` did not, and answered "<fn> does not perform Fsz" at exit 0 — a typo scored
+    // as a confident NEGATIVE, in the verb people reach for to check one specific claim.
+    //
+    // Same rule as `where`, deliberately: a KNOWN effect that is simply absent is a legitimate negative
+    // answer, and an unknown name PRESENT in the report (a spec extension effect from another engine) is
+    // allowed. The error is only for a name NEITHER known NOR present.
+    const KNOWN_EFFECTS: &[&str] =
+        &["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Unknown"];
+    if !KNOWN_EFFECTS.contains(&effect)
+        && !entries.iter().any(|e| e.inferred.iter().any(|x| x == effect))
+    {
+        eprintln!("candor-query path: unknown effect '{effect}' (known: {})", KNOWN_EFFECTS.join(", "));
+        return 2;
+    }
     let by_name: HashMap<&str, &ReportEntry> =
         entries.iter().map(|e| (e.func.as_str(), e)).collect();
     let start = entries
