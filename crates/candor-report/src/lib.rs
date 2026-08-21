@@ -49,8 +49,14 @@ pub struct ReportFile {
 /// candor-java (`Query.java`) and candor-swift (`FixCLI.swift`) all exclude the same suffixes by name;
 /// this engine discriminated by segment count alone, which covered its OWN 3-segment sidecars but not
 /// a 2-segment one from another producer.
-pub const SIDECAR_KINDS: [&str; 6] =
-    ["callgraph", "hierarchy", "calibrated", "layerreach", "locs", "gate"];
+pub const SIDECAR_KINDS: [&str; 7] =
+    // ⟨0.32⟩ `refused` — the refusal marker (SPEC §2.2's family-wide reserved set). This engine already
+    // excluded it INCIDENTALLY, because the discrimination rule wants `<crate>.<type>` (two segments)
+    // and `<prefix>.refused.json` has one. Listed explicitly anyway: being excluded by SHAPE rather than
+    // by NAME is precisely the drift §2.2 records — "three of the four excluded these by name and one
+    // discriminated by segment count, but the by-name lists disagreed" — and candor-ts, whose predicate
+    // IS by name, counted the marker as a report the moment ⟨0.32⟩ landed there. PART 56 caught it.
+    ["callgraph", "hierarchy", "calibrated", "layerreach", "locs", "gate", "refused"];
 
 /// Discover the per-crate report files for a prefix (`.candor/report` →
 /// `.candor/report.<crate>.<type>.json`), sorted by path for deterministic output. A directoryless
