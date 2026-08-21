@@ -8221,6 +8221,40 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     }
 
     #[test]
+    fn the_hand_back_never_restores_its_own_placeholder() {
+        // ⟨0.31⟩ THE HAND-BACK WAS DEFEATED BY COMPOSITION, in three ordinary steps. MEASURED on a
+        // two-member workspace before this fix:
+        //
+        //   1. scan both members          -> two real reports
+        //   2. delete member `b`, refuse  -> `b`'s orphan is armed. Correct: the run refused.
+        //   3. scan the remaining member  -> COMPLETES at exit 0, and `b` STILL held the placeholder,
+        //                                    because step 3's arming saved step 2's PLACEHOLDER as
+        //                                    `b`'s "previous bytes" and the hand-back restored it.
+        //
+        // `gate --report <prefix>` then refuses at exit 2 off that leftover for ever — the exact state
+        // `disarm_unwritten_out_reports` exists to prevent, reached by running it twice. The note at
+        // `arm_out_prefix` records the FIRST version of this failure; that was the same failure wearing
+        // the fix.
+        //
+        // The fix records `None` when the bytes being displaced are this machinery's own placeholder,
+        // and the hand-back then REMOVES rather than restores. Both directions are asserted here,
+        // because removing is sound only for a placeholder: §3.3.1 forbids deleting a REPORT — a
+        // consumer reading absence as "nothing to report" fails open — and the second arm is what stops
+        // a future edit turning this into that.
+        let gate = include_str!("gate.rs");
+        assert!(gate.contains("if prev_is_placeholder { None } else { prev_bytes }"),
+                "the armer no longer distinguishes a placeholder from a real report, so a complete run \
+                 can hand its own marker back and leave a permanent exit-2 behind");
+        assert!(gate.contains("None => { let _ = std::fs::remove_file(path); }"),
+                "the hand-back no longer removes an orphaned placeholder");
+        // …and the REAL-report arm must still restore. If this line goes, the fix has become the
+        // fail-open deletion the spec forbids.
+        assert!(gate.contains("Some(bytes) => { let _ = std::fs::write(path, bytes); }"),
+                "the hand-back no longer restores a real orphaned report byte-for-byte — deleting one \
+                 is the fail-open harm §3.3.1 forbids, and this arm is the whole difference");
+    }
+
+    #[test]
     fn no_gate_accumulator_can_record_from_inside_the_peek() {
         // ⟨0.31⟩ THE PEEK MUST WRITE NO VERDICT STATE. It re-enters `scan_one` over the files the scan
         // EXCLUDED, so anything it records is carried by the scan route and by no other — the peek writes
