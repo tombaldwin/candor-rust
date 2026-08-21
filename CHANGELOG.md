@@ -9,6 +9,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.31.0] — 2026-08-20
+
 - **⚠ The unevaluable-target refusal handed a PREVIOUS run's green report back.** With `--out` naming a
   prefix that already held a green report, the refusal armed its fail-closed placeholder correctly — and
   then `scan_target` granted the hand-back licence anyway, so the stale green was restored byte-for-byte
@@ -26,8 +28,6 @@ after upgrading; review policies and regenerate baselines with the new build.
   be read, sending the reader to debug the wrong file. ⟨0.24⟩ pins that field as a string naming the
   cause, and this family rates a false disclosure worse than a missing one. It now names the target and
   carries the remedy.
-
-## [0.31.0] — 2026-08-20
 
 - **One scan run is one thread, and now the compiler says so.** `GATE_VIOLATIONS` is a thread-local
   while nine sibling accumulators are process-globals — the asymmetry is deliberate (`cargo test` runs on
