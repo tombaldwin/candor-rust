@@ -9,6 +9,25 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ The report hand-back restored its own placeholder, leaving a permanent exit 2.** Reachable in three
+  ordinary steps and MEASURED on a two-member workspace: scan both members; delete one and let any
+  refusal happen (an unknown flag will do), which correctly arms the orphan; then scan the remaining
+  member successfully. That third run COMPLETES at exit 0 and the orphan still holds the placeholder,
+  because the run's own arming had saved the *previous* run's placeholder as the orphan's "previous
+  bytes" and the hand-back dutifully put it back. `gate --report <prefix>` then refuses at exit 2 off
+  that leftover for ever, until somebody deletes the file by hand.
+
+  That is the exact state the hand-back exists to prevent, reached by running it twice — the same
+  failure its own note records, wearing the fix.
+
+  A placeholder is not a previous run's report; it is this machinery's marker saying a run did not
+  finish. It is now recorded as "no previous report", and the hand-back REMOVES it rather than restoring
+  it. Removing a placeholder is sound where removing a report never is: §3.3.1 forbids deleting a report
+  because a consumer reading absence as "nothing to report" fails open, and a placeholder makes no claim
+  about code at all — here its absence is also the truth, since the member is gone. Both directions are
+  pinned, because the second one is the whole difference: a real orphaned report is still handed back
+  byte-for-byte.
+
 ## [0.31.0] — 2026-08-20
 
 - **⚠ The unevaluable-target refusal handed a PREVIOUS run's green report back.** With `--out` naming a

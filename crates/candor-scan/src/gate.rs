@@ -872,13 +872,37 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
         }
         // Remember the bytes BEFORE overwriting, so a run that completes can hand back anything it
         // turned out not to own (see `disarm_unwritten_out_reports`).
-        if let Ok(prev) = std::fs::read(&full) {
-            OUT_ARMED
-                .get_or_init(|| std::sync::Mutex::new(Vec::new()))
-                .lock()
-                .unwrap()
-                .push((full.clone(), prev));
-        }
+        //
+        // ⟨0.31⟩ …BUT NEVER REMEMBER A PLACEHOLDER AS THOUGH IT WERE A REPORT. The hand-back was
+        // defeated by COMPOSITION, and it is reachable in three ordinary steps — MEASURED on a
+        // two-member workspace:
+        //
+        //   1. scan both members            -> two real reports
+        //   2. delete member `b`, then any refusal (an unknown flag will do)
+        //                                   -> `b`'s orphan is armed. Correct: the run refused.
+        //   3. scan the remaining member    -> COMPLETES, exit 0 …and `b` still holds the placeholder,
+        //                                      because step 3's arming saved step 2's PLACEHOLDER as
+        //                                      `b`'s "previous bytes" and the hand-back dutifully
+        //                                      restored it.
+        //
+        // `gate --report <prefix>` then refuses at exit 2 off that leftover, for ever, until somebody
+        // deletes the file by hand — the exact state `disarm_unwritten_out_reports` exists to prevent,
+        // reached by running it twice. The note there records the first version of this failure; this is
+        // the same failure wearing the fix.
+        //
+        // A placeholder is NOT a previous run's report: it is this machinery's own marker saying a run
+        // did not finish. Recording `None` makes the hand-back DELETE it rather than restore it, and
+        // deleting it is sound where deleting a report never is — §3.3.1 forbids removing a REPORT
+        // because a consumer reading absence as "nothing to report" fails open, and a placeholder makes
+        // no claim about code at all. Its absence is also the truth here: the member is gone.
+        let prev_bytes = std::fs::read(&full).ok();
+        let prev_is_placeholder = prev_bytes.as_deref()
+            .is_some_and(|b| b == doc.as_bytes());
+        OUT_ARMED
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .push((full.clone(), if prev_is_placeholder { None } else { prev_bytes }));
         // THE SIDECARS FOLLOW ONLY IF THE REPORT ACTUALLY ARMED. This was `let _ = write(...)` followed
         // by an unconditional delete, so a write that FAILED (read-only tree, full disk) left the STALE
         // report in place and removed its callgraph — strictly worse than the pre-rung state, because
@@ -953,6 +977,10 @@ pub(crate) fn arm_out_prefix(prefix: &str, inputs: &[(String, String)]) {
 /// What the armer saved so the disarm can hand it back: `(path, the bytes before arming)`, guarded
 /// for the lazy `OnceLock` init. Named once so the two ledgers below cannot drift in shape.
 type ArmedBytes = std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>>>;
+/// ⟨0.31⟩ `None` means "there was no REPORT here before this run armed it" — either the path held this
+/// machinery's own placeholder from an earlier unfinished run, or nothing at all. The hand-back removes
+/// such a file instead of restoring it; see the note in `arm_out_prefix`.
+type ArmedReports = std::sync::OnceLock<std::sync::Mutex<Vec<(std::path::PathBuf, Option<Vec<u8>>)>>>;
 
 /// `(path, bytes)` for every §2.2 sidecar this run DELETED while arming. Restored beside its report by
 /// [`disarm_unwritten_out_reports`] when the run turns out not to have owned that report after all —
@@ -999,7 +1027,7 @@ pub(crate) fn mark_out_reports_written() {
     let _ = OUT_REPORTS_WRITTEN.set(true);
 }
 /// `(path, bytes-before-arming)` for every report this run armed under an `--out` prefix.
-static OUT_ARMED: ArmedBytes = std::sync::OnceLock::new();
+static OUT_ARMED: ArmedReports = std::sync::OnceLock::new();
 
 /// SPEC §3.3.1 ⟨0.28⟩ — **HAND BACK WHAT THIS RUN TURNED OUT NOT TO OWN.**
 ///
@@ -1036,7 +1064,17 @@ pub(crate) fn disarm_unwritten_out_reports() {
     for (path, prev) in armed.lock().unwrap().iter() {
         // Only files this run left untouched since arming — anything it rewrote is a real report.
         if std::fs::read(path).is_ok_and(|now| now == doc.as_bytes()) {
-            let _ = std::fs::write(path, prev);
+            match prev {
+                // A real report this run turned out not to own — hand it back exactly as found.
+                Some(bytes) => { let _ = std::fs::write(path, bytes); }
+                // ⟨0.31⟩ Nothing here was a REPORT before this run armed: the path held this
+                // machinery's own placeholder from an earlier unfinished run. Restoring it re-creates
+                // the permanent exit-2 the hand-back exists to prevent — a complete run leaving a
+                // marker that says an earlier run failed, which `gate --report` then refuses off for
+                // ever. Removing it is sound where removing a REPORT never is: §3.3.1's fail-open rule
+                // protects a document that describes CODE, and a placeholder describes only a run.
+                None => { let _ = std::fs::remove_file(path); }
+            }
             // ⟨0.28⟩ …and this report's sidecars come back with it. A report the run turned out not to
             // own is an ORPHAN, left exactly as found — and "as found" included its sidecars. Restoring
             // the report while leaving its sidecars deleted would be a THIRD state neither the pre-run
