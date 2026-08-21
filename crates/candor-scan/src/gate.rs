@@ -747,8 +747,68 @@ pub(crate) fn record_gate_refusal(why: impl Into<String>) {
 /// unknown flag wrote it in one of four. Routing every pre-verdict exit through the one writer closes
 /// the cause split; on a FILE sink this also replaces the armed placeholder with the specific reason,
 /// which is strictly more informative and still fail-closed.
+/// ⟨0.32⟩ THE PREFIX THIS RUN WOULD WRITE REPORTS TO, latched as soon as it is known.
+///
+/// Needed by the refusal marker, which must be written for the prefix a refusing run WOULD have used —
+/// including the default one, which is only computable once the target is resolved.
+static REFUSAL_PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub(crate) fn note_report_prefix(prefix: &str) {
+    let _ = REFUSAL_PREFIX.set(prefix.to_string());
+}
+
+/// ⟨0.32⟩ WRITE THE REFUSAL MARKER — SPEC §3.3.1 ⟨0.32⟩.
+///
+/// A run given no `--out` still writes reports, to its default prefix, and a refusal leaves whatever the
+/// last successful run put there readable as current. Arming that prefix is NOT the answer and this
+/// engine has the scar: a run that died in argv parsing once replaced a COMMITTED report in this very
+/// repository. Naming a prefix is a declaration; a default is a convention, and a convention does not
+/// license destroying a file the operator may be keeping.
+///
+/// So the refusal is recorded BESIDE the reports instead of over them. It overwrites nothing, so the
+/// worst an error here can cost is a false red — and a marker that goes missing fails open, exactly as
+/// today, which makes this strictly better than the status quo and never worse.
+///
+/// It carries its own `prefix` because §3.3.1's DIRECT-FILE locator accepts any `.json` name whatever its
+/// dot-segments: a consumer handed one file cannot recover the prefix from the filename, so it reads the
+/// prefix out of the marker and asks whether it covers the file it was given.
+pub(crate) fn write_refusal_marker(why: &str) {
+    let Some(prefix) = REFUSAL_PREFIX.get() else { return };
+    let target = REFUSAL_TARGET.get().map(String::as_str).unwrap_or(".");
+    let doc = serde_json::json!({
+        "candor":  { "spec": candor_report::SPEC_VERSION },
+        "refused": true,
+        "prefix":  prefix,
+        "target":  target,
+        "reason":  why,
+    });
+    if let Some(dir) = std::path::Path::new(prefix).parent() {
+        if !dir.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+    }
+    let _ = std::fs::write(format!("{prefix}.refused.json"),
+                           serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n");
+}
+
+/// ⟨0.32⟩ …and a run that COMPLETES its write phase removes it, so the marker's presence means exactly
+/// "the most recent attempt over this prefix refused".
+pub(crate) fn clear_refusal_marker() {
+    let Some(prefix) = REFUSAL_PREFIX.get() else { return };
+    let _ = std::fs::remove_file(format!("{prefix}.refused.json"));
+}
+
+/// The target this run was pointed at, for the marker's `target` field.
+static REFUSAL_TARGET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub(crate) fn note_scan_target(t: &str) {
+    let _ = REFUSAL_TARGET.set(t.to_string());
+}
+
 pub(crate) fn exit2_refused(why: impl Into<String>) -> ! {
     let why = why.into();
+    // ⟨0.32⟩ every refusal routes through here, which is why the marker is written here and not at the
+    // fifteen call sites — the rule is over the RUN, not over the sites anyone enumerated.
+    write_refusal_marker(&why);
     record_gate_refusal(why.clone());
     write_gate_json(2);
     // ⟨0.28⟩ REPORT STREAM: the same rule the verdict stream gets one hop upstream. If `--json` (report
@@ -1018,6 +1078,10 @@ pub(crate) fn note_refused_before_write() {
 }
 
 pub(crate) fn mark_out_reports_written() {
+    // ⟨0.32⟩ The write phase finished, so the marker's claim ("the most recent attempt over this prefix
+    // refused") is no longer true. Cleared HERE rather than at each success exit for the same reason the
+    // marker is WRITTEN in `exit2_refused`: one place per direction, over the run.
+    clear_refusal_marker();
     // A run that refused before writing never had a write phase to finish, so it never earns the
     // license — whatever it armed IS its answer, and handing the previous run's report back would
     // republish a verdict this run explicitly declined to make.

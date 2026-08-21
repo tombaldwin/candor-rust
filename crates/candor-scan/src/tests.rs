@@ -8221,6 +8221,68 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     }
 
     #[test]
+    fn a_refusal_leaves_a_marker_and_a_completing_run_clears_it() {
+        // ⟨0.32⟩ SPEC §3.3.1: a refusing run records itself BESIDE the reports it would have written,
+        // and `gate --report` refuses off that marker.
+        //
+        // The hazard: a run given no `--out` writes to its default prefix, and a refusal leaves whatever
+        // the last successful run put there readable as current. MEASURED in all four engines — scan a
+        // tree green, change it so it now violates, refuse for any reason, and `gate --report <tree>`
+        // answers `policy ✓` at exit 0 off the previous run's bytes.
+        //
+        // ARMING THAT PREFIX IS NOT THE ANSWER and this engine has the scar: a run that died in argv
+        // parsing once replaced a COMMITTED report in this repository. Naming a prefix is a declaration;
+        // a default is a convention, and a convention does not license destroying a file the operator
+        // may be keeping. The marker destroys nothing, so it can be written at the EARLIEST moment the
+        // prefix is known — pre-parse — which is what lets it cover the argv-death case that arming
+        // structurally cannot.
+        //
+        // FOUR ROWS. The last two are the controls: a marker that is never cleared makes every later run
+        // refuse, and a marker written where nothing refused makes the tool useless.
+        let root = std::env::temp_dir().join(format!("candor-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"),
+                       "[package]\nname=\"mk\"\nversion=\"0.0.0\"\nedition=\"2021\"\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn f() -> i32 { 1 }\n").unwrap();
+        let marker = root.join(".candor/report.refused.json");
+
+        // A clean run leaves no marker.
+        crate::gate::note_scan_target(&root.to_string_lossy());
+        crate::gate::note_report_prefix(&format!("{}/.candor/report", root.to_string_lossy()));
+        crate::gate::clear_refusal_marker();
+        assert!(!marker.exists(), "a run that did not refuse left a marker");
+
+        // A refusal writes one, carrying the prefix a consumer needs to match it to a direct-file
+        // locator — §3.3.1's direct-file form accepts any `.json` name, so the prefix cannot be
+        // recovered from the filename and has to be IN the marker.
+        crate::gate::write_refusal_marker("a probe cause");
+        assert!(marker.exists(), "a refusal left no marker at the default prefix");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+        assert_eq!(doc["refused"], serde_json::json!(true));
+        assert!(doc["prefix"].as_str().is_some_and(|p| p.contains(".candor/report")),
+                "the marker must carry its own prefix: {doc}");
+        assert!(doc["reason"].as_str().is_some_and(|r| r.contains("a probe cause")),
+                "the marker must name the cause: {doc}");
+
+        // …and the consumer finds it.
+        assert!(candor_report::refusal_marker_for(
+                    &format!("{}/.candor/report", root.to_string_lossy())).is_some(),
+                "a prefix locator did not resolve the marker beside it");
+
+        // CONTROL: a completing run clears it, or every later run refuses for ever off a stale marker.
+        crate::gate::clear_refusal_marker();
+        assert!(!marker.exists(), "a completing run left the marker behind — every later gate over this \
+                                   prefix would refuse off it, which is the permanent-red mirror of the \
+                                   permanent-green this rung exists to close");
+        assert!(candor_report::refusal_marker_for(
+                    &format!("{}/.candor/report", root.to_string_lossy())).is_none(),
+                "the consumer still reports a refusal after the marker was cleared");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_hand_back_never_restores_its_own_placeholder() {
         // ⟨0.31⟩ THE HAND-BACK WAS DEFEATED BY COMPOSITION, in three ordinary steps. MEASURED on a
         // two-member workspace before this fix:

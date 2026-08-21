@@ -605,9 +605,25 @@ pub(crate) fn scan_main() {
             "--out was given more than once ({named}) — a run writes one report set to one prefix"
         ));
     }
+    // ⟨0.32⟩ the target is latched first, so a refusal during parsing still names what it was pointed at.
+    crate::gate::note_scan_target(pre_target.as_deref().unwrap_or("."));
     if let Some(pre_pfx) = pre.outs.last() {
         let inputs = run_inputs(pre_target.as_deref().unwrap_or("."), pre_policy.as_deref());
         crate::gate::arm_out_prefix(pre_pfx, &inputs);
+        crate::gate::note_report_prefix(pre_pfx);
+    } else if let Some(t) = pre_target.as_deref() {
+        // ⟨0.32⟩ NO `--out`, SO THE DEFAULT PREFIX — AND LATCHED HERE, AT PRE-PARSE, NOT LATER.
+        //
+        // This is the window the marker exists to close and the one that separates it from arming. A
+        // refusal during argv parsing (an unknown flag is the everyday case) happens BEFORE the scan
+        // resolves its target and computes this prefix, so latching it downstream leaves exactly the
+        // shape that bit: a stale green survives and `gate --report` certifies it. The TARGET is already
+        // known here, and the default prefix is a pure function of it.
+        //
+        // Arming could not be moved this early — that is the measured data loss, a run that died in
+        // parsing replacing a committed report. Writing a marker BESIDE the reports can be, because it
+        // destroys nothing: the earliest safe moment and the earliest useful moment are the same moment.
+        crate::gate::note_report_prefix(&format!("{t}/.candor/report"));
     }
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -3660,6 +3676,10 @@ pub(crate) fn scan_target(
         return code;
     }
     let prefix = if prefix.is_empty() { format!("{dir}/.candor/report") } else { prefix };
+    // ⟨0.32⟩ A run given no `--out` still writes reports HERE, and a refusal after this point leaves the
+    // previous run's bytes readable as current. `note_report_prefix` is a no-op if `--out` already
+    // latched one (OnceLock), so the named sink keeps precedence.
+    crate::gate::note_report_prefix(&prefix);
     let mut dirs: Vec<String> = Vec::new();
     if read_crate_name(Path::new(dir)).is_some() {
         dirs.push(dir.to_string()); // the workspace manifest also declares a root package
