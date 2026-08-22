@@ -100,7 +100,7 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     let reason_acc = &sig.reason_classes;
     let class_matches = |e: &ReportEntry| -> bool {
         match &want {
-            Some(w) => candor_classify::policy::reason_class_matches(reason_acc.get(&e.func), w),
+            Some(w) => candor_classify::policy::reason_class_matches(reason_acc.get(&crate::gate::entry_key(e)), w),
             None => true, // no --class ⇒ no filter
         }
     };

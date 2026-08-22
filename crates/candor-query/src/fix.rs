@@ -620,7 +620,7 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
         let mut effs: Vec<&String> = e.inferred.iter().collect();
         effs.sort();
         for effect in effs {
-            if let Some(layer) = denied_layer_evidenced(e, effect, rules, reason_acc.get(&e.func)) {
+            if let Some(layer) = denied_layer_evidenced(e, effect, rules, reason_acc.get(&crate::gate::entry_key(e))) {
                 let plan = compute_remedy(&by_name, &rev, rules, e, effect, layer);
                 plans.entry(plan.dedup_key()).or_insert(plan);
             }
