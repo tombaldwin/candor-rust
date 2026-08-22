@@ -381,6 +381,18 @@ impl ReportSignature {
 /// read the gate's own signature, so "which classes does this function have" has one answer on this side
 /// of the report boundary. The `GateReport` envelope (the ⟨0.21⟩ manifest, the κ ledger) is the
 /// VERDICT's input and stays with the gate.
+/// ⟨0.33⟩ THE UNIT KEY — `hash` when the producer emitted one, else the bare name.
+///
+/// Exposed because `report_signature`'s accumulators are keyed by it, and the ADVISORY verbs read those
+/// accumulators directly (deliberately — `unverified` and `fix-gate` select over exactly the set the gate
+/// scopes over, and a private copy is how they came to disagree with it). They must therefore look units
+/// up the same way. They did not, and it is the shape to watch for: a name-keyed lookup into a
+/// hash-keyed map does not error, it returns None — so `--class dispatch` selected NOTHING and read as
+/// "nothing to report" rather than as a break.
+pub(crate) fn entry_key(e: &ReportEntry) -> String {
+    if e.hash.is_empty() { e.func.clone() } else { e.hash.clone() }
+}
+
 pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     let mut inferred: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut calls: HashMap<String, BTreeSet<String>> = HashMap::new();
@@ -413,9 +425,7 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     // declares it. An ambiguous cross-package name contributes NO EDGE rather than a guess: picking is
     // what the name join did implicitly, and it is wrong both ways — right by luck when the guess lands,
     // inventing a reach when it does not.
-    let key_of = |e: &ReportEntry| -> String {
-        if e.hash.is_empty() { e.func.clone() } else { e.hash.clone() }
-    };
+    let key_of = entry_key;
     let mut by_name: HashMap<&str, BTreeSet<String>> = HashMap::new();
     for e in entries {
         by_name.entry(e.func.as_str()).or_default().insert(key_of(e));
@@ -680,8 +690,11 @@ pub(crate) fn unanswerable_pairs(
     let mut out = Vec::new();
     for r in &p.rules {
         for q in &sig.all {
+            // ⟨0.33⟩ match the NAME, not the unit key — a policy scope is written against names
+            // (`deny Net app`), and `sig.all` holds hashes since the merge moved to them.
+            let q_name = sig.display.get(q).map(|v| v.as_str()).unwrap_or(q.as_str());
             if let Some(s) = &r.scope
-                && !candor_classify::policy::scope_matches(q, s)
+                && !candor_classify::policy::scope_matches(q_name, s)
             {
                 continue;
             }
@@ -693,7 +706,7 @@ pub(crate) fn unanswerable_pairs(
             {
                 out.push(Unanswerable {
                     rule: r.raw.trim().to_string(),
-                    func: q.clone(),
+                    func: q_name.to_string(),   // ⟨0.33⟩ the NAME, not the unit key
                     why: format!(
                         "it narrows on the Net DESTINATION CLASS, but `{q}` carries Net with no \
                          `netClass` in this report — the field the filter reads is absent, so the \
