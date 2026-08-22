@@ -279,6 +279,8 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
     // for the verb: no end-to-end test could have separated this from a classifier defect.
     let mut seen_fn: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for q in gi.all {
+        // ⟨0.33⟩ the key identifies the unit; the NAME is what a human reads and a scope matches.
+        let disp_q = gi.disp(q);
         if !seen_fn.insert(q.as_str()) {
             continue;
         }
@@ -323,7 +325,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     rule: "AS-EFF-006".into(),
                     func: gi.disp(q).to_string(),
                     effects: hits.iter().map(|s| s.to_string()).collect(),
-                    detail: format!("`{q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
+                    detail: format!("`{disp_q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
                     reason_class,
                     net_class,
                 });
@@ -364,7 +366,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                             rule: "AS-EFF-008".into(),
                             func: gi.disp(q).to_string(),
                             effects: vec![r.effect.to_string()],
-                            detail: format!("`{q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw),
+                            detail: format!("`{disp_q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw),
                             ..Default::default()
                         });
                     }
@@ -373,7 +375,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     rule: "AS-EFF-008".into(),
                     func: gi.disp(q).to_string(),
                     effects: vec![r.effect.to_string()],
-                    detail: format!("`{q}` performs {} with no visible literal — the surface cannot be certified: `{}`", r.effect, r.raw),
+                    detail: format!("`{disp_q}` performs {} with no visible literal — the surface cannot be certified: `{}`", r.effect, r.raw),
                     ..Default::default()
                 }),
             }
@@ -404,7 +406,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     rule: "AS-EFF-009".into(),
                     func: gi.disp(q).to_string(),
                     effects: Vec::new(), // a layer-flow has no single effect
-                    detail: format!("`{q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw),
+                    detail: format!("`{disp_q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw),
                     ..Default::default()
                 });
             }
@@ -458,7 +460,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     func: gi.disp(q).to_string(),
                     effects: Vec::new(),
                     detail: format!(
-                        "`{q}` reaches `{h}`, which this permission rule does not permit: `{}`",
+                        "`{disp_q}` reaches `{h}`, which this permission rule does not permit: `{}`",
                         r.raw
                     ),
                     ..Default::default()

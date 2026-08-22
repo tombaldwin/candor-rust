@@ -391,14 +391,58 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     let mut net: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut why_direct: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut display: HashMap<String, String> = HashMap::new();
+
+    // ⟨0.33⟩ KEY BY `hash`, NEVER BY BARE `fn` — SPEC §2.2, and the reason it is a MUST. MEASURED on
+    // candor-query 0.31.0: `gate --report` over one member refused a scoped rule at exit 2, and the SAME
+    // member gated beside an unrelated sibling exited 0 with `policy ✓`.
+    //
+    // WHY UNION IS NOT THE SAFE DIRECTION, which the old comment here got wrong. Union IS safe for
+    // EFFECTS — adding effects can only add violations. It is NOT safe for REASON CLASSES, because a
+    // reason set is what makes an `Unknown` ANSWERABLE: an Unknown with no reachable reason is
+    // unanswerable and the gate REFUSES, and borrowing a reason from an unrelated same-named function
+    // converts that refusal into an answer. That is the measured false green exactly — `a::main` took
+    // `b`'s `callback:` class, the filter saw {indirect} ∌ dispatch, and tolerated. Union turned "I
+    // cannot say" into "I checked, it's fine".
+    //
+    // THE EDGES NEED RESOLVING TOO, which is what makes this more than a key swap: `hash` is
+    // `package#fn` but `calls` names callees by BARE `fn`, so hash-keying the NODES alone leaves the
+    // call graph joining by name one layer down — the same defect, harder to see because the node table
+    // looks right. Each report's callees resolve against its OWN package first (the common case, and
+    // unambiguous); a name that leaves the package resolves only when exactly ONE unit in the set
+    // declares it. An ambiguous cross-package name contributes NO EDGE rather than a guess: picking is
+    // what the name join did implicitly, and it is wrong both ways — right by luck when the guess lands,
+    // inventing a reach when it does not.
+    let key_of = |e: &ReportEntry| -> String {
+        if e.hash.is_empty() { e.func.clone() } else { e.hash.clone() }
+    };
+    let mut by_name: HashMap<&str, BTreeSet<String>> = HashMap::new();
+    for e in entries {
+        by_name.entry(e.func.as_str()).or_default().insert(key_of(e));
+    }
 
     for e in entries {
-        let fn_ = e.func.clone();
+        let fn_ = key_of(e);
+        // The KEY is what every accumulator is keyed by; the NAME is what a policy scope matches and
+        // what the verdict prints. Keeping both is the whole point — see GateInput::display.
+        display.insert(fn_.clone(), e.func.clone());
         names.insert(fn_.clone());
-        // UNION on a repeated `fn` rather than overwrite: a duplicate key is malformed input, and the
-        // union is the direction that cannot turn a violation into a pass.
+        // UNION on a repeated KEY: two entries sharing a hash are ONE unit by construction (an inherent
+        // method and a trait implementation of the same name do this, and the scan already unions them),
+        // so here the union is this engine's own unit semantics rather than a guess about two functions.
         inferred.entry(fn_.clone()).or_default().extend(e.inferred.iter().cloned());
-        calls.entry(fn_.clone()).or_default().extend(e.calls.iter().cloned());
+        let mine = fn_.split_once('#').map(|(p, _)| p.to_string()).unwrap_or_default();
+        let resolved = e.calls.iter().filter_map(|c| {
+            let same_pkg = format!("{mine}#{c}");
+            if by_name.get(c.as_str()).is_some_and(|h| h.contains(&same_pkg)) {
+                return Some(same_pkg);
+            }
+            match by_name.get(c.as_str()) {
+                Some(h) if h.len() == 1 => h.iter().next().cloned(),
+                _ => None,
+            }
+        });
+        calls.entry(fn_.clone()).or_default().extend(resolved);
         if !e.hosts.is_empty() {
             hosts.entry(fn_.clone()).or_default().extend(e.hosts.iter().cloned());
         }
@@ -440,7 +484,7 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     let all: Vec<String> = names.into_iter().collect();
     let reason_classes = candor_classify::propagate::propagate_str(&why_direct, &calls, &all);
     ReportSignature {
-        display: std::collections::HashMap::new(),
+        display,
         net_classes: net.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
         all,
         inferred,
