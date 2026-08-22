@@ -55,9 +55,25 @@ pub fn net_classes_of<E: AsRef<str> + Ord>(
 /// vocabulary) and `String` on the report route (the wire's names, taken VERBATIM — a report naming an
 /// effect this build's vocabulary does not list must still trip a `pure` rule, so the names are never
 /// filtered through a known-effect allowlist on the way in).
+impl<'a, E: AsRef<str> + Ord> GateInput<'a, E> {
+    /// The name to match a policy scope against, and to print. Identity when no map was supplied.
+    pub fn disp<'x>(&'x self, k: &'x str) -> &'x str {
+        self.display.get(k).map(|v| v.as_str()).unwrap_or(k)
+    }
+}
+
 pub struct GateInput<'a, E: AsRef<str> + Ord> {
-    /// Every function the gate ranges over, in the caller's order.
+    /// Every UNIT the gate ranges over, in the caller's order — an opaque KEY, not necessarily a name.
     pub all: &'a [String],
+    /// ⟨0.33⟩ key -> the name to MATCH and DISPLAY. Empty means the keys are already names.
+    ///
+    /// A multi-report gate must join by `hash` and never by bare `fn` (SPEC §2.2), because two members
+    /// of a workspace legitimately share a name — and merging them was measured turning a refusal into
+    /// `policy ✓` by letting one borrow the other's Unknown reason class. But a hash is `package#fn`,
+    /// and a POLICY SCOPE is written against the name (`deny Exec app::`), so keying by hash without
+    /// this map silently stops scopes matching: a false green introduced by fixing a false green.
+    /// Identity is the default, so the single-report callers are unaffected.
+    pub display: &'a std::collections::HashMap<String, String>,
     /// Per fn, the TRANSITIVE effect set — the model's `S`, with candor's `Unknown` marker carried as a
     /// member (this engine's encoding of `D ≠ ∅`).
     pub inferred: &'a HashMap<String, BTreeSet<E>>,
@@ -274,7 +290,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
         // AS-EFF-006 — deny/pure: forbidden effects in the transitive set.
         for r in &p.rules {
             if let Some(s) = &r.scope {
-                if !scope_matches(q, s) {
+                if !scope_matches(gi.disp(q), s) {
                     continue;
                 }
             }
@@ -287,7 +303,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 gi.net_classes.get(q).map(Vec::as_slice).unwrap_or(&no_classes),
             );
             for filter in wh {
-                withheld.push(Withheld { rule: r.raw.clone(), func: q.clone(), filter });
+                withheld.push(Withheld { rule: r.raw.clone(), func: gi.disp(q).to_string(), filter });
             }
             if !hits.is_empty() {
                 // §6.2: when Unknown is denied, report ALL reason classes on the fn (transitive), so the
@@ -305,7 +321,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 };
                 out.push(GateViolation {
                     rule: "AS-EFF-006".into(),
-                    func: q.clone(),
+                    func: gi.disp(q).to_string(),
                     effects: hits.iter().map(|s| s.to_string()).collect(),
                     detail: format!("`{q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
                     reason_class,
@@ -316,7 +332,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
         // AS-EFF-008 — literal allowlists over the transitive literal surfaces.
         for r in &p.allow_rules {
             if let Some(s) = &r.scope {
-                if !scope_matches(q, s) {
+                if !scope_matches(gi.disp(q), s) {
                     continue;
                 }
             }
@@ -346,7 +362,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     if !bad.is_empty() {
                         out.push(GateViolation {
                             rule: "AS-EFF-008".into(),
-                            func: q.clone(),
+                            func: gi.disp(q).to_string(),
                             effects: vec![r.effect.to_string()],
                             detail: format!("`{q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw),
                             ..Default::default()
@@ -355,7 +371,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 }
                 _ => out.push(GateViolation {
                     rule: "AS-EFF-008".into(),
-                    func: q.clone(),
+                    func: gi.disp(q).to_string(),
                     effects: vec![r.effect.to_string()],
                     detail: format!("`{q}` performs {} with no visible literal — the surface cannot be certified: `{}`", r.effect, r.raw),
                     ..Default::default()
@@ -364,7 +380,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
         }
         // AS-EFF-009 — layering: no fn in scope A may transitively reach scope B.
         for r in &p.layer_rules {
-            if !scope_matches(q, &r.from) {
+            if !scope_matches(gi.disp(q), &r.from) {
                 continue;
             }
             let mut seen: BTreeSet<&str> = BTreeSet::new();
@@ -375,7 +391,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 if !seen.insert(n) {
                     continue;
                 }
-                if scope_matches(n, &r.to) {
+                if scope_matches(gi.disp(n), &r.to) {
                     hit = Some(n);
                     break;
                 }
@@ -386,7 +402,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
             if let Some(h) = hit {
                 out.push(GateViolation {
                     rule: "AS-EFF-009".into(),
-                    func: q.clone(),
+                    func: gi.disp(q).to_string(),
                     effects: Vec::new(), // a layer-flow has no single effect
                     detail: format!("`{q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw),
                     ..Default::default()
@@ -406,7 +422,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
         // you permit, which is the same enumeration-that-rots one level down. `from` IS descended through
         // — a fn in A calling another fn in A that reaches infra is still A reaching infra.
         for r in &p.only_rules {
-            if !scope_matches(q, &r.from) {
+            if !scope_matches(gi.disp(q), &r.from) {
                 continue;
             }
             let mut seen: BTreeSet<&str> = BTreeSet::new();
@@ -419,10 +435,10 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 }
                 // ⟨0.29⟩ EXACT segment match on a PERMITTED scope — see `scope_matches_permitted`. The
                 // shared prefix matcher is fail-CLOSED for every other rule kind and fail-OPEN here.
-                if r.to.iter().any(|t| scope_matches_permitted(n, t)) {
+                if r.to.iter().any(|t| scope_matches_permitted(gi.disp(n), t)) {
                     continue; // permitted, and its own callees are not this rule's business
                 }
-                if !scope_matches(n, &r.from) {
+                if !scope_matches(gi.disp(n), &r.from) {
                     hit = Some(n);
                     break;
                 }
@@ -439,7 +455,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     // accepted: a fail-open change to an operator's config, made by us and invisible to
                     // them, which is the argument this form is built on turned on the tool.
                     rule: "AS-EFF-011".into(),
-                    func: q.clone(),
+                    func: gi.disp(q).to_string(),
                     effects: Vec::new(),
                     detail: format!(
                         "`{q}` reaches `{h}`, which this permission rule does not permit: `{}`",
@@ -485,13 +501,13 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
         for n in names {
             for r in &p.rules {
                 if let Some(s) = &r.scope {
-                    if scope_matches(n, s) {
+                    if scope_matches(gi.disp(n), s) {
                         *zero.entry(r.raw.as_str()).or_insert(0) += 1;
                     }
                 }
             }
             for r in &p.layer_rules {
-                if scope_matches(n, &r.from) || scope_matches(n, &r.to) {
+                if scope_matches(gi.disp(n), &r.from) || scope_matches(gi.disp(n), &r.to) {
                     *zero.entry(r.raw.as_str()).or_insert(0) += 1;
                 }
             }
@@ -501,7 +517,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
             // nothing at all, and is exactly the typo that leaves an operator believing a leaf is
             // protected. Counting the destinations would hide it behind a scope that happens to resolve.
             for r in &p.only_rules {
-                if scope_matches(n, &r.from) {
+                if scope_matches(gi.disp(n), &r.from) {
                     *zero.entry(r.raw.as_str()).or_insert(0) += 1;
                 }
             }
