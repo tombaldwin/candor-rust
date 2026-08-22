@@ -2884,6 +2884,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // of those cases no file of any class was opened. `peek_unread` subtracts the classes the
                 // peek RAN over and could not read — parse failures are per file, so the claim is per class.
                 peeked: peek_read && !peek_unattributed && !peek_unread.contains(class),
+                // ⟨0.33⟩ the producer's own carve-out: `build-output` is a DERIVED copy of code this
+                // scan already judged, so it hides nothing. `build-script` is NOT — `build.rs` runs on
+                // every `cargo build` and can perform any effect, which is the case this file's own
+                // ExcludedClass doc records going GREEN under `deny Exec`. It must fail closed.
+                judged_elsewhere: class == "build-output",
                 reason: match class {
                     "build-script" => "the Cargo build script runs at COMPILE time, not as the crate's \
                          runtime behaviour, so this scan does not judge it — but it runs on every \
