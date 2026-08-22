@@ -441,18 +441,42 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
         // method and a trait implementation of the same name do this, and the scan already unions them),
         // so here the union is this engine's own unit semantics rather than a guess about two functions.
         inferred.entry(fn_.clone()).or_default().extend(e.inferred.iter().cloned());
+        // The package prefix rescue is only reachable for `pkg#fn`-shaped hashes. A REAL rust hash is a
+        // hex DefPathHash with no `#` (candor-report), so `mine` is empty in production and the
+        // unique-declarer arm below is what actually runs. Kept because a report from another engine —
+        // or a hand-authored one, which §3.1 says this verb serves — may carry the qualified form, but
+        // NOT relied upon: every fixture that exercised only this branch was testing a path real
+        // reports never take, which is how it went unnoticed that it does nothing here.
         let mine = fn_.split_once('#').map(|(p, _)| p.to_string()).unwrap_or_default();
-        let resolved = e.calls.iter().filter_map(|c| {
+        let mut ambiguous = false;
+        let resolved: Vec<String> = e.calls.iter().filter_map(|c| {
             let same_pkg = format!("{mine}#{c}");
-            if by_name.get(c.as_str()).is_some_and(|h| h.contains(&same_pkg)) {
+            if !mine.is_empty() && by_name.get(c.as_str()).is_some_and(|h| h.contains(&same_pkg)) {
                 return Some(same_pkg);
             }
             match by_name.get(c.as_str()) {
                 Some(h) if h.len() == 1 => h.iter().next().cloned(),
+                // AMBIGUOUS: two or more units declare this name and nothing here can say which is
+                // meant. Dropping the edge is right — picking would invent a reach — but dropping it
+                // SILENTLY is not, and that was measured: the caller lost the reason class it would
+                // have inherited, stayed ANSWERABLE through a reason of its own, and a red verdict went
+                // green BY ADDING A REPORT. That is the shape conformance PART 63 exists to forbid,
+                // reopened by the fix that closed the other route to it.
+                Some(h) if h.len() > 1 => { ambiguous = true; None }
                 _ => None,
             }
-        });
+        }).collect();
         calls.entry(fn_.clone()).or_default().extend(resolved);
+        // …so the ambiguity is CONTRIBUTED as evidence at this entry, before the fixpoint, exactly as
+        // the reasonless-Unknown contribution below is. `dispatch` is the right class by the
+        // vocabulary's own definition — "unresolved virtual/dynamic dispatch, SAME-NAME AMBIGUITY" —
+        // and it is evidence the MERGE holds (it saw two declarers), never a class borrowed from
+        // another function's body, so it cannot make some other fn's Unknown answerable.
+        if ambiguous {
+            inferred.entry(fn_.clone()).or_default().insert("Unknown".to_string());
+            why_direct.entry(fn_.clone()).or_default()
+                .insert(ReasonClass::Dispatch.token().to_string());
+        }
         if !e.hosts.is_empty() {
             hosts.entry(fn_.clone()).or_default().extend(e.hosts.iter().cloned());
         }
