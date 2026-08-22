@@ -108,6 +108,9 @@ pub(crate) fn policy_violations(
         &p,
         &candor_classify::gate::GateInput {
             all,
+            // ⟨0.33⟩ identity: a scan gates ONE analysis world, so its keys are already names. The map
+            // exists for the multi-report route, where keys must be hashes (SPEC §2.2).
+            display: &std::collections::HashMap::new(),
             inferred,
             calls,
             hosts: hostsacc,
