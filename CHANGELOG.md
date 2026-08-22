@@ -9,6 +9,29 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.31.1] — 2026-08-22
+
+### Fixed
+
+- ⚠ **A gate over a MULTI-REPORT set could be flipped from a refusal to `policy ✓` by adding an unrelated
+  sibling report.** `gate --report` merged member reports by bare `fn`, so two distinct functions
+  sharing a name became one unit. Measured: gating member `a` alone correctly refused a scoped rule at
+  exit 2, and gating that same member beside a sibling exited 0. The harm was not effects merging —
+  `a::main` had an `Unknown` with no reachable reason, which is UNANSWERABLE and refused, and the
+  sibling supplied a reason for that NAME, so the filter answered instead. Union is safe for effects
+  and unsafe for reasons.
+
+  The merge now keys on `hash`, which SPEC §2.2 has required of consumers all along ("MUST join across
+  reports by `hash`, never by bare `fn`"). Callees resolve within their own package first, then against
+  a unique declarer in the set; an ambiguous cross-package name contributes no edge rather than a guess.
+
+  Also fixes the count discrepancy this was originally filed as: on a cargo workspace, `scan --policy`
+  and `gate --report` now produce byte-equal verdict documents (measured on rustls- and zellij-shaped
+  inputs, and on regex and ripgrep, which were already equal and stay so).
+
+  Single-crate projects are unaffected: with one report there is no join, and the corpus confirms the
+  verdict documents are unchanged.
+
 ## [0.31.0] — 2026-08-20
 
 - **⚠ The unevaluable-target refusal handed a PREVIOUS run's green report back.** With `--out` naming a
