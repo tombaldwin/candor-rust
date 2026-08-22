@@ -321,6 +321,10 @@ fn gate_report_input_files(report_flag: Option<&str>) -> Vec<String> {
 /// from the classifier's fixpoints. Both feed the one `candor_classify::gate::gate`.
 pub(crate) struct ReportSignature {
     all: Vec<String>,
+    /// ⟨0.33⟩ key -> name. EMPTY while `all` still holds names; populated when the merge moves to
+    /// `hash` keys, which is what stops one member answering for another. Plumbed ahead of that change
+    /// so the two land separately and each can be verified on its own.
+    display: std::collections::HashMap<String, String>,
     inferred: HashMap<String, BTreeSet<String>>,
     calls: HashMap<String, BTreeSet<String>>,
     hosts: HashMap<String, BTreeSet<String>>,
@@ -340,6 +344,7 @@ impl ReportSignature {
     fn as_input(&self) -> candor_classify::gate::GateInput<'_, String> {
         candor_classify::gate::GateInput {
             all: &self.all,
+            display: &self.display,
             inferred: &self.inferred,
             calls: &self.calls,
             hosts: &self.hosts,
@@ -435,6 +440,7 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     let all: Vec<String> = names.into_iter().collect();
     let reason_classes = candor_classify::propagate::propagate_str(&why_direct, &calls, &all);
     ReportSignature {
+        display: std::collections::HashMap::new(),
         net_classes: net.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
         all,
         inferred,
