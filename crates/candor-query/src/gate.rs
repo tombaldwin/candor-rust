@@ -1669,17 +1669,6 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             rep.unanalyzed.len()
         );
         2
-    } else if !rep.unpeeked.is_empty() {
-        // ⟨0.32⟩ THE THIRD CAUSE, and the counterpart of candor-scan's arm — a class the PRODUCING scan
-        // did not read. Above the `outOfScope` arm and below `unanalyzed`, matching the scan route's
-        // order so a target that trips both reports the same cause on both routes.
-        eprintln!(
-            "candor-query gate: NOT certified — the report says the scan did not READ {}. Their effects \
-             are absent because nothing looked, not because there are none, so the verdict is INCOMPLETE \
-             rather than a pass",
-            rep.unpeeked.join(", ")
-        );
-        2
     } else if !rep.out_of_scope.is_empty() {
         // ⟨0.30⟩ the SCOPE half of the same posture, and the same exit. Named separately from the
         // `unanalyzed` arm above because the repairs differ: that one wants a scan that can read a file,
@@ -1689,6 +1678,29 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
              performing an effect this policy denies; the gate did not judge them, so the verdict is \
              incomplete rather than a pass",
             rep.out_of_scope.len()
+        );
+        2
+    } else if !rep.unpeeked.is_empty() && !p.rules.is_empty() {
+        // ⟨0.32⟩ THE THIRD CAUSE, and the counterpart of candor-scan's arm — a class the PRODUCING scan
+        // did not read.
+        //
+        // GATED ON THIS POLICY HAVING A DENY RULE, which is the same short-circuit the producer's peek
+        // applies (`rules` is the DENY list; allow/forbid/only live in their own). Without it this route
+        // refused an `allow`-only policy over a class the producer never even looked at — `peeked: false`
+        // has two causes, "opened it and failed" and "never asked", and the document cannot tell them
+        // apart. Deciding it from THIS policy is what keeps the two routes answering the same way.
+        //
+        // MEASURED AS DEFENSIVE, not load-bearing: this verb already refuses `allow` and `forbid` rules
+        // UNIFORMLY and earlier, so a policy with no deny rule never reaches this line today. Kept
+        // because the guard states the intended condition rather than relying on a refusal three
+        // screens up that exists for an unrelated reason — and stated as defensive rather than left to
+        // read as load-bearing. Above the `outOfScope` arm and below `unanalyzed`, matching the scan route's
+        // order so a target that trips both reports the same cause on both routes.
+        eprintln!(
+            "candor-query gate: NOT certified — the report says the scan did not READ {}. Their effects \
+             are absent because nothing looked, not because there are none, so the verdict is INCOMPLETE \
+             rather than a pass",
+            rep.unpeeked.join(", ")
         );
         2
     } else {

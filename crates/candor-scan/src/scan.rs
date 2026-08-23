@@ -2729,6 +2729,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut peek_read = false;
     let mut peek_unread: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut peek_unattributed = false;
+    // ⟨0.32⟩ DID THE PEEK ACTUALLY TRY? `peeked: false` has TWO causes — "opened it and failed" and
+    // "never asked" — and only the first is evidence of unread code. MEASURED as a defect in the first
+    // cut of this rung: the peek short-circuits when the policy carries no DENY rule (`rules` is the deny
+    // list; allow/forbid/only live in their own), so an `allow`-only policy left every excluded class
+    // `peeked: false` and a perfectly READABLE build.rs was refused with "this scan did not READ it" —
+    // false as a statement, and it refused three whole policy shapes on any tree with an exclusion. The
+    // flag is set where the reads actually begin, so it cannot drift from the short-circuit above it.
+    let peek_attempted = std::cell::Cell::new(false);
     let out_of_scope: Option<Vec<candor_report::OutOfScopeFinding>> = policy_path
         .as_ref()
         .and_then(|pp| std::fs::read_to_string(pp).ok())
@@ -2762,6 +2770,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if parsed.rules.is_empty() || excluded.is_empty() {
                 return Some(Vec::new());   // the policy STOOD — asked-and-clear, key present
             }
+            peek_attempted.set(true);
             let class_of: std::collections::BTreeMap<&str, &str> =
                 excluded.iter().map(|(p, c)| (p.as_str(), *c)).collect();
             // ⟨0.31⟩ NOTHING THE PEEK SEES MAY REACH THE VERDICT — see `while_peeking` in gate.rs.
@@ -3602,7 +3611,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 .filter(|e| !e.peeked && !e.judged_elsewhere)
                 .map(|e| e.class.as_str())
                 .collect();
-            if !unread.is_empty() && out_of_scope.is_some() && v.is_empty() {
+            if !unread.is_empty() && peek_attempted.get() && v.is_empty() {
                 let why = format!(
                     "gate NOT certified — this scan did not READ {}. Their effects are absent because \
                      nothing looked, not because there are none, so the verdict is INCOMPLETE rather \
