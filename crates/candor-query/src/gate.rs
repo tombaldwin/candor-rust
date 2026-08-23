@@ -244,12 +244,12 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
         // its recording site, so the two routes filter an identical set. An ABSENT `outOfScope` means
         // the producing scan was never ASKED (⟨0.29⟩ omits it with no policy), so the rule does not
         // bite; present-and-empty means asked-and-clear, which does — the ⟨0.26⟩ absent-vs-empty rule.
-        if matches!(candor_report::report_out_of_scope(&text), candor_report::KeyRead::Present(_)) {
-            if let candor_report::KeyRead::Present(ex) = candor_report::report_excluded(&text) {
-                out.unpeeked.extend(
-                    ex.iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class.clone()),
-                );
-            }
+        if matches!(candor_report::report_out_of_scope(&text), candor_report::KeyRead::Present(_))
+            && let candor_report::KeyRead::Present(ex) = candor_report::report_excluded(&text)
+        {
+            out.unpeeked.extend(
+                ex.iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class.clone()),
+            );
         }
         out.out_of_scope.extend(strict!(
             candor_report::report_out_of_scope(&text),
