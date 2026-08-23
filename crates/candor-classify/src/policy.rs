@@ -660,16 +660,38 @@ pub fn scope_matches_permitted(name: &str, scope: &str) -> bool {
     segs.windows(parts.len()).any(|w| w == parts.as_slice())
 }
 
+/// A TRAILING SEPARATOR MEANS EXACT SEGMENT — `app::` matches the segment `app` and nothing else,
+/// where bare `app` keeps the documented prefix behaviour and still matches `application_name`.
+///
+/// REPORTED FROM THE FIELD (ebman CI adoption, 2026-08-23) and reproduced: `forbid aws -> app` fired
+/// 14 times on honest AWS SDK calls because `app` prefix-matched `application_name`, and writing
+/// `app::` did not help — `name_segments` drops empty parts, so `app::` segmented to exactly `["app"]`
+/// and the separator never survived to mean anything. The reporter deleted the rule, which is the real
+/// cost: **the genuine `aws -> app` violation it existed to catch will now never fire, and nothing in
+/// the policy file records that a boundary stopped being checked.** The two available responses to the
+/// false positives — delete the rule, or widen the scope until it stops firing — end in the same place.
+///
+/// ADDITIVE ON PURPOSE. Bare `app` is unchanged, so no existing verdict moves; only `app::`, which
+/// today silently behaves as `app`, starts meaning what everyone who writes it intends. Silence was
+/// the worst of the three options available (match exactly / error as unsupported / quietly do
+/// nothing), because ⟨0.24⟩ §3.1 already rules that an unanswerable condition must be DISCLOSED rather
+/// than scored as satisfied — and a scope token that segments away is exactly that.
+fn scope_is_exact(scope: &str) -> bool {
+    let t = scope.trim_end();
+    t.ends_with("::") || t.ends_with('.')
+}
+
 pub fn scope_matches(name: &str, scope: &str) -> bool {
     let segs = name_segments(name);
     let parts = name_segments(scope);
     if parts.is_empty() || parts.len() > segs.len() {
         return false;
     }
+    let exact = scope_is_exact(scope);
     let (last, init) = parts.split_last().unwrap();
     segs.windows(parts.len()).any(|w| {
         let (w_last, w_init) = w.split_last().unwrap();
-        w_init == init && w_last.starts_with(last)
+        w_init == init && if exact { w_last == last } else { w_last.starts_with(last) }
     })
 }
 
