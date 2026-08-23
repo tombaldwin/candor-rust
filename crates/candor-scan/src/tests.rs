@@ -8581,3 +8581,172 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                    "the consumer went silent over a serialisation difference between two copies of one \
                     claim — ⟨0.21⟩ reads that absence as a purity claim");
     }
+
+
+    /// Effects of `name`, or EMPTY when the function is absent — the report lists only EFFECTFUL
+    /// functions, so "pure" and "not present" are the same observation. The over-charge controls need
+    /// this: `fn_entry` panics on a function that is (correctly) pure.
+    #[cfg(test)]
+    fn effs_opt(v: &serde_json::Value, name: &str) -> Vec<String> {
+        v["functions"].as_array().into_iter().flatten()
+            .find(|f| f["fn"] == name)
+            .map(effs).unwrap_or_default()
+    }
+
+    // ── std I/O HANDLE RECEIVERS ────────────────────────────────────────────────────────────────
+    // A method call on a receiver typed to a std I/O handle (`fn run(cmd: &mut Command)` calling
+    // `cmd.spawn()`) formed NO `Type::method` path at all: `visit_method_call` skipped every
+    // `std`/`core`/`alloc`-rooted receiver type, so the call never reached the classifier and the
+    // function certified PURE while it spawned a process — a silent false all-clear on the exact
+    // surface `deny Exec` exists to gate. Receiver typing itself was never at fault: the same
+    // function taking a `tokio::process::Command` was caught, because tokio is not std.
+    //
+    // The CONTROLS come first and they are the reason the widening is narrow: the routed set is the
+    // enumerated std HANDLE types (`is_std_effect_handle`), never the whole of std, because std's
+    // pure DATA types (`Metadata`, `DirEntry`, `Vec`, …) sit under the same coarse `std::fs::`
+    // prefix rules and would be charged an effect for reading a field.
+
+    /// CONTROL (over-charge, the mandated one): a crate that defines its OWN `Command` with its own
+    /// inherent `spawn` must stay PURE. The local type never expands to a std path through `uses`, so
+    /// the widening cannot reach it — this pins that, because a fix that reddens this control has
+    /// traded a false all-clear for a fabrication on a provably-pure local path.
+    #[test]
+    fn a_local_command_shadowing_std_is_not_charged_exec() {
+        let v = scan_src_to_json("localcmdshadow", "\
+            pub struct Command;\n\
+            impl Command { pub fn spawn(&self) {} }\n\
+            pub fn run(cmd: &Command) { cmd.spawn(); }\n");
+        assert!(!effs_opt(&v, "run").contains(&"Exec".to_string()),
+                "a LOCAL `Command::spawn` that does nothing must not inherit std's Exec — the \
+                 `local_types` shadowing case the std exclusion was protecting:\n{v:#}");
+    }
+
+    /// CONTROL (over-charge): the same shadowing for the Fs and Net handle types, since the widening
+    /// names three families and a control on one of them is not a control on the others.
+    #[test]
+    fn local_file_and_tcpstream_shadows_are_not_charged() {
+        let v = scan_src_to_json("localiohshadow", "\
+            pub struct File;\n\
+            impl File { pub fn write_all(&self, _b: &[u8]) {} }\n\
+            pub struct TcpStream;\n\
+            impl TcpStream { pub fn connect(&self) {} }\n\
+            pub fn w(f: &File) { f.write_all(b\"x\"); }\n\
+            pub fn c(s: &TcpStream) { s.connect(); }\n");
+        assert!(!effs_opt(&v, "w").contains(&"Fs".to_string()), "local File shadow:\n{v:#}");
+        assert!(!effs_opt(&v, "c").contains(&"Net".to_string()), "local TcpStream shadow:\n{v:#}");
+    }
+
+    /// CONTROL (over-charge): std's pure DATA types must NOT route. `Metadata::len` and
+    /// `DirEntry::path` read an already-fetched stat struct and issue no syscall, but they live under
+    /// the coarse `std::fs::` prefix rule — routing all of std would charge them Fs. This control is
+    /// what forces the routed set to be an enumerated handle list rather than "not a known-pure name".
+    #[test]
+    fn std_pure_data_type_receivers_are_not_routed() {
+        let v = scan_src_to_json("stdpuredata", "\
+            pub fn size(m: &std::fs::Metadata) -> u64 { m.len() }\n\
+            pub fn name(e: &std::fs::DirEntry) -> std::path::PathBuf { e.path() }\n\
+            pub fn push(v: &mut Vec<u8>) { v.push(1); }\n");
+        assert!(!effs_opt(&v, "size").contains(&"Fs".to_string()),
+                "`Metadata::len` reads a struct field — charging Fs is a fabrication:\n{v:#}");
+        assert!(!effs_opt(&v, "name").contains(&"Fs".to_string()),
+                "`DirEntry::path` performs no syscall:\n{v:#}");
+        assert!(effs_opt(&v, "push").is_empty(), "`Vec::push` is pure:\n{v:#}");
+    }
+
+    /// CONTROL (over-charge): on the types that DO route, the classifier's reviewed pure-accessor
+    /// carve-outs must still hold through the receiver route — the route must not become a second,
+    /// coarser door into rules that were already refined once (`local_addr`/`get_program` read back
+    /// state, `as_raw_fd` borrows a descriptor opened elsewhere).
+    #[test]
+    fn pure_accessors_on_routed_std_handles_stay_pure() {
+        let v = scan_src_to_json("stdhandleacc", "\
+            pub fn a(s: &std::net::TcpStream) { let _ = s.local_addr(); }\n\
+            pub fn b(c: &std::process::Command) { let _ = c.get_program(); }\n\
+            pub fn c(f: &std::fs::File) { let _ = f.as_raw_fd(); }\n\
+            pub fn d(s: &std::net::TcpStream) { let _ = s.peer_addr(); }\n");
+        for (name, eff) in [("a", "Net"), ("b", "Exec"), ("c", "Fs"), ("d", "Net")] {
+            assert!(!effs_opt(&v, name).contains(&eff.to_string()),
+                    "`{name}` is a pure read-back — the receiver route must not re-fabricate {eff}:\n{v:#}");
+        }
+    }
+
+    /// CONTROL (over-charge): `.clone()` keeps its exclusion. Through the `Arc`/`Rc`/`Box` deref-peel
+    /// an `Arc<File>` receiver types as `File`, so a routed `.clone()` would form `File::clone` and
+    /// charge Fs for a refcount bump that calls `Arc::clone`, not `File::clone`.
+    #[test]
+    fn clone_on_a_routed_std_handle_is_still_excluded() {
+        let v = scan_src_to_json("stdhandleclone", "\
+            use std::sync::Arc;\n\
+            pub fn k(f: &Arc<std::fs::File>) { let _ = f.clone(); }\n");
+        assert!(!effs_opt(&v, "k").contains(&"Fs".to_string()),
+                "`arc.clone()` is a refcount bump:\n{v:#}");
+    }
+
+    /// THE SIN, all five spellings that were confirmed to miss identically. Each of these functions
+    /// performs the effect its policy denies; before the fix every one of them reported `inferred: []`.
+    #[test]
+    fn std_io_handle_receiver_methods_are_charged() {
+        let v = scan_src_to_json("stdhandlesin", "\
+            use std::process::Command;\n\
+            use std::fs::File;\n\
+            use std::net::TcpStream;\n\
+            use std::io::Write;\n\
+            pub fn borrowed(cmd: &mut Command) { let _ = cmd.spawn(); }\n\
+            pub fn owned(mut cmd: Command) { let _ = cmd.spawn(); }\n\
+            pub fn fully_qualified(cmd: &mut std::process::Command) { let _ = cmd.spawn(); }\n\
+            pub fn file(f: &mut File) { let _ = f.write_all(b\"x\"); }\n\
+            pub fn sock(s: &mut TcpStream) { let _ = s.write_all(b\"x\"); }\n\
+            pub fn child(c: &mut std::process::Child) { let _ = c.kill(); }\n");
+        for name in ["borrowed", "owned", "fully_qualified"] {
+            assert!(effs(fn_entry(&v, name)).contains(&"Exec".to_string()),
+                    "`{name}` spawns a process and certified PURE — the cardinal sin:\n{v:#}");
+        }
+        assert!(effs(fn_entry(&v, "child")).contains(&"Exec".to_string()), "`Child::kill` is Exec:\n{v:#}");
+        assert!(effs(fn_entry(&v, "file")).contains(&"Fs".to_string()),
+                "`File::write_all` writes to disk:\n{v:#}");
+        assert!(effs(fn_entry(&v, "sock")).contains(&"Net".to_string()),
+                "`TcpStream::write_all` writes to a socket:\n{v:#}");
+    }
+
+    /// THE SIN, REOPENED BY ITS OWN FIX — found by fixture, not by review. Routing std handle
+    /// receivers forms `std::process::Command::spawn`, but `tail2` keeps only the last two segments,
+    /// so a crate that ALSO defines its own `Command` with a `spawn` puts that bare leaf in
+    /// `local_types`, the std path resolves to the LOCAL method, and `resolved_local` suppresses the
+    /// classifier. The genuine spawn certified clean again — the same false all-clear, now with a
+    /// local type's effects fabricated in its place. A std-qualified typed path is the classifier's.
+    #[test]
+    fn a_local_type_sharing_a_std_handles_name_cannot_capture_the_std_call() {
+        let v = scan_src_to_json("stdhandlecollide", "\
+            pub mod mine {\n\
+                pub struct Command;\n\
+                impl Command { pub fn spawn(&self) {} }\n\
+            }\n\
+            pub fn run(c: &mut std::process::Command) { let _ = c.spawn(); }\n");
+        assert!(effs(fn_entry(&v, "run")).contains(&"Exec".to_string()),
+                "a local `mine::Command::spawn` captured a std `Command::spawn` and silenced it:\n{v:#}");
+    }
+
+    /// The same hole through every OTHER receiver spelling the scanner can type. The gate that hid it
+    /// sat at the routing frontier, not at any one inference route, so a fixture over parameters alone
+    /// would not have shown whether fields, `Box` receivers and loop elements were also silent — they
+    /// were. (`let c = Command::new(..)` was never silent: the CONSTRUCTOR is a qualified call, which
+    /// is exactly the asymmetry that made a builder-only `constructs_only` red while a real spawn on a
+    /// parameter was green.)
+    #[test]
+    fn std_handle_receivers_are_charged_through_field_box_and_loop_spellings() {
+        let v = scan_src_to_json("stdhandlespell", "\
+            use std::process::Command;\n\
+            use std::io::Write;\n\
+            pub struct Holder { pub cmd: Command }\n\
+            impl Holder { pub fn go(&mut self) { let _ = self.cmd.spawn(); } }\n\
+            pub fn via_box(c: &mut Box<Command>) { let _ = c.spawn(); }\n\
+            pub fn via_loop(v: &mut Vec<std::fs::File>) {\n\
+                for f in v.iter_mut() { let _ = f.write_all(b\"x\"); }\n\
+            }\n");
+        assert!(effs(fn_entry(&v, "Holder::go")).contains(&"Exec".to_string()),
+                "a `Command` FIELD receiver:\n{v:#}");
+        assert!(effs(fn_entry(&v, "via_box")).contains(&"Exec".to_string()),
+                "a `Box<Command>` receiver (the smart-pointer deref-peel):\n{v:#}");
+        assert!(effs(fn_entry(&v, "via_loop")).contains(&"Fs".to_string()),
+                "a `File` LOOP-ELEMENT receiver:\n{v:#}");
+    }

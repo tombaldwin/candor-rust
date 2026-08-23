@@ -1892,9 +1892,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // caller (a phantom-edge fabrication — the precision failure). Its effect still flows via `classified` / κ above.
                 false
             } else if c.typed {
-                tail2(&c.path)
-                    .and_then(|t2| t2.split("::").next().map(str::to_string))
-                    .is_some_and(|ty| local_types.contains(&ty))
+                // A std/core/alloc-QUALIFIED typed path names STD's type, and the classifier owns it —
+                // the same rule the non-typed branch below states, now stated for the typed branch too.
+                // It could be left unsaid while no typed std path existed; the std I/O HANDLE receiver
+                // routing creates them, and without this the routing DEFEATS ITSELF: `tail2` throws the
+                // `std::process` qualifier away, so a crate that also defines its own `Command` puts
+                // that bare leaf in `local_types`, `std::process::Command::spawn` MIS-LINKS to the
+                // local method, and `resolved_local` then SUPPRESSES the classifier — the real spawn
+                // certifies clean again, with a local type's effects fabricated in its place. MEASURED
+                // on a fixture with a local `mine::Command::spawn` beside a std `Command` parameter:
+                // exit 0, the cardinal sin reopened by the fix that closed it.
+                //
+                // This is the invariant the external case already relies on and states two comments
+                // up — "an external `reqwest::Client::send` is left to the classifier (its type isn't
+                // local, so it can't mis-link to a same-named local `Client::send`)". For an external
+                // crate the leaf collision is unlikely; for `Command`/`File`/`Path` it is ordinary.
+                // The cost is a local extension-trait impl on a std type (`impl CommandExt for
+                // Command`) no longer contributing its edge: `by_tail2` keys BOTH that impl and a
+                // local `struct Command`'s method as `Command::spawn`, so honouring one means
+                // guessing between them — the collision the `resolved_local` guard exists to refuse.
+                !matches!(c.path.split("::").next().unwrap_or(""), "std" | "core" | "alloc")
+                    && tail2(&c.path)
+                        .and_then(|t2| t2.split("::").next().map(str::to_string))
+                        .is_some_and(|ty| local_types.contains(&ty))
             } else {
                 !matches!(cr, "std" | "core" | "alloc")
             };

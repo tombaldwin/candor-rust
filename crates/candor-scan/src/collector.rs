@@ -1363,24 +1363,49 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // the method-dispatch frontier: light, local type inference, no compiler.
         //
         // EXTERNAL types only. The external-crate rules are verb-precise (`ends_with("::execute")`), so
-        // they're safe to apply to an inferred method call. The std rules are coarse PREFIX matches
-        // (`std::fs::`, `std::process::Command`) written for free-function/constructor calls — applied to
-        // arbitrary method calls they mis-fire on pure ones (`File::as_raw_fd`, `Command::arg`). So skip
-        // std/core/alloc receivers: their free-function effects are already caught path-qualified, and an
-        // honest miss on a std method beats a wrong effect on a pure one.
+        // they're safe to apply to an inferred method call. MOST std rules are coarse PREFIX matches
+        // (`std::fs::`) written for free-function/constructor calls — applied to arbitrary method calls
+        // they mis-fire on the pure DATA types under the same prefix (`Metadata::len`, `DirEntry::path`).
+        // So std/core/alloc receivers are skipped by default, with two NAMED exceptions below where the
+        // classifier's rule is precise enough to answer a method call.
+        //
+        // The default was ONCE the whole story, and it hid a cardinal sin: with no exception for the
+        // handle types, `fn run(cmd: &mut Command) { cmd.spawn(); }` formed no path at all, reached no
+        // rule, and certified PURE under `deny Exec` — a silent false all-clear on a real subprocess
+        // spawn (`cc`'s `command_helpers::spawn` in the wild). Receiver typing was never the problem:
+        // the same function over a `tokio::process::Command` was caught, because tokio is not std. "An
+        // honest miss beats a wrong effect" was the right instinct for `std::fs::Metadata` and the wrong
+        // one for `std::fs::File`, and it was applied to both by a test on the crate ROOT.
         if let Some(ty) = self.resolve_recv_type(&node.receiver) {
             let cr = ty.split("::").next().unwrap_or("");
-            // EXCEPTION to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
+            // EXCEPTION 1 to the std exclusion: `std::path::Path`/`PathBuf` receivers route through —
             // the classifier has a VERB-PRECISE stat-family rule for them (metadata/read_dir/exists/…
             // → Fs; the pure join/file_name surface returns None), so the coarse-prefix mis-fire risk
             // doesn't apply. Without this an entire directory walker reads as pure (gix-dir: zero Fs).
             let std_path_recv = ty == "std::path::Path" || ty == "std::path::PathBuf";
+            // EXCEPTION 2: the std I/O HANDLE types (`Command`/`Child`, the TCP/UDP/Unix sockets,
+            // `File`) — an open descriptor whose every method is either the effect or a pure read-back
+            // the classifier already carves out. The membership rule, and what is deliberately left
+            // out (`OpenOptions`/`DirBuilder`/`ReadDir`, which have pure setters), are documented on
+            // `STD_EFFECT_HANDLES`. Keyed on the RESOLVED, use-expanded TYPE PATH, never a leaf: a
+            // crate's own `struct Command` expands to a bare `Command` (or `crate::…`) and cannot
+            // collide with `std::process::Command`, so the local-shadowing case the blanket exclusion
+            // also happened to cover stays covered — that is what the shadow controls pin.
+            //
+            // HALF ONE OF TWO. Emitting the path is not enough: `resolvable` in scan.rs keys local
+            // resolution on `tail2`, which DROPS the `std::process` qualifier this exception depends
+            // on, so a crate defining its own `Command` captured the std call there instead and
+            // suppressed the classifier. Both halves are needed for either to close the hole; see the
+            // `c.typed` branch of `resolvable`.
+            let std_handle_recv = candor_classify::is_std_effect_handle(&ty);
             // `.clone()` resolves to NO typed `Type::clone`: it is conventionally pure, and through the
             // smart-pointer deref-peel (type_path) an `Arc<T>`/`Rc<T>` receiver types as `T`, so
             // `arc.clone()` would form `T::clone` and FABRICATE — but `arc.clone()` calls the pointer's
             // own `Arc::clone` (a pure refcount bump), NEVER `T::clone`. An effectful `T::clone` is a rare
             // anti-pattern, so skipping the typed clone resolution is the safe choice (no fabrication).
-            if (!matches!(cr, "std" | "core" | "alloc") || std_path_recv) && leaf != "clone" {
+            if (!matches!(cr, "std" | "core" | "alloc") || std_path_recv || std_handle_recv)
+                && leaf != "clone"
+            {
                 let path = format!("{ty}::{leaf}");
                 self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
             }
