@@ -1712,6 +1712,9 @@ fn write_verdict(
         ignored,
         out_of_scope,
         net_partners,
+        // ⟨0.32⟩ this route cannot answer yet — it does not parse the report's `excluded`
+        // key. Empty until it does, so the two routes stay byte-equal.
+        &[]
     ) {
         Ok(j) => j,
         Err(e) => {
