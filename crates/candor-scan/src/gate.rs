@@ -678,6 +678,35 @@ pub(crate) static GATE_OUT_OF_SCOPE: std::sync::OnceLock<
 
 
 
+/// ⟨0.32⟩ The exclusion classes this scan did NOT READ, for the verdict document. Same storage shape
+/// and the same gating as `GATE_OUT_OF_SCOPE` above — and the note there applies verbatim: this is fed
+/// only when a `--gate-json` sink was asked for, so THE EXIT CODE MUST NOT READ IT. scan.rs decides the
+/// exit from its local `excluded_classes`; this only feeds the document. Ignoring that rule in
+/// candor-ts produced an exit arm that fired for `--gate-json` users and was silently inert for
+/// everyone else, which is the CI-gate hazard this project was handed from the field the same week.
+pub(crate) static GATE_UNPEEKED: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::OnceLock::new();
+
+/// Record the classes this scan did not read. Two conditions, both earned in candor-java:
+/// `judged_elsewhere` is the producer's carve-out for a DERIVED copy of already-judged code
+/// (`build-output`), and nothing is recorded unless the peek RAN — `peeked: false` also means no policy
+/// was configured and nothing was asked, which records an absence of QUESTION rather than of evidence.
+pub(crate) fn record_gate_unpeeked(excluded: &[candor_report::ExcludedClass], peek_ran: bool) {
+    if recording_suppressed() || !peek_ran { return; }
+    let unread: Vec<String> = excluded
+        .iter()
+        .filter(|e| !e.peeked && !e.judged_elsewhere)
+        .map(|e| e.class.clone())
+        .collect();
+    if !unread.is_empty() {
+        GATE_UNPEEKED
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .extend(unread);
+    }
+}
+
 /// ⟨0.31⟩ The ambient `net-partner` provenance for the verdict document — same storage shape as
 /// `GATE_OUT_OF_SCOPE` beside it, and fed only when a `--gate-json` sink was asked for.
 pub(crate) static GATE_NET_PARTNERS: std::sync::OnceLock<
@@ -1428,6 +1457,13 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .get()
         .map(|m| m.lock().unwrap().clone())
         .unwrap_or_default();
+    // ⟨0.32⟩ NOT YET READ — deliberately. The static is fed (see `record_gate_unpeeked`) and the
+    // verdict writer accepts the value, but supplying it HERE while `candor-query`'s `gate --report`
+    // route cannot would make `scan --policy` exit 2 where `gate --report` exits 0 over the SAME
+    // report — a §3.1 route asymmetry, which is the class of defect this rung exists to remove.
+    // candor-query does not parse the report's `excluded` key at all yet; that is the next step, and
+    // the behaviour lands when both routes can answer together.
+    let unpeeked: Vec<String> = Vec::new();
     match candor_report::gate_verdict_json_v31(
         &mut violations,
         coverage.as_ref(),
@@ -1439,6 +1475,7 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         &ignored,
         &out_of_scope,
         &net_partners,
+        &unpeeked,
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {

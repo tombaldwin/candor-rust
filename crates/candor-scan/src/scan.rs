@@ -3225,6 +3225,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // as the ⟨0.24⟩ "record the violations FIRST" fix one cause over: a document written on the way out of
     // an early return is a document missing whatever had not been recorded yet. (Review, MEASURED.)
     crate::gate::record_gate_out_of_scope(out_of_scope.as_deref().unwrap_or(&[]));
+    // ⟨0.32⟩ beside it, from the same local values and at the same point in the sequence. `out_of_scope`
+    // being Some(_) is the "the peek RAN" signal — ⟨0.29⟩ leaves it None when no policy was configured.
+    crate::gate::record_gate_unpeeked(&excluded_classes, out_of_scope.is_some());
     if let Some(pp) = policy_path {
         let Ok(text) = std::fs::read_to_string(&pp) else {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.

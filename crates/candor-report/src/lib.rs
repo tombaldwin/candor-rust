@@ -1221,7 +1221,7 @@ pub fn gate_verdict_json_v28(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        &[], &[],
+        &[], &[], &[],
     )
 }
 
@@ -1244,7 +1244,7 @@ pub fn gate_verdict_json_v30(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        out_of_scope, &[],
+        out_of_scope, &[], &[],
     )
 }
 
@@ -1266,10 +1266,12 @@ pub fn gate_verdict_json_v31(
     ignored: &[IgnoredLine],
     out_of_scope: &[OutOfScopeFinding],
     net_partners: &[NetPartners],
+    // ⟨0.32⟩ exclusion classes the scan did not READ — the caller supplies it from GATE_UNPEEKED.
+    unpeeked: &[String],
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        out_of_scope, net_partners,
+        out_of_scope, net_partners, unpeeked,
     )
 }
 
@@ -1305,7 +1307,7 @@ pub fn gate_verdict_json_v27(
     unevaluated: &[Unevaluated],
     zero_match: &[String],
 ) -> serde_json::Result<String> {
-    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[], &[])
+    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[], &[], &[])
 }
 
 /// The ONE verdict writer behind [`gate_verdict_json_v27`]/[`gate_verdict_json_v28`] — a single field
@@ -1322,6 +1324,8 @@ fn gate_verdict_json_impl(
     ignored: &[IgnoredLine],
     out_of_scope: &[OutOfScopeFinding],
     net_partners: &[NetPartners],
+    // ⟨0.32⟩ exclusion classes the scan did not READ, pre-filtered by the producer.
+    unpeeked: &[String],
 ) -> serde_json::Result<String> {
     violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
     // ⟨0.31⟩ …AND `outOfScope` FOR THE SAME REASON, which nothing was doing. §3.1 is BYTE equality, so
@@ -1388,11 +1392,11 @@ fn gate_verdict_json_impl(
     // ⟨0.30⟩ EITHER cause suppresses `ok`. `unanalyzed` is "I opened this file and could not read it";
     // `out_of_scope` is "I never opened it, and when I peeked afterwards it performed the denied effect".
     // Both mean the gate could not see enough of this tree to certify it.
-    // ⟨0.32⟩ THE THIRD CAUSE — a class this scan did not READ — is NOT wired here yet. It needs the
-    // `excluded` slice, which this function does not receive, so threading it through the public
-    // wrappers is the port's first step. The struct field is in place and round-trips; the VERDICT
-    // still ignores it, which is why candor-rust does not yet implement the rung.
-    let incomplete = !unanalyzed.is_empty() || !out_of_scope.is_empty();
+    // ⟨0.32⟩ THE THIRD CAUSE — a class this scan did not READ. ⟨0.30⟩ keys on what the peek FOUND, and
+    // a peek that could not open a file finds nothing, which is byte-identical to finding it clean.
+    // `unpeeked` arrives already filtered by the producer's `judged_elsewhere` carve-out and by whether
+    // the peek RAN, both applied at the recording site in candor-scan.
+    let incomplete = !unanalyzed.is_empty() || !out_of_scope.is_empty() || !unpeeked.is_empty();
     serde_json::to_string_pretty(&Verdict {
         spec: SPEC_VERSION,
         ok: violations.is_empty() && !incomplete,
@@ -1507,7 +1511,7 @@ mod tests {
         b.reverse();
 
         let render = |oos: &[OutOfScopeFinding]| {
-            gate_verdict_json_impl(&mut [], None, 1, &[], None, &[], &[], &[], oos, &[]).unwrap()
+            gate_verdict_json_impl(&mut [], None, 1, &[], None, &[], &[], &[], oos, &[], &[]).unwrap()
         };
         assert_eq!(render(&a), render(&b),
                    "the same findings in a different order produced different verdict documents. That is \
