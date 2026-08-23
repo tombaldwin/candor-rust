@@ -175,6 +175,62 @@ const PURE_FD_TRANSFER: &[&str] = &[
     "from_pathname",
 ];
 
+/// The std I/O **handle** types whose methods the scanner's receiver inference may route into
+/// `classify` as `Type::method`.
+///
+/// WHY A LIST AND NOT "std". The std rules in `classify` are a MIXTURE: a few are type-precise with
+/// reviewed pure-accessor carve-outs (`std::net::TcpStream` → Net minus `local_addr`/`peer_addr`/…;
+/// `std::process::Command` → Exec minus `get_program`/`get_args`/…), but most are coarse MODULE
+/// prefixes (`std::fs::` → Fs) written for free functions and constructors. Applied to arbitrary
+/// method calls, a coarse prefix charges an effect for reading a struct field: `std::fs::Metadata`,
+/// `DirEntry`, `Permissions` and `FileType` all sit under `std::fs::` and are pure DATA. So the
+/// scanner used to skip EVERY std-rooted receiver — which shut the door on the pure data types and on
+/// the real handles alike, and `fn run(cmd: &mut Command) { cmd.spawn(); }` certified PURE while it
+/// spawned a process (a silent false all-clear; the `cc` crate's `command_helpers::spawn` was a live
+/// instance). This list re-opens the door for the handles ONLY.
+///
+/// MEMBERSHIP RULE, and the reason it is safe to apply a whole-type rule to an inferred method call:
+/// a type belongs here only when EVERY method on it is either the effect itself or an already-carved-
+/// out pure read-back. That holds for an open descriptor's handle — a `File`/`TcpStream`/`Child` does
+/// nothing but I/O on the thing it owns — and the `PURE_FD_TRANSFER` guard at the top of `classify`
+/// exempts the `as_raw_fd`/`into_std` family for all of them before any prefix rule runs.
+///
+/// DELIBERATELY ABSENT, each because it has PURE SETTERS that the coarse `std::fs::` prefix would
+/// classify: `OpenOptions` (`o.read(true)`), `DirBuilder` (`b.recursive(true)`), and `ReadDir` (whose
+/// `next` is a syscall but whose rule cannot say so without saying it for the setters too). Their
+/// effectful entry points (`OpenOptions::new(..).open(..)`, `fs::read_dir`) are qualified calls that
+/// are already classified today, so this is a narrow residual, not the reported hole. Widening to
+/// them needs verb-precise rules written first — an ALLOWLIST of routed types under-reports whatever
+/// is missing from it, which is at least visible here as a named exclusion; a coarse rule applied to
+/// a setter FABRICATES on a provably-pure path, which is not recoverable by reading the list.
+///
+/// `std::path::Path`/`PathBuf` are NOT here: they are pure data with an effectful STAT sub-surface —
+/// the exact inverse shape — and they route through their own verb-precise carve-out in the scanner.
+const STD_EFFECT_HANDLES: &[&str] = &[
+    // Exec — the whole type is the subprocess boundary (`new` names a program, `arg`/`env` build the
+    // invocation, `spawn`/`output`/`status` run it); the read-back getters are already carved out.
+    "std::process::Command",
+    "std::process::Child",
+    // Net — an open socket. `connect`/`accept`/`read`/`write`/`shutdown`/`set_*` are socket syscalls;
+    // `local_addr`/`peer_addr`/`nodelay`/`ttl`/`take_error` are carved out.
+    "std::net::TcpStream",
+    "std::net::TcpListener",
+    "std::net::UdpSocket",
+    // Ipc — a Unix-domain socket, the same shape as the TCP/UDP handles above.
+    "std::os::unix::net::UnixStream",
+    "std::os::unix::net::UnixListener",
+    "std::os::unix::net::UnixDatagram",
+    // Fs — an open file. Every method reads, writes, syncs, truncates or stats it; the descriptor
+    // conversions are carved out by `PURE_FD_TRANSFER`.
+    "std::fs::File",
+];
+
+/// Is `ty` a std I/O handle type whose methods may be routed into `classify` by the scanner's
+/// receiver inference? See `STD_EFFECT_HANDLES` for the membership rule and the named exclusions.
+pub fn is_std_effect_handle(ty: &str) -> bool {
+    STD_EFFECT_HANDLES.contains(&ty)
+}
+
 /// Classify a resolved callee by the crate it belongs to and its full path.
 pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // Pure fd ownership-transfer/extraction leaves are never an effect, regardless of which std I/O
@@ -2143,6 +2199,67 @@ mod tests {
     }
 
     use super::*;
+
+    /// The routed-handle list's MEMBERSHIP RULE, enforced rather than merely documented.
+    ///
+    /// (a) Every routed type must have a whole-type rule that answers an ARBITRARY method on it.
+    /// If it did not, routing it would hand the scanner a path the classifier drops — motion with no
+    /// effect, and the silent under-report would survive the fix that was supposed to close it. The
+    /// probe leaf is deliberately a name no carve-out lists, so it measures the BASE rule.
+    ///
+    /// (b) The named exclusions stay excluded. `OpenOptions`/`DirBuilder`/`ReadDir` have PURE setters
+    /// that only the coarse `std::fs::` prefix would see, and `Metadata`/`DirEntry`/`Permissions` are
+    /// pure DATA under that same prefix — routing any of them charges an effect for reading a field.
+    #[test]
+    fn std_effect_handles_have_a_whole_type_rule_and_exclude_the_pure_surfaces() {
+        for ty in STD_EFFECT_HANDLES {
+            let probe = format!("{ty}::__candor_probe_verb");
+            assert!(
+                classify("std", &probe).is_some(),
+                "`{ty}` is routed into the classifier by receiver inference, but an arbitrary method \
+                 on it classifies to NOTHING — the routing cannot close any under-report"
+            );
+            assert!(is_std_effect_handle(ty), "the predicate must agree with the list");
+        }
+        for ty in [
+            "std::fs::OpenOptions", "std::fs::DirBuilder", "std::fs::ReadDir",
+            "std::fs::Metadata", "std::fs::DirEntry", "std::fs::Permissions", "std::fs::FileType",
+            "std::path::Path", "std::path::PathBuf", "std::vec::Vec",
+        ] {
+            assert!(!is_std_effect_handle(ty),
+                    "`{ty}` has a pure surface the coarse prefix rules would charge — it must not be \
+                     routed as a handle (Path/PathBuf route through their own verb-precise carve-out)");
+        }
+    }
+
+    /// The pure read-backs on the ROUTED types, which is what makes (a) above safe: a whole-type rule
+    /// answering every method is only acceptable because the genuinely-pure methods were carved out
+    /// first. Receiver routing is a second door into these rules, so it must not re-fabricate.
+    #[test]
+    fn routed_std_handles_keep_their_pure_accessor_carve_outs() {
+        for p in [
+            "std::process::Command::get_program", "std::process::Command::get_args",
+            "std::process::Command::get_envs", "std::process::Command::get_current_dir",
+            "std::process::Child::id",
+            "std::net::TcpStream::local_addr", "std::net::TcpStream::peer_addr",
+            "std::net::TcpStream::nodelay", "std::net::TcpStream::ttl",
+            "std::net::UdpSocket::take_error",
+            "std::fs::File::as_raw_fd", "std::fs::File::into_raw_fd",
+            "std::os::unix::net::UnixStream::as_raw_fd",
+        ] {
+            assert_eq!(classify("std", p), None, "`{p}` is a pure read-back");
+        }
+        // …and the verbs on the same types still answer, or the carve-outs would have eaten the rule.
+        for (p, want) in [
+            ("std::process::Command::spawn", "Exec"),
+            ("std::process::Child::wait", "Exec"),
+            ("std::fs::File::write_all", "Fs"),
+            ("std::net::TcpStream::write_all", "Net"),
+            ("std::os::unix::net::UnixStream::send", "Ipc"),
+        ] {
+            assert_eq!(classify("std", p), Some(want), "`{p}` must stay {want}");
+        }
+    }
 
     #[test]
     fn db_crates_are_calibrated() {
