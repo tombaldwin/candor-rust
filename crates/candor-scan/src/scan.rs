@@ -3588,6 +3588,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             crate::gate::record_gate_refusal(why);
             return (2, json_body);
         }
+        // ⟨0.32⟩ THE THIRD CAUSE — a class this scan did not READ. ⟨0.30⟩'s arm keys on what the peek
+        // FOUND, and a peek that could not open a file finds nothing, which is byte-identical to
+        // finding it clean. Decided from the LOCAL `excluded_classes`, never from GATE_UNPEEKED: that
+        // accumulator is fed only when `--gate-json` was requested, and an exit code must not depend on
+        // whether a machine-readable sink was asked for (the rule stated at gate.rs:670).
+        //
+        // AFTER the violation and withheld arms, deliberately — a certain violation dominates, and a
+        // rule that never ran is a better message than "something went unread".
+        {
+            let unread: Vec<&str> = excluded_classes
+                .iter()
+                .filter(|e| !e.peeked && !e.judged_elsewhere)
+                .map(|e| e.class.as_str())
+                .collect();
+            if !unread.is_empty() && out_of_scope.is_some() && v.is_empty() {
+                let why = format!(
+                    "gate NOT certified — this scan did not READ {}. Their effects are absent because \
+                     nothing looked, not because there are none, so the verdict is INCOMPLETE rather \
+                     than a pass",
+                    unread.join(", ")
+                );
+                eprintln!("candor-scan: {why}");
+                return (2, json_body);
+            }
+        }
         // Provable-purity disclosure (advisory — NEVER changes the verdict/exit): pure/deny layers that PASS
         // but are Unknown. Surfaces the gap automatically so an author learns their "pure" layer isn't
         // PROVABLY pure (eval/fixloop/DISPATCH-NOTE.md); the `candor-query unverified` query has the detail.
