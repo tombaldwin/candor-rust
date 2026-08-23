@@ -867,6 +867,15 @@ pub fn report_out_of_scope(text: &str) -> KeyRead<Vec<OutOfScopeFinding>> {
     read_key(text, "outOfScope")
 }
 
+/// ⟨0.32⟩ Parse a report's `excluded` envelope field — the SCOPE the producing scan recorded. The
+/// `gate --report` route needs it for the unread-classes rule: a class the producer marked
+/// `peeked: false`, and did not carve out as `judgedElsewhere`, is code that scan never read, and a
+/// verdict over it is INCOMPLETE. READ, never recomputed — this route has no target to re-derive an
+/// exclusion set from, the same reason `outOfScope` and `netPartners` ride the report.
+pub fn report_excluded(text: &str) -> KeyRead<Vec<ExcludedClass>> {
+    read_key(text, "excluded")
+}
+
 /// ⟨0.31⟩ Parse a report's `netPartners` envelope field — the ambient `net-partner` provenance the
 /// PRODUCER recorded. Read, never recomputed: this route has no target to anchor `net-partner` at, and
 /// re-classifying the report's hosts through the consumer's own config is the re-derivation ⟨0.24⟩

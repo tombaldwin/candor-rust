@@ -40,6 +40,8 @@ struct GateReport {
     /// only a document), which is exactly why the field rides the report and why §3.1's byte-equality
     /// holds here by construction rather than by two authors agreeing.
     out_of_scope: Vec<candor_report::OutOfScopeFinding>,
+    // ⟨0.32⟩ the exclusion classes the PRODUCING scan did not read.
+    unpeeked: Vec<String>,
     /// ⟨0.31⟩ one record per report that carried the key — a prefix can match several.
     net_partners: Vec<candor_report::NetPartners>,
     /// ⟨0.15⟩ the κ ledger's package NAMES, unioned across reports — the verdict's advisory note.
@@ -120,6 +122,7 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
         analyzed_count: 0,
         unanalyzed: Vec::new(),
         out_of_scope: Vec::new(),
+        unpeeked: Vec::new(),
         net_partners: Vec::new(),
         coverage_packages: BTreeSet::new(),
         judged_nothing_pkgs: Vec::new(),
@@ -236,6 +239,17 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
                 out.net_partners.push(np);
             }
             _ => {}
+        }
+        // ⟨0.32⟩ …and the SCOPE. Both conditions applied HERE, exactly as candor-scan applies them at
+        // its recording site, so the two routes filter an identical set. An ABSENT `outOfScope` means
+        // the producing scan was never ASKED (⟨0.29⟩ omits it with no policy), so the rule does not
+        // bite; present-and-empty means asked-and-clear, which does — the ⟨0.26⟩ absent-vs-empty rule.
+        if matches!(candor_report::report_out_of_scope(&text), candor_report::KeyRead::Present(_)) {
+            if let candor_report::KeyRead::Present(ex) = candor_report::report_excluded(&text) {
+                out.unpeeked.extend(
+                    ex.iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class.clone()),
+                );
+            }
         }
         out.out_of_scope.extend(strict!(
             candor_report::report_out_of_scope(&text),
@@ -1636,6 +1650,9 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         // makes §3.1 byte-equality hold on a route that cannot peek for itself.
         &rep.out_of_scope,
         &rep.net_partners,
+        // ⟨0.32⟩ off the REPORT — the same filtered set the scan route derives locally, which is what
+        // makes §3.1 byte-equality hold on a route that cannot peek for itself.
+        &rep.unpeeked,
         want_json,
         gate_json.as_deref(),
     ) {
@@ -1650,6 +1667,17 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             "candor-query gate: NOT certified — the report declares {} unit(s) candor could not analyze; \
              a gate cannot be green over unanalyzed code",
             rep.unanalyzed.len()
+        );
+        2
+    } else if !rep.unpeeked.is_empty() {
+        // ⟨0.32⟩ THE THIRD CAUSE, and the counterpart of candor-scan's arm — a class the PRODUCING scan
+        // did not read. Above the `outOfScope` arm and below `unanalyzed`, matching the scan route's
+        // order so a target that trips both reports the same cause on both routes.
+        eprintln!(
+            "candor-query gate: NOT certified — the report says the scan did not READ {}. Their effects \
+             are absent because nothing looked, not because there are none, so the verdict is INCOMPLETE \
+             rather than a pass",
+            rep.unpeeked.join(", ")
         );
         2
     } else if !rep.out_of_scope.is_empty() {
@@ -1686,6 +1714,8 @@ fn write_verdict(
     out_of_scope: &[candor_report::OutOfScopeFinding],
     // ⟨0.31⟩ the producer's ambient-partner provenance, copied — never recomputed here.
     net_partners: &[candor_report::NetPartners],
+    // ⟨0.32⟩ exclusion classes the producing scan did not READ.
+    unpeeked: &[String],
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -1712,9 +1742,8 @@ fn write_verdict(
         ignored,
         out_of_scope,
         net_partners,
-        // ⟨0.32⟩ this route cannot answer yet — it does not parse the report's `excluded`
-        // key. Empty until it does, so the two routes stay byte-equal.
-        &[]
+        // ⟨0.32⟩ the unread classes, off the report's `excluded` key.
+        unpeeked
     ) {
         Ok(j) => j,
         Err(e) => {

@@ -1362,7 +1362,21 @@ pub(crate) fn write_gate_json(exit_code: i32) {
     // which HAS a faithful verdict to emit — would be written as a config REFUSAL document, losing the
     // findings and telling the operator their policy failed to load. Same conflation the ⟨0.24⟩ note
     // above records for `violations`, one cause later.
-    if exit_code == 2 && unanalyzed.is_empty() && violations.is_empty() && out_of_scope.is_empty() {
+    // ⟨0.32⟩ …AND no unread class. THE SAME CONFLATION AS THE TWO NOTES ABOVE, ONE CAUSE LATER, and it
+    // fired on the first end-to-end run of this rung: an exit 2 whose whole content is "these classes
+    // went unread" was serialized as "your policy failed to load", which sends the operator to fix a
+    // config that is fine. Every new exit-2 cause has to be added here — the arm is a DENYLIST of causes
+    // that have a verdict to emit, so a cause nobody adds silently degrades to a refusal document.
+    let unpeeked_now: Vec<String> = GATE_UNPEEKED
+        .get()
+        .map(|m| m.lock().unwrap().clone())
+        .unwrap_or_default();
+    if exit_code == 2
+        && unanalyzed.is_empty()
+        && violations.is_empty()
+        && out_of_scope.is_empty()
+        && unpeeked_now.is_empty()
+    {
         let why = GATE_REFUSAL.get().cloned().unwrap_or_else(|| {
             "the gate config did not load (exit 2) — see stderr for the specific cause".to_string()
         });
@@ -1457,13 +1471,13 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .get()
         .map(|m| m.lock().unwrap().clone())
         .unwrap_or_default();
-    // ⟨0.32⟩ NOT YET READ — deliberately. The static is fed (see `record_gate_unpeeked`) and the
-    // verdict writer accepts the value, but supplying it HERE while `candor-query`'s `gate --report`
-    // route cannot would make `scan --policy` exit 2 where `gate --report` exits 0 over the SAME
-    // report — a §3.1 route asymmetry, which is the class of defect this rung exists to remove.
-    // candor-query does not parse the report's `excluded` key at all yet; that is the next step, and
-    // the behaviour lands when both routes can answer together.
-    let unpeeked: Vec<String> = Vec::new();
+// ⟨0.32⟩ the classes this scan did not READ, for the DOCUMENT. The exit code is decided separately,
+    // from the local `excluded_classes` in scan.rs — see GATE_UNPEEKED for why an accumulator gated on
+    // `--gate-json` must never feed an exit code.
+    let unpeeked: Vec<String> = GATE_UNPEEKED
+        .get()
+        .map(|m| m.lock().unwrap().clone())
+        .unwrap_or_default();
     match candor_report::gate_verdict_json_v31(
         &mut violations,
         coverage.as_ref(),
