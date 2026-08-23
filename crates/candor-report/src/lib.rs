@@ -374,7 +374,7 @@ pub struct ExcludedClass {
     /// partial answer being worse than an absent one.
     #[serde(default)]
     pub peeked: bool,
-    /// ⟨0.33⟩ TRUE when the files of this class are COPIES of code this same scan already judged — a
+    /// ⟨0.32⟩ TRUE when the files of this class are COPIES of code this same scan already judged — a
     /// jar or archive under a build tree is a derived copy of what was just analysed, so the class
     /// hides nothing and does not make the verdict INCOMPLETE.
     ///
@@ -1388,7 +1388,7 @@ fn gate_verdict_json_impl(
     // ⟨0.30⟩ EITHER cause suppresses `ok`. `unanalyzed` is "I opened this file and could not read it";
     // `out_of_scope` is "I never opened it, and when I peeked afterwards it performed the denied effect".
     // Both mean the gate could not see enough of this tree to certify it.
-    // ⟨0.33⟩ THE THIRD CAUSE — a class this scan did not READ — is NOT wired here yet. It needs the
+    // ⟨0.32⟩ THE THIRD CAUSE — a class this scan did not READ — is NOT wired here yet. It needs the
     // `excluded` slice, which this function does not receive, so threading it through the public
     // wrappers is the port's first step. The struct field is in place and round-trips; the VERDICT
     // still ignores it, which is why candor-rust does not yet implement the rung.

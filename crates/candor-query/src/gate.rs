@@ -321,7 +321,7 @@ fn gate_report_input_files(report_flag: Option<&str>) -> Vec<String> {
 /// from the classifier's fixpoints. Both feed the one `candor_classify::gate::gate`.
 pub(crate) struct ReportSignature {
     all: Vec<String>,
-    /// ⟨0.33⟩ key -> name. EMPTY while `all` still holds names; populated when the merge moves to
+    /// ⟨0.32⟩ key -> name. EMPTY while `all` still holds names; populated when the merge moves to
     /// `hash` keys, which is what stops one member answering for another. Plumbed ahead of that change
     /// so the two land separately and each can be verified on its own.
     display: std::collections::HashMap<String, String>,
@@ -381,7 +381,7 @@ impl ReportSignature {
 /// read the gate's own signature, so "which classes does this function have" has one answer on this side
 /// of the report boundary. The `GateReport` envelope (the ⟨0.21⟩ manifest, the κ ledger) is the
 /// VERDICT's input and stays with the gate.
-/// ⟨0.33⟩ THE UNIT KEY — `hash` when the producer emitted one, else the bare name.
+/// ⟨0.32⟩ THE UNIT KEY — `hash` when the producer emitted one, else the bare name.
 ///
 /// Exposed because `report_signature`'s accumulators are keyed by it, and the ADVISORY verbs read those
 /// accumulators directly (deliberately — `unverified` and `fix-gate` select over exactly the set the gate
@@ -405,7 +405,7 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut display: HashMap<String, String> = HashMap::new();
 
-    // ⟨0.33⟩ KEY BY `hash`, NEVER BY BARE `fn` — SPEC §2.2, and the reason it is a MUST. MEASURED on
+    // ⟨0.32⟩ KEY BY `hash`, NEVER BY BARE `fn` — SPEC §2.2, and the reason it is a MUST. MEASURED on
     // candor-query 0.31.0: `gate --report` over one member refused a scoped rule at exit 2, and the SAME
     // member gated beside an unrelated sibling exited 0 with `policy ✓`.
     //
@@ -714,7 +714,7 @@ pub(crate) fn unanswerable_pairs(
     let mut out = Vec::new();
     for r in &p.rules {
         for q in &sig.all {
-            // ⟨0.33⟩ match the NAME, not the unit key — a policy scope is written against names
+            // ⟨0.32⟩ match the NAME, not the unit key — a policy scope is written against names
             // (`deny Net app`), and `sig.all` holds hashes since the merge moved to them.
             let q_name = sig.display.get(q).map(|v| v.as_str()).unwrap_or(q.as_str());
             if let Some(s) = &r.scope
@@ -730,7 +730,7 @@ pub(crate) fn unanswerable_pairs(
             {
                 out.push(Unanswerable {
                     rule: r.raw.trim().to_string(),
-                    func: q_name.to_string(),   // ⟨0.33⟩ the NAME, not the unit key
+                    func: q_name.to_string(),   // ⟨0.32⟩ the NAME, not the unit key
                     why: format!(
                         "it narrows on the Net DESTINATION CLASS, but `{q}` carries Net with no \
                          `netClass` in this report — the field the filter reads is absent, so the \

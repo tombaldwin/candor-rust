@@ -65,7 +65,7 @@ impl<'a, E: AsRef<str> + Ord> GateInput<'a, E> {
 pub struct GateInput<'a, E: AsRef<str> + Ord> {
     /// Every UNIT the gate ranges over, in the caller's order — an opaque KEY, not necessarily a name.
     pub all: &'a [String],
-    /// ⟨0.33⟩ key -> the name to MATCH and DISPLAY. Empty means the keys are already names.
+    /// ⟨0.32⟩ key -> the name to MATCH and DISPLAY. Empty means the keys are already names.
     ///
     /// A multi-report gate must join by `hash` and never by bare `fn` (SPEC §2.2), because two members
     /// of a workspace legitimately share a name — and merging them was measured turning a refusal into
@@ -279,7 +279,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
     // for the verb: no end-to-end test could have separated this from a classifier defect.
     let mut seen_fn: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for q in gi.all {
-        // ⟨0.33⟩ the key identifies the unit; the NAME is what a human reads and a scope matches.
+        // ⟨0.32⟩ the key identifies the unit; the NAME is what a human reads and a scope matches.
         let disp_q = gi.disp(q);
         if !seen_fn.insert(q.as_str()) {
             continue;
