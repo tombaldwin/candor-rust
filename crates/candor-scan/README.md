@@ -98,6 +98,18 @@ candor-scan [<dir>] [--out <prefix>] [--json] [--include-tests] [--policy <file>
 - `--json` — print the report to stdout instead of writing files.
 - `--include-tests` — also scan `tests/`/`benches/`/`examples/` and `#[cfg(test)]` modules (off by
   default, so the report describes the crate, not its test harness).
+
+  **Caveat, reported from the field and worth knowing before you write a policy against it.** candor
+  reads source syntactically and does not evaluate `cfg`, so under `--include-tests` it reports the
+  effects of **both** arms of a `#[cfg(not(test))]` / `#[cfg(test)]` pair — including the arm that is
+  compiled *out* under test. Measured on a real codebase: 102 test functions reported as reaching
+  `Clipboard`, all 102 through the `#[cfg(not(test))]` arm of a single `yank()` helper.
+
+  That is the safe direction for a scanner that does not evaluate `cfg` — over-reporting an effect
+  never hides one — but it makes a policy of the form *"the test harness reaches no clipboard, no
+  `$HOME`, no network"* unusable on any codebase that uses `cfg(test)` stubs to hold exactly that
+  boundary, which is the standard way to hold it. Until candor is `cfg`-aware, such a policy needs
+  either a scope that excludes the stub or no `--include-tests`.
 - `--policy <file>` / `--gate-json <file|->` — the policy gate + structured verdict (above).
 - `CANDOR_BASELINE=<path|prefix>` — the AS-EFF-005 regression guard (above).
 - `.candor/config` — the checked-in configuration (spec §3.4), discovered by walking up from the
