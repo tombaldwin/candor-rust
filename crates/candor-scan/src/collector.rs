@@ -2435,6 +2435,160 @@ pub(crate) fn resolve_target<'a>(
     }
 }
 
+/// Above how many definitions one re-exported NAME may stand for before the alias is dropped. A name
+/// with several targets is normal and correct — a `#[cfg]`-redirected platform module contributes one
+/// definition per target — but only up to a point: past it the edge is not a platform split, it is
+/// something this index has mis-read, and an honest miss beats a fan-out nobody can explain. The bound
+/// matches the trait-CHA fallback's, for the same reason.
+const REEXPORT_FANOUT_MAX: usize = 12;
+
+/// How many re-export HOPS a name may travel. Re-exports chain (`a` re-exports `a::b`, which re-exports
+/// `a::b::c`), so the alias index is a fixpoint; the bound is what stops a cyclic `pub use` pair spinning.
+/// Separate from the fan-out bound above: they limit different things and neither should follow the other.
+const REEXPORT_CHAIN_MAX: usize = 12;
+
+/// Sentinel "edge id" for a name a module DECLARES itself, as opposed to one a `pub use` brought in.
+const DECLARED_HERE: usize = usize::MAX;
+
+/// Fold the crate's `pub use` RE-EXPORT edges into the alias index `reexport_target` consults:
+/// `tail2 of <module>::<name>` -> the definition qual(s) that name stands for.
+///
+/// THE PROBLEM. The intra-crate call graph keys a qualified call on its last TWO segments. A definition
+/// re-exported out of its own module is nameable by two different tails — `platform::doit` where it is
+/// written, `imp::doit` where callers write it — and only the first was ever indexed, so the caller
+/// resolved to nothing and read silent-pure (tempfile's eight `NamedTempFile` entry points, whose only
+/// `Fs` sits behind `pub use self::platform::*`).
+///
+/// THE RULES, each of which is a direction this index refuses to guess in:
+///   * A name the module DECLARES ITSELF is never aliased — the primary index already owns it, and in
+///     Rust a declaration shadows a glob import anyway.
+///   * A name reaching a module through TWO OR MORE independent `pub use` edges is dropped. That is the
+///     never-guess rule the leaf and tail2 indexes already apply, one level up.
+///   * ONE edge standing for several definitions is KEPT and charged as a union — that is the cfg
+///     platform split (`#[cfg_attr(unix, path = "unix.rs")] mod platform;`), where the scanner already
+///     analyses every branch and `cfg_if` already unions every arm.
+///   * A tail2 key two DIFFERENT modules would answer differently is dropped, because the key cannot
+///     tell them apart. (`file::imp::create` and `dir::imp::create` are both `imp::create` — and so is
+///     the CALL, which is why the primary index cannot tell them apart either.)
+///
+/// Fixpoint, because re-exports chain: `a` re-exports `a::b`, which re-exports `a::b::c`, and `a::doit()`
+/// has to travel both edges. Bounded, so a cyclic `pub use` pair cannot spin.
+pub(crate) fn reexport_aliases(edges: &[Reexport], fns: &[FnInfo]) -> HashMap<String, Vec<String>> {
+    use std::collections::BTreeMap;
+    // module key -> name -> (which edges put it there, which definitions it stands for). The module key
+    // is the fn qual minus its last segment, so a FREE fn keys on its module (`imp::platform`) and a
+    // METHOD keys one level deeper (`imp::platform::Type`) — which is what makes a glob from a module
+    // pick up that module's free functions and nothing else.
+    let mut exported: BTreeMap<String, BTreeMap<String, (BTreeSet<usize>, BTreeSet<String>)>> =
+        BTreeMap::new();
+    for f in fns {
+        // A synthetic lazy-init unit is reachable only through the forcing edge its own qual spells out.
+        if f.qual.starts_with(LAZY_UNIT_PREFIX) {
+            continue;
+        }
+        let Some((m, n)) = f.qual.rsplit_once("::") else { continue };
+        let e = exported.entry(m.to_string()).or_default().entry(n.to_string()).or_default();
+        e.0.insert(DECLARED_HERE);
+        e.1.insert(f.qual.clone());
+    }
+    for _ in 0..REEXPORT_CHAIN_MAX {
+        let mut changed = false;
+        for (i, ed) in edges.iter().enumerate() {
+            let mut adds: Vec<(String, String)> = Vec::new();
+            for src in &ed.from {
+                let Some(names) = exported.get(src) else { continue };
+                if ed.name == "*" {
+                    for (n, (_, quals)) in names {
+                        adds.extend(quals.iter().map(|q| (n.clone(), q.clone())));
+                    }
+                } else if let Some((_, quals)) = names.get(&ed.name) {
+                    adds.extend(quals.iter().map(|q| (ed.alias.clone(), q.clone())));
+                }
+            }
+            for (n, q) in adds {
+                let e = exported.entry(ed.module.clone()).or_default().entry(n).or_default();
+                changed |= e.0.insert(i);
+                changed |= e.1.insert(q);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // WHO COULD CLAIM EACH tail2 KEY, before any other rule has run. A call writes `imp::create`, and
+    // `dir::imp` and `file::imp` are both spelled `imp` in a 2-segment tail — the key names neither, so
+    // it must answer for neither.
+    //
+    // MEASURED: the first cut of this index counted claimants only among the aliases that SURVIVED the
+    // per-module rules, and tempfile's `dir::imp` had already been dropped by the two-edge rule (its
+    // re-export is a `#[cfg]` pair). One claimant was left standing, the key looked unambiguous, and
+    // `dir::create` — which only makes a directory — inherited `file::imp`'s temp-name `Env` + `Rand`.
+    // A key is ambiguous because of who COULD claim it, not who is left after the other filters.
+    let mut claimants: BTreeMap<String, BTreeSet<&String>> = BTreeMap::new();
+    for (module, names) in &exported {
+        // The crate ROOT has no second segment to key on — and a root re-export already resolves, both
+        // by bare leaf and through `collect_root_reexports`.
+        if module.is_empty() {
+            continue;
+        }
+        let mlast = module.rsplit("::").next().unwrap_or(module);
+        for (name, (from_edges, _)) in names {
+            // A name the module only DECLARES is not a claim on the alias index: the primary tail2 index
+            // holds it, and `reexport_target` steps aside whenever that index has the key at all.
+            if from_edges.iter().all(|e| *e == DECLARED_HERE) {
+                continue;
+            }
+            claimants.entry(format!("{mlast}::{name}")).or_default().insert(module);
+        }
+    }
+    let mut keyed: HashMap<String, Vec<String>> = HashMap::new();
+    for (module, names) in &exported {
+        if module.is_empty() {
+            continue;
+        }
+        let mlast = module.rsplit("::").next().unwrap_or(module);
+        for (name, (from_edges, quals)) in names {
+            if from_edges.contains(&DECLARED_HERE) || from_edges.len() != 1 {
+                continue;
+            }
+            if quals.is_empty() || quals.len() > REEXPORT_FANOUT_MAX {
+                continue;
+            }
+            let key = format!("{mlast}::{name}");
+            if claimants.get(&key).is_none_or(|c| c.len() != 1) {
+                continue;
+            }
+            keyed.insert(key, quals.iter().cloned().collect());
+        }
+    }
+    keyed
+}
+
+/// The definition(s) a qualified FREE call names through a SUBMODULE-level `pub use` re-export, for a
+/// call `resolve_target` could not place. Consulted ONLY when the call's 2-segment tail names NO
+/// definition at all, so an alias can never override a definition nor break an ambiguity tie — it is a
+/// weaker fact than a definition and is used only where there was nothing.
+///
+/// METHOD calls are excluded outright. A re-export alias keys on `<module>::<fn>`, which shares its key
+/// space with `<Type>::<method>`; letting one answer a method call would mark that call locally-resolved
+/// and so SUPPRESS the classifier for a receiver the classifier owns — trading a miss for a wrong
+/// answer. A re-export is about free functions named through a module: exactly the non-method form.
+pub(crate) fn reexport_target<'a>(
+    path: &str,
+    method: bool,
+    by_tail2: &HashMap<String, Vec<String>>,
+    by_reexport: &'a HashMap<String, Vec<String>>,
+) -> Option<&'a Vec<String>> {
+    if method || !path.contains("::") {
+        return None;
+    }
+    let t2 = tail2(path)?;
+    if by_tail2.contains_key(&t2) {
+        return None;
+    }
+    by_reexport.get(&t2)
+}
+
 /// The parsed BLOCKS of a `cfg_if::cfg_if! { .. }` body — one per arm. `cfg_if`'s grammar is a chain of
 /// `if #[cfg(COND)] { BLOCK }` clauses (each cfg is an outer attribute on the arm), optionally chained by
 /// `else if #[cfg(COND)] { BLOCK }`, and optionally terminated by a bare `else { BLOCK }`. We keep EVERY

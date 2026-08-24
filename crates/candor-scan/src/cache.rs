@@ -44,13 +44,16 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev9: FileDecls gained `reexports` (the SUBMODULE-level `pub use` edges). A rev8 entry has none, so
+    // it deserializes as an EMPTY vec — i.e. "this file re-exports nothing", which is precisely the
+    // silent under-report the field exists to close, served from a warm cache and invisible.
     // rev8: FileCache gained `aborted` (the contained-parser-abort disclosure). A rev7 entry has no
     // such field, so it deserializes as None — i.e. "this file was analysed and has no functions",
     // which for an entry written by the aborting run is exactly the false all-clear rev8 exists to
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev8/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev9/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -118,12 +121,21 @@ pub(crate) struct FileDecls {
     /// See `collect_root_reexports`. Empty for a non-root file.
     #[serde(default)]
     pub(crate) root_reexports: HashMap<String, String>,
+    /// This file's SUBMODULE-level `pub use` RE-EXPORT edges (see `Reexport` / `collect_reexports`) —
+    /// every module in the file, not just its top level. The crate-wide union feeds the alias index a
+    /// qualified call falls back to when its 2-segment tail names no definition.
+    #[serde(default)]
+    pub(crate) reexports: Vec<Reexport>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`). `modpath` is the
 /// file's module path — the ROOT file (`""`) additionally contributes its crate-root re-exports, a
 /// crate-wide fact seeded into every file's `use` map (see `root_reexports`).
-pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str) -> FileDecls {
+pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -> FileDecls {
+    let modpath = module_path(rel);
+    let modpath = modpath.as_str();
+    // `#[path = "…"]` on a `mod` resolves against the DIRECTORY of the file that declares it.
+    let dir = rel.parent().unwrap_or(Path::new("")).to_path_buf();
     let mut uses = HashMap::new();
     let mut fields = HashMap::new();
     let mut field_elem = HashMap::new();
@@ -166,6 +178,14 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, modpath: &str
         blanket_methods,
         // Crate-root re-exports are a ROOT-file fact only; a submodule's `use crate::X` seeds against them.
         root_reexports: if modpath.is_empty() { collect_root_reexports(items) } else { HashMap::new() },
+        // …and the SUBMODULE-level re-exports, which every file can contribute (the crate root included:
+        // a `pub use self::platform::*` at the root is BOTH a root re-export and a module-alias edge, and
+        // the two answer different questions — see `Reexport`).
+        reexports: {
+            let mut v = Vec::new();
+            collect_reexports(items, modpath, &dir, include_tests, &mut v);
+            v
+        },
     }
 }
 
@@ -194,6 +214,9 @@ pub(crate) struct MergedDecls {
     /// file. Seeded — under `crate::<name>` keys — into every file's `use` map at Pass B so a `use crate::X`
     /// / `crate::X::foo` in ANY file resolves through the crate-root re-export (`root_reexports`).
     pub(crate) root_reexports: HashMap<String, String>,
+    /// Every file's SUBMODULE-level `pub use` re-export edges, concatenated in file walk order. Turned
+    /// into the tail2-keyed alias index by `reexport_aliases`.
+    pub(crate) reexports: Vec<Reexport>,
 }
 
 /// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics
@@ -299,6 +322,10 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
         // Only the ROOT file populates this, so there is at most one contributor — a plain insert.
         acc.root_reexports.insert(k.clone(), v.clone());
     }
+    // Re-export EDGES are facts about distinct modules — they never collide, so they concatenate. The
+    // caller walks files in a fixed order and `reexport_aliases` folds them into sorted maps, so the
+    // resulting index does not depend on this order.
+    acc.reexports.extend(fd.reexports.iter().cloned());
 }
 
 /// A CANONICAL, order-stable digest of the merged decl index — the gate that decides whether a cached
@@ -503,6 +530,26 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push_str(k);
         s.push('=');
         s.push_str(&m.root_reexports[k]);
+    }
+    s.push('\n');
+    // reexports — the SUBMODULE-level `pub use` edges, SORTED (they are facts about distinct modules; the
+    // walk order they arrive in carries no meaning). They steer which definition a qualified call in
+    // ANOTHER file resolves to, which is the same reason `root_reexports` is here.
+    //
+    // Folded in even though they are consumed AFTER Pass B (`reexport_aliases` runs over the assembled
+    // `fns`, a stage re-derived on every scan) — because "this field cannot reach a cached FnInfo" is
+    // exactly the reasoning that left `deref_target` out of this digest for months. Over-invalidating
+    // costs a re-derivation nobody notices; under-invalidating publishes a stale purity claim.
+    s.push_str("reexports");
+    let mut rx: Vec<String> = m
+        .reexports
+        .iter()
+        .map(|r| format!("{}<-{}::{} as {}", r.module, r.from.join(","), r.name, r.alias))
+        .collect();
+    rx.sort();
+    for r in rx {
+        s.push('|');
+        s.push_str(&r);
     }
     s.push('\n');
     // active cfg-features — items behind an inactive feature are skipped in Pass B, so a change to the

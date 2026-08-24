@@ -205,6 +205,255 @@ pub(crate) fn submodule_uses(
     subuses
 }
 
+// ── SUBMODULE-LEVEL RE-EXPORTS ────────────────────────────────────────────────────────────────────
+//
+// `collect_root_reexports` answers "what does the CRATE ROOT re-export", because a submodule's
+// `use crate::net` cannot see the root's `pub use x::net` from its own file. The mirror-image question —
+// "what does THIS module re-export, so that a call written ELSEWHERE and qualified by this module names
+// it" — had no answer at all, and the intra-crate call graph keys on the last TWO segments, so the two
+// spellings of one function never met:
+//
+//     src/lib.rs            mod imp;  pub fn go() { imp::doit(); }         call tail2:  imp::doit
+//     src/imp/mod.rs        mod platform;  pub use self::platform::*;
+//     src/imp/platform.rs   pub fn doit() { Command::new("sh").spawn(); }  def  tail2:  platform::doit
+//
+// `go` reported NOTHING. The named spelling (`pub use self::platform::doit;`) missed identically, so the
+// failure is the submodule re-export and not the glob. `collect_reexports` records the edge; scan.rs
+// turns the crate's edges into an ALIAS index and consults it only where a qualified tail names no
+// definition at all (see `reexport_aliases` / `reexport_target`).
+
+/// The `#[path = "…"]` values on a `mod` declaration, including the ones carried by a
+/// `#[cfg_attr(COND, path = "…")]`. SEVERAL are normal and are all kept: the platform-module idiom
+/// (`#[cfg_attr(unix, path = "unix.rs")] #[cfg_attr(windows, path = "windows.rs")] mod platform;`, which
+/// is tempfile's `src/file/imp/mod.rs` verbatim) names a different file per target, and the scanner
+/// analyses EVERY `#[cfg]` branch — so the module has several bodies here, exactly as `cfg_if` arms do.
+fn mod_path_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    fn take(m: &syn::Meta, out: &mut Vec<String>) {
+        let syn::Meta::NameValue(nv) = m else { return };
+        if !nv.path.is_ident("path") {
+            return;
+        }
+        if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+            let v = s.value();
+            if !v.trim().is_empty() && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    for a in attrs {
+        if a.path().is_ident("path") {
+            take(&a.meta, &mut out);
+        } else if a.path().is_ident("cfg_attr") {
+            // `#[cfg_attr(COND, attr, …)]` — the first element is the condition, the rest are the
+            // attributes it would apply. Only the `path = "…"` ones matter here; the CONDITION is
+            // deliberately discarded, matching how every other `#[cfg]` branch is treated.
+            if let Ok(items) = a.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) {
+                for m in items.iter().skip(1) {
+                    take(m, &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Lexically normalise a source-relative path (`src/imp/../shared/x.rs` -> `src/shared/x.rs`) so
+/// `module_path` sees the same spelling the file walk produced. Purely textual — no filesystem access,
+/// so it cannot depend on what happens to exist.
+fn normalize_rel(p: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// `mod NAME;` / `mod NAME { … }` declarations at ONE module level -> the module path(s) their body is
+/// analysed under. Without a `#[path]` redirect that is simply `<modpath>::<NAME>`, which is what
+/// `module_path` yields for both `NAME.rs` and `NAME/mod.rs`. With one, the target is resolved as a FILE
+/// path relative to `dir` and then run through `module_path` — the scanner names a file by where it SITS,
+/// so resolving to the file and asking `module_path` is exactly right even where Rust's own module path
+/// would differ (a `#[path]` on a `mod` in a non-`mod.rs` file).
+fn mod_targets(
+    items: &[syn::Item],
+    modpath: &str,
+    dir: &Path,
+    include_tests: bool,
+) -> HashMap<String, Vec<String>> {
+    let mut m = HashMap::new();
+    for it in items {
+        let syn::Item::Mod(md) = it else { continue };
+        if !include_tests && is_cfg_test(&md.attrs) {
+            continue;
+        }
+        let name = md.ident.to_string();
+        let mut targets: Vec<String> = Vec::new();
+        for p in mod_path_attrs(&md.attrs) {
+            let mp = module_path(&normalize_rel(&dir.join(p)));
+            if !targets.contains(&mp) {
+                targets.push(mp);
+            }
+        }
+        if targets.is_empty() {
+            targets.push(if modpath.is_empty() { name.clone() } else { format!("{modpath}::{name}") });
+        }
+        m.insert(name, targets);
+    }
+    m
+}
+
+/// Flatten a `use` tree into `(source module segments, source name, visible-as name)` triples. A glob
+/// yields `("*", "*")` with the whole prefix as the module.
+///
+/// `use a::b::{self, …}` (re-exporting the MODULE `b` under its own name) is DELIBERATELY skipped: this
+/// index maps NAMES to function definitions, and a module alias would need the whole path rewritten
+/// rather than one name aliased. Skipping it is the under-report direction.
+fn use_leaves(tree: &syn::UseTree, prefix: Vec<String>, out: &mut Vec<(Vec<String>, String, String)>) {
+    match tree {
+        syn::UseTree::Path(p) => {
+            let mut pf = prefix;
+            pf.push(p.ident.to_string());
+            use_leaves(&p.tree, pf, out);
+        }
+        syn::UseTree::Name(n) => {
+            let id = n.ident.to_string();
+            if id != "self" {
+                out.push((prefix, id.clone(), id));
+            }
+        }
+        syn::UseTree::Rename(r) => {
+            let id = r.ident.to_string();
+            if id != "self" {
+                out.push((prefix, id, r.rename.to_string()));
+            }
+        }
+        syn::UseTree::Group(g) => {
+            for t in &g.items {
+                use_leaves(t, prefix.clone(), out);
+            }
+        }
+        syn::UseTree::Glob(_) => out.push((prefix, "*".to_string(), "*".to_string())),
+    }
+}
+
+/// The module path(s) a `use` prefix names, or EMPTY when it names nothing local (an external crate).
+///
+/// Only `self::` / `super::` / `crate::` and the Rust-2018 UNIFORM-PATH form (a bare head segment that
+/// this very module DECLARES as a `mod` — tempfile's `pub use unix::*;`) resolve. A bare head segment
+/// that names no local `mod` is an EXTERNAL crate and yields nothing: assuming it were local is how an
+/// alias index would start answering for paths that name no item in this crate.
+fn resolve_use_base(segs: &[String], modpath: &str, mods: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut i = 0usize;
+    let mut bases: Vec<String> = match segs.first().map(String::as_str) {
+        Some("self") => {
+            i = 1;
+            vec![modpath.to_string()]
+        }
+        Some("crate") => {
+            i = 1;
+            vec![String::new()]
+        }
+        Some("super") => {
+            let mut m = modpath.to_string();
+            while segs.get(i).map(String::as_str) == Some("super") {
+                match m.rsplit_once("::") {
+                    Some((p, _)) => m = p.to_string(),
+                    None if !m.is_empty() => m = String::new(),
+                    // more `super`s than the module has ancestors — impossible in code that compiles,
+                    // and answering anyway would name the wrong module.
+                    None => return Vec::new(),
+                }
+                i += 1;
+            }
+            vec![m]
+        }
+        Some(head) if mods.contains_key(head) => {
+            i = 1;
+            mods[head].clone()
+        }
+        _ => return Vec::new(),
+    };
+    // Having landed on THIS module, the next segment may be one of its own `mod` declarations — and that
+    // is where a `#[path]` redirect has to be honoured (`self::platform` -> `imp::unix`/`imp::windows`).
+    // Only at this module's level: no other module's `mod` declarations are in `mods`.
+    if bases.len() == 1 && bases[0] == modpath {
+        if let Some(t) = segs.get(i).and_then(|n| mods.get(n)) {
+            bases = t.clone();
+            i += 1;
+        }
+    }
+    let rest = segs[i..].join("::");
+    bases
+        .into_iter()
+        .map(|b| match (b.is_empty(), rest.is_empty()) {
+            (_, true) => b,
+            (true, false) => rest.clone(),
+            (false, false) => format!("{b}::{rest}"),
+        })
+        .collect()
+}
+
+/// Collect this file's `pub use` RE-EXPORT edges, recursing into inline `mod` blocks. `modpath` is the
+/// module path the items sit at and `dir` is the DIRECTORY of the source file, relative to the scan root
+/// — `#[path]` targets resolve against it (Rust resolves a `#[path]` on an out-of-line `mod` relative to
+/// the containing file's directory, and inside an inline `mod` block with the inline names as
+/// directories, which is what the recursion below does).
+pub(crate) fn collect_reexports(
+    items: &[syn::Item],
+    modpath: &str,
+    dir: &Path,
+    include_tests: bool,
+    out: &mut Vec<Reexport>,
+) {
+    let mods = mod_targets(items, modpath, dir, include_tests);
+    for it in items {
+        match it {
+            syn::Item::Use(u) => {
+                // A PRIVATE `use` exports nothing — it binds a name for this module's own body. `pub(self)`
+                // is spelled differently and means private too.
+                match &u.vis {
+                    syn::Visibility::Inherited => continue,
+                    syn::Visibility::Restricted(r) if r.path.is_ident("self") => continue,
+                    _ => {}
+                }
+                if !include_tests && is_cfg_test(&u.attrs) {
+                    continue;
+                }
+                let mut leaves = Vec::new();
+                use_leaves(&u.tree, Vec::new(), &mut leaves);
+                for (segs, name, alias) in leaves {
+                    let from = resolve_use_base(&segs, modpath, &mods);
+                    if from.is_empty() {
+                        continue;
+                    }
+                    out.push(Reexport { module: modpath.to_string(), from, name, alias });
+                }
+            }
+            syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    let name = m.ident.to_string();
+                    let sub =
+                        if modpath.is_empty() { name.clone() } else { format!("{modpath}::{name}") };
+                    collect_reexports(inner, &sub, &dir.join(&name), include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Whether a lazy-static synthetic unit will be EMITTED for `it` — a `static`/`const`/macro lazy with a
 /// walkable thunk that is NOT `#[cfg(test)]`-gated (unless tests are included). The single source of
 /// truth shared by `scan_items` (emits the unit) and `fn_locs` (emits its loc), so the two walks stay in
