@@ -9,6 +9,30 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ The invocation object and the option-builder, told apart.** Three measured residuals of the
+  std I/O-handle receiver routing, two over-charges and one silent under-report.
+
+  A submodule's OWN type was charged from the FILE's import: with `use std::process::Command;` at the top
+  of a file, `mod mine { pub struct Command; pub fn run(c: &Command) { c.spawn(); } }` reported `Exec` for
+  a `spawn` that does nothing. Rust gives an inline module its own namespace and no enclosing `use` reaches
+  into it, so an inline `mod` no longer inherits a name it declares for itself.
+
+  A pure read-back's RESULT was charged: `c.get_program()` is carved out of `Exec`, but the carve-out only
+  survived as far as the next `.` — `c.get_program().to_str()`, `c.get_args().len()` and
+  `for .. in c.get_envs()` all walked back to the `Command` and answered `Exec`.
+
+  `OpenOptions` was wrong in BOTH directions at once. `o.open(p)` on a received `&OpenOptions` opened a file
+  and reported NOTHING (the same silent false all-clear as the `Command` parameter — `tempfile`'s
+  `create_named`, which opens every temp file it makes, certified pure), while a setter-only
+  `OpenOptions::new().read(true)` with no `open` anywhere reported `Fs`. SPEC §1 ⟨0.32⟩ names the boundary:
+  an invocation object is `Exec` from construction, an option-builder for another effect stays PURE because
+  its resource arrives at the terminal verb. `OpenOptions`/`DirBuilder` now route as handles behind
+  type-keyed setter carve-outs, so only `open`/`create` charge. Keyed on the TYPE, not the leaf: `create`
+  sets a flag on `OpenOptions` and makes a directory on `DirBuilder`.
+
+  `OpenOptions::open` also claims NO read/write direction — the direction was set by the builder chain,
+  which the classifier cannot read, and §2 forbids the partial claim. `File::open` still reads.
+
 - **⟨0.32⟩ A refusal now records itself beside the reports it would have written.** Scan a tree green,
   change it so it now violates, then refuse for any reason: `gate --report <tree>` answered `policy ✓` at
   exit 0 off the previous run's bytes, because a run given no `--out` writes to its default prefix and

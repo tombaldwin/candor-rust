@@ -241,11 +241,21 @@ impl<'a> CallCollector<'a> {
                 // review). These names are UNIVERSALLY non-`Self` (no builder uses them as a fluent step,
                 // unlike `get`/`post`/`arg`/`bind`), so a hard type-change here → the chain's type is
                 // unknown → honest miss (the safe direction), never the base's coarse/whole-crate rule.
+                // The PURE READ-BACKS of an invocation object belong in the same list, and this is what
+                // MEASURED wrong before them: SPEC §1 ⟨0.32⟩ requires them carved out of `Exec`, and
+                // `classify` does carve them out — but the carve-out only survives as far as the next `.`.
+                // `c.get_program().to_str()` walked THROUGH `get_program` to the base `Command` and formed
+                // `Command::to_str`, which the whole-type Exec rule then charged; likewise `get_args().len()`
+                // /`.collect()`, `get_current_dir().unwrap()` and a `for .. in c.get_envs()`. Each returns a
+                // DIFFERENT type (`&OsStr`, `CommandArgs`, `CommandEnvs`, `Option<&Path>`) — the exact
+                // hard-type-change shape this guard is for, and `get_argv` (portable_pty's spelling of the
+                // same read-back) was already here for the same reason.
                 if matches!(
                     m.method.to_string().as_str(),
                     "iter" | "into_iter" | "iter_mut" | "drain" | "as_slice" | "as_mut_slice"
                         | "as_bytes" | "as_str" | "to_vec" | "keys" | "values" | "values_mut"
                         | "chars" | "bytes" | "get_argv" | "into_inner" | "lines"
+                        | "get_program" | "get_args" | "get_envs" | "get_current_dir"
                 ) {
                     return None;
                 }
