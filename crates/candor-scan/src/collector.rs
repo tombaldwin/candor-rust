@@ -2479,8 +2479,11 @@ pub(crate) fn reexport_aliases(edges: &[Reexport], fns: &[FnInfo]) -> HashMap<St
     // is the fn qual minus its last segment, so a FREE fn keys on its module (`imp::platform`) and a
     // METHOD keys one level deeper (`imp::platform::Type`) — which is what makes a glob from a module
     // pick up that module's free functions and nothing else.
-    let mut exported: BTreeMap<String, BTreeMap<String, (BTreeSet<usize>, BTreeSet<String>)>> =
-        BTreeMap::new();
+    /// Which `pub use` edges put a name in a module, and which definitions it stands for. Named because
+    /// clippy's `type_complexity` refuses the inline spelling and CI denies warnings — the alias is the
+    /// documentation the nested generics were not.
+    type ExportClaims = (BTreeSet<usize>, BTreeSet<String>);
+    let mut exported: BTreeMap<String, BTreeMap<String, ExportClaims>> = BTreeMap::new();
     for f in fns {
         // A synthetic lazy-init unit is reachable only through the forcing edge its own qual spells out.
         if f.qual.starts_with(LAZY_UNIT_PREFIX) {
