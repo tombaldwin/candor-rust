@@ -155,7 +155,16 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     // `deny Net app` that nothing violates: `{"ok": true, "unverified": []}`, exit 0 under `--strict`,
     // and the stdout line *"every function in a pure/deny layer is PROVABLY clean (no Unknown holes) ✓"*
     // — over a report that declares source candor could not read.
-    let comp = crate::completeness::report_completeness(prefix);
+    //
+    // ⟨0.32⟩ …AND THE CLASSES NOTHING OPENED, armed against THIS run's policy — see
+    // [`crate::completeness::arm_unread`]. Computed ONCE, here, and every channel below reads this one
+    // value, so the exit code and the document cannot disagree about a run. MEASURED on the release
+    // build at `ab505c0`, over a no-policy report of a tree with an unreadable `build.rs`, under
+    // `deny Exec`: `gate --report` exited 2 while this verb printed `{"ok": true, "unverified": []}` at
+    // exit 0 — the verb whose whole job is *"your green gate is not provably green"* certifying a
+    // universe it is on record as not having seen. (Over a fixture with an `Unknown` in it the verb
+    // exits 1 on the HOLES and reads as a refusal; that is a different finding, not this rule.)
+    let comp = crate::completeness::arm_unread(crate::completeness::report_completeness(prefix), &parsed);
     comp.warn_unreadable("unverified");
 
     // ⟨0.28⟩ SPEC §2: a CONFIGURED policy that parsed to zero rules asked nothing — there is no

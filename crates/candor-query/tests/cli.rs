@@ -5309,3 +5309,167 @@ fn gate_report_refuses_a_corrupt_excluded_key_and_tolerates_an_absent_one() {
         "ABSENT is ⟨0.26⟩'s cannot-answer and takes the documented default — refusing here would \
          refuse every pre-⟨0.29⟩ report: {}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// ⟨0.32⟩ **THE ADVISORY SIBLINGS CERTIFIED WHAT THE GATE HAD JUST STARTED REFUSING** — SPEC §3.2's
+/// pessimism relation, which ⟨0.24⟩ states as *"an advisory verb may be LESS certain than the gate over
+/// the same bytes and NEVER MORE"* and binds explicitly to `unverified`, `fix-gate` *"and any later
+/// sibling"*.
+///
+/// MEASURED on the release build at `ab505c0`, over the PART 62 rust fixture (an unreadable `build.rs`
+/// that runs `curl`, scanned with NO policy, then gated under `deny Exec`):
+///
+/// ```text
+///   gate --report N --policy P            exit 2   {"ok": false, "incomplete": true}
+///   fix-gate   --report N --policy P -s   exit 0   {"ok": true, "remedies": []}
+///   unverified --report N --policy P -s   exit 0   {"ok": true, "unverified": []}
+/// ```
+///
+/// The `--strict` forms are how CI consumes both verbs, and the documents beside them are the agent
+/// channel — the one that cannot ask a follow-up question. This is the SECOND time the ⟨0.30⟩/⟨0.32⟩
+/// rung has closed a cause on the gate and left its siblings behind (`outOfScope` did it first), which
+/// is why the repair is an ARM on the shared completeness value rather than a note at each verb.
+///
+/// **AND `unverified`'S CORRECT-LOOKING ANSWER WAS A COINCIDENCE.** Over a fixture whose functions
+/// carry `Unknown`, the verb exits 1 on the holes it found and looks like it refused; over the same
+/// tree with no hole in it — this row's fixture — it answers `{"ok": true, "unverified": []}` at 0.
+/// A non-zero exit reached by a different finding is not this rule being satisfied.
+#[test]
+fn advisory_verbs_refuse_a_deny_rule_over_classes_the_producer_never_read() {
+    let f = Fixture::new("unpeeked-advisory");
+    let deny = write_policy(&f, "deny.policy", "deny Exec\n");
+    // A no-policy producer's report: `outOfScope` ABSENT, every class `peeked: false`. Its one function
+    // does `Fs` and is NOT `Unknown`, so under `deny Exec` there is no violation, no remedy and no hole
+    // — every finding set is empty and the ONLY thing that can move these verbs is the unread class.
+    write_excluded_report(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": false, "reason": "compile time" }]"#,
+        None,
+    );
+
+    for verb in ["fix-gate", "unverified"] {
+        let out = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &deny, "--strict", "--json"])
+            .output().expect("run candor-query");
+        let doc = String::from_utf8(out.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(out.status.code(), Some(2),
+            "`{verb} --strict` must answer 2 wherever `gate --report` does over the same bytes \
+             (SPEC §3.2) — the gate refuses this report for an unread class. doc: {doc}");
+        assert_eq!(v["incomplete"], serde_json::json!(true),
+            "the DOCUMENT must carry the same finding as the exit — a CI wrapper reads the exit, an \
+             agent reads this: {doc}");
+        // OMITTED, never `false`. These verbs found NOTHING: `ok: false` beside an empty array would
+        // assert a hole/crossing the analysis never made — the fabrication mirror ⟨0.24⟩ rules out.
+        assert!(v.get("ok").is_none(),
+            "`ok` must be WITHHELD over an incomplete universe, not set false: {doc}");
+    }
+
+    // CONTROL — `fix` takes the disclosure and NOT an exit code. It answers no `ok` for `--strict` to
+    // follow, and a second exit policy inside one verb would say the gate's refusal is the milder
+    // finding. The hedge must still reach it: every one of its answers is a claim over the report.
+    let out = Command::new(bin())
+        .args(["fix", "inner", "Exec", "--report", &f.prefix, "--policy", &deny, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0), "`fix` answers no `ok`, so its exit must not move");
+    let doc = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    assert_eq!(v["incomplete"], serde_json::json!(true),
+        "`fix`'s remedy is computed over a universe it cannot fully see, and the document must say so: {doc}");
+}
+
+/// ⟨0.32⟩ THE THREE OVER-CHARGE CONTROLS for the row above, written BEFORE the fix. Each one is a way
+/// the arm could be satisfied by refusing something it must not: an unread class rides almost every
+/// report a bare scan writes, so a verb that hedged unconditionally would teach its reader to skip the
+/// hedge — and would fail every one of these.
+#[test]
+fn advisory_verbs_do_not_refuse_for_a_peek_nobody_asked_for() {
+    let f = Fixture::new("unpeeked-advisory-controls");
+    let deny = write_policy(&f, "deny.policy", "deny Exec\n");
+
+    // (1) THE PRODUCER LOOKED. `peeked: true` beside `outOfScope: []` is the asked-and-clear answer:
+    // both verbs must certify exactly as they did before this rung.
+    write_excluded_report(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+    );
+    for verb in ["fix-gate", "unverified"] {
+        let out = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &deny, "--strict", "--json"])
+            .output().expect("run candor-query");
+        let doc = String::from_utf8(out.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(out.status.code(), Some(0),
+            "a class the producer READ and found clean is not unread code — re-charging it would \
+             refuse every complete report with an exclusion in it. `{verb}` doc: {doc}");
+        assert_eq!(v["ok"], serde_json::json!(true),
+            "`{verb}` must still certify a report whose every class was peeked: {doc}");
+        assert!(v.get("incomplete").is_none(), "no hedge is owed here: {doc}");
+    }
+
+    // (2) `judgedElsewhere` — the producer's own carve-out. A derived copy of code this same scan
+    // already judged hides nothing, and refusing over it double-charges one body of code.
+    write_excluded_report(
+        &f,
+        r#"[{ "class": "build-output", "count": 1, "peeked": false, "judgedElsewhere": true, "reason": "derived" }]"#,
+        None,
+    );
+    for verb in ["fix-gate", "unverified"] {
+        let out = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &deny, "--strict", "--json"])
+            .output().expect("run candor-query");
+        let doc = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(out.status.code(), Some(0),
+            "`judgedElsewhere` carves the class out on this route exactly as it does on the gate's. \
+             `{verb}` doc: {doc}");
+    }
+
+    // (3) A POLICY WITH NO DENY RULE. Only a `deny`/`pure` rule's answer depends on code outside the
+    // scan's scope, so an unread class must cost a `forbid`-only policy nothing.
+    //
+    // ASSERTED ON THE DOCUMENT, NOT THE EXIT, and that is the whole subtlety: a `forbid`-only policy
+    // ALREADY exits 2 on both verbs for its OWN unanswerability (⟨0.29⟩ `whole_policy_refusals`), so an
+    // exit-code assertion here would pass whether or not the arm is over-charging. `unevaluated`
+    // present + `incomplete` ABSENT is the only thing that tells the two readings apart.
+    write_excluded_report(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": false, "reason": "compile time" }]"#,
+        None,
+    );
+    let forbid = write_policy(&f, "forbid.policy", "forbid app -> infra\n");
+    for verb in ["fix-gate", "unverified"] {
+        let out = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &forbid, "--strict", "--json"])
+            .output().expect("run candor-query");
+        let doc = String::from_utf8(out.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert!(v.get("unevaluated").is_some(),
+            "instrument: this row means nothing unless the forbid rule really is unanswerable here — \
+             `{verb}` doc: {doc}");
+        assert!(v.get("incomplete").is_none(),
+            "a policy with no deny rule asks nothing of the unread class, so no incompleteness is \
+             owed — this is the over-charge the scan route carved out with `peek_attempted`. \
+             `{verb}` doc: {doc}");
+    }
+
+    // (4) …and `pure` IS a deny rule — an empty effect list, §2.2 ⟨0.30⟩. An engine deciding "does this
+    // policy deny anything" by flattening rules into effect NAMES gets nothing from it and lets the
+    // STRICTEST policy in the grammar disarm the rung. Measured four-way on the scan route once already.
+    let pure = write_policy(&f, "pure.policy", "pure\n");
+    for verb in ["fix-gate", "unverified"] {
+        let out = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &pure, "--strict", "--json"])
+            .output().expect("run candor-query");
+        let doc = String::from_utf8(out.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(out.status.code(), Some(2),
+            "`pure` is a deny rule with an empty effect list — the rung must not be disarmed by the \
+             strictest policy there is. `{verb}` doc: {doc}");
+        // ON THE DOCUMENT TOO, because `fix-gate` already exits 1 here on a REAL finding (`inner` does
+        // `Fs`, which `pure` denies) — an exit-code assertion alone would pass on that finding whether
+        // or not the arm fired. `incomplete` is the only key that says this run was armed.
+        assert_eq!(v["incomplete"], serde_json::json!(true),
+            "`pure` must arm the unread-class cause in the DOCUMENT, not only reach a non-zero exit by \
+             some other route. `{verb}` doc: {doc}");
+    }
+}
