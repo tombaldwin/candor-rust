@@ -108,6 +108,19 @@ pub(crate) struct CompletenessFields {
     /// `"noManifest": [ "<report path>", … ]  // consulted reports carrying no `analyzed` key`.
     #[serde(rename = "noManifest", skip_serializing_if = "Vec::is_empty")]
     pub(crate) no_manifest: Vec<String>,
+    /// ⟨0.32⟩ The exclusion CLASSES the producing scan never opened, on the machine channel — the same
+    /// wire spelling candor-ts publishes. Written ONLY on a run this verb ARMED (see
+    /// [`ReportCompleteness::unread_armed`]), which is why it can be a plain `skip_serializing_if`
+    /// field: on every other verb and every unarmed run the list is empty and the document is
+    /// byte-identical to its pre-rung form.
+    ///
+    /// IT CARRIES THE CAUSE, and that is not decoration. `incomplete: true` alone tells an agent the
+    /// answer is partial and nothing about WHY — and on this rung the repair is specific and cheap
+    /// (re-run the producing scan WITH this policy), where the `unanalyzed` repair is not. The gate's
+    /// own verdict document does not carry this key, because §3.1 makes it byte-equal to the scan
+    /// route's; an advisory document is under no such constraint, and its reader has no stderr.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unread: Vec<String>,
 }
 
 /// The manifest as far as it could be READ, unioned across the reports under a locator.
@@ -151,6 +164,55 @@ pub(crate) struct ReportCompleteness {
     /// a denied effect while `unverified --strict` printed *"every function in a pure/deny layer is
     /// PROVABLY clean ✓"* at exit 0 — the rung's own false all-clear, moved sideways into the sibling.
     pub(crate) out_of_scope: Vec<candor_report::OutOfScopeFinding>,
+    /// ⟨0.32⟩ The exclusion CLASSES the producing scan never opened — `excluded[]` entries that are
+    /// neither `peeked` nor `judgedElsewhere`, read off the SAME key and through the SAME reader
+    /// `gate --report` uses ([`candor_report::report_excluded`]). The sibling of `out_of_scope` and the
+    /// other half of one rung: that one is what the peek FOUND, this is what nothing ever opened.
+    ///
+    /// **COLLECTED HERE, ARMED BY THE VERB** — see [`Self::unread_armed`] and [`arm_unread`]. This
+    /// function reads a report locator and holds no policy, and the condition is about the policy in
+    /// force NOW.
+    pub(crate) unread: Vec<String>,
+    /// ⟨0.32⟩ Has the calling verb decided that THIS run's policy makes [`Self::unread`] matter?
+    ///
+    /// **THE CONDITION IS THE QUESTION BEING ASKED, NEVER THE PRODUCER'S HISTORY** — only a
+    /// `deny`/`pure` rule's answer depends on code outside the scan's scope, so `allow`/`forbid`/`only`/
+    /// `layer` must cost an unread class nothing. Held as its own flag rather than inferred from
+    /// `unread` being non-empty so that *"no policy was given"* and *"this policy denies nothing"*
+    /// cannot be confused with *"the producer read everything"*.
+    ///
+    /// **AND IT IS WHY THIS IS NOT AN UNCONDITIONAL ARM.** An unread class rides almost every report a
+    /// bare `candor-scan <dir> --out r` writes — any tree with a build script, tests, benches or
+    /// examples — so a verb that hedged on every run would teach its reader to skip the hedge, which is
+    /// the same argument this module already makes for omitting the manifest on a complete report. The
+    /// descriptive verbs (`whatif`, `map`, `where`, `blindspots`, `tour`, `containment`) never arm it,
+    /// and that is a ruling rather than an omission: they carry no policy, so there is no question whose
+    /// answer could depend on the unread code. Their `outOfScope`/`unanalyzed` arms are untouched —
+    /// those are facts about the report, not about a rule.
+    pub(crate) unread_armed: bool,
+}
+
+/// ⟨0.32⟩ **ARM THE UNREAD-CLASS CAUSE FOR THIS RUN'S POLICY** — the one place the condition is applied
+/// on the advisory route, so the three verbs that carry a policy cannot answer it three ways.
+///
+/// **APPLIED ONCE TO THE VALUE**, exactly as `cmd_gate` applies it to `rep.unpeeked`: this object feeds
+/// the exit code, the JSON document and the prose note, and a condition stated at only one of them lets
+/// them disagree about one run. That split is not hypothetical — it has now been found in three engines,
+/// most recently on candor-scan's own `--gate-json` (a document reading `"ok": false, "incomplete":
+/// true` beside exit 0).
+///
+/// `p.rules` IS THE DENY LIST AND `pure` IS IN IT — the parser records a `pure` line as a rule with an
+/// EMPTY effect list (§2.2 ⟨0.30⟩). Reading the question off a flattened set of effect NAMES would get
+/// nothing from that and let the STRICTEST policy the grammar has disarm the rung; measured four-way on
+/// the scan route once already, which is why the conformance arm carries a `pure` row.
+pub(crate) fn arm_unread(mut c: ReportCompleteness, p: &candor_classify::policy::ParsedPolicy) -> ReportCompleteness {
+    if p.rules.is_empty() {
+        // CLEARED, not merely left unarmed: nothing downstream may read a list this run decided is not
+        // a question, and the document key is built off the same vector.
+        c.unread.clear();
+    }
+    c.unread_armed = !c.unread.is_empty();
+    c
 }
 
 impl ReportCompleteness {
@@ -165,8 +227,33 @@ impl ReportCompleteness {
     /// verb that exited 2 there would claim it got LESS far than the gate on identical input — the
     /// mirror of the over-claim the strict exit exists to prevent. So the count-0 cause reaches the two
     /// DISCLOSURE channels via [`Self::must_hedge`] and stops at the exit code.
+    ///
+    /// ⟨0.32⟩ **`unread_armed` IS AN ARM, and it is the same MUST arriving one shape over.**
+    /// `gate --report` refuses over a class the producing scan never opened, so a `--strict` verb over
+    /// those bytes must not certify. MEASURED on the release build at `ab505c0`, the moment the gate
+    /// route gained the rule and stopped there, over the PART 62 rust fixture (an unreadable `build.rs`
+    /// running `curl`, scanned with no policy, gated under `deny Exec`):
+    ///
+    /// ```text
+    ///   gate --report N --policy P            exit 2   {"ok": false, "incomplete": true}
+    ///   fix-gate   --report N --policy P -s   exit 0   {"ok": true, "remedies": []}
+    ///   unverified --report N --policy P -s   exit 0   {"ok": true, "unverified": []}
+    /// ```
+    ///
+    /// Closing a cause on the gate and leaving its siblings is how the ⟨0.30⟩ half of this same rung
+    /// drifted first (`out_of_scope`, one line up). Twice says the ARM is what a new verdict cause
+    /// needs, not a comment telling the next author to remember.
+    ///
+    /// **AND `unverified`'S ANSWER LOOKED RIGHT FOR THE WRONG REASON.** Over a fixture whose functions
+    /// carry `Unknown`, it exited 1 on the holes it found and read as a refusal; over the same tree with
+    /// no hole in it, it answered `{"ok": true, "unverified": []}` at 0. A non-zero exit reached by a
+    /// different finding is not this relation being satisfied — which is why the pinned row's fixture
+    /// has every finding set empty and the unread class as the only thing that can move a verb.
     pub(crate) fn incomplete(&self) -> bool {
-        !self.unanalyzed.is_empty() || !self.unreadable.is_empty() || !self.out_of_scope.is_empty()
+        !self.unanalyzed.is_empty()
+            || !self.unreadable.is_empty()
+            || !self.out_of_scope.is_empty()
+            || self.unread_armed
     }
 
     /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where
@@ -237,6 +324,12 @@ impl ReportCompleteness {
         self.unreadable.extend(other.unreadable);
         self.judged_nothing.extend(other.judged_nothing);
         self.no_manifest.extend(other.no_manifest);
+        // ⟨0.32⟩ …and the unread classes, with the ARMING ORed rather than replaced: a baseline armed
+        // under this run's policy stays armed after the union, and an unarmed side cannot disarm an
+        // armed one. `containment` is the only caller, and its answer is a DIFFERENCE — unsound if
+        // either side is partial.
+        self.unread.extend(other.unread);
+        self.unread_armed |= other.unread_armed;
     }
 
     /// The stderr disclosure for a `unanalyzed` key that is present and unreadable. Named per file and
@@ -307,6 +400,10 @@ impl ReportCompleteness {
             // send the reader to different repairs. Omitted when empty like the other two, so a document
             // raised by either sibling alone is byte-identical to its pre-row-3 form.
             no_manifest: self.no_manifest.clone(),
+            // ⟨0.32⟩ The classes nothing opened, on the machine channel. Empty on every unarmed run —
+            // which is every descriptive verb and every policy with no deny rule — so a document raised
+            // by any pre-⟨0.32⟩ cause alone stays byte-identical to its pre-rung form.
+            unread: if self.unread_armed { self.unread.clone() } else { Vec::new() },
         })
     }
 
@@ -351,7 +448,16 @@ impl ReportCompleteness {
         // says nothing, and a reader sent to re-run a scan that already reached a conclusion goes to the
         // wrong repair. Appended rather than folded into the existing arms so the two measured wordings
         // stay character-for-character what they were when no row-3 report is present.
-        let mut head = match (self.incomplete(), self.judged_nothing.len()) {
+        //
+        // ⟨0.32⟩ **AND THE FIRST ARM ASKS `units()`, NOT `incomplete()`.** Those are different questions
+        // and the gap between them is a sentence that says nothing: `incomplete()` has counted the two
+        // SCOPE causes since ⟨0.30⟩ while this head was built from the MANIFEST rows alone, so a note
+        // whose ONLY cause is out-of-scope or unread code came out as *"declare 0 unit(s) candor could
+        // not analyze"* — a hedge that names no cause, which is the deleted-disclosure defect arriving
+        // inside the disclosure. Latent while the unread-class rule was gated on the producer's history;
+        // reachable on nearly every no-policy report the moment it was not. candor-java measured the
+        // same line on the same rung.
+        let mut head = match (self.units() > 0, self.judged_nothing.len()) {
             (true, 0) => format!(
                 "the report(s) under this locator declare {} unit(s) candor could not analyze,",
                 self.units()
@@ -369,18 +475,54 @@ impl ReportCompleteness {
                 "{n} report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`),"
             ),
         };
-        if let n @ 1.. = self.no_manifest.len() {
+        // ONE CLAUSE PER CAUSE, appended by one rule: the `alone` wording when nothing precedes it (a
+        // clause has to be a sentence on its own), the `joined` wording otherwise — and the joined form
+        // eats the preceding clause comma so the whole reads `…, and N …,`. Written once because the
+        // row-3 block below was copied twice before this rung and the copies drifted in their verb.
+        fn append(head: &mut String, alone: String, joined: String) {
             if head.is_empty() {
-                head = format!(
-                    "{n} report(s) under this locator carry NO `analyzed` manifest at all (SPEC §2 row \
-                     3, a pre-⟨0.21⟩ producer),"
-                );
+                *head = alone;
             } else {
                 head.pop(); // the clause comma, so the joined sentence reads `…, and N report(s) …,`
-                head.push_str(&format!(
-                    ", and {n} report(s) carrying NO `analyzed` manifest at all,"
-                ));
+                head.push_str(&joined);
             }
+        }
+        if let n @ 1.. = self.no_manifest.len() {
+            append(
+                &mut head,
+                format!(
+                    "{n} report(s) under this locator carry NO `analyzed` manifest at all (SPEC §2 row \
+                     3, a pre-⟨0.21⟩ producer),"
+                ),
+                format!(", and {n} report(s) carrying NO `analyzed` manifest at all,"),
+            );
+        }
+        // ⟨0.30⟩ THE PEEK'S FINDINGS — an arm of `incomplete()` since that rung, and named here since
+        // ⟨0.32⟩ made the omission reachable.
+        if let n @ 1.. = self.out_of_scope.len() {
+            append(
+                &mut head,
+                format!(
+                    "the report(s) under this locator name {n} function(s) OUTSIDE the scan's scope \
+                     performing an effect the producing scan's policy DENIED,"
+                ),
+                format!(
+                    ", and {n} function(s) OUTSIDE the scan's scope performing a DENIED effect,"
+                ),
+            );
+        }
+        // ⟨0.32⟩ …and the classes nothing OPENED. Only ever on an ARMED run — the descriptive verbs and
+        // a policy with no deny rule never reach it, which is what keeps this off every ordinary note.
+        if self.unread_armed {
+            let n = self.unread.len();
+            append(
+                &mut head,
+                format!(
+                    "the report(s) under this locator declare {n} exclusion class(es) the scan did NOT \
+                     READ (`excluded[].peeked: false`),"
+                ),
+                format!(", and {n} exclusion class(es) the scan did NOT READ,"),
+            );
         }
         writeln!(w, "  ⚠ INCOMPLETE — {head}")?;
         writeln!(w, "      so {so_what}:")?;
@@ -404,6 +546,25 @@ impl ReportCompleteness {
                  DECLARES nothing about what was judged, so its silence licenses no purity claim \
                  either. Re-scan with a current engine so the report carries its manifest"
             )?;
+        }
+        for o in &self.out_of_scope {
+            writeln!(
+                w,
+                "      {} — OUTSIDE the producing scan's scope: it performs {}, and the gate did not \
+                 judge it",
+                o.func,
+                o.effects.join(", ")
+            )?;
+        }
+        if self.unread_armed {
+            for c in &self.unread {
+                writeln!(
+                    w,
+                    "      {c} — this exclusion class went UNREAD (`excluded[].peeked: false`): its \
+                     effects are absent because nothing looked, not because there are none. Re-run the \
+                     producing scan WITH this policy (candor-scan <dir> --policy <p>)"
+                )?;
+            }
         }
         writeln!(w, "      {tail}")
     }
@@ -433,6 +594,8 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         judged_nothing: Vec::new(),
         no_manifest: Vec::new(),
         out_of_scope: Vec::new(),
+        unread: Vec::new(),
+        unread_armed: false,
     };
     for path in glob_reports(prefix) {
         let p = path.display().to_string();
@@ -456,6 +619,30 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         // corrupt input, never its permissive empty value, because non-emptiness is a fail-closed trigger.
         match candor_report::report_out_of_scope(&text) {
             candor_report::KeyRead::Present(o) => out.out_of_scope.extend(o),
+            candor_report::KeyRead::Absent => {}
+            candor_report::KeyRead::Corrupt => {
+                out.unreadable.push(Unreadable { path: p, key_present: true });
+                continue;
+            }
+        }
+        // ⟨0.32⟩ …and the SCOPE the producer recorded, off the SAME key and through the SAME reader
+        // `load_gate_report` uses (`candor_report::report_excluded`) — shared rather than re-spelled,
+        // because two readings of one flag is exactly how the two arms of ⟨0.30⟩ drifted. The FILTER is
+        // the gate's too: `peeked` says the producer opened the class, `judged_elsewhere` is the
+        // producer's own carve-out for a derived copy of code this same scan already judged.
+        //
+        // CORRUPT RIDES `unreadable`, as the `out_of_scope` block above does it and for its reason: an
+        // `excluded` key coerced to `[]` is the claim "this scan excluded nothing" — the safe-LOOKING
+        // value — and here it would silently DELETE an arm rather than raise one. The gate refuses over
+        // the same bytes naming the key, so an advisory verb that read them leniently would be LESS
+        // pessimistic than the gate (SPEC §3.2).
+        //
+        // COLLECTED UNCONDITIONALLY; whether it MATTERS is `arm_unread`'s decision, because it turns on
+        // the policy in force and this function holds none.
+        match candor_report::report_excluded(&text) {
+            candor_report::KeyRead::Present(x) => out.unread.extend(
+                x.into_iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class),
+            ),
             candor_report::KeyRead::Absent => {}
             candor_report::KeyRead::Corrupt => {
                 out.unreadable.push(Unreadable { path: p, key_present: true });

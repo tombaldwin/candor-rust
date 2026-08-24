@@ -9,6 +9,49 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ `fix-gate --strict` and `unverified --strict` certified what the gate had just started refusing
+  (⟨0.32⟩).** SPEC §3.2 binds an advisory verb to be LESS certain than the gate over the same bytes and
+  never MORE, naming `unverified`, `fix-gate` *"and any later sibling"*. The unread-class rule landed on
+  `gate --report` in the entry above and stopped there, so the moment that route began refusing, this
+  opened underneath it:
+
+  ```text
+    gate --report N --policy P            exit 2   {"ok": false, "incomplete": true}
+    fix-gate   --report N --policy P -s   exit 0   {"ok": true, "remedies": []}
+    unverified --report N --policy P -s   exit 0   {"ok": true, "unverified": []}
+  ```
+
+  `--strict` is how CI consumes both verbs, and the documents beside them are the agent channel — the
+  one that cannot ask a follow-up question. MEASURED over `~/.cargo/registry` (265 crates ×
+  `deny Exec`/`deny Fs` = 530 pairs, each gating a report its own no-policy scan produced): **318 pairs
+  had `gate --report` at exit 2 while `fix-gate --strict` answered 0**, and 78 of those were
+  `unverified --strict` printing `{"ok": true, "unverified": []}` at exit 0 over the same bytes. After
+  the fix: 0 pairs where the gate refuses and either verb does not.
+
+  `unverified`'s answer had looked right for the wrong reason. Over a report whose functions carry
+  `Unknown` it exits 1 on the HOLES it found and reads as a refusal; over the same tree with no hole in
+  it, it certified. A non-zero exit reached by a different finding is not this relation being satisfied,
+  which is why the pinned row's fixture has every finding set empty.
+
+  The classes the producing scan never opened now ride `ReportCompleteness` — read off the SAME key and
+  through the SAME reader `gate --report` uses, with a corrupt `excluded` riding the existing
+  fail-closed `unreadable` arm. They are COLLECTED by the loader and ARMED by the verb, once, against
+  this run's rule set, so the caveat, the document and the exit read one value. The descriptive verbs
+  (`whatif`, `map`, `where`, `blindspots`, `tour`, `containment`) never arm it: they carry no policy, so
+  there is no question whose answer could depend on the unread code, and an unread class rides almost
+  every report a bare scan writes — a hedge on every run trains its reader to skip it.
+
+  Fixed beside it: the `⚠ INCOMPLETE` prose built its sentence from the three MANIFEST rows alone while
+  `incomplete()` had counted the two SCOPE causes since ⟨0.30⟩, so a note whose only cause is unread or
+  out-of-scope code read *"declare 0 unit(s) candor could not analyze"* — a hedge that names no cause.
+  Both causes now get a clause and a per-item line.
+
+  **Upgrade note:** same as the entry below, one verb over. `fix-gate --strict` and `unverified --strict`
+  over a report produced WITHOUT a policy now exit 2 whenever the tree has a build script, tests, benches
+  or examples the scan did not read — 376 of the 530 pairs above. The repair is the same one flag:
+  produce the report with the policy. A policy carrying no `deny`/`pure` rule is unaffected, and a
+  fully-peeked report still certifies on all four routes.
+
 - **⚠ `gate --report` certified a deny rule over code the producing scan never read (fail-open, ⟨0.32⟩).**
   A scan run WITHOUT a policy writes a report whose `outOfScope` key is absent — nothing was asked — but
   whose `excluded[].peeked` is `false` on every class for that same reason. The unread-class rule was
