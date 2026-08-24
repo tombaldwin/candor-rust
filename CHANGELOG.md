@@ -9,6 +9,31 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ A call through a SUBMODULE-level re-export resolved to nothing.** The oldest shape in Rust's module
+  system — `mod imp { mod platform; pub use self::platform::*; }` with callers writing `imp::doit()` —
+  reported no effect at all. The intra-crate call graph keys a qualified call on its last two segments, so
+  the definition (`platform::doit`) and the call (`imp::doit`) never met, and the crate-root re-export
+  machinery covers only the root file. MEASURED silent on every spelling: file-per-module and inline `mod`,
+  glob and named, one hop and two.
+
+  Real instance: `tempfile`'s `src/file/imp/mod.rs` is that shape, so `NamedTempFile::new`, `new_in`,
+  `with_prefix{,_in}`, `with_suffix{,_in}` and `Builder::tempfile{,_in}` — eight entry points behind every
+  temp file the crate makes — did not reach the `Fs` in `file::imp::unix::create_named`. They do now.
+
+  Each module's `pub use` edges are collected and folded into an alias index, consulted ONLY where the
+  primary index holds nothing for a call's tail, so no resolution that worked before can be displaced or
+  made ambiguous. `#[cfg_attr(unix, path = "unix.rs")] mod platform;` is followed to every branch's file
+  (the scanner analyses all of them; `cfg_if` arms are already unioned the same way), and Rust 2018 uniform
+  paths (`pub use unix::*;`) resolve only against a `mod` the module actually declares. A private `use`
+  exports nothing. A name reaching a module by two independent routes, or a tail that two different modules
+  would answer differently, is refused rather than guessed — `dir::imp` and `file::imp` are both `imp` in a
+  two-segment tail, and the first cut of this fix charged `tempfile`'s `dir::create` with the file side's
+  temp-name `Env`+`Rand`.
+
+  Corpus A/B, 265 crates × {`deny Exec`, `deny Fs`}: zero exit-code flips, zero effects and zero call edges
+  LOST, 195 functions gained one (Fs +11, Clock +46, Log +6, Env +4, Unknown +118). Hand-traced to a real
+  effect site in ten crates.
+
 - **⚠ ⟨0.32⟩ The invocation object and the option-builder, told apart.** Three measured residuals of the
   std I/O-handle receiver routing, two over-charges and one silent under-report.
 

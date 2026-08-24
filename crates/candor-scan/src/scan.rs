@@ -1305,7 +1305,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             None => {
                 // A freshly-parsed file (or a parse failure → skip the file entirely, as before).
                 let Some((sf, locs)) = r1 else { continue };
-                let fd = file_decls(&sf.0.items, include_tests, &module_path(Path::new(&rel)));
+                let fd = file_decls(&sf.0.items, include_tests, Path::new(&rel));
                 decls_per_file.push((rel.clone(), ch, fd));
                 parsed_locs.insert(rel.clone(), locs);
                 parsed_files.insert(rel, sf.0);
@@ -1569,6 +1569,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             by_tail2.entry(t2).or_default().push(f.qual.clone());
         }
     }
+    // The SUBMODULE-level `pub use` alias index — the tails a definition also answers to because a module
+    // re-exported it (`pub use self::platform::*` makes `imp::platform::doit` nameable as `imp::doit`).
+    // A FALLBACK, never a competitor: `reexport_target` consults it only where `by_tail2` holds nothing at
+    // all for the call's tail, so no resolution that worked before can be displaced or made ambiguous.
+    let by_reexport = reexport_aliases(&merged.reexports, &fns);
 
     // Inverse of trait_impls (impl-TYPE leaf → the trait leaves it impls), for the trait-DEFAULT-method
     // caller fallback below: a call `t.m()` on a concrete type T that does NOT declare `m` but impls a
@@ -1935,7 +1940,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // case (free fns and qualified `Type::method` calls the bare-leaf guard missed).
             let mut resolved_local = false;
             if resolvable && !aliased {
-                let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf);
+                let targets = resolve_target(&c.path, &c.leaf, c.method, &by_tail2, &by_leaf)
+                    .or_else(|| reexport_target(&c.path, c.method, &by_tail2, &by_reexport));
                 if let Some(targets) = targets {
                     resolved_local = true;
                     for t in targets {

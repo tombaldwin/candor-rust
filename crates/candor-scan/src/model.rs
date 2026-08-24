@@ -124,6 +124,35 @@ pub(crate) type EnumVariantIndex = HashMap<String, String>;
 /// (no guess), like the unique-leaf call-graph rule.
 pub(crate) type ReturnIndex = HashMap<String, String>;
 
+/// One `pub use` RE-EXPORT edge: the fact that a name defined in ANOTHER module is ALSO nameable through
+/// `module`. Collected per file/inline-module by `collect_reexports`, merged crate-wide, and turned into
+/// the alias index `reexport_aliases` that `reexport_target` consults.
+///
+/// WHY IT HAS TO EXIST SEPARATELY FROM THE `use` MAP. A file's `use` map answers "what does a name written
+/// IN THIS FILE mean"; a re-export is the opposite direction — what a name written in a DIFFERENT file
+/// means when it is qualified by this module. `collect_root_reexports` already covers that for the crate
+/// ROOT; a re-export declared in a SUBMODULE (`mod imp { pub use self::platform::*; }`) had no such
+/// channel at all, so a call `imp::doit()` — whose 2-segment tail (`imp::doit`) matches no definition's
+/// tail (`platform::doit`) — resolved to nothing and every caller read silent-pure.
+///
+/// Private (`use …`, no `pub`) statements are NOT collected: they bind a name for the module's own body
+/// and export nothing, so treating one as a re-export would answer for a path that names no item.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Reexport {
+    /// The module path the name becomes visible IN (`file::imp`), in the scanner's file-derived spelling.
+    pub(crate) module: String,
+    /// The module path(s) the name comes FROM (`file::imp::unix`), already resolved through any
+    /// `#[path]` / `#[cfg_attr(.., path = "..")]` redirect on the `mod` declaration. SEVERAL when the
+    /// redirect is cfg-conditional (`unix.rs` / `windows.rs` / `other.rs`): the scanner analyses every
+    /// `#[cfg]` branch, so the re-export names every branch's definition and the caller charges their
+    /// union — the same over-approximation `cfg_if` arms already get.
+    pub(crate) from: Vec<String>,
+    /// The name in the SOURCE module, or `*` for a glob (`pub use self::platform::*`).
+    pub(crate) name: String,
+    /// The name it is visible AS in `module` — differs from `name` only for `pub use … as …`. `*` for a glob.
+    pub(crate) alias: String,
+}
+
 /// Sentinel return-"type" for a fn whose return is a CALLABLE (`-> fn()`/`-> impl Fn`/`-> Box<dyn Fn>`).
 /// Stored in the return index under the fn's leaf; `expr_is_fn_typed` reads it so `let g = make_cb()`
 /// propagates fn-typed-ness, while `ctor_type` filters it out of var-typing (it's not a nominal type).

@@ -6718,6 +6718,9 @@ trait G {
             local_macros => |m| { m.local_macros.insert("do_io".into(), "() => { fs::write(\"/x\", b\"y\"); }".into()); },
             blanket_methods => |m| { m.blanket_methods.insert("ext".into(), "T".into()); },
             root_reexports => |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); },
+            // `pub use self::platform::*` in a SUBMODULE — a call `imp::doit()` in ANOTHER file resolves
+            // through it, so a change to the edge set re-resolves that file's calls.
+            reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into() }); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -7424,39 +7427,50 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// A cache written by a PRE-`aborted` binary must be discarded, not read. `aborted` carries
-    /// `#[serde(default)]` (so the struct stays additive), which means an old entry deserializes as
-    /// `None` — i.e. "this file was analysed and has no functions", which is precisely the false
-    /// all-clear the field exists to stop, restored by a version skip. The `rev8` schema token is the
-    /// only thing standing between those two readings, so it is pinned here rather than trusted.
+    /// A cache written by an OLDER binary must be discarded, not read — for every rev whose new field
+    /// defaults to a reading that is a false all-clear. Both revs pinned here are exactly that shape:
+    ///
+    ///   rev7 -> rev8  `FileCache.aborted`. `#[serde(default)]` keeps the struct additive, so an old
+    ///                 entry deserializes as `None` — "this file was analysed and has no functions",
+    ///                 which is precisely the hole the field exists to disclose.
+    ///   rev8 -> rev9  `FileDecls.reexports`. An old entry deserializes as an EMPTY vec — "this file
+    ///                 re-exports nothing" — restoring the submodule-re-export under-report from a warm
+    ///                 cache, where no test that scans from scratch would ever see it.
+    ///
+    /// The schema token is the only thing standing between those readings, so it is pinned rather than
+    /// trusted. (The `aborted` disclosure is what this fixture MEASURES in both cases: it is the visible
+    /// consequence a mis-read entry produces, and the same discard covers both fields.)
     #[test]
-    fn a_pre_rev8_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        let _lock = abort_injection_lock();
-        let (d, policy) = abort_fixture("oldcache");
-        let out = |n: &str| d.join(n).to_string_lossy().into_owned();
-        let (rc1, v1) = incremental_scan(&d, &out("a1"), &policy, Some("src/bad.rs"));
-        assert_eq!(rc1, 2, "the fixture must abort first:\n{v1:#}");
+    fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
+        for stale in ["rev7", "rev8"] {
+            let _lock = abort_injection_lock();
+            let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
+            let out = |n: &str| d.join(n).to_string_lossy().into_owned();
+            let (rc1, v1) = incremental_scan(&d, &out("a1"), &policy, Some("src/bad.rs"));
+            assert_eq!(rc1, 2, "the fixture must abort first:\n{v1:#}");
 
-        // Doctor the cache into exactly what the previous binary would have left: the entry with no
-        // `aborted` key at all, under the previous schema token.
-        let p = d.join(".candor/cache/scan-cache.json");
-        let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-        let old = c["schema"].as_str().unwrap().replace("/rev8/", "/rev7/");
-        assert!(old.contains("/rev7/"), "the schema rev token moved — update this test: {c}");
-        c["schema"] = serde_json::Value::String(old);
-        for (_, e) in c["files"].as_object_mut().unwrap() {
-            e.as_object_mut().unwrap().remove("aborted");
+            // Doctor the cache into exactly what the older binary would have left: the entry with no
+            // `aborted` key at all, under the older schema token.
+            let p = d.join(".candor/cache/scan-cache.json");
+            let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+            let old = c["schema"].as_str().unwrap().replace("/rev9/", &format!("/{stale}/"));
+            assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
+            c["schema"] = serde_json::Value::String(old);
+            for (_, e) in c["files"].as_object_mut().unwrap() {
+                e.as_object_mut().unwrap().remove("aborted");
+            }
+            std::fs::write(&p, serde_json::to_vec(&c).unwrap()).unwrap();
+
+            let (rc2, v2) = incremental_scan(&d, &out("a2"), &policy, Some("src/bad.rs"));
+            assert_eq!(
+                rc2, 2,
+                "a {stale} cache entry was TRUSTED — its missing field read as an analysed, \
+                 function-free file and the gate certified the hole:\n{v2:#}"
+            );
+            assert_eq!(v2["unanalyzed"], v1["unanalyzed"],
+                       "the discarded cache must re-derive the disclosure:\n{v2:#}");
+            let _ = std::fs::remove_dir_all(&d);
         }
-        std::fs::write(&p, serde_json::to_vec(&c).unwrap()).unwrap();
-
-        let (rc2, v2) = incremental_scan(&d, &out("a2"), &policy, Some("src/bad.rs"));
-        assert_eq!(
-            rc2, 2,
-            "a pre-`aborted` cache entry was TRUSTED — its missing field read as an analysed, \
-             function-free file and the gate certified the hole:\n{v2:#}"
-        );
-        assert_eq!(v2["unanalyzed"], v1["unanalyzed"], "the discarded cache must re-derive the disclosure:\n{v2:#}");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -8984,4 +8998,322 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                    "a determined verb still answers:\n{v:#}");
         assert_eq!(fn_entry(&v, "plain_open")["fs"], serde_json::json!(["read"]),
                    "`File::open` IS unambiguously a read — the carve-out must not swallow it:\n{v:#}");
+    }
+
+    // ── SUBMODULE-LEVEL RE-EXPORTS ──────────────────────────────────────────────────────────────
+    // A call through a re-export declared in a SUBMODULE (`mod imp { mod platform; pub use
+    // self::platform::*; }`) resolved to NOTHING: the crate-root re-export machinery
+    // (`collect_root_reexports`) covers the ROOT file only, and the intra-crate call graph keys on the
+    // last TWO segments — the definition's tail2 is `platform::doit` while the call site writes
+    // `imp::doit`, so the two never met and every caller of `imp::doit` read SILENT-PURE.
+    //
+    // MEASURED on the shape below before the fix: `go` reported no `Exec` at all, in the file-per-module
+    // form AND the inline-`mod` form, for the glob (`pub use self::platform::*`) AND the named
+    // (`pub use self::platform::doit`) spelling, and two re-export hops deep. Real-world instance:
+    // tempfile's `src/file/imp/mod.rs` is exactly this, so `NamedTempFile::new` and its seven siblings
+    // did not reach the `Fs` in `file::imp::unix::create_named`.
+
+    /// Build and scan a multi-FILE crate. `files` are `(path-under-the-crate-root, contents)`;
+    /// intermediate directories are created. The submodule re-export lives in a `mod.rs` that the
+    /// caller of the re-exported fn never sees, so the single-file `scan_src_to_json` cannot express it.
+    #[cfg(test)]
+    fn scan_crate_to_json(tag: &str, files: &[(&str, &str)]) -> serde_json::Value {
+        let d = std::env::temp_dir().join(format!("candor-scan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{tag}\"\n")).unwrap();
+        for (rel, src) in files {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, src).unwrap();
+        }
+        let idx = DepIndex::default();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+        serde_json::from_str(&body.unwrap()).unwrap()
+    }
+
+    const SPAWN: &str = "pub fn doit() { let _ = std::process::Command::new(\"sh\").spawn(); }\n";
+    /// The same one-line spawn under a chosen fn name, for the fixtures that need a second spelling.
+    #[cfg(test)]
+    #[allow(non_snake_case)]
+    fn SPAWN_AS(name: &str) -> String {
+        format!("pub fn {name}() {{ let _ = std::process::Command::new(\"sh\").spawn(); }}\n")
+    }
+
+    /// DEFECT, file-per-module, GLOB form. `imp/mod.rs` re-exports its own submodule; the caller in
+    /// `lib.rs` writes `imp::doit()`. Before the fix: `go` had no effects at all.
+    #[test]
+    fn a_call_through_a_submodule_glob_reexport_reaches_the_effect() {
+        let v = scan_crate_to_json("subreexpglob", &[
+            ("src/lib.rs", "mod imp;\npub fn go() { imp::doit(); }\n"),
+            ("src/imp/mod.rs", "mod platform;\npub use self::platform::*;\n"),
+            ("src/imp/platform.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "imp::platform::doit").contains(&"Exec".to_string()),
+                "the definition itself must be Exec — else the fixture proves nothing:\n{v:#}");
+        assert!(effs_opt(&v, "go").contains(&"Exec".to_string()),
+                "`go` calls `imp::doit()`, which IS `imp::platform::doit` through the submodule's \
+                 `pub use self::platform::*` — reporting nothing is a silent under-report:\n{v:#}");
+    }
+
+    /// DEFECT, file-per-module, NAMED form — it missed identically, which is what proved the failure is
+    /// the SUBMODULE re-export and not the glob.
+    #[test]
+    fn a_call_through_a_submodule_named_reexport_reaches_the_effect() {
+        let v = scan_crate_to_json("subreexpnamed", &[
+            ("src/lib.rs", "mod imp;\npub fn go() { imp::doit(); }\n"),
+            ("src/imp/mod.rs", "mod platform;\npub use self::platform::doit;\n"),
+            ("src/imp/platform.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "go").contains(&"Exec".to_string()),
+                "the NAMED re-export misses the same way the glob does:\n{v:#}");
+    }
+
+    /// DEFECT, INLINE `mod` — the same two spellings with no second file involved, so the fix is pinned
+    /// on the walk and not on the file-to-module-path mapping.
+    #[test]
+    fn a_call_through_an_inline_submodule_reexport_reaches_the_effect() {
+        for (tag, reexport) in [("inlglob", "pub use self::platform::*;"),
+                                ("inlnamed", "pub use self::platform::doit;")] {
+            let v = scan_src_to_json(tag, &format!("\
+pub mod imp {{
+    mod platform {{ {SPAWN} }}
+    {reexport}
+}}
+pub fn go() {{ imp::doit(); }}
+"));
+            assert!(effs_opt(&v, "go").contains(&"Exec".to_string()),
+                    "inline `{reexport}`:\n{v:#}");
+        }
+    }
+
+    /// DEFECT, TWO hops. `a` re-exports `a::b`, which re-exports `a::b::c` — the name has to travel two
+    /// re-export edges before `a::doit()` names it, so the alias index has to reach a fixpoint rather
+    /// than take one step.
+    #[test]
+    fn a_call_through_two_nested_reexports_reaches_the_effect() {
+        let v = scan_crate_to_json("subreexpdeep", &[
+            ("src/lib.rs", "mod a;\npub fn go() { a::doit(); }\n"),
+            ("src/a/mod.rs", "mod b;\npub use self::b::*;\n"),
+            ("src/a/b/mod.rs", "mod c;\npub use self::c::*;\n"),
+            ("src/a/b/c.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "go").contains(&"Exec".to_string()),
+                "two re-export hops:\n{v:#}");
+    }
+
+    /// DEFECT, the tempfile shape verbatim: a `#[cfg_attr(.., path = "..")]`-redirected `mod platform;`
+    /// whose body lives in `unix.rs`/`windows.rs`/`other.rs`. The scanner walks EVERY `#[cfg]` branch
+    /// (its standing over-approximation), so all three files are analysed and the re-export names all
+    /// three — a call to `imp::doit()` reaches whichever one compiles, and charging the union is the
+    /// same discipline `cfg_if` arms already get. Without the `#[path]` mapping the glob points at a
+    /// module path (`imp::platform`) that no analysed file carries, so it names nothing.
+    #[test]
+    fn a_reexport_through_a_path_redirected_platform_module_reaches_the_effect() {
+        let v = scan_crate_to_json("subreexppath", &[
+            ("src/lib.rs", "mod imp;\npub fn go() { imp::doit(); }\n"),
+            ("src/imp/mod.rs", "#[cfg_attr(unix, path = \"unix.rs\")]\n\
+                                #[cfg_attr(windows, path = \"windows.rs\")]\n\
+                                mod platform;\n\
+                                pub use self::platform::*;\n"),
+            ("src/imp/unix.rs", SPAWN),
+            ("src/imp/windows.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "go").contains(&"Exec".to_string()),
+                "the `#[path]`-redirected platform module is where tempfile's real Fs lives:\n{v:#}");
+    }
+
+    /// DEFECT, the OTHER tempfile spelling: Rust 2018 uniform paths let a re-export name a child module
+    /// with no `self::` (`pub use unix::*;`), which tempfile's `src/dir/imp/mod.rs` uses. A bare head
+    /// segment is an EXTERNAL crate unless the module declares it, so the rule is keyed on the `mod`
+    /// declaration being present — never on the bare name alone.
+    #[test]
+    fn a_bare_uniform_path_reexport_of_a_child_module_reaches_the_effect() {
+        let v = scan_crate_to_json("subreexpbare", &[
+            ("src/lib.rs", "mod imp;\npub fn go() { imp::doit(); }\n"),
+            ("src/imp/mod.rs", "mod unix;\npub use unix::*;\n"),
+            ("src/imp/unix.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "go").contains(&"Exec".to_string()),
+                "`pub use unix::*` names the DECLARED child module `imp::unix`:\n{v:#}");
+    }
+
+    /// CONTROL, GREEN BEFORE AND AFTER — 9cbd732's fabrication, in the FILE-per-module shape this change
+    /// touches. A submodule's OWN `struct Command` with an empty `spawn`, in a file that also carries
+    /// `use std::process::Command;`, must stay PURE: an enclosing file's imports never reach into a
+    /// submodule. Narrowing a fabrication is where silent under-reports get introduced, and this change
+    /// is in the same machinery, so the direction that must NOT move is pinned beside the one that must.
+    #[test]
+    fn a_submodules_own_type_stays_pure_across_the_reexport_change() {
+        let v = scan_crate_to_json("subreexpshadow", &[
+            ("src/lib.rs", "mod mine;\npub fn real() { let mut c = std::process::Command::new(\"sh\"); \
+                            let _ = c.spawn(); }\n"),
+            ("src/mine/mod.rs", "use std::process::Command;\n\
+                                 mod inner;\n\
+                                 pub use self::inner::*;\n\
+                                 pub fn on_std() { let mut c = Command::new(\"sh\"); let _ = c.spawn(); }\n"),
+            ("src/mine/inner.rs", "pub struct Command;\n\
+                                   impl Command { pub fn spawn(&self) {} }\n\
+                                   pub fn run(c: &Command) { c.spawn(); }\n"),
+        ]);
+        assert!(!effs_opt(&v, "mine::inner::run").contains(&"Exec".to_string()),
+                "`mine::inner::Command` is the crate's OWN type and its `spawn` does nothing — \
+                 charging Exec here is the fabrication 9cbd732 closed:\n{v:#}");
+        assert!(effs_opt(&v, "real").contains(&"Exec".to_string()),
+                "the real spawn in lib.rs still resolves:\n{v:#}");
+        assert!(effs_opt(&v, "mine::on_std").contains(&"Exec".to_string()),
+                "`mine/mod.rs`'s OWN import still governs its OWN code:\n{v:#}");
+    }
+
+    /// CONTROL, GREEN BEFORE AND AFTER: a re-export must not MERGE two same-named functions in
+    /// different modules. `top::doit` is re-exported into `top`; `other::doit` is a different function
+    /// with a different effect. Neither caller may inherit the other's effect.
+    #[test]
+    fn a_reexport_does_not_merge_same_named_fns_in_different_modules() {
+        let v = scan_crate_to_json("subreexpmerge", &[
+            ("src/lib.rs", "mod top;\nmod other;\n\
+                            pub fn via_reexport() { top::doit(); }\n\
+                            pub fn via_other() { other::doit(); }\n"),
+            ("src/top/mod.rs", "mod platform;\npub use self::platform::*;\n"),
+            ("src/top/platform.rs", SPAWN),
+            ("src/other.rs", "pub fn doit() { let _ = std::fs::read_to_string(\"/etc/hosts\"); }\n"),
+        ]);
+        assert!(effs_opt(&v, "via_reexport").contains(&"Exec".to_string()),
+                "the re-exported `top::doit` is the SPAWN:\n{v:#}");
+        assert!(!effs_opt(&v, "via_reexport").contains(&"Fs".to_string()),
+                "`other::doit`'s Fs must NOT smear onto the re-export route — that is the leaf-index \
+                 flood one level up:\n{v:#}");
+        assert!(effs_opt(&v, "via_other").contains(&"Fs".to_string()),
+                "`other::doit` is the READ:\n{v:#}");
+        assert!(!effs_opt(&v, "via_other").contains(&"Exec".to_string()),
+                "and it must not gain the re-exported spawn:\n{v:#}");
+    }
+
+    /// CONTROL, GREEN BEFORE AND AFTER: a PRIVATE `use` (no `pub`) imports a name for the module's own
+    /// body and exports NOTHING. `imp::doit()` from outside names no item, so it must resolve to
+    /// nothing — an alias index that ignored visibility would answer here.
+    #[test]
+    fn a_private_use_does_not_reexport() {
+        let v = scan_crate_to_json("subreexppriv", &[
+            ("src/lib.rs", "mod imp;\npub fn go() { imp::doit(); }\n"),
+            ("src/imp/mod.rs", "mod platform;\nuse self::platform::*;\n"),
+            ("src/imp/platform.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "imp::platform::doit").contains(&"Exec".to_string()),
+                "the definition is still analysed — this control is not vacuous:\n{v:#}");
+        assert!(!effs_opt(&v, "go").contains(&"Exec".to_string()),
+                "a private `use` exports nothing; `imp::doit` names no item and must resolve to \
+                 nothing rather than pick up the private import:\n{v:#}");
+    }
+
+    /// CONTROL, GREEN BEFORE AND AFTER: a NAMED re-export exports exactly the name it lists. A sibling
+    /// `pub fn` in the same source module is NOT visible as `imp::other`, so a call to it stays
+    /// unresolved — the named form must not behave like a glob.
+    #[test]
+    fn a_named_reexport_does_not_export_its_modules_other_names() {
+        let v = scan_crate_to_json("subreexponly", &[
+            ("src/lib.rs", "mod imp;\npub fn go() { imp::other(); }\n"),
+            ("src/imp/mod.rs", "mod platform;\npub use self::platform::doit;\n"),
+            ("src/imp/platform.rs", &format!("{SPAWN}\
+                pub fn other() {{ let _ = std::fs::read_to_string(\"/etc/hosts\"); }}\n")),
+        ]);
+        assert!(effs_opt(&v, "imp::platform::other").contains(&"Fs".to_string()),
+                "the definition is analysed — not vacuous:\n{v:#}");
+        assert!(!effs_opt(&v, "go").contains(&"Fs".to_string()),
+                "`pub use self::platform::doit` lists ONE name; `imp::other` is not an item:\n{v:#}");
+    }
+
+    /// CONTROL, GREEN BEFORE AND AFTER: the CRATE-ROOT re-export (the case `collect_root_reexports`
+    /// already covered) keeps working — this change adds a fallback, it must not displace the route
+    /// that was already there.
+    #[test]
+    fn a_crate_root_reexport_still_resolves() {
+        let v = scan_crate_to_json("rootreexp", &[
+            ("src/lib.rs", "mod platform;\npub use self::platform::*;\npub fn go() { doit(); }\n"),
+            ("src/platform.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "go").contains(&"Exec".to_string()),
+                "the crate-root re-export route is pre-existing and must stay:\n{v:#}");
+    }
+
+    /// CONTROL — MEASURED AS A FABRICATION on the first cut of this fix, on the very crate it was
+    /// written for. `tail2` keys a call on its last TWO segments, so `dir::imp` and `file::imp` are BOTH
+    /// spelled `imp` there — and so is the call (`imp::create()` in `dir/mod.rs` and in `file/mod.rs`).
+    /// tempfile has exactly that pair, and `dir::create` linked to `file::imp::*::create`, inheriting the
+    /// temp-NAME generator's `Env` and `Rand` from a function that only makes a directory.
+    ///
+    /// The first cut DID check for two modules claiming one key — but it checked only among the aliases
+    /// that SURVIVED, and `dir::imp`'s claim had already been dropped for an unrelated reason (its
+    /// re-export is a `#[cfg]` PAIR, two edges, which the never-guess rule refuses). One claimant was
+    /// left standing and the key looked unambiguous. A key is ambiguous because of who COULD claim it,
+    /// not because of who is left after the other rules have run.
+    #[test]
+    fn two_modules_sharing_a_last_segment_do_not_answer_each_others_reexports() {
+        let v = scan_crate_to_json("subreexpcollide", &[
+            ("src/lib.rs", "mod dir;\nmod file;\n\
+                            pub fn via_dir() { dir::go(); }\n\
+                            pub fn via_file() { file::go(); }\n"),
+            // `dir::imp` re-exports through a `#[cfg]` PAIR — two edges, so its own alias is refused.
+            ("src/dir/mod.rs", "mod imp;\npub fn go() { imp::doit(); }\n"),
+            ("src/dir/imp/mod.rs", "#[cfg(unix)]\nmod unix;\n#[cfg(unix)]\npub use unix::*;\n\
+                                    #[cfg(not(unix))]\nmod any;\n#[cfg(not(unix))]\npub use any::*;\n"),
+            ("src/dir/imp/unix.rs", "pub fn doit() { let _ = std::fs::create_dir(\"/tmp/d\"); }\n"),
+            ("src/dir/imp/any.rs", "pub fn doit() { let _ = std::fs::create_dir(\"/tmp/d\"); }\n"),
+            // `file::imp` re-exports through ONE glob, so its alias would otherwise stand.
+            ("src/file/mod.rs", "mod imp;\npub fn go() { imp::doit(); }\n"),
+            ("src/file/imp/mod.rs", "mod platform;\npub use self::platform::*;\n"),
+            ("src/file/imp/platform.rs",
+             "pub fn doit() { let _ = std::process::Command::new(\"sh\").spawn(); }\n"),
+        ]);
+        assert!(effs_opt(&v, "file::imp::platform::doit").contains(&"Exec".to_string()),
+                "the definition is analysed — not vacuous:\n{v:#}");
+        assert!(!effs_opt(&v, "dir::go").contains(&"Exec".to_string()),
+                "`dir::imp::doit` makes a DIRECTORY. Charging it `file::imp`'s spawn is a fabrication — \
+                 `imp::doit` is the same tail2 for both trees and names neither:\n{v:#}");
+        assert!(!effs_opt(&v, "file::go").contains(&"Fs".to_string()),
+                "…and the collision has to be refused in both directions:\n{v:#}");
+    }
+
+    /// The RENAME spelling (`pub use symbol::mangled as mangled_symbol_name;`) and the SUPER-relative
+    /// one. Both appear in the corpus this fix was measured on (defmt-macros uses the first verbatim,
+    /// and it is where the change's `Env` gains come from), so both are pinned rather than assumed.
+    #[test]
+    fn a_renamed_and_a_super_relative_reexport_both_resolve() {
+        let v = scan_crate_to_json("subreexprename", &[
+            ("src/lib.rs", "mod construct;\nmod other;\n\
+                            pub fn via_rename() { construct::mangled_name(); }\n\
+                            pub fn via_super() { other::doit(); }\n"),
+            ("src/construct/mod.rs", "mod symbol;\npub use self::symbol::mangled as mangled_name;\n"),
+            ("src/construct/symbol.rs", &SPAWN_AS("mangled")),
+            // `other` re-exports a name from a SIBLING module by walking up through `super`.
+            ("src/other/mod.rs", "pub use super::helper::doit;\n"),
+            ("src/helper.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "via_rename").contains(&"Exec".to_string()),
+                "`mangled_name` is `construct::symbol::mangled` under an `as`:\n{v:#}");
+        assert!(effs_opt(&v, "via_super").contains(&"Exec".to_string()),
+                "`super::helper::doit` names the sibling module's fn:\n{v:#}");
+    }
+
+    /// CONTROL, GREEN BEFORE AND AFTER: a module that DECLARES a name keeps it. A glob re-export bringing
+    /// in a same-named function must not make `imp::doit` ambiguous or redirect it — in Rust the
+    /// declaration shadows the glob, and here the primary index owns the tail outright.
+    #[test]
+    fn a_declared_name_is_not_displaced_by_a_glob_reexport_of_the_same_name() {
+        let v = scan_crate_to_json("subreexpshadowname", &[
+            ("src/lib.rs", "mod imp;\npub fn go() { imp::doit(); }\n"),
+            ("src/imp/mod.rs", "mod platform;\npub use self::platform::*;\n\
+                                pub fn doit() { let _ = std::fs::read_to_string(\"/etc/hosts\"); }\n"),
+            ("src/imp/platform.rs", SPAWN),
+        ]);
+        assert!(effs_opt(&v, "go").contains(&"Fs".to_string()),
+                "`imp`'s OWN `doit` is what `imp::doit()` names:\n{v:#}");
+        assert!(!effs_opt(&v, "go").contains(&"Exec".to_string()),
+                "the glob-imported `platform::doit` is SHADOWED by the declaration and must not be \
+                 charged onto the caller:\n{v:#}");
     }
