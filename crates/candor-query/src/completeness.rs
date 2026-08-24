@@ -181,14 +181,15 @@ pub(crate) struct ReportCompleteness {
     /// `unread` being non-empty so that *"no policy was given"* and *"this policy denies nothing"*
     /// cannot be confused with *"the producer read everything"*.
     ///
-    /// **AND IT IS WHY THIS IS NOT AN UNCONDITIONAL ARM.** An unread class rides almost every report a
-    /// bare `candor-scan <dir> --out r` writes — any tree with a build script, tests, benches or
-    /// examples — so a verb that hedged on every run would teach its reader to skip the hedge, which is
-    /// the same argument this module already makes for omitting the manifest on a complete report. The
-    /// descriptive verbs (`whatif`, `map`, `where`, `blindspots`, `tour`, `containment`) never arm it,
-    /// and that is a ruling rather than an omission: they carry no policy, so there is no question whose
-    /// answer could depend on the unread code. Their `outOfScope`/`unanalyzed` arms are untouched —
-    /// those are facts about the report, not about a rule.
+    /// **AND IT IS WHY THIS IS NOT AN UNCONDITIONAL ARM *OF THE EXIT CODE*.** An unread class rides
+    /// almost every report a bare `candor-scan <dir> --out r` writes — any tree with a build script,
+    /// tests, benches or examples — and a `--strict` verb that exited 2 on every one of them would be
+    /// MORE pessimistic than the gate, which ⟨0.24⟩ forbids in the same breath as the under-claim.
+    ///
+    /// ⟨0.32⟩ **IT IS NOT WHAT THE *DISCLOSURE* IS KEYED ON — SEE [`Self::must_hedge`], WHICH READS
+    /// [`Self::unread`] DIRECTLY.** The paragraph above used to end *"the descriptive verbs never arm
+    /// it … they carry no policy, so there is no question whose answer could depend on the unread
+    /// code"*, and that was ruled WRONG four-way on 2026-08-24; the ruling is on `must_hedge`.
     pub(crate) unread_armed: bool,
 }
 
@@ -271,8 +272,49 @@ impl ReportCompleteness {
     /// identical reason `judged_nothing` is: the gate exits 0 over a manifest-less report too, so a verb
     /// exiting 2 there would claim it got LESS far than the gate on the same bytes. The row-3 split
     /// re-routes a hedge that was already happening; it must not also move an exit code.
+    ///
+    /// ⟨0.32⟩ **AND [`Self::unread`] IS AN ARM OF THIS, *UNARMED* — RULED 2026-08-24 AFTER A FOUR-WAY
+    /// DIVERGENCE. DO NOT RE-LITIGATE IT HERE.** Over a report whose `excluded` names a class the scan
+    /// never opened, `tour` printed the bare *"nothing hidden — every effect sits where its name says it
+    /// should"* at exit 0 in candor-rust, candor-ts and candor-swift, while candor-java hedged and named
+    /// the class. **candor-java was right.**
+    ///
+    /// **IT IS A DISCLOSURE, NOT A VERDICT, AND IT MUST NOT MOVE AN EXIT CODE** — which is why the arm is
+    /// here and NOT on [`Self::incomplete`]. ⟨0.24⟩'s advisory-verb pessimism MUST binds verbs that
+    /// answer `ok`; `tour` answers none and has no exit-code obligation, so that clause does not reach
+    /// it. What reaches it is SPEC §2 ⟨0.28⟩, which widens the re-disclosure MUST to *"any verb whose
+    /// output could be read as a negative finding about the code — a verdict, an empty result set, or a
+    /// zero count"*, and SPEC §3.1 ⟨0.18⟩, which already forbids THIS EXACT SENTENCE over a ≥⅓-Unknown
+    /// graph. An unread exclusion class is the same ignorance arriving by a different route, and the ⅓
+    /// threshold structurally CANNOT see it: an unread unit contributes no entry, so it moves neither
+    /// the numerator nor the denominator.
+    ///
+    /// **AND THE ARGUMENT THAT KEPT IT OUT WAS THE WRONG WAY ROUND.** Three engines reasoned *"these
+    /// verbs carry no policy, so there is no question whose answer could depend on the unread code"*.
+    /// The condition ⟨0.32⟩ states is the QUESTION IN FORCE, and a verb with no policy is not asking a
+    /// NARROWER question than `deny Exec` — it is asking the widest one there is, the whole effect
+    /// surface. A `deny`/`pure` rule's answer can depend on unread code, so [`arm_unread`] arms; an
+    /// `allow`/`forbid`/`only`/`layer` policy's answer cannot, so it CLEARS the list and this arm goes
+    /// quiet with it; a descriptive verb's answer always can.
+    ///
+    /// **THE TRIGGER IS THE GATE'S, MINUS THE POLICY CONDITION**: `peeked == false` with no
+    /// `judgedElsewhere`, off the same key through the same reader, `count` IGNORED (measured
+    /// 2026-08-24 — all four gates refuse over a `count: 0` unread class and certify over a
+    /// `judgedElsewhere: true` one). One matcher, so a report that earns an unhedged `tour` is exactly a
+    /// report `gate --report` can certify. The NOISE objection — this fires on nearly every no-policy
+    /// report — is real, and it is answered by the REMEDY rather than by silence: scan with the policy,
+    /// the peek reads the class, `peeked` turns true and the hedge goes away.
+    ///
+    /// **KNOWN RESIDUAL, stated rather than asserted away:** `peeked: true` means the class was READ,
+    /// not ANALYZED — the peek looks only for effects the PRODUCER's policy denied — so an undenied
+    /// effect inside a peeked class is still outside `tour`'s graph and outside this hedge. That is the
+    /// gate's residual too (SPEC §2 ⟨0.32⟩ files it against a report recording its own deny set), and
+    /// closing it is a rung, not a fix.
     pub(crate) fn must_hedge(&self) -> bool {
-        self.incomplete() || !self.judged_nothing.is_empty() || !self.no_manifest.is_empty()
+        self.incomplete()
+            || !self.judged_nothing.is_empty()
+            || !self.no_manifest.is_empty()
+            || !self.unread.is_empty()
     }
 
     /// How many units the reports say were not analysed — readable manifest entries plus files whose
@@ -303,6 +345,17 @@ impl ReportCompleteness {
     pub(crate) fn gate_line(&self) -> &'static str {
         if self.incomplete() {
             "`gate --report` exits 2 over these bytes."
+        } else if !self.unread.is_empty() {
+            // ⟨0.32⟩ THE UNARMED UNREAD CAUSE GETS ITS OWN SENTENCE, because both of the ones below are
+            // FALSE of it in opposite directions. "exits 2 over these bytes" is unqualified and this verb
+            // holds no policy to say it under; "exits 0 over a judged-nothing report" names a cause that
+            // is not present and sends the reader to a CI job that will pass. `gate --report` can only
+            // ever evaluate a deny-family rule — measured 2026-08-24, all four engines refuse an
+            // `allow`-only policy as NO RULES and a `forbid` rule as unevaluable on this route — so the
+            // exit is a certainty once a policy exists, and the gap is only that none does here.
+            "`gate --report` exits 2 over these bytes under any policy it can evaluate (they are all \
+             `deny`/`pure`), and this verb holds none — so NOTHING DOWNSTREAM IS FAILING CLOSED ON IT \
+             HERE and this note is the whole of the warning."
         } else if self.judged_nothing.is_empty() {
             "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a report carrying \
              no `analyzed` manifest (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole \
@@ -403,6 +456,16 @@ impl ReportCompleteness {
             // ⟨0.32⟩ The classes nothing opened, on the machine channel. Empty on every unarmed run —
             // which is every descriptive verb and every policy with no deny rule — so a document raised
             // by any pre-⟨0.32⟩ cause alone stays byte-identical to its pre-rung form.
+            //
+            // ⟨0.32⟩ **STILL `unread_armed` AND DELIBERATELY NOT `!unread.is_empty()`, even though the
+            // PROSE note moved.** This is a WIRE key, and the only engine that publishes it is this one
+            // (measured 2026-08-24: `fix-gate --json` over one unread report — rust `{"incomplete":
+            // true, "unread": […]}`, java and swift `{"incomplete": true}` alone). Widening it to the
+            // descriptive documents would mint a fifth key set on the six verbs where three engines
+            // publish none, which is §3.3.1's *"four independent guesses with a conformance failure
+            // scheduled"*. The descriptive hedge raises `incomplete: true` and adds NO key of its own —
+            // the rule this module already applies to `unreadable`, and the one ts and swift state for
+            // themselves. Closing the rust-only ADVISORY key four-way is a separate rung.
             unread: if self.unread_armed { self.unread.clone() } else { Vec::new() },
         })
     }
@@ -511,9 +574,10 @@ impl ReportCompleteness {
                 ),
             );
         }
-        // ⟨0.32⟩ …and the classes nothing OPENED. Only ever on an ARMED run — the descriptive verbs and
-        // a policy with no deny rule never reach it, which is what keeps this off every ordinary note.
-        if self.unread_armed {
+        // ⟨0.32⟩ …and the classes nothing OPENED, on `unread` DIRECTLY rather than on `unread_armed` —
+        // see `must_hedge`, which carries the ruling. A policy with no deny rule still reaches nothing
+        // here, because `arm_unread` CLEARS the list rather than merely leaving it unarmed.
+        if !self.unread.is_empty() {
             let n = self.unread.len();
             append(
                 &mut head,
@@ -556,15 +620,22 @@ impl ReportCompleteness {
                 o.effects.join(", ")
             )?;
         }
-        if self.unread_armed {
-            for c in &self.unread {
-                writeln!(
-                    w,
-                    "      {c} — this exclusion class went UNREAD (`excluded[].peeked: false`): its \
-                     effects are absent because nothing looked, not because there are none. Re-run the \
-                     producing scan WITH this policy (candor-scan <dir> --policy <p>)"
-                )?;
-            }
+        for c in &self.unread {
+            // ONE FACT SENTENCE, TWO REMEDIES. The fact is the same on both routes and stays
+            // character-for-character what the armed route was measured on; the REPAIR is not — an
+            // armed run already holds the policy to re-scan with, and a descriptive verb holds none, so
+            // telling it to re-run "WITH this policy" names a thing the reader does not have.
+            let remedy = if self.unread_armed {
+                "Re-run the producing scan WITH this policy (candor-scan <dir> --policy <p>)"
+            } else {
+                "Re-run the producing scan WITH a `deny`/`pure` policy so the peek reads it \
+                 (candor-scan <dir> --policy <p>)"
+            };
+            writeln!(
+                w,
+                "      {c} — this exclusion class went UNREAD (`excluded[].peeked: false`): its \
+                 effects are absent because nothing looked, not because there are none. {remedy}"
+            )?;
         }
         writeln!(w, "      {tail}")
     }

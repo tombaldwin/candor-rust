@@ -497,6 +497,68 @@
         assert!(db["noManifest"][0].as_str().unwrap().ends_with("rep.bb.scan.json"), "{db}");
     }
 
+    /// ⟨0.32⟩ **AN UNREAD EXCLUSION CLASS HEDGES A DESCRIPTIVE ANSWER, AND MUST NOT TOUCH AN EXIT
+    /// CODE** — the 2026-08-24 four-way ruling, pinned on the mechanism. See
+    /// [`crate::completeness::ReportCompleteness::must_hedge`] for the argument; this asserts the shape
+    /// of it in BOTH directions, because the SAFE value of the key under test passes a one-sided
+    /// assertion while deleting the feature.
+    ///
+    /// The divergence it closes: `tour` printed the bare *"nothing hidden"* over a report whose
+    /// `excluded` names a class nothing opened — in this engine, candor-ts and candor-swift; candor-java
+    /// hedged and named the class, and was right.
+    #[test]
+    fn an_unread_exclusion_class_hedges_the_answer_without_touching_the_exit_code() {
+        let unread = serde_json::json!({
+            "candor": "0.32",
+            "analyzed": { "count": 1 },
+            "excluded": [{ "class": "build-script", "count": 1, "peeked": false, "reason": "r" }],
+            "functions": [{ "fn": "f", "inferred": ["Fs"], "direct": ["Fs"] }],
+        });
+        let rep = comp_fixture("unread-class", unread.clone());
+        let comp = crate::completeness::report_completeness(&rep);
+        assert!(comp.must_hedge(), "a class the scan never opened must reach the disclosure predicate");
+        assert!(
+            !comp.incomplete(),
+            "…and MUST NOT reach the exit-code predicate: `unverified --strict` computes its 2 from \
+             this, and over a report the gate — holding no deny rule — exits 0 on, a verb exiting 2 \
+             would claim it got LESS far than the gate. ⟨0.24⟩'s over-claim, mirrored."
+        );
+        // The MACHINE half raises the flag and mints NO new key: `unread` is the ADVISORY route's wire
+        // spelling and this engine is the only one that publishes it, so widening it to the six
+        // descriptive verbs would be a fifth key set nothing else speaks (see `fields`).
+        let mut doc = serde_json::json!({ "reaches": [] });
+        comp.write_json(&mut doc);
+        assert_eq!(doc["incomplete"], serde_json::json!(true), "{doc}");
+        assert!(doc.get("unread").is_none(), "the descriptive hedge mints no wire key: {doc}");
+        // The HUMAN half names the class AND the cause — a hedge whose sentence says nothing is the
+        // deleted disclosure arriving inside the disclosure (measured on java and rust, same rung).
+        let mut note = Vec::new();
+        comp.write_note_for_test(&mut note, "so-what", "tail");
+        let note = String::from_utf8(note).unwrap();
+        assert!(note.contains("exclusion class(es) the scan did NOT READ"), "{note}");
+        assert!(note.contains("build-script"), "the class must be NAMED: {note}");
+        // …and the tail must not send the reader to a gate that will pass and make this read as noise,
+        // nor claim a gate is running when this verb holds no policy at all.
+        assert!(comp.gate_line().contains("under any policy it can evaluate"), "{}", comp.gate_line());
+
+        // OVER-CHARGE CONTROL 1 — the SAME report with the class PEEKED gets the unhedged answer and a
+        // byte-identical document. Without it this test passes for an engine that hedges every report,
+        // which deletes the sentence rather than qualifying it.
+        let mut peeked = unread.clone();
+        peeked["excluded"][0]["peeked"] = serde_json::json!(true);
+        let c = crate::completeness::report_completeness(&comp_fixture("peeked-class", peeked));
+        assert!(!c.must_hedge(), "a class the peek READ is not an unread class");
+        assert!(c.fields().is_none());
+
+        // OVER-CHARGE CONTROL 2 — the producer's own ⟨0.32⟩ carve-out. `judgedElsewhere: true` says
+        // another report judges those files, and it must cost this answer nothing, exactly as it costs
+        // `gate --report` nothing (measured four-way, exit 0).
+        let mut elsewhere = unread;
+        elsewhere["excluded"][0]["judgedElsewhere"] = serde_json::json!(true);
+        let c = crate::completeness::report_completeness(&comp_fixture("elsewhere-class", elsewhere));
+        assert!(!c.must_hedge(), "`judgedElsewhere: true` is judged, not unread");
+    }
+
     /// ⟨0.28⟩ **THE TRAP THE ROW-3 SPLIT SETS, PINNED.** [`candor_report::report_judged_nothing`] is not
     /// only a disclosure predicate — it is what candor-scan's chained join
     /// (`DepIndex::judged_nothing_pkgs` → the κ ledger's coverage exemption) and `gate --report` read to
