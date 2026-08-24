@@ -60,6 +60,19 @@ impl<'a, E: AsRef<str> + Ord> GateInput<'a, E> {
     pub fn disp<'x>(&'x self, k: &'x str) -> &'x str {
         self.display.get(k).map(|v| v.as_str()).unwrap_or(k)
     }
+
+    /// ⟨0.32⟩ The §2.2 UNIT IDENTITY this key stands for — what a verdict row carries so a consumer can
+    /// tell two units apart (SPEC §2). EMPTY when the caller has none to give, and empty is then omitted
+    /// from the wire: *this producer cannot answer* beats a fabricated id.
+    ///
+    /// A separate map from [`Self::display`] rather than a second use of the key, because the two routes
+    /// disagree about what the key IS: the report route keys by `hash` already, the scan route keys by
+    /// the qualified NAME and must qualify it with the crate. Reading identity off the key would have
+    /// made the two routes emit different `hash` values for one unit, which §3.1 byte-equality forbids
+    /// and which no single-route test could see.
+    pub fn unit<'x>(&'x self, k: &'x str) -> &'x str {
+        self.hash.get(k).map(|v| v.as_str()).unwrap_or("")
+    }
 }
 
 pub struct GateInput<'a, E: AsRef<str> + Ord> {
@@ -74,6 +87,9 @@ pub struct GateInput<'a, E: AsRef<str> + Ord> {
     /// this map silently stops scopes matching: a false green introduced by fixing a false green.
     /// Identity is the default, so the single-report callers are unaffected.
     pub display: &'a std::collections::HashMap<String, String>,
+    /// ⟨0.32⟩ key -> the §2.2 UNIT IDENTITY (`package#fn`) a verdict row carries. Missing means this
+    /// caller has none, and the row then omits the field — see [`Self::unit`].
+    pub hash: &'a std::collections::HashMap<String, String>,
     /// Per fn, the TRANSITIVE effect set — the model's `S`, with candor's `Unknown` marker carried as a
     /// member (this engine's encoding of `D ≠ ∅`).
     pub inferred: &'a HashMap<String, BTreeSet<E>>,
@@ -324,6 +340,9 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 out.push(GateViolation {
                     rule: "AS-EFF-006".into(),
                     func: gi.disp(q).to_string(),
+                    // ⟨0.32⟩ THE UNIT, beside the name — SPEC §2. Two members of a workspace violating
+                    // one rule under one name produced two byte-identical rows until this line.
+                    hash: gi.unit(q).to_string(),
                     effects: hits.iter().map(|s| s.to_string()).collect(),
                     detail: format!("`{disp_q}` performs {{ {} }}, forbidden by policy: `{}`", hits.join(", "), r.raw),
                     reason_class,
@@ -365,6 +384,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                         out.push(GateViolation {
                             rule: "AS-EFF-008".into(),
                             func: gi.disp(q).to_string(),
+                            hash: gi.unit(q).to_string(),   // ⟨0.32⟩ SPEC §2 — every verdict row
                             effects: vec![r.effect.to_string()],
                             detail: format!("`{disp_q}` reaches {{ {} }} outside the allowlist: `{}`", bad.join(", "), r.raw),
                             ..Default::default()
@@ -374,6 +394,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 _ => out.push(GateViolation {
                     rule: "AS-EFF-008".into(),
                     func: gi.disp(q).to_string(),
+                    hash: gi.unit(q).to_string(),   // ⟨0.32⟩ SPEC §2 — every verdict row
                     effects: vec![r.effect.to_string()],
                     detail: format!("`{disp_q}` performs {} with no visible literal — the surface cannot be certified: `{}`", r.effect, r.raw),
                     ..Default::default()
@@ -405,6 +426,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                 out.push(GateViolation {
                     rule: "AS-EFF-009".into(),
                     func: gi.disp(q).to_string(),
+                    hash: gi.unit(q).to_string(),   // ⟨0.32⟩ SPEC §2 — every verdict row
                     effects: Vec::new(), // a layer-flow has no single effect
                     detail: format!("`{disp_q}` reaches into a forbidden layer (via `{h}`): `{}`", r.raw),
                     ..Default::default()
@@ -458,6 +480,7 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
                     // them, which is the argument this form is built on turned on the tool.
                     rule: "AS-EFF-011".into(),
                     func: gi.disp(q).to_string(),
+                    hash: gi.unit(q).to_string(),   // ⟨0.32⟩ SPEC §2 — every verdict row
                     effects: Vec::new(),
                     detail: format!(
                         "`{disp_q}` reaches `{h}`, which this permission rule does not permit: `{}`",
@@ -471,7 +494,17 @@ pub fn gate<E: AsRef<str> + Ord>(p: &ParsedPolicy, gi: &GateInput<E>) -> GateOut
     // Sort by (rule, detail) — identical order to the old rendered-line sort (the "[rule] detail" render
     // puts the constant '[' first and all AS-EFF codes are same-length), without allocating two Strings
     // per comparison.
-    out.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
+    //
+    // ⟨0.32⟩ …AND THEN BY UNIT (SPEC §2). Two units sharing a name produce rows whose `rule` and
+    // `detail` are identical — `detail` is built from the DISPLAY name — so the pair tied and their
+    // order was whatever `all` happened to hold. §3.3.1 makes the order part of the byte-equality
+    // between the two routes, and the two routes accumulate in different orders. The same key is
+    // applied again in `candor_report`'s verdict writers, where the SCAN route's cross-member
+    // concatenation is re-sorted.
+    out.sort_by(|a, b| {
+        (a.rule.as_str(), a.detail.as_str(), a.hash.as_str())
+            .cmp(&(b.rule.as_str(), b.detail.as_str(), b.hash.as_str()))
+    });
     // Deterministic for the same reason the violations are: a disclosure a consumer diffs between runs
     // must not reorder because a HashMap iterated differently.
     withheld.sort_by(|a, b| (&a.rule, &a.func).cmp(&(&b.rule, &b.func)));

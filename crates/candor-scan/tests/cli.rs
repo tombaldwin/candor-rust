@@ -2860,3 +2860,69 @@ fn a_policy_with_no_deny_rule_does_not_record_unread_classes_into_the_verdict() 
     assert_eq!(v["ok"], serde_json::json!(false), "{v}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// ⟨0.32⟩ **TWO UNITS, TWO ROWS A READER CAN TELL APART** — SPEC §2: *"a verdict row MUST carry enough
+/// identity for a consumer to tell two units apart… and the sort key MUST include that identity."*
+///
+/// MEASURED at `ab505c0` on exactly this fixture — a two-member workspace whose members both define
+/// `go()` and both spawn `curl` — under `deny Exec`:
+///
+/// ```text
+///   "violations": [
+///     { "rule": "AS-EFF-006", "fn": "go", "effects": ["Exec"], "detail": "`go` performs { Exec } …" },
+///     { "rule": "AS-EFF-006", "fn": "go", "effects": ["Exec"], "detail": "`go` performs { Exec } …" }
+///   ]
+/// ```
+///
+/// Byte-identical. A reader cannot tell two broken members from one listed twice, and this is the
+/// SCAN route — where the two rows are produced by two separate `policy_violations` calls and
+/// concatenated, so their order was the member walk's and the `(rule, detail)` sort could not break
+/// the tie. §3.3.1 makes the document's order part of the byte-equality with `gate --report`.
+#[test]
+fn a_workspace_verdict_tells_two_same_named_units_apart() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-wsidentity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    for m in ["a", "b"] {
+        std::fs::create_dir_all(d.join(m).join("src")).unwrap();
+        std::fs::write(d.join(m).join("Cargo.toml"), format!("[package]\nname = \"{m}\"\n")).unwrap();
+        std::fs::write(
+            d.join(m).join("src/lib.rs"),
+            "pub fn go() { let _ = std::process::Command::new(\"curl\").status(); }\n",
+        ).unwrap();
+    }
+    std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\n").unwrap();
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Exec\n").unwrap();
+    let gp = d.join("gate.json");
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--out").arg(d.join("rep").to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .arg("--gate-json").arg(gp.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    assert_eq!(out.status.code(), Some(1), "both members violate `deny Exec`");
+    let doc = std::fs::read_to_string(&gp).expect("gate.json written");
+    let v: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
+    // READ BEFORE DELETING. This block used to sit after the `remove_dir_all` below and read a path
+    // that no longer existed, behind an `if !rep.is_empty()` — an assertion that could only ever be
+    // skipped. A join key the report does not carry is not a join key, so the row must be REACHED.
+    let rep = std::fs::read_to_string(d.join("rep.a.scan.json")).expect("the member's report");
+    let _ = std::fs::remove_dir_all(&d);
+
+    let rows = v["violations"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "instrument: this row means nothing without TWO violations: {doc}");
+    assert_ne!(rows[0], rows[1],
+        "two units, two rows, and NOTHING in either says which member it is about: {doc}");
+    // The §2.2 JOIN KEY, and in SORTED order — the sort key must include the identity or the tie is
+    // broken by the member walk, which the report route does not share.
+    let hashes: Vec<&str> = rows.iter().map(|r| r["hash"].as_str().unwrap_or("")).collect();
+    assert_eq!(hashes, vec!["a#go", "b#go"], "each row carries its unit's `hash`, sorted: {doc}");
+    // …and it is the SAME string the report entry carries, which is what makes the join work at all.
+    assert!(rep.contains("\"hash\": \"a#go\""),
+        "the verdict row's identity must be findable in the report it is about: {rep}");
+    // The NAME is untouched: it is what a policy scope matches and what a human reads.
+    let names: Vec<&str> = rows.iter().map(|r| r["fn"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["go", "go"], "`fn` stays the bare name: {doc}");
+}

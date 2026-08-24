@@ -76,6 +76,10 @@ pub(crate) fn policy_precheck(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn policy_violations(
     policy_text: &str,
+    // ⟨0.32⟩ The crate this signature belongs to, so a verdict row can carry the §2.2 unit identity
+    // (`<crate>#<qual>`) — the SAME string `scan.rs` writes into each report entry's `hash`. Taken as a
+    // name and joined here rather than as a prebuilt map, because the scan's keys ARE the quals.
+    crate_name: &str,
     all: &[String],
     inferred: &HashMap<String, BTreeSet<&'static str>>,
     calls: &HashMap<String, BTreeSet<String>>,
@@ -104,6 +108,12 @@ pub(crate) fn policy_violations(
     // is identical (only a Net-bearing fn could reach that branch) and it is the same derivation scan.rs
     // writes into the report's `netClass`, which is what makes the ⟨0.24⟩ report route byte-equivalent.
     let net_classes = net_class_map(all, inferred, hostsacc, incompleteacc, net_partners);
+    // ⟨0.32⟩ THE §2 IDENTITY EACH VERDICT ROW CARRIES — `<crate>#<qual>`, exactly what `scan.rs` writes
+    // into the report entry's `hash`. Two members of a workspace are gated by two separate calls to this
+    // function and their rows are concatenated into ONE document; without this the two rows for a shared
+    // function name were byte-identical and a reader could not attribute either.
+    let hash: std::collections::HashMap<String, String> =
+        all.iter().map(|q| (q.clone(), format!("{crate_name}#{q}"))).collect();
     candor_classify::gate::gate(
         &p,
         &candor_classify::gate::GateInput {
@@ -111,6 +121,7 @@ pub(crate) fn policy_violations(
             // ⟨0.32⟩ identity: a scan gates ONE analysis world, so its keys are already names. The map
             // exists for the multi-report route, where keys must be hashes (SPEC §2.2).
             display: &std::collections::HashMap::new(),
+            hash: &hash,
             inferred,
             calls,
             hosts: hostsacc,
@@ -407,6 +418,7 @@ pub(crate) fn check_baseline(
                 out.push(GateViolation {
                     rule: "AS-EFF-005".into(),
                     func: q.clone(),
+                    hash: format!("{crate_name}#{q}"),   // ⟨0.32⟩ SPEC §2 — every verdict row
                     effects: vec!["Unknown".to_string()],
                     detail: format!(
                         "`{q}` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot \
@@ -422,6 +434,7 @@ pub(crate) fn check_baseline(
         out.push(GateViolation {
             rule: "AS-EFF-005".into(),
             func: q.clone(),
+            hash: format!("{crate_name}#{q}"),   // ⟨0.32⟩ SPEC §2 — every verdict row
             effects: real.iter().map(|s| s.to_string()).collect(),
             detail: format!(
                 "`{q}` gained effect {{ {} }} not present in the baseline; an existing function \

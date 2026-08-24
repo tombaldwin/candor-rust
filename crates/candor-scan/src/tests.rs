@@ -29,8 +29,10 @@
         unknown_aliases: &std::collections::BTreeMap<String, BTreeSet<candor_classify::policy::ReasonClass>>,
         net_partners: &BTreeSet<String>,
     ) -> Vec<GateViolation> {
+        // ⟨0.32⟩ a fixed crate name: these unit tests assert on the FINDINGS, and the `hash` a verdict
+        // row now carries is `<crate>#<qual>`. The CLI rows pin the real value on both routes.
         policy_violations(
-            policy_text, all, inferred, calls, hostsacc, cmdsacc, pathsacc, tablesacc, incompleteacc,
+            policy_text, "unit", all, inferred, calls, hostsacc, cmdsacc, pathsacc, tablesacc, incompleteacc,
             reasonclassacc, unknown_aliases, net_partners,
         )
         .violations
@@ -4274,7 +4276,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         // than printing `policy ✓` over a rule that never ran.
         let none: HashMap<String, BTreeSet<String>> = HashMap::new();
         let full = |pol: &str, rc: &HashMap<String, BTreeSet<String>>| {
-            policy_violations(pol, &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, rc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new())
+            policy_violations(pol, "unit", &all, &inferred, &calls, &empty, &empty, &empty, &empty, &empty_inc, rc, &std::collections::BTreeMap::new(), &std::collections::BTreeSet::new())
         };
         let o = full("deny Net Unknown[unresolved]\n", &none);
         assert!(o.violations.is_empty(), "an UNEVIDENCED reason class must not be CHARGED: {:?}", o.violations);

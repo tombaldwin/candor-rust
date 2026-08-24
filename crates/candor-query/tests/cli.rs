@@ -5473,3 +5473,107 @@ fn advisory_verbs_do_not_refuse_for_a_peek_nobody_asked_for() {
              some other route. `{verb}` doc: {doc}");
     }
 }
+
+/// Write TWO reports under one locator, one per package, each declaring a single same-named function
+/// with the given effects. This is SPEC §2's "a single analysis world" spelled as a report SET — the
+/// everyday workspace shape, and the one where a bare `fn` stops being an identifier.
+fn write_two_package_reports(f: &Fixture, func: &str, effects: &str) {
+    for pkg in ["a", "b"] {
+        let report = format!(
+            r#"{{
+  "candor": {{ "version": "scan-test", "toolchain": "stable", "spec": "0.32" }},
+  "package": "{pkg}",
+  "analyzed": {{ "count": 1, "digest": "0000000000000000" }},
+  "functions": [
+    {{ "fn": "{func}", "loc": "src/lib.rs:1:1", "inferred": {effects}, "direct": {effects}, "hash": "{pkg}#{func}", "cmds": ["curl"] }}
+  ]
+}}"#
+        );
+        std::fs::write(format!("{}.{pkg}.scan.json", f.prefix), report).unwrap();
+        std::fs::write(format!("{}.{pkg}.scan.callgraph.json", f.prefix), format!(r#"{{"{func}":[]}}"#)).unwrap();
+    }
+}
+
+/// ⟨0.32⟩ **A VERDICT ROW MUST CARRY ENOUGH IDENTITY TO TELL TWO UNITS APART** — SPEC §2, and the
+/// clause names this engine's own case as its motivating example.
+///
+/// MEASURED at `ab505c0` on a two-member workspace whose members both violate `deny Exec`:
+///
+/// ```text
+///   "violations": [
+///     { "rule": "AS-EFF-006", "fn": "go", "effects": ["Exec"], "detail": "`go` performs { Exec } …" },
+///     { "rule": "AS-EFF-006", "fn": "go", "effects": ["Exec"], "detail": "`go` performs { Exec } …" }
+///   ]
+/// ```
+///
+/// Two BYTE-IDENTICAL rows. No hash, no package, no loc — nothing a consumer can attribute, so a
+/// reader cannot tell whether two members are broken or one is listed twice, and a consumer that
+/// fingerprints on name alone (candor's own SARIF action did) hides one finding behind the other.
+/// §2.2 already binds a consumer to join by `hash`; a verdict row that omits it forces exactly the
+/// name join the spec forbids.
+///
+/// AND THE SORT KEY IS HALF THE CLAUSE. `(rule, detail)` ties on these twins, so the order between
+/// them is whatever order the two routes happened to accumulate in — and §3.3.1 makes the document's
+/// order part of byte-equality. Identity in the row without identity in the key leaves the two routes
+/// free to disagree.
+#[test]
+fn a_verdict_row_names_the_unit_it_is_about() {
+    let f = Fixture::new("verdict-identity");
+    let deny = write_policy(&f, "deny.policy", "deny Exec\n");
+    write_two_package_reports(&f, "go", r#"["Exec"]"#);
+
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(1), "both members violate `deny Exec`");
+    let doc = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    let rows = v["violations"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "instrument: this row means nothing without TWO violations: {doc}");
+    // THE DEFECT: the two rows were identical documents.
+    assert_ne!(rows[0], rows[1],
+        "two units, two rows, and NOTHING in either says which unit it is about — a reader cannot tell \
+         two broken members from one listed twice: {doc}");
+    // …and the identity is the §2.2 JOIN KEY, not a decoration. A consumer joins a verdict row back to
+    // the report entry by `hash`; anything else forces the name join §2.2 forbids.
+    let hashes: Vec<&str> = rows.iter().map(|r| r["hash"].as_str().unwrap_or("")).collect();
+    assert_eq!(hashes, vec!["a#go", "b#go"],
+        "each row must carry its unit's `hash` — §2.2's join key — and in SORTED order, because the \
+         document's order is part of §3.3.1 byte-equality and `(rule, detail)` ties on these twins: {doc}");
+}
+
+/// ⟨0.32⟩ THE OVER-CHARGE CONTROL for the row above: a SINGLE-unit verdict must not change shape
+/// gratuitously. Identity is ADDED to the row; nothing that was there moves, changes value, or goes.
+#[test]
+fn a_single_unit_verdict_keeps_every_key_it_had() {
+    let f = Fixture::new("verdict-identity-single");
+    let deny = write_policy(&f, "deny.policy", "deny Fs\n");
+    f.write_report();      // one package `rpt`, `inner`/`outer`, both Fs
+
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(1), "`deny Fs` fires on this report");
+    let doc = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    let rows = v["violations"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "instrument: two functions violate here: {doc}");
+    for r in rows {
+        let o = r.as_object().unwrap();
+        assert_eq!(o["rule"], serde_json::json!("AS-EFF-006"), "{doc}");
+        assert!(o.contains_key("fn") && o.contains_key("effects") && o.contains_key("detail"),
+            "the pre-⟨0.32⟩ keys must all survive: {doc}");
+        // The KEY SET, pinned: identity is the ONLY addition. A rung that quietly grew a second field
+        // would break every consumer that validates the shape, and the growth would be invisible to an
+        // assertion that only reads keys by name.
+        let mut keys: Vec<&str> = o.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["detail", "effects", "fn", "hash", "rule"],
+            "a verdict row gains IDENTITY and nothing else: {doc}");
+    }
+    // …and the NAME is untouched — it is what a policy scope matches and what a human reads. Carrying
+    // the hash must not turn `fn` into `pkg#fn`, which would silently stop every scoped rule matching:
+    // a false green introduced by fixing a false green.
+    let names: Vec<&str> = rows.iter().map(|r| r["fn"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["inner", "outer"], "the `fn` field stays the bare NAME: {doc}");
+}

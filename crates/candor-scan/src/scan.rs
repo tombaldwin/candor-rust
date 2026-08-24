@@ -3468,7 +3468,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let code = if guard_code == 1 || crate::gate::holds_violation(run) { 1 } else { 2 };
             return (code, json_body);
         }
-        let outcome = policy_violations(&text, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
+        let outcome = policy_violations(&text, &crate_name, &all, &inferred, &calls, &hostsacc, &cmdsacc, &pathsacc, &tablesacc, &incompleteacc, &reason_class_acc, &unknown_aliases, &net_partners);
         // ⟨0.29⟩ THE NAME RULES STOP AT THE SCAN BOUNDARY, AND NOW SAY SO. `forbid A -> B` and
         // `only A -> B …` match over the call graph; a chained dependency contributes EFFECTS, not EDGES,
         // so a function calling into a dep has an EMPTY adjacency and the crossing is invisible to them.
