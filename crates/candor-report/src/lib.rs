@@ -1016,6 +1016,29 @@ pub struct GateViolation {
     pub rule: String,
     #[serde(rename = "fn")]
     pub func: String,
+    /// ⟨0.32⟩ **THE UNIT THIS ROW IS ABOUT** — §2.2's join key, `package#fn`.
+    ///
+    /// SPEC §2 ⟨0.32⟩: *"a verdict row MUST carry enough identity for a consumer to tell two units
+    /// apart… and the sort key MUST include that identity."* MEASURED here on a two-member workspace
+    /// where both members violate `deny Exec`: two BYTE-IDENTICAL rows, `{rule, fn, effects, detail}`
+    /// with nothing to attribute either to a package. A reader cannot tell two broken members from one
+    /// listed twice, and a consumer that fingerprints on name alone — candor's own SARIF action did —
+    /// hides one finding behind the other.
+    ///
+    /// **`hash` AND NOT `package` OR `loc`**, because §2.2 already binds a consumer to join a verdict
+    /// row back to its report entry BY HASH. A row that omits it forces exactly the name join that
+    /// clause forbids, and names are not unique even within one report: an inherent method and a trait
+    /// implementation of the same name emit two entries sharing `fn`.
+    ///
+    /// **BESIDE `fn`, NEVER INSTEAD OF IT.** The NAME is what a policy scope matches (`deny Exec app::`)
+    /// and what a human reads; replacing it with the qualified form would silently stop every scoped
+    /// rule matching — a false green introduced by fixing a false green.
+    ///
+    /// Omitted when empty, which is a row whose producer had no unit identity to give: a report with no
+    /// `hash` key (a hand-authored one, which §3.1 says this verb serves) and any pre-⟨0.32⟩ record read
+    /// back off the NDJSON lint route. Absent is *"this producer cannot answer"*, never a fabricated id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hash: String,
     #[serde(default)]
     pub effects: Vec<String>,
     #[serde(default)]
@@ -1073,7 +1096,17 @@ pub fn gate_verdict_json_with_coverage_v28(
     coverage: Option<&GateCoverage>,
     ignored: &[IgnoredLine],
 ) -> serde_json::Result<String> {
-    violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
+    // ⟨0.32⟩ …AND `hash` IS PART OF THE KEY (SPEC §2). `(rule, detail)` TIES on two units that share a
+    // name — a two-member workspace where both violate `deny Exec` produces twin rows differing only in
+    // identity — and §3.3.1 makes the document's ORDER part of the byte-equality between `scan --policy`
+    // and `gate --report`. The two routes accumulate in different orders (the scan gates member by
+    // member and concatenates; the report route gates one merged unit set), so a tie left unbroken lets
+    // them emit the same findings as unequal documents. Identity in the row without identity in the key
+    // is half a fix.
+    violations.sort_by(|a, b| {
+        (a.rule.as_str(), a.detail.as_str(), a.hash.as_str())
+            .cmp(&(b.rule.as_str(), b.detail.as_str(), b.hash.as_str()))
+    });
     #[derive(Serialize)]
     struct Verdict<'a> {
         spec: &'static str,
@@ -1336,7 +1369,17 @@ fn gate_verdict_json_impl(
     // ⟨0.32⟩ exclusion classes the scan did not READ, pre-filtered by the producer.
     unpeeked: &[String],
 ) -> serde_json::Result<String> {
-    violations.sort_by(|a, b| (a.rule.as_str(), a.detail.as_str()).cmp(&(b.rule.as_str(), b.detail.as_str())));
+    // ⟨0.32⟩ …AND `hash` IS PART OF THE KEY (SPEC §2). `(rule, detail)` TIES on two units that share a
+    // name — a two-member workspace where both violate `deny Exec` produces twin rows differing only in
+    // identity — and §3.3.1 makes the document's ORDER part of the byte-equality between `scan --policy`
+    // and `gate --report`. The two routes accumulate in different orders (the scan gates member by
+    // member and concatenates; the report route gates one merged unit set), so a tie left unbroken lets
+    // them emit the same findings as unequal documents. Identity in the row without identity in the key
+    // is half a fix.
+    violations.sort_by(|a, b| {
+        (a.rule.as_str(), a.detail.as_str(), a.hash.as_str())
+            .cmp(&(b.rule.as_str(), b.detail.as_str(), b.hash.as_str()))
+    });
     // ⟨0.31⟩ …AND `outOfScope` FOR THE SAME REASON, which nothing was doing. §3.1 is BYTE equality, so
     // the ORDER of this list is part of the contract, and the two routes arrive at it differently: the
     // scan route accumulates across workspace members in the order it scans them, while `gate --report`

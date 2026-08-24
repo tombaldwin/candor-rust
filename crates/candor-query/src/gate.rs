@@ -366,6 +366,12 @@ pub(crate) struct ReportSignature {
     /// `hash` keys, which is what stops one member answering for another. Plumbed ahead of that change
     /// so the two land separately and each can be verified on its own.
     display: std::collections::HashMap<String, String>,
+    /// ⟨0.32⟩ key -> the §2.2 unit identity a verdict row carries (SPEC §2). The producer's OWN `hash`,
+    /// verbatim — never re-derived here from `package` + `fn`, because the scan route builds its copy
+    /// from the crate name it scanned and §3.1 makes the two documents byte-equal; two derivations of
+    /// one string is how those two would drift. An entry carrying no `hash` contributes no mapping, and
+    /// its row omits the field rather than inventing one.
+    hash: std::collections::HashMap<String, String>,
     inferred: HashMap<String, BTreeSet<String>>,
     calls: HashMap<String, BTreeSet<String>>,
     hosts: HashMap<String, BTreeSet<String>>,
@@ -386,6 +392,7 @@ impl ReportSignature {
         candor_classify::gate::GateInput {
             all: &self.all,
             display: &self.display,
+            hash: &self.hash,
             inferred: &self.inferred,
             calls: &self.calls,
             hosts: &self.hosts,
@@ -445,6 +452,8 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     let mut why_direct: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut display: HashMap<String, String> = HashMap::new();
+    // ⟨0.32⟩ key -> the producer's own `hash`, for the verdict row's §2 identity.
+    let mut hash: HashMap<String, String> = HashMap::new();
 
     // ⟨0.32⟩ KEY BY `hash`, NEVER BY BARE `fn` — SPEC §2.2, and the reason it is a MUST. MEASURED on
     // candor-query 0.31.0: `gate --report` over one member refused a scoped rule at exit 2, and the SAME
@@ -477,6 +486,11 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
         // The KEY is what every accumulator is keyed by; the NAME is what a policy scope matches and
         // what the verdict prints. Keeping both is the whole point — see GateInput::display.
         display.insert(fn_.clone(), e.func.clone());
+        // ⟨0.32⟩ …and the identity a verdict row carries, VERBATIM off the wire. An empty `hash` inserts
+        // nothing, so a hand-authored report's rows omit the field instead of claiming a made-up id.
+        if !e.hash.is_empty() {
+            hash.insert(fn_.clone(), e.hash.clone());
+        }
         names.insert(fn_.clone());
         // UNION on a repeated KEY: two entries sharing a hash are ONE unit by construction (an inherent
         // method and a trait implementation of the same name do this, and the scan already unions them),
@@ -560,6 +574,7 @@ pub(crate) fn report_signature(entries: &[ReportEntry]) -> ReportSignature {
     let reason_classes = candor_classify::propagate::propagate_str(&why_direct, &calls, &all);
     ReportSignature {
         display,
+        hash,
         net_classes: net.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
         all,
         inferred,

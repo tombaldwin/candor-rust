@@ -9,6 +9,40 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **A verdict row could not say which unit it was about (⟨0.32⟩).** SPEC §2: *"a verdict row MUST carry
+  enough identity for a consumer to tell two units apart… and the sort key MUST include that identity."*
+  MEASURED on a two-member workspace whose members both define `go()` and both spawn `curl`, under
+  `deny Exec` — two BYTE-IDENTICAL rows:
+
+  ```json
+  { "rule": "AS-EFF-006", "fn": "go", "effects": ["Exec"], "detail": "`go` performs { Exec } …" },
+  { "rule": "AS-EFF-006", "fn": "go", "effects": ["Exec"], "detail": "`go` performs { Exec } …" }
+  ```
+
+  No hash, no package, no loc. A reader cannot tell two broken members from one listed twice, and a
+  consumer that fingerprints on name alone — candor's own SARIF action did — hides one finding behind
+  the other. Names are not unique even within one report: an inherent method and a trait implementation
+  of the same name emit two entries sharing `fn`.
+
+  Every verdict row (AS-EFF-005/006/008/009/011) now carries **`hash`** — §2.2's join key, `package#fn`
+  — BESIDE `fn` and never instead of it, because the name is what a policy scope matches and what a
+  human reads. `hash` rather than `package` or `loc` because §2.2 already binds a consumer to join a
+  verdict row back to its report entry by hash; a row that omits it forces exactly the name join that
+  clause forbids. It is also now part of the SORT KEY: `(rule, detail)` ties on twin rows, and §3.3.1
+  makes the document's order part of the byte-equality between `scan --policy` and `gate --report`,
+  which accumulate in different orders — identity in the row without identity in the key is half a fix.
+
+  MEASURED after, over `~/.cargo/registry` (265 crates × `deny Exec`/`deny Fs` = 530 pairs, each gating
+  the report its own policy-carrying scan produced): **530/530 byte-equal between the two routes**, exit
+  codes agreeing on every pair, and **1313 of 1313 violation rows carrying identity** (82 pairs emit a
+  multi-row verdict).
+
+  **Wire note:** this is a NEW KEY on the violation record, so a verdict document is no longer
+  byte-identical to a pre-⟨0.32⟩ one — unavoidable, since the MUST is that the row carry identity. Every
+  pre-existing key keeps its name, position and value; the field is omitted when the producer has no
+  identity to give (a hand-authored report with no `hash`), because absent is *cannot answer* and never
+  a fabricated id.
+
 - **⚠ `fix-gate --strict` and `unverified --strict` certified what the gate had just started refusing
   (⟨0.32⟩).** SPEC §3.2 binds an advisory verb to be LESS certain than the gate over the same bytes and
   never MORE, naming `unverified`, `fix-gate` *"and any later sibling"*. The unread-class rule landed on
