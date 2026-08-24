@@ -9,6 +9,42 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`tour` said "nothing hidden" over a class the scan never opened — the ⟨0.32⟩ descriptive hedge,
+  ruled and closed four-way.** Over a report whose `excluded` names a class with `peeked: false`,
+  `tour` printed *"candor: nothing hidden — every effect sits where its name says it should"* at exit 0
+  here, in candor-ts and in candor-swift, while candor-java hedged and named the class. **candor-java
+  was right, and the ruling is now stated in a comment in all four engines so it is not re-litigated.**
+
+  ```
+  tour --report <report with excluded[].peeked:false>
+    rust/ts/swift   candor: nothing hidden — every effect sits where its name says it should.   exit 0
+    java            ⚠ INCOMPLETE — … 1 exclusion class(es) the scan did NOT READ …              exit 0
+  ```
+
+  **IT IS A DISCLOSURE, NOT A VERDICT.** `tour` answers no `ok` and carries no exit-code obligation, so
+  ⟨0.24⟩'s advisory-verb pessimism MUST does not reach it — which is why the arm is on `must_hedge` and
+  NOT on `incomplete()`, and why the exit code is unchanged. What reaches it is §2 ⟨0.28⟩, which widens
+  the re-disclosure MUST to *"any verb whose output could be read as a negative finding about the code —
+  a verdict, an empty result set, or a zero count"*, and §3.1 ⟨0.18⟩, which already forbids **that exact
+  sentence** over a ≥⅓-Unknown graph. An unread exclusion class is the same ignorance by another route,
+  and the ⅓ threshold structurally cannot see it: an unread unit contributes no entry, so it moves
+  neither the numerator nor the denominator.
+
+  **THE ARGUMENT THAT KEPT IT OUT WAS THE WRONG WAY ROUND**, and it was written down in this file as a
+  ruling: *"the descriptive verbs carry no policy, so there is no question whose answer could depend on
+  the unread code."* The condition ⟨0.32⟩ states is the QUESTION IN FORCE, and a verb with no policy is
+  not asking a NARROWER question than `deny Exec` — it is asking the widest one there is, the whole
+  effect surface. `arm_unread` still CLEARS the list for a policy that denies nothing, so an
+  `allow`/`forbid`/`only`-only run is untouched, and the `--strict` exit codes are untouched.
+
+  Trigger = the gate's, minus the policy condition: `peeked == false`, no `judgedElsewhere`, `count`
+  ignored (measured — all four gates refuse over `count: 0` and certify over `judgedElsewhere: true`).
+  The remedy answers the noise objection the old ruling raised: scan with the policy, the peek reads the
+  class, `peeked` turns true, the hedge goes away. The machine channel raises `incomplete: true` and
+  mints **no** new key — `unread` stays the ADVISORY route's wire spelling, which this engine is still
+  the only one to publish. Over-charge controls in-tree, both directions: a peeked class and a
+  `judgedElsewhere: true` class each get the unhedged answer and a byte-identical document.
+
 - **A verdict row could not say which unit it was about (⟨0.32⟩).** SPEC §2: *"a verdict row MUST carry
   enough identity for a consumer to tell two units apart… and the sort key MUST include that identity."*
   MEASURED on a two-member workspace whose members both define `go()` and both spawn `curl`, under
