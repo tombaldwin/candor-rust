@@ -195,14 +195,15 @@ const PURE_FD_TRANSFER: &[&str] = &[
 /// nothing but I/O on the thing it owns — and the `PURE_FD_TRANSFER` guard at the top of `classify`
 /// exempts the `as_raw_fd`/`into_std` family for all of them before any prefix rule runs.
 ///
-/// DELIBERATELY ABSENT, each because it has PURE SETTERS that the coarse `std::fs::` prefix would
-/// classify: `OpenOptions` (`o.read(true)`), `DirBuilder` (`b.recursive(true)`), and `ReadDir` (whose
-/// `next` is a syscall but whose rule cannot say so without saying it for the setters too). Their
-/// effectful entry points (`OpenOptions::new(..).open(..)`, `fs::read_dir`) are qualified calls that
-/// are already classified today, so this is a narrow residual, not the reported hole. Widening to
-/// them needs verb-precise rules written first — an ALLOWLIST of routed types under-reports whatever
-/// is missing from it, which is at least visible here as a named exclusion; a coarse rule applied to
-/// a setter FABRICATES on a provably-pure path, which is not recoverable by reading the list.
+/// THE OPTION-BUILDERS, `OpenOptions` and `DirBuilder`, were absent for exactly this rule and now
+/// satisfy it: each has a type-keyed carve-out in `classify` subtracting its pure setters, so only its
+/// TERMINAL VERB (`open` / `create`) is Fs. The exclusion was written as "a narrow residual, not the
+/// reported hole" and MEASURED otherwise — `fn load(o: &OpenOptions, p: &Path) { o.open(p) }` opened a
+/// file and reported NOTHING, the same silent false all-clear as the `Command` parameter, while a
+/// setter-only `OpenOptions::new().read(true)` reported `Fs` for opening nothing. The order the old
+/// comment prescribed is the order taken: the verb-precise rules went in FIRST, and this list widened
+/// onto them. `ReadDir` stays out — its `next` IS a syscall, but nothing distinguishes it from any
+/// other iterator's `next`, so no verb-precise rule can be written and the honest miss stands.
 ///
 /// `std::path::Path`/`PathBuf` are NOT here: they are pure data with an effectful STAT sub-surface —
 /// the exact inverse shape — and they route through their own verb-precise carve-out in the scanner.
@@ -223,6 +224,10 @@ const STD_EFFECT_HANDLES: &[&str] = &[
     // Fs — an open file. Every method reads, writes, syncs, truncates or stats it; the descriptor
     // conversions are carved out by `PURE_FD_TRANSFER`.
     "std::fs::File",
+    // Fs — the option-builders, whose PURE setters are subtracted by the type-keyed carve-outs in
+    // `classify` so that only the terminal verb (`OpenOptions::open`, `DirBuilder::create`) routes to Fs.
+    "std::fs::OpenOptions",
+    "std::fs::DirBuilder",
 ];
 
 /// Is `ty` a std I/O handle type whose methods may be routed into `classify` by the scanner's
@@ -952,6 +957,35 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         ];
         return STAT.contains(&m).then_some("Fs");
     }
+    // OPTION-BUILDERS, the shape SPEC §1 ⟨0.32⟩ separates from an invocation object: "option-builders for
+    // other effects (`OpenOptions`, request builders) stay pure because their resource arrives at the
+    // terminal verb, which is charged at its own call site". An `OpenOptions` holds a handful of bools and
+    // names no file; `DirBuilder` holds one bool and a mode. Both sit under the coarse `std::fs::` prefix
+    // below, which charged Fs for `OpenOptions::new()` and for every `o.read(true)` — MEASURED: a
+    // `let o = OpenOptions::new().read(true);` with no `open` ANYWHERE reported `Fs`.
+    //
+    // A DENYLIST, and keyed on the TYPE. Only the provably-pure setters/ctors are subtracted; anything
+    // else under the type keeps its effect, so the terminal verb (`OpenOptions::open`, `DirBuilder::create`)
+    // stays Fs and a std addition we have not read about fails in the safe direction. The type key is not
+    // decoration: `create` is a pure flag SETTER on `OpenOptions` and the mkdir SYSCALL on `DirBuilder` —
+    // one leaf, opposite answers. (candor-java keys the same carve-out by DESCRIPTOR, because its collision
+    // is an overload — `command()` reads back, `command(List)` sets. Rust has no overloads, so the type IS
+    // the discriminator; a bare-name denylist would silence `DirBuilder::create`.)
+    if let Some(m) = path.strip_prefix("std::fs::OpenOptions::") {
+        const PURE: &[&str] = &[
+            // the builder itself + the std flag setters
+            "new", "read", "write", "append", "truncate", "create", "create_new",
+            // the platform extension setters (`OpenOptionsExt`, unix + windows)
+            "mode", "custom_flags", "security_qos_flags", "access_mode", "share_mode", "attributes",
+            // derives
+            "clone", "default", "fmt", "eq", "ne", "hash",
+        ];
+        return (!PURE.contains(&m)).then_some("Fs");
+    }
+    if let Some(m) = path.strip_prefix("std::fs::DirBuilder::") {
+        const PURE: &[&str] = &["new", "recursive", "mode", "clone", "default", "fmt"];
+        return (!PURE.contains(&m)).then_some("Fs");
+    }
     // Filesystem. `tokio::fs`/`async_std::fs` are the async mirrors of `std::fs`; `async_fs` is
     // smol's fs crate; `fs_err` is a drop-in `std::fs` wrapper (its whole surface is fs I/O).
     if path.starts_with("std::fs::")
@@ -1610,6 +1644,20 @@ pub fn cap_from_name(name: &str) -> Option<&'static str> {
 pub fn fs_kind(path: &str) -> &'static [&'static str] {
     // the terminal segment is the verb (`std::fs::write`, `File::create`, `f.read_to_string`)
     let leaf = path.rsplit("::").next().unwrap_or(path);
+    // `OpenOptions::open` is the one verb that does NOT carry its own direction — the direction was set
+    // by the BUILDER chain (`.read(true)`/`.write(true)`), which this function cannot see. The READ list
+    // below holds a bare `open` for `File::open`, unambiguously a read; letting an `OpenOptions` receiver
+    // reach it publishes `fs: ["read"]` for a builder configured `write(true)`, and §2 reads that as the
+    // positive claim "reads but never writes" — the forbidden direction. The paragraph under the READ
+    // list has always SAID this; nothing implemented it, and it only became REACHABLE when
+    // `OpenOptions::open` started classifying on its own — before, the `Fs` came from the
+    // `OpenOptions::new` constructor, whose leaf claims nothing, so the field was simply absent.
+    // MEASURED on this commit's own fix before this guard: `OpenOptions::new().read(true).open(p)` went
+    // from `fs` ABSENT to `fs: ["read"]`, i.e. the fix minted a claim the engine cannot support. Keyed on
+    // the TYPE segment, so it holds for the `fs_err`/`tokio::fs`/`async_std::fs` spellings too.
+    if path.rsplit("::").nth(1) == Some("OpenOptions") {
+        return &[];
+    }
     // Reads the source AND writes the destination in one call.
     if matches!(leaf, "copy" | "rename" | "hard_link" | "soft_link" | "symlink") {
         return &["read", "write"];
@@ -2207,9 +2255,12 @@ mod tests {
     /// effect, and the silent under-report would survive the fix that was supposed to close it. The
     /// probe leaf is deliberately a name no carve-out lists, so it measures the BASE rule.
     ///
-    /// (b) The named exclusions stay excluded. `OpenOptions`/`DirBuilder`/`ReadDir` have PURE setters
-    /// that only the coarse `std::fs::` prefix would see, and `Metadata`/`DirEntry`/`Permissions` are
-    /// pure DATA under that same prefix — routing any of them charges an effect for reading a field.
+    /// (b) The named exclusions stay excluded. `ReadDir` cannot have a verb-precise rule written for it
+    /// (its `next` is a syscall and is spelled like every other iterator's), and `Metadata`/`DirEntry`/
+    /// `Permissions`/`FileType` are pure DATA under the coarse `std::fs::` prefix — routing any of them
+    /// charges an effect for reading a field. `OpenOptions`/`DirBuilder` LEFT this list by the route the
+    /// list's own comment prescribed: their type-keyed setter carve-outs were written first, so the
+    /// whole-type rule under them now answers only for the terminal verb.
     #[test]
     fn std_effect_handles_have_a_whole_type_rule_and_exclude_the_pure_surfaces() {
         for ty in STD_EFFECT_HANDLES {
@@ -2222,7 +2273,7 @@ mod tests {
             assert!(is_std_effect_handle(ty), "the predicate must agree with the list");
         }
         for ty in [
-            "std::fs::OpenOptions", "std::fs::DirBuilder", "std::fs::ReadDir",
+            "std::fs::ReadDir",
             "std::fs::Metadata", "std::fs::DirEntry", "std::fs::Permissions", "std::fs::FileType",
             "std::path::Path", "std::path::PathBuf", "std::vec::Vec",
         ] {
@@ -2246,6 +2297,14 @@ mod tests {
             "std::net::UdpSocket::take_error",
             "std::fs::File::as_raw_fd", "std::fs::File::into_raw_fd",
             "std::os::unix::net::UnixStream::as_raw_fd",
+            // The OPTION-BUILDER setters (SPEC §1 ⟨0.32⟩): flags in a struct, no file named, nothing
+            // opened. `create` is here as `OpenOptions`' setter and is a VERB on `DirBuilder` below —
+            // one leaf, two answers, which is why these carve-outs are keyed on the TYPE.
+            "std::fs::OpenOptions::new", "std::fs::OpenOptions::read", "std::fs::OpenOptions::write",
+            "std::fs::OpenOptions::append", "std::fs::OpenOptions::truncate",
+            "std::fs::OpenOptions::create", "std::fs::OpenOptions::create_new",
+            "std::fs::OpenOptions::mode", "std::fs::OpenOptions::custom_flags",
+            "std::fs::DirBuilder::new", "std::fs::DirBuilder::recursive", "std::fs::DirBuilder::mode",
         ] {
             assert_eq!(classify("std", p), None, "`{p}` is a pure read-back");
         }
@@ -2256,6 +2315,9 @@ mod tests {
             ("std::fs::File::write_all", "Fs"),
             ("std::net::TcpStream::write_all", "Net"),
             ("std::os::unix::net::UnixStream::send", "Ipc"),
+            // the TERMINAL VERBS of the two option-builders — the whole point of routing them.
+            ("std::fs::OpenOptions::open", "Fs"),
+            ("std::fs::DirBuilder::create", "Fs"),
         ] {
             assert_eq!(classify("std", p), Some(want), "`{p}` must stay {want}");
         }
@@ -2889,5 +2951,19 @@ mod fs_kind_tests {
         for p in ["std::fs::OpenOptions", "some_crate::do_thing", "std::fs::File", "f::seek"] {
             assert!(fs_kind(p).is_empty(), "{p} must not claim a direction it did not reveal");
         }
+    }
+
+    /// `OpenOptions::open` is `File::open`'s leaf and NOT its verb: the direction lives in the builder
+    /// chain (`.read(true)`/`.write(true)`), which `fs_kind` cannot see. A `write(true)` builder claiming
+    /// `["read"]` is the forbidden direction, so the type wins over the leaf here. `File::open` — where
+    /// `open` DOES mean read — is unaffected, which is the whole reason this is keyed on the type.
+    #[test]
+    fn openoptions_open_claims_no_direction_but_file_open_still_reads() {
+        for p in ["std::fs::OpenOptions::open", "fs_err::OpenOptions::open",
+                  "tokio::fs::OpenOptions::open"] {
+            assert!(fs_kind(p).is_empty(),
+                    "{p}'s direction was set by the builder chain, which this function cannot see");
+        }
+        assert_eq!(fs_kind("std::fs::File::open"), &["read"], "`File::open` is unambiguously a read");
     }
 }

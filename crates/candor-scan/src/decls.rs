@@ -96,7 +96,9 @@ pub(crate) fn scan_items(
                 }
                 if let Some((_, inner)) = &m.content {
                     let sub = qual(&m.ident.to_string());
-                    let mut subuses = uses.clone();
+                    // The file's imports do NOT reach into an inline module's own declarations — see
+                    // `submodule_uses`, and the `mod mine { struct Command }` fabrication it closes.
+                    let mut subuses = submodule_uses(uses, inner, include_tests);
                     scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, &mut subuses, out);
                 }
             }
@@ -145,6 +147,62 @@ pub(crate) fn scan_items(
             }
         }
     }
+}
+
+/// The `use` map an INLINE `mod m { .. }` inherits from the file around it: the enclosing map MINUS every
+/// name the module DECLARES for itself.
+///
+/// Rust gives an inline module its own namespace — a file-level `use` does not reach into it at all, which
+/// is why a submodule that wants an import writes its own (and `scan_items`/`collect_decls` pick that up
+/// from the inner items, re-binding the name over this map). Inheriting the enclosing map wholesale is a
+/// deliberate over-approximation that costs nothing while the names are DISJOINT, and FABRICATES the moment
+/// they are not: with `use std::process::Command;` at the top of the file, `mod mine { pub struct Command;
+/// pub fn run(c: &Command) { c.spawn(); } }` typed its own receiver as `std::process::Command`, and the std
+/// I/O-handle receiver route then charged the crate's own do-nothing `spawn` with `Exec` — MEASURED, a
+/// false positive on a provably-pure local path, and SPEC §1 ⟨0.32⟩'s PART 66 over-charge control names
+/// exactly it ("a project-local type that merely shares the name gains nothing").
+///
+/// Removal, not rewriting: the name becomes MODULE-RELATIVE again, which is what it is. Downstream that
+/// means `Command::spawn` resolves against `local_types` (the crate's own definition, the right answer) or,
+/// if the module declares the name but candor cannot link the call, an honest miss. Removing an inherited
+/// binding can never invent an effect — the direction a fabrication would need.
+///
+/// Namespace-blind on purpose (a `fn read` removes an imported `read` whatever namespace it lives in): in
+/// real Rust NO enclosing import reaches an inline module, so removing a shadowed name is always a step
+/// toward the truth, never past it. `#[cfg(test)]`-gated declarations are skipped in a production scan,
+/// matching the discipline of every other index here.
+pub(crate) fn submodule_uses(
+    uses: &HashMap<String, String>,
+    inner: &[syn::Item],
+    include_tests: bool,
+) -> HashMap<String, String> {
+    let mut subuses = uses.clone();
+    for it in inner {
+        let (attrs, name): (&[syn::Attribute], String) = match it {
+            syn::Item::Fn(f) => (&f.attrs, f.sig.ident.to_string()),
+            syn::Item::Struct(s) => (&s.attrs, s.ident.to_string()),
+            syn::Item::Enum(e) => (&e.attrs, e.ident.to_string()),
+            syn::Item::Union(u) => (&u.attrs, u.ident.to_string()),
+            syn::Item::Type(t) => (&t.attrs, t.ident.to_string()),
+            syn::Item::Trait(t) => (&t.attrs, t.ident.to_string()),
+            syn::Item::TraitAlias(t) => (&t.attrs, t.ident.to_string()),
+            syn::Item::Mod(m) => (&m.attrs, m.ident.to_string()),
+            syn::Item::Const(c) => (&c.attrs, c.ident.to_string()),
+            syn::Item::Static(s) => (&s.attrs, s.ident.to_string()),
+            syn::Item::ExternCrate(e) => (&e.attrs, e.ident.to_string()),
+            // a `macro_rules! NAME` DEFINITION carries an ident; an item-position INVOCATION does not.
+            syn::Item::Macro(m) => match &m.ident {
+                Some(id) => (&m.attrs, id.to_string()),
+                None => continue,
+            },
+            _ => continue,
+        };
+        if !include_tests && is_cfg_test(attrs) {
+            continue;
+        }
+        subuses.remove(&name);
+    }
+    subuses
 }
 
 /// Whether a lazy-static synthetic unit will be EMITTED for `it` — a `static`/`const`/macro lazy with a
@@ -980,7 +1038,10 @@ pub(crate) fn collect_decls(
                     continue;
                 }
                 if let Some((_, inner)) = &m.content {
-                    let mut subuses = uses.clone();
+                    // Same shadowing rule as `scan_items` — the DECL indexes (field types, return types)
+                    // are built through this map too, so leaving it un-shadowed would type a submodule's
+                    // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
+                    let mut subuses = submodule_uses(uses, inner, include_tests);
                     collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods);
                 }
             }

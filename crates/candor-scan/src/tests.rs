@@ -8750,3 +8750,238 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         assert!(effs(fn_entry(&v, "via_loop")).contains(&"Fs".to_string()),
                 "a `File` LOOP-ELEMENT receiver:\n{v:#}");
     }
+
+    // ── SPEC §1 ⟨0.32⟩: THE INVOCATION OBJECT vs THE OPTION-BUILDER ─────────────────────────────
+    // Three MEASURED residuals of the std-handle receiver routing, written as controls FIRST.
+    //
+    //  R1  a project's OWN type charged `Exec` because the FILE imports the std one. A regression the
+    //      previously-written shadow control could not see: it used ONE file with NO `use` in scope,
+    //      and the whole mechanism is the file's `use` map reaching a name it does not govern.
+    //  R2  a pure read-back's RESULT, used (`c.get_program().to_str()`), charged `Exec` — the chain
+    //      walk attributes the outer leaf to the BASE receiver, so the reviewed carve-out is bypassed
+    //      by the very next `.` in the expression.
+    //  R3  `OpenOptions` in BOTH directions at once: `o.open(p)` on a received `&OpenOptions` answered
+    //      NOTHING (the terminal verb, the thing that opens the file), while `OpenOptions::new()
+    //      .read(true)` with no `open` at all answered `Fs`. SPEC §1 ⟨0.32⟩ names this shape: an
+    //      option-builder for another effect stays PURE, because its resource arrives at the terminal
+    //      verb, which is charged at its own call site.
+
+    /// CONTROL (over-charge, R1) — THE REGRESSION. A submodule's own `Command`, in a file that ALSO
+    /// imports `std::process::Command` for its own use. Rust does not let an inline `mod`'s names be
+    /// resolved by the enclosing file's imports, so `mine::run`'s receiver is `mine::Command` and its
+    /// `spawn` does nothing. The `real()` arm is the other direction in the same fixture: the file's
+    /// import still governs the file's own code, so a genuine spawn stays `Exec`.
+    #[test]
+    fn a_submodules_own_type_is_not_charged_from_the_files_std_import() {
+        let v = scan_src_to_json("submodshadow", "\
+            use std::process::Command;\n\
+            pub mod mine {\n\
+                pub struct Command;\n\
+                impl Command { pub fn spawn(&self) {} }\n\
+                pub fn run(c: &Command) { c.spawn(); }\n\
+            }\n\
+            pub fn real() { let mut c = Command::new(\"sh\"); let _ = c.spawn(); }\n");
+        assert!(!effs_opt(&v, "mine::run").contains(&"Exec".to_string()),
+                "`mine::Command` is the crate's OWN type — the file's `use std::process::Command` \
+                 does not reach into `mod mine`, and charging Exec here is a fabrication:\n{v:#}");
+        assert!(effs(fn_entry(&v, "real")).contains(&"Exec".to_string()),
+                "the file's own code DOES resolve `Command` through its import — `real` spawns:\n{v:#}");
+    }
+
+    /// CONTROL (R1, the other direction, per shadowed type): the same submodule shadow for `File` and
+    /// `TcpStream`, so the fix is pinned on every family the routing names, not just the one measured.
+    #[test]
+    fn submodule_shadows_of_file_and_tcpstream_are_not_charged() {
+        let v = scan_src_to_json("submodshadow2", "\
+            use std::fs::File;\n\
+            use std::net::TcpStream;\n\
+            pub mod mine {\n\
+                pub struct File;\n\
+                impl File { pub fn write_all(&self, _b: &[u8]) {} }\n\
+                pub struct TcpStream;\n\
+                impl TcpStream { pub fn connect(&self) {} }\n\
+                pub fn w(f: &File) { f.write_all(b\"x\"); }\n\
+                pub fn c(s: &TcpStream) { s.connect(); }\n\
+            }\n\
+            pub fn real_open() { let _ = File::open(\"/etc/hosts\"); }\n\
+            pub fn real_net() { let _ = TcpStream::connect(\"127.0.0.1:1\"); }\n");
+        assert!(!effs_opt(&v, "mine::w").contains(&"Fs".to_string()), "local File shadow:\n{v:#}");
+        assert!(!effs_opt(&v, "mine::c").contains(&"Net".to_string()), "local TcpStream shadow:\n{v:#}");
+        assert!(effs(fn_entry(&v, "real_open")).contains(&"Fs".to_string()), "the real File::open:\n{v:#}");
+        assert!(effs(fn_entry(&v, "real_net")).contains(&"Net".to_string()), "the real connect:\n{v:#}");
+    }
+
+    /// CONTROL (R1): a submodule's own FREE FUNCTION sharing an imported name is the same shadow one
+    /// namespace over — `mod mine { fn read(..) }` is `mine::read`, never `std::fs::read`.
+    #[test]
+    fn a_submodules_own_free_fn_is_not_charged_from_the_files_std_import() {
+        let v = scan_src_to_json("submodfnshadow", "\
+            use std::fs::read;\n\
+            pub mod mine {\n\
+                pub fn read(_p: &str) -> Vec<u8> { Vec::new() }\n\
+                pub fn go() { let _ = read(\"x\"); }\n\
+            }\n\
+            pub fn real() { let _ = read(\"/etc/hosts\"); }\n");
+        assert!(!effs_opt(&v, "mine::go").contains(&"Fs".to_string()),
+                "`mine::read` is the crate's own function:\n{v:#}");
+        assert!(effs(fn_entry(&v, "real")).contains(&"Fs".to_string()),
+                "the file's own `read(..)` IS `std::fs::read`:\n{v:#}");
+    }
+
+    /// CONTROL (over-charge, R2): a pure read-back's RESULT is a DIFFERENT type — `get_program()`
+    /// hands back an `&OsStr`, `get_args()` a `CommandArgs` — so the chain walk must stop there
+    /// rather than attribute `to_str`/`len`/`collect`/`unwrap` to the `Command` and charge Exec.
+    /// Measured before the fix: all four of these reported `["Exec"]`.
+    #[test]
+    fn a_chain_off_a_command_read_back_is_not_charged_exec() {
+        let v = scan_src_to_json("cmdreadbackchain", "\
+            use std::process::Command;\n\
+            pub struct H { pub cmd: Command }\n\
+            impl H { pub fn field_chain(&self) { let _ = self.cmd.get_program().to_string_lossy(); } }\n\
+            pub fn to_str(c: &Command) { let _ = c.get_program().to_str(); }\n\
+            pub fn len(c: &Command) { let _ = c.get_args().len(); }\n\
+            pub fn collect(c: &Command) { let _: Vec<_> = c.get_args().collect(); }\n\
+            pub fn cwd(c: &Command) { let _ = c.get_current_dir().unwrap(); }\n\
+            pub fn envs(c: &Command) { for (k, _v) in c.get_envs() { let _ = k; } }\n");
+        for name in ["H::field_chain", "to_str", "len", "collect", "cwd", "envs"] {
+            assert!(!effs_opt(&v, name).contains(&"Exec".to_string()),
+                    "`{name}` only reads back the builder's stored state and uses the RESULT — the \
+                     carve-out must survive the next `.`:\n{v:#}");
+        }
+    }
+
+    /// CONTROL (R2, the direction that must NOT move): the read-back carve-out is NOT a licence to
+    /// drop the invocation object. SPEC §1 ⟨0.32⟩ charges construction and the argument/env/redirect
+    /// SETTERS as `Exec` alongside the launch, and no `get_`-prefix or bare-leaf rule may reach them.
+    #[test]
+    fn command_setters_and_launches_stay_exec() {
+        let v = scan_src_to_json("cmdsetters", "\
+            use std::process::Command;\n\
+            pub fn ctor() { let _ = Command::new(\"sh\"); }\n\
+            pub fn arg(c: &mut Command) { c.arg(\"x\"); }\n\
+            pub fn env(c: &mut Command) { c.env(\"K\", \"V\"); }\n\
+            pub fn cwd(c: &mut Command) { c.current_dir(\"/tmp\"); }\n\
+            pub fn stdio(c: &mut Command) { c.stdout(std::process::Stdio::null()); }\n\
+            pub fn spawn(c: &mut Command) { let _ = c.spawn(); }\n\
+            pub fn output(c: &mut Command) { let _ = c.output(); }\n\
+            pub fn kill(c: &mut std::process::Child) { let _ = c.kill(); }\n");
+        for name in ["ctor", "arg", "env", "cwd", "stdio", "spawn", "output", "kill"] {
+            assert!(effs(fn_entry(&v, name)).contains(&"Exec".to_string()),
+                    "`{name}` is part of the subprocess capability (SPEC §1 ⟨0.32⟩):\n{v:#}");
+        }
+    }
+
+    /// THE UNDER-REPORT (R3). `open` is the terminal verb: it takes the path and opens the file. On a
+    /// RECEIVED `&OpenOptions` it formed no path at all and the function certified PURE — the same
+    /// shape as the `Command` parameter sin, on the type that was deliberately left out of the routed
+    /// handle list. Every receiver spelling, because the gate sat at the routing frontier.
+    #[test]
+    fn open_on_a_received_openoptions_is_charged_fs() {
+        let v = scan_src_to_json("openoptsin", "\
+            use std::fs::OpenOptions;\n\
+            use std::path::Path;\n\
+            pub struct H { pub o: OpenOptions }\n\
+            impl H { pub fn field(&self, p: &Path) { let _ = self.o.open(p); } }\n\
+            pub fn borrowed(o: &OpenOptions, p: &Path) { let _ = o.open(p); }\n\
+            pub fn owned(o: OpenOptions, p: &Path) { let _ = o.open(p); }\n\
+            pub fn qualified(o: &std::fs::OpenOptions, p: &Path) { let _ = o.open(p); }\n\
+            pub fn boxed(o: &Box<OpenOptions>, p: &Path) { let _ = o.open(p); }\n\
+            pub fn chained(p: &Path) { let _ = OpenOptions::new().read(true).open(p); }\n");
+        for name in ["H::field", "borrowed", "owned", "qualified", "boxed", "chained"] {
+            assert!(effs(fn_entry(&v, name)).contains(&"Fs".to_string()),
+                    "`{name}` opens a file and certified PURE — the cardinal sin:\n{v:#}");
+        }
+    }
+
+    /// CONTROL (over-charge, R3): an option-builder for ANOTHER effect stays PURE. `OpenOptions::new()`
+    /// and its setters record flags in a struct; nothing is opened until `open(path)` is called, and
+    /// that call is charged at its own site (the sin test above). Before the fix a `let o =
+    /// OpenOptions::new().read(true);` with no `open` anywhere answered `Fs`.
+    #[test]
+    fn openoptions_setters_without_open_stay_pure() {
+        let v = scan_src_to_json("openoptspure", "\
+            use std::fs::OpenOptions;\n\
+            pub fn build() -> OpenOptions {\n\
+                let mut o = OpenOptions::new();\n\
+                o.read(true).write(true).append(false).truncate(false).create(true).create_new(false);\n\
+                o\n\
+            }\n\
+            pub fn fluent() -> OpenOptions { OpenOptions::new().read(true).write(true).clone() }\n\
+            pub fn setter(o: &mut OpenOptions) { o.append(true); }\n");
+        for name in ["build", "fluent", "setter"] {
+            assert!(!effs_opt(&v, name).contains(&"Fs".to_string()),
+                    "`{name}` only records flags — SPEC §1 ⟨0.32⟩ keeps an option-builder for another \
+                     effect PURE, its resource arrives at the terminal verb:\n{v:#}");
+        }
+    }
+
+    /// CONTROL (R3, the descriptor trap): `create` is a PURE SETTER on `OpenOptions` and the TERMINAL
+    /// VERB on `DirBuilder` — same leaf, opposite answers. candor-java carves its read-backs by
+    /// DESCRIPTOR for exactly this reason (`command()` vs `command(List)`); Rust has no overloads, so
+    /// the carve-out must be keyed on the TYPE. A bare-name denylist gets `DirBuilder::create` wrong.
+    #[test]
+    fn create_is_a_setter_on_openoptions_and_a_verb_on_dirbuilder() {
+        let v = scan_src_to_json("createtrap", "\
+            use std::fs::{OpenOptions, DirBuilder};\n\
+            pub fn opt() { let _ = OpenOptions::new().create(true); }\n\
+            pub fn dir() { let _ = DirBuilder::new().recursive(true).create(\"/tmp/x\"); }\n\
+            pub fn dir_recv(b: &DirBuilder) { let _ = b.create(\"/tmp/x\"); }\n");
+        assert!(!effs_opt(&v, "opt").contains(&"Fs".to_string()),
+                "`OpenOptions::create(bool)` sets a flag:\n{v:#}");
+        assert!(effs(fn_entry(&v, "dir")).contains(&"Fs".to_string()),
+                "`DirBuilder::create(path)` makes a directory:\n{v:#}");
+        assert!(effs(fn_entry(&v, "dir_recv")).contains(&"Fs".to_string()),
+                "`DirBuilder::create` on a RECEIVED builder is the same syscall:\n{v:#}");
+    }
+
+    /// CONTROL (R3): a project's OWN `OpenOptions` must gain nothing from the widening — the R1 shape
+    /// applied to the type R3 adds, since a fix and its control belong to the same commit.
+    #[test]
+    fn a_local_openoptions_shadow_is_not_charged_fs() {
+        let v = scan_src_to_json("openoptsshadow", "\
+            use std::fs::OpenOptions;\n\
+            pub mod mine {\n\
+                pub struct OpenOptions;\n\
+                impl OpenOptions { pub fn open(&self, _p: &str) {} }\n\
+                pub fn go(o: &OpenOptions) { o.open(\"x\"); }\n\
+            }\n\
+            pub fn real(p: &std::path::Path) { let _ = OpenOptions::new().read(true).open(p); }\n");
+        assert!(!effs_opt(&v, "mine::go").contains(&"Fs".to_string()),
+                "a LOCAL `OpenOptions::open` that does nothing must not inherit std's Fs:\n{v:#}");
+        assert!(effs(fn_entry(&v, "real")).contains(&"Fs".to_string()),
+                "the real std builder still opens the file:\n{v:#}");
+    }
+
+    /// CONTROL (R3, SPEC §2 `fs` — the row PART 31 asserts). The terminal verb's DIRECTION was set by
+    /// the builder chain, which the classifier cannot read, so `open` on an `OpenOptions` proves `Fs`
+    /// and claims NO kind — and a caller mixing it with a writer must suppress the whole field, never
+    /// publish the writer's half. §2: an empty or partial `fs` reads as "writes but never reads".
+    ///
+    /// This control exists because the fix WITHOUT it minted exactly that false claim: routing
+    /// `OpenOptions::open` into the classifier put it in front of `fs_kind`, whose READ list holds a
+    /// bare `open` for `File::open` — MEASURED, `fs` went from ABSENT to `["read"]` on a builder that
+    /// may have been configured `write(true)`. The guard is keyed on the TYPE segment, so `File::open`
+    /// keeps its `["read"]` (asserted here too, because a carve-out that swallows the real verb has
+    /// traded one wrong answer for another).
+    #[test]
+    fn openoptions_open_proves_fs_but_claims_no_direction() {
+        let v = scan_src_to_json("openoptskind", "\
+            use std::fs::OpenOptions;\n\
+            use std::path::Path;\n\
+            pub fn writes_only() { let _ = std::fs::write(\"/tmp/b\", \"x\"); }\n\
+            pub fn undetermined(p: &Path) { let _ = OpenOptions::new().write(true).open(p); }\n\
+            pub fn on_param(o: &OpenOptions, p: &Path) { let _ = o.open(p); }\n\
+            pub fn mixed(p: &Path) { writes_only(); undetermined(p); }\n\
+            pub fn plain_open() { let _ = std::fs::File::open(\"/tmp/a\"); }\n");
+        for name in ["undetermined", "on_param", "mixed"] {
+            let e = fn_entry(&v, name);
+            assert!(effs(e).contains(&"Fs".to_string()), "`{name}` must prove Fs:\n{v:#}");
+            assert!(e.get("fs").is_none(),
+                    "`{name}` must claim NO direction — the builder chain set it and the classifier \
+                     cannot read it, so §2 requires the field OMITTED, not the writer's half:\n{v:#}");
+        }
+        assert_eq!(fn_entry(&v, "writes_only")["fs"], serde_json::json!(["write"]),
+                   "a determined verb still answers:\n{v:#}");
+        assert_eq!(fn_entry(&v, "plain_open")["fs"], serde_json::json!(["read"]),
+                   "`File::open` IS unambiguously a read — the carve-out must not swallow it:\n{v:#}");
+    }
