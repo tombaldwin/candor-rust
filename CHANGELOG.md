@@ -9,6 +9,38 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ `gate --report` certified a deny rule over code the producing scan never read (fail-open, ⟨0.32⟩).**
+  A scan run WITHOUT a policy writes a report whose `outOfScope` key is absent — nothing was asked — but
+  whose `excluded[].peeked` is `false` on every class for that same reason. The unread-class rule was
+  gated on `outOfScope` being present, so it was skipped in exactly the case it exists for, and the gate
+  route answered `policy ✓`, exit 0, `ok: true`, with no disclosure, over classes nobody had opened.
+
+  MEASURED over `~/.cargo/registry` (265 crates × `deny Exec`/`deny Net`/`deny Fs` = 795 pairs):
+  **90 pairs went exit 2 on `candor-scan <crate> --policy P` and exit 0 through
+  `candor-query gate --report <no-policy report> --policy P`** — including `anyhow`, whose build script
+  spawns `rustc`, named by the scan route and invisible to the other. All 90 now refuse on both routes;
+  the 265-crate cross-check finds **0 crates refusing with nothing unread and 0 exiting 0 with an unread
+  class**, and the 24 crates carrying a real in-scope violation still exit 1 (a violation dominates).
+
+  `peeked: false` genuinely has two causes — "opened it and failed" and "never asked" — and from a report
+  they are indistinguishable, because they leave the identical hole. Which one it is does not decide the
+  verdict; the QUESTION does: only a `deny`/`pure` rule's answer depends on code outside the scan's scope,
+  so the condition is now applied once, to this run's rule set, on both routes. An `allow`-only,
+  `forbid`-only or `only`-only policy is unaffected, and a report with no exclusions, with every class
+  peeked, or with the class carved out as `judgedElsewhere`, still certifies.
+
+  Fixed beside it, same class of split: candor-scan recorded unread classes into its `--gate-json`
+  document from `outOfScope.is_some()` while deciding its EXIT from `peek_attempted`. Those are different
+  predicates, and on a policy with no deny rule the document came out `"ok": false, "incomplete": true`
+  **at exit 0** — visible only to a machine reading the JSON, which is the only consumer that matters
+  there. One predicate now feeds both halves. `excluded` also joins the strictly-read §2 keys: present-
+  but-unparseable is a refusal naming the key, never coerced to "this scan excluded nothing".
+
+  **Upgrade note:** gating a report produced without a policy now refuses (exit 2) whenever the tree has
+  a build script, tests, benches or examples the scan did not read — 504 of the 795 pairs above. The
+  repair is one flag: produce the report with the policy (`candor-scan <dir> --out r --policy P`), and
+  the class flips to `peeked: true` with a definite answer either way.
+
 - **⚠ A call through a SUBMODULE-level re-export resolved to nothing.** The oldest shape in Rust's module
   system — `mod imp { mod platform; pub use self::platform::*; }` with callers writing `imp::doit()` —
   reported no effect at all. The intra-crate call graph keys a qualified call on its last two segments, so

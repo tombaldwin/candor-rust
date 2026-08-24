@@ -689,8 +689,15 @@ pub(crate) static GATE_UNPEEKED: std::sync::OnceLock<std::sync::Mutex<Vec<String
 
 /// Record the classes this scan did not read. Two conditions, both earned in candor-java:
 /// `judged_elsewhere` is the producer's carve-out for a DERIVED copy of already-judged code
-/// (`build-output`), and nothing is recorded unless the peek RAN — `peeked: false` also means no policy
-/// was configured and nothing was asked, which records an absence of QUESTION rather than of evidence.
+/// (`build-output`), and nothing is recorded unless the peek was ATTEMPTED.
+///
+/// `peek_ran` MUST be the caller's `peek_attempted`, which is "this run's policy carries a deny rule and
+/// there was something to look at" — the same question `gate --report` asks of its own policy before it
+/// lets an unread class bite. It is NOT "`outOfScope` came back `Some`": that is also true for a policy
+/// with no deny rule, where the peek short-circuits and every class stays `peeked: false` with nothing
+/// having gone wrong. Recording there wrote `incomplete: true` into a document whose exit code was 0
+/// (measured 2026-08-24 on an `allow`-only policy) — the exit arm in scan.rs and this recorder were
+/// keyed on two different predicates, so the two halves of one verdict disagreed.
 pub(crate) fn record_gate_unpeeked(excluded: &[candor_report::ExcludedClass], peek_ran: bool) {
     if recording_suppressed() || !peek_ran { return; }
     let unread: Vec<String> = excluded
