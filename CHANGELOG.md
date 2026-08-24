@@ -45,7 +45,11 @@ after upgrading; review policies and regenerate baselines with the new build.
   the only one to publish. Over-charge controls in-tree, both directions: a peeked class and a
   `judgedElsewhere: true` class each get the unhedged answer and a byte-identical document.
 
-- **A verdict row could not say which unit it was about (⟨0.32⟩).** SPEC §2: *"a verdict row MUST carry
+- ⚠ **A verdict row could not say which unit it was about (⟨0.32⟩). NOT ADDITIVE — verdict documents
+  change shape: violation rows gain a `hash` key, so bytes differ from any pre-⟨0.32⟩ verdict and a
+  baseline taken against one must be regenerated.** No arrangement of the existing keys satisfies the
+  MUST, so the field is new; everything that could stay additive did (every pre-existing key keeps its
+  name, position and value, and `hash` is omitted when the producer has no identity to give). SPEC §2: *"a verdict row MUST carry
   enough identity for a consumer to tell two units apart… and the sort key MUST include that identity."*
   MEASURED on a two-member workspace whose members both define `go()` and both spawn `curl`, under
   `deny Exec` — two BYTE-IDENTICAL rows:
