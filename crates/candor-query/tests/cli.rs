@@ -5166,3 +5166,146 @@ fn gate_verdict_documents_carry_the_dropped_policy_lines_as_ignored() {
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
     assert!(v.get("ignored").is_none(), "{v}");
 }
+
+/// Write a report whose envelope carries an `excluded` set, with `outOfScope` PRESENT or ABSENT.
+/// `outOfScope` absent is what a scan run with NO policy writes (⟨0.29⟩): nothing was asked, so the
+/// producer withholds the key — while `excluded[].peeked` is `false` on every class for that same
+/// reason. Both spellings are real producer output; `candor-scan <dir> --out r` writes the second.
+fn write_excluded_report(f: &Fixture, excluded: &str, out_of_scope: Option<&str>) {
+    let oos = out_of_scope.map(|o| format!("\"outOfScope\": {o},\n  ")).unwrap_or_default();
+    let report = format!(
+        r#"{{
+  "candor": {{ "version": "scan-test", "toolchain": "stable", "spec": "0.32" }},
+  "package": "rpt",
+  "analyzed": {{ "count": 1, "digest": "0000000000000000" }},
+  "excluded": {excluded},
+  {oos}"functions": [
+    {{ "fn": "inner", "loc": "src/lib.rs:2:1", "inferred": ["Fs"], "direct": ["Fs"], "hash": "rpt#inner", "paths": ["/x"] }}
+  ]
+}}"#
+    );
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    std::fs::write(format!("{}.rpt.scan.callgraph.json", f.prefix), r#"{"inner":[]}"#).unwrap();
+}
+
+/// ⟨0.32⟩ A REPORT WRITTEN BY A SCAN THAT WAS NEVER ASKED CANNOT CERTIFY A DENY RULE — and the
+/// ROUTE SPLIT this pins was a VERIFIED FAIL-OPEN, measured 2026-08-24 on ~/.cargo/registry:
+///
+///   candor-scan <crate> --out A --policy <deny Exec>   → exit 2, naming the build.rs fns spawning rustc
+///   candor-scan <crate> --out B                        (no policy)
+///   candor-query gate --report B --policy <deny Exec>  → exit 0, `policy ✓`, `ok: true`, NO disclosure
+///
+/// 90 of 795 crate×policy pairs went 2 → 0 that way. The mechanism is one conjunct: the unread-class
+/// rule was gated on `outOfScope` being PRESENT, and ⟨0.29⟩ omits that key precisely when no policy was
+/// configured — so the whole rule was skipped in exactly the case it exists for. The report DOES carry
+/// `excluded[].peeked: false`, which is the same evidence the scan route acts on; this route simply
+/// never looked at it. "Nothing to peek at" and "never looked" were being read as one answer.
+///
+/// The three rows are the rule and its two controls, and the controls are the point: `peeked: false`
+/// has two causes and only the QUESTION decides whether it bites.
+#[test]
+fn gate_report_refuses_a_deny_rule_over_classes_the_producer_never_read() {
+    let f = Fixture::new("unpeeked-noask");
+    let deny = write_policy(&f, "deny.policy", "deny Exec\n");
+
+    // (1) THE DEFECT. A no-policy report: `outOfScope` ABSENT, every class `peeked: false`.
+    write_excluded_report(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": false, "reason": "compile time" }]"#,
+        None,
+    );
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny, "--json"])
+        .output().expect("run candor-query");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2),
+        "a deny rule certified over a class NOBODY READ is the fail-open this row exists for — the \
+         producer's silence about the QUESTION is not an answer about the CODE. stderr: {err}");
+    assert!(err.contains("did not READ") && err.contains("build-script"),
+        "the refusal must NAME the unread class, or the operator cannot repair it: {err}");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(false), "the DOCUMENT must agree with the exit: {v}");
+    assert_eq!(v["incomplete"], serde_json::json!(true),
+        "⟨0.32⟩ unread code makes the verdict INCOMPLETE, and a machine consumer reads that key, not \
+         the exit code: {v}");
+
+    // (2) CONTROL — THE OVER-CHARGE SIDE. The same never-asked report under a policy carrying NO deny
+    // rule. Nothing this policy asks depends on code outside the scan's scope, so an unread class must
+    // not cost it anything: `forbid` is refused HERE for answerability (§3.1), never for want of a peek,
+    // and the message is what tells the two apart.
+    let forbid = write_policy(&f, "forbid.policy", "forbid app -> infra\n");
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &forbid])
+        .output().expect("run candor-query");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!err.contains("did not READ"),
+        "a policy with no deny rule must not be refused for an unread class — that is the over-charge \
+         the scan route measured and carved out with `peek_attempted`: {err}");
+
+    // (3) CONTROL — NOTHING WAS EXCLUDED. A no-policy report over a tree with no exclusions at all has
+    // no hole to disclose, and must still gate green. Without this row the fix above is satisfied by
+    // refusing every report a bare scan ever wrote.
+    write_excluded_report(&f, "[]", None);
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "an empty `excluded` is \"I excluded nothing\" — there is nothing unread to refuse over. \
+         stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    // (4) CONTROL — THE PRODUCER LOOKED. `peeked: true` beside `outOfScope: []` is the asked-and-clear
+    // answer, and it certifies.
+    write_excluded_report(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+    );
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "a class the producer READ and found clean must not be re-charged as unread: {}",
+        String::from_utf8_lossy(&out.stderr));
+
+    // (5) THE `judgedElsewhere` CARVE-OUT still stands on this route — a DERIVED copy of already-judged
+    // code is not unread code.
+    write_excluded_report(
+        &f,
+        r#"[{ "class": "build-output", "count": 1, "peeked": false, "judgedElsewhere": true, "reason": "derived" }]"#,
+        None,
+    );
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "`judgedElsewhere` is the producer's statement that this class's SOURCE was judged; refusing \
+         over it double-charges one body of code: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// ⟨0.32⟩ …and `excluded` is read STRICTLY, like every other verdict-bearing §2 key on this route.
+/// Present-but-unparseable coerced to `[]` is the claim "this scan excluded nothing" — the
+/// safe-LOOKING value — and it deletes the rule above wholesale. ABSENT stays permissive: a
+/// pre-⟨0.29⟩ report has no `excluded` key, and refusing over one would refuse every report an older
+/// producer ever wrote.
+#[test]
+fn gate_report_refuses_a_corrupt_excluded_key_and_tolerates_an_absent_one() {
+    let f = Fixture::new("unpeeked-corrupt");
+    let deny = write_policy(&f, "deny.policy", "deny Exec\n");
+
+    write_excluded_report(&f, r#""oops""#, None);
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny])
+        .output().expect("run candor-query");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2), "a corrupt key is corrupt input, never its empty value: {err}");
+    assert!(err.contains("`excluded`"), "the refusal must NAME the key it could not read: {err}");
+
+    // CONTROL: the pre-rung report — no `excluded` key at all — still gates.
+    f.write_report();
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "ABSENT is ⟨0.26⟩'s cannot-answer and takes the documented default — refusing here would \
+         refuse every pre-⟨0.29⟩ report: {}", String::from_utf8_lossy(&out.stderr));
+}

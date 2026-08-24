@@ -2796,3 +2796,67 @@ fn a_workspace_root_that_is_also_a_member_is_scanned_once() {
     assert!(sum > 0, "the fixture analyzed nothing — this row would pass for the wrong reason");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// ⟨0.32⟩ THE VERDICT DOCUMENT AND THE EXIT CODE MUST BE DECIDED BY ONE PREDICATE.
+///
+/// The unread-class recorder keyed on `out_of_scope.is_some()` while the exit arm keyed on
+/// `peek_attempted`, and the two are NOT the same question. `outOfScope` comes back `Some(vec![])`
+/// when the policy carries no DENY rule — the peek short-circuits, returning "asked and clear" — so an
+/// `allow`-only or `forbid`-only policy over a tree with a build script recorded every exclusion class
+/// as unread INTO THE DOCUMENT. MEASURED 2026-08-24: exit 0 beside `"ok": false, "incomplete": true`.
+/// The exit was right and the document was the over-charge, visible only to a reader of the JSON —
+/// which is the CI consumer, i.e. the only reader that matters here.
+///
+/// TWO ROWS: the over-charge (a policy with no deny rule asks nothing of the excluded code, so it must
+/// cost nothing) and the CONTROL that the disclosure still fires when a deny rule really is unanswered.
+/// Without the second, deleting the recorder passes the first.
+#[test]
+fn a_policy_with_no_deny_rule_does_not_record_unread_classes_into_the_verdict() {
+    let d = make_crate("nodeny", "pub fn go() { let _ = 1; }");
+    // build.rs is EXCLUDED (`build-script`) — without an exclusion there is nothing to mis-record and
+    // both rows below are vacuous. It is readable and effectful; the point is that NOBODY ASKS.
+    std::fs::write(d.join("build.rs"),
+        "fn main() { let _ = std::process::Command::new(\"rustc\").status(); }").unwrap();
+
+    let run = |pol: &str, tag: &str| -> (Option<i32>, serde_json::Value) {
+        let pp = d.join(format!("{tag}.policy"));
+        std::fs::write(&pp, pol).unwrap();
+        let gate = d.join(format!("{tag}.verdict.json"));
+        let _ = std::fs::remove_file(&gate);
+        let out = Command::new(bin())
+            .args([d.to_string_lossy().as_ref(),
+                   "--out", d.join(format!("rep-{tag}")).to_string_lossy().as_ref(),
+                   "--policy", pp.to_string_lossy().as_ref(),
+                   "--gate-json", gate.to_string_lossy().as_ref()])
+            .output().expect("run candor-scan");
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&gate).unwrap_or_else(|e| panic!(
+                "no --gate-json document at {}: {e}; stderr: {}",
+                gate.display(), String::from_utf8_lossy(&out.stderr))))
+            .expect("the verdict is JSON");
+        (out.status.code(), v)
+    };
+
+    // THE OVER-CHARGE. `allow` asks nothing of code outside the scan's scope, and neither does
+    // `forbid` — both are answered from the scanned surface — so an unpeeked class must not move
+    // either half of the verdict.
+    for (pol, tag) in [("allow Net api.example.com\n", "allowonly"), ("forbid app -> infra\n", "forbidonly")] {
+        let (code, v) = run(pol, tag);
+        assert_eq!(code, Some(0), "a policy with no deny rule passes on this tree: {v}");
+        assert_eq!(v["ok"], serde_json::json!(true),
+            "the DOCUMENT said not-ok at exit 0 — the recorder and the exit arm were keyed on two \
+             different predicates, and only a reader of the JSON could see the disagreement: {v}");
+        assert!(v.get("incomplete").is_none(),
+            "`incomplete` claims the scan could not see enough; nothing here went unread that this \
+             policy needed read: {v}");
+    }
+
+    // THE CONTROL. Add a DENY rule and the same tree is genuinely unanswered — the peek reads build.rs,
+    // finds the denied effect, and the verdict is INCOMPLETE at exit 2. A fix that simply stopped
+    // recording would pass the rows above and delete the rung.
+    let (code, v) = run("deny Exec\n", "deny");
+    assert_eq!(code, Some(2), "the deny rule's answer DOES depend on the excluded build script: {v}");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v}");
+    assert_eq!(v["ok"], serde_json::json!(false), "{v}");
+    let _ = std::fs::remove_dir_all(&d);
+}

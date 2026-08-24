@@ -240,17 +240,44 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
             }
             _ => {}
         }
-        // ⟨0.32⟩ …and the SCOPE. Both conditions applied HERE, exactly as candor-scan applies them at
-        // its recording site, so the two routes filter an identical set. An ABSENT `outOfScope` means
-        // the producing scan was never ASKED (⟨0.29⟩ omits it with no policy), so the rule does not
-        // bite; present-and-empty means asked-and-clear, which does — the ⟨0.26⟩ absent-vs-empty rule.
-        if matches!(candor_report::report_out_of_scope(&text), candor_report::KeyRead::Present(_))
-            && let candor_report::KeyRead::Present(ex) = candor_report::report_excluded(&text)
-        {
-            out.unpeeked.extend(
-                ex.iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class.clone()),
-            );
-        }
+        // ⟨0.32⟩ …and the SCOPE — the classes the PRODUCER did not read, off `excluded[].peeked`.
+        //
+        // THE RULE, stated once and applied on both routes: **a class the producing scan did not READ
+        // licenses nothing, and whether that matters is decided by the policy being applied NOW, not by
+        // the producer's history.** `peeked: false` has two causes — "opened it and failed" and "never
+        // asked" — and from a REPORT they are indistinguishable, because they leave the identical hole:
+        // that code's effects are absent from `functions` because nothing looked, and ⟨0.21⟩ licenses a
+        // purity claim only over units the scan actually judged. The carve-out is about the QUESTION
+        // (does this policy's answer depend on code outside the scan's scope? — only a `deny`/`pure`
+        // rule's does), and it is applied ONCE in `cmd_gate` against THIS run's `p.rules`. On the scan
+        // route the question and the producer are one run, which is why `peek_attempted` there says the
+        // same thing about the same policy.
+        //
+        // THIS CONDITION USED TO ALSO REQUIRE `outOfScope` PRESENT, and that was a VERIFIED FAIL-OPEN
+        // (measured 2026-08-24, 90 of 795 crate×policy pairs over ~/.cargo/registry): ⟨0.29⟩ omits
+        // `outOfScope` when the producing scan carried no policy, so a report written by a bare
+        // `candor-scan <dir> --out B` — which carries `excluded[].peeked: false` on every class, nothing
+        // having been asked — skipped this whole rule and gated `deny Exec` at exit 0 `ok: true` with no
+        // disclosure, while `candor-scan <dir> --policy <deny Exec>` over the SAME tree exited 2 naming
+        // the build-script functions that spawn `rustc`. The producer's silence about the QUESTION was
+        // read as an answer about the CODE. An absent `outOfScope` is now what ⟨0.26⟩ says it is — that
+        // producer cannot answer — and that is exactly why the unread classes still bite.
+        //
+        // STRICT, like every other verdict-bearing key here: `excluded` present-but-unparseable coerced
+        // to `[]` is the claim "this scan excluded nothing", the safe-LOOKING value, and it deletes this
+        // rule. ABSENT stays permissive — a pre-⟨0.29⟩ report has no `excluded` key at all, and refusing
+        // over one would refuse every report an older producer ever wrote.
+        let excluded_classes = strict!(
+            candor_report::report_excluded(&text),
+            "excluded",
+            "a list of `{ class, count, peeked, reason }`",
+            "the EMPTY list — \"this scan excluded nothing\", which deletes the unread-class rule and \
+             turns this verb's exit 2 into `policy ✓`",
+            Vec::new()
+        );
+        out.unpeeked.extend(
+            excluded_classes.iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class.clone()),
+        );
         out.out_of_scope.extend(strict!(
             candor_report::report_out_of_scope(&text),
             "outOfScope",
@@ -1434,6 +1461,23 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             return refuse(&why, want_json, gate_json.as_deref());
         }
     };
+    // ⟨0.32⟩ DOES THIS POLICY'S ANSWER DEPEND ON THE CODE THE PRODUCER LEFT UNREAD? — the ONE place that
+    // condition is applied on this route (see the rule stated at the recording site in
+    // `load_gate_report`). `rules` is the DENY list; `allow`/`forbid`/`only`/`layer` live in their own,
+    // and none of them is answered from code OUTSIDE the scan's scope — refusing them for want of a peek
+    // is the over-charge the scan route measured and carved out with `peek_attempted`.
+    //
+    // APPLIED TO THE VALUE, not repeated at the exit arm, and that is deliberate: `rep.unpeeked` feeds
+    // BOTH the exit code and `incomplete`/`ok` in the verdict document, so a condition stated only at the
+    // exit would let the two disagree — a document reading `ok: false, incomplete: true` beside exit 0.
+    // The scan route had exactly that split until this commit (its recorder keyed on `outOfScope`'s
+    // presence while its exit keyed on `peek_attempted`), measured on an `allow`-only policy over a tree
+    // with a build script: exit 0, `"ok": false`.
+    let mut rep = rep;
+    if p.rules.is_empty() {
+        rep.unpeeked.clear();
+    }
+    let rep = rep;
     // ⟨0.24⟩ THE REPORT JUDGED NOTHING (SPEC §3.1) — DISCLOSED, NOT REFUSED.
     //
     // This verb's whole contract is that the report IS the signature: nothing is re-derived, and an entry
@@ -1680,26 +1724,26 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             rep.out_of_scope.len()
         );
         2
-    } else if !rep.unpeeked.is_empty() && !p.rules.is_empty() {
+    } else if !rep.unpeeked.is_empty() {
         // ⟨0.32⟩ THE THIRD CAUSE, and the counterpart of candor-scan's arm — a class the PRODUCING scan
         // did not read.
         //
-        // GATED ON THIS POLICY HAVING A DENY RULE, which is the same short-circuit the producer's peek
-        // applies (`rules` is the DENY list; allow/forbid/only live in their own). Without it this route
-        // refused an `allow`-only policy over a class the producer never even looked at — `peeked: false`
-        // has two causes, "opened it and failed" and "never asked", and the document cannot tell them
-        // apart. Deciding it from THIS policy is what keeps the two routes answering the same way.
+        // NO `!p.rules.is_empty()` CONJUNCT HERE, and that is not a relaxation: the condition is applied
+        // to `rep.unpeeked` ITSELF, once, right after the report loads — see the note there for why it
+        // has to be the value and not the arm (the document and the exit read the same list, and a
+        // condition on only one of them lets them disagree). Repeating it would be a second statement of
+        // one rule, which is how the two routes drifted in the first place.
         //
-        // MEASURED AS DEFENSIVE, not load-bearing: this verb already refuses `allow` and `forbid` rules
-        // UNIFORMLY and earlier, so a policy with no deny rule never reaches this line today. Kept
-        // because the guard states the intended condition rather than relying on a refusal three
-        // screens up that exists for an unrelated reason — and stated as defensive rather than left to
-        // read as load-bearing. Above the `outOfScope` arm and below `unanalyzed`, matching the scan route's
-        // order so a target that trips both reports the same cause on both routes.
+        // BELOW the `outOfScope` arm and below `unanalyzed`, matching candor-scan's order
+        // (`had_parse_failure` → `oos_findings` → withheld → unread), so a target that trips two of them
+        // names the same cause on both routes. The message differs from `outOfScope`'s because the repair
+        // does: that one wants a scan whose SELECTOR reaches the code, this one wants a scan that was
+        // asked the question at all — re-run the producing scan WITH this policy.
         eprintln!(
             "candor-query gate: NOT certified — the report says the scan did not READ {}. Their effects \
              are absent because nothing looked, not because there are none, so the verdict is INCOMPLETE \
-             rather than a pass",
+             rather than a pass. Re-scan with this policy (candor-scan <dir> --policy <p>) — a scan that \
+             was never asked cannot certify what it never opened",
             rep.unpeeked.join(", ")
         );
         2

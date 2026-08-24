@@ -3260,9 +3260,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // as the ⟨0.24⟩ "record the violations FIRST" fix one cause over: a document written on the way out of
     // an early return is a document missing whatever had not been recorded yet. (Review, MEASURED.)
     crate::gate::record_gate_out_of_scope(out_of_scope.as_deref().unwrap_or(&[]));
-    // ⟨0.32⟩ beside it, from the same local values and at the same point in the sequence. `out_of_scope`
-    // being Some(_) is the "the peek RAN" signal — ⟨0.29⟩ leaves it None when no policy was configured.
-    crate::gate::record_gate_unpeeked(&excluded_classes, out_of_scope.is_some());
+    // ⟨0.32⟩ beside it, from the same local values and at the same point in the sequence.
+    //
+    // `peek_attempted`, NOT `out_of_scope.is_some()`. The two are not the same predicate and the
+    // difference was MEASURED as a document/exit split (2026-08-24): `out_of_scope` is `Some(vec![])`
+    // when the policy carries NO deny rule — the peek short-circuits and returns "asked and clear" —
+    // so an `allow`-only or `forbid`-only policy over a tree with a build script recorded every class as
+    // unread INTO THE VERDICT DOCUMENT, which came out `"ok": false, "incomplete": true` at **exit 0**.
+    // The exit arm below already used `peek_attempted` and passed; the document was the half that
+    // over-charged, and only a reader of the JSON could see it. One predicate now feeds both, and it is
+    // the same question `gate --report` asks of its own policy: does this run's rule set need code
+    // outside the scan's scope to have been read?
+    crate::gate::record_gate_unpeeked(&excluded_classes, peek_attempted.get());
     if let Some(pp) = policy_path {
         let Ok(text) = std::fs::read_to_string(&pp) else {
             // A set-but-unreadable policy must be LOUD — silently passing would let a violation ship.
