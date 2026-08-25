@@ -9,6 +9,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.32.0] — 2026-08-25
+
 - **`callers`, `impact` and `path` carried NO completeness reader at all — the SILENT half of the same
   class, closed in the three engines that ship them.** ⟨0.28⟩ widened SPEC §2's re-disclosure MUST to
   *"any verb whose output could be read as a NEGATIVE FINDING about the code — a verdict, an empty
