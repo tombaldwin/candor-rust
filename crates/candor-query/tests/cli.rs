@@ -5068,6 +5068,158 @@ fn show_and_map_return_their_result_beside_the_caveat_when_hedging() {
         "healthy map keeps its module rows and gains no caveat key: {v}");
 }
 
+/// ⟨0.32⟩ **THE SILENT HALF OF THE SAME CLASS: `callers`, `impact` AND `path` CARRIED NO COMPLETENESS
+/// READER AT ALL.** `show`/`map` OVER-hedged (the caveat replaced the data, fixed by
+/// [`show_and_map_return_their_result_beside_the_caveat_when_hedging`]); these three UNDER-hedged — over
+/// a report whose own `excluded` names a class the producing scan never opened they answered FLAT, at
+/// exit 0, with no disclosure on the machine channel and none on the human one.
+///
+/// MEASURED at HEAD on a three-function crate with one `tests/` dir (`excluded: [{class:
+/// "non-library-target", peeked: false}]`), scanned with no policy — reproduced identically in
+/// candor-ts and candor-java:
+///
+/// ```text
+///   callers wrapper --json   {"of":[…],"direct":["top"],"transitive":["top"]}   exit 0   no caveat
+///   impact  wrapper --json   {"fn":…,"affectedCount":1,"affected":["top"],…}    exit 0   no caveat
+///   path    top Fs  --json   {"fn":…,"effect":"Fs","path":[…3 steps…]}          exit 0   no caveat
+/// ```
+///
+/// A user asks who calls a function, gets an answer, and is never told part of the codebase went unread.
+/// An empty `direct` over the same bytes reads as *nothing calls this* — the determined negative SPEC §2
+/// ⟨0.28⟩ binds ("a verdict, an empty RESULT SET, or a zero count"), on the three verbs the rung's own
+/// enumeration skipped.
+///
+/// **THE REMEDY IS THE ONE THE HEDGING VERBS ALREADY USE, NOT A FOURTH SPELLING.** All three have a FIXED
+/// key set at their root — `{of,direct,transitive}`, `{fn,affectedCount,affected,entryPoints}`,
+/// `{fn,effect,path}` — so unlike `show`/`map` there is nothing to nest: they take
+/// [`crate::completeness::ReportCompleteness::write_json`] and `print_note`, exactly as `where`,
+/// `reachable`, `blindspots` and `containment` do. `must_hedge()` is the trigger, `incomplete()` and every
+/// exit code are untouched, and the boundary is unmoved — the verbs that answer `ok` still REFUSE over
+/// these same bytes ([`the_verbs_that_answer_ok_still_refuse_over_an_unread_class`], conformance PARTs 62
+/// and 67).
+///
+/// The assertions are on the ROW NAMES and COUNTS, never on key presence: a hedge that shipped an empty
+/// `direct`/`affected`/`path` would pass "the key exists" while deleting the answer this rung exists to
+/// keep.
+#[test]
+fn callers_impact_and_path_disclose_an_unread_class_beside_their_answer() {
+    let f = Fixture::new("cip-unread");
+    // Three functions in a chain (top -> wrapper -> inner), inner is the Fs source. `excluded` names one
+    // class with `peeked: false` and no `judgedElsewhere` — ⟨0.32⟩'s unread-class cause, the shape a bare
+    // `candor-scan <crate-with-tests/> --out r` publishes.
+    let report = r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.32"},"package":"rpt",
+        "analyzed":{"count":3,"digest":"d"},
+        "excluded":[{"class":"non-library-target","count":1,"peeked":false,"reason":"tests/"}],
+        "functions":[
+          {"fn":"inner","loc":"s:1","inferred":["Fs"],"direct":["Fs"],"hash":"h1"},
+          {"fn":"wrapper","loc":"s:2","inferred":["Fs"],"hash":"h2","calls":["inner"]},
+          {"fn":"top","loc":"s:3","inferred":["Fs"],"hash":"h3","calls":["wrapper"]}]}"#;
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    // The COMPLETE-graph sidecar, so `callers` takes its sidecar arm rather than the effect-only
+    // fallback — the arm a real scan produces, and the one whose miss is a definitive negative.
+    std::fs::write(format!("{}.rpt.scan.callgraph.json", f.prefix),
+        r#"{"inner":[],"wrapper":["inner"],"top":["wrapper"]}"#).unwrap();
+
+    // ── callers: the caveat rides at the root, and the reachers are STILL THERE ──────────────────────
+    let out = Command::new(bin()).args(["callers", "wrapper", "--report", &f.prefix, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "a descriptive verb's hedge is a DISCLOSURE, not an exit code (⟨0.24⟩)");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["incomplete"], serde_json::json!(true),
+        "callers answered flat over a class nothing opened: {v}");
+    assert_eq!(v["direct"], serde_json::json!(["top"]),
+        "…BESIDE the answer, never instead of it — the direct callers by NAME: {v}");
+    assert_eq!(v["transitive"], serde_json::json!(["top"]), "{v}");
+    assert_eq!(v["of"], serde_json::json!(["wrapper"]), "{v}");
+
+    // The `--include-unknown` arm is a SECOND function in this engine (`callers_via_callgraph_frontier`),
+    // and the file's own comment records that the last fix to this pair had to be applied twice. Driven,
+    // not assumed.
+    let out = Command::new(bin())
+        .args(["callers", "wrapper", "--report", &f.prefix, "--json", "--include-unknown"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["incomplete"], serde_json::json!(true),
+        "the frontier arm is the OTHER site of the same verb: {v}");
+    assert_eq!(v["direct"], serde_json::json!(["top"]), "{v}");
+
+    // ── impact ──────────────────────────────────────────────────────────────────────────────────────
+    let out = Command::new(bin()).args(["impact", "wrapper", "--report", &f.prefix, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["incomplete"], serde_json::json!(true), "impact answered flat: {v}");
+    assert_eq!(v["affected"], serde_json::json!(["top"]),
+        "…and the blast radius survives the hedge, by NAME: {v}");
+    assert_eq!(v["affectedCount"], serde_json::json!(1), "{v}");
+    assert_eq!(v["fn"], serde_json::json!("wrapper"), "{v}");
+
+    // ── path ────────────────────────────────────────────────────────────────────────────────────────
+    let out = Command::new(bin()).args(["path", "top", "Fs", "--report", &f.prefix, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["incomplete"], serde_json::json!(true), "path answered flat: {v}");
+    let steps: Vec<&str> =
+        v["path"].as_array().expect("the chain rides beside the caveat")
+            .iter().map(|s| s["fn"].as_str().unwrap()).collect();
+    assert_eq!(steps, ["top", "wrapper", "inner"],
+        "…and the WHOLE chain is still there, in order: {v}");
+
+    // `path`'s EMPTY-answer arm takes the same route. `{"path": []}` is the determined negative this rung
+    // is about — *this function does not reach that effect* — and over an unread class it is exactly the
+    // claim the report cannot support. Asserted separately because it is a different emit site.
+    let out = Command::new(bin()).args(["path", "top", "Net", "--report", &f.prefix, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["incomplete"], serde_json::json!(true),
+        "an empty `path` over an unread class is a determined negative and must hedge: {v}");
+    assert_eq!(v["path"], serde_json::json!([]), "{v}");
+
+    // ── THE HUMAN CHANNEL, because a mutant that keeps the JSON fix and deletes the printed line
+    //    survives an absence-assert on the document (candor-spec `ec1a441`, measured on this engine).
+    for argv in [vec!["callers", "wrapper"], vec!["impact", "wrapper"], vec!["path", "top", "Fs"]] {
+        let mut args: Vec<&str> = argv.clone();
+        args.extend(["--report", &f.prefix]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains("INCOMPLETE") && text.contains("non-library-target"),
+            "{argv:?}: the prose channel must carry the note AND name the class: {text}");
+    }
+
+    // ── THE INTACT CONTROL: nothing unread ⇒ NO hedge, and the pinned shape is untouched. Without this
+    //    the rows above pass just as well from a verb that hedges unconditionally, which would make every
+    //    ordinary answer read as partial — the disclosure discrediting itself.
+    let h = Fixture::new("cip-healthy");
+    h.write_report();
+    for argv in [vec!["callers", "inner"], vec!["impact", "inner"], vec!["path", "outer", "Fs"]] {
+        let mut args: Vec<&str> = argv.clone();
+        args.extend(["--report", &h.prefix, "--json"]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(0));
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+        assert!(v.get("incomplete").is_none(),
+            "{argv:?}: a complete report gains NO caveat key: {v}");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert!(keys.iter().all(|k| ["of", "direct", "transitive", "possibleViaUnknownDispatch",
+                                     "fn", "affectedCount", "affected", "entryPoints", "effect",
+                                     "path"].contains(k)),
+            "{argv:?}: the healthy document keeps its pinned key set exactly: {keys:?}");
+    }
+    // …and on the human channel the healthy run prints no note either.
+    for argv in [vec!["callers", "inner"], vec!["impact", "inner"], vec!["path", "outer", "Fs"]] {
+        let mut args: Vec<&str> = argv.clone();
+        args.extend(["--report", &h.prefix]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(!text.contains("INCOMPLETE"), "{argv:?}: healthy prose gains no note: {text}");
+    }
+}
+
 /// SPEC §2 ⟨0.28⟩: an ADVISORY verb over a CONFIGURED policy that parsed to ZERO RULES answers with
 /// the caveat document — result keys withheld, exit UNCHANGED. Measured before the fix: `whatif`,
 /// `fix-gate` and `unverified` all answered `{"ok": true, …}` at exit 0 over `# no rules yet` — the

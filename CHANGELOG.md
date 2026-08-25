@@ -9,6 +9,39 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`callers`, `impact` and `path` carried NO completeness reader at all — the SILENT half of the same
+  class, closed in the three engines that ship them.** ⟨0.28⟩ widened SPEC §2's re-disclosure MUST to
+  *"any verb whose output could be read as a NEGATIVE FINDING about the code — a verdict, an empty
+  result set, or a zero count"*, enumerated six verbs, and skipped these three; the ⟨0.32⟩ unread-class
+  cause then made the gap fire on nearly every no-policy report. MEASURED at HEAD on a three-function
+  crate with one `tests/` dir (`excluded: [{class: "non-library-target", peeked: false}]`):
+
+  ```
+  callers wrapper --json   {"of":[…],"direct":["top"],"transitive":["top"]}   exit 0   no caveat
+  impact  wrapper --json   {"fn":…,"affectedCount":1,"affected":["top"],…}    exit 0   no caveat
+  path    top Fs  --json   {"fn":…,"effect":"Fs","path":[…3 steps…]}          exit 0   no caveat
+  ```
+
+  — and nothing on the human channel either, while `where` and `reachable` read the same bytes through
+  the same module and hedged. A user asks who calls a function, gets an answer, and is never told that
+  part of the codebase went unread. An empty `direct` reads as *nothing calls this*, an
+  `affectedCount: 0` as *safe to edit*, an empty `path` as *this function does not reach that effect*.
+
+  Where `show`/`map` OVER-hedged (the caveat replaced the data, ruled the other way in the entry below),
+  these three UNDER-hedged. **The remedy is the mechanism already in the file, not a fourth spelling:**
+  all three documents have a FIXED key set at their root, so nothing nests and no reserved-key collision
+  can arise — they take `write_json` on the machine channel and `print_note` on the human one, exactly
+  as `reachable` does. Both of `callers`' answering functions and all three of `path`'s emit sites are
+  covered, including the two that answer an EMPTY chain and `callers`' `{}` fallback arm, which is the
+  strongest determined negative the format has.
+
+  **The boundary does not move.** The trigger is `must_hedge()` — a disclosure — and `incomplete()`
+  with every exit computed from it is untouched, so `gate`/`gate --report` and
+  `unverified`/`fix-gate`/`whatif`/`fix` under `--strict` still REFUSE over these same bytes (⟨0.24⟩'s
+  "never LESS sensitive than the gate"; conformance PARTs 62 and 67). Healthy output is byte-identical,
+  measured by diffing all three verbs on both channels against the pre-change binary over a report whose
+  excluded class is `peeked: true`.
+
 - **`show` and `map` returned the WARNING INSTEAD OF THE ANSWER — the ⟨0.32⟩ descriptive hedge, ruled
   the other way and closed four-way.** ⟨0.28⟩ Rung A tells a verb *whose pinned shape cannot carry the
   caveat* to emit the CAVEAT DOCUMENT **instead of** its result document, and yesterday's rung armed
