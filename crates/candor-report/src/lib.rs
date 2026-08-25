@@ -292,7 +292,7 @@ pub struct ReportEntry {
 /// from the engine build id (`ReportMeta::version`) and from the crate release version. Bumped only when
 /// the spec contract changes; emitted as the envelope's `spec` so a consumer can see which contract a
 /// report conforms to. Both backends and the JVM port declare the SAME value — see candor-spec §2.1.
-pub const SPEC_VERSION: &str = "0.31";
+pub const SPEC_VERSION: &str = "0.32";
 
 /// The envelope header: which engine produced the report (`version` = build id, `toolchain`), and which
 /// candor-spec contract it implements (`spec`).
