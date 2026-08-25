@@ -191,6 +191,23 @@ pub(crate) struct ReportCompleteness {
     /// it … they carry no policy, so there is no question whose answer could depend on the unread
     /// code"*, and that was ruled WRONG four-way on 2026-08-24; the ruling is on `must_hedge`.
     pub(crate) unread_armed: bool,
+    /// ⟨0.33⟩ RAW MATERIALS for [`arm_unasked_rules`] — one entry per report under the locator: did THAT
+    /// report have any `excluded[]` entry that was `peeked` and NOT `judgedElsewhere` (the SPEC §2
+    /// ⟨0.33⟩ precondition), and what deny set did its peek run under (`None` = `scannedUnder` ABSENT,
+    /// which is the EMPTY SET for the subset test, never a licence).
+    ///
+    /// Collected PER REPORT rather than pre-unioned, for the same reason `gate --report` computes
+    /// [`crate::gate`]'s equivalent per report: `scannedUnder` and `peeked` are facts about ONE producing
+    /// scan, and unioning them before comparing would let a policy-scanned report's deny set answer for a
+    /// no-policy sibling's peeked classes.
+    pub(crate) scanned_under_facts: Vec<(bool, Option<Vec<String>>)>,
+    /// ⟨0.33⟩ The rules THIS run's policy holds that some report's peek was never asked about (SPEC §2
+    /// ⟨0.33⟩) — canonical, deduplicated, code-point sorted. Empty until [`arm_unasked_rules`] is called;
+    /// mirrors [`Self::unread_armed`]'s split between raw collection and policy-scoped arming, but needs
+    /// no separate `_armed` flag because the value ITSELF is structurally empty whenever this run's own
+    /// deny set is empty (an allow/forbid/only-only policy, or no policy at all) — the over-charge control
+    /// falls out of the computation rather than needing a second conjunct.
+    pub(crate) unasked_rules: Vec<String>,
 }
 
 /// ⟨0.32⟩ **ARM THE UNREAD-CLASS CAUSE FOR THIS RUN'S POLICY** — the one place the condition is applied
@@ -213,6 +230,45 @@ pub(crate) fn arm_unread(mut c: ReportCompleteness, p: &candor_classify::policy:
         c.unread.clear();
     }
     c.unread_armed = !c.unread.is_empty();
+    c
+}
+
+/// ⟨0.33⟩ **ARM THE CROSS-POLICY CAUSE FOR THIS RUN'S POLICY** (SPEC §2 ⟨0.33⟩) — the one place the
+/// condition is applied on the advisory route, beside [`arm_unread`] for the identical reason: `gate
+/// --report` binds every advisory verb that answers `ok` to be at least as pessimistic as it is over the
+/// same bytes (⟨0.24⟩), and a second computation of that relation is how it has drifted before (PART 67).
+///
+/// **PER REPORT, NEVER OVER THE UNION** — the same rule `Query::unaskedRules`/`candor-query gate --report`
+/// applies: `scannedUnder` and `peeked` are facts about ONE producing scan, so unioning [`Self::
+/// scanned_under_facts`] first would let a policy-scanned report's deny set answer for a no-policy
+/// sibling's peeked classes.
+///
+/// **STRUCTURALLY EMPTY, not by a conjunct.** `own` is the canonical form of `p.rules`; when it is empty
+/// (an `allow`/`forbid`/`only`-only policy denies nothing, so its canonical set is empty and a subset of
+/// everything) the loop below contributes nothing, and a report with no `any_peeked` fact never
+/// contributes either — both of ⟨0.33⟩'s over-charge controls fall out of the computation rather than
+/// needing a second `if`.
+pub(crate) fn arm_unasked_rules(
+    mut c: ReportCompleteness,
+    p: &candor_classify::policy::ParsedPolicy,
+) -> ReportCompleteness {
+    let own = candor_classify::policy::canonical_deny_set(&p.rules);
+    let mut missing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if !own.is_empty() {
+        for (any_peeked, scanned_under) in &c.scanned_under_facts {
+            if !*any_peeked {
+                continue;
+            }
+            let theirs: std::collections::BTreeSet<&str> =
+                scanned_under.as_deref().unwrap_or(&[]).iter().map(String::as_str).collect();
+            for r in &own {
+                if !theirs.contains(r.as_str()) {
+                    missing.insert(r.clone());
+                }
+            }
+        }
+    }
+    c.unasked_rules = missing.into_iter().collect();
     c
 }
 
@@ -255,6 +311,11 @@ impl ReportCompleteness {
             || !self.unreadable.is_empty()
             || !self.out_of_scope.is_empty()
             || self.unread_armed
+            // ⟨0.33⟩ THE FOURTH CAUSE (SPEC §2 ⟨0.33⟩) — a class the producing scan READ, but under a
+            // DIFFERENT deny set than this run holds. Needs no separate `_armed` flag the way `unread`
+            // does: `arm_unasked_rules` already leaves this structurally empty whenever the policy in
+            // force asks nothing (see that function).
+            || !self.unasked_rules.is_empty()
     }
 
     /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where
@@ -383,6 +444,12 @@ impl ReportCompleteness {
         // either side is partial.
         self.unread.extend(other.unread);
         self.unread_armed |= other.unread_armed;
+        // ⟨0.33⟩ …and the cross-policy raw materials + any already-armed value, on the same terms:
+        // `containment` never arms either cause today, so this is symmetry with `unread` above rather
+        // than a reachable path, and it is what keeps a future armed caller from silently losing one side
+        // of a diff.
+        self.scanned_under_facts.extend(other.scanned_under_facts);
+        self.unasked_rules.extend(other.unasked_rules);
     }
 
     /// The stderr disclosure for a `unanalyzed` key that is present and unreadable. Named per file and
@@ -588,6 +655,23 @@ impl ReportCompleteness {
                 format!(", and {n} exclusion class(es) the scan did NOT READ,"),
             );
         }
+        // ⟨0.33⟩ …and the rules THIS policy holds that some peeked class's producer was never asked about
+        // (SPEC §2 ⟨0.33⟩). Needs no `_armed` check the way `unread` does above — `arm_unasked_rules`
+        // already leaves this structurally empty whenever the policy in force asks nothing.
+        if !self.unasked_rules.is_empty() {
+            let n = self.unasked_rules.len();
+            append(
+                &mut head,
+                format!(
+                    "the report(s) under this locator were peeked under a deny set that does not cover \
+                     {n} rule(s) of THIS policy,"
+                ),
+                format!(
+                    ", and {n} rule(s) of THIS policy the report(s) were peeked under a DIFFERENT deny \
+                     set,"
+                ),
+            );
+        }
         writeln!(w, "  ⚠ INCOMPLETE — {head}")?;
         writeln!(w, "      so {so_what}:")?;
         for u in &self.unanalyzed {
@@ -637,6 +721,16 @@ impl ReportCompleteness {
                  effects are absent because nothing looked, not because there are none. {remedy}"
             )?;
         }
+        if !self.unasked_rules.is_empty() {
+            writeln!(
+                w,
+                "      {} — never asked of the excluded files a peeked class's producer read: the empty \
+                 finding there answers a DIFFERENT question, not this one. Re-run the producing scan \
+                 under THE SAME policy this verb is applying (candor-scan <dir> --policy <p>) — not \
+                 merely under a policy",
+                self.unasked_rules.join(", ")
+            )?;
+        }
         writeln!(w, "      {tail}")
     }
 }
@@ -667,6 +761,8 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         out_of_scope: Vec::new(),
         unread: Vec::new(),
         unread_armed: false,
+        scanned_under_facts: Vec::new(),
+        unasked_rules: Vec::new(),
     };
     for path in glob_reports(prefix) {
         let p = path.display().to_string();
@@ -710,11 +806,32 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         //
         // COLLECTED UNCONDITIONALLY; whether it MATTERS is `arm_unread`'s decision, because it turns on
         // the policy in force and this function holds none.
+        // ⟨0.33⟩ THE PRECONDITION of the cross-policy cause (SPEC §2 ⟨0.33⟩): did ANY class of THIS report
+        // get read (`peeked`) and not carved out as `judgedElsewhere`? Captured here, before `x` is
+        // consumed below, because it is the SAME `excluded` read `unread` already does — a second parse
+        // of one key is how the two would drift.
+        let mut any_peeked = false;
         match candor_report::report_excluded(&text) {
-            candor_report::KeyRead::Present(x) => out.unread.extend(
-                x.into_iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class),
-            ),
+            candor_report::KeyRead::Present(x) => {
+                any_peeked = x.iter().any(|e| e.peeked && !e.judged_elsewhere);
+                out.unread.extend(
+                    x.into_iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class),
+                );
+            }
             candor_report::KeyRead::Absent => {}
+            candor_report::KeyRead::Corrupt => {
+                out.unreadable.push(Unreadable { path: p, key_present: true });
+                continue;
+            }
+        }
+        // ⟨0.33⟩ …and THE QUESTION THIS REPORT'S PEEK WAS PUT — read as strictly as `excluded`/
+        // `outOfScope` above, and for the identical fail-open reason: a garbled `scannedUnder` coerced to
+        // its permissive value would MANUFACTURE coverage this report's producer never claimed. Recorded
+        // per report (never unioned yet) for [`arm_unasked_rules`] to consume once this run's policy is
+        // known.
+        match candor_report::report_scanned_under(&text) {
+            candor_report::KeyRead::Present(d) => out.scanned_under_facts.push((any_peeked, Some(d))),
+            candor_report::KeyRead::Absent => out.scanned_under_facts.push((any_peeked, None)),
             candor_report::KeyRead::Corrupt => {
                 out.unreadable.push(Unreadable { path: p, key_present: true });
                 continue;

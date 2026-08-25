@@ -2763,6 +2763,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // false as a statement, and it refused three whole policy shapes on any tree with an exclusion. The
     // flag is set where the reads actually begin, so it cannot drift from the short-circuit above it.
     let peek_attempted = std::cell::Cell::new(false);
+    // ⟨0.33⟩ THE QUESTION THE PEEK WAS PUT (SPEC §2 ⟨0.33⟩) — the deny rules THIS scan HELD, in their
+    // canonical expanded form. A `RefCell` rather than a return value because it must be set BEFORE
+    // either short-circuit inside the closure below (an `allow`-only policy, or nothing excluded to look
+    // at): the report must say *a policy stood and it denied nothing* (present-and-empty) in exactly
+    // those cases, never *nothing was asked* (absent) — the same emission rule `outOfScope` follows, and
+    // deliberately the same reasoning: present-and-empty and absent are different claims (⟨0.26⟩).
+    let scanned_under_rules: std::cell::RefCell<Option<Vec<String>>> = std::cell::RefCell::new(None);
     let out_of_scope: Option<Vec<candor_report::OutOfScopeFinding>> = policy_path
         .as_ref()
         .and_then(|pp| std::fs::read_to_string(pp).ok())
@@ -2778,6 +2785,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if !parsed.fatal_messages().is_empty() {
                 return None;
             }
+            // ⟨0.33⟩ RECORDED HERE — after the policy is known to STAND, before either short-circuit
+            // below — from `parsed.rules`, the very list the peek matches with two lines down. A
+            // main-thread re-parse of the same file would be a second opinion about one file, the shape
+            // ⟨0.29⟩ already forbids one level down (candor-java's reference comment makes the same
+            // point: "the peek's parse IS the matcher").
+            *scanned_under_rules.borrow_mut() =
+                Some(candor_classify::policy::canonical_deny_set(&parsed.rules));
             // ⟨0.30⟩ THE TRIGGER IS "ARE THERE DENY RULES", and the matcher below is the GATE'S OWN.
             // This flattened the rules into a set of effect NAMES, which §6.2 already forbids ("THE GATE
             // AND THE DISCLOSURE MUST APPLY THE SAME RULE, AND SHOULD SHARE THE SAME CODE") and which was
@@ -2901,6 +2915,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             out.sort_by(|a, b| (&a.path, &a.func).cmp(&(&b.path, &b.func)));
             Some(out)
         });
+    // ⟨0.33⟩ …materialized. `None` here is reachable only where `out_of_scope` is also `None` (a refused
+    // policy, or none configured) — the same emission rule, applied to the same `RefCell`, so the two
+    // keys cannot drift into "asked" and "not asked" over one run.
+    let scanned_under: Option<candor_report::ScannedUnder> =
+        scanned_under_rules.into_inner().map(|deny| candor_report::ScannedUnder { deny });
 
     let excluded_classes: Vec<candor_report::ExcludedClass> = {
         let mut by_class: std::collections::BTreeMap<&'static str, usize> =
@@ -2971,7 +2990,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     crate::gate::record_gate_net_partners(net_partners_record.as_ref());
     let body = candor_report::to_packaged_report_json_typed(
         &meta, &crate_name, &entries, coverage.as_ref(), &unanalyzed_units, Some(&analyzed),
-        Some(&type_surface), &excluded_classes, out_of_scope.as_deref(),
+        Some(&type_surface), &excluded_classes, out_of_scope.as_deref(), scanned_under.as_ref(),
         net_partners_record.as_ref())
         .unwrap_or_default();
     // With want_json the body is RETURNED to the caller (which prints one document for a single

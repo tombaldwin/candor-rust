@@ -372,6 +372,60 @@ pub struct PolicyRule {
     pub raw: String,
 }
 
+/// ⟨0.33⟩ ONE `deny`/`pure` RULE IN ITS CANONICAL EXPANDED FORM — the §6.2 spelling of the rule as THE
+/// MATCHER USED it, after alias resolution (`unknown_classes` is already the resolved token set, not the
+/// raw `Unknown[<alias>]` text).
+///
+/// This is what SPEC §2 ⟨0.33⟩'s `scannedUnder.deny` records: the deny set a policy-scanned peek was
+/// BOUNDED BY, so a consumer gating with a different deny set can tell whether the producer was even
+/// asked its question (candor-java's `Policy.canonicalDenyRule` is the reference sibling — this is the
+/// same rendering, ported).
+///
+/// **NOT effect NAMES.** `pure` is a rule with an EMPTY effect set ("every effect except `Unknown`"), so
+/// flattening the rule to a set of names loses it entirely and a flattened STRICTEST policy compares
+/// equal to the EMPTY set — the four-way false all-clear ⟨0.30⟩ closed on the peek itself, one layer in.
+///
+/// **NOT the raw line.** §3.1 already records that alias expansion breaks byte-equality: two configs
+/// defining `unknown-alias corp` DIFFERENTLY give the raw line `deny Unknown[corp]` two meanings, so
+/// comparing raw text would read a producer that asked the WEAKER question as having answered the
+/// stronger one. Recording the EXPANDED, resolved form is the only rendering that is one meaning per
+/// string.
+pub fn canonical_deny_rule(r: &PolicyRule) -> String {
+    let suffix = r.scope.as_deref().map(|s| format!(" {s}")).unwrap_or_default();
+    if r.effects.is_empty() {
+        return format!("pure{suffix}");
+    }
+    // `effects` is a `BTreeSet<&'static str>`, so this iterates in one fixed (alphabetical) order for
+    // any given set — deterministic across calls and across which order the policy TEXT listed them in,
+    // which is what lets `canonical_deny_set` below produce ONE string per rule regardless of how the
+    // operator wrote it.
+    let parts: Vec<String> = r
+        .effects
+        .iter()
+        .map(|&e| {
+            if e == "Unknown" && !r.unknown_classes.is_empty() {
+                let mut toks: Vec<&str> = r.unknown_classes.iter().map(|c| c.token()).collect();
+                toks.sort_unstable();
+                format!("Unknown[{}]", toks.join(","))
+            } else if e == "Net" && !r.net_classes.is_empty() {
+                // `net_classes` is a `BTreeSet<String>`, already code-point sorted.
+                format!("Net[{}]", r.net_classes.iter().cloned().collect::<Vec<_>>().join(","))
+            } else {
+                e.to_string()
+            }
+        })
+        .collect();
+    format!("deny {}{suffix}", parts.join(" "))
+}
+
+/// ⟨0.33⟩ A rule LIST as a canonical SET — [`canonical_deny_rule`] over every entry, deduplicated and
+/// code-point sorted (`BTreeSet<String>`'s own order, the same collation the verdict's `zeroMatch` list
+/// uses), so one policy produces ONE document however its lines were ordered and a consumer's SUBSET
+/// test (SPEC §2 ⟨0.33⟩) is a plain membership test rather than an order-sensitive comparison.
+pub fn canonical_deny_set(rules: &[PolicyRule]) -> Vec<String> {
+    rules.iter().map(canonical_deny_rule).collect::<BTreeSet<String>>().into_iter().collect()
+}
+
 /// One `allow <Effect> [in <scope>] <literal>…` rule (AS-EFF-008). The effect is one of the four
 /// that carry a literal surface (`Net` hosts / `Exec` commands / `Fs` paths / `Db` tables); a
 /// function in `scope` performing it may reach ONLY the listed literals. Matching is

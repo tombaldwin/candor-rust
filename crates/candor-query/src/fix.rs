@@ -396,7 +396,11 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
     // ([`crate::completeness::arm_unread`]). The DISCLOSURE only: this verb's exit stays 0 for the
     // reason above, and the hedge is owed for the reason above too — a callee in an unread class
     // contributes no effect to "does not perform E", and a caller in one is missing from the hoist.
-    let comp = crate::completeness::arm_unread(crate::completeness::report_completeness(prefix), &parsed);
+    // ⟨0.33⟩ …and the cross-policy cause, on the same DISCLOSURE-only terms as `unread` above.
+    let comp = crate::completeness::arm_unasked_rules(
+        crate::completeness::arm_unread(crate::completeness::report_completeness(prefix), &parsed),
+        &parsed,
+    );
     comp.warn_unreadable("fix");
     let (so_what, tail) = (
         "any remedy below is computed over a universe candor cannot fully see",
@@ -614,7 +618,13 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     // value. MEASURED on the release build at `ab505c0`, over a no-policy report of a tree with an
     // unreadable `build.rs`, under `deny Exec`: `gate --report` exited 2 while this printed
     // `{"ok": true, "remedies": []}` at exit 0 under `--strict` — and `--strict` is how CI consumes it.
-    let comp = crate::completeness::arm_unread(crate::completeness::report_completeness(prefix), &parsed);
+    // ⟨0.33⟩ …and the cross-policy cause (SPEC §2 ⟨0.33⟩), armed on the SAME parsed policy: `gate
+    // --report` refuses a report whose peek was bounded by a different deny set, so `--strict` must
+    // answer 2 wherever it would.
+    let comp = crate::completeness::arm_unasked_rules(
+        crate::completeness::arm_unread(crate::completeness::report_completeness(prefix), &parsed),
+        &parsed,
+    );
     comp.warn_unreadable("fix-gate");
 
     // ⟨0.28⟩ SPEC §2: a CONFIGURED policy that parsed to zero rules asked nothing — an empty `remedies`

@@ -164,7 +164,13 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     // exit 0 — the verb whose whole job is *"your green gate is not provably green"* certifying a
     // universe it is on record as not having seen. (Over a fixture with an `Unknown` in it the verb
     // exits 1 on the HOLES and reads as a refusal; that is a different finding, not this rule.)
-    let comp = crate::completeness::arm_unread(crate::completeness::report_completeness(prefix), &parsed);
+    // ⟨0.33⟩ …and the cross-policy cause (SPEC §2 ⟨0.33⟩), armed on the SAME parsed policy: `gate
+    // --report` refuses a report whose peek was bounded by a different deny set, so this verb must not
+    // certify over one either.
+    let comp = crate::completeness::arm_unasked_rules(
+        crate::completeness::arm_unread(crate::completeness::report_completeness(prefix), &parsed),
+        &parsed,
+    );
     comp.warn_unreadable("unverified");
 
     // ⟨0.28⟩ SPEC §2: a CONFIGURED policy that parsed to zero rules asked nothing — there is no

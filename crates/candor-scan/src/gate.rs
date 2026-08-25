@@ -1498,7 +1498,7 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         .get()
         .map(|m| m.lock().unwrap().clone())
         .unwrap_or_default();
-    match candor_report::gate_verdict_json_v31(
+    match candor_report::gate_verdict_json_v33(
         &mut violations,
         coverage.as_ref(),
         analyzed_count,
@@ -1510,6 +1510,10 @@ pub(crate) fn write_gate_json(exit_code: i32) {
         &out_of_scope,
         &net_partners,
         &unpeeked,
+        // ⟨0.33⟩ ALWAYS EMPTY on this route, by construction and not by omission: `scan --policy` is its
+        // own producer and consumer, so the recorded `scannedUnder` set IS this policy and `P ⊆ P` holds
+        // — SPEC §2 ⟨0.33⟩'s §3.1 route-equality argument.
+        &[],
     ) {
         Ok(json) if path == "-" => println!("{json}"),
         Ok(json) => {
