@@ -11,6 +11,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.32.1] — 2026-08-25
 
+- Build version → 0.32.1 (crates and `Cargo.lock`); no analyzer change.
+
 - **Family build bump — this engine is unchanged.** The floor stays 0.32, and every report byte, verdict
   and exit code is identical to 0.32.0; nothing here is ⚠. What the patch carries is candor-java's, whose
   v0.32.0 NATIVE binaries were never published — `native.yml`'s parity gate failed the build after the
