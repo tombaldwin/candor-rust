@@ -5415,14 +5415,32 @@ fn gate_verdict_documents_carry_the_dropped_policy_lines_as_ignored() {
 /// producer withholds the key — while `excluded[].peeked` is `false` on every class for that same
 /// reason. Both spellings are real producer output; `candor-scan <dir> --out r` writes the second.
 fn write_excluded_report(f: &Fixture, excluded: &str, out_of_scope: Option<&str>) {
+    write_excluded_report_under(f, excluded, out_of_scope, None)
+}
+
+/// ⟨0.33⟩ [`write_excluded_report`] plus an explicit `scannedUnder.deny` — the canonical rules THIS
+/// hand-authored report's producer HELD, as a raw JSON array fragment (e.g. `r#"["deny Exec"]"#`).
+/// `None` omits the key entirely, which is the pre-⟨0.33⟩ shape every existing caller of the sibling
+/// function keeps writing: `outOfScope` PRESENT with NO `scannedUnder` beside it is exactly the report
+/// SPEC §2 ⟨0.33⟩ says must fail closed once a class comes back `peeked: true` — an absent
+/// `scannedUnder` is the EMPTY SET for the subset test, never a licence.
+fn write_excluded_report_under(
+    f: &Fixture,
+    excluded: &str,
+    out_of_scope: Option<&str>,
+    scanned_under: Option<&str>,
+) {
     let oos = out_of_scope.map(|o| format!("\"outOfScope\": {o},\n  ")).unwrap_or_default();
+    let su = scanned_under
+        .map(|d| format!("\"scannedUnder\": {{ \"deny\": {d} }},\n  "))
+        .unwrap_or_default();
     let report = format!(
         r#"{{
   "candor": {{ "version": "scan-test", "toolchain": "stable", "spec": "0.32" }},
   "package": "rpt",
   "analyzed": {{ "count": 1, "digest": "0000000000000000" }},
   "excluded": {excluded},
-  {oos}"functions": [
+  {oos}{su}"functions": [
     {{ "fn": "inner", "loc": "src/lib.rs:2:1", "inferred": ["Fs"], "direct": ["Fs"], "hash": "rpt#inner", "paths": ["/x"] }}
   ]
 }}"#
@@ -5496,8 +5514,27 @@ fn gate_report_refuses_a_deny_rule_over_classes_the_producer_never_read() {
         "an empty `excluded` is \"I excluded nothing\" — there is nothing unread to refuse over. \
          stderr: {}", String::from_utf8_lossy(&out.stderr));
 
-    // (4) CONTROL — THE PRODUCER LOOKED. `peeked: true` beside `outOfScope: []` is the asked-and-clear
-    // answer, and it certifies.
+    // (4) CONTROL — THE PRODUCER LOOKED, UNDER THE SAME POLICY THIS GATE HOLDS. `peeked: true` beside
+    // `outOfScope: []` AND a `scannedUnder` covering `deny Exec` is the asked-and-clear answer, and it
+    // certifies. ⟨0.33⟩ SPEC §2: a `scannedUnder` is now required for that claim — without it the same
+    // bytes are the pre-⟨0.33⟩ shape the rung fails closed over (see the row below).
+    write_excluded_report_under(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        Some(r#"["deny Exec"]"#),
+    );
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &deny])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "a class the producer READ and found clean, under THE SAME deny set this gate holds, must not \
+         be re-charged as unread: {}",
+        String::from_utf8_lossy(&out.stderr));
+
+    // (4b) ⟨0.33⟩ THE SAME BYTES MINUS `scannedUnder` — the pre-rung shape, and the rung's whole point:
+    // `peeked: true` is relative to a deny set the document no longer names, so this MUST now refuse
+    // rather than certify (SPEC §2 ⟨0.33⟩, "an absent `scannedUnder` is the empty set for this test").
     write_excluded_report(
         &f,
         r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
@@ -5506,8 +5543,9 @@ fn gate_report_refuses_a_deny_rule_over_classes_the_producer_never_read() {
     let out = Command::new(bin())
         .args(["gate", "--report", &f.prefix, "--policy", &deny])
         .output().expect("run candor-query");
-    assert_eq!(out.status.code(), Some(0),
-        "a class the producer READ and found clean must not be re-charged as unread: {}",
+    assert_eq!(out.status.code(), Some(2),
+        "a peeked class with NO `scannedUnder` answers a question the document no longer names — SPEC \
+         §2 ⟨0.33⟩ fails this closed rather than trusting a pre-rung producer's silence: {}",
         String::from_utf8_lossy(&out.stderr));
 
     // (5) THE `judgedElsewhere` CARVE-OUT still stands on this route — a DERIVED copy of already-judged
@@ -5551,6 +5589,116 @@ fn gate_report_refuses_a_corrupt_excluded_key_and_tolerates_an_absent_one() {
     assert_eq!(out.status.code(), Some(0),
         "ABSENT is ⟨0.26⟩'s cannot-answer and takes the documented default — refusing here would \
          refuse every pre-⟨0.29⟩ report: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// ⟨0.33⟩ **A GATE MUST NOT ANSWER FROM A PEEK THAT WAS PUT A DIFFERENT QUESTION** (SPEC §2 ⟨0.33⟩).
+///
+/// THE HOLE ⟨0.32⟩ LEFT: `excluded[].peeked: true` says the peek OPENED those files, so ⟨0.32⟩'s
+/// unread-class rule correctly does not fire — but ⟨0.29⟩ bounds the peek to effects the PRODUCER's
+/// policy denies, so a class read under `deny Net` says nothing about `Exec` in those same files. A
+/// consumer gating with `deny Exec` got a definite `outOfScope: []` answer to a question nobody asked.
+///
+/// `scannedUnder` closes it: the report now records the deny set the peek was bounded by, so a
+/// consumer whose OWN deny set is not covered by it can tell.
+#[test]
+fn gate_report_refuses_a_peek_bounded_by_a_different_deny_set() {
+    let f = Fixture::new("cross-policy");
+    let net = write_policy(&f, "net.policy", "deny Net\n");
+    let exec = write_policy(&f, "exec.policy", "deny Exec\n");
+    let both = write_policy(&f, "both.policy", "deny Net\ndeny Exec\n");
+
+    // THE DEFECT: scanned under `deny Net` (peeked, clean), gated under `deny Exec` — a DIFFERENT
+    // question the producer's peek never asked.
+    write_excluded_report_under(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        Some(r#"["deny Net"]"#),
+    );
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &exec, "--json"])
+        .output().expect("run candor-query");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2),
+        "a peek bounded by `deny Net` answers nothing about `deny Exec` in the same excluded files — \
+         certifying here is the ⟨0.33⟩ fail-open. stderr: {err}");
+    assert!(err.contains("deny Exec"),
+        "the refusal must NAME the unasked rule, or the operator cannot repair it: {err}");
+    assert!(err.contains("THE SAME") || err.to_lowercase().contains("same policy"),
+        "SPEC §2 ⟨0.33⟩: the remedy must say re-scan under THE SAME policy, not merely A policy — a \
+         loose remedy is what produces this hole in the first place: {err}");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(false), "the DOCUMENT must agree with the exit: {v}");
+    assert_eq!(v["incomplete"], serde_json::json!(true),
+        "⟨0.33⟩ a cross-policy peek makes the verdict INCOMPLETE, and a machine consumer reads that \
+         key, not the exit code: {v}");
+
+    // CONTROL 1 — THE SAME POLICY BOTH ROUTES: gated under the SAME `deny Net` the producer scanned
+    // under must still certify, or the scan-then-gate pipeline this rung exists to protect cannot pass.
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &net])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "the SAME policy the producer scanned under must certify — if this reddens the rung is \
+         unusable: {}", String::from_utf8_lossy(&out.stderr));
+
+    // CONTROL 2 — THE CONSUMER'S RULES A STRICT SUBSET OF THE PRODUCER'S. A producer that scanned under
+    // `deny Net` AND `deny Exec` fully answers a consumer asking only `deny Net` — the control that
+    // proves the key is a RULE SET, not a digest (a digest could only test equality and would refuse a
+    // narrowing at the same implementation cost).
+    write_excluded_report_under(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        Some(r#"["deny Exec", "deny Net"]"#),
+    );
+    let _ = &both; // the policy text is not re-parsed here; the fixture's `scannedUnder` states its effect
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &net])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "a producer that held `deny Net` AND `deny Exec` fully answers a consumer asking only `deny \
+         Net` — refusing this is the loud over-charge a careless implementation ships: {}",
+        String::from_utf8_lossy(&out.stderr));
+
+    // CONTROL 3 — NO PEEKED CLASS AT ALL, POLICIES DIFFER. Analysed code's effect sets are
+    // POLICY-INDEPENDENT; only the peek was ever bounded. Refusing here would redden every
+    // scan-then-gate pipeline in the family, which is why this control is written FIRST in the design.
+    write_excluded_report(&f, "[]", None);
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &exec])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0),
+        "no `peeked: true` class at all means nothing was ever bounded by a deny set — a policy \
+         mismatch cannot matter here: {}", String::from_utf8_lossy(&out.stderr));
+
+    // CONTROL 4 (the `pure` flattening trap, ⟨0.30⟩ one layer out): `pure` is a deny rule with an EMPTY
+    // effect list. An engine deciding coverage by flattening rules to effect NAMES gets nothing from it,
+    // so the STRICTEST policy in the grammar would compare equal to the empty set and certify past a
+    // peek that never asked its question. THE ANALYSED FUNCTION MUST ITSELF BE PURE here: violation (1)
+    // outranks incomplete (2) in this gate's precedence, so an effectful `inner` would dominate with a
+    // REAL finding and the row would measure nothing about `pure`'s flattening. Written by hand rather
+    // than through `write_excluded_report_under` (whose `inner` always performs `Fs`) for that reason.
+    let report = format!(
+        r#"{{
+  "candor": {{ "version": "scan-test", "toolchain": "stable", "spec": "0.32" }},
+  "package": "rpt",
+  "analyzed": {{ "count": 1, "digest": "0000000000000000" }},
+  "excluded": [{{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }}],
+  "outOfScope": [],
+  "scannedUnder": {{ "deny": ["deny Net"] }},
+  "functions": []
+}}"#
+    );
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    std::fs::write(format!("{}.rpt.scan.callgraph.json", f.prefix), "{}").unwrap();
+    let pure = write_policy(&f, "pure.policy", "pure\n");
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &pure])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2),
+        "`pure` denies every effect except `Unknown` — a peek bounded by `deny Net` alone must not \
+         satisfy it: {}", String::from_utf8_lossy(&out.stderr));
 }
 
 /// ⟨0.32⟩ **THE ADVISORY SIBLINGS CERTIFIED WHAT THE GATE HAD JUST STARTED REFUSING** — SPEC §3.2's
@@ -5629,12 +5777,16 @@ fn advisory_verbs_do_not_refuse_for_a_peek_nobody_asked_for() {
     let f = Fixture::new("unpeeked-advisory-controls");
     let deny = write_policy(&f, "deny.policy", "deny Exec\n");
 
-    // (1) THE PRODUCER LOOKED. `peeked: true` beside `outOfScope: []` is the asked-and-clear answer:
-    // both verbs must certify exactly as they did before this rung.
-    write_excluded_report(
+    // (1) THE PRODUCER LOOKED, UNDER THE SAME POLICY THESE VERBS HOLD. `peeked: true` beside
+    // `outOfScope: []` AND a `scannedUnder` covering `deny Exec` is the asked-and-clear answer: both
+    // verbs must certify exactly as they did before this rung. ⟨0.33⟩ makes `scannedUnder` the thing
+    // that licenses the claim — see `advisory_verbs_refuse_a_deny_rule_over_classes_the_producer_never_read`
+    // for the same bytes MINUS `scannedUnder`, which must now refuse.
+    write_excluded_report_under(
         &f,
         r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
         Some("[]"),
+        Some(r#"["deny Exec"]"#),
     );
     for verb in ["fix-gate", "unverified"] {
         let out = Command::new(bin())
@@ -5643,10 +5795,11 @@ fn advisory_verbs_do_not_refuse_for_a_peek_nobody_asked_for() {
         let doc = String::from_utf8(out.stdout).unwrap();
         let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
         assert_eq!(out.status.code(), Some(0),
-            "a class the producer READ and found clean is not unread code — re-charging it would \
-             refuse every complete report with an exclusion in it. `{verb}` doc: {doc}");
+            "a class the producer READ and found clean, under THE SAME deny set these verbs hold, is \
+             not unread code — re-charging it would refuse every complete report with an exclusion in \
+             it. `{verb}` doc: {doc}");
         assert_eq!(v["ok"], serde_json::json!(true),
-            "`{verb}` must still certify a report whose every class was peeked: {doc}");
+            "`{verb}` must still certify a report whose every class was peeked under the SAME policy: {doc}");
         assert!(v.get("incomplete").is_none(), "no hedge is owed here: {doc}");
     }
 

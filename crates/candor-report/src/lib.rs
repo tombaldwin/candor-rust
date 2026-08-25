@@ -515,12 +515,44 @@ pub struct Report {
     /// asked); empty when a policy was configured and the excluded files were clean under it.
     #[serde(rename = "outOfScope", default, skip_serializing_if = "Option::is_none")]
     pub out_of_scope: Option<Vec<OutOfScopeFinding>>,
+    /// ⟨0.33⟩ …and the QUESTION the peek was put — see [`ScannedUnder`]. Immediately after `out_of_scope`
+    /// (the answer it qualifies) and before `net_partners`, matching the reference engine's field order —
+    /// a porting engine has one position to match rather than guessing where a new key belongs.
+    #[serde(rename = "scannedUnder", default, skip_serializing_if = "Option::is_none")]
+    pub scanned_under: Option<ScannedUnder>,
     /// ⟨0.31⟩ Omitted when nothing participated, so a project declaring no partners — or declaring some
     /// that never matched — is byte-identical to a pre-rung report. A declaration that changed nothing is
     /// not provenance.
     #[serde(rename = "netPartners", default, skip_serializing_if = "Option::is_none")]
     pub net_partners: Option<NetPartners>,
     pub functions: Vec<ReportEntry>,
+}
+
+/// ⟨0.33⟩ THE QUESTION THE PEEK WAS PUT (SPEC §2 ⟨0.33⟩) — the deny rules this scan HELD, in the
+/// canonical EXPANDED form ([`candor_classify::policy::canonical_deny_set`], via the type-erased `String`s
+/// here since this crate does not depend on `candor-classify`).
+///
+/// `ExcludedClass::peeked` is true only RELATIVE to a deny set: the ⟨0.29⟩ bound filters the peek to
+/// effects the policy DENIES, so a class read under `deny Net` says nothing about `Exec` in those same
+/// files. Without this key a consumer gating with a DIFFERENT deny set gets a definite answer to a
+/// question nobody asked, and it fails OPEN on the `gate --report` route — past every ⟨0.32⟩ control,
+/// because the class really WAS read.
+///
+/// **THE EMISSION RULE IS `out_of_scope`'s, deliberately the same one**: `None` (key omitted) when no
+/// policy was configured, or over a policy this engine REFUSED — recording the rules a refused parse
+/// produced would publish a question that was never put. `Some(ScannedUnder{deny: vec![]})` is a
+/// different claim (*a policy stood and it denied nothing*), so the two states must not collapse into
+/// one another.
+///
+/// **THE RULES ARE THE EXPANDED FORM THE MATCHER USED — post-alias — never the raw policy line.**
+/// Recording effect NAMES would reintroduce the flattening defect ⟨0.30⟩ closed one layer out (`pure` has
+/// no name, so a flattened set makes the strictest policy compare equal to the empty one); recording raw
+/// text would let two configs spelling one rule differently compare unequal (§3.1's alias-expansion
+/// byte-inequality). One element per RULE — a rule denying several effects is ONE element — deduplicated
+/// and code-point sorted, so two runs of one policy (however its lines were ordered) produce one document.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ScannedUnder {
+    pub deny: Vec<String>,
 }
 
 /// ⟨proposed⟩ candor-spec/DEP-RECEIVER-TYPING-DESIGN.md, half 2.
@@ -664,7 +696,7 @@ pub fn to_packaged_report_json_with_coverage(
     functions: &[ReportEntry],
     coverage: Option<&Coverage>,
 ) -> serde_json::Result<String> {
-    to_packaged_report_json_full(candor, package, functions, coverage, &[], None, &[], None, None)
+    to_packaged_report_json_full(candor, package, functions, coverage, &[], None, &[], None, None, None)
 }
 
 /// ⟨proposed — Gap 2⟩ Like [`to_packaged_report_json_with_coverage`], additionally carrying the
@@ -682,6 +714,7 @@ pub fn to_packaged_report_json_full(
     analyzed: Option<&Analyzed>,
     excluded: &[ExcludedClass],
     out_of_scope: Option<&[OutOfScopeFinding]>,
+    scanned_under: Option<&ScannedUnder>,
     net_partners: Option<&NetPartners>,
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
@@ -715,14 +748,19 @@ pub fn to_packaged_report_json_full(
         /// excluded files were clean under it, which is a real answer and must be emitted.
         #[serde(rename = "outOfScope", skip_serializing_if = "Option::is_none")]
         out_of_scope: Option<&'a [OutOfScopeFinding]>,
-        /// ⟨0.31⟩ after `outOfScope`, before `functions` — one position, both engines' writers, so the
-        /// key order a consumer sees does not depend on which engine produced the report.
+        /// ⟨0.33⟩ …and the QUESTION the peek was put, immediately after the answer it qualifies — see
+        /// [`ScannedUnder`]. Same `None`/`Some` emission rule as `out_of_scope` (SPEC §2 ⟨0.33⟩).
+        #[serde(rename = "scannedUnder", skip_serializing_if = "Option::is_none")]
+        scanned_under: Option<&'a ScannedUnder>,
+        /// ⟨0.31⟩ after `outOfScope`/`scannedUnder`, before `functions` — one position, both engines'
+        /// writers, so the key order a consumer sees does not depend on which engine produced the report.
         #[serde(rename = "netPartners", skip_serializing_if = "Option::is_none")]
         net_partners: Option<&'a NetPartners>,
         functions: &'a [ReportEntry],
     }
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, excluded, out_of_scope, net_partners, functions,
+        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, excluded, out_of_scope,
+        scanned_under, net_partners, functions,
     })
 }
 
@@ -740,6 +778,7 @@ pub fn to_packaged_report_json_typed(
     type_surface: Option<&TypeSurface>,
     excluded: &[ExcludedClass],
     out_of_scope: Option<&[OutOfScopeFinding]>,
+    scanned_under: Option<&ScannedUnder>,
     net_partners: Option<&NetPartners>,
 ) -> serde_json::Result<String> {
     #[derive(Serialize)]
@@ -772,16 +811,20 @@ pub fn to_packaged_report_json_typed(
         /// excluded files were clean under it, which is a real answer and must be emitted.
         #[serde(rename = "outOfScope", skip_serializing_if = "Option::is_none")]
         out_of_scope: Option<&'a [OutOfScopeFinding]>,
-        /// ⟨0.31⟩ same position as the untyped writer puts it — after `outOfScope`, before `functions` —
-        /// so key order does not depend on which writer produced the report.
+        /// ⟨0.33⟩ …and the QUESTION the peek was put — same position and emission rule as the untyped
+        /// writer's (SPEC §2 ⟨0.33⟩).
+        #[serde(rename = "scannedUnder", skip_serializing_if = "Option::is_none")]
+        scanned_under: Option<&'a ScannedUnder>,
+        /// ⟨0.31⟩ same position as the untyped writer puts it — after `outOfScope`/`scannedUnder`, before
+        /// `functions` — so key order does not depend on which writer produced the report.
         #[serde(rename = "netPartners", skip_serializing_if = "Option::is_none")]
         net_partners: Option<&'a NetPartners>,
         functions: &'a [ReportEntry],
     }
     let ts = type_surface.filter(|t| !t.returns.is_empty());
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, excluded, out_of_scope, net_partners,
-        type_surface: ts, resolves: RESOLVES, functions,
+        candor, package, coverage, analyzed, unanalyzed, excluded, out_of_scope, scanned_under,
+        net_partners, type_surface: ts, resolves: RESOLVES, functions,
     })
 }
 
@@ -865,6 +908,55 @@ pub fn report_unanalyzed(text: &str) -> KeyRead<Vec<UnanalyzedUnit>> {
 /// must not become exit 2 on contact.
 pub fn report_out_of_scope(text: &str) -> KeyRead<Vec<OutOfScopeFinding>> {
     read_key(text, "outOfScope")
+}
+
+/// ⟨0.33⟩ Read a report's `scannedUnder.deny` — the canonical expanded deny rules THE PRODUCER'S PEEK
+/// WAS BOUNDED BY (SPEC §2 ⟨0.33⟩). `ExcludedClass::peeked` is true only RELATIVE to this set: the
+/// ⟨0.29⟩ bound filters the peek to effects the policy DENIES, so a class read under `deny Net` says
+/// nothing about `Exec` in those same files, and a consumer's own deny set is compared against this one
+/// to decide whether it was ever asked.
+///
+/// **ABSENT IS THE EMPTY SET FOR THE SUBSET TEST, and that is a deliberate fail-closed default — never a
+/// licence.** SPEC §2 ⟨0.33⟩: *"an absent `scannedUnder` is the EMPTY SET for this test, so a pre-⟨0.33⟩
+/// report carrying `peeked: true` fails closed."* Returned as `KeyRead::Absent` rather than
+/// `Present(vec![])` so the caller applies its own documented default exactly as every other §2 key on
+/// this route does (⟨0.24⟩'s three-answer rule).
+///
+/// **PRESENT-BUT-UNPARSEABLE — a non-object, or a `deny` that is not a list of strings — is `Corrupt`,
+/// and the fail-open direction here is the MIRROR of `peeked`'s.** The safe-LOOKING coercion would be
+/// "the producer held these rules" (an empty or partial list, read as the whole truth), which
+/// MANUFACTURES coverage the producer never claimed — so a garbled `scannedUnder` must impeach the whole
+/// document rather than shrink to a value a subset test could pass against. Twelve shapes are driven by
+/// conformance PART 69's corruption arm; none may certify.
+///
+/// An object present with NO `deny` key reads as the EMPTY LIST (which then loses the subset test and
+/// refuses) rather than `Corrupt`: the wrapper object standing at all is `outOfScope`'s "a policy stood"
+/// claim, and it is only the rule set inside it that is missing — the same value a subset test already
+/// treats as covering nothing.
+pub fn report_scanned_under(text: &str) -> KeyRead<Vec<String>> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(text) else { return KeyRead::Corrupt };
+    match val.get("scannedUnder") {
+        None => KeyRead::Absent,
+        Some(v) => {
+            let Some(obj) = v.as_object() else { return KeyRead::Corrupt };
+            match obj.get("deny") {
+                None => KeyRead::Present(Vec::new()),
+                Some(d) => match d.as_array() {
+                    Some(arr) => {
+                        let mut out = Vec::with_capacity(arr.len());
+                        for item in arr {
+                            match item.as_str() {
+                                Some(s) => out.push(s.to_string()),
+                                None => return KeyRead::Corrupt,
+                            }
+                        }
+                        KeyRead::Present(out)
+                    }
+                    None => KeyRead::Corrupt,
+                },
+            }
+        }
+    }
 }
 
 /// ⟨0.32⟩ Parse a report's `excluded` envelope field — the SCOPE the producing scan recorded. The
@@ -1263,7 +1355,7 @@ pub fn gate_verdict_json_v28(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        &[], &[], &[],
+        &[], &[], &[], &[],
     )
 }
 
@@ -1286,7 +1378,7 @@ pub fn gate_verdict_json_v30(
 ) -> serde_json::Result<String> {
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        out_of_scope, &[], &[],
+        out_of_scope, &[], &[], &[],
     )
 }
 
@@ -1311,9 +1403,50 @@ pub fn gate_verdict_json_v31(
     // ⟨0.32⟩ exclusion classes the scan did not READ — the caller supplies it from GATE_UNPEEKED.
     unpeeked: &[String],
 ) -> serde_json::Result<String> {
+    // ⟨0.33⟩ `&[]`: this function is kept for source-compat with any caller that has not been ported to
+    // [`gate_verdict_json_v33`] below, and on every such caller the cross-policy cause is inapplicable —
+    // it is the SCAN route's own verdict writer (candor-scan's producer and consumer are one run, so
+    // `P ⊆ P` holds by construction, SPEC §2 ⟨0.33⟩) or a pre-⟨0.33⟩ call site.
     gate_verdict_json_impl(
         violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
-        out_of_scope, net_partners, unpeeked,
+        out_of_scope, net_partners, unpeeked, &[],
+    )
+}
+
+/// ⟨0.33⟩ [`gate_verdict_json_v31`] plus the SPEC §2 ⟨0.33⟩ CROSS-POLICY cause: the rules THIS gate's
+/// policy holds that some peeked class's producer was never asked about — `Query::unasked_rules`'s
+/// result, canonical and code-point sorted.
+///
+/// Non-empty makes the verdict INCOMPLETE (`ok:false`, `incomplete:true`, exit 2) exactly as `unpeeked`
+/// does, and for the identical reason: the document and the exit code must be two readings of ONE value,
+/// never a condition stated at the exit arm alone (that split is what shipped `"ok": false, "incomplete":
+/// true"` AT EXIT 0 on the ⟨0.32⟩ rung one step back).
+///
+/// **NO NEW WIRE KEY** — matching the reference engine (candor-java's `Query.GateFacts.unaskedRules` also
+/// feeds only `incomplete`/`ok`, with no new serialized field): the rung's contract is the EXIT/`ok`
+/// behaviour, and a document with nothing unasked stays byte-identical to the v31 form.
+///
+/// Empty (`&[]`) on the SCAN route BY CONSTRUCTION: `scan --policy` is its own producer and consumer, so
+/// the recorded set IS this policy and the subset test cannot fail (§3.1 route equality holds with no new
+/// anchor, unlike the reverted `net-partner` attempt).
+#[allow(clippy::too_many_arguments)]
+pub fn gate_verdict_json_v33(
+    violations: &mut [GateViolation],
+    coverage: Option<&GateCoverage>,
+    analyzed_count: usize,
+    unanalyzed: &[UnanalyzedUnit],
+    vocabulary: Option<&GateVocabulary>,
+    unevaluated: &[Unevaluated],
+    zero_match: &[String],
+    ignored: &[IgnoredLine],
+    out_of_scope: &[OutOfScopeFinding],
+    net_partners: &[NetPartners],
+    unpeeked: &[String],
+    unasked_rules: &[String],
+) -> serde_json::Result<String> {
+    gate_verdict_json_impl(
+        violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, ignored,
+        out_of_scope, net_partners, unpeeked, unasked_rules,
     )
 }
 
@@ -1349,7 +1482,7 @@ pub fn gate_verdict_json_v27(
     unevaluated: &[Unevaluated],
     zero_match: &[String],
 ) -> serde_json::Result<String> {
-    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[], &[], &[])
+    gate_verdict_json_impl(violations, coverage, analyzed_count, unanalyzed, vocabulary, unevaluated, zero_match, &[], &[], &[], &[], &[])
 }
 
 /// The ONE verdict writer behind [`gate_verdict_json_v27`]/[`gate_verdict_json_v28`] — a single field
@@ -1368,6 +1501,10 @@ fn gate_verdict_json_impl(
     net_partners: &[NetPartners],
     // ⟨0.32⟩ exclusion classes the scan did not READ, pre-filtered by the producer.
     unpeeked: &[String],
+    // ⟨0.33⟩ the rules THIS gate's policy holds that some peeked class's producer was never asked about
+    // (SPEC §2 ⟨0.33⟩) — canonical, deduplicated and code-point sorted. NOT its own wire key (see
+    // `gate_verdict_json_v33`); it only widens `incomplete`/`ok`, exactly as the reference engine does.
+    unasked_rules: &[String],
 ) -> serde_json::Result<String> {
     // ⟨0.32⟩ …AND `hash` IS PART OF THE KEY (SPEC §2). `(rule, detail)` TIES on two units that share a
     // name — a two-member workspace where both violate `deny Exec` produces twin rows differing only in
@@ -1448,7 +1585,12 @@ fn gate_verdict_json_impl(
     // a peek that could not open a file finds nothing, which is byte-identical to finding it clean.
     // `unpeeked` arrives already filtered by the producer's `judged_elsewhere` carve-out and by whether
     // the peek RAN, both applied at the recording site in candor-scan.
-    let incomplete = !unanalyzed.is_empty() || !out_of_scope.is_empty() || !unpeeked.is_empty();
+    // ⟨0.33⟩ THE FOURTH CAUSE — a class the producer's peek READ, but under a DIFFERENT deny set than
+    // this gate holds (SPEC §2 ⟨0.33⟩). `unanalyzed`/`out_of_scope`/`unpeeked` each name a MORE concrete
+    // gap; this is the residual case where the class really was read and found clean, but clean under a
+    // question nobody here asked. Empty on the scan route by construction (§3.1 route equality, `P ⊆ P`).
+    let incomplete =
+        !unanalyzed.is_empty() || !out_of_scope.is_empty() || !unpeeked.is_empty() || !unasked_rules.is_empty();
     serde_json::to_string_pretty(&Verdict {
         spec: SPEC_VERSION,
         ok: violations.is_empty() && !incomplete,
@@ -1563,7 +1705,7 @@ mod tests {
         b.reverse();
 
         let render = |oos: &[OutOfScopeFinding]| {
-            gate_verdict_json_impl(&mut [], None, 1, &[], None, &[], &[], &[], oos, &[], &[]).unwrap()
+            gate_verdict_json_impl(&mut [], None, 1, &[], None, &[], &[], &[], oos, &[], &[], &[]).unwrap()
         };
         assert_eq!(render(&a), render(&b),
                    "the same findings in a different order produced different verdict documents. That is \
@@ -1583,13 +1725,13 @@ mod tests {
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         // present: a parse failure travels
         let units = vec![UnanalyzedUnit { path: "src/broken.rs".into(), reason: "source failed to read/parse".into() }];
-        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None, &[], None, None).unwrap();
+        let json = to_packaged_report_json_full(&meta, "p", &[], None, &units, None, &[], None, None, None).unwrap();
         assert!(json.contains("\"unanalyzed\""), "unanalyzed must serialize when non-empty");
         let KeyRead::Present(parsed) = report_unanalyzed(&json) else { panic!("must read back") };
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].path, "src/broken.rs");
         // empty: omitted entirely (a complete scan is byte-identical to a pre-rung report)
-        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None, &[], None, None).unwrap();
+        let clean = to_packaged_report_json_full(&meta, "p", &[], None, &[], None, &[], None, None, None).unwrap();
         assert!(!clean.contains("unanalyzed"), "an empty unanalyzed must be omitted");
         assert_eq!(report_unanalyzed(&clean), KeyRead::Absent, "…and reads back as ABSENT, not as corrupt");
     }
@@ -1776,6 +1918,7 @@ mod tests {
             resolves: vec![],
             excluded: vec![],
             out_of_scope: None,
+            scanned_under: None,
             net_partners: None,
             functions: vec![ReportEntry {
                 func: "f".into(),
@@ -1849,15 +1992,15 @@ mod tests {
         // consumer that ignores the field is unaffected (tier-1 additive).
         let meta = ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() };
         let e = [ReportEntry { func: "f".into(), inferred: vec!["Net".into()], ..Default::default() }];
-        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None, &[], None, None).unwrap();
+        let old = to_packaged_report_json_full(&meta, "p", &e, None, &[], None, &[], None, None, None).unwrap();
         let empty = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                  Some(&TypeSurface::default()), &[], None, None).unwrap();
+                                                  Some(&TypeSurface::default()), &[], None, None, None).unwrap();
         assert_eq!(old, empty, "an empty type surface must not change one byte of the report");
         assert!(report_type_surface(&old).is_none(), "absence must parse as nothing, never an error");
         let mut returns = std::collections::BTreeMap::new();
         returns.insert("dep#sync::build".to_string(), "dep#sync::Client".to_string());
         let full = to_packaged_report_json_typed(&meta, "p", &e, None, &[], None,
-                                                 Some(&TypeSurface { returns }), &[], None, None).unwrap();
+                                                 Some(&TypeSurface { returns }), &[], None, None, None).unwrap();
         let back = report_type_surface(&full).expect("typeSurface must round-trip");
         assert_eq!(back.returns.get("dep#sync::build").map(String::as_str), Some("dep#sync::Client"),
                    "both ids stay FULLY QUALIFIED on the wire — the leaf form is the reverted defect");

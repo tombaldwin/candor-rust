@@ -42,6 +42,12 @@ struct GateReport {
     out_of_scope: Vec<candor_report::OutOfScopeFinding>,
     // ⟨0.32⟩ the exclusion classes the PRODUCING scan did not read.
     unpeeked: Vec<String>,
+    /// ⟨0.33⟩ THE RULES THIS GATE'S POLICY HOLDS THAT SOME PEEKED CLASS'S PRODUCER WAS NEVER ASKED ABOUT
+    /// (SPEC §2 ⟨0.33⟩) — canonical, deduplicated, code-point sorted. Computed PER REPORT and unioned:
+    /// `scannedUnder` and `peeked` are facts about ONE producing scan, so a union taken before the
+    /// per-report subtraction would let a policy-scanned report's deny set answer for a no-policy
+    /// sibling's peeked classes (the §2.2 name-join hazard arriving on a different key).
+    unasked_rules: BTreeSet<String>,
     /// ⟨0.31⟩ one record per report that carried the key — a prefix can match several.
     net_partners: Vec<candor_report::NetPartners>,
     /// ⟨0.15⟩ the κ ledger's package NAMES, unioned across reports — the verdict's advisory note.
@@ -91,7 +97,7 @@ struct GateReport {
 /// `Err(<reason>)` on a locator that matches no report, or one that is found-but-corrupt: §3.1's found-but-
 /// corrupt rule — a report that cannot be parsed is corrupt input, not an effect-free package, and a
 /// policy gated over the resulting empty map would PASS. Never a silently-empty "no violations".
-fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
+fn load_gate_report(prefix: &str, own_rules: &[String]) -> Result<GateReport, String> {
     // ⟨0.32⟩ FIRST: did the most recent attempt over these reports REFUSE? SPEC §3.3.1 ⟨0.32⟩.
     //
     // Checked BEFORE the reports are read, because the answer does not depend on them: they may parse
@@ -123,6 +129,7 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
         unanalyzed: Vec::new(),
         out_of_scope: Vec::new(),
         unpeeked: Vec::new(),
+        unasked_rules: BTreeSet::new(),
         net_partners: Vec::new(),
         coverage_packages: BTreeSet::new(),
         judged_nothing_pkgs: Vec::new(),
@@ -278,6 +285,37 @@ fn load_gate_report(prefix: &str) -> Result<GateReport, String> {
         out.unpeeked.extend(
             excluded_classes.iter().filter(|e| !e.peeked && !e.judged_elsewhere).map(|e| e.class.clone()),
         );
+        // ⟨0.33⟩ …and THE QUESTION THIS REPORT'S PEEK WAS PUT (SPEC §2 ⟨0.33⟩), read PER REPORT and
+        // compared against `own_rules` — this run's OWN canonical deny set — right here, never over the
+        // union: `scannedUnder` and `peeked` are facts about ONE producing scan, so unioning first would
+        // let one report's deny set answer for a sibling's peeked classes.
+        //
+        // THE PRECONDITION IS "did THIS report's peek read anything at all" — a class the producer marked
+        // `peeked: true` and did NOT carve out as `judgedElsewhere` (that carve-out is the SAME producer
+        // statement ⟨0.32⟩ already trusts completely: those files are copies of code this same scan
+        // JUDGED, so their effects are policy-independent and refusing over them gains no evidence). A
+        // report with no peeked class never contributes here — the OVER-CHARGE CONTROL, and it falls out
+        // of this `any()` rather than needing a second conjunct.
+        let any_peeked = excluded_classes.iter().any(|e| e.peeked && !e.judged_elsewhere);
+        // STRICT, exactly like `excluded`/`outOfScope` above, and the fail-open direction is their MIRROR:
+        // the safe-LOOKING coercion of a garbled `scannedUnder` would be "the producer held these rules",
+        // which MANUFACTURES coverage nobody claimed. ABSENT is the ⟨0.33⟩ EMPTY-SET default for the
+        // subset test below (a pre-rung producer, or none configured) — never a licence, and never
+        // `hard_fail`: it is the ordinary, expected shape of most reports.
+        let scanned_under: Vec<String> = strict!(
+            candor_report::report_scanned_under(&text),
+            "scannedUnder",
+            "`{ deny: [<string>, …] }`",
+            "the EMPTY set — which, for a report carrying any peeked class, is what makes this route \
+             refuse a report whose peek answered a DIFFERENT question (SPEC §2 ⟨0.33⟩)",
+            Vec::new()
+        );
+        if any_peeked && !own_rules.is_empty() {
+            let theirs: BTreeSet<&str> = scanned_under.iter().map(String::as_str).collect();
+            out.unasked_rules.extend(
+                own_rules.iter().filter(|r| !theirs.contains(r.as_str())).cloned(),
+            );
+        }
         out.out_of_scope.extend(strict!(
             candor_report::report_out_of_scope(&text),
             "outOfScope",
@@ -1460,6 +1498,11 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
     p.only_rules.clear();
     let p = p;
 
+    // ⟨0.33⟩ THIS GATE'S OWN QUESTION, canonical and sorted (SPEC §2 ⟨0.33⟩) — `p.rules` is the deny/pure
+    // list and is untouched by the clearing above, so this is computed once here and passed down rather
+    // than re-derived inside the loader, which would be a second statement of one condition.
+    let own_rules = candor_classify::policy::canonical_deny_set(&p.rules);
+
     let Some(prefix) = report_flag.or_else(discover_report_prefix) else {
         let why = "no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: \
                    candor-scan . --out .candor/report)"
@@ -1467,7 +1510,7 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         eprintln!("candor-query gate: {why}");
         return refuse(&why, want_json, gate_json.as_deref());
     };
-    let rep = match load_gate_report(&prefix) {
+    let rep = match load_gate_report(&prefix, &own_rules) {
         Ok(r) => r,
         // ⟨0.24⟩ The reason travels now (SPEC §3.1 `1503368` (b)): a report that did not load is exactly
         // the case where a consumer reading the `--gate-json` path unconditionally most needs to be told
@@ -1671,6 +1714,10 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         uncovered: rep.coverage_packages.len(),
         packages: rep.coverage_packages.iter().cloned().collect(),
     });
+    // ⟨0.33⟩ `BTreeSet` -> `Vec`, sorted (code-point) and deduplicated by construction — read ONCE here so
+    // the document `write_verdict` writes and the exit arm below are two readings of the SAME value,
+    // never two computations of one condition.
+    let unasked_rules: Vec<String> = rep.unasked_rules.iter().cloned().collect();
     // ⟨0.21⟩ COMPLETENESS MANIFEST — ON THE SAME DOCUMENT AS THE VIOLATIONS, never instead of them.
     //
     // THE DEFECT THIS ORDERING FIXES (measured 2026-07-28 on a `deny Net` over a report carrying two Net
@@ -1712,6 +1759,10 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         // ⟨0.32⟩ off the REPORT — the same filtered set the scan route derives locally, which is what
         // makes §3.1 byte-equality hold on a route that cannot peek for itself.
         &rep.unpeeked,
+        // ⟨0.33⟩ …and the rules THIS gate's own policy holds that some peeked class's producer was never
+        // asked about (SPEC §2 ⟨0.33⟩) — computed off THIS RUN's `own_rules` above, never re-derived by
+        // the writer, so the document and the exit code below read the identical value.
+        &unasked_rules,
         want_json,
         gate_json.as_deref(),
     ) {
@@ -1762,6 +1813,30 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
             rep.unpeeked.join(", ")
         );
         2
+    } else if !unasked_rules.is_empty() {
+        // ⟨0.33⟩ THE FOURTH CAUSE — THE REPORT'S PEEK ANSWERED A DIFFERENT QUESTION (SPEC §2 ⟨0.33⟩). The
+        // arm above is about classes the producer never OPENED; this one is about classes it opened and
+        // read WITH A DIFFERENT DENY SET IN HAND. ⟨0.29⟩ bounds the peek to effects the producer's policy
+        // denies, so a class read under `deny Net` says nothing about `Exec` in those same files — and
+        // the document said nothing about the difference until `scannedUnder` existed to record it.
+        //
+        // LAST of the four, deliberately: `unanalyzed`/`outOfScope`/`unpeeked` each name a MORE concrete
+        // gap, and an operator reading one sentence should get the most specific one their report supports.
+        //
+        // THE REMEDY SAYS **THE SAME** POLICY, NOT *A* POLICY — that wording is part of the rung. ⟨0.32⟩'s
+        // remedy read loosely ("scan with the policy") is what PRODUCES this hole: the operator DID scan
+        // with a policy, and got a report whose peek answered a different one.
+        eprintln!(
+            "candor-query gate: NOT certified — this report's peek was bounded by the deny set its \
+             producing scan held, and that set does not cover {} rule(s) of this policy: {}. The \
+             excluded files it reports as read were searched for OTHER effects, so an empty finding there \
+             is not an answer to this question, and the verdict is INCOMPLETE rather than a pass. \
+             Re-run the producing scan under THE SAME policy this gate is applying \
+             (candor-scan <dir> --policy <file> --out <report>) — not merely under a policy.",
+            unasked_rules.len(),
+            unasked_rules.join(", ")
+        );
+        2
     } else {
         eprintln!("candor-query gate: policy ✓ (the report's own signature — no re-scan, no re-derivation)");
         0
@@ -1787,6 +1862,9 @@ fn write_verdict(
     net_partners: &[candor_report::NetPartners],
     // ⟨0.32⟩ exclusion classes the producing scan did not READ.
     unpeeked: &[String],
+    // ⟨0.33⟩ the rules THIS gate's policy holds that some peeked class's producer was never asked about
+    // (SPEC §2 ⟨0.33⟩), off the report's `scannedUnder` key.
+    unasked_rules: &[String],
     want_json: bool,
     gate_json: Option<&str>,
 ) -> bool {
@@ -1802,7 +1880,7 @@ fn write_verdict(
     if targets.is_empty() {
         return true;
     }
-    let json = match candor_report::gate_verdict_json_v31(
+    let json = match candor_report::gate_verdict_json_v33(
         violations,
         coverage,
         analyzed_count,
@@ -1814,7 +1892,8 @@ fn write_verdict(
         out_of_scope,
         net_partners,
         // ⟨0.32⟩ the unread classes, off the report's `excluded` key.
-        unpeeked
+        unpeeked,
+        unasked_rules,
     ) {
         Ok(j) => j,
         Err(e) => {

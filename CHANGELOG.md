@@ -9,6 +9,39 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ ⟨0.33⟩ `scannedUnder`: a report now records the deny set its peek was BOUNDED BY, and
+  `gate --report` refuses when that set does not cover the policy being applied.** SPEC §2 ⟨0.33⟩,
+  ported from the candor-java reference. `excluded[].peeked: true` is true only relative to the
+  PRODUCER's deny set — ⟨0.29⟩ bounds the peek to effects that policy DENIES, so a class read under
+  `deny Net` says nothing about `Exec` in those same files. Until this rung the report never recorded
+  the question, so a consumer gating with a DIFFERENT deny set got a definite `outOfScope: []` answer to
+  a question nobody asked — and it survives every ⟨0.32⟩ control, because the class really WAS read.
+
+  PRODUCER (`candor-scan --policy`): the envelope now carries `scannedUnder: { "deny": [ … ] }` under
+  exactly `outOfScope`'s emission rule — present iff a policy was configured AND honoured, absent
+  otherwise (no policy, or one this engine refused) — holding the deny/`pure` rules in their canonical
+  EXPANDED form (`candor_classify::policy::canonical_deny_set`), recorded from the very list the peek
+  matched with, before either short-circuit that would otherwise leave a "policy stood and denied
+  nothing" run looking like "nothing was asked".
+
+  CONSUMER (`candor-query gate --report`): refuses at exit 2 with `ok: false, incomplete: true` when
+  this gate's own expanded deny set is not a SUBSET of a peeked report's `scannedUnder.deny`, naming the
+  rules that went unasked and pointing the remedy at THE SAME policy — not merely *a* policy. **A REPORT
+  THIS ENGINE WROTE WITHOUT `scannedUnder` NOW FAILS CLOSED wherever a class comes back `peeked: true`**
+  — the same non-additive shape ⟨0.32⟩ took, with an exact remedy: re-scan under the gate's own policy.
+  `scannedUnder` itself is read STRICTLY: a non-object, or a `deny` that is not an array of strings,
+  impeaches the whole document rather than being coerced to "the producer held these rules".
+
+  Both over-charge carve-outs are STRUCTURAL rather than spelled twice: an empty consumer rule set is a
+  subset of everything (so a policy with no `deny`/`pure` rule, or a verb carrying no policy at all,
+  never fires), and a report with no `peeked: true` class never fires either (analysed code's effect
+  sets are policy-independent; only the peek was ever bounded). `unverified --strict` and `fix-gate
+  --strict` gained the identical cause through the shared `ReportCompleteness`/`arm_unasked_rules`
+  helper, so an advisory verb cannot be less pessimistic than the gate over the same bytes. §3.1 route
+  equality holds by construction and needs no new anchor: on `scan --policy P` the producer and consumer
+  are one run, so the recorded set IS `P`, `P ⊆ P` holds, and the scan route's own `--gate-json` verdict
+  is byte-unchanged. Conformance PART 69.
+
 - **The README/AGENTS spec-claim gate now reads two spellings it was structurally blind to.** Its claim
   grammar was `spec` + one to FOUR of `[-: "]`, which cannot reach a version behind an ALIGNED envelope
   column (`"spec":    "0.32"` — six separators, the padding that had already defeated a hand sweep at
