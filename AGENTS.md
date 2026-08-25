@@ -95,7 +95,8 @@ CANDOR_JSON=/tmp/candor-report cargo dylint --lib-path "$LIB"
 ```
 
 Either way you get one report file per crate: `<prefix>.<crate>.<type>.json`. Rust entries never
-carry `unitKind` (every Rust unit is an ordinary function — the spec-0.7 field's default);
+carry `unitKind` (every Rust unit is an ordinary function, which is that field's default — the
+field arrived at spec 0.7, informative);
 sibling reports under a merged prefix may carry it (an accessor, a `<clinit>`, a fleet's agents) —
 it is informative only, read effects/edges identically.
 

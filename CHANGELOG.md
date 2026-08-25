@@ -327,6 +327,21 @@ after upgrading; review policies and regenerate baselines with the new build.
   pinned, because the second one is the whole difference: a real orphaned report is still handed back
   byte-for-byte.
 
+- **The docs drift gate could not see the JSON spelling of the spec version, and the ⟨0.32⟩ sweep proved
+  it.** `repo_docs_carry_the_family_attribution_and_spec_floor` asserts `README contains "spec 0.32"` — a
+  POSITIVE existence check, satisfied by one correct prose mention and structurally blind to a second,
+  stale claim in the same file. So the bump rewrote the prose everywhere and left README's `--gate-json`
+  example printing `# → { "spec": "0.31", … }`, which is the literal shape a reader copies into a CI
+  assertion. It survived the bump, the doc sweep and CI.
+
+  The gate is now UNIVERSAL as well as positive: every `spec <X.Y>` claim in README.md and AGENTS.md —
+  prose, hyphenated, or `"spec": "X.Y"` — must equal `SPEC_VERSION`, DERIVED from the constant and never
+  a literal. Historical markers are exempted by the family's `(spec X.Y, informative)` form rather than
+  by a list of tolerated old versions, and a control asserts the exemption discriminates, so a broken one
+  cannot quietly turn the check into a no-op. This is candor-swift's `AgentsDocDriftTests` ported, not a
+  third convention — swift was clean here for exactly that reason. AGENTS.md's one attributive `spec-0.7`
+  marker moved to the annotated form with it.
+
 ## [0.31.0] — 2026-08-20
 
 - **⚠ The unevaluable-target refusal handed a PREVIOUS run's green report back.** With `--out` naming a
