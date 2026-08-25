@@ -1801,10 +1801,10 @@ mod tests {
         assert!(!empty.contains("unknownWhy"), "empty unknownWhy must be omitted: {empty}");
         assert!(!empty.contains("entryPoint"), "false entryPoint must be omitted: {empty}");
         // the spec contract version (§2.1) is emitted in the envelope header.
-        assert!(s.contains("\"spec\":\"0.31\""), "envelope must carry the spec version: {s}");
+        assert!(s.contains("\"spec\":\"0.32\""), "envelope must carry the spec version: {s}");
         // A LITERAL on purpose, unlike the two cli.rs assertions above: this canary exists to
         // notice that the constant changed, so deriving it from the constant makes it vacuous.
-        assert_eq!(SPEC_VERSION, "0.31");
+        assert_eq!(SPEC_VERSION, "0.32");
     }
 
     /// THE MODEL-LEVEL HALF of the §4 ⟨0.24⟩ forward-compatibility control: the report type must carry an
