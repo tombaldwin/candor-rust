@@ -1,5 +1,39 @@
 //! Call-graph traversals: `callers`, `impact`, `path`, `reachable`.
+//!
+//! ⟨0.32⟩ **THE THREE VERBS IN THIS FILE THAT HAD NO COMPLETENESS READER AT ALL.** `reachable` gained
+//! one at ⟨0.28⟩; `callers`, `impact` and `path` did not, and the ⟨0.28⟩ enumeration that widened the
+//! re-disclosure MUST to *"any verb whose output could be read as a NEGATIVE FINDING about the code — a
+//! verdict, an empty result set, or a zero count"* skipped all three. MEASURED at HEAD (2026-08-25) on a
+//! three-function crate with one `tests/` dir, scanned with no policy, whose report therefore publishes
+//! `excluded: [{class: "non-library-target", peeked: false}]`:
+//!
+//! ```text
+//!   callers wrapper --json   {"of":[…],"direct":["top"],"transitive":["top"]}   exit 0   no caveat
+//!   impact  wrapper --json   {"fn":…,"affectedCount":1,"affected":["top"],…}    exit 0   no caveat
+//!   path    top Fs  --json   {"fn":…,"effect":"Fs","path":[…]}                  exit 0   no caveat
+//! ```
+//!
+//! — and nothing on the human channel either. Reproduced identically in candor-ts and candor-java.
+//! `where` and `reachable`, reading the same bytes through the same module, hedged.
+//!
+//! **THIS IS THE SILENT HALF OF THE `show`/`map` CLASS.** Those two OVER-hedged (⟨0.28⟩ Rung A had them
+//! emit the caveat INSTEAD of the result, ruled the other way on 2026-08-25 — see [`crate::show`]); these
+//! three UNDER-hedged, which is the direction this family calls the cardinal sin. An empty `direct` says
+//! *nothing calls this*, an `affectedCount: 0` says *safe to edit*, an empty `path` says *this function
+//! does not reach that effect* — three determined negatives over a report whose own manifest says part of
+//! the tree went unread.
+//!
+//! **THE REMEDY IS THE ONE ALREADY IN THIS FILE, NOT A FOURTH SPELLING OF THE RULE.** All three documents
+//! have a FIXED key set at their root, so unlike `show`/`map` there is nothing to nest and no reserved-key
+//! collision to avoid: they take [`crate::completeness::ReportCompleteness::write_json`] on the machine
+//! channel and `print_note` on the human one, exactly as `reachable` does further down this file. The
+//! trigger is `must_hedge()` — a DISCLOSURE, keyed on the answer — and `incomplete()`, the exit-code
+//! predicate, is untouched: the verbs that answer `ok` (`gate`, and `unverified`/`fix-gate`/`whatif`/`fix`
+//! under `--strict`) still REFUSE over these same bytes, which is ⟨0.24⟩'s *"never LESS sensitive than
+//! the gate"* and is pinned by conformance PARTs 62 and 67. Healthy output is byte-identical: `fields()`
+//! is `None` unless there is something to disclose.
 
+use crate::completeness::ReportCompleteness;
 use crate::*;
 
 // ── callers ─────────────────────────────────────────────────────────────────────────────────────
@@ -54,15 +88,35 @@ pub(crate) fn cmd_callers(args: &[String]) -> i32 {
             Err(c) => return c,
         };
     }
+    // ⟨0.32⟩ READ ONCE HERE AND PASSED DOWN, because this verb has TWO answering functions and the file's
+    // own comment records that the last fix to this pair had to be applied to both (`grep -n
+    // 'coreCallers\|callersFrontier'` is the check candor-ts wrote for the same reason). Building it in
+    // `cmd_callers` is what makes the two arms structurally incapable of disagreeing about one report.
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("callers");
     if include_unknown {
         let entries = match load_entries_loud(pre) {
             Ok(v) => v,
             Err(c) => return c,
         };
-        callers_via_callgraph_frontier(&cg, &entries, &load_hierarchy(pre), q, want_json, complete_graph)
+        callers_via_callgraph_frontier(&cg, &entries, &load_hierarchy(pre), q, want_json, complete_graph, &comp)
     } else {
-        callers_via_callgraph(&cg, q, want_json, complete_graph)
+        callers_via_callgraph(&cg, q, want_json, complete_graph, &comp)
     }
+}
+
+/// ⟨0.32⟩ The human half of the hedge for `callers`, shared by both answering arms above so the
+/// substitution cannot be fixed in one and forgotten in the other. See the module header.
+fn callers_note(comp: &ReportCompleteness) {
+    comp.print_note(
+        "the caller set below covers only the call graph candor could see",
+        &format!(
+            "A caller living in an unread unit is ABSENT from the graph, so it appears in neither \
+             `direct` nor `transitive` — and an EMPTY answer here reads as *nothing calls this*, which \
+             is a claim this report cannot support. {} Re-scan before treating this as the blast radius.",
+            comp.gate_line()
+        ),
+    );
 }
 
 /// callers + the unresolved-dispatch frontier (--include-unknown). The CONFIRMED reachers, plus the
@@ -78,6 +132,7 @@ pub(crate) fn callers_via_callgraph_frontier(
     q: &str,
     want_json: bool,
     complete: bool,
+    comp: &ReportCompleteness,
 ) -> i32 {
     let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (caller, callees) in cg {
@@ -116,8 +171,19 @@ pub(crate) fn callers_via_callgraph_frontier(
         // absent. On the effect-only fallback (no sidecar), a miss is INCONCLUSIVE — a pure leaf called only
         // by pure fns is simply invisible — so answer empty at exit 0, never a false "no such function" (#5).
         if !complete {
-            if want_json { println!("{{}}"); }
-            else { println!("candor: no caller of `{q}` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers)."); }
+            // ⟨0.32⟩ AND THIS ARM TAKES THE HEDGE TOO. `{}` is the STRONGEST determined negative the
+            // format has — every key a consumer reads defaults to empty, so `d.get("direct", [])` cannot
+            // tell it from `{"direct": []}` — and over a report whose own `excluded` names a class
+            // nothing opened it is a claim about code nobody examined. The sidecar-absence sentence
+            // below is a DIFFERENT limitation (an effect-only graph) and does not cover this one.
+            if want_json {
+                let mut out = serde_json::json!({});
+                comp.write_json(&mut out);
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            } else {
+                callers_note(comp);
+                println!("candor: no caller of `{q}` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers).");
+            }
             return 0;
         }
         eprintln!("candor-query callers: no function matching '{q}' in the call graph");
@@ -205,15 +271,20 @@ pub(crate) fn callers_via_callgraph_frontier(
     if want_json {
         let pv: Vec<_> =
             possible.iter().map(|(f, v)| serde_json::json!({"fn": f, "viaDispatchOn": v})).collect();
-        let out = serde_json::json!({
+        // ⟨0.32⟩ Built BEFORE the disclosure is attached, so the hedged document carries the SAME answer
+        // the healthy one would — a hedged document that recomputed its own result would move the
+        // omission rather than remove it. `write_json` is a no-op on a complete report.
+        let mut out = serde_json::json!({
             "of": targets,
             "direct": direct.iter().collect::<Vec<_>>(),
             "transitive": all.iter().collect::<Vec<_>>(),
             "possibleViaUnknownDispatch": pv,
         });
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
+    callers_note(comp);
     let tgt = targets.join(", ");
     if !all.is_empty() {
         println!("  `{tgt}` is reached by {} function(s) (the blast radius if it gained an effect):", all.len());
@@ -229,14 +300,21 @@ pub(crate) fn callers_via_callgraph_frontier(
         }
     }
     if all.is_empty() && possible.is_empty() {
-        println!("  `{tgt}` has no callers (nothing in this crate calls it).");
+        // ⟨0.32⟩ The same withdrawal as the plain arm below — the note qualifies the answer, and an
+        // unqualified "nothing in this crate calls it" printed under it re-asserts what it withdrew.
+        if comp.must_hedge() {
+            println!("  `{tgt}` has no callers IN WHAT CANDOR COULD SEE — see the INCOMPLETE note above; \
+                      this is NOT \"nothing calls it\".");
+        } else {
+            println!("  `{tgt}` has no callers (nothing in this crate calls it).");
+        }
     }
     0
 }
 
 /// "Who reaches `q`?" over the full call graph: the DIRECT callers and the full TRANSITIVE set (the
 /// blast radius if `q` gained an effect). Works for any function, effectful or pure.
-pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str, want_json: bool, complete: bool) -> i32 {
+pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str, want_json: bool, complete: bool, comp: &ReportCompleteness) -> i32 {
     // reverse adjacency: callee -> its direct callers.
     let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (caller, callees) in cg {
@@ -276,8 +354,19 @@ pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str,
         // absent. On the effect-only fallback (no sidecar), a miss is INCONCLUSIVE — a pure leaf called only
         // by pure fns is simply invisible — so answer empty at exit 0, never a false "no such function" (#5).
         if !complete {
-            if want_json { println!("{{}}"); }
-            else { println!("candor: no caller of `{q}` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers)."); }
+            // ⟨0.32⟩ AND THIS ARM TAKES THE HEDGE TOO. `{}` is the STRONGEST determined negative the
+            // format has — every key a consumer reads defaults to empty, so `d.get("direct", [])` cannot
+            // tell it from `{"direct": []}` — and over a report whose own `excluded` names a class
+            // nothing opened it is a claim about code nobody examined. The sidecar-absence sentence
+            // below is a DIFFERENT limitation (an effect-only graph) and does not cover this one.
+            if want_json {
+                let mut out = serde_json::json!({});
+                comp.write_json(&mut out);
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            } else {
+                callers_note(comp);
+                println!("candor: no caller of `{q}` in the effect-relevant graph (the full call-graph sidecar is absent; re-scan with --out to see pure-only callers).");
+            }
             return 0;
         }
         eprintln!("candor-query callers: no function matching '{q}' in the call graph");
@@ -299,16 +388,28 @@ pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str,
     }
 
     if want_json {
-        let out = serde_json::json!({
+        // ⟨0.32⟩ Built BEFORE the disclosure is attached (see the frontier arm above and the module
+        // header); `write_json` is a no-op on a complete report, so healthy output is byte-identical.
+        let mut out = serde_json::json!({
             "of": targets,
             "direct": direct.iter().collect::<Vec<_>>(),
             "transitive": all.iter().collect::<Vec<_>>(),
         });
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
+    callers_note(comp);
     let tgt = targets.join(", ");
     if all.is_empty() {
+        // ⟨0.32⟩ The sentence a hedging report cannot support, so it does not get said. `reachable` takes
+        // the same shape one verb down: the note above is a qualifier, and an unqualified "no callers"
+        // under it would still be the determined negative the note just withdrew.
+        if comp.must_hedge() {
+            println!("  `{tgt}` has no callers IN WHAT CANDOR COULD SEE — see the INCOMPLETE note above; \
+                      this is NOT \"nothing calls it\".");
+            return 0;
+        }
         println!("  `{tgt}` has no callers (nothing in this crate calls it).");
         return 0;
     }
@@ -388,20 +489,38 @@ pub(crate) fn cmd_impact(args: &[String]) -> i32 {
     downstream.sort_by(|a, b| a.func.cmp(&b.func));
     roots.extend(downstream);
 
+    // ⟨0.32⟩ `affectedCount: 0` is this verb's determined negative and it is the one an agent acts on —
+    // *nothing downstream, safe to edit*. Over a report whose own `excluded` names a class nothing opened
+    // it rests on a graph that is missing whatever lives in that class. See the module header.
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("impact");
+
     if want_json {
         let eps: Vec<_> = roots
             .iter()
             .map(|r| serde_json::json!({ "fn": r.func, "inferred": r.inferred }))
             .collect();
-        let out = serde_json::json!({
+        // Built BEFORE the disclosure is attached, so both arms carry the same answer; `write_json` is a
+        // no-op on a complete report and healthy output is byte-identical.
+        let mut out = serde_json::json!({
             "fn": target.func,
             "affectedCount": affected_names.len(),
             "affected": affected_names,
             "entryPoints": eps
         });
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
+    comp.print_note(
+        "the blast radius below covers only the callers candor could see",
+        &format!(
+            "A caller living in an unread unit is ABSENT from the graph, so it is missing from this \
+             count and from the entry points below — and a count of 0 reads as *safe to edit*, which is \
+             a claim this report cannot support. {} Re-scan before treating this as the blast radius.",
+            comp.gate_line()
+        ),
+    );
     println!("candor impact — what changing `{}` affects:\n", target.func);
     println!(
         "  {} effectful function{} transitively call it.",
@@ -409,6 +528,15 @@ pub(crate) fn cmd_impact(args: &[String]) -> i32 {
         if affected_names.len() == 1 { "" } else { "s" }
     );
     if roots.is_empty() {
+        // ⟨0.32⟩ "not on a runtime path" is a determined negative about reachability; under the note
+        // above it is exactly the sentence the note withdrew, so the hedging arm says less.
+        if comp.must_hedge() {
+            println!(
+                "  No entry point reaches it IN WHAT CANDOR COULD SEE — see the INCOMPLETE note above; \
+                 this is NOT \"not on a runtime path\"."
+            );
+            return 0;
+        }
         println!(
             "  No entry point reaches it — not on a runtime path (dead, or a library fn called only externally)."
         );
@@ -423,6 +551,22 @@ pub(crate) fn cmd_impact(args: &[String]) -> i32 {
         println!("    {}   {{ {} }}", r.func, r.inferred.join(", "));
     }
     0
+}
+
+/// ⟨0.32⟩ The human half of the hedge for `path`, shared by its three emit sites — the two that answer
+/// an EMPTY chain and the one that answers a real one — so a later change cannot qualify one and leave
+/// the others flat. See the module header.
+fn path_note(comp: &ReportCompleteness) {
+    comp.print_note(
+        "the chain below is traced over only the call graph candor could see",
+        &format!(
+            "A hop through an unread unit BREAKS the chain, so `path` can answer EMPTY for a function \
+             that really does reach the effect — and an empty `path` reads as *this function does not \
+             reach it*, which is a claim this report cannot support. {} Re-scan before treating an empty \
+             chain as an answer.",
+            comp.gate_line()
+        ),
+    );
 }
 
 /// `path` — the call chain by which a function comes to perform an effect: a shortest-path BFS over the
@@ -471,14 +615,21 @@ pub(crate) fn cmd_path(args: &[String]) -> i32 {
         eprintln!("candor-query path: no function matching '{fn_arg}'");
         return 2;
     };
+    // ⟨0.32⟩ THE COMPLETENESS READER THIS VERB DID NOT HAVE, read ONCE for all three emit sites below —
+    // two of which answer `path: []`, this verb's determined negative (*<fn> does not reach that effect*).
+    // See the module header. `path_note` is the shared human half for the same reason.
+    let comp = crate::completeness::report_completeness(pre);
+    comp.warn_unreadable("path");
     if !start.inferred.iter().any(|e| e == effect) {
         // An empty `path` is the honest "no local source on a path" answer (SPEC §3.1), NOT an error.
         // In --json mode emit the documented {effect,fn,path:[]} object — printing human text here
         // polluted stdout so a `jq` consumer crashed (adversarial fidelity review; Java/TS emit the JSON).
         if want_json {
-            let out = serde_json::json!({ "fn": start.func, "effect": effect, "path": [] });
+            let mut out = serde_json::json!({ "fn": start.func, "effect": effect, "path": [] });
+            comp.write_json(&mut out);
             println!("{}", serde_json::to_string_pretty(&out).unwrap());
         } else {
+            path_note(&comp);
             println!("{} does not perform {effect}  (inferred: {:?})", start.func, start.inferred);
         }
         return 0;
@@ -507,9 +658,11 @@ pub(crate) fn cmd_path(args: &[String]) -> i32 {
         // Reached via a cross-crate call or Unknown — the honest empty-path answer (SPEC §3.1), not an
         // error. Emit the JSON object in --json mode (was human text → broke a `jq` consumer).
         if want_json {
-            let out = serde_json::json!({ "fn": start.func, "effect": effect, "path": [] });
+            let mut out = serde_json::json!({ "fn": start.func, "effect": effect, "path": [] });
+            comp.write_json(&mut out);
             println!("{}", serde_json::to_string_pretty(&out).unwrap());
         } else {
+            path_note(&comp);
             println!(
                 "{} performs {effect} but its source is not a local function \
                  (cross-crate, or via Unknown) — not statically traceable.",
@@ -535,10 +688,13 @@ pub(crate) fn cmd_path(args: &[String]) -> i32 {
                 serde_json::json!({ "fn": name, "loc": loc, "source": i == chain.len() - 1 })
             })
             .collect();
-        let out = serde_json::json!({ "fn": start.func, "effect": effect, "path": steps });
+        // Built BEFORE the disclosure is attached; `write_json` is a no-op on a complete report.
+        let mut out = serde_json::json!({ "fn": start.func, "effect": effect, "path": steps });
+        comp.write_json(&mut out);
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
+    path_note(&comp);
     println!("candor path — how `{}` comes to perform {effect}:\n", start.func);
     for (i, name) in chain.iter().enumerate() {
         let indent = "  ".repeat(i + 1);
