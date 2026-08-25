@@ -6194,6 +6194,88 @@ trait G {
         let floor = candor_report::SPEC_VERSION;
         assert!(readme.contains(&format!("spec {floor}")), "README must state the spec {floor} floor");
         assert!(agents.contains(&format!("spec {floor}")), "AGENTS must state the spec {floor} floor");
+
+        // ── AND NO CLAIM THE OTHER WAY: every spec version the docs state must be one this build
+        // speaks, in EVERY spelling — including the JSON one.
+        //
+        // The three assertions above are POSITIVE existence checks. One correct prose mention
+        // satisfies them, and they are structurally blind to a second, stale claim elsewhere in the
+        // same file. MEASURED at the ⟨0.32⟩ bump: the prose spelling was rewritten everywhere and
+        // README's `--gate-json` example kept `# → { "spec": "0.31", … }` — the literal shape a reader
+        // copies into a CI assertion. It survived the bump, the doc sweep and CI, because `spec 0.32`
+        // was present three lines away. candor-swift's `AgentsDocDriftTests` already carries the
+        // universal form and was clean for exactly that reason; this is that check ported here, not a
+        // third convention.
+        //
+        // DERIVED, like the floor assertions above: the expected value is SPEC_VERSION, never a
+        // literal. A literal here breaks on every floor bump and its fix each release is to edit a
+        // literal — which is precisely the drift it exists to catch, aimed at itself.
+        //
+        // THE EXEMPTION is the family's `(spec X.Y, informative)` marker: a historical note naming the
+        // rung a field arrived at is a true statement about the past and must NOT move with the floor.
+        // It keys on the marker rather than on a list of tolerated old versions, so adding a legitimate
+        // annotation never needs this gate edited, and a stale claim cannot hide merely by being old.
+        for (doc, text) in [("README.md", &readme), ("AGENTS.md", &agents)] {
+            for (version, tail) in spec_claims(text) {
+                if tail.starts_with(", informative)") { continue; }
+                assert_eq!(version, floor,
+                    "{doc} claims spec {version} but this build stamps spec {floor} \
+                     (at `spec…{version}{tail}`). If that is a historical marker naming the rung a \
+                     feature arrived at, write it \"(spec {version}, informative)\"; otherwise bump it.");
+            }
+        }
+
+        // THE EXEMPTION MUST DISCRIMINATE, and the scanner must actually see all three spellings.
+        // Without this control, an exemption that matched everything — or a scanner that found
+        // nothing — turns the loop above into a no-op that passes for the same reason a correct run
+        // does, which is the vacuity this family keeps finding in its own instruments.
+        let sample = "carrying `unitKind` (spec 0.8, informative); ordinary\n\
+                      This project is on candor-scan 9.9.9 (spec 0.9).\n\
+                      a section reference, spec §6.1, is not a version\n\
+                      the gate prints { \"spec\": \"0.7\", \"ok\": true }\n\
+                      and the hyphenated attributive spec-0.6 form\n";
+        let flagged: Vec<String> = spec_claims(sample).into_iter()
+            .filter(|(_, tail)| !tail.starts_with(", informative)"))
+            .map(|(v, _)| v).collect();
+        assert_eq!(flagged, vec!["0.9".to_string(), "0.7".to_string(), "0.6".to_string()],
+            "the exemption must skip the annotated claim, keep the live prose one, SEE the JSON and \
+             hyphenated spellings, and never read `spec §6.1` as a version");
+    }
+
+    /// Every `spec` version claim in a document, as `(version, the 16 chars after it)`.
+    ///
+    /// The shape candor-swift's `AgentsDocDriftTests` pins, ported: `spec` followed by one to four of
+    /// `[-: "]` and then `<digits>.<digits>`. That separator class is what keeps `spec §6.1` and
+    /// `SPEC §2.2` — SECTION references — from reading as versions, while covering `spec 0.32`,
+    /// `spec-0.32` and `"spec": "0.32"` alike. The separator run is taken greedily and backtracked
+    /// down to one, which is what the regex's `{1,4}` does.
+    fn spec_claims(text: &str) -> Vec<(String, String)> {
+        const SEP: [char; 4] = ['-', ':', ' ', '"'];
+        let c: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i + 4 <= c.len() {
+            if c[i..i + 4] != ['s', 'p', 'e', 'c'] { i += 1; continue; }
+            let mut seps = 0usize;
+            while seps < 4 && i + 4 + seps < c.len() && SEP.contains(&c[i + 4 + seps]) { seps += 1; }
+            while seps >= 1 {
+                let s = i + 4 + seps;
+                let mut j = s;
+                while j < c.len() && c[j].is_ascii_digit() { j += 1; }
+                if j > s && j < c.len() && c[j] == '.' {
+                    let mut k = j + 1;
+                    while k < c.len() && c[k].is_ascii_digit() { k += 1; }
+                    if k > j + 1 {
+                        out.push((c[s..k].iter().collect(),
+                                  c[k..c.len().min(k + 16)].iter().collect()));
+                        break;
+                    }
+                }
+                seps -= 1;
+            }
+            i += 4;
+        }
+        out
     }
 
     #[test]
