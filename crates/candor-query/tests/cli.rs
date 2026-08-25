@@ -5679,17 +5679,15 @@ fn gate_report_refuses_a_peek_bounded_by_a_different_deny_set() {
     // outranks incomplete (2) in this gate's precedence, so an effectful `inner` would dominate with a
     // REAL finding and the row would measure nothing about `pure`'s flattening. Written by hand rather
     // than through `write_excluded_report_under` (whose `inner` always performs `Fs`) for that reason.
-    let report = format!(
-        r#"{{
-  "candor": {{ "version": "scan-test", "toolchain": "stable", "spec": "0.32" }},
+    let report = r#"{
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.32" },
   "package": "rpt",
-  "analyzed": {{ "count": 1, "digest": "0000000000000000" }},
-  "excluded": [{{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }}],
+  "analyzed": { "count": 1, "digest": "0000000000000000" },
+  "excluded": [{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }],
   "outOfScope": [],
-  "scannedUnder": {{ "deny": ["deny Net"] }},
+  "scannedUnder": { "deny": ["deny Net"] },
   "functions": []
-}}"#
-    );
+}"#;
     std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
     std::fs::write(format!("{}.rpt.scan.callgraph.json", f.prefix), "{}").unwrap();
     let pure = write_policy(&f, "pure.policy", "pure\n");
