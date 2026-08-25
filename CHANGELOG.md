@@ -9,6 +9,58 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`show` and `map` returned the WARNING INSTEAD OF THE ANSWER — the ⟨0.32⟩ descriptive hedge, ruled
+  the other way and closed four-way.** ⟨0.28⟩ Rung A tells a verb *whose pinned shape cannot carry the
+  caveat* to emit the CAVEAT DOCUMENT **instead of** its result document, and yesterday's rung armed
+  that substitution on the unread-exclusion-class cause. MEASURED on a two-function crate with one
+  `tests/` dir (`excluded: [{class: "non-library-target", peeked: false}]`), and reproduced in every
+  engine that ships these verbs:
+
+  ```
+  show <fn> --json   ->  {"incomplete": true}      exit 0    the rows are GONE
+  map       --json   ->  {"incomplete": true}      exit 0    the map is GONE
+  ```
+
+  That is approximately every no-policy scan of a crate with `tests/`, `benches/`, `examples/` or a
+  `build.rs`, and of a single-file TS scan with unparsed siblings — and through candor-ts's MCP tools
+  `candor_show`/`candor_map` handed the same document to an AGENT, on the edit-time channel that cannot
+  ask a follow-up question.
+
+  **RETURN THE DATA AND THE WARNING; DO NOT REPLACE THE DATA WITH THE WARNING.** Rung A's wording was
+  written when the trigger was a manifest a scan had FAILED to produce — there was little result to
+  lose. It is wrong once the trigger is ordinary: `show` and `map` are DESCRIPTIVE, they certify
+  nothing, so there is no claim for a pessimism rule to protect and withholding the answer buys no
+  soundness. The same codebase already answers this way one verb over — `gains --json` keeps its gained
+  set and adds `incomplete: true` beside it — and the descriptive verbs are now consistent with it.
+
+  **THE BOUNDARY IS WHETHER THE VERB ANSWERS `ok`, AND IT IS NOW STATED IN A COMMENT IN ALL FOUR
+  ENGINES.** `gate`/`gate --report`, and `unverified`/`fix-gate`/`whatif`/`fix` under `--strict`, answer
+  `ok`: they still REFUSE over these same bytes (exit 2, `ok` false on the gate and OMITTED on the
+  advisory siblings), which ⟨0.24⟩ requires and conformance PARTs 62 and 67 pin. Getting the boundary
+  wrong in that direction re-opens the cardinal sin, so the controls for it were written FIRST and
+  confirmed green before anything moved.
+
+  **THE SHAPE: THE RESULT NESTS, THE CAVEAT SITS AT THE ROOT.** `show` hedging is
+  `{"functions": [ … ], "incomplete": true, …}`; `map` hedging is `{"modules": { … }, "incomplete":
+  true, …}`. Every property Rung A cited for its own shape still holds — healthy output is untouched,
+  the root type change stays LOUD (a consumer doing `for (const x of doc)` over `show` still gets a
+  TypeError, not a silent zero-iteration loop), and no reserved-key convention is needed. Nesting
+  `map`'s USER NAMESPACE one level down *removes* the collision the ruling deferred rather than
+  re-opening it: a module literally named `incomplete` is a key of `modules`, the boolean is a key of
+  the root, and neither can displace the other. Relative to the shape it replaces the change is purely
+  ADDITIVE: a consumer that already handles today's hedge sees one more key.
+
+  **CONTROLS, WRITTEN FIRST AND BOTH DIRECTIONS ASSERTED**, because the safe-looking empty value passes
+  a presence check while deleting the feature: the certifying verbs still refuse over an unread class
+  (exit 2, `ok` withheld); a report with nothing unread produces a document BYTE-IDENTICAL to the
+  pre-change binary's on both verbs, measured by diff; the hedge still appears when it should; and the
+  restored answer is asserted by ROW COUNT and NAME, not by key presence.
+
+  GATES: cargo test --workspace (all green, +1 control row, the Rung A row re-aimed);
+  cargo clippy --all-targets -D warnings clean. Conformance was NOT run — candor-spec is under
+  concurrent edit; PART 40's oracle scores an object carrying a live disclosure key as a hedge and is
+  unaffected, PART 5's guard fires on a hedging FIXTURE and is unaffected.
+
 - **`tour` said "nothing hidden" over a class the scan never opened — the ⟨0.32⟩ descriptive hedge,
   ruled and closed four-way.** Over a report whose `excluded` names a class with `peeked: false`,
   `tour` printed *"candor: nothing hidden — every effect sits where its name says it should"* at exit 0

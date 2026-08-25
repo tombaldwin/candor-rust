@@ -4906,15 +4906,91 @@ fn gate_json_naming_the_reports_sidecar_is_refused_and_a_gate_json_sibling_still
 
 // ── ⟨0.28⟩ Phase 1, Rung A: the disclosure envelope for the two pinned shapes that cannot carry it ──
 
-/// SPEC §2 ⟨0.28⟩ (Rung A): a verb whose pinned shape cannot carry the caveat emits the CAVEAT DOCUMENT
-/// INSTEAD of its result document. `show` is pinned to a TOP-LEVEL ARRAY and `map`'s top level is a USER
-/// NAMESPACE (module names), so neither may carry a reserved key — over a hedging report each answers
-/// `{ "incomplete": true, … }` and nothing else. Measured before the fix: `show --json` answered the bare
-/// array with no caveat anywhere, and `map --json` merged the caveat keys INTO the module namespace
-/// (the collision hazard the ruling rejects). Healthy output is pinned byte-shaped by the control arm
-/// (byte-level identity vs the pre-fix binary was verified out of band).
+/// ⟨0.32⟩ **THE CONTROL FOR THE DESCRIPTIVE/CERTIFYING BOUNDARY — WRITTEN BEFORE THE RUNG-A CHANGE AND
+/// UNCHANGED BY IT.** Rung A's substitution was widened to the unread-class cause on 2026-08-24 and then
+/// ruled the wrong way round for the DESCRIPTIVE verbs (they now return the data AND the caveat, see
+/// [`show_and_map_return_their_result_beside_the_caveat_when_hedging`]). The direction that must NOT move
+/// is this one: a verb that answers `ok` still refuses over the same bytes. Getting that wrong re-opens
+/// the cardinal sin, and both arms below are pinned by conformance PARTs 62 and 67.
+///
+/// The fixture is the one the ruling was measured on: a report whose `excluded` names a class the
+/// producing scan never opened (`peeked: false`, no `judgedElsewhere`), under a `deny` policy.
 #[test]
-fn show_and_map_emit_the_caveat_document_instead_of_their_result_when_hedging() {
+fn the_verbs_that_answer_ok_still_refuse_over_an_unread_class() {
+    let f = Fixture::new("unread-refusal-control");
+    let report = r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.32"},"package":"rpt",
+        "analyzed":{"count":2,"digest":"d"},
+        "excluded":[{"class":"non-library-target","count":1,"peeked":false,"reason":"tests/"}],
+        "functions":[
+          {"fn":"inner","loc":"s:1","inferred":["Fs"],"direct":["Fs"],"hash":"h1"},
+          {"fn":"outer","loc":"s:2","inferred":["Fs"],"hash":"h2","calls":["inner"]}]}"#;
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    let pol = write_policy(&f, "deny.policy", "deny Exec\n");
+
+    // `gate --report`: exit 2, `ok: false`, `incomplete: true`. The certifying route, unchanged.
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f.prefix, "--policy", &pol, "--json"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(2), "the gate REFUSES over a class nothing opened");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert_eq!(v["ok"], serde_json::json!(false), "{v}");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v}");
+
+    // The `--strict` advisory verbs: exit 2, and `ok` OMITTED rather than falsified (⟨0.24⟩).
+    for argv in [vec!["unverified", "--strict"], vec!["fix-gate", "--strict"]] {
+        let mut args: Vec<&str> = argv.clone();
+        args.extend(["--report", &f.prefix, "--policy", &pol, "--json"]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(2),
+            "{argv:?}: an advisory verb must never be LESS sensitive than the gate over the same bytes");
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+        assert!(v.get("ok").is_none(), "{argv:?}: `ok` is OMITTED, never falsified: {v}");
+        assert_eq!(v["incomplete"], serde_json::json!(true), "{argv:?}: {v}");
+    }
+
+    // …and the descriptive verbs over the SAME bytes hedge WITHOUT moving an exit code. This half is what
+    // makes the two arms above a boundary rather than a blanket: `show`/`map` are on the other side of it.
+    for argv in [vec!["show", "inner"], vec!["map"]] {
+        let mut args: Vec<&str> = argv.clone();
+        args.extend(["--report", &f.prefix, "--json"]);
+        let out = Command::new(bin()).args(&args).output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(0),
+            "{argv:?}: a descriptive verb's hedge is a DISCLOSURE, not an exit code");
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+        assert_eq!(v["incomplete"], serde_json::json!(true),
+            "{argv:?}: the hedge must still appear over an unread class: {v}");
+    }
+}
+
+/// SPEC §2 ⟨0.28⟩ (Rung A): a verb whose pinned shape cannot carry the caveat changes SHAPE over a
+/// hedging report. `show` is pinned to a TOP-LEVEL ARRAY and `map`'s top level is a USER NAMESPACE
+/// (module names), so neither may carry a reserved key at its root — measured before that rung,
+/// `show --json` answered the bare array with no caveat anywhere and `map --json` merged the caveat keys
+/// INTO the module namespace, displacing any real module that owned the name.
+///
+/// ⟨0.32⟩ **AND WHAT THE HEDGING DOCUMENT CONTAINS WAS RULED AGAIN ON 2026-08-25: THE RESULT *AND* THE
+/// WARNING.** Rung A's "the CAVEAT DOCUMENT INSTEAD of its result document" was written when the trigger
+/// was a manifest a scan had FAILED to produce. ⟨0.32⟩'s unread-class cause then armed the same hedge on
+/// approximately every no-policy report — MEASURED on a two-function crate with one `tests/` dir:
+///
+/// ```text
+///   show wrapper --json   {"incomplete": true}      the rows are GONE
+///   map          --json   {"incomplete": true}      the map is GONE
+/// ```
+///
+/// Both verbs are DESCRIPTIVE — they certify nothing, so there is no claim for a pessimism rule to
+/// protect. The result now rides under `functions` / `modules` with the caveat keys flattened beside it;
+/// the loud root-type change is unchanged, no reserved-key convention is needed, and no row is displaced.
+/// The verbs on the OTHER side of that boundary are pinned by
+/// [`the_verbs_that_answer_ok_still_refuse_over_an_unread_class`] and must not move.
+///
+/// Healthy output is pinned byte-shaped by the control arm (byte-level identity vs the pre-fix binary
+/// was verified out of band, on both verbs).
+#[test]
+fn show_and_map_return_their_result_beside_the_caveat_when_hedging() {
     // Cause 1: a non-empty `unanalyzed` manifest.
     let f = Fixture::new("runga-unanalyzed");
     let report = r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.28"},"package":"rpt",
@@ -4930,35 +5006,50 @@ fn show_and_map_emit_the_caveat_document_instead_of_their_result_when_hedging() 
     let judged_file = format!("{}.lib.scan.json", j.prefix);
     std::fs::write(&judged_file, judged).unwrap();
 
-    // `show` hedging: the caveat document REPLACES the array — an OBJECT, not `[]` and not the rows.
+    // `show` hedging: an OBJECT rather than the array (the loud stop), AND the rows are still in it.
     let out = Command::new(bin()).args(["show", "inner", "--report", &f.prefix, "--json"])
         .output().expect("run candor-query");
     assert_eq!(out.status.code(), Some(0), "the hedge is a disclosure, not an exit code");
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
     assert!(v.is_object(),
-        "show hedging must emit the CAVEAT DOCUMENT instead of its array — an array here is the \
-         pre-⟨0.28⟩ silent wrong answer: {v}");
+        "show hedging must not answer the bare array — an array here is the pre-⟨0.28⟩ silent wrong \
+         answer, and the root type change is the loud stop: {v}");
     assert_eq!(v["incomplete"], serde_json::json!(true));
     assert_eq!(v["unanalyzed"][0]["path"], serde_json::json!("src/gen.rs"));
+    // ⟨0.32⟩ THE DEFECT ASSERTION, and it is the whole of this rung: the ANSWER is still here. The rows
+    // must be the SAME rows the healthy arm would have printed — a hedge that ships an empty `functions`
+    // passes "the key exists" while deleting exactly what the ruling restored.
+    assert_eq!(v["functions"][0]["fn"], serde_json::json!("inner"),
+        "the result travels BESIDE the warning, never instead of it: {v}");
+    assert_eq!(v["functions"].as_array().map(Vec::len), Some(1), "{v}");
 
-    // `map` hedging over the judged-nothing report: the caveat document, and NOT `{}` — the strongest
-    // determined negative there is, asserted about code nobody examined.
+    // `map` hedging over the judged-nothing report: the caveat, and NOT a bare `{}` — the strongest
+    // determined negative there is, asserted about code nobody examined. Here the map is legitimately
+    // empty (the report judged nothing), so `modules` is `{}` INSIDE the hedged envelope: a consumer
+    // reading `doc.modules` gets the same empty map the report supports, and `doc.incomplete` tells it
+    // why. The two are distinguishable, which is the property `{}` at the root destroyed.
     let out = Command::new(bin()).args(["map", "--report", &j.prefix, "--json"])
         .output().expect("run candor-query");
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
-    assert_eq!(v["incomplete"], serde_json::json!(true), "map hedging emits the caveat document: {v}");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "map hedging carries the caveat: {v}");
     assert_eq!(v["judgedNothing"], serde_json::json!([judged_file]));
+    assert!(v["modules"].is_object(), "…and the (empty) map is present, not withheld: {v}");
 
-    // …and `map` hedging must not carry a single MODULE row beside the caveat: the caveat REPLACES the
-    // result, it does not accompany one (the merged shape displaced real modules by reserved key).
+    // …and over a report that DID judge something, `map` hedging carries the module rows. They live one
+    // level down, under `modules`, which is what makes the caveat keys safe at the root: `map`'s own
+    // namespace is the operator's module names, and a module named `incomplete` is now a key of
+    // `modules` while the boolean is a key of the root. Neither can displace the other.
     let out = Command::new(bin()).args(["map", "--report", &f.prefix, "--json"])
         .output().expect("run candor-query");
     let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
-    let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
-    assert!(keys.iter().all(|k| ["incomplete", "unanalyzed", "judgedNothing"].contains(&k.as_str())),
-        "map hedging carries ONLY caveat keys — a module row beside the hedge is the merged shape the \
-         ruling replaced: {keys:?}");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v}");
+    let mods = v["modules"].as_object().expect("the module map rides beside the caveat");
+    assert!(!mods.is_empty(), "map hedging must still ANSWER — the rows are the thing: {v}");
+    assert!(v.as_object().unwrap().keys().all(|k| ["modules", "incomplete", "unanalyzed",
+        "judgedNothing", "noManifest", "unread"].contains(&k.as_str())),
+        "…and the ROOT carries only `modules` + the ⟨0.28⟩ caveat vocabulary — a module name at the root \
+         is the merged shape whose collision the nesting removes: {v}");
 
     // INTACT-INPUT CONTROL: a healthy report keeps the pinned shapes exactly — `show` a top-level ARRAY,
     // `map` an object of module rows with no caveat key.
