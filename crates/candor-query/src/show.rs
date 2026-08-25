@@ -22,6 +22,25 @@ pub(crate) struct ShowJson {
     pub(crate) unresolved: bool,
 }
 
+/// ⟨0.32⟩ **`show`'s HEDGING DOCUMENT: THE RESULT *AND* THE WARNING.** See [`cmd_show`] for the ruling.
+/// The rows go under `functions` — the report's own key for the same list — and the caveat keys flatten
+/// in beside them, so the disclosure is a sibling of the data rather than a replacement for it.
+///
+/// **THE LOUD TYPE CHANGE IS UNCHANGED BY THIS.** A healthy `show --json` is still a top-level ARRAY and a
+/// hedging one is still an OBJECT, so a consumer doing `for (const x of doc)` still gets a TypeError
+/// rather than a silent zero-iteration loop. Relative to the shape this replaces (`{"incomplete": true}`
+/// alone) the change is purely ADDITIVE: every consumer that already handles the hedge sees one more key.
+#[derive(Serialize)]
+pub(crate) struct ShowHedgedJson {
+    pub(crate) functions: Vec<ShowJson>,
+    /// `flatten` rather than a nested `completeness` object: the ⟨0.28⟩ key set is defined once in
+    /// [`crate::completeness::ReportCompleteness::fields`] and rides EVERY document at its top level —
+    /// `where`, `blindspots`, `containment` and the gate's own verdict all spell it that way, and a
+    /// fifth spelling here is §3.3.1's "four independent guesses with a conformance failure scheduled".
+    #[serde(flatten)]
+    pub(crate) completeness: crate::completeness::CompletenessFields,
+}
+
 pub(crate) fn cmd_show(args: &[String]) -> i32 {
     let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
     let Some(q) = g.positional.first().map(String::as_str) else {
@@ -42,21 +61,38 @@ pub(crate) fn cmd_show(args: &[String]) -> i32 {
     fns.sort_by(|a, b| a.func.cmp(&b.func));
 
     // ⟨0.28⟩ SPEC §2 (Rung A): `show`'s pinned shape is a TOP-LEVEL ARRAY, which has nowhere to put a
-    // completeness key — so over a hedging report the verb emits the CAVEAT DOCUMENT INSTEAD of its
-    // result document. Not the array with the caveat omitted (today's shape: `[]` over a report whose
-    // own manifest names a file it could not read — *nothing performs this effect*, asserted about code
-    // nobody examined), and not an empty array of the pinned shape. The type change is LOUD on purpose:
-    // a consumer iterating the array gets a TypeError, not a silent zero-iteration loop, and that is
-    // the one case where breaking a consumer is the CORRECT outcome — it was being lied to. Healthy
-    // output stays byte-identical: `fields()` is `None` unless there is something to disclose.
+    // completeness key — so over a hedging report the verb changes SHAPE. Not the array with the caveat
+    // omitted (the pre-⟨0.28⟩ answer: `[]` over a report whose own manifest names a file it could not
+    // read — *nothing performs this effect*, asserted about code nobody examined), and not an empty
+    // array of the pinned shape. The type change is LOUD on purpose: a consumer iterating the array gets
+    // a TypeError, not a silent zero-iteration loop, and that is the one case where breaking a consumer
+    // is the CORRECT outcome — it was being lied to.
+    //
+    // ⟨0.32⟩ **AND WHAT THE HEDGING DOCUMENT CONTAINS WAS RULED AGAIN ON 2026-08-25: THE RESULT *AND* THE
+    // WARNING, NEVER THE WARNING INSTEAD OF THE RESULT.** Rung A said "the CAVEAT DOCUMENT INSTEAD of its
+    // result document", which was written while the trigger was a manifest a scan had FAILED to produce.
+    // Once ⟨0.32⟩'s unread-class cause armed the same hedge, the substitution fired on approximately
+    // every no-policy report of a crate with `tests/`, `benches/`, `examples/` or a `build.rs` —
+    // MEASURED here on a two-function crate with one `tests/` dir, `show wrapper --json` →
+    // `{"incomplete": true}`, exit 0, and through candor-ts's MCP `candor_show` the same document reached
+    // an AGENT. The result was GONE.
+    //
+    // **THE BOUNDARY, STATED: `show` IS DESCRIPTIVE — IT CERTIFIES NOTHING, SO THERE IS NOTHING FOR A
+    // PESSIMISM RULE TO PROTECT.** It answers no `ok`, sets no verdict and has no exit-code obligation;
+    // withholding its rows buys no soundness and costs the reader the answer. The verbs on the OTHER side
+    // of the boundary are the ones that answer `ok` — `gate`/`gate --report`, and the `--strict` advisory
+    // siblings `unverified`/`fix-gate`/`whatif`/`fix` — and they MUST keep refusing over these same bytes
+    // (⟨0.24⟩'s "never LESS sensitive than the gate", conformance PARTs 62 and 67). Nothing here touches
+    // them; `incomplete()` and the exit codes computed from it are untouched by this rung.
+    //
+    // The same codebase already answers this way one verb over: `gains --json` keeps its gained set and
+    // adds `incomplete: true` beside it (measured, rust and ts, exit 0). This makes the two consistent.
+    //
+    // Healthy output stays byte-identical: `fields()` is `None` unless there is something to disclose.
     let comp = crate::completeness::report_completeness(pre);
     comp.warn_unreadable("show");
 
     if want_json {
-        if let Some(caveat) = comp.fields() {
-            println!("{}", serde_json::to_string_pretty(&caveat).unwrap());
-            return 0;
-        }
         let out: Vec<ShowJson> = fns
             .iter()
             .map(|e| ShowJson {
@@ -69,6 +105,14 @@ pub(crate) fn cmd_show(args: &[String]) -> i32 {
                 unresolved: e.unresolved,
             })
             .collect();
+        // BUILT BEFORE THE BRANCH, so the two arms cannot compute different rows — the hedged document
+        // must carry the SAME answer the healthy one would, or the fix has moved the omission rather
+        // than removed it.
+        if let Some(completeness) = comp.fields() {
+            let doc = ShowHedgedJson { functions: out, completeness };
+            println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+            return 0;
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
@@ -240,6 +284,21 @@ pub(crate) struct MapJson {
     pub(crate) functions: usize,
 }
 
+/// ⟨0.32⟩ **`map`'s HEDGING DOCUMENT: THE MODULE MAP *AND* THE WARNING.** See [`cmd_map`] for the ruling.
+///
+/// The module map moves down one level, under `modules`, and the caveat keys flatten in at the root. That
+/// placement is the whole point: `map`'s pinned top level is a USER NAMESPACE (the operator's own module
+/// names), and the ⟨0.28⟩ argument against writing a reserved key beside them is sound — an npm scoped
+/// package is spelled `@scope/name`, so no prefix convention is safe there. Nesting the namespace one
+/// level down removes the collision instead of deferring it: a module named `incomplete` is a key of
+/// `modules` and the boolean is a key of the root, and neither can displace the other.
+#[derive(Serialize)]
+pub(crate) struct MapHedgedJson {
+    pub(crate) modules: BTreeMap<String, MapJson>,
+    #[serde(flatten)]
+    pub(crate) completeness: crate::completeness::CompletenessFields,
+}
+
 pub(crate) fn cmd_map(args: &[String]) -> i32 {
     let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false });
     let Some(pre) = report_or_discover(&g) else {
@@ -296,20 +355,41 @@ pub(crate) fn cmd_map(args: &[String]) -> i32 {
     if want_json {
         // ⟨0.28⟩ SPEC §2 (Rung A): `map`'s top level is a USER NAMESPACE — its keys are the operator's
         // own module names, and an npm scoped package is spelled `@scope/name`, so no reserved-key
-        // convention is safe here. The ruling closes the cell the previous shape left open: over a
-        // hedging report the verb emits the CAVEAT DOCUMENT INSTEAD of the module map. This replaces the
-        // earlier merge-and-disclose-collisions shape, whose hedge keys could displace a real module
-        // named `incomplete`/`unanalyzed`/`judgedNothing` — a dropped row is exactly the defect the rung
-        // exists to remove, and the caveat-instead shape needs no collision handling at all. Healthy
-        // output stays byte-identical: `fields()` is `None` unless there is something to disclose.
-        if let Some(caveat) = comp.fields() {
-            println!("{}", serde_json::to_string_pretty(&caveat).unwrap());
-            return 0;
-        }
+        // convention is safe there. That argument stands, and it rules out the ORIGINAL shape: merging
+        // the hedge keys in beside the module rows, where a module named `incomplete`/`unanalyzed`/
+        // `judgedNothing` is silently displaced. A dropped row is exactly the defect this rung exists to
+        // remove.
+        //
+        // ⟨0.32⟩ **BUT THE REMEDY WAS THE WRONG ONE, AND IT WAS RULED SO ON 2026-08-25: RETURN THE DATA
+        // AND THE WARNING, DO NOT REPLACE THE DATA WITH THE WARNING.** Rung A's answer here was the
+        // CAVEAT DOCUMENT INSTEAD of the module map, which was tolerable while the trigger was a manifest
+        // a scan had FAILED to produce (there was little map to lose). Once ⟨0.32⟩'s unread-class cause
+        // armed the same hedge it fired on approximately every no-policy report — MEASURED, a two-
+        // function crate with one `tests/` dir answered `map --json` → `{"incomplete": true}` at exit 0,
+        // and candor-ts's MCP `candor_map` handed an AGENT the same document. `Object.keys(map).length`
+        // is how an agent asks "does this codebase do anything", and it got the caveat.
+        //
+        // **THE BOUNDARY, STATED: `map` IS DESCRIPTIVE.** It certifies nothing — no `ok`, no verdict, no
+        // exit-code obligation — so there is no claim for a pessimism rule to protect. The verbs on the
+        // other side are the ones that answer `ok` (`gate`, and `unverified`/`fix-gate`/`whatif`/`fix`
+        // under `--strict`); they still refuse over these bytes and this rung does not touch them
+        // (⟨0.24⟩, conformance PARTs 62 and 67).
+        //
+        // **AND NESTING IS WHAT LETS BOTH BE TRUE AT ONCE.** The module namespace moves under `modules`,
+        // the caveat keys sit at the root: no reserved-key convention is needed, no row is displaced, and
+        // the answer ships. The type at the root is an object in both arms — a consumer that already
+        // handles today's hedge sees one extra key, which makes this change ADDITIVE over the shape it
+        // replaces. Healthy output stays byte-identical: `fields()` is `None` unless there is something
+        // to disclose.
         let out: BTreeMap<String, MapJson> = mods
             .iter()
             .map(|(m, (eff, n))| (m.clone(), MapJson { effects: eff.iter().cloned().collect(), functions: *n }))
             .collect();
+        if let Some(completeness) = comp.fields() {
+            let doc = MapHedgedJson { modules: out, completeness };
+            println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+            return 0;
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
