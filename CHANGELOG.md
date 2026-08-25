@@ -9,6 +9,16 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **The README/AGENTS spec-claim gate now reads two spellings it was structurally blind to.** Its claim
+  grammar was `spec` + one to FOUR of `[-: "]`, which cannot reach a version behind an ALIGNED envelope
+  column (`"spec":    "0.32"` — six separators, the padding that had already defeated a hand sweep at
+  0.30) nor one behind a markdown link (`[candor-spec](…) 0.32`). Both were live in shipped documents in
+  this family while every gate read clean over them. The grammar is now `spec` + one to EIGHT of
+  `[-: "*)\]]`, the expected value is still DERIVED from `candor_report::SPEC_VERSION`, and the
+  discriminating control carries both new spellings — so a silent narrowing reddens rather than going
+  quiet. Measured: with the old grammar, a README carrying `"spec":    "0.31"` and `[candor-spec](…)
+  0.30` passed this test.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (crates and `Cargo.lock`); no analyzer change.

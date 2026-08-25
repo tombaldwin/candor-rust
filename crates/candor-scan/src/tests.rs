@@ -6225,39 +6225,54 @@ trait G {
             }
         }
 
-        // THE EXEMPTION MUST DISCRIMINATE, and the scanner must actually see all three spellings.
+        // THE EXEMPTION MUST DISCRIMINATE, and the scanner must actually see every spelling.
         // Without this control, an exemption that matched everything — or a scanner that found
         // nothing — turns the loop above into a no-op that passes for the same reason a correct run
         // does, which is the vacuity this family keeps finding in its own instruments.
+        //
+        // THE LAST TWO LINES ARE THE ⟨0.32⟩ WIDENING, and each is a spelling that was live in a
+        // shipped doc while every gate in the family read clean over it:
+        //   · the ALIGNED envelope column — SPEC.md's own `"spec":    "0.32"` — has a SIX-character
+        //     separator run, so a `{1,4}` grammar cannot reach the digits. `check_agents_drift.py`'s
+        //     header already records that the padding "defeated a hand sweep for the exact string" at
+        //     0.30; it defeated the automated one too, one layer down, and nobody had asked.
+        //   · the MARKDOWN LINK — candor-swift/README.md line 3 is `[candor-spec](…) 0.32`, where the
+        //     separator between the word and the version is `) `. That claim was in the file this very
+        //     gate's swift original reads, and the swift original could not see it.
         let sample = "carrying `unitKind` (spec 0.8, informative); ordinary\n\
                       This project is on candor-scan 9.9.9 (spec 0.9).\n\
                       a section reference, spec §6.1, is not a version\n\
                       the gate prints { \"spec\": \"0.7\", \"ok\": true }\n\
-                      and the hyphenated attributive spec-0.6 form\n";
+                      and the hyphenated attributive spec-0.6 form\n\
+                      an aligned envelope column, { \"spec\":    \"0.5\" }\n\
+                      a markdown link [candor-spec](https://example.org/candor-spec) 0.4\n";
         let flagged: Vec<String> = spec_claims(sample).into_iter()
             .filter(|(_, tail)| !tail.starts_with(", informative)"))
             .map(|(v, _)| v).collect();
-        assert_eq!(flagged, vec!["0.9".to_string(), "0.7".to_string(), "0.6".to_string()],
-            "the exemption must skip the annotated claim, keep the live prose one, SEE the JSON and \
-             hyphenated spellings, and never read `spec §6.1` as a version");
+        assert_eq!(flagged, ["0.9", "0.7", "0.6", "0.5", "0.4"].map(String::from).to_vec(),
+            "the exemption must skip the annotated claim, keep the live prose one, SEE the JSON, \
+             hyphenated, ALIGNED-JSON and MARKDOWN-LINK spellings, and never read `spec §6.1` as a \
+             version");
     }
 
     /// Every `spec` version claim in a document, as `(version, the 16 chars after it)`.
     ///
-    /// The shape candor-swift's `AgentsDocDriftTests` pins, ported: `spec` followed by one to four of
-    /// `[-: "]` and then `<digits>.<digits>`. That separator class is what keeps `spec §6.1` and
-    /// `SPEC §2.2` — SECTION references — from reading as versions, while covering `spec 0.32`,
-    /// `spec-0.32` and `"spec": "0.32"` alike. The separator run is taken greedily and backtracked
-    /// down to one, which is what the regex's `{1,4}` does.
+    /// The family's shared claim grammar: `spec`, then one to eight of `[-: "*)\]]`, then
+    /// `<digits>.<digits>`. The separator class is what keeps `spec §6.1` and `SPEC §2.2` — SECTION
+    /// references — from reading as versions, while covering `spec 0.32`, `spec-0.32`,
+    /// `"spec": "0.32"`, the ALIGNED `"spec":    "0.32"` and the markdown-link `[candor-spec](…) 0.32`
+    /// alike. The separator run is taken greedily and backtracked down to one, which is what the
+    /// equivalent regex's `{1,8}` does in the java/ts/swift/agents copies of this grammar; the control
+    /// above is byte-for-byte the same fixture in all five, so the copies cannot drift apart silently.
     fn spec_claims(text: &str) -> Vec<(String, String)> {
-        const SEP: [char; 4] = ['-', ':', ' ', '"'];
+        const SEP: [char; 7] = ['-', ':', ' ', '"', '*', ')', ']'];
         let c: Vec<char> = text.chars().collect();
         let mut out = Vec::new();
         let mut i = 0usize;
         while i + 4 <= c.len() {
             if c[i..i + 4] != ['s', 'p', 'e', 'c'] { i += 1; continue; }
             let mut seps = 0usize;
-            while seps < 4 && i + 4 + seps < c.len() && SEP.contains(&c[i + 4 + seps]) { seps += 1; }
+            while seps < 8 && i + 4 + seps < c.len() && SEP.contains(&c[i + 4 + seps]) { seps += 1; }
             while seps >= 1 {
                 let s = i + 4 + seps;
                 let mut j = s;
