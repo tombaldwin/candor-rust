@@ -392,7 +392,55 @@ pub(crate) fn rank(c: &Change, top_level: &BTreeSet<String>) -> u8 {
 /// The Claude Code receipt's report-derived fields, emitted as shell-friendly `key<TAB>value` lines
 /// so `candor-run.sh` reads them without a JSON parser (it used inline Python heredocs). Fields:
 /// `fns`, `effects` (count-prefixed, in the receipt's display order), `unresolved`, `calibrated`
-/// (`<crates>|<prefixes>`), `encountered` (crates candor saw resolved calls into).
+/// (`<crates>|<prefixes>`), `encountered` (crates candor saw resolved calls into), and — since ⟨R55⟩,
+/// ONLY when the report is incomplete — a trailing `incomplete\ttrue` row (below).
+///
+/// **⟨R55⟩ SOUNDNESS.md: `receipt` carried NO completeness reader at all**, the same defect `diff` had
+/// (R54, `f3bedac`) and the same fixture: over a report declaring an unread `excluded` class, every
+/// field above answered as if the report were whole, exit 0, no caveat on any channel.
+///
+/// **THE SHAPE QUESTION `f3bedac` LEFT OPEN: TSV HAS NO ENVELOPE, SO WHERE DOES A CAVEAT GO?** Three
+/// candidates were on the table and none had a clear winner reasoned in the abstract: a leading `#`
+/// comment line (unclear whether a consumer skips it or reads it as data), an extra COLUMN glued onto
+/// an existing row, or the disclosure going out on stderr only. The tie-break is this format's ONE
+/// real consumer, `candor-run.sh` (verified by reading it, not assumed): it parses with
+/// `while IFS=$'\t' read -r k v; do case "$k" in fns) …; effects) …; esac; done`, over stdout captured
+/// with `2>/dev/null` — stderr is thrown away before the loop ever runs. That resolves two of the
+/// three questions empirically rather than by guessing:
+///
+/// ```text
+///   effects\t3 Fs\tINCOMPLETE   (extra column)   → EFFS becomes "3 Fs<TAB>INCOMPLETE" — the loop's
+///                                                   `read -r k v` glues any field past the 2nd into
+///                                                   the LAST one, so the existing `effects` VALUE is
+///                                                   silently corrupted with an embedded tab. Measured.
+///   (nothing on stdout, only stderr)               → invisible: `2>/dev/null` discards it before the
+///                                                   loop sees a single byte. This is the exact failure
+///                                                   ⟨R55⟩ exists to close, reintroduced as the fix.
+///   incomplete\ttrue            (NEW ROW)          → `case "$k"` has no `incomplete)` arm, falls
+///                                                   through, changes NOTHING about fns/effects/
+///                                                   unresolved/calibrated/encountered. Measured.
+/// ```
+///
+/// So this ships a **NEW ROW using the SAME `key<TAB>value` schema the other five already are** —
+/// not a bare `#` comment, because a comment has no name a future consumer can switch on (whereas
+/// extending the case statement with `incomplete) INCOMPLETE="$v" ;;` is a one-line change), and not
+/// an extra column, which the measurement above shows corrupts data rather than merely being ignored.
+/// A `#` line WOULD also survive today's parser (it fails the same `case` match `incomplete` does) —
+/// the two are equally safe against *this* consumer, and a hypothetical future consumer that reads
+/// receipt output by fixed LINE COUNT rather than by key would be equally exposed to either — but only
+/// the named row is self-documenting and matches the format's own convention, so the tie goes to it.
+///
+/// **THE VALUE IS A BARE BOOLEAN, NOT THE FULL MANIFEST.** A TSV cell cannot safely carry `diff`/
+/// `gains`' JSON arrays (a path or reason containing a tab or newline would corrupt the row bent to
+/// hold it), so the full detail — which unit, which exclusion class, which report judged nothing —
+/// goes out on **stderr** via [`crate::completeness::ReportCompleteness::eprint_note`], exactly as
+/// `fix` already does for a verb whose stdout is a pinned consumer surface. Putting it on stderr TOO
+/// is not the rejected candidate 3 (stderr ALONE): the machine-actionable flag ships on stdout inside
+/// the row above, and stderr is now an ADDITIONAL channel for a human running `candor-query receipt`
+/// directly at a terminal, not the only one — which is the distinction that made candidate 3 unsound.
+///
+/// **OMITTED ENTIRELY ON A COMPLETE REPORT** (`skip`, not `incomplete\tfalse`), so the five pre-⟨R55⟩
+/// lines stay byte-identical to today's on every intact run.
 pub(crate) fn cmd_receipt(args: &[String]) -> i32 {
     let Some(pre) = args.first().map(String::as_str) else {
         eprintln!("usage: candor-query receipt <prefix>");
@@ -403,6 +451,10 @@ pub(crate) fn cmd_receipt(args: &[String]) -> i32 {
         Ok(v) => v,
         Err(c) => return c,
     };
+    // ⟨R55⟩ Read ONCE, AFTER the loud load above succeeds — `cmd_diff`'s ordering (R54), for the same
+    // reason: a bad/typo'd prefix must stay the plain "no report files" error, never a hedged answer.
+    // `receipt` is DESCRIPTIVE (no `ok`, no exit-code obligation), so this moves neither.
+    let comp = crate::completeness::report_completeness(pre);
     let (tally, unresolved) = tally_effects(&fns);
     let unresolved = unresolved.len();
     // Receipt display order (`RECEIPT_ORDER`, module-level): a permutation of `candor_report::EFFECTS`,
@@ -424,6 +476,21 @@ pub(crate) fn cmd_receipt(args: &[String]) -> i32 {
     println!("unresolved\t{unresolved}");
     println!("calibrated\t{}|{}", join(&calib_c), join(&calib_p));
     println!("encountered\t{}", join(&encountered));
+    // ⟨R55⟩ See cmd_receipt's own doc comment for the shape reasoning. A no-op on a complete report —
+    // no sixth line, nothing on stderr — so an intact run's five lines above stay byte-identical.
+    if comp.must_hedge() {
+        println!("incomplete\ttrue");
+        comp.eprint_note(
+            "the fields above are computed against only what candor could see in this report",
+            &format!(
+                "A gap here can UNDER-count `fns`/`effects`, hide a class from `encountered`, or leave \
+                 `unresolved` short — this row's boolean is the whole of the machine-readable warning \
+                 (a TSV cell cannot safely carry the manifest itself). {} Re-scan before trusting this \
+                 receipt as complete.",
+                comp.gate_line()
+            ),
+        );
+    }
     0
 }
 

@@ -6128,3 +6128,173 @@ fn diff_cannot_raise_the_cross_policy_cause_because_it_holds_no_policy_to_ask() 
         "⟨0.33⟩ cannot fire on a verb with no `--policy` to hold a deny set against: {v}");
     assert_eq!(v["changes"][0]["gained"], serde_json::json!(["Fs"]), "{v}");
 }
+
+// ── R55 (SOUNDNESS.md): `receipt` (TSV) had NO completeness reader at all ──────────────────────────
+
+/// ⟨R55⟩ **THE INTACT CONTROL, WRITTEN FIRST.** `receipt` over a complete report must be BYTE-IDENTICAL
+/// to its pre-⟨R55⟩ shape — exactly five `key<TAB>value` lines on stdout, in this exact order, nothing
+/// on stderr. Every later test in this section only proves the hedge fires; this one proves it does
+/// NOT fire where it must not, which a "no caveat key present" check alone cannot: key order or an
+/// added blank line would pass that shallow assertion and still break `candor-run.sh`'s line-oriented
+/// parser (the `f3bedac` control lesson, applied to the sixth output this rung touches).
+#[test]
+fn receipt_over_an_intact_report_is_byte_identical_to_the_pre_r55_shape() {
+    let f = Fixture::new("receipt-r55-intact");
+    f.write_report(); // inner -> outer, inner does Fs — no `excluded`/`analyzed` key at all (pre-⟨0.21⟩ shape)
+    let out = Command::new(bin()).args(["receipt", &f.prefix]).output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["fns\t2", "effects\t2 Fs", "unresolved\t0", "calibrated\t|", "encountered\t"],
+        "exactly the pre-⟨R55⟩ five lines, same order, no sixth line: {stdout:?}"
+    );
+    assert!(out.stderr.is_empty(), "an intact report must print NOTHING on stderr: {:?}", out.stderr);
+}
+
+/// ⟨R55⟩ **THE DEFECT, reproduced on the exact fixture R54/⟨0.32⟩ were measured on**: a report whose
+/// `excluded` names a class the producing scan never opened (`peeked: false`, no `judgedElsewhere`).
+/// Before this fix every field below answered as if the report were whole, at exit 0, on every channel.
+///
+/// This also doubles as the shape control for the fix itself: the FIVE existing lines must carry the
+/// SAME values as the intact control above (the new row must not perturb them — the failure mode
+/// measured against the "extra column" candidate in `cmd_receipt`'s doc comment), and the caveat must
+/// land as a SIXTH, NAMED row a `case`-dispatching consumer's unmatched arm silently drops.
+#[test]
+fn receipt_discloses_an_unread_exclusion_class() {
+    let f = Fixture::new("receipt-r55-unread");
+    let report = r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.32"},"package":"rpt",
+        "analyzed":{"count":2,"digest":"d"},
+        "excluded":[{"class":"non-library-target","count":1,"peeked":false,"reason":"tests/"}],
+        "functions":[
+          {"fn":"inner","loc":"s:1","inferred":["Fs"],"direct":["Fs"],"hash":"h1"},
+          {"fn":"outer","loc":"s:2","inferred":["Fs"],"hash":"h2","calls":["inner"]}]}"#;
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+
+    let out = Command::new(bin()).args(["receipt", &f.prefix]).output().expect("run");
+    assert_eq!(out.status.code(), Some(0), "receipt is DESCRIPTIVE — the exit code does not move");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        &lines[..5],
+        ["fns\t2", "effects\t2 Fs", "unresolved\t0", "calibrated\t|", "encountered\t"],
+        "the five pre-existing fields must carry their ORDINARY values, uncorrupted by the caveat: {stdout:?}"
+    );
+    assert_eq!(lines.get(5), Some(&"incomplete\ttrue"),
+        "a SIXTH, NAMED row — not folded into an existing line, not a bare `#` comment: {stdout:?}");
+    assert_eq!(lines.len(), 6, "no seventh line: {stdout:?}");
+
+    // The full explanation is NOT on stdout (it would corrupt the `key<TAB>value` surface) — it is on
+    // stderr, ADDITIONALLY to the stdout flag above (never stderr ALONE — that is the rejected
+    // candidate 3, invisible to `candor-run.sh`'s `2>/dev/null` capture).
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("⚠ INCOMPLETE") && stderr.contains("non-library-target"),
+        "stderr names the cause for a human running `receipt` directly: {stderr}");
+}
+
+/// ⟨R55⟩ **THE `case`-DISPATCH CONTROL** — the caveat row must be exactly what `cmd_receipt`'s doc
+/// comment measured `candor-run.sh`'s real parser do with it: an unmatched key, silently dropped,
+/// touching NONE of the five variables the loop assigns. This is the closest an integration test can
+/// get to driving the actual consumer script without shelling out to bash from Rust; it reimplements
+/// the loop's `case` dispatch verbatim and asserts on the SAME five variable names the script uses.
+#[test]
+fn receipt_incomplete_row_is_invisible_to_the_case_dispatch_consumer() {
+    let f = Fixture::new("receipt-r55-dispatch");
+    let report = r#"{"candor":{"version":"t","toolchain":"stable","spec":"0.32"},"package":"rpt",
+        "analyzed":{"count":1,"digest":"d"},
+        "excluded":[{"class":"build-script","count":1,"peeked":false,"reason":"compile time"}],
+        "functions":[{"fn":"inner","loc":"s:1","inferred":["Fs"],"direct":["Fs"],"hash":"h1"}]}"#;
+    std::fs::write(format!("{}.rpt.scan.json", f.prefix), report).unwrap();
+    let out = Command::new(bin()).args(["receipt", &f.prefix]).output().expect("run");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+
+    let (mut fns, mut effs, mut unres, mut calib, mut enc) =
+        (String::new(), String::new(), String::new(), String::new(), String::new());
+    for line in stdout.lines() {
+        let Some((k, v)) = line.split_once('\t') else { continue };
+        match k {
+            "fns" => fns = v.to_string(),
+            "effects" => effs = v.to_string(),
+            "unresolved" => unres = v.to_string(),
+            "calibrated" => calib = v.to_string(),
+            "encountered" => enc = v.to_string(),
+            _ => {} // candor-run.sh's `case` falls through here too — `incomplete` matches no arm
+        }
+    }
+    assert_eq!((fns.as_str(), effs.as_str(), unres.as_str(), calib.as_str(), enc.as_str()),
+        ("1", "1 Fs", "0", "|", ""),
+        "the caveat row must change none of the five variables a case-dispatching consumer reads");
+}
+
+// ── candor-spec PART 70: `whatif` had no cross-policy (⟨0.33⟩) reader ───────────────────────────────
+
+/// ⟨0.33⟩ candor-spec PART 70 pinned this RED: `whatif` never called
+/// [`crate::completeness::arm_unasked_rules`], so a report `peeked: true` under a deny set NARROWER
+/// than the policy `whatif` is asked to check answered as if the peek had covered it — `ok` PRESENT
+/// (`false`) where SPEC §2 ⟨0.33⟩ requires `incomplete: true` with `ok` OMITTED. The fixture is the one
+/// PART 70 and the ⟨0.33⟩ gate rung already use: `excluded[].peeked: true` (the class WAS read, so
+/// ⟨0.32⟩'s unread-class cause does not fire and `outOfScope: []` keeps ⟨0.30⟩ quiet too) with
+/// `scannedUnder: {deny: ["deny Net"]}` — the peek was bounded by `deny Net`, and this asks about `Exec`.
+///
+/// THE SHAPE IS NOT THE REFUSAL'S (SPEC §3.1 ⟨0.24⟩): `affected`/`violations` still ship, no `refused`,
+/// exit stays whatever a normal violation would give (1, never 2) — `whatif` is consulted BEFORE an
+/// edit and a partial answer beats one withdrawn entirely.
+#[test]
+fn whatif_raises_the_cross_policy_cause_over_a_peek_bounded_by_a_narrower_deny_set() {
+    let f = Fixture::new("whatif-r55-0-33");
+    write_excluded_report_under(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        Some(r#"["deny Net"]"#),
+    );
+    let exec_policy = write_policy(&f, "exec.policy", "deny Exec\n");
+
+    // THE DEFECT: `whatif inner Exec` under `deny Exec`, over a report whose peek only ever asked
+    // `deny Net`. `inner` performs `Fs` today (irrelevant — `whatif` asks a HYPOTHETICAL), and `deny
+    // Exec` has no scope restriction, so the introduced `Exec` WOULD violate — but the peek that
+    // produced this report never checked the excluded `build-script` class against `Exec` at all, so
+    // the answer must be withdrawn rather than asserted.
+    let out = Command::new(bin())
+        .args(["whatif", "inner", "Exec", "--report", &f.prefix, "--policy", &exec_policy, "--json"])
+        .output()
+        .expect("run candor-query");
+    assert_ne!(out.status.code(), Some(2), "a partial answer beats a refusal — whatif never exits 2");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.get("ok").is_none(), "`ok` must be OMITTED, never `false` — the fabrication mirror: {v}");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v}");
+    assert!(v.get("refused").is_none(), "this is NOT the refusal document's shape: {v}");
+    assert!(v["affected"].as_array().is_some_and(|a| !a.is_empty()),
+        "the blast radius still ships, withdrawn `ok` or not: {v}");
+    assert!(v["violations"].as_array().is_some_and(|a| !a.is_empty()),
+        "the hypothetical violation still ships: {v}");
+
+    // THE MATCHING-POLICY CONTROL: the SAME report, asked about `Net` — the effect the peek WAS put.
+    // `own` ({Net}) is a subset of `scannedUnder` ({Net}), so ⟨0.33⟩ must NOT fire, and nothing else in
+    // this report does either (`outOfScope: []`, and `peeked: true` keeps it out of the unread list) —
+    // an ORDINARY answer, `ok` present, no `incomplete`. Without this control, an implementation that
+    // withdraws `ok` unconditionally over any `excluded` entry would pass the defect row above too.
+    let net_policy = write_policy(&f, "net.policy", "deny Net\n");
+    let out = Command::new(bin())
+        .args(["whatif", "inner", "Net", "--report", &f.prefix, "--policy", &net_policy, "--json"])
+        .output()
+        .expect("run candor-query");
+    assert_eq!(out.status.code(), Some(1), "deny Net over an fn `whatif` puts Net onto: a real violation");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.get("ok").is_some(), "a peek asked the SAME question owes an ordinary answer: {v}");
+    assert!(v.get("incomplete").is_none(), "the matching-policy control gains no caveat: {v}");
+    assert!(v["violations"].as_array().is_some_and(|a| !a.is_empty()), "{v}");
+
+    // THE NO-POLICY CONTROL: `whatif` with no `--policy` at all never calls `arm_unasked_rules` (there
+    // is no `ParsedPolicy` to arm against), so ⟨0.33⟩ cannot fire — it must fall back to whatever the
+    // OTHER causes say, and this report has none of those either (`peeked: true`, `outOfScope: []`).
+    let out = Command::new(bin())
+        .args(["whatif", "inner", "Exec", "--report", &f.prefix, "--json"])
+        .output()
+        .expect("run candor-query");
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+    assert!(v.get("incomplete").is_none(),
+        "no policy means no deny set to compare `scannedUnder` against — ⟨0.33⟩ structurally cannot \
+         fire, mirroring `diff`'s reasoning for holding no policy at all: {v}");
+}

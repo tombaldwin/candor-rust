@@ -9,6 +9,42 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`receipt` (TSV) carried NO completeness reader at all — SOUNDNESS.md R55, closed.** The same defect
+  `diff` had (R54), reproduced on the same fixture: over a report declaring an unread `excluded` class,
+  every `fns`/`effects`/`unresolved`/`calibrated`/`encountered` line answered as if the report were
+  whole, exit 0, no caveat anywhere.
+
+  `f3bedac` left this open because TSV has no envelope to hedge inside and none of three candidates read
+  as clearly right in the abstract (a leading `#` comment, an extra column, or stderr alone). The tie is
+  broken by this format's ONE real consumer, `candor-run.sh`, read rather than guessed: it parses with
+  `while IFS=$'\t' read -r k v; do case "$k" in fns) …; esac; done` over stdout captured with
+  `2>/dev/null`. Measured against that parser: an extra COLUMN on an existing row corrupts the row's
+  value (the loop's `read -r k v` glues any third field onto the last variable, so `effects` came back
+  holding an embedded tab); stderr alone never reaches the loop at all (the exact failure this rung
+  exists to close, reintroduced as the fix). A NEW `key<TAB>value` ROW — `incomplete\ttrue`, appended
+  only when the report is incomplete — matches neither failure mode: the `case` has no arm for
+  `incomplete`, so it falls through untouched, exactly as a bare `#` line would, but a NAMED row is
+  self-documenting and matches the format's own convention (extending the consumer's case statement with
+  `incomplete) …` is a one-line change; a comment has nothing to switch on). The full explanation — which
+  class, which report — cannot safely live in one TSV cell, so it goes to stderr ADDITIONALLY to the
+  stdout flag (never the sole channel, which is what made candidate three unsound).
+
+  Byte-identical on an intact report: the five pre-⟨R55⟩ lines are unchanged, in order, and stderr stays
+  empty — proven against the pre-fix binary (`cmp`, matching MD5) rather than by a shallow "no caveat
+  key" check.
+
+- **⚠ candor-spec conformance PART 70: `whatif`'s ⟨0.33⟩ cross-policy cause never fired.** `whatif` read
+  the bare, unarmed completeness manifest and never called `arm_unread`/`arm_unasked_rules` — the same
+  union `unverified` and `fix`/`fix-gate` already apply to their own parsed policy. The ⟨0.32⟩ unread-class
+  cause still worked (`must_hedge` reads `unread` directly, unarmed), which is why that cell was already
+  green; but ⟨0.33⟩'s cross-policy cause is populated ONLY by `arm_unasked_rules`, so a report whose peek
+  was bounded by a narrower `deny` set than the policy `whatif` is asked to check answered as an ordinary
+  verdict — `ok` PRESENT (`false`) — where SPEC §2 ⟨0.33⟩ requires `incomplete: true` with `ok` OMITTED.
+  Now armed on the SAME `ParsedPolicy` `whatif` already loads, only when a policy was actually given (a
+  no-policy run has no deny set to compare `scannedUnder` against, mirroring `diff`'s reasoning for
+  holding no policy at all). PART 70's rust row: `outOfScope=OK unread-class=OK cross-policy=OK`,
+  controls `violating=OK clean=OK` in both polarities.
+
 - **`diff` carried NO completeness reader at all — SOUNDNESS.md R54, closed.** `diff` answered
   `{baseline_version, engine_version, changes: []}` with no caveat on either channel over a report
   declaring an unread `excluded` class, exit 0 unchanged. MEASURED at HEAD before this fix, on a report
@@ -31,8 +67,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
   ⟨0.33⟩'s cross-policy cause cannot fire on this verb — `diff` never parses a `--policy`, so the
   consumer deny set is always empty and vacuously a subset of any `scannedUnder`, verified rather than
-  assumed. `receipt` (SOUNDNESS.md R55) is a TSV surface with no established caveat shape to port — left
-  open pending a SPEC ruling on that shape (see SOUNDNESS.md's own note against inventing a fourth one).
+  assumed. `receipt` (SOUNDNESS.md R55) was left open at this commit as a TSV surface with no established
+  caveat shape to port — see the entry above this one for the shape it landed on.
 
 - **⚠ ⟨0.33⟩ `scannedUnder`: a report now records the deny set its peek was BOUNDED BY, and
   `gate --report` refuses when that set does not cover the policy being applied.** SPEC §2 ⟨0.33⟩,
