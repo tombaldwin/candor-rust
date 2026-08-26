@@ -9,6 +9,31 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **`diff` carried NO completeness reader at all — SOUNDNESS.md R54, closed.** `diff` answered
+  `{baseline_version, engine_version, changes: []}` with no caveat on either channel over a report
+  declaring an unread `excluded` class, exit 0 unchanged. MEASURED at HEAD before this fix, on a report
+  whose `excluded` names one class with `peeked: false`:
+
+  ```text
+  diff cur.json base.json --json   {"baseline_version":…,"engine_version":…,"changes":[…]}   exit 0   no caveat
+  ```
+
+  `diff` reads TWO locators that fail in OPPOSITE directions: an unread unit in the CURRENT tree can hide
+  a real gain from `changes`, while one in the BASELINE tree can make a longstanding effect read as newly
+  gained (or a lost one read as never-had). A bare `incomplete: true` cannot say which side was partial,
+  so this reuses `gains`' own PREFIXED shape (`incomplete` + `baselineIncomplete`, now factored into
+  `completeness::BaselineCompletenessFields`) rather than a fourth spelling. Both channels now carry the
+  hedge, disclosed per side (`CURRENT`/`BASELINE`, never combined into one sentence), and the human
+  channel withdraws its determined negative ("no effect changes") under a hedge rather than leaving it
+  standing beside the note. `diff` is descriptive (no `ok`, no exit-code obligation), so neither the
+  gain-ratchet output nor the exit moves. Healthy output is byte-identical to the pre-fix binary on both
+  channels, over a real gain and an empty-changes fixture, diffed rather than assumed.
+
+  ⟨0.33⟩'s cross-policy cause cannot fire on this verb — `diff` never parses a `--policy`, so the
+  consumer deny set is always empty and vacuously a subset of any `scannedUnder`, verified rather than
+  assumed. `receipt` (SOUNDNESS.md R55) is a TSV surface with no established caveat shape to port — left
+  open pending a SPEC ruling on that shape (see SOUNDNESS.md's own note against inventing a fourth one).
+
 - **⚠ ⟨0.33⟩ `scannedUnder`: a report now records the deny set its peek was BOUNDED BY, and
   `gate --report` refuses when that set does not cover the policy being applied.** SPEC §2 ⟨0.33⟩,
   ported from the candor-java reference. `excluded[].peeked: true` is true only relative to the
