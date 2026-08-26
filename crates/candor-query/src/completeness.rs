@@ -123,6 +123,33 @@ pub(crate) struct CompletenessFields {
     pub(crate) unread: Vec<String>,
 }
 
+/// ⟨R54⟩ [`CompletenessFields`]'s SAME key set, `baseline`-prefixed — for a two-locator verb whose
+/// BASELINE side must be disclosed SEPARATELY from its CURRENT side (SOUNDNESS.md R54: `diff`). This is
+/// not a new spelling: `gains --json` has published exactly this shape since ⟨0.28⟩
+/// (`baselineIncomplete`/`baselineUnanalyzed`/`baselineJudgedNothing`/`baselineNoManifest`, built by
+/// hand in `diff.rs`'s `attach_manifest`) precisely because a bare `incomplete: true` cannot say WHICH
+/// of two reports was partial, and *the baseline was partial* / *the current scan was partial* license
+/// opposite readings of the same comparison. This struct makes that shape reusable by a TYPED document
+/// (`#[serde(flatten)]`, [`ReportCompleteness::baseline_fields`]) rather than a `serde_json::Value` one:
+/// see [`ReportCompleteness::fields`]'s own doc for why `to_value` is the wrong route for a struct whose
+/// field ORDER is part of the byte-identical contract.
+#[derive(serde::Serialize)]
+pub(crate) struct BaselineCompletenessFields {
+    #[serde(rename = "baselineIncomplete")]
+    pub(crate) incomplete: bool,
+    #[serde(rename = "baselineUnanalyzed", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unanalyzed: Vec<candor_report::UnanalyzedUnit>,
+    #[serde(rename = "baselineJudgedNothing", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) judged_nothing: Vec<String>,
+    #[serde(rename = "baselineNoManifest", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) no_manifest: Vec<String>,
+    /// See [`CompletenessFields::unread`] — carried here on the same terms (empty and omitted unless
+    /// this verb ever arms `unread_armed` on the baseline side, which none does today) so a future
+    /// policy-carrying two-locator verb inherits the wire key rather than needing a second rung to add it.
+    #[serde(rename = "baselineUnread", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unread: Vec<String>,
+}
+
 /// The manifest as far as it could be READ, unioned across the reports under a locator.
 pub(crate) struct ReportCompleteness {
     pub(crate) unanalyzed: Vec<candor_report::UnanalyzedUnit>,
@@ -533,6 +560,22 @@ impl ReportCompleteness {
             // scheduled"*. The descriptive hedge raises `incomplete: true` and adds NO key of its own —
             // the rule this module already applies to `unreadable`, and the one ts and swift state for
             // themselves. Closing the rust-only ADVISORY key four-way is a separate rung.
+            unread: if self.unread_armed { self.unread.clone() } else { Vec::new() },
+        })
+    }
+
+    /// ⟨R54⟩ [`Self::fields`], `baseline`-prefixed — see [`BaselineCompletenessFields`] for why this is
+    /// a reused shape and not a new one. Same trigger (`must_hedge`), same no-op-when-complete rule, so
+    /// a two-locator verb's intact side stays byte-identical to a one-locator verb's.
+    pub(crate) fn baseline_fields(&self) -> Option<BaselineCompletenessFields> {
+        if !self.must_hedge() {
+            return None;
+        }
+        Some(BaselineCompletenessFields {
+            incomplete: true,
+            unanalyzed: self.unanalyzed.clone(),
+            judged_nothing: self.judged_nothing.clone(),
+            no_manifest: self.no_manifest.clone(),
             unread: if self.unread_armed { self.unread.clone() } else { Vec::new() },
         })
     }

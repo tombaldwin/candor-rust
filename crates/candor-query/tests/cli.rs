@@ -5971,3 +5971,160 @@ fn a_single_unit_verdict_keeps_every_key_it_had() {
     let names: Vec<&str> = rows.iter().map(|r| r["fn"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["inner", "outer"], "the `fn` field stays the bare NAME: {doc}");
 }
+
+// ── R54 (SOUNDNESS.md): `diff` had NO completeness reader at all ───────────────────────────────────
+
+/// ⟨R54⟩ **`diff` ANSWERED `{ baseline_version, engine_version, changes: [] }` WITH NO COMPLETENESS
+/// READER AT ALL** — over TWO reports that fail in OPPOSITE directions: an unread unit in the CURRENT
+/// tree can hide a real gain from `changes`, while one in the BASELINE tree can make a longstanding
+/// effect read as newly gained (or a lost one read as never-had). MEASURED at HEAD before this fix, on
+/// a current report whose `excluded` names one class with `peeked: false`:
+///
+/// ```text
+///   diff cur base --json   {"baseline_version":"","engine_version":"","changes":[…]}   exit 0   no caveat
+/// ```
+///
+/// — identically on the human channel. `diff`'s sibling `gains` already reads both locators and hedges
+/// both, in the PREFIXED spelling (`incomplete` + `baselineIncomplete`) — so this pins `diff` onto that
+/// SAME shape rather than a fourth spelling. Every assertion is on the CHANGES themselves (by function
+/// name), never on key presence alone — a hedge that shipped a flat answer would still pass "the key
+/// exists".
+#[test]
+fn diff_discloses_each_unread_locator_separately() {
+    let f = Fixture::new("diff-r54");
+    // One function, `app.svc.act`, gains `Fs` between baseline and current. `unread` independently
+    // marks EACH SIDE with an ⟨0.32⟩ unpeeked exclusion class — R54's point is that the two fail in
+    // opposite directions and must be disclosed (and tested) separately, never collapsed into one flag.
+    let make = |unread: bool, effects: &str| {
+        let excluded = if unread {
+            r#","excluded":[{"class":"generated-source","count":1,"peeked":false,"reason":"generated"}]"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"candor":{{"version":"t","spec":"0.33"}},"analyzed":{{"count":3}}{excluded},
+               "functions":[{{"fn":"app.svc.act","inferred":[{effects}],"direct":[{effects}]}}]}}"#,
+        )
+    };
+    let write = |tag: &str, cur_unread: bool, base_unread: bool, same_effects: bool| -> (String, String) {
+        let cur_pre = format!("{}.cur.{tag}", f.prefix);
+        let base_pre = format!("{}.base.{tag}", f.prefix);
+        std::fs::write(format!("{cur_pre}.app.rlib.json"), make(cur_unread, r#""Fs""#)).unwrap();
+        let base_eff = if same_effects { r#""Fs""# } else { "" };
+        std::fs::write(format!("{base_pre}.app.rlib.json"), make(base_unread, base_eff)).unwrap();
+        (cur_pre, base_pre)
+    };
+
+    // Cause: the CURRENT side unread, baseline intact.
+    let (cur, base) = write("cur", true, false, false);
+    let out = Command::new(bin()).args(["diff", &cur, &base, "--json"]).output().expect("run");
+    assert_eq!(out.status.code(), Some(0), "diff has no exit-code obligation (⟨0.32⟩ descriptive test)");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "diff answered flat over an unread CURRENT class: {v}");
+    assert!(v.get("baselineIncomplete").is_none(), "the intact baseline side must stay unflagged: {v}");
+    assert_eq!(v["changes"].as_array().unwrap().len(), 1, "…BESIDE the answer, never instead of it: {v}");
+    assert_eq!(v["changes"][0]["fn"], serde_json::json!("app.svc.act"), "{v}");
+    assert_eq!(v["changes"][0]["gained"], serde_json::json!(["Fs"]), "{v}");
+
+    // Cause: the BASELINE side unread, current intact — the OTHER prefix, and it must be THIS one, not
+    // the bare `incomplete` a single-flag design could not tell apart from the case above.
+    let (cur, base) = write("base", false, true, false);
+    let out = Command::new(bin()).args(["diff", &cur, &base, "--json"]).output().expect("run");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(v.get("incomplete").is_none(), "the intact current side must stay unflagged: {v}");
+    assert_eq!(v["baselineIncomplete"], serde_json::json!(true),
+        "diff answered flat over an unread BASELINE class: {v}");
+    assert_eq!(v["changes"].as_array().unwrap().len(), 1, "{v}");
+
+    // Cause: BOTH sides unread — both flags present, INDEPENDENTLY (not collapsed into one).
+    let (cur, base) = write("both", true, true, false);
+    let out = Command::new(bin()).args(["diff", &cur, &base, "--json"]).output().expect("run");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v}");
+    assert_eq!(v["baselineIncomplete"], serde_json::json!(true), "{v}");
+
+    // THE SHARPEST CELL: `changes: []` over an unread side is "nothing about this codebase's effects
+    // changed", asserted from two reports neither fully read — the determined negative this rung
+    // withdraws, on the human channel (the JSON `changes` array is already empty by construction, so
+    // JSON has nothing further to withdraw — only the prose sentence changes).
+    let (cur, base) = write("empty", true, true, true);
+    let out = Command::new(bin()).args(["diff", &cur, &base]).output().expect("run");
+    let human = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        human.contains("IN WHAT CANDOR COULD SEE") && human.contains("NOT \"nothing changed\""),
+        "the flat \"no effect changes\" sentence must be WITHDRAWN, not left standing beside the note: {human}"
+    );
+    assert_eq!(
+        human.matches("⚠ INCOMPLETE").count(), 2,
+        "both sides get their OWN note, never combined into one sentence: {human}"
+    );
+    assert!(human.contains("CURRENT") && human.contains("BASELINE") && human.contains("generated-source"),
+        "each note names its SIDE and the class: {human}");
+    let out = Command::new(bin()).args(["diff", &cur, &base, "--json"]).output().expect("run");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["incomplete"], serde_json::json!(true), "{v}");
+    assert_eq!(v["baselineIncomplete"], serde_json::json!(true), "{v}");
+    assert_eq!(v["changes"].as_array().unwrap().len(), 0, "{v}");
+
+    // THE HUMAN CHANNEL on the non-empty cell too, because a mutant that keeps the JSON fix and drops
+    // only the printed note survives every JSON-only assertion above (candor-spec `ec1a441`'s shape).
+    let (cur, base) = write("humancur", true, false, false);
+    let out = Command::new(bin()).args(["diff", &cur, &base]).output().expect("run");
+    let human = String::from_utf8(out.stdout).unwrap();
+    assert!(human.contains("⚠ INCOMPLETE") && human.contains("CURRENT") && human.contains("generated-source"),
+        "the prose channel must carry the note ON STDOUT, name the SIDE and the class: {human}");
+
+    // THE INTACT CONTROL: neither side carries an unread class — nothing to disclose. Without it every
+    // row above would pass just as well from a `diff` that hedges unconditionally, which makes every
+    // ordinary diff read as partial.
+    let (cur, base) = write("ok", false, false, false);
+    let out = Command::new(bin()).args(["diff", &cur, &base, "--json"]).output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(v.get("incomplete").is_none() && v.get("baselineIncomplete").is_none(),
+        "a complete pair gains NO caveat key on EITHER side: {v}");
+    let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    assert!(keys.iter().all(|k| ["baseline_version", "engine_version", "changes"].contains(k)),
+        "the healthy document keeps its pinned key set EXACTLY, got {keys:?}: {v}");
+    let out = Command::new(bin()).args(["diff", &cur, &base]).output().expect("run");
+    let human = String::from_utf8(out.stdout).unwrap();
+    assert!(!human.contains("INCOMPLETE"), "healthy prose gains no note: {human}");
+}
+
+/// ⟨R54⟩ **⟨0.33⟩'s `unasked_rules` cause STRUCTURALLY CANNOT FIRE for `diff`, verified rather than
+/// assumed** — the same reasoning candor-java's `1fdf0f2` states for its own `diff` (which never even
+/// parses a `--policy`): `diff`'s bespoke arg parser (see `cmd_diff`) recognizes only `--json`/`--text`/
+/// `--human` and rejects every other flag loud, so there is no `--policy` for it to hold, and
+/// `arm_unasked_rules` — the ONLY place that ever populates `unasked_rules` — is never called on this
+/// route (`grep -n arm_unasked_rules crates/candor-query/src/*.rs` shows only `fix.rs`/`unverified.rs`,
+/// the two verbs that DO carry a policy). A report `peeked: true` under a `scannedUnder` that would
+/// fail a `deny Net` gate must therefore answer CLEAN here — the consumer rule set is the empty set a
+/// verb with no policy always holds, and an empty set is a subset of everything.
+#[test]
+fn diff_cannot_raise_the_cross_policy_cause_because_it_holds_no_policy_to_ask() {
+    let f = Fixture::new("diff-r54-0-33");
+    let cur_pre = format!("{}.cur", f.prefix);
+    let base_pre = format!("{}.base", f.prefix);
+    // `peeked: true` (not an ⟨0.32⟩ unread class) + `scannedUnder` naming a deny set — the ONLY shape
+    // that can ever raise ⟨0.33⟩, and only for a verb that holds a policy to compare it against.
+    std::fs::write(
+        format!("{cur_pre}.app.rlib.json"),
+        r#"{"candor":{"version":"t","spec":"0.33"},"analyzed":{"count":3},
+            "excluded":[{"class":"build-script","count":1,"peeked":true,"reason":"compile time"}],
+            "scannedUnder":{"deny":["Net"]},
+            "functions":[{"fn":"app.svc.act","inferred":["Fs"],"direct":["Fs"]}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{base_pre}.app.rlib.json"),
+        r#"{"candor":{"version":"t","spec":"0.33"},"analyzed":{"count":3},
+            "functions":[{"fn":"app.svc.act","inferred":[],"direct":[]}]}"#,
+    )
+    .unwrap();
+    let out = Command::new(bin()).args(["diff", &cur_pre, &base_pre, "--json"]).output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(v.get("incomplete").is_none() && v.get("baselineIncomplete").is_none(),
+        "⟨0.33⟩ cannot fire on a verb with no `--policy` to hold a deny set against: {v}");
+    assert_eq!(v["changes"][0]["gained"], serde_json::json!(["Fs"]), "{v}");
+}

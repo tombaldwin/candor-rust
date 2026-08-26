@@ -79,6 +79,40 @@ pub(crate) struct DiffJson<'a> {
     pub(crate) baseline_version: &'a str,
     pub(crate) engine_version: &'a str,
     pub(crate) changes: Vec<Change>,
+    /// ⟨R54⟩ SOUNDNESS.md: `diff` carried NO completeness reader at all — see the module-level fix in
+    /// `cmd_diff` and [`crate::completeness::ReportCompleteness::fields`] for why this is `#[serde(
+    /// flatten)]`ed onto a TYPED field rather than attached to a `serde_json::Value` the way `gains`'
+    /// `attach_manifest` does: `to_value` does not preserve field order, and this struct's declared
+    /// order (`baseline_version, engine_version, changes`, NOT alphabetical) is part of the
+    /// byte-identical-on-an-intact-pair contract. `None` on an intact CURRENT report — no-op.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub(crate) completeness: Option<crate::completeness::CompletenessFields>,
+    /// ⟨R54⟩ The BASELINE side of the same hedge, `baseline`-prefixed — see
+    /// [`crate::completeness::BaselineCompletenessFields`]. `diff` reads TWO locators that fail in
+    /// OPPOSITE directions (an unread unit in the CURRENT tree can hide a real gain; one in the
+    /// BASELINE tree can make a longstanding effect read as newly gained), so the two are never merged
+    /// into one flag — this is `gains`' own established two-sided shape, ported rather than reinvented.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub(crate) baseline_completeness: Option<crate::completeness::BaselineCompletenessFields>,
+}
+
+/// ⟨R54⟩ SOUNDNESS.md: the human half of `diff`'s hedge, printed BEFORE the answer. `diff` reads TWO
+/// locators that fail in OPPOSITE directions: an unread unit in the CURRENT tree can hide a real gain
+/// from `changes`, while one in the BASELINE tree can make a longstanding effect read as newly gained
+/// (or a lost one read as never-had). Both are named, never collapsed into one sentence — the reason
+/// [`crate::completeness::BaselineCompletenessFields`] takes a distinct key set instead of one shared
+/// flag applies here exactly as it does on the machine channel.
+fn diff_note(comp: &crate::completeness::ReportCompleteness, side: &str) {
+    comp.print_note(
+        &format!("the changes below are computed against only the {side} report candor could see"),
+        &format!(
+            "A change hiding in an unread unit of the {side} tree means `changes` can MISS a real gain, \
+             or show a stale effect as newly gained (or lost) — and an empty `changes` reads as *nothing \
+             about this codebase's effects changed*, a claim built from two reports where at least one \
+             was not read in full. {} Re-scan before treating this diff as complete.",
+            comp.gate_line()
+        ),
+    );
 }
 
 pub(crate) fn cmd_diff(args: &[String]) -> i32 {
@@ -148,6 +182,13 @@ pub(crate) fn cmd_diff(args: &[String]) -> i32 {
         Ok(m) => m,
         Err(c) => return c,
     };
+    // ⟨R54⟩ SOUNDNESS.md: read ONCE for both channels, AFTER the loads above succeed — so a bad/typo'd
+    // locator stays the plain "no report files" error above rather than becoming a hedged answer
+    // (candor-java's `1fdf0f2` orders it identically, for the same reason). `diff` is DESCRIPTIVE (no
+    // `ok`, no exit-code obligation — the ⟨0.32⟩ test), so building these changes NEITHER the load
+    // errors above NOR any exit below.
+    let cur_comp = crate::completeness::report_completeness(cur_pre);
+    let base_comp = crate::completeness::report_completeness(base_pre);
     let empty = BTreeSet::new();
 
     let mut changes: Vec<Change> = Vec::new();
@@ -192,12 +233,38 @@ pub(crate) fn cmd_diff(args: &[String]) -> i32 {
 
     if want_json {
         changes.sort_by(|a, b| a.func.cmp(&b.func));
-        let out = DiffJson { baseline_version: bver, engine_version: ever, changes };
+        let out = DiffJson {
+            baseline_version: bver,
+            engine_version: ever,
+            changes,
+            completeness: cur_comp.fields(),
+            baseline_completeness: base_comp.baseline_fields(),
+        };
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return 0;
     }
 
+    // ⟨R54⟩ printed BEFORE the answer, one note per side that needs it — NEVER combined into one
+    // sentence (see `diff_note`), because a reader must be able to tell which half is soft.
+    if cur_comp.must_hedge() {
+        diff_note(&cur_comp, "CURRENT");
+    }
+    if base_comp.must_hedge() {
+        diff_note(&base_comp, "BASELINE");
+    }
+
     if changes.is_empty() {
+        // ⟨R54⟩ "no effect changes" IS the prose spelling of `changes: []` — the determined negative
+        // this rung exists to withdraw (the `callers`/`impact`/`path` precedent: a hedge that leaves the
+        // flat sentence standing beside its own note has not withdrawn anything).
+        if cur_comp.must_hedge() || base_comp.must_hedge() {
+            println!(
+                "candor: no effect changes IN WHAT CANDOR COULD SEE vs {base_pre} (@{}) — but see the \
+                 INCOMPLETE note(s) above; this is NOT \"nothing changed\".",
+                q_or(bver)
+            );
+            return 0;
+        }
         println!("candor: no effect changes vs {base_pre} (@{}).", q_or(bver));
         return 0;
     }
