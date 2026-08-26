@@ -361,7 +361,30 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
 
     // ⟨0.24⟩ Did the producing scan see all of the target's own source? SPEC §3.2 (`0075987`,
     // `ec1a441`) — see [`crate::completeness`] for why the answer is neither `ok: true` nor `ok: false`.
-    let comp = crate::completeness::report_completeness(prefix);
+    //
+    // ⟨0.33⟩ candor-spec PART 70: `whatif` read the bare, unarmed manifest here and never called
+    // [`crate::completeness::arm_unread`]/[`crate::completeness::arm_unasked_rules`] — the SAME union
+    // `unverified` and `fix`/`fix-gate` already apply to their own `parsed` policy (`unverified.rs`,
+    // `fix.rs`). The ⟨0.32⟩ unread-class cause still reached `must_hedge()` unarmed (that predicate reads
+    // `unread` directly — see its own doc), which is why PART 70 measured that cell OK without this call;
+    // but ⟨0.33⟩'s cross-policy cause is populated ONLY by `arm_unasked_rules`, which nothing on this
+    // route ever invoked, so a report `peeked: true` under a deny set narrower than THIS run's policy
+    // could never raise it — `unasked_rules` stayed structurally empty forever and `ok` answered as if
+    // the peek had been asked this policy's question. MEASURED: PART 70's cross-policy cell read
+    // `ok: false` PRESENT where `incomplete: true` with `ok` OMITTED was required.
+    //
+    // Armed only when a policy was actually loaded, matching `diff`'s converse reasoning exactly: a
+    // verb holding NO policy has no deny set for `arm_unasked_rules` to compare against (its `own` set
+    // is structurally empty, same as `diff`'s), so skipping the call rather than calling it with an
+    // empty policy changes nothing observable and avoids inventing a `ParsedPolicy` this route did not
+    // parse.
+    let comp = match parsed.as_ref() {
+        Some((_, pp)) => crate::completeness::arm_unasked_rules(
+            crate::completeness::arm_unread(crate::completeness::report_completeness(prefix), pp),
+            pp,
+        ),
+        None => crate::completeness::report_completeness(prefix),
+    };
     comp.warn_unreadable("whatif");
 
     // ⟨0.28⟩ SPEC §2: a CONFIGURED policy that parsed to zero rules asked nothing, so the pre-edit
