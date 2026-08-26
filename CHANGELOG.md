@@ -137,6 +137,18 @@ after upgrading; review policies and regenerate baselines with the new build.
   quiet. Measured: with the old grammar, a README carrying `"spec":    "0.31"` and `[candor-spec](…)
   0.30` passed this test.
 
+- **⚠ `git2::Repository::clone`/`clone_recurse`/`RepoBuilder::clone` — libgit2's actual network clone,
+  and arguably git2's most common entry point — reported ZERO effects and passed `deny Net` at exit 0.**
+  A corpus round found it on published 0.33.0. The classifier's own comment named the trap and then fell
+  into it: the git2 rule matched remote verbs precisely and deliberately left bare `::clone` unmatched so
+  it wouldn't over-charge `Remote::clone` (the derived `Clone`-trait dup of a `Remote` handle, genuinely
+  pure) — but that same bare-`::clone` exclusion also swallowed `Repository::clone`, the thing the
+  comment explicitly said it did NOT mean to exclude. Fixed with an FQN-exact carve-out (the same
+  technique already used for `reqwest::get`/`reqwest::blocking::get`), so it catches the real network
+  clone without re-widening `::clone` and undoing the fix it sits beside: `Remote::clone` stays pure,
+  every already-charged git2 remote verb (`fetch`/`push`/`download`/`connect`/`connect_auth`/`ls`/
+  `upload`) is unmoved, and a tree with no git2 usage scans byte-identical to before.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (crates and `Cargo.lock`); no analyzer change.

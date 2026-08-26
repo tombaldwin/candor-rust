@@ -265,6 +265,16 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // the `Clone`-trait dup of a `Remote` handle (pure), not `Repository::clone`. (Found
     // hardening on gitui: `remote.fetch`/`remote.push` were classified network-free — a git
     // client reporting it makes no network calls.)
+    //
+    // `Repository::clone`/`clone_recurse`/`clone_local`/`init` (via `RepoBuilder::clone`) IS the
+    // thing the comment above named and then excluded anyway: the bare `::clone` denylist meant
+    // to keep out `Remote::clone` (the derived trait dup) also swallowed `Repository::clone` —
+    // libgit2's actual network clone, and arguably git2's single most common entry point. A
+    // fabrication corpus round caught it: `git2::Repository::clone(url, path)` reported ZERO
+    // effects and passed `deny Net` at exit 0. FQN-exact (like the `reqwest::get` disambiguation
+    // a few lines up) so the fix doesn't just re-widen `::clone` and reintroduce the very
+    // over-charge the comment was written to prevent: `Remote::clone` (and `Repository::clone`'s
+    // own `Clone` derive, if it has one) must still read pure.
     if crate_name == "git2" {
         if path.ends_with("::fetch")
             || path.ends_with("::push")
@@ -273,6 +283,9 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::connect_auth")
             || path.ends_with("::ls")
             || path.ends_with("::upload")
+            || path == "git2::Repository::clone"
+            || path == "git2::Repository::clone_recurse"
+            || path == "git2::build::RepoBuilder::clone"
         {
             return Some("Net");
         }
@@ -2684,6 +2697,30 @@ mod tests {
         assert_eq!(classify("tracing", "tracing::Span::metadata"), None); // pure accessor
         assert_eq!(classify("tracing", "tracing::metadata::Level::TRACE"), None); // pure data type
         assert_eq!(classify("tracing", "tracing::field::Field::name"), None); // pure data type
+        // git2 (high-level Rust API, not the `raw::git_*` FFI tier tested above): remote verbs are Net,
+        // local .git-directory operations stay unclassified (honest under-report, never a wrong effect).
+        assert_eq!(classify("git2", "git2::Remote::fetch"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Remote::push"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Remote::download"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Remote::connect"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Remote::connect_auth"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Remote::ls"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Remote::upload"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Repository::open"), None); // local — no network
+        assert_eq!(classify("git2", "git2::Repository::init"), None); // local — no network
+        // THE FIX: `Repository::clone`/`clone_recurse` and `RepoBuilder::clone` ARE libgit2's real
+        // network clone — a corpus round found `git2::Repository::clone(url, path)` reporting ZERO
+        // effects and passing `deny Net` at exit 0, because the bare `::clone` denylist meant to keep
+        // out `Remote`'s derived `Clone` dup (below) also excluded the one thing the old comment named
+        // as NOT meant to be excluded.
+        assert_eq!(classify("git2", "git2::Repository::clone"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Repository::clone_recurse"), Some("Net"));
+        assert_eq!(classify("git2", "git2::build::RepoBuilder::clone"), Some("Net"));
+        // THE CONTROL: `Remote::clone` is the DERIVED `Clone` trait impl (an Arc/handle duplication, no
+        // libgit2 call) — it must stay pure. Re-fabricating Net here would undo the very over-charge the
+        // original exclusion existed to prevent. FQN-exact matching (not a bare `::clone` re-widen) keeps
+        // this pure while catching `Repository::clone` above.
+        assert_eq!(classify("git2", "git2::Remote::clone"), None);
         // memmap2: only the syscall-issuing map/flush/protect verbs are Fs; reads over an already-mapped
         // region (len/as_ptr/is_empty) and the request builder are PURE (whole-crate Fs fabricated Fs).
         assert_eq!(classify("memmap2", "memmap2::MmapOptions::map"), Some("Fs"));
