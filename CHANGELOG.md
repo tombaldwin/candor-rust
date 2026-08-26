@@ -9,6 +9,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.33.0] — 2026-08-26
+
 - **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
   **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
   published by a dependency and gated downstream — expect exit 2. Measured over **32 real third-party
