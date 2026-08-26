@@ -9,6 +9,28 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
+  **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
+  published by a dependency and gated downstream — expect exit 2. Measured over **32 real third-party
+  projects, 67 reports, 402 report×policy pairs, all four engines**, published **0.32.1** binaries as
+  the producer against **0.33** HEAD as the consumer: **202 of the 265 pairs that pass today — 76.2% —
+  flip to exit 2** with the policy unchanged. It is deterministic rather than statistical: a report
+  carrying any `peeked: true` class refuses **202 of 202**, a report carrying none passes **63 of 63**,
+  and **26 of the 32 projects** have at least one.
+
+  **THE REMEDY: re-scan with a 0.33 engine under the SAME policy the gate applies** — not merely *a*
+  policy, which is the loose reading this rung exists to close. It discharges the cost in full:
+  **265 of 265** pairs green again, no residual tax and nothing to suppress. A pipeline that scans and
+  gates in ONE run under ONE policy is **unaffected** — producer and consumer are the same run, so
+  `P ⊆ P` holds by construction. Nor is legitimate narrowing over-charged: **62 pairs** whose
+  producer's deny set genuinely covers the gate's took **0 refusals**, and over the full cross-policy
+  sweep of **918 gates**, **529 refuse correctly and none fails open**.
+
+  **The operators this hits are the ones who followed ⟨0.32⟩'s own remedy** — *scan with the policy* —
+  because that is exactly what puts a `peeked: true` class into a report. They migrated one rung ago
+  and are being asked to migrate again, for a hole that remedy did not close. The wording was the
+  defect and the wording is the fix. It fails **CLOSED**.
+
 - **`receipt` (TSV) carried NO completeness reader at all — SOUNDNESS.md R55, closed.** The same defect
   `diff` had (R54), reproduced on the same fixture: over a report declaring an unread `excluded` class,
   every `fns`/`effects`/`unresolved`/`calibrated`/`encountered` line answered as if the report were
