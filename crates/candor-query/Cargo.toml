@@ -4,7 +4,7 @@
 # and IMMUTABLE once on crates.io. This is the guard, since `git rm` alone only fixes it once.
 exclude = [".candor/**"]
 name = "candor-query"
-version = "0.33.0"
+version = "0.33.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "candor's read-only report queries (show/where/callers/map/diff/containment/…) in Rust — used by cargo-candor."
@@ -23,8 +23,8 @@ path = "src/main.rs"
 # Floors, not pins — but candor-report ≥ 0.5.8 is REQUIRED (GateViolation/gate_verdict_json live
 # there, and ≥ 0.5.7 is what declares spec 0.8, so resolution can never produce a pre-0.8 spec
 # declaration — the same reasoning as candor-scan's floor). Publish order: report first.
-candor-report = { path = "../candor-report", version = "0.33.0" }
-candor-classify = { path = "../candor-classify", version = "0.33.0" }
+candor-report = { path = "../candor-report", version = "0.33.1" }
+candor-classify = { path = "../candor-classify", version = "0.33.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
