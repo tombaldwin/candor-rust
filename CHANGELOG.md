@@ -11,6 +11,73 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.33.0] — 2026-08-26
 
+- **⚠ First triage pass over the completeness-gate ratchet (`eval/coverage-gate/open.tsv`): 148 of the
+  251 rows closed — 96 real rules added to `covered.tsv` (git2 37, sea_orm 24, rusqlite 16, lettre 16,
+  tonic 3) plus 52 rows removed as GENERATOR false positives, none reachable by any external consumer.**
+  Worked the priority families the gate's own header names (connection/constructor/handshake/open-create)
+  crate by crate against real vendored source, each rule proven with a compiling consumer fixture and an
+  A/B against the pre-fix binary (never just by reading the table).
+  - **git2 and rusqlite share ONE root cause, found twice**: their `crate_name == "..."` branches in
+    `classify()` return unconditionally, so a real consumer's call NEVER reaches this file's own
+    `sqlite3_*`/`git_*` FFI-leaf tables lower down — those tables only ever fired when SELF-scanning the
+    crate's own internals, where the call resolves to the FFI crate's name instead. Every one of git2's
+    `Repository::{open,init,init_bare,init_opts,open_bare,open_ext,open_from_env,discover,discover_path,
+    checkout_head,checkout_index,checkout_tree,commit,reference,tag,blob_path}`, `Config::{open,
+    open_default,add_file}`, `Index::*`, `Odb::*`, `PackBuilder::write`, `Reference::{delete,set_target}`,
+    `TreeBuilder::write` read PURE — a `deny Fs` over a fixture calling `git2::Repository::open` +
+    `git2::Cred::credential_helper` (a real `sh -c "<helper> get"` subprocess spawn for
+    `credential.helper` auth, real Exec) passed at exit 0 before this fix, exit 1 after. `Remote::list`/
+    `RemoteConnection::list` (real `git_remote_ls`) were ALSO missing — the crate's own `::ls` suffix
+    matches no method that exists in git2 0.20. rusqlite's online-backup (`Backup::{new,new_with_names,
+    step,run_to_completion}`, `Connection::{backup,restore}`) and incremental-BLOB positional I/O
+    (`Blob::{read_at,read_at_exact,raw_read_at,raw_read_at_exact,write_at,write_all_at}`) were the same
+    shape, plus the loadable-extension entry points (`Connection::{from_handle,from_handle_owned,
+    extension_init2}`, `init_auto_extension`) that wrap a caller-supplied raw handle into a live
+    connection. tonic's client-only rule missed the SERVER half: `transport::server::Router::{serve,
+    serve_with_shutdown}` bind a real listening socket via `TcpIncoming::new` — a `deny Net` on a gRPC
+    server missed its own listen call.
+  - **sea_orm's transaction and pagination families** were never reached by the existing `::exec`/
+    `::execute` allowlist: `DatabaseConnection::{transaction,transaction_with_config}`,
+    `DatabaseTransaction::{commit,rollback}`, the three `SqlxXxxPoolConnection::{begin,ping,transaction}`
+    trios, `Paginator::{fetch,fetch_and_next,into_stream,num_pages,num_items_and_pages}`, and
+    `{Insert,Inserter,TryInsert}::exec_with_returning_{keys,many}` all read pure. FQN-exact throughout
+    (not a bare `::ping`/`::begin`/`::transaction` suffix) because `MockDatabaseConnection`/
+    `ProxyDatabaseConnection` share every one of those verb names while performing no provable real I/O —
+    a blanket suffix would have fabricated Db on both. **Bonus, found only by building the reachability
+    fixture** (self-scan's own pass never flagged these — it doesn't track an enum match arm's payload as
+    a typed receiver): `DatabaseConnection::{ping,begin,begin_with_config}` dispatch through the identical
+    shape and were also silently pure.
+  - **lettre's TLS-setup family**: `TlsParameters::{new,new_rustls}` and
+    `TlsParametersBuilder::{build,build_rustls}` (the latter calls `rustls_native_certs::
+    load_native_certs()`, a real OS-trust-store read) were unreached by the `send`-only rule, along with
+    every transport constructor that builds TLS through them (`{Smtp,AsyncSmtp}Transport::{from_url,
+    relay,starttls_relay}`), `FileTransport::read` (`std::fs::read` directly), and the sealed `Executor`
+    trait's `AsyncStd1Executor::{connect,fs_read,fs_write}` — the last three are `#[doc(hidden)]` in
+    lettre's own source, a narrower and less-visited surface than the rest, but genuinely reachable (both
+    the trait and the type are `pub`, re-exported at the crate root).
+  - **THE 52 REMOVED ROWS are a distinct, second finding**: `eval/coverage-gate/generate.py`'s visibility
+    check for a `pub fn` never distinguished `pub(crate)`/`pub(super)`/`pub(in ...)` from a bare `pub` —
+    it already excluded `pub(crate)` STRUCTS (`restricted_types()`, from the diesel `RawConnection`
+    fix) but never functions, so `sea_orm::DatabaseTransaction::{begin,run}`, every one of ureq's
+    `connect`/`connect_host`/`connect_http`/`connect_https` (all `pub(crate) fn`), and 36 others across
+    17 crates were carried as open "gaps" no external consumer can ever compile a call to. Fixed the
+    generator (`is_bare_pub`, `eval/coverage-gate/generate.py`) so a future regeneration won't
+    reintroduce them. A SECOND, related shape surfaced by hand rather than by that fix: rusqlite's
+    `InnerConnection`/`RawStatement` and lettre's `NetworkStream` are bare `pub struct`s declared inside a
+    PRIVATE `mod` and never re-exported — `restricted_types()` only reads a type's own visibility
+    keyword, not its enclosing module chain, so these still read as public entries; both left unclassified
+    rather than given a dead rule. Two crates' real spellings also turned out to differ from the ratchet's
+    recorded one for the same reason in reverse: rusqlite's `Backup`/`Blob`/`init_auto_extension` and
+    lettre's `TlsParameters`/`TlsParametersBuilder`/`AsyncSmtpConnection`/`AsyncNetworkStream` are not
+    re-exported at the crate root, so the short spelling `generate.py` guesses and records is not what a
+    real consumer's source contains — both the recorded short form and the real module-qualified one are
+    now classified, proven by a fixture written against the real, compiling long form.
+  - **103 rows remain** (largest: tempfile 13, sqlx_core 13, ureq 10, isahc 8, ignore 8), left in the
+    ratchet rather than guessed. The cross-crate `Unknown` gap this gate cannot see through (diesel's
+    `establish`, sync `mysql::Conn::new`, `sea_orm::connect_proxy`, `tokio_postgres::connect_raw`,
+    tungstenite's transport-generic handshake) is unchanged by this pass — none of the fixes above
+    crossed it.
+
 - **A completeness GATE for `CALIBRATED_CRATES`, closing the generator behind the ten silent
   under-reports below, not another instance of it.** The coverage ledger (`scan.rs:2458-2479`) is
   deliberately crate-level: once a crate is calibrated, an unmatched path is a claim of reviewed purity

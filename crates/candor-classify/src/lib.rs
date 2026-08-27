@@ -317,8 +317,76 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // derive-`Clone` dup on every other git2 type.
             || path == "git2::Submodule::clone"
             || path == "git2::Submodule::update"
+            // `Remote::list`/`RemoteConnection::list` (remote.rs:378,755) call `raw::git_remote_ls`
+            // directly — the reference-advertisement fetch already in the FFI-tier NET table below,
+            // reached the same way `Submodule::clone`/`update` were: the safe wrapper's OWN name
+            // (`list`, not `ls`) never matched the `::ls` suffix this block already carried (which, on
+            // git2 0.20, matches no real method at all — dead weight kept for whatever older API it once
+            // fit). FQN-exact so a `list` on some other git2 type (none exist today, but the same
+            // discipline as `Submodule::clone` above) can't be swept in by a bare suffix later.
+            || path == "git2::Remote::list"
+            || path == "git2::RemoteConnection::list"
         {
             return Some("Net");
+        }
+        // THE COVERAGE-GATE SWEEP (2026-08-27): every one of these is a public entry point whose body
+        // calls a `raw::git_*` FFI leaf ALREADY in this file's own FS FFI-tier table below (config.rs/
+        // index.rs/odb.rs/packbuilder.rs/reference.rs/repo.rs/treebuilder.rs, verified against git2
+        // 0.20.4 source) — but that table is UNREACHABLE for a real consumer's call, because it only
+        // fires when self-scan resolves the FFI leaf's OWN crate (`libgit2_sys`, via git2's internal
+        // `use libgit2_sys as raw`), never for `crate_name == "git2"`, which returns from THIS block
+        // first. A consumer never spells `raw::git_repository_open`; they call `git2::Repository::open`,
+        // which fell through this entire branch to `None` — the exact `ignore::Walk::new` shape (a
+        // lower-level rule the top-level entry point never reaches) but affecting git2's single most
+        // common local operations (`Repository::open`/`init`), not an edge case. FQN-exact, not a
+        // `::open`/`::write`/`::read` suffix — those verbs are common enough elsewhere (`Odb::reader`
+        // isn't `::read`, `TreeBuilder`/`Index`/`PackBuilder::write` share the name with plenty of pure
+        // builder setters on other types) that a bare suffix would either miss these or over-charge.
+        if path == "git2::Config::add_file"
+            || path == "git2::Config::open"
+            || path == "git2::Config::open_default"
+            || path == "git2::Index::add_all"
+            || path == "git2::Index::add_path"
+            || path == "git2::Index::read"
+            || path == "git2::Index::write"
+            || path == "git2::Index::write_tree"
+            || path == "git2::Index::write_tree_to"
+            || path == "git2::Odb::read"
+            || path == "git2::Odb::reader"
+            || path == "git2::Odb::write"
+            || path == "git2::Odb::writer"
+            || path == "git2::PackBuilder::write"
+            || path == "git2::Reference::delete"
+            || path == "git2::Reference::set_target"
+            || path == "git2::Repository::blob_path"
+            || path == "git2::Repository::checkout_head"
+            || path == "git2::Repository::checkout_index"
+            || path == "git2::Repository::checkout_tree"
+            || path == "git2::Repository::commit"
+            || path == "git2::Repository::discover"
+            || path == "git2::Repository::discover_path"
+            || path == "git2::Repository::init"
+            || path == "git2::Repository::init_bare"
+            || path == "git2::Repository::init_opts"
+            || path == "git2::Repository::open"
+            || path == "git2::Repository::open_bare"
+            || path == "git2::Repository::open_ext"
+            || path == "git2::Repository::open_from_env"
+            || path == "git2::Repository::reference"
+            || path == "git2::Repository::tag"
+            || path == "git2::TreeBuilder::write"
+        {
+            return Some("Fs");
+        }
+        // `Cred::credential_helper` (cred.rs:121) calls `CredentialHelper::execute` (cred.rs:326),
+        // which — on every code path — spawns a REAL `sh -c "<helper> get"` (or, if `sh` itself fails to
+        // spawn, the helper binary directly) via `std::process::Command::spawn` to resolve
+        // `credential.helper`-configured auth (cred.rs:370-390): a real subprocess launch a caller
+        // authenticating against a private remote is one call away from (`Cred::credential_helper(cfg,
+        // url, user)` is the crate's own documented way to honor `credential.helper`), not a lower-level
+        // implementation detail. FQN-exact: `execute` alone is far too generic to key on blindly.
+        if path == "git2::Cred::credential_helper" || path == "git2::CredentialHelper::execute" {
+            return Some("Exec");
         }
         return None;
     }
@@ -649,10 +717,67 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     }
     // SMTP email — lettre's `Transport::send` is the network dispatch; Message building is
     // pure. (Found hardening on a lettre consumer: `mailer.send(&email)` classified pure.)
+    //
+    // THE COVERAGE-GATE SWEEP (2026-08-27), verified against lettre 0.11.23 source — the TLS-setup and
+    // connection-establishment family this crate's own `send` rule never reached:
+    //
+    // `TlsParameters::new`/`new_rustls` (client/tls.rs:598,617) and `TlsParametersBuilder::build`/
+    // `build_rustls` (tls.rs:325,446) — `build_rustls` calls `rustls_native_certs::load_native_certs()`
+    // (a real OS-trust-store read) plus `tracing::debug!`; `build()` dispatches to it under the
+    // (textually-visible, cfg-gated) `rustls` feature. `SmtpTransport`/`AsyncSmtpTransport::{from_url,
+    // relay,starttls_relay}` (transport.rs:90,114,243; async_transport.rs:135,169,306) each construct a
+    // `TlsParameters` directly (`relay`/`starttls_relay`) or via the crate's OWN `pub(crate)
+    // from_connection_url` (`from_url`) — real TLS setup a consumer never spells `TlsParameters` to
+    // reach. `FileTransport::read` (transport/file/mod.rs:216) calls `std::fs::read` directly.
     if crate_name == "lettre" {
         if path.ends_with("::send") || path.ends_with("::send_raw") {
             return Some("Net");
         }
+        if path == "lettre::TlsParametersBuilder::build"
+            || path == "lettre::transport::smtp::client::TlsParametersBuilder::build"
+            || path == "lettre::TlsParametersBuilder::build_rustls"
+            || path == "lettre::transport::smtp::client::TlsParametersBuilder::build_rustls"
+            || path == "lettre::TlsParameters::new"
+            || path == "lettre::transport::smtp::client::TlsParameters::new"
+            || path == "lettre::TlsParameters::new_rustls"
+            || path == "lettre::transport::smtp::client::TlsParameters::new_rustls"
+            || path == "lettre::SmtpTransport::from_url"
+            || path == "lettre::SmtpTransport::relay"
+            || path == "lettre::SmtpTransport::starttls_relay"
+            || path == "lettre::AsyncSmtpTransport::from_url"
+            || path == "lettre::AsyncSmtpTransport::relay"
+            || path == "lettre::AsyncSmtpTransport::starttls_relay"
+            || path == "lettre::FileTransport::read"
+        {
+            return Some("Fs");
+        }
+        // `AsyncStd1Executor::{connect,fs_read,fs_write}` (executor.rs:223,260,265, the sealed
+        // `Executor` trait impl — `#[doc(hidden)]` in lettre's own source, so this is a narrower, less-
+        // visited surface than the others above, but genuinely reachable: both the trait and the type
+        // are `pub`, re-exported at the crate root) dial a real connection / read+write real files.
+        // `AsyncSmtpConnection`/`AsyncNetworkStream::connect_asyncstd1` (client/async_connection.rs:121,
+        // client/async_net.rs:207) dial a real `async-std` TCP connection — reachable only via the
+        // module-qualified path (`transport::smtp::client::`), since neither type is re-exported at the
+        // crate root (unlike `TlsParameters`'s sibling forms, which at least reach `client::` — the dual
+        // spellings above, same shape as rusqlite's `Blob`/`Backup`).
+        if path == "lettre::AsyncStd1Executor::connect"
+            || path == "lettre::AsyncSmtpConnection::connect_asyncstd1"
+            || path == "lettre::transport::smtp::client::AsyncSmtpConnection::connect_asyncstd1"
+            || path == "lettre::AsyncNetworkStream::connect_asyncstd1"
+            || path == "lettre::transport::smtp::client::AsyncNetworkStream::connect_asyncstd1"
+        {
+            return Some("Net");
+        }
+        if path == "lettre::AsyncStd1Executor::fs_read" || path == "lettre::AsyncStd1Executor::fs_write" {
+            return Some("Fs");
+        }
+        // NOT included: `NetworkStream::{shutdown,set_read_timeout,set_write_timeout}` (client/net.rs)
+        // LOOK like three more hits (self-scan flags them too, propagating from the coarse
+        // `std::net::TcpStream` whole-handle rule) but `mod net;` (client/mod.rs:50) is PRIVATE and
+        // `NetworkStream` is never re-exported (only imported crate-internally via a bare `use
+        // self::net::NetworkStream;`, mod.rs:35) — no external consumer can ever name the type, so no
+        // rule was added despite self-scan flagging it (the same `InnerConnection`/`RawStatement` shape
+        // as the rusqlite fix elsewhere in this file).
         return None;
     }
     // WebSockets — tungstenite (the modern successor to the old `websocket` crate). connect
@@ -700,12 +825,24 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // gRPC — tonic. The transport connect and the Grpc client RPC dispatch are network;
     // codecs and request/response wrappers are pure. (connect repro-confirmed on a consumer;
     // the unary/streaming RPC verbs are from the tonic::client::Grpc API.)
+    //
+    // THE COVERAGE-GATE FIX: the rule above only ever covered the CLIENT half. `Router::serve`/
+    // `::serve_with_shutdown` (transport/server/mod.rs:783,811) are the SERVER's own most common entry
+    // points — a tonic quickstart's last line — and both bind a real listening socket via
+    // `TcpIncoming::new` (incoming.rs:197: `StdTcpListener::bind(addr)`), the crate's other bare-`pub`
+    // constructor (`Server<L>::serve_with_shutdown` at mod.rs:530 is a DIFFERENT, `pub(crate)` method on
+    // a different receiver — not reachable, and not this one). A `deny Net` on a gRPC SERVER app missed
+    // its own listen call entirely.
     if crate_name == "tonic" {
         if path.ends_with("::connect")
             || path.ends_with("::unary")
             || path.ends_with("::server_streaming")
             || path.ends_with("::client_streaming")
             || path.ends_with("::streaming")
+            || path.ends_with("::Router::serve")
+            || path.ends_with("::Router::serve_with_shutdown")
+            || path == "tonic::TcpIncoming::new"
+            || path == "tonic::transport::server::TcpIncoming::new"
         {
             return Some("Net");
         }
@@ -936,6 +1073,76 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             {
                 return Some("Db");
             }
+            // THE COVERAGE-GATE SWEEP (2026-08-27): same shape again, and the SAME root cause as
+            // `git2`'s — this `if crate_name == "rusqlite"` block returns unconditionally, so it never
+            // reaches this file's own `sqlite3_*` FFI-leaf table below even though every one of these
+            // calls a leaf ALREADY listed there (`sqlite3_backup_init`/`_step`, `sqlite3_blob_read`/
+            // `_write`). Verified against rusqlite 0.32.1 source. `Backup::new`/`new_with_names` are the
+            // crate's own online-backup constructors (backup.rs:187,200); `step`/`run_to_completion`
+            // drive it; `Connection::backup`/`restore` (backup.rs:61,99) are the one-call convenience
+            // wrappers around the same API and need their OWN rule since a consumer calling THEM never
+            // names `Backup` at all. `Blob::{read,write}_at[_exact]`/`raw_read_at[_exact]`/
+            // `write_all_at` (blob/pos_io.rs) are the incremental-BLOB positional-I/O methods, each
+            // calling `ffi::sqlite3_blob_read`/`_write` directly. `Connection::from_handle`/
+            // `_owned`/`extension_init2` and the free fn `init_auto_extension` (lib.rs:950,999,966;
+            // auto_extension.rs:26) wrap a caller-supplied raw `*mut ffi::sqlite3` into a live
+            // `Connection` — the loadable-extension entry points, same "produces a live connection"
+            // effect as `Connection::open`, just over a handle the caller already has instead of one
+            // this call opens itself (the `tokio_postgres::connect_raw`/`sea_orm::connect_proxy` shape).
+            //
+            // NOT included: `InnerConnection::*` and `RawStatement::step` LOOK like six more hits (self-
+            // scan flags them too) but `mod inner_connection;`/`mod raw_statement;` (lib.rs:119,127) are
+            // PRIVATE — despite `pub struct InnerConnection`/`RawStatement`, neither type has any public
+            // path a real consumer could ever name or obtain a value of, so no rule was added for them
+            // (a rule would be dead weight, never reachable). `Context::get_connection` (functions.rs)
+            // is ALSO left out, deliberately: it returns a `ConnectionRef` accessor to an
+            // ALREADY-established connection (`ffi::sqlite3_context_db_handle`, not an I/O verb) — the
+            // same "handle accessor, not a syscall" shape as `TcpStream::local_addr`, not confirmed
+            // enough to charge without risking the over-charge this file's history has repeatedly warned
+            // against; left in the ratchet rather than guessed.
+            //
+            // TWO SPELLINGS EACH for `Backup`/`Blob`/`init_auto_extension`: none of the three is
+            // re-exported at rusqlite's crate root (unlike `Connection`, declared directly in lib.rs), so
+            // the ONLY real spelling a consumer can write is the module-qualified one
+            // (`rusqlite::backup::Backup::new`, `rusqlite::blob::Blob::read_at`,
+            // `rusqlite::auto_extension::init_auto_extension`) — but the coverage-gate ratchet recorded
+            // the SHORT, technically-unreachable guess (`generate.py` always adds a bare
+            // `{crate}::{Type}::{fn}` guess as a possible root-alias, without confirming a `pub use`
+            // actually exists for it). Both are listed: the short form so this fix closes the exact row
+            // the ratchet carries, the long form so it fires for what a real consumer's source (proven
+            // against a compiling fixture) actually contains — dropping the long form would leave the
+            // real gap open while the bookkeeping said closed.
+            if crate_name == "rusqlite"
+                && (path == "rusqlite::Backup::new"
+                    || path == "rusqlite::backup::Backup::new"
+                    || path == "rusqlite::Backup::new_with_names"
+                    || path == "rusqlite::backup::Backup::new_with_names"
+                    || path == "rusqlite::Backup::step"
+                    || path == "rusqlite::backup::Backup::step"
+                    || path == "rusqlite::Backup::run_to_completion"
+                    || path == "rusqlite::backup::Backup::run_to_completion"
+                    || path == "rusqlite::Connection::backup"
+                    || path == "rusqlite::Connection::restore"
+                    || path == "rusqlite::Blob::read_at"
+                    || path == "rusqlite::blob::Blob::read_at"
+                    || path == "rusqlite::Blob::read_at_exact"
+                    || path == "rusqlite::blob::Blob::read_at_exact"
+                    || path == "rusqlite::Blob::raw_read_at"
+                    || path == "rusqlite::blob::Blob::raw_read_at"
+                    || path == "rusqlite::Blob::raw_read_at_exact"
+                    || path == "rusqlite::blob::Blob::raw_read_at_exact"
+                    || path == "rusqlite::Blob::write_at"
+                    || path == "rusqlite::blob::Blob::write_at"
+                    || path == "rusqlite::Blob::write_all_at"
+                    || path == "rusqlite::blob::Blob::write_all_at"
+                    || path == "rusqlite::Connection::from_handle"
+                    || path == "rusqlite::Connection::from_handle_owned"
+                    || path == "rusqlite::Connection::extension_init2"
+                    || path == "rusqlite::init_auto_extension"
+                    || path == "rusqlite::auto_extension::init_auto_extension")
+            {
+                return Some("Db");
+            }
             return None;
         }
         // redis: the way redis is ACTUALLY used is the high-level `Commands`/`AsyncCommands`
@@ -1053,6 +1260,68 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 || path.ends_with("::fetch_page")
                 || path.ends_with("::num_items")
                 || path.contains("ActiveModelTrait::")
+            {
+                return Some("Db");
+            }
+            // THE COVERAGE-GATE SWEEP (2026-08-27): sea_orm's TRANSACTION and PAGINATION families,
+            // verified against sea-orm 1.1.20 source — each of these was found effectful by self-scan
+            // under no guessed spelling this allowlist already covered.
+            //
+            // `DatabaseConnection::transaction`/`transaction_with_config` (db_connection.rs:302,345, the
+            // `TransactionTrait` impl) is the crate's documented callback-transaction API
+            // (`db.transaction(|txn| ...)`) — every sqlx-backed match arm dispatches to the
+            // `SqlxXxxPoolConnection::transaction` methods FQN-listed below, a real BEGIN. FQN-exact
+            // (not a bare `::transaction` suffix) because `MockDatabaseConnection`/`ProxyDatabaseConnection`
+            // (driver/mock.rs, driver/proxy.rs, both feature-gated) have their OWN `begin`/`commit`/
+            // `rollback`/`ping`/`transaction` methods sharing every one of these verb names — a mock
+            // backend performs no real I/O by construction, and a caller-supplied proxy is a callback
+            // boundary, not a provable effect; a bare suffix would fabricate Db on both.
+            if path == "sea_orm::DatabaseConnection::transaction"
+                || path == "sea_orm::DatabaseConnection::transaction_with_config"
+                // BONUS, found while proving the above reachable with a real consumer fixture (not in
+                // the original coverage-gate ratchet — self-scan's own reachability pass didn't flag
+                // these, apparently because it doesn't track an enum match arm's payload binding as a
+                // typed receiver, but they dispatch through the identical match-on-`self` shape as
+                // `transaction` two lines up): `DatabaseConnection::ping` (db_connection.rs:462) and the
+                // `TransactionTrait::begin`/`begin_with_config` impl (db_connection.rs:246,268) — a fixture
+                // proved `ping` silently read pure with no rule at all.
+                || path == "sea_orm::DatabaseConnection::ping"
+                || path == "sea_orm::DatabaseConnection::begin"
+                || path == "sea_orm::DatabaseConnection::begin_with_config"
+                // `DatabaseTransaction::commit`/`rollback` (transaction.rs:119,159) call
+                // `<sqlx::X as sqlx::Database>::TransactionManager::commit`/`rollback` directly — real
+                // COMMIT/ROLLBACK, not sea_orm's OWN `::begin`/`::run` (both `pub(crate)`, unreachable).
+                || path == "sea_orm::DatabaseTransaction::commit"
+                || path == "sea_orm::DatabaseTransaction::rollback"
+                // The three sqlx-backed pool connections' OWN `begin`/`ping`/`transaction` (driver/
+                // sqlx_{mysql,postgres,sqlite}.rs) — `begin`/`transaction` acquire a pool connection and
+                // start a real transaction, `ping` round-trips `conn.ping()` to the server.
+                || path == "sea_orm::SqlxMySqlPoolConnection::begin"
+                || path == "sea_orm::SqlxMySqlPoolConnection::ping"
+                || path == "sea_orm::SqlxMySqlPoolConnection::transaction"
+                || path == "sea_orm::SqlxPostgresPoolConnection::begin"
+                || path == "sea_orm::SqlxPostgresPoolConnection::ping"
+                || path == "sea_orm::SqlxPostgresPoolConnection::transaction"
+                || path == "sea_orm::SqlxSqlitePoolConnection::begin"
+                || path == "sea_orm::SqlxSqlitePoolConnection::ping"
+                || path == "sea_orm::SqlxSqlitePoolConnection::transaction"
+                // `Paginator::fetch`/`fetch_and_next`/`into_stream`/`num_pages`/`num_items_and_pages`
+                // (executor/paginator.rs) all transitively reach `fetch_page`/`num_items` — already-
+                // covered verbs — but each is ALSO a documented entry point a real consumer calls
+                // directly (`cake::Entity::find().paginate(db, 50).into_stream()`, the crate's own
+                // pagination doc example) and needs its own rule for the same reason
+                // `Connection::backup` needed one beside `Backup::new` in rusqlite.
+                || path == "sea_orm::Paginator::fetch"
+                || path == "sea_orm::Paginator::fetch_and_next"
+                || path == "sea_orm::Paginator::into_stream"
+                || path == "sea_orm::Paginator::num_pages"
+                || path == "sea_orm::Paginator::num_items_and_pages"
+                // `Insert`/`Inserter`/`TryInsert::exec_with_returning_keys`/`_many` (executor/insert.rs)
+                // are sibling spellings of the already-covered `::exec_with_returning` (same shape as
+                // rusqlite's `open_with_flags_and_vfs` beside `open_with_flags`): each calls through to
+                // the same underlying `exec_with_returning_keys`/`_many` executor, a real INSERT.
+                || path.ends_with("::exec_with_returning_keys")
+                || path.ends_with("::exec_with_returning_many")
             {
                 return Some("Db");
             }
@@ -2857,6 +3126,37 @@ mod tests {
         // `pragma::Sql::open_brace`, which pushes one char to a string buffer) must not gain Db — the
         // fix keys on the `Connection::` segment, not a bare leaf prefix.
         assert_eq!(classify("rusqlite", "rusqlite::pragma::Sql::open_brace"), None);
+        // THE COVERAGE-GATE SWEEP FIX: the online-backup API and incremental-BLOB positional I/O,
+        // verified against rusqlite 0.32.1 (each calls an `ffi::sqlite3_*` leaf already in this file's
+        // own FFI-leaf DB table, but the `crate_name == "rusqlite"` block above returned before ever
+        // reaching it — same shape as the git2 fix elsewhere in this file).
+        assert_eq!(classify("rusqlite", "rusqlite::Backup::new"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Backup::new_with_names"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Backup::step"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Backup::run_to_completion"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::backup"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::restore"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Blob::read_at"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Blob::read_at_exact"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Blob::raw_read_at"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Blob::raw_read_at_exact"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Blob::write_at"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Blob::write_all_at"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::from_handle"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::from_handle_owned"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::extension_init2"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::init_auto_extension"), Some("Db"));
+        // …and the REAL module-qualified spellings (`Backup`/`Blob`/`init_auto_extension` are not
+        // re-exported at rusqlite's crate root, unlike `Connection` — a real consumer's source, proven
+        // against a compiling fixture, must use these, not the short forms above).
+        assert_eq!(classify("rusqlite", "rusqlite::backup::Backup::new"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::blob::Blob::read_at"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::auto_extension::init_auto_extension"), Some("Db"));
+        // NO FABRICATION: `InnerConnection`/`RawStatement` live in PRIVATE modules (lib.rs `mod
+        // inner_connection;`/`mod raw_statement;`, no `pub`) — no external consumer can ever name either
+        // type, so no rule was added despite self-scan flagging them too.
+        assert_eq!(classify("rusqlite", "rusqlite::InnerConnection::close"), None);
+        assert_eq!(classify("rusqlite", "rusqlite::RawStatement::step"), None);
         // …but `open` stays rusqlite-only (postgres has no open; nothing else may borrow it):
         assert_eq!(classify("postgres", "postgres::Client::open"), None);
         assert_eq!(classify("tokio_postgres", "tokio_postgres::Client::query_typed"), Some("Db"));
@@ -2892,8 +3192,7 @@ mod tests {
         assert_eq!(classify("tracing", "tracing::Span::metadata"), None); // pure accessor
         assert_eq!(classify("tracing", "tracing::metadata::Level::TRACE"), None); // pure data type
         assert_eq!(classify("tracing", "tracing::field::Field::name"), None); // pure data type
-        // git2 (high-level Rust API, not the `raw::git_*` FFI tier tested above): remote verbs are Net,
-        // local .git-directory operations stay unclassified (honest under-report, never a wrong effect).
+        // git2 (high-level Rust API, not the `raw::git_*` FFI tier tested above): remote verbs are Net.
         assert_eq!(classify("git2", "git2::Remote::fetch"), Some("Net"));
         assert_eq!(classify("git2", "git2::Remote::push"), Some("Net"));
         assert_eq!(classify("git2", "git2::Remote::download"), Some("Net"));
@@ -2901,8 +3200,76 @@ mod tests {
         assert_eq!(classify("git2", "git2::Remote::connect_auth"), Some("Net"));
         assert_eq!(classify("git2", "git2::Remote::ls"), Some("Net"));
         assert_eq!(classify("git2", "git2::Remote::upload"), Some("Net"));
-        assert_eq!(classify("git2", "git2::Repository::open"), None); // local — no network
-        assert_eq!(classify("git2", "git2::Repository::init"), None); // local — no network
+        // THE COVERAGE-GATE SWEEP FIX: `Repository::open`/`init` (and every other local .git-directory
+        // operation below) used to read PURE here — the comment this replaced called that "honest, no
+        // network", but candor-scan self-scanning git2's OWN source (eval/coverage-gate) proved these
+        // reach a REAL Fs effect (`raw::git_repository_open`/`_init_ext`, already in this file's FFI-tier
+        // table) that a real consumer's call to the safe wrapper could never surface, because THIS
+        // block's early `return None` sat in front of that table for every `crate_name == "git2"` call.
+        // "local, no network" was true and beside the point: Fs was the effect being missed. See MEMORY /
+        // the commit that added this block for the full sweep (Config/Index/Odb/PackBuilder/Reference/
+        // Repository/TreeBuilder — every FQN below calls a listed FS FFI leaf; verified against git2
+        // 0.20.4 source).
+        assert_eq!(classify("git2", "git2::Repository::open"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::init"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::open_bare"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::open_ext"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::open_from_env"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::discover"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::discover_path"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::init_bare"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::init_opts"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::blob_path"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::checkout_head"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::checkout_index"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::checkout_tree"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::commit"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::reference"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Repository::tag"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Config::add_file"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Config::open"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Config::open_default"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Index::add_all"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Index::add_path"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Index::read"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Index::write"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Index::write_tree"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Index::write_tree_to"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Odb::read"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Odb::reader"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Odb::write"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Odb::writer"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::PackBuilder::write"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Reference::delete"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::Reference::set_target"), Some("Fs"));
+        assert_eq!(classify("git2", "git2::TreeBuilder::write"), Some("Fs"));
+        // `Remote::list`/`RemoteConnection::list` call `raw::git_remote_ls` directly — the same
+        // reference-advertisement Net effect `Remote::ls` was meant to catch, under the name git2 0.20
+        // actually uses (there is no `ls` method left in the crate at all — that suffix rule is dead
+        // weight, kept rather than removed since deleting it is a separate, unrelated cleanup).
+        assert_eq!(classify("git2", "git2::Remote::list"), Some("Net"));
+        assert_eq!(classify("git2", "git2::RemoteConnection::list"), Some("Net"));
+        // `Cred::credential_helper` spawns a real `sh -c "<helper> get"` subprocess to resolve
+        // `credential.helper` config (cred.rs:370-390) — a real consumer's most common way to honor it.
+        assert_eq!(classify("git2", "git2::Cred::credential_helper"), Some("Exec"));
+        assert_eq!(classify("git2", "git2::CredentialHelper::execute"), Some("Exec"));
+        // NO FABRICATION controls: a `write`/`read`/`open` on some OTHER git2 type (not FQN-listed above)
+        // must stay pure — this fix is FQN-exact, not a suffix re-widen.
+        assert_eq!(classify("git2", "git2::Repository::state"), None);
+        assert_eq!(classify("git2", "git2::Blob::content"), None);
+        // tonic's SERVER half (the coverage-gate sweep found only the client verbs were covered):
+        // `Router::serve`/`::serve_with_shutdown` bind a real listening socket via `TcpIncoming::new`
+        // (`StdTcpListener::bind`), verified against tonic 0.12.3 source.
+        assert_eq!(classify("tonic", "tonic::transport::server::Router::serve"), Some("Net"));
+        assert_eq!(
+            classify("tonic", "tonic::transport::server::Router::serve_with_shutdown"),
+            Some("Net")
+        );
+        assert_eq!(classify("tonic", "tonic::TcpIncoming::new"), Some("Net"));
+        // NO FABRICATION control: `Server<L>::serve_with_shutdown` (mod.rs:530) is a DIFFERENT,
+        // `pub(crate)` method on a different type — not reachable by any consumer, and this fix does not
+        // fabricate an effect for it by widening past the `Router::` FQN.
+        assert_eq!(classify("tonic", "tonic::transport::server::Server::serve_with_shutdown"), None);
         // THE FIX: `Repository::clone`/`clone_recurse` and `RepoBuilder::clone` ARE libgit2's real
         // network clone — a corpus round found `git2::Repository::clone(url, path)` reporting ZERO
         // effects and passing `deny Net` at exit 0, because the bare `::clone` denylist meant to keep
@@ -3027,6 +3394,88 @@ mod tests {
         // a live `DatabaseConnection` through a caller-supplied `ProxyDatabaseTrait` — same effect,
         // missing from an allowlist keyed on the plain `connect` spelling.
         assert_eq!(classify("sea_orm", "sea_orm::Database::connect_proxy"), Some("Db"));
+        // THE COVERAGE-GATE SWEEP: the transaction and pagination families, verified against sea-orm
+        // 1.1.20 source.
+        assert_eq!(classify("sea_orm", "sea_orm::DatabaseConnection::transaction"), Some("Db"));
+        assert_eq!(
+            classify("sea_orm", "sea_orm::DatabaseConnection::transaction_with_config"),
+            Some("Db")
+        );
+        // BONUS (found proving the above reachable with a real fixture, not in the original ratchet):
+        assert_eq!(classify("sea_orm", "sea_orm::DatabaseConnection::ping"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::DatabaseConnection::begin"), Some("Db"));
+        assert_eq!(
+            classify("sea_orm", "sea_orm::DatabaseConnection::begin_with_config"),
+            Some("Db")
+        );
+        assert_eq!(classify("sea_orm", "sea_orm::DatabaseTransaction::commit"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::DatabaseTransaction::rollback"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::SqlxMySqlPoolConnection::begin"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::SqlxMySqlPoolConnection::ping"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::SqlxMySqlPoolConnection::transaction"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::SqlxPostgresPoolConnection::begin"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::SqlxSqlitePoolConnection::ping"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Paginator::fetch"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Paginator::fetch_and_next"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Paginator::into_stream"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Paginator::num_pages"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Paginator::num_items_and_pages"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Insert::exec_with_returning_keys"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::Inserter::exec_with_returning_many"), Some("Db"));
+        assert_eq!(classify("sea_orm", "sea_orm::TryInsert::exec_with_returning_keys"), Some("Db"));
+        // NO FABRICATION: the mock/proxy backends share every one of these verb names but perform no
+        // real I/O (mock) or dispatch through a caller-supplied trait (proxy) — FQN-exact, not a bare
+        // `::ping`/`::begin`/`::transaction`/`::commit`/`::rollback` suffix, keeps them pure/unknown.
+        assert_eq!(classify("sea_orm", "sea_orm::MockDatabaseConnection::ping"), None);
+        assert_eq!(classify("sea_orm", "sea_orm::MockDatabaseConnection::begin"), None);
+        assert_eq!(classify("sea_orm", "sea_orm::ProxyDatabaseConnection::commit"), None);
+        assert_eq!(classify("sea_orm", "sea_orm::ProxyDatabaseConnection::ping"), None);
+    }
+
+    #[test]
+    fn lettre_tls_setup_and_connection_family_is_covered() {
+        // THE COVERAGE-GATE SWEEP, verified against lettre 0.11.23 source. `build_rustls` calls
+        // `rustls_native_certs::load_native_certs()` (a real OS-trust-store read) + `tracing::debug!`.
+        assert_eq!(
+            classify("lettre", "lettre::transport::smtp::client::TlsParametersBuilder::build_rustls"),
+            Some("Fs")
+        );
+        assert_eq!(classify("lettre", "lettre::TlsParametersBuilder::build"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::TlsParameters::new"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::TlsParameters::new_rustls"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::SmtpTransport::from_url"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::SmtpTransport::relay"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::SmtpTransport::starttls_relay"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::AsyncSmtpTransport::from_url"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::AsyncSmtpTransport::relay"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::AsyncSmtpTransport::starttls_relay"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::FileTransport::read"), Some("Fs"));
+        // The sealed `Executor` trait impl — `#[doc(hidden)]`, a narrower surface, but genuinely
+        // reachable (both the trait and `AsyncStd1Executor` are `pub`, re-exported at the crate root).
+        assert_eq!(classify("lettre", "lettre::AsyncStd1Executor::connect"), Some("Net"));
+        assert_eq!(classify("lettre", "lettre::AsyncStd1Executor::fs_read"), Some("Fs"));
+        assert_eq!(classify("lettre", "lettre::AsyncStd1Executor::fs_write"), Some("Fs"));
+        // Only reachable via the module-qualified path — neither type is re-exported at the crate root.
+        assert_eq!(
+            classify(
+                "lettre",
+                "lettre::transport::smtp::client::AsyncSmtpConnection::connect_asyncstd1"
+            ),
+            Some("Net")
+        );
+        assert_eq!(
+            classify(
+                "lettre",
+                "lettre::transport::smtp::client::AsyncNetworkStream::connect_asyncstd1"
+            ),
+            Some("Net")
+        );
+        // NO FABRICATION: `NetworkStream` lives in a PRIVATE module (`mod net;`, never re-exported) — no
+        // external consumer can ever name it, so no rule was added despite self-scan flagging its
+        // `shutdown`/`set_read_timeout`/`set_write_timeout` (propagated from the coarse
+        // `std::net::TcpStream` whole-handle rule).
+        assert_eq!(classify("lettre", "lettre::NetworkStream::shutdown"), None);
+        assert_eq!(classify("lettre", "lettre::NetworkStream::set_read_timeout"), None);
     }
 
     #[test]
