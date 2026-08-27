@@ -254,8 +254,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // endpoint / STS over the network (and reads ~/.aws + env). Builders (`defaults()`,
     // `SdkConfig::builder()`, `BehaviorVersion::latest()`) are pure; the `load` is the I/O.
     // (Found hardening on a real app, ebman: `builder.load().await` was classified pure.)
+    //
+    // THE FIX: `load_from_env()` (lib.rs:170/188, both the `behavior-version-latest` and deprecated
+    // forms) is `from_env().load().await` / `load_defaults(latest).await` one call down — the crate's OWN
+    // "convenience wrapper" (its own doc comment's phrase) around the already-modelled `.load()` — but
+    // `"load_from_env".ends_with("::load")` is false, so the wrapper read pure. Same vein as
+    // `ignore::Walk::new`.
     if crate_name == "aws_config" {
-        if path.ends_with("::load") || path.ends_with("::load_defaults") {
+        if path.ends_with("::load") || path.ends_with("::load_defaults") || path.ends_with("::load_from_env") {
             return Some("Net");
         }
         return None;
@@ -286,6 +292,18 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path == "git2::Repository::clone"
             || path == "git2::Repository::clone_recurse"
             || path == "git2::build::RepoBuilder::clone"
+            // A FOURTH+FIFTH true positive in the same gap the `Repository::clone` fix left open:
+            // `Submodule::clone`/`Submodule::update` (submodule.rs:39,234) call `raw::git_submodule_clone`/
+            // `git_submodule_update` DIRECTLY — the exact FFI leaves already in this file's own
+            // FFI-tier NET table below, but only when a caller names the raw `ffi`/`raw::` leaf itself.
+            // git2's documented, standard submodule-init idiom (`sub.clone(None)` /
+            // `sub.update(true, None)`) never does that — it calls the safe wrapper, which carried no
+            // rule of its own and read pure under `deny Net`. FQN-exact, matching the `Repository::clone`
+            // fix's own discipline: a bare `::update`/`::clone` substring would sweep in git2's many pure
+            // `update_*` setters (`CheckoutBuilder::update_only`, `DiffOptions::update_index`, …) and the
+            // derive-`Clone` dup on every other git2 type.
+            || path == "git2::Submodule::clone"
+            || path == "git2::Submodule::update"
         {
             return Some("Net");
         }
@@ -627,8 +645,28 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // WebSockets — tungstenite (the modern successor to the old `websocket` crate). connect
     // and the socket read/write/send are network; Message constructors are pure. (Found on a
     // tungstenite consumer: connect + send + read classified pure.)
+    //
+    // THE FIX: `connect` only names the URL-dialing client entry point. tungstenite ALSO ships the
+    // stream-first client/server handshake free functions — `client`/`client_with_config` (client.rs:176,
+    // 152: "use this if you need a nonblocking handshake ... or a custom stream") and
+    // `accept`/`accept_with_config`/`accept_hdr`/`accept_hdr_with_config` (server.rs:23-63) — each of
+    // which does `{Client,Server}Handshake::start(stream, ..).handshake()`, the REAL WS upgrade
+    // handshake read/write over an already-open stream. These are the documented way to run tungstenite
+    // over a caller-managed TCP/TLS/mio stream (exactly the shape most async runtimes use, since
+    // tungstenite itself is sync/transport-agnostic) — missing from a verb list keyed only on the
+    // dial-it-yourself `connect` spelling. Same vein as `git2::Submodule::clone`/`ignore::Walk::new`: an
+    // established effect's SIBLING entry point absent from the allowlist.
     if crate_name == "tungstenite" {
         if path.ends_with("::connect")
+            || path.ends_with("::connect_with_config")
+            || path.ends_with("::client")
+            || path.ends_with("::client_with_config")
+            || path.ends_with("::client_tls")
+            || path.ends_with("::client_tls_with_config")
+            || path.ends_with("::accept")
+            || path.ends_with("::accept_with_config")
+            || path.ends_with("::accept_hdr")
+            || path.ends_with("::accept_hdr_with_config")
             || path.ends_with("::read")
             || path.ends_with("::write")
             || path.ends_with("::send")
@@ -732,6 +770,17 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // `WalkParallel::run` (which drives it) touch the filesystem. A bare `build` would wrongly flag the
     // config builders. (Found scanning fd — a file finder — which reported Fs 2: its own `fs::read_dir`
     // was caught, but the `ignore`-based traversal that IS fd was invisible cross-crate.)
+    //
+    // `Walk::new`/`Walk::from_iter` are the crate's own documented convenience constructors — literally
+    // `WalkBuilder::new(path).build()` / `WalkBuilder::from_iter(paths).build()` in `ignore`'s own source
+    // (walk.rs:1128-1146) — but a verb list keyed only on `WalkBuilder::build`/`build_parallel`/
+    // `WalkParallel::run`/`add_ignore` never sees `Walk::new(root)` (the crate's own top-level doc example
+    // and the SAME shape as the already-fixed `walkdir::WalkDir::new`/`git2::Repository::clone`: a
+    // documented public entry point that reaches the modelled effect through a wrapper the allowlist
+    // didn't name). `deny Fs` over `for e in Walk::new(root) { .. }` exited 0. Charged at the SAME
+    // construction site as `WalkBuilder::build` — no receiver typing needed, it's a plain `Expr::Call` on
+    // `ignore::Walk::new`/`ignore::Walk::from_iter`, crate-gated so an unrelated `Walk::new` (a different
+    // crate, or a local type) cannot match this arm.
     if crate_name == "ignore" {
         if path == "ignore::WalkBuilder::build"
             || path == "ignore::WalkBuilder::build_parallel"
@@ -741,6 +790,8 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // only stores a filename string. The lone Fs-touching builder method in the otherwise-pure setter
             // surface, so it was silently pure under the covered-crate floor.
             || path == "ignore::WalkBuilder::add_ignore"
+            || path == "ignore::Walk::new"
+            || path == "ignore::Walk::from_iter"
         {
             return Some("Fs");
         }
@@ -821,10 +872,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // only BUILDS — it keeps the narrow set below. (Found by running on a real
         // tokio-postgres app, pgman: candor had reported only 4 of ~20 DB call sites.)
         if matches!(crate_name, "postgres" | "tokio_postgres" | "deadpool_postgres" | "rusqlite") {
-            const PG: [&str; 19] = [
+            const PG: [&str; 20] = [
                 "::query", "::query_one", "::query_opt", "::query_raw", "::execute",
                 "::batch_execute", "::simple_query", "::prepare", "::prepare_typed",
                 "::copy_in", "::copy_out", "::transaction", "::connect",
+                // `Config::connect_raw` (tokio-postgres config.rs:739) does the SAME protocol handshake
+                // as `Config::connect` over a caller-supplied stream (a Unix socket, a TLS-terminated
+                // proxy) instead of dialing one itself — real Db/Net I/O, missing because the verb
+                // doesn't end in the plain `connect` spelling.
+                "::connect_raw",
                 // rusqlite's dialect of the same verbs (a verb-probe found the CANONICAL rusqlite
                 // consumer API classifying pure): `query_row` is the one-row read, `query_map`/
                 // `query_and_then` the many-row reads, `execute_batch` is rusqlite's name for
@@ -838,10 +894,32 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             }
             // rusqlite only: opening the database IS the connection establishment (`Connection::
             // open`/`open_in_memory`/`open_with_flags` — the embedded analog of `::connect`).
+            //
+            // THE FIX: rusqlite 0.32's `Connection` type has SIX `open*` constructors, not three —
+            // `open_with_flags_and_vfs` and `open_in_memory_with_flags_and_vfs` call the real
+            // `InnerConnection::open_with_flags` (the sqlite3_open_v2 FFI) directly (lib.rs:492,530), and
+            // `open_in_memory_with_flags` (lib.rs:515) calls `Connection::open_with_flags(":memory:", ..)`
+            // — but an exact-suffix allowlist keyed on the THREE simplest names never matches any of
+            // them (`"open_in_memory_with_flags".ends_with("::open_with_flags")` is false: the suffix
+            // check needs the string to END in that literal tail, and `_and_vfs`/`_with_flags` add
+            // characters AFTER it). The same shape as `ignore::Walk::new`: a sibling spelling of an
+            // already-modelled constructor missing from the allowlist, silently pure because rusqlite is
+            // calibrated. Match on the `Connection::open` PREFIX rather than enumerating every suffix —
+            // every current and future `Connection::open*` constructor opens a real handle. Scoped to the
+            // `Connection::` segment specifically (not a bare leaf prefix) so an unrelated same-crate
+            // `open`-prefixed method on a DIFFERENT type (e.g. the private `pragma::Sql::open_brace`,
+            // which pushes one char to a string buffer — no I/O) cannot be swept in by accident.
+            //
+            // Same sighting, different constructor: `Connection::blob_open` and `Blob::reopen` call
+            // `ffi::sqlite3_blob_open`/`sqlite3_blob_reopen` directly (blob/mod.rs:218,251) — genuinely
+            // Db, and `sqlite3_blob_open`/`sqlite3_blob_reopen` are already in this file's own FFI-leaf DB
+            // table above (matched only when a caller names the raw `ffi::` leaf directly) — but rusqlite's
+            // own documented safe wrapper, the incremental-BLOB-I/O API every rusqlite blob consumer
+            // actually calls, carried no rule of its own.
             if crate_name == "rusqlite"
-                && (path.ends_with("::open")
-                    || path.ends_with("::open_in_memory")
-                    || path.ends_with("::open_with_flags"))
+                && (path.contains("::Connection::open")
+                    || path.ends_with("::Connection::blob_open")
+                    || path.ends_with("::Blob::reopen"))
             {
                 return Some("Db");
             }
@@ -875,9 +953,19 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // these a mongodb user's calls classify PURE. (Found hardening: a fn doing
         // `find_one`+`insert_one` reported no effects.) Handle accessors (name/namespace)
         // and option/doc builders don't match these verbs, so they stay pure.
+        //
+        // THE FIX: `Client::with_options(options)` IS `with_uri_str`'s own body one call down —
+        // `with_uri_str` (client.rs:179) is literally `ClientOptions::parse(uri).await?;
+        // Client::with_options(options)`, and `with_options` (client.rs:188) is where the topology/
+        // monitoring actually spins up. A caller who already holds a `ClientOptions` (built
+        // programmatically, or via `ClientOptions::parse` called separately) uses `with_options`
+        // directly — mongodb's OWN alternate entry point for the identical effect, missing from an
+        // allowlist keyed only on the URI-string spelling. Same shape as `ignore::Walk::new` and
+        // diesel's `establish`: a sibling constructor of an already-modelled effect. Verified against
+        // mongodb 3.8.1 source for both the async (`client.rs`) and sync (`sync/client.rs`) `Client`.
         if crate_name == "mongodb" {
-            const MONGO: [&str; 27] = [
-                "::with_uri_str", "::connect", "::find", "::find_one", "::insert_one",
+            const MONGO: [&str; 28] = [
+                "::with_uri_str", "::with_options", "::connect", "::find", "::find_one", "::insert_one",
                 "::insert_many", "::update_one", "::update_many", "::delete_one",
                 "::delete_many", "::replace_one", "::aggregate", "::count_documents",
                 "::estimated_document_count", "::count", "::distinct", "::run_command",
@@ -894,7 +982,19 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // immediately — no build-then-execute split like sqlx, so matching `::query` is safe
         // here. Same DB-verb-dialect gap class as redis/mongodb; calibrated from the Queryable
         // API (unit-tested; a real-app repro is the remaining confirmation).
+        //
+        // THE FIX: `Conn::new(opts)` is each crate's OWN primary connection constructor — not a
+        // pool helper like `get_conn`, but the raw handle. `mysql::Conn::new` (conn/mod.rs:342) calls
+        // `conn.connect_stream()?; conn.connect()?` directly; `mysql_async::Conn::new` (conn/mod.rs:921)
+        // returns a future that does the same handshake. Real connection establishment, same shape as
+        // diesel's `establish`/rusqlite's `open*` — but `::new` never appeared in this verb list, so a
+        // bare `Conn::new(opts)?` (the crate's OWN first doctest example) read pure. Scoped to the
+        // `Conn::` segment specifically (`::new` alone is far too generic a suffix to key on blindly —
+        // `Opts`/`Pool`/query-result types in the same two crates have their own pure `new`s).
         if matches!(crate_name, "mysql" | "mysql_async") {
+            if path.ends_with("::Conn::new") {
+                return Some("Db");
+            }
             const MY: [&str; 16] = [
                 "::query", "::query_first", "::query_iter", "::query_map", "::query_fold",
                 "::query_drop", "::exec", "::exec_first", "::exec_iter", "::exec_map",
@@ -928,6 +1028,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 || path.ends_with("::exec_with_returning")
                 || path.ends_with("::exec_without_returning")
                 || path.ends_with("::connect")
+                // `Database::connect_proxy` (database/mod.rs:139, behind the `proxy` feature) is
+                // `Database::connect`'s sibling for a caller-supplied `ProxyDatabaseTrait` backend —
+                // same effect (produces a live `DatabaseConnection`), different verb, missing from an
+                // allowlist keyed on the plain `connect` spelling.
+                || path.ends_with("::connect_proxy")
                 || path.ends_with("::execute")
                 || path.ends_with("::execute_unprepared")
                 || path.ends_with("::query_one")
@@ -943,11 +1048,24 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // (Reached by sqlx + diesel — the build-vs-execute-split crates.) `first` is diesel's
         // LIMIT-1 round trip and `load_iter` its 2.x streaming execution; `fetch_many` is sqlx's
         // multi-result stream. All crate-gated, so a std `Vec::first` never resolves here.
-        const VERBS: [&str; 19] = [
+        //
+        // `establish` is diesel's OWN name for `::connect` — `Connection::establish(url)`
+        // (connection/mod.rs:243), implemented by opening the real backend handle in
+        // `SqliteConnection`/`PgConnection`/`MysqlConnection::establish` (sqlite/connection/mod.rs:230,
+        // pg/connection/mod.rs:176, mysql/connection/mod.rs:158 — each does the real file-open/socket-
+        // connect). It is diesel's canonical, and by far most common, connection entry point — every
+        // diesel quickstart opens with it — yet it shares no verb spelling with `::connect`, so it fell
+        // through this allowlist to `None`, and because `diesel` IS a CALIBRATED_CRATES entry the miss
+        // produced NO `coverage.uncovered` disclosure either (that ledger is crate-level: a calibrated
+        // crate's unmatched path reads as reviewed-pure, not as a gap) — the same silent-purity shape as
+        // `ignore::Walk::new` above, one call away from `establish_test_transaction`/`establish_inner`,
+        // which are diesel's own private plumbing and stay unmatched (no `::` in the allowed suffix keeps
+        // this exact-verb, not a substring match).
+        const VERBS: [&str; 20] = [
             "::execute", "::query_row", "::query_map", "::query_one", "::fetch_one",
             "::fetch_all", "::fetch_optional", "::fetch", "::fetch_many", "::connect",
             "::acquire", "::begin", "::commit", "::rollback", "::load", "::load_iter",
-            "::first", "::get_result", "::get_results",
+            "::first", "::get_result", "::get_results", "::establish",
         ];
         if VERBS.iter().any(|v| path.ends_with(v)) {
             return Some("Db");
@@ -2687,6 +2805,15 @@ mod tests {
         assert_eq!(classify("ignore", "ignore::overrides::OverrideBuilder::build"), None); // pure config
         assert_eq!(classify("ignore", "ignore::gitignore::GitignoreBuilder::build"), None); // pure config
         assert_eq!(classify("ignore", "ignore::DirEntry::path"), None); // pure accessor
+        // THE FIX: `Walk::new`/`Walk::from_iter` are `WalkBuilder::new(path).build()` /
+        // `WalkBuilder::from_iter(paths).build()` in ignore's own source — the crate's documented
+        // convenience constructors, and its own top-level doc example (`for entry in Walk::new(path)`).
+        // A corpus round caught `deny Fs` exiting 0 over exactly that idiom.
+        assert_eq!(classify("ignore", "ignore::Walk::new"), Some("Fs"));
+        assert_eq!(classify("ignore", "ignore::Walk::from_iter"), Some("Fs"));
+        // NO FABRICATION: a same-named `Walk::new` from an unrelated crate must not gain Fs — crate-gated.
+        assert_eq!(classify("walkdir", "walkdir::Walk::new"), None);
+        assert_eq!(classify("some_local_crate", "some_local_crate::Walk::new"), None);
         // notify fs-watching: watcher constructors + watch/unwatch are Fs, data types stay pure.
         assert_eq!(classify("notify", "notify::RecommendedWatcher::new"), Some("Fs"));
         assert_eq!(classify("notify", "notify::PollWatcher::new"), Some("Fs"));
@@ -2702,12 +2829,41 @@ mod tests {
         assert_eq!(classify("rusqlite", "rusqlite::Connection::prepare_cached"), Some("Db"));
         assert_eq!(classify("rusqlite", "rusqlite::Connection::open"), Some("Db"));
         assert_eq!(classify("rusqlite", "rusqlite::Connection::open_in_memory"), Some("Db"));
+        // THE FIX: three more real `Connection::open*` constructors an exact-suffix list missed
+        // (`open_in_memory_with_flags` doesn't END in `open_with_flags`), plus the documented blob-I/O
+        // API (`blob_open`/`Blob::reopen`), each calling the real sqlite3 FFI directly.
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::open_in_memory_with_flags"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::open_with_flags_and_vfs"), Some("Db"));
+        assert_eq!(
+            classify("rusqlite", "rusqlite::Connection::open_in_memory_with_flags_and_vfs"),
+            Some("Db")
+        );
+        assert_eq!(classify("rusqlite", "rusqlite::Connection::blob_open"), Some("Db"));
+        assert_eq!(classify("rusqlite", "rusqlite::blob::Blob::reopen"), Some("Db"));
+        // NO FABRICATION: a same-crate, DIFFERENT type's `open`-prefixed method (rusqlite's own private
+        // `pragma::Sql::open_brace`, which pushes one char to a string buffer) must not gain Db — the
+        // fix keys on the `Connection::` segment, not a bare leaf prefix.
+        assert_eq!(classify("rusqlite", "rusqlite::pragma::Sql::open_brace"), None);
         // …but `open` stays rusqlite-only (postgres has no open; nothing else may borrow it):
         assert_eq!(classify("postgres", "postgres::Client::open"), None);
         assert_eq!(classify("tokio_postgres", "tokio_postgres::Client::query_typed"), Some("Db"));
+        // THE FIX: `Config::connect_raw` does the same protocol handshake as `Config::connect`, over a
+        // caller-supplied stream instead of one it dials itself.
+        assert_eq!(classify("tokio_postgres", "tokio_postgres::Config::connect_raw"), Some("Db"));
         // diesel's LIMIT-1 + streaming executions; sqlx's multi-result stream:
         assert_eq!(classify("diesel", "diesel::RunQueryDsl::first"), Some("Db"));
         assert_eq!(classify("diesel", "diesel::RunQueryDsl::load_iter"), Some("Db"));
+        // THE FIX: `Connection::establish` is diesel's own name for `::connect` — the crate's canonical,
+        // most-used connection entry point (`SqliteConnection::establish(url)` in every diesel
+        // quickstart), implemented by really opening the backend handle — but shared no verb spelling
+        // with `::connect`, so it read pure with zero `coverage.uncovered` disclosure (diesel is
+        // calibrated, so the miss reads as reviewed-pure, not as a gap).
+        assert_eq!(classify("diesel", "diesel::sqlite::SqliteConnection::establish"), Some("Db"));
+        assert_eq!(classify("diesel", "diesel::pg::PgConnection::establish"), Some("Db"));
+        assert_eq!(classify("diesel", "diesel::mysql::MysqlConnection::establish"), Some("Db"));
+        assert_eq!(classify("diesel", "diesel::Connection::establish"), Some("Db"));
+        // NO FABRICATION: diesel's own private plumbing shares the substring but not the exact verb.
+        assert_eq!(classify("diesel", "diesel::sqlite::SqliteConnection::establish_inner"), None);
         assert_eq!(classify("sqlx", "sqlx::query::Query::fetch_many"), Some("Db"));
         // sqlx's bare `query()` builder must STAY pure (the original sqlx lesson):
         assert_eq!(classify("sqlx", "sqlx::query"), None);
@@ -2747,6 +2903,17 @@ mod tests {
         // original exclusion existed to prevent. FQN-exact matching (not a bare `::clone` re-widen) keeps
         // this pure while catching `Repository::clone` above.
         assert_eq!(classify("git2", "git2::Remote::clone"), None);
+        // THE SWEEP FIX: a fourth+fifth true positive in the SAME gap — `Submodule::clone`/
+        // `Submodule::update` call `raw::git_submodule_clone`/`git_submodule_update` directly (the exact
+        // leaves already in this file's FFI-tier NET table), but git2's documented submodule-init idiom
+        // calls the safe Rust wrapper, which carried no rule of its own.
+        assert_eq!(classify("git2", "git2::Submodule::clone"), Some("Net"));
+        assert_eq!(classify("git2", "git2::Submodule::update"), Some("Net"));
+        // NO FABRICATION: git2's many pure `update_*` setters (CheckoutBuilder/DiffOptions/StatusOptions)
+        // must not gain Net — FQN-exact, not a bare `::update` substring.
+        assert_eq!(classify("git2", "git2::build::CheckoutBuilder::update_only"), None);
+        assert_eq!(classify("git2", "git2::DiffOptions::update_index"), None);
+        assert_eq!(classify("git2", "git2::Submodule::update_strategy"), None);
         // memmap2: only the syscall-issuing map/flush/protect verbs are Fs; reads over an already-mapped
         // region (len/as_ptr/is_empty) and the request builder are PURE (whole-crate Fs fabricated Fs).
         assert_eq!(classify("memmap2", "memmap2::MmapOptions::map"), Some("Fs"));
@@ -2843,6 +3010,10 @@ mod tests {
         assert_eq!(classify("sea_orm", "sea_orm::sea_query::Func::count"), None);
         assert_eq!(classify("sea_orm", "sea_orm::sea_query::Condition::all"), None);
         assert_eq!(classify("sea_orm", "sea_orm::Select::all"), Some("Db"));
+        // THE FIX: `Database::connect_proxy` (the `proxy`-feature sibling of `Database::connect`) opens
+        // a live `DatabaseConnection` through a caller-supplied `ProxyDatabaseTrait` — same effect,
+        // missing from an allowlist keyed on the plain `connect` spelling.
+        assert_eq!(classify("sea_orm", "sea_orm::Database::connect_proxy"), Some("Db"));
     }
 
     #[test]
@@ -2865,6 +3036,65 @@ mod tests {
         // the LIVE manager still round-trips (Db).
         assert_eq!(classify("redis", "redis::aio::ConnectionManager::new"), Some("Db"));
         assert_eq!(classify("redis", "redis::Commands::get"), Some("Db"));
+    }
+
+    #[test]
+    fn aws_config_load_from_env_is_loads_own_convenience_wrapper() {
+        // THE FIX: `load_from_env()` is the crate's OWN "convenience wrapper" (its doc comment's words)
+        // around `from_env().load().await` — the exact already-modelled effect one call down — but
+        // "load_from_env".ends_with("::load") is false.
+        assert_eq!(classify("aws_config", "aws_config::load"), Some("Net"));
+        assert_eq!(classify("aws_config", "aws_config::load_defaults"), Some("Net"));
+        assert_eq!(classify("aws_config", "aws_config::load_from_env"), Some("Net"));
+        assert_eq!(classify("aws_config", "aws_config::from_env"), None); // pure builder
+    }
+
+    #[test]
+    fn tungstenite_stream_first_handshake_entry_points_are_net() {
+        // THE FIX: `client`/`client_with_config`/`client_tls`/`client_tls_with_config` (client.rs:176,
+        // 159; tls.rs:163,179) and `accept`/`accept_with_config`/`accept_hdr`/`accept_hdr_with_config`
+        // (server.rs:23-63) each run `{Client,Server}Handshake::start(stream, ..).handshake()` — the real
+        // WS upgrade I/O over an already-open stream. tungstenite's OWN documented way to run over a
+        // caller-managed TCP/TLS/mio stream, missing from a verb list keyed only on `connect`.
+        assert_eq!(classify("tungstenite", "tungstenite::client::client"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::client::client_with_config"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::tls::client_tls"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::tls::client_tls_with_config"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::server::accept"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::server::accept_with_config"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::server::accept_hdr"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::server::accept_hdr_with_config"), Some("Net"));
+        assert_eq!(classify("tungstenite", "tungstenite::client::connect_with_config"), Some("Net"));
+    }
+
+    #[test]
+    fn mysql_conn_new_is_the_real_connect() {
+        // THE FIX: `mysql::Conn::new` (conn/mod.rs:342) calls `connect_stream()?; connect()?` directly;
+        // `mysql_async::Conn::new` (conn/mod.rs:921) is the async equivalent. Each crate's own primary
+        // connection constructor, the crate's own first doctest example — but `::new` never appeared in
+        // the verb list.
+        assert_eq!(classify("mysql", "mysql::Conn::new"), Some("Db"));
+        assert_eq!(classify("mysql_async", "mysql_async::Conn::new"), Some("Db"));
+        // NO FABRICATION: the SAME two crates' unrelated pure `new`s (Opts/PoolConstraints/TxOpts/…)
+        // must not gain Db — scoped to the `Conn::` segment, not a bare `::new` suffix.
+        assert_eq!(classify("mysql", "mysql::Opts::new"), None);
+        assert_eq!(classify("mysql", "mysql::PoolConstraints::new"), None);
+        assert_eq!(classify("mysql_async", "mysql_async::TxOpts::new"), None);
+    }
+
+    #[test]
+    fn mongodb_with_options_is_the_same_effect_as_with_uri_str() {
+        // THE FIX: `with_uri_str` (client.rs:179) is `ClientOptions::parse(uri).await?;
+        // Client::with_options(options)` one call down — `with_options` (client.rs:188) is where the
+        // topology/monitoring actually spins up, and mongodb's own doc calls it the entry point for a
+        // caller who already holds parsed `ClientOptions`. Verified against mongodb 3.8.1 (both the
+        // async `client.rs` and sync `sync/client.rs` `Client`).
+        assert_eq!(classify("mongodb", "mongodb::Client::with_uri_str"), Some("Db"));
+        assert_eq!(classify("mongodb", "mongodb::Client::with_options"), Some("Db"));
+        assert_eq!(classify("mongodb", "mongodb::sync::Client::with_options"), Some("Db"));
+        assert_eq!(classify("mongodb", "mongodb::Collection::find_one"), Some("Db"));
+        // NO FABRICATION: an unrelated crate's `with_options` builder must not gain Db — crate-gated.
+        assert_eq!(classify("some_other_crate", "some_other_crate::Widget::with_options"), None);
     }
 
     #[test]
