@@ -11,6 +11,16 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.33.1] — 2026-08-27
 
+- **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family
+  without one.** Found by `release-preflight [7b]` on this cut, which is the first cut since [7b] was
+  fixed to read JOBS rather than the FILE: the file-level question passed here because the
+  `build-and-test` job beside it declares a deadline, so the macOS lane inherited GitHub's 6-hour
+  default and a hang there would have read as a slow job while blocking `[10]`'s CI-green gate for an
+  afternoon. That is verbatim the failure `build-and-test`'s own timeout comment records — "fixing the
+  two that had failed and not their siblings is the habit this repo keeps measuring" — one sibling
+  further on. Set to 20m against a measured 32-51s across five runs (533 tests; the `target` cache
+  makes the build the small part), sized to the work rather than to a round number.
+
 - **⚠ First triage pass over the completeness-gate ratchet (`eval/coverage-gate/open.tsv`): 148 of the
   251 rows closed — 96 real rules added to `covered.tsv` (git2 37, sea_orm 24, rusqlite 16, lettre 16,
   tonic 3) plus 52 rows removed as GENERATOR false positives, none reachable by any external consumer.**
