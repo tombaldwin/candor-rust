@@ -9,6 +9,59 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ R59/R60 (SOUNDNESS.md): two independent FFI cardinal sins closed — a local `extern "C"` call
+  disclosed NOTHING in rust-deep despite its own callgraph proving it visited the call, and an
+  unclassified `libc`/`nix`/`rustix` generic-fd-verb call (`read`/`write`/`close`/...) vanished
+  entirely from rust-scan's report instead of disclosing the honest no-classify the crate's own
+  comment already claimed.**
+  - **R60 (rust-deep, `src/lib.rs`)**: `record_resolved_call` classifies a callee by
+    `(crate_name, path)` and floors an unreviewed external crate to `invisible` — both routes are
+    gated on the callee being NON-local, so a fn declared in a LOCAL `extern "C" { .. }` block (bindgen's
+    shape, `#[link(name="c")]` or bare) fell through both: its crate name is the scanned crate itself
+    (never calibrated) and `is_local()` excludes it from the floor-disclosure branch too. `fn run_cmd()
+    { unsafe { system(c.as_ptr()); } }` produced `"functions": []` while the SAME run's callgraph
+    sidecar read `{"run_cmd":["system"]}` — the HIR walk visited the call and the effect layer attached
+    nothing. Fixed by disclosing `Unknown`/`native:extern fn` on `cx.tcx.is_foreign_item(def_id) &&
+    def_id.is_local()`, mirroring rust-scan's already-correct `decls.rs` `ForeignMod` handling
+    unconditionally rather than routing through the crate-name-keyed `invisible` machinery — the same
+    mechanism that already correctly discloses `"invisible": ["libc"]` for an external unclassified
+    call has no crate name to hang a LOCAL extern block's disclosure off. New `ui/ffi_extern.rs` UI test
+    (red on the pre-fix binary: zero warnings emitted; green after: `Unknown` on the direct call and its
+    transitive caller, `#[link(name="c")]` behaves identically to a bare block, a genuinely pure sibling
+    fn stays unflagged).
+  - **R59 (rust-scan, `candor-classify`/`candor-scan`)**: `libc`/`nix`/`rustix` are in
+    `CALIBRATED_CRATES`, whose coverage-ledger exemption (`scan.rs`) reads "classify has rules here" as
+    "an unmatched call was reviewed and found pure" — true for most calibrated crates, false for these
+    three, whose generic fd verbs (`read`/`write`/`close`/`lseek`/`dup`/`fcntl`/...) `classify()`
+    *deliberately* leaves unclassified (an ambiguous fd could be Fs/Net/Ipc; the table's own comment
+    calls this "an honest no-classify… beats emitting the WRONG effect"). The blanket exemption made
+    that comment false: `fn drain(fd: i32) -> usize { unsafe { libc::read(fd, buf, 64) } }` produced
+    `"functions": []` — neither function appeared, not as `Unknown`, not as `invisible`, nothing —
+    strictly worse than an uncalibrated dependency's honest blind-spot disclosure. New
+    `CALIBRATED_BUT_PARTIAL_CRATES` const (`candor-classify`) carves these three OUT of the coverage
+    ledger's `CALIBRATED_CRATES` exemption at its one consumer site; a call `classify()` DOES cover
+    (`open`/`socket`/...) never reaches the ledger at all (gated upstream on `classified.is_none()`), so
+    their precise effects are untouched — only the genuinely-unclassified calls now join `invisible`,
+    matching what rust-deep already did for the identical fixture. No effect is fabricated (never Fs/Net
+    — disclosure, not resolution). New `candor-scan` test
+    `libc_generic_fd_verb_discloses_invisible_instead_of_vanishing` (red on the pre-fix binary: the bare
+    fixture's `"functions"` array was empty; green after, with controls proving a classified call stays
+    noise-free and a mixed classified+unclassified fn keeps both).
+  - **Corpus quantification** (`~/.cargo/registry`, 1202 cached crates, standalone scans, before/after
+    binary diff): 97 crates (8%) differ, every byte of every diff explained by (a) a new
+    `invisible`/`coverage.uncovered` entry for `libc`/`nix`/`rustix` or (b) a previously wholly-silent
+    report (`"functions": []`) gaining its now-honestly-disclosed entries — zero changes to any
+    `inferred`/`direct`/`fs`/`hosts`/`hash`/`calls` field anywhere in the corpus. Spot-checked against
+    real source: `serial-unix` (a real serial-port crate) calls `libc::{fcntl,close,read,write}` — 6
+    previously-silent calls across 5 functions including a `Drop` impl that closes the fd — now
+    correctly disclosed; `termios`'s pre-existing disclosure (25 calls) is untouched. Not a flood: only
+    crates that declare `libc`/`nix`/`rustix` as a direct dependency and call their generic fd verbs are
+    affected at all.
+  - This closes the seam these two fixtures probe; it does not make every calibrated crate's
+    completeness claim (`CALIBRATED_CRATES` minus the three carved out here) independently re-verified,
+    and it does not touch java/ts/swift's own FFI mechanisms (tracked separately, see SOUNDNESS.md R58/
+    R61).
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family

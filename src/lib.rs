@@ -3297,6 +3297,41 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             Callee::Def { did, dynamic } => (did, dynamic),
         };
 
+        // §4 HONESTY — FFI BOUNDARY (SPEC §4 ⟨0.7⟩, `native:`): a call resolving to a fn declared in a
+        // LOCAL `extern "C" { .. }` block. Its body lives in another language — Fs/Net/Exec is
+        // unknowable — so disclose Unknown with the same "native:extern fn" reason rust-scan already
+        // gives via its `ForeignMod` handling (decls.rs), for byte-parity over the same bytes (R60,
+        // SOUNDNESS.md). Gated to `is_local()`: an EXTERNAL dependency's own extern declarations (e.g.
+        // `libc::open`/`libc::read` are themselves `extern "C" { .. }` items inside the `libc` crate)
+        // must NOT take this branch — those go through `record_resolved_call`'s classify()/floor-
+        // disclosure pipeline below, which already handles them (a classified one gets its real effect;
+        // an unclassified one is floored to `invisible`, not silently swallowed here).
+        //
+        // Without this, `record_resolved_call` classifies by `(crate_name, path)`: a LOCAL extern fn's
+        // crate_name is THIS crate (never a calibrated one, so `classify` always misses) and its
+        // `is_local()` ALSO excludes it from the floor-disclosure branch (deliberately non-local-only —
+        // that branch's whole point is flagging an unreviewed EXTERNAL crate). Both honest-disclosure
+        // routes miss it, so the call fell through to silent-pure — strictly worse than rust-scan gives
+        // the identical source, though rust-deep is billed as the sound gate.
+        //
+        // `return` before `add_edge`: a foreign item has no HIR body, so recursing into it as a local
+        // call edge would only ever be a dead edge in the fixpoint (never a real one to propagate
+        // through), and skipping the rest of check_expr matches how the `Callee::Unresolved` callback
+        // disclosure above already short-circuits.
+        if def_id.is_local() && cx.tcx.is_foreign_item(def_id) {
+            self.direct.entry(caller).or_default().insert(UNKNOWN);
+            self.unknown_why.entry(caller).or_default().insert("native:extern fn".to_string());
+            if self.explain.is_some() {
+                let loc = cx.tcx.sess.source_map().span_to_diagnostic_string(expr.span);
+                self.sites.entry(caller).or_default().push(EffectSite {
+                    eff: UNKNOWN,
+                    via: "FFI boundary (local extern fn)".to_string(),
+                    loc,
+                });
+            }
+            return;
+        }
+
         // Record a local call edge for transitive propagation.
         let add_edge = |this: &mut Self, target: DefId| {
             if let Some(local) = target.as_local()

@@ -2467,8 +2467,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !deps_idx.untrusted.contains(real)
                 && !deps_idx.incomplete_pkgs.contains(real)
                 && !deps_idx.judged_nothing_pkgs.contains(real);
+            // `CALIBRATED_CRATES` normally exempts a crate outright — "classify has rules here" is read
+            // as "an unmatched call was reviewed and found pure". `CALIBRATED_BUT_PARTIAL_CRATES` (R59,
+            // SOUNDNESS.md) carves the FFI-thin syscall crates OUT of that exemption: `libc`/`nix`/
+            // `rustix`'s generic fd verbs (`read`/`write`/`close`/...) are deliberately UNCLASSIFIED
+            // (an ambiguous fd could be Fs/Net/Ipc — see candor-classify's table), so "no rule matched"
+            // there is an honest gap, not a reviewed verdict — it must still reach the ledger and
+            // disclose `invisible`, exactly like a call into an uncalibrated dependency.
+            let fully_calibrated = candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
+                && !candor_classify::CALIBRATED_BUT_PARTIAL_CRATES.contains(&cr.as_str());
             !covered
-                && !candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
+                && !fully_calibrated
                 && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
                 && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
                 // REVIEWED-PURE: read and found to perform no effect of its own, so its silence is an
