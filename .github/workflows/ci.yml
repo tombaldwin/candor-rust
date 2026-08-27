@@ -305,6 +305,17 @@ jobs:
   # nightly build is expensive and OS-independent in what it checks).
   stable-crates-macos:
     runs-on: macos-latest
+    # A DEADLINE, for the reason its `build-and-test` sibling above carries one — and this job is
+    # exactly the "fixing the two that had failed and not their siblings" habit that comment names.
+    # It was the LAST job in the family with no `timeout-minutes`, found by `release-preflight [7b]`
+    # on the 0.33.1 cut, the first cut after [7b] was fixed to read JOBS rather than the file (a
+    # file-level check passed here because `build-and-test` in the same file declares one).
+    #
+    # 20, sized to the work rather than to a round number: measured across five runs the job takes
+    # 32-51s wall clock (533 tests; the `target` cache makes the build the small part), so 20m is
+    # ~25x the observed runtime and still two orders of magnitude below GitHub's 6-hour default,
+    # which is what makes a hung runner read as a slow one and block preflight [10] for an afternoon.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
