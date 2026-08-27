@@ -7461,7 +7461,76 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             !effs(fn_entry(&b, "chan")).is_empty(),
             "the classified call's own fn keeps its effect:\n{b:#}"
         );
-    
+
+    }
+
+    /// R59 (SOUNDNESS.md): `libc`/`nix`/`rustix` are `CALIBRATED_CRATES`, and the coverage ledger
+    /// normally exempts a calibrated crate outright — "classify has rules here" reads as "an unmatched
+    /// call was reviewed and found pure". That does not hold for these three: `classify` DELIBERATELY
+    /// skips their generic fd verbs (`read`/`write`/`close`/...) because a fixed label would
+    /// mis-categorise an ambiguous fd as often as it helps (an honest no-classify, documented in
+    /// `candor-classify/src/lib.rs`). Before the fix the blanket exemption converted that documented gap
+    /// into total silence: a fn whose ENTIRE effectful surface was `libc::read` on a bare fd param
+    /// vanished from the report completely — `"functions": []`, no `Unknown`, no `invisible`, nothing
+    /// (worse than an uncalibrated dependency, which discloses `invisible` on the same shape).
+    /// CONTROLS: (a) a CLASSIFIED libc call (`open` → Fs) stays exactly as precise as before, with no
+    /// `invisible` noise; (b) a function mixing a classified call with an unclassified one keeps BOTH the
+    /// real effect and the disclosure, never one masking the other.
+    #[test]
+    fn libc_generic_fd_verb_discloses_invisible_instead_of_vanishing() {
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-libcfd-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\nlibc = \"0.2\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // THE FIX: an unclassified generic fd verb (`read`) discloses `invisible`, not silence.
+        let bare = run("libcfdbare",
+            "pub fn drain(fd: i32) -> usize { let mut b = [0u8; 64]; \
+             unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, 64) as usize } }\n");
+        assert!(
+            !bare["functions"].as_array().unwrap().is_empty(),
+            "before the fix this vanished entirely (\"functions\": []) — total silence, worse than an \
+             uncalibrated dep:\n{bare:#}"
+        );
+        assert_eq!(fn_entry(&bare, "drain")["invisible"], serde_json::json!(["libc"]),
+            "an unclassified libc fd verb must disclose the crate as invisible, not silently pure:\n{bare:#}");
+        assert!(effs(fn_entry(&bare, "drain")).is_empty(),
+            "NO FABRICATION: candor cannot know if the fd is a file/socket/pipe, so it must never guess \
+             a concrete effect (Fs/Net) here:\n{bare:#}");
+        assert_eq!(bare["coverage"]["uncovered"], serde_json::json!([{ "name": "libc", "calls": 1 }]),
+            "the coverage ledger must count the unclassified call:\n{bare:#}");
+        // CONTROL (a): a CLASSIFIED libc call keeps its precise effect, with NO invisible noise —
+        // libc/nix/rustix stay fully trusted for the calls the syscall table DOES cover.
+        let classified = run("libcfdclassified",
+            "pub fn open_it() -> i32 { unsafe { libc::open(std::ptr::null(), 0) } }\n");
+        assert_eq!(effs(fn_entry(&classified, "open_it")), vec!["Fs"],
+            "a classified libc call (open) must keep its precise effect:\n{classified:#}");
+        assert!(fn_entry(&classified, "open_it").get("invisible").is_none(),
+            "a classified libc call must NOT be flagged invisible — no spurious noise:\n{classified:#}");
+        assert!(classified.get("coverage").is_none(),
+            "a fully-classified scan must omit the coverage field:\n{classified:#}");
+        // CONTROL (b): mixing a classified call with an unclassified one keeps BOTH — the real effect is
+        // not masked by the disclosure, and the disclosure is not masked by the real effect.
+        let mixed = run("libcfdmixed",
+            "pub fn read_it(fd: i32) -> i32 { \
+                 unsafe { let f = libc::open(std::ptr::null(), 0); \
+                 let mut b = [0u8; 8]; libc::read(f, b.as_mut_ptr() as *mut libc::c_void, 8); f } }\n");
+        assert_eq!(effs(fn_entry(&mixed, "read_it")), vec!["Fs"],
+            "the classified open() effect must survive alongside the disclosure:\n{mixed:#}");
+        assert_eq!(fn_entry(&mixed, "read_it")["invisible"], serde_json::json!(["libc"]),
+            "the unclassified read() must still be disclosed even with a classified sibling call:\n{mixed:#}");
     }
     /// `CANDOR_PANIC_ON_FILE` is process-global and `INCREMENTAL` is a thread-local the tests set by
     /// hand, so the abort tests take this lock rather than race each other's injection window.

@@ -1,0 +1,22 @@
+warning: `caller` effects: { Unknown* }   (* = via callee)
+  --> $DIR/ffi_extern.rs:31:1
+   |
+LL | fn caller() {
+   | ^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `get_pid` effects: { Unknown }   (* = via callee)
+  --> $DIR/ffi_extern.rs:26:1
+   |
+LL | fn get_pid() -> i32 {
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: `run_cmd` effects: { Unknown }   (* = via callee)
+  --> $DIR/ffi_extern.rs:19:1
+   |
+LL | fn run_cmd() {
+   | ^^^^^^^^^^^^
+
+warning: 3 warnings emitted
+

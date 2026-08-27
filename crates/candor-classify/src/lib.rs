@@ -94,6 +94,30 @@ pub const CALIBRATED_PREFIXES: [&str; 3] = ["aws_sdk_", "aws_smithy", "cap_"];
 /// treat them as *covered* — otherwise it would mislabel the most common async crates as blind spots.
 pub const PATH_CALIBRATED_CRATES: [&str; 3] = ["tokio", "async_std", "mio"];
 
+/// The FFI-thin syscall crates whose `CALIBRATED_CRATES` membership is INCOMPLETE BY DESIGN.
+///
+/// For every OTHER calibrated crate, "classify returned None" is a REVIEWED verdict — the table covers
+/// the crate's effectful surface, so a miss means the call really is pure, and candor-scan's coverage
+/// ledger exempts all of `CALIBRATED_CRATES` from blind-spot disclosure on exactly that theory (a
+/// calibrated crate's silence is informative). That does not hold for `libc`/`nix`/`rustix`: the table
+/// above DELIBERATELY skips their generic fd verbs (`read`/`write`/`close`/`lseek`/`dup`/`fcntl`/...)
+/// because a fixed label would mis-categorise an ambiguous fd (file? socket? pipe?) as often as it
+/// helps — an honest no-classify, not a purity finding. Real programs that touch these crates go
+/// through those exact verbs constantly (`libc::read(fd, ..)` IS the effect, not a builder step), so the
+/// blanket exemption converted "no rule here" into a confident, silent purity claim: `fn drain(fd: i32)
+/// { libc::read(fd, buf, 64); }` reported zero effects AND zero disclosure (R59, SOUNDNESS.md) — worse
+/// than an uncalibrated dependency, which at least discloses `invisible`.
+///
+/// Consumed ONLY by candor-scan's coverage-ledger filter (the same one-consumer site
+/// `coverage_has_exactly_one_anchor_and_exactly_one_consumer` enforces), to carve these three OUT of the
+/// `CALIBRATED_CRATES` exemption there — an unclassified call into them still joins the ledger and
+/// disclosed `invisible`, exactly like a call into an uncalibrated dependency, while their CLASSIFIED
+/// calls (`open`/`close`/`socket`/...) are untouched (they never reach the ledger at all — see
+/// `blind_direct`'s `classified.is_none()` gate). Deliberately NOT removed from `CALIBRATED_CRATES`
+/// itself: that list means "classify has SOME live rules here" (true — the FS/NET/EXEC/IPC/ENV/CLOCK/
+/// RAND tables all fire for these three), and stays the honest `.calibrated.json` sidecar contract.
+pub const CALIBRATED_BUT_PARTIAL_CRATES: [&str; 3] = ["libc", "nix", "rustix"];
+
 /// Crates REVIEWED AND FOUND TO PERFORM NO EFFECT OF THEIR OWN — the κ ledger treats them as covered, so
 /// their calls stop being disclosed blind spots.
 ///
