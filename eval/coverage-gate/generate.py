@@ -197,6 +197,22 @@ BORING_TRAITS = {
     "Serialize", "Deserialize", "Send", "Sync", "Iterator", "IntoIterator", "FromIterator", "Extend",
 }
 TYPE_DECL_RE = re.compile(r'\b(pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+(\w+)')
+
+
+def is_bare_pub(pub_kw):
+    """True only for a BARE `pub` — `pub(crate)`/`pub(super)`/`pub(in ...)` are restricted visibility,
+    not reachable by an external consumer at all, and must not count as a public entry point. Mirrors
+    `restricted_types()`'s treatment of types (found via diesel's `RawConnection`), but that check never
+    covered plain FUNCTIONS: `sea_orm::DatabaseTransaction::begin`/`::run` (transaction.rs:32,96) and
+    every one of ureq's module-private `connect`/`connect_host`/`connect_http`/`connect_https`
+    (unit.rs:155, stream.rs:326,334,347) are `pub(crate) fn`, syntactically matched `pub(?:\\(...\\))?`
+    by the old regex just like a bare `pub fn` — so the coverage-gate ratchet carried them as open
+    "gaps" a real consumer can never trigger (calling them from outside the crate does not compile).
+    FN_HEAD_RE's capture group includes the parenthesised qualifier verbatim when present, so the fix is
+    a plain string check: only whitespace may follow the `pub` token for it to be bare."""
+    return pub_kw is not None and pub_kw.strip() == "pub"
+
+
 PUB_USE_RE = re.compile(r'pub\s+use\s+(?:crate::)?([\w:]+)::\{([^}]*)\}\s*;')
 PUB_USE_SINGLE_RE = re.compile(r'pub\s+use\s+(?:crate::)?([\w:]+)::(\w+)(?:\s+as\s+(\w+))?\s*;')
 
@@ -345,7 +361,7 @@ def process_crate(registry_src, crate_name):
         mp = module_path_for(f, srcdir)
         for start, pub_kw, is_async, fn_name in find_fns(s):
             depth = s[:start].count('{') - s[:start].count('}')
-            if depth == 0 and pub_kw:
+            if depth == 0 and is_bare_pub(pub_kw):
                 public_entries.append((mp, None, fn_name, f))
         for m in IMPL_RE.finditer(s):
             res = parse_impl_header(s, m.start())
@@ -370,7 +386,7 @@ def process_crate(registry_src, crate_name):
                 require_pub_kw = False  # a pub trait's impl methods are public with no `pub` keyword
             for start, pub_kw, is_async, fn_name in find_fns(body):
                 d2 = body[:start].count('{') - body[:start].count('}')
-                if d2 == 0 and (pub_kw or not require_pub_kw):
+                if d2 == 0 and (is_bare_pub(pub_kw) or not require_pub_kw):
                     public_entries.append((mp, ty_name, fn_name, f))
 
     out = []
