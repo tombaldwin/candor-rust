@@ -11,6 +11,29 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.33.0] — 2026-08-26
 
+- **⚠ `walkdir::WalkDir` traversal reported ZERO effects on every idiomatic usage — `deny Fs` passed
+  at exit 0 over code that walks the filesystem.** The classify.rs rule keyed the `Fs` charge on a
+  typed `IntoIter::next` receiver, but candor-scan's receiver-typing (`ctor_type`/`resolve_recv_type`)
+  hard-blocks the `.into_iter()` verb everywhere (a guard against fabricating onto a DIFFERENT std
+  type, e.g. `Vec::into_iter()` → `std::vec::IntoIter`, with no per-crate exception for a SAME-crate
+  return like `walkdir::IntoIter`) — so no idiomatic chain (`for e in WalkDir::new(p)`,
+  `.into_iter().count()`, the crate's own README `.filter_map(|e| e.ok())` form, or an untyped
+  `let it = ..into_iter(); it.next()`) ever reached a typed `IntoIter` receiver, and `candor-query
+  blindspots` reported "every call resolved." Fixed by charging at `WalkDir::new` (construction),
+  mirroring the already-modeled `ignore::WalkBuilder::build`/`glob::glob` — an ordinary `Expr::Call`
+  needing no receiver typing at all. The `IntoIter::next`/`DirEntry::metadata` rule is kept (not
+  removed as dead code): it still fires for the narrower explicit-type-annotation case a receiver
+  blocklist doesn't gate. Audited the other 81 calibrated crates for the same shape (a same-crate
+  iterator reached only through the `iter`/`into_iter`/`drain` blocklist) — walkdir was the only one
+  keyed on an iteration method rather than construction, confirmed by two independent checks, so the
+  blocklist itself was left untouched rather than narrowed blind. Controls: a std `Vec::into_iter()`
+  stays exactly as pure as before, `ignore`/`glob` are unmoved, and 11 of 14 real corpus crates with
+  no walkdir usage (duct, flate2, git2, mio, rayon, reqwest, rusqlite, sysinfo, tempfile, ureq, which)
+  scan byte-identical to the pre-fix binary. Over the 3 corpus crates that DO call `WalkDir` (notify,
+  walkdir itself, zip), exactly one new legitimate `Fs` surfaced — `notify`'s own
+  `poll::data::WatchData::scan_all_path_data`, a real published crate silently missing `Fs` on a
+  `WalkDir::new(root).follow_links(true).max_depth(..)` scan — and zero false positives.
+
 - **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
   **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
   published by a dependency and gated downstream — expect exit 2. Measured over **32 real third-party

@@ -5898,6 +5898,146 @@ trait G {
             "a dotless host must NOT be captured (matches sibling engines):\n{f:#}");
     }
 
+    // CARDINAL SIN FIX: `walkdir::WalkDir` traversal was silent for `Fs` on every idiomatic usage —
+    // `deny Fs` exited 0 "policy ✓" over code that walks the filesystem. classify.rs keyed the charge
+    // on a typed `IntoIter::next` receiver, but candor-scan's receiver-typing (`ctor_type`/
+    // `resolve_recv_type`) hard-blocks the `.into_iter()` verb across the board (a guard against
+    // fabricating onto a DIFFERENT std type — `Vec::into_iter()` -> `std::vec::IntoIter` — that has no
+    // per-crate exception for a SAME-crate return like `walkdir::IntoIter`), so no idiomatic chain ever
+    // reached a typed `IntoIter` receiver. Fixed by charging at `WalkDir::new` (construction), mirroring
+    // `ignore::WalkBuilder::build`/`glob::glob` — an ordinary `Expr::Call`, no receiver typing needed.
+    // The five cases below are the exact repro forms; the untyped four were silent before the fix, the
+    // typed fifth (`vec_into_iter_does_not_fabricate_an_effect`'s sibling) already worked.
+    #[test]
+    fn walkdir_for_loop_is_charged_fs_at_construction() {
+        let v = scan_src_to_json("walkdir_for", "\
+            use walkdir::WalkDir;\n\
+            pub fn walk() -> usize {\n\
+                let mut n = 0;\n\
+                for entry in WalkDir::new(\".\") {\n\
+                    let _ = entry;\n\
+                    n += 1;\n\
+                }\n\
+                n\n\
+            }\n");
+        let f = fn_entry(&v, "walk");
+        assert!(effs(f).contains(&"Fs".to_string()), "a WalkDir for-loop must charge Fs:\n{f:#}");
+    }
+
+    #[test]
+    fn walkdir_into_iter_count_is_charged_fs() {
+        let v = scan_src_to_json("walkdir_count", "\
+            use walkdir::WalkDir;\n\
+            pub fn walk() -> usize {\n\
+                WalkDir::new(\".\").into_iter().count()\n\
+            }\n");
+        let f = fn_entry(&v, "walk");
+        assert!(effs(f).contains(&"Fs".to_string()),
+            "WalkDir::new(..).into_iter().count() must charge Fs:\n{f:#}");
+    }
+
+    #[test]
+    fn walkdir_untyped_explicit_next_is_charged_fs() {
+        let v = scan_src_to_json("walkdir_next", "\
+            use walkdir::WalkDir;\n\
+            pub fn walk() -> usize {\n\
+                let mut it = WalkDir::new(\".\").into_iter();\n\
+                let mut n = 0;\n\
+                while let Some(entry) = it.next() {\n\
+                    let _ = entry;\n\
+                    n += 1;\n\
+                }\n\
+                n\n\
+            }\n");
+        let f = fn_entry(&v, "walk");
+        assert!(effs(f).contains(&"Fs".to_string()),
+            "an untyped `it.next()` over WalkDir must charge Fs:\n{f:#}");
+    }
+
+    #[test]
+    fn walkdir_filter_map_readme_form_is_charged_fs() {
+        // walkdir's own README idiom.
+        let v = scan_src_to_json("walkdir_fm", "\
+            use walkdir::WalkDir;\n\
+            pub fn walk() -> usize {\n\
+                let mut n = 0;\n\
+                for entry in WalkDir::new(\".\").into_iter().filter_map(|e| e.ok()) {\n\
+                    let _ = entry;\n\
+                    n += 1;\n\
+                }\n\
+                n\n\
+            }\n");
+        let f = fn_entry(&v, "walk");
+        assert!(effs(f).contains(&"Fs".to_string()),
+            "walkdir's own README filter_map form must charge Fs:\n{f:#}");
+    }
+
+    #[test]
+    fn walkdir_typed_next_still_detected() {
+        // The pre-fix ONLY-detected shape: an explicit `walkdir::IntoIter` type annotation bypasses the
+        // receiver-typing blocklist via `syn::Pat::Type`. Must still fire post-fix (the `IntoIter::next`
+        // classify rule is kept as a secondary charge, not removed as dead code).
+        let v = scan_src_to_json("walkdir_typed", "\
+            use walkdir::WalkDir;\n\
+            pub fn walk() -> usize {\n\
+                let mut it: walkdir::IntoIter = WalkDir::new(\".\").into_iter();\n\
+                let mut n = 0;\n\
+                while let Some(entry) = it.next() {\n\
+                    let _ = entry;\n\
+                    n += 1;\n\
+                }\n\
+                n\n\
+            }\n");
+        let f = fn_entry(&v, "walk");
+        assert!(effs(f).contains(&"Fs".to_string()), "the typed receiver form must still charge Fs:\n{f:#}");
+    }
+
+    #[test]
+    fn vec_into_iter_does_not_fabricate_an_effect() {
+        // CONTROL: the entire reason `into_iter`/`iter`/`drain` are blocklisted in `ctor_type`/
+        // `resolve_recv_type` is to stop a coarse crate rule fabricating onto a std collection's
+        // iterator (`Vec::iter()` -> `std::slice::Iter`). The walkdir fix charges at `WalkDir::new`
+        // instead of touching that blocklist, so a std `Vec` must stay exactly as pure as before.
+        // A pure function with no blind reach is OMITTED from `functions` entirely (scan.rs: `if
+        // inf.is_empty() && !has_blind { continue; }`) — so the control is ABSENCE, not a `[]` entry.
+        let v = scan_src_to_json("vecinto", "\
+            pub fn count_it() -> usize {\n\
+                let v: Vec<i32> = vec![1, 2, 3];\n\
+                let mut it = v.into_iter();\n\
+                let mut n = 0;\n\
+                while let Some(x) = it.next() {\n\
+                    n += x as usize;\n\
+                }\n\
+                n\n\
+            }\n");
+        assert!(
+            !v["functions"].as_array().unwrap().iter().any(|f| f["fn"] == "count_it"),
+            "Vec::into_iter/.next() must stay pure — no fabricated effect (fn must be OMITTED as pure):\n{v:#}"
+        );
+    }
+
+    #[test]
+    fn ignore_walkbuilder_build_still_charged_fs() {
+        // CONTROL: `ignore`'s already-modeled construction-site charge must be unchanged by this fix.
+        let v = scan_src_to_json("ignorebuild", "\
+            pub fn walk() {\n\
+                let _w = ignore::WalkBuilder::new(\".\").build();\n\
+            }\n");
+        let f = fn_entry(&v, "walk");
+        assert!(effs(f).contains(&"Fs".to_string()), "ignore::WalkBuilder::build must remain Fs:\n{f:#}");
+    }
+
+    #[test]
+    fn glob_glob_still_charged_fs() {
+        // CONTROL: `glob`'s already-modeled construction-site charge must be unchanged by this fix.
+        let v = scan_src_to_json("globcall", "\
+            pub fn walk() {\n\
+                let _p = glob::glob(\"*.rs\");\n\
+            }\n");
+        let f = fn_entry(&v, "walk");
+        assert!(effs(f).contains(&"Fs".to_string()), "glob::glob must remain Fs:\n{f:#}");
+    }
+
     #[test]
     fn dotless_ollama_11434_refines_to_llm_without_capture() {
         // The :11434 refinement is PORT-based (separate from FINDING 10): a bare `localhost:11434`
