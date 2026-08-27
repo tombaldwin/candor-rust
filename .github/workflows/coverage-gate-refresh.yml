@@ -1,0 +1,119 @@
+# THE STALENESS ANSWER for eval/coverage-gate/{covered,open}.tsv (see generate.py's header for the full
+# design). The fast gate (crates/candor-classify/tests/coverage_gate.rs, riding `cargo test --workspace`
+# on every push) proves classify.rs hasn't REGRESSED against what the checked-in manifest already knows —
+# but it reads a static snapshot of ~74 external crates' PUBLISHED source, so it cannot see a crate
+# publishing a new version with a new, uncovered public entry point. That needs a fresh `cargo fetch`
+# against live crates.io, which is exactly the "network on every push" cost this family avoids (see
+# nightly-bump.yml / disclosure-recall.yml / re-baseline.yml for the same weekly-not-continuous shape).
+#
+# This job re-runs the SAME generator against FRESH sources and diffs the result against the checked-in
+# manifest: a shrinking or unchanged open.tsv and an intact covered.tsv are fine (nothing to do); either
+# manifest changing for the worse — a new uncovered entry crates.io drift introduced, or a covered entry
+# that no longer resolves — fails the job and opens a tracking issue with the concrete diff, the same
+# "report a NEW finding" contract realworld-oracle.yml already uses.
+name: coverage-gate-refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 3 * * 3'  # weekly (Wed 03:41 UTC) — a full re-fetch + 74-crate self-scan, not cheap
+
+permissions:
+  issues: write
+
+concurrency:
+  group: coverage-gate-refresh-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the stable scanner (the self-scan oracle)
+        run: cargo build --release -p candor-scan
+
+      - name: Fetch fresh crates.io source for every in-scope calibrated crate
+        run: |
+          mkdir -p /tmp/coverage-gate-fixture/src
+          touch /tmp/coverage-gate-fixture/src/lib.rs
+          python3 eval/coverage-gate/generate.py --print-fixture-toml > /tmp/coverage-gate-fixture/Cargo.toml
+          cd /tmp/coverage-gate-fixture && cargo fetch
+
+      - name: Regenerate covered.tsv / open.tsv against the fresh fetch
+        run: |
+          REG=$(ls -d ~/.cargo/registry/src/index.crates.io-* | head -1)
+          mkdir -p /tmp/fresh
+          cp eval/coverage-gate/generate.py /tmp/fresh-generate.py
+          python3 eval/coverage-gate/generate.py --registry "$REG"
+          cp eval/coverage-gate/covered.tsv /tmp/fresh/covered.tsv
+          cp eval/coverage-gate/open.tsv /tmp/fresh/open.tsv
+          # restore the checked-in files so `git diff` below is the ONLY source of truth for what changed
+          git checkout -- eval/coverage-gate/covered.tsv eval/coverage-gate/open.tsv
+
+      - name: Diff fresh vs checked-in — fail on regression or growth
+        id: diff
+        run: |
+          # Data rows only (strip the generated `#` header comments) so a header wording tweak never
+          # counts as drift.
+          grep -v '^#' eval/coverage-gate/covered.tsv | sort > /tmp/covered.checked-in.tsv
+          grep -v '^#' /tmp/fresh/covered.tsv | sort > /tmp/covered.fresh.tsv
+          grep -v '^#' eval/coverage-gate/open.tsv | sort > /tmp/open.checked-in.tsv
+          grep -v '^#' /tmp/fresh/open.tsv | sort > /tmp/open.fresh.tsv
+
+          # REGRESSION: a row classify() covered before, that the fresh run no longer sees covered at all
+          # (dropped from covered.tsv without reappearing — as a MATCHING crate+path — in open.tsv, which
+          # would mean self-scan itself stopped finding the effect, e.g. the crate rewrote that function).
+          cut -f1,2 /tmp/covered.checked-in.tsv | sort -u > /tmp/covered.checked-in.keys
+          cut -f1,2 /tmp/covered.fresh.tsv       | sort -u > /tmp/covered.fresh.keys
+          comm -23 /tmp/covered.checked-in.keys /tmp/covered.fresh.keys > /tmp/regressed.keys || true
+
+          # GROWTH: a fresh-run open.tsv row (crate+path) absent from the checked-in open.tsv AND absent
+          # from the checked-in covered.tsv — i.e. genuinely new, not just a row that got fixed elsewhere.
+          cut -f1,2 /tmp/open.checked-in.tsv | sort -u > /tmp/open.checked-in.keys
+          cut -f1,2 /tmp/open.fresh.tsv      | sort -u > /tmp/open.fresh.keys
+          comm -23 /tmp/open.fresh.keys /tmp/open.checked-in.keys > /tmp/new-open.raw.keys || true
+          comm -23 /tmp/new-open.raw.keys /tmp/covered.checked-in.keys > /tmp/new-open.keys || true
+
+          regressed=$(wc -l < /tmp/regressed.keys | tr -d ' ')
+          grown=$(wc -l < /tmp/new-open.keys | tr -d ' ')
+          echo "regressed=$regressed" >> "$GITHUB_OUTPUT"
+          echo "grown=$grown" >> "$GITHUB_OUTPUT"
+          echo "--- regressed (was covered, no longer classified) ---"; cat /tmp/regressed.keys
+          echo "--- newly open (crates.io drift introduced an uncovered entry) ---"; cat /tmp/new-open.keys
+          if [ "$regressed" -ne 0 ] || [ "$grown" -ne 0 ]; then
+            echo "::error::coverage-gate drift: $regressed regressed, $grown newly-uncovered — see job log"
+            exit 1
+          fi
+
+      - name: Upload fresh manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-gate-fresh-manifests
+          path: /tmp/fresh/*.tsv
+          if-no-files-found: warn
+
+      - name: On drift, open a tracking issue
+        if: failure() && steps.diff.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "A fresh \`cargo fetch\` against live crates.io shifted the coverage-gate differential:"
+            echo ""
+            echo "- regressed (checked-in covered.tsv row no longer classified): ${{ steps.diff.outputs.regressed }}"
+            echo "- newly uncovered (crates.io drift, not yet in open.tsv or covered.tsv): ${{ steps.diff.outputs.grown }}"
+            echo ""
+            echo "See the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) log for the exact rows, and the uploaded \`coverage-gate-fresh-manifests\` artifact for the full fresh output."
+            echo ""
+            echo "Regenerate locally (\`python3 eval/coverage-gate/generate.py --print-fixture-toml | ...\`, see that file's USAGE) and either add a classify.rs rule, list a genuinely-pure entry in REVIEWED_PURE_ENTRIES, or fold the new row into open.tsv after triage."
+          } > /tmp/issue-body.md
+          gh issue create \
+            --title "coverage-gate: crates.io drift changed the CALIBRATED_CRATES differential" \
+            --label automated,coverage-gate \
+            --body-file /tmp/issue-body.md \
+            || echo "issue may already exist; skipping"

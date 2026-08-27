@@ -1,0 +1,13 @@
+[package]
+name = "classify_check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone (excluded from the root workspace, same as every other eval/* crate) — it exists only to
+# be run by eval/coverage-gate/generate.py, which shells out to it once per generation run.
+
+[dependencies]
+candor-classify = { path = "../../../crates/candor-classify" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -8,3 +8,8 @@ __pycache__/
 .candor/*.callgraph.json
 .DS_Store
 soundness/realworld/**/r.*.json
+# coverage-gate: entries.json is a regeneratable ~9MB intermediate (per-crate self-scan output feeding
+# classify_check); only covered.tsv/open.tsv, its checked-in DERIVED artifacts, are meant to be committed.
+/eval/coverage-gate/entries.json
+/eval/coverage-gate/scan_errors.json
+/eval/coverage-gate/classify_check/target
