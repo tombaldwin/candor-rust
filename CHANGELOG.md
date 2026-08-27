@@ -11,6 +11,93 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.33.0] — 2026-08-26
 
+- **⚠ `ignore::Walk::new`/`Walk::from_iter` reported ZERO effects — `deny Fs` passed at exit 0 over
+  code that walks the filesystem.** `Walk::new(path)` is `WalkBuilder::new(path).build()` in ignore's
+  own source (walk.rs:1128-1146) — the crate's own top-level doc example (`for entry in
+  Walk::new(path)`) — but the rule keyed the `Fs` charge on `WalkBuilder::build`/`build_parallel`/
+  `WalkParallel::run`/`add_ignore` only, and `Walk::new`/`Walk::from_iter` matched none of them.
+  `analyzed.count` proved the function was read and classified — a classification miss, not an
+  unread file — and it hid well: an unscoped `deny Fs` still caught the sibling `WalkBuilder` form in
+  the same file, so only a scoped policy exposed it. Fixed by adding `ignore::Walk::new`/
+  `ignore::Walk::from_iter` as two more FQN-exact constructors, the same plain-`Expr::Call` construction
+  site as `WalkBuilder::build` — no receiver typing needed, so it is robust regardless of how the
+  returned iterator is later consumed. Controls: `WalkBuilder::new(root).build()` is unmoved, a
+  same-named `Walk::new` from an unrelated crate stays pure (crate-gated), and a tree with no `ignore`
+  usage is byte-identical (982 vendored crates' own source trees + 15 hand-built consumer fixtures,
+  zero diffs outside the two known sites).
+
+- **`diesel::Connection::establish` — diesel's OWN name for `::connect`, and its single most common
+  entry point (`SqliteConnection::establish(url)` in every diesel quickstart) — read pure with NO
+  `coverage.uncovered` disclosure either.** Trace: `establish` (connection/mod.rs:243) is implemented
+  by really opening the backend handle (`sqlite/connection/mod.rs:230`, `pg/connection/mod.rs:176`,
+  `mysql/connection/mod.rs:158`), but shared no verb spelling with the `::connect`/build-vs-execute
+  VERBS list diesel shares with sqlx. The missing disclosure is not a second, independent defect in
+  the coverage LEDGER — that ledger is deliberately CRATE-level (`coverage.uncovered` names dependency
+  packages candor has no rules for at all; `fs_extra`/`ssh2`/`native_tls`/`csv`/`tar`/`xz2` disclosed
+  correctly in the same corpus round precisely because none of them is a `CALIBRATED_CRATES` entry).
+  Once a crate IS calibrated, an unmatched path is a claim of reviewed purity by design — which is
+  exactly why an incomplete verb table in a calibrated crate is silent in the dangerous direction, same
+  as `ignore::Walk::new`. Fixed by adding `::establish` to the shared VERBS list.
+
+- **THE SWEEP — a systematic audit of all 82 `CALIBRATED_CRATES` for the same shape (a documented
+  public entry point reaching an already-modelled effect through a spelling missing from its verb
+  allowlist), each verdict checked against the real vendored crate source, not the table. Found and
+  fixed NINE more live sites**, all proven red→green on hand-built consumer fixtures and unit-tested
+  with a no-fabrication control alongside each fix:
+  - `rusqlite::Connection::open_in_memory_with_flags`/`open_with_flags_and_vfs`/
+    `open_in_memory_with_flags_and_vfs` (3 more `open*` constructors beyond the three the old exact-
+    suffix list matched — `"open_in_memory_with_flags".ends_with("::open_with_flags")` is false, the
+    suffix must be the literal tail) and `Connection::blob_open`/`Blob::reopen` (the documented
+    incremental-BLOB-I/O API, calling `sqlite3_blob_open`/`_reopen` directly — leaves already in this
+    file's own FFI table, just never wired to rusqlite's safe wrapper). Now matched on the
+    `Connection::open` PREFIX plus the two blob methods, scoped so a same-crate different-type
+    `open`-prefixed method (the private `pragma::Sql::open_brace`) cannot be swept in.
+  - `git2::Submodule::clone`/`Submodule::update` — call `raw::git_submodule_clone`/`_update` directly,
+    the exact leaves already in this file's FFI-tier NET table, but only when a caller names the raw
+    leaf itself; git2's documented submodule-init idiom (`sub.clone(opts)`/`sub.update(init, opts)`)
+    calls the safe wrapper, which had no rule. FQN-exact, mirroring the `Repository::clone` fix's own
+    discipline (a bare `::update`/`::clone` substring would sweep in git2's many pure `update_*`
+    setters and the derive-`Clone` dup on every other git2 type). **Reachability caveat, found by
+    testing the fixture, not by reading the table**: `Submodule` values come only from
+    `Repository::find_submodule`, an external method absent from candor-scan's generic constructor-name
+    list — so `update` fires only with an explicit `let sub: Submodule = ..` annotation, not the
+    idiomatic `repo.find_submodule(name)?.update(..)` chain, and `clone` does not fire via ANY method
+    call at all: candor-scan blanket-excludes `.clone()` from typed receiver resolution everywhere (a
+    deliberate anti-fabrication guard against `Arc`/`Rc::clone` false-positiving through the
+    smart-pointer deref-peel). Both rules are kept — correct and harmless — but `Submodule::clone`
+    specifically is live only via a UFCS call (`Submodule::clone(&mut sub, opts)`), the same
+    "kept, not dead, for the narrower case" shape as `walkdir::IntoIter::next`.
+  - `mongodb::Client::with_options` (async + sync) — `with_uri_str` is `ClientOptions::parse(uri)
+    .await?; Client::with_options(options)` one call down; a caller who already holds parsed
+    `ClientOptions` uses `with_options` directly.
+  - `mysql::Conn::new`/`mysql_async::Conn::new` — each crate's own primary connection constructor
+    (`connect_stream()?; connect()?` directly in the sync crate), not merely a pool helper; scoped to
+    the `Conn::` segment since a bare `::new` would sweep in `Opts`/`PoolConstraints`/`TxOpts`'s own
+    pure constructors in the same two crates.
+  - `sea_orm::Database::connect_proxy` — the `proxy`-feature sibling of `Database::connect` for a
+    caller-supplied `ProxyDatabaseTrait` backend.
+  - `tokio_postgres::Config::connect_raw` — the same protocol handshake as `Config::connect`, over a
+    caller-supplied stream instead of one it dials itself.
+  - `tungstenite::client`/`client_with_config`/`client_tls`/`client_tls_with_config`/`accept`/
+    `accept_with_config`/`accept_hdr`/`accept_hdr_with_config`/`connect_with_config` — the
+    stream-first client AND server WebSocket-upgrade handshake functions (`{Client,Server}Handshake
+    ::start(stream, ..).handshake()`), tungstenite's documented way to run over a caller-managed
+    TCP/TLS/mio stream (the dominant real-world shape, since tungstenite itself is sync/transport-
+    agnostic) — an allowlist keyed only on the dial-it-yourself `connect` spelling missed all nine.
+  - `aws_config::load_from_env` — the crate's own "convenience wrapper" (its doc comment's words)
+    around `from_env().load().await`, the already-modelled effect one call down;
+    `"load_from_env".ends_with("::load")` is false.
+
+  All nine (bar the noted git2 caveat) verified with a hand-built minimal consumer fixture going from
+  0 effectful functions before the fix to the expected charge after, checked against the real crate
+  source at the cited line, never the classify.rs table alone. Zero new false positives: the full
+  982-crate vendored registry snapshot scans byte-identical before/after (these crates' own
+  implementations don't happen to call the fixed sites), and 15 of 17 hand-built consumer fixtures
+  using unrelated calibrated crates (`c_async_std`/`c_csv`/`c_curl`/`c_fs_extra`/`c_globset`/
+  `c_hyper`/`c_memmap2`/`c_native_tls`/`c_redis`/`c_serde_json`/`c_sqlx`/`c_ssh2`/`c_tar`/`c_tokio`/
+  `c_xz2`) are byte-identical too — only `c_ignore` and `c_diesel` differ, by exactly the recovered
+  effect and nothing else.
+
 - **⚠ `walkdir::WalkDir` traversal reported ZERO effects on every idiomatic usage — `deny Fs` passed
   at exit 0 over code that walks the filesystem.** The classify.rs rule keyed the `Fs` charge on a
   typed `IntoIter::next` receiver, but candor-scan's receiver-typing (`ctor_type`/`resolve_recv_type`)
