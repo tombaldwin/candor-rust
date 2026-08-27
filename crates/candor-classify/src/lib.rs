@@ -129,13 +129,39 @@ pub const REVIEWED_PURE_CRATES: [&str; 5] = ["serde_json", "serde_yml", "toml", 
 /// self-scanning the crate's own vendored source finding a reachable Fs/Net/Db/Exec effect there. SEPARATE
 /// from `REVIEWED_PURE_CRATES` — that list exempts a WHOLE crate from the coverage LEDGER's crate-level
 /// disclosure; this one exempts a single ENTRY from the completeness GATE's per-function differential.
-/// Empty today: the gate's generator run (2026-08-27) found 669 self-scan-confirmed entries `classify()`
-/// already recognizes (checked in as `covered.tsv`, asserted every push) and 251 it does not yet
-/// recognize under any guessed spelling (checked in as `open.tsv`, a ratchet — NOT individually
-/// hand-verified, see that file's header). An `open.tsv` row belongs here ONLY once read against the
-/// crate's real source and confirmed to perform no effect (the SAME evidence bar `REVIEWED_PURE_CRATES`
-/// documents) — until then it stays in the ratchet as an open question, not a silent assumption.
-pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[];
+/// The gate's generator run (2026-08-27) found 669 self-scan-confirmed entries `classify()` already
+/// recognizes (checked in as `covered.tsv`, asserted every push) and 251 it did not yet recognize under
+/// any guessed spelling (checked in as `open.tsv`, a ratchet — NOT individually hand-verified, see that
+/// file's header). An `open.tsv` row belongs here ONLY once read against the crate's real source and
+/// confirmed to perform no effect (the SAME evidence bar `REVIEWED_PURE_CRATES` documents) — until then
+/// it stays in the ratchet as an open question, not a silent assumption. The five below were the first
+/// batch, from the 2026-08-27 coverage-gate triage:
+///
+///   - `curl::Multi::timeout` — this file's own `curl` rule (above) already documents WHY: `Easy::
+///     timeout` is a pure `CURLOPT_TIMEOUT` setter sharing the `::timeout` leaf, and an under-report on
+///     the rare event-loop kick beats mis-tagging every consumer that sets a timeout.
+///   - `execute::command` / `execute::shell` — this file's own `execute` rule (above) already documents
+///     WHY: both free functions only BUILD a `std::process::Command` (no `.spawn()`/`.output()`/
+///     `.status()` call in either body) and return it to the caller, who spawns it themselves — the
+///     caller's own `Command::spawn()` carries the effect. Self-scan's raw "Exec" signal comes from
+///     `std::process::Command::new`'s coarse whole-type rule (constructing a `Command` is Exec by
+///     default, narrowed only for crates like `async_process` that document their own pure-setter
+///     surface), not from an actual subprocess launch in either function.
+///   - `elasticsearch::Response::content_type` — a pure accessor reading a header off an ALREADY-received
+///     response (`self.response.headers().get(..)`, http/response.rs:61) — no I/O of its own. Self-scan's
+///     raw "Net" signal is the underlying HTTP client response type's coarse whole-type propagation, not
+///     a second network round-trip.
+///   - `rusqlite::Context::get_connection` — this file's own rusqlite rule (above) already documents WHY:
+///     it hands back a `ConnectionRef` BORROWED from the ALREADY-established connection a running SQL
+///     function executes within (`ffi::sqlite3_context_db_handle`, not a syscall) — the same "handle
+///     accessor, not a syscall" shape as `TcpStream::local_addr`.
+pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
+    ("curl", "curl::Multi::timeout"),
+    ("execute", "execute::command"),
+    ("execute", "execute::shell"),
+    ("elasticsearch", "elasticsearch::Response::content_type"),
+    ("rusqlite", "rusqlite::Context::get_connection"),
+];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
 /// liveness test probes: at least one must match for every `CALIBRATED_CRATES` entry, else the entry is
@@ -602,11 +628,88 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         {
             return Some("Net");
         }
+        // THE COVERAGE-GATE SWEEP (2026-08-27), verified against isahc 2.0.1 — isahc-only, since
+        // reqwest has no equivalent free-function async family:
+        //
+        // `get_async`/`head_async`/`post_async`/`put_async`/`delete_async`/`send_async` (lib.rs:357-500)
+        // are the crate's async one-shot convenience functions — `HttpClient::shared().get_async(uri)`
+        // etc., the exact async mirror of the already-covered `isahc::get`, dispatching immediately.
+        // `HttpClient::new`/`HttpClientBuilder::build` (client.rs:629,444) are genuinely NOT lazy like
+        // reqwest's `Client::new`: `build()` unconditionally calls `agent_builder.spawn()`
+        // (agent/mod.rs:63), which spawns a background OS thread running `AgentContext::run` — curl's
+        // multi-handle event loop that DOES perform the real socket reads/writes for every request later
+        // sent through this client. Confirmed via self-scan on isahc's own source: `AgentBuilder::spawn`
+        // reaches `Net` through that same call chain, not a guess.
+        if crate_name == "isahc"
+            && (path == "isahc::get_async"
+                || path == "isahc::head_async"
+                || path == "isahc::post_async"
+                || path == "isahc::put_async"
+                || path == "isahc::delete_async"
+                || path == "isahc::send_async"
+                || path.ends_with("HttpClient::new")
+                || path.ends_with("HttpClientBuilder::build"))
+        {
+            return Some("Net");
+        }
+        // `reqwest::multipart::Part::file` (blocking/multipart.rs:223) opens the given path directly
+        // (`std::fs::File::open`) to attach it as a form part — genuinely Fs, not Net (the eventual
+        // upload is charged at `.send()`, already covered above).
+        //
+        // NOT modelled: `h3_client::pool::PoolClient::send_request` (async_impl/h3_client/pool.rs:207)
+        // — `mod async_impl;` is PRIVATE in reqwest's lib.rs (only `self::async_impl::multipart` is
+        // selectively re-exported), so `PoolClient` is unreachable from outside the crate; the real
+        // HTTP/3 dispatch a consumer can actually reach is the already-covered `::send`/`::execute`.
+        // Removed from open.tsv rather than guessed.
+        if crate_name == "reqwest" && path.ends_with("::Part::file") {
+            return Some("Fs");
+        }
         return None;
     }
     if crate_name == "ureq" && path.ends_with("::call") {
         return Some("Net");
     }
+    // THE COVERAGE-GATE SWEEP (2026-08-27), verified against ureq 2.12.1 (the version this ratchet's
+    // rows were generated from — 3.x, also cached locally, rewrote this surface beyond recognition and
+    // is a different question for a future pass). `::call` above is the no-body dispatch terminal;
+    // these are its siblings:
+    //
+    // `Request::send`/`send_bytes`/`send_form`/`send_json`/`send_string` (request.rs:78-296) are the
+    // WITH-BODY dispatch terminals — `do_call(Payload::..)`, the exact same terminal `call` reaches with
+    // an empty payload. Missing them left every `agent.post(url).send_json(&body)` (the dominant idiom
+    // for a JSON API call) silently pure.
+    // `ureq::agent`/`request`/`request_url` (lib.rs:513,539,561) are real gaps in a stranger way: each
+    // one's own body contains a REACHABLE (if `is_test(true)` was ever called — itself a `pub fn` a
+    // consumer or another dependency could invoke) call to `testserver::test_agent()`, which binds a
+    // real listening `TcpStream` (see `TestServer::new` below) — self-scan's whole-body reachability
+    // treats that as real, and per this project's over-approximate-rather-than-miss discipline (a
+    // toggleable global flag routing traffic through an internal listener is exactly the kind of path a
+    // security-conscious caller wants disclosed, not silently pure), so does this rule. `agent()` is also
+    // the crate's OWN base for `request`/`request_url` (`agent().request(..)`), and `request`/
+    // `request_url` additionally carry the URL argument — matching the reqwest/isahc precedent above of
+    // classifying the URL-bearing constructor `Net` too (idempotent with the eventual `.call()`/`.send()`)
+    // so the destination is captured even if a caller never re-touches the returned `Request`.
+    if crate_name == "ureq"
+        && (path.ends_with("::send")
+            || path.ends_with("::send_bytes")
+            || path.ends_with("::send_form")
+            || path.ends_with("::send_json")
+            || path.ends_with("::send_string")
+            || path == "ureq::agent"
+            || path == "ureq::request"
+            || path == "ureq::request_url")
+    {
+        return Some("Net");
+    }
+    // NOT modelled (both removed from open.tsv, not guessed):
+    //   `ureq::Arc::connect` — the ratchet's generator strips generic arguments from an impl header, so
+    //   `impl TlsConnector for Arc<rustls::ClientConfig>` (rtls.rs:88) produced the type name "Arc" — a
+    //   bogus path (`ureq::Arc` names nothing; `Arc` is std's, not ureq's) that no consumer could ever
+    //   write. The trait method itself is real (ureq's own internal TLS dispatch, invoked by `.call()`,
+    //   already covered), but no FQN a real caller would spell resolves through this guess.
+    //   `ureq::TestServer::new` — `TestServer` (testserver.rs:62) lives in `mod testserver;` (lib.rs:444),
+    //   PRIVATE with no re-export, so `ureq::TestServer` is unreachable from outside the crate (the
+    //   listener it binds is real, but only `agent()`'s internal `is_test` branch above can reach it).
     // The `curl` crate (libcurl's safe binding — cargo's own HTTP client): the dispatch verbs are
     // `perform` (Easy/Easy2/Transfer/Multi), raw-socket `send`/`recv`, the keepalive `upkeep`, and the
     // multi-interface `action` (socket_action). The big setopt-style builder surface stays pure.
@@ -683,6 +786,26 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 || path.ends_with("::handshake") => return Some("Net"),
         _ => {}
     }
+    // THE COVERAGE-GATE SWEEP (2026-08-27) — two crate-root CONSTRUCTORS the verb-keyed match above
+    // never reached because neither ends in connect/accept/handshake, verified against their real
+    // per-platform impl (native-tls 0.2.18, rustls 0.23.43):
+    //
+    // `native_tls_crate::TlsConnector::new` (lib.rs:481, the PUBLIC newtype wrapper around the private
+    // per-platform `imp::TlsConnector`) reads the system trust store — on the openssl backend it loads
+    // the probed cert file/dir from disk before any socket exists. `Identity::from_pkcs8` (lib.rs:178,
+    // wrapping `imp::Identity::from_pkcs8`) on the security-framework (macOS) backend creates a real
+    // temporary keychain file on disk to import the PKCS8 key into.
+    // `rustls::KeyLogFile::new` (key_log_file.rs:88) reads `$SSLKEYLOGFILE` and, if set, opens (creating
+    // if needed) that file in append mode — a real, if opt-in, disk write path independent of the sync
+    // TLS record-layer I/O the `rustls` arm above already covers.
+    if crate_name == "native_tls_crate"
+        && (path.ends_with("TlsConnector::new") || path.ends_with("Identity::from_pkcs8"))
+    {
+        return Some("Fs");
+    }
+    if crate_name == "rustls" && path.ends_with("KeyLogFile::new") {
+        return Some("Fs");
+    }
     // Message-queue clients fully encapsulate the socket (the underlying tokio::net lives
     // inside the crate, unseen), so a user's connect/publish/consume calls ARE the I/O
     // boundary — to a remote broker, hence Net. Match the broker round-trip verbs (snake_case
@@ -697,6 +820,28 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.contains("::request")
             || path.ends_with("::flush")
         {
+            return Some("Net");
+        }
+        // THE COVERAGE-GATE SWEEP (2026-08-27), verified against async-nats 0.35.1 (the version this
+        // ratchet's rows were generated from — 0.50.0, also cached locally, removed/relocated this
+        // exact surface, a separate question for a future pass):
+        //
+        // `connect_with_options` (lib.rs:891) is the crate's OWN real entry point `connect()` calls one
+        // hop down — the actual handshake, missing because the verb list above matches the bare
+        // `::connect` suffix, not the `_with_options` sibling.
+        // `ConnectOptions::credentials_file`/`with_credentials_file` (options.rs:417,438) load a real
+        // credentials file off disk via `auth_utils::load_creds` before authenticating — Fs, not Net
+        // (the network round-trip these feed happens later, at `connect`).
+        // `ServerAddr::socket_addrs` (lib.rs:1473) does `tokio::net::lookup_host` — a real DNS query.
+        if path == "async_nats::connect_with_options" {
+            return Some("Net");
+        }
+        if path == "async_nats::ConnectOptions::credentials_file"
+            || path == "async_nats::ConnectOptions::with_credentials_file"
+        {
+            return Some("Fs");
+        }
+        if path == "async_nats::ServerAddr::socket_addrs" {
             return Some("Net");
         }
         return None;
@@ -945,6 +1090,39 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         {
             return Some("Fs");
         }
+        // THE COVERAGE-GATE SWEEP (2026-08-27), verified against ignore 0.4.33 — the gitignore-matcher
+        // construction family, a DIFFERENT public surface from the walk-builder family above:
+        //
+        // `Gitignore::new` (gitignore.rs:103) opens and reads the given file directly via
+        // `GitignoreBuilder::add`. `Gitignore::global` (gitignore.rs:141) reads `$PWD` then delegates to
+        // `GitignoreBuilder::new(cwd).build_global()`. `GitignoreBuilder::add` (gitignore.rs:405) is the
+        // crate's own per-file loader — `File::open` + line-by-line read — the same shape `add_ignore`
+        // above was fixed for, on the SIBLING type. `GitignoreBuilder::build_global`/
+        // `gitconfig_excludes_path` (gitignore.rs:377,583) resolve git's global excludesfile: read
+        // `GIT_CONFIG_GLOBAL`/`XDG_CONFIG_HOME`/`HOME` env vars, then open and parse whichever gitconfig
+        // file they point at. `WalkBuilder::build_matchers` (walk.rs:675) is the incremental-walk
+        // sibling of the already-covered `build_parallel` — same `self.build_ignore()` call, different
+        // caller-facing verb. `IncrementalIgnore::matched`/`matched_with_errors` (incremental.rs:194,213)
+        // are the newer per-directory incremental-walk API: each lazily loads that directory's ignore
+        // files (and, when `max_filesize` is set, `stat`s the candidate file) as the walk descends.
+        //
+        // `Gitignore`/`GitignoreBuilder`/`gitconfig_excludes_path` live in `pub mod gitignore;`
+        // (lib.rs:59) but — unlike `Walk`/`WalkBuilder` two lines up (`pub use crate::walk::{..}`,
+        // lib.rs:52) — are NOT re-exported at the crate root, so the only real, compilable spelling is
+        // the module-qualified one (proven by a consumer fixture: `ignore::Gitignore::new` does not
+        // exist, `ignore::gitignore::Gitignore::new` does). `IncrementalIgnore` IS re-exported at the
+        // root (`pub use crate::incremental::{..}`, lib.rs:51), so the bare form is correct there.
+        if path == "ignore::gitignore::Gitignore::new"
+            || path == "ignore::gitignore::Gitignore::global"
+            || path == "ignore::gitignore::GitignoreBuilder::add"
+            || path == "ignore::gitignore::GitignoreBuilder::build_global"
+            || path == "ignore::gitignore::gitconfig_excludes_path"
+            || path == "ignore::WalkBuilder::build_matchers"
+            || path == "ignore::IncrementalIgnore::matched"
+            || path == "ignore::IncrementalIgnore::matched_with_errors"
+        {
+            return Some("Fs");
+        }
         return None;
     }
     // Filesystem watching — `notify` (the de-facto fs-watch crate: watchexec, cargo-watch, mdbook). A
@@ -958,6 +1136,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::recommended_watcher")
             || path.ends_with("::watch")
             || path.ends_with("::unwatch")
+            // `ReadDirectoryChangesWatcher::create` (windows.rs:475, `pub use windows::
+            // ReadDirectoryChangesWatcher` at the crate root) is a SECOND, directly-callable
+            // constructor distinct from the `Watcher::new` trait method above — it takes a raw
+            // meta-event channel `Watcher::new`'s impl builds internally by calling THIS same
+            // `create`, then spawns the real ReadDirectoryChangesW watch server thread.
+            || path.ends_with("ReadDirectoryChangesWatcher::create")
         {
             return Some("Fs");
         }
@@ -1042,6 +1226,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             if PG.iter().any(|v| path.ends_with(v)) {
                 return Some("Db");
             }
+            // THE COVERAGE-GATE SWEEP (2026-08-27): `CancelToken::cancel_query` (tokio-postgres
+            // cancel_token.rs:34) opens a BRAND NEW connection to the server to send a raw CancelRequest
+            // packet — real socket I/O, but not a query round-trip on an existing connection like the PG
+            // verb list above, so bucketed `Net` rather than `Db`.
+            if crate_name == "tokio_postgres" && path.ends_with("CancelToken::cancel_query") {
+                return Some("Net");
+            }
             // rusqlite only: opening the database IS the connection establishment (`Connection::
             // open`/`open_in_memory`/`open_with_flags` — the embedded analog of `::connect`).
             //
@@ -1099,7 +1290,9 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // ALREADY-established connection (`ffi::sqlite3_context_db_handle`, not an I/O verb) — the
             // same "handle accessor, not a syscall" shape as `TcpStream::local_addr`, not confirmed
             // enough to charge without risking the over-charge this file's history has repeatedly warned
-            // against; left in the ratchet rather than guessed.
+            // against. THE COVERAGE-GATE SWEEP (2026-08-27) resolved this from "left in the ratchet"
+            // to a formal call: `REVIEWED_PURE_ENTRIES` now carries `("rusqlite",
+            // "rusqlite::Context::get_connection")` so the gate stops re-flagging it every refresh.
             //
             // TWO SPELLINGS EACH for `Backup`/`Blob`/`init_auto_extension`: none of the three is
             // re-exported at rusqlite's crate root (unlike `Connection`, declared directly in lib.rs), so
@@ -1152,7 +1345,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // PURE. (Found hardening on redis-rs: a fn doing `con.get`/`set` reported no effects.)
         if crate_name == "redis"
             && (path.contains("Commands::")
-                || path.contains("::get_connection")
+                // THE COVERAGE-GATE SWEEP (2026-08-27), a pre-existing over-report found in passing:
+                // `path.contains("::get_connection")` is a SUBSTRING match, so it also matched
+                // `Client::get_connection_info` (client.rs:78) — a pure accessor returning an
+                // already-stored `&ConnectionInfo`, no round-trip at all. Verified against redis 1.6.0.
+                || (path.contains("::get_connection") && !path.ends_with("::get_connection_info"))
                 || path.contains("::get_async_connection")
                 || path.contains("::get_multiplexed_async_connection")
                 // a live `ConnectionManager` round-trips (Db), but `ConnectionManagerConfig` is a pure
@@ -1196,6 +1393,41 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             if MONGO.iter().any(|v| path.ends_with(v)) {
                 return Some("Db");
             }
+            // THE COVERAGE-GATE SWEEP (2026-08-27), verified against mongodb 3.8.1 — the client-side
+            // field-level encryption (CSFLE) surface, entirely unrelated to the CRUD verb list above.
+            //
+            // `ClientEncryption::decrypt` (client/csfle/client_encryption.rs:195) is an ordinary `pub
+            // async fn` that bottoms out in `CryptExecutor::run_ctx` (client/csfle/state_machine.rs:106),
+            // a state-machine loop that — depending on state — runs a real `list_collections` query
+            // against the key-vault database, executes a real command against `mongocryptd` (respawning
+            // the child process if the connection drops), and fetches data keys from the key vault:
+            // genuinely Net (and, via mongocryptd respawn, Exec), reached from a manual decrypt call, not
+            // a guess. Suffix-matched because the real path runs through a re-export hop the ratchet's
+            // crate-root-alias guess skips: `ClientEncryption` is defined inside `pub(crate) mod csfle;`
+            // (client.rs:4) and reachable only via `pub use crate::client::csfle::client_encryption;` at
+            // the crate root (lib.rs:74) — `mongodb::client_encryption::ClientEncryption`, not bare
+            // `mongodb::ClientEncryption`. The name is specific enough within this crate that a suffix
+            // match carries no fabrication risk (crate-gated, and `ClientEncryption` exists nowhere else
+            // in mongodb's own source).
+            if path.ends_with("ClientEncryption::decrypt") {
+                return Some("Net");
+            }
+            // NOT modelled (removed from open.tsv, not guessed): `CreateDataKey::execute` /
+            // `Encrypt::execute` — a DIFFERENT false-guess shape from every other row in this pass.
+            // `CreateDataKey`/`Encrypt` (action/csfle/create_data_key.rs, action/csfle/encrypt.rs) are
+            // the crate's real, publicly re-exported Action-builder types (`mongodb::action::csfle::
+            // {CreateDataKey,Encrypt}`) — but the SAME effect self-scan found (the real `run_ctx` call)
+            // lives in `impl Action for CreateDataKey<'a> { async fn execute(self) -> .. { .. } }`
+            // (client/csfle/client_encryption/create_data_key.rs:14), which is the INPUT to the
+            // `#[action_impl]` proc macro, not a real method: the `Action` trait (action.rs:104) declares
+            // only `optional`, and its own doc comment says the crate's action types are "executed via
+            // `await` (or `run` if using the sync client)" — the macro consumes this `execute` fn body
+            // and re-emits it as `IntoFuture::into_future`, so no compiled `CreateDataKey`/`Encrypt`
+            // value ever has a method literally named `execute` a consumer could call. Self-scan found a
+            // real function performing a real effect; it is just never reachable under this spelling
+            // (nor, by construction, under ANY spelling — a consumer's call site is `.await`, not a
+            // `.execute()` method call, so candor-scan would need to resolve the `IntoFuture` desugaring
+            // itself to see this at all, a different, deeper question than a classify() rule can answer).
             return None;
         }
         // mysql / mysql_async: the `query`/`exec` families + `get_conn`/`ping` execute
@@ -1223,6 +1455,30 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             if MY.iter().any(|v| path.ends_with(v)) {
                 return Some("Db");
             }
+            // THE COVERAGE-GATE SWEEP (2026-08-27), verified against mysql_async 0.37.0:
+            // `Conn::from_url` (conn/mod.rs:1059) is `Conn::new(Opts::from_str(url)?)` one hop down —
+            // the crate's OWN alternate entry point for the identical connect effect `Conn::new` above
+            // already carries, same shape as `ignore::Walk::new`/diesel's `establish`.
+            // `WhiteListFsHandler::handle` (local_infile_handler/builtin.rs:58, the `GlobalHandler` impl
+            // for `LOAD DATA LOCAL INFILE`) opens a real file off the caller-supplied whitelist —
+            // reachable at the crate root (`pub use self::local_infile_handler::{builtin::
+            // WhiteListFsHandler, ..}`, lib.rs:500).
+            if path == "mysql_async::Conn::from_url" {
+                return Some("Db");
+            }
+            if path.ends_with("WhiteListFsHandler::handle") {
+                return Some("Fs");
+            }
+            // NOT modelled (all three removed from open.tsv, not guessed): `mysql::MyTcpBuilder::connect`/
+            // `Stream::connect_tcp`/`Stream::make_secure` (mysql, not mysql_async — io/tcp.rs, io/mod.rs,
+            // io/tls/native_tls_io.rs). `mod io;` is PRIVATE in mysql's lib.rs with no re-export of
+            // `MyTcpBuilder`/`Stream`, so none of the three is a path any external consumer can name —
+            // the crate's real, externally-reachable connect effect is `Conn::new` above (already
+            // covered), which calls into this private `io` module internally. Also NOT modelled:
+            // `mysql_async::PathOrBuf::read` (opts/mod.rs) — `PathOrBuf` is declared in the same private
+            // `mod opts;` whose OTHER types (`Opts`, `OptsBuilder`, …) ARE individually `pub use`-
+            // re-exported at the crate root (lib.rs:493) but `PathOrBuf` specifically is not, so it too
+            // is unreachable — the same private-module shape as tempfile's `imp::` functions above.
             return None;
         }
         // sea_orm: an ORM whose execution is split from building (like sqlx). The query
@@ -1453,6 +1709,45 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     {
         return Some("Fs");
     }
+    // THE COVERAGE-GATE SWEEP (2026-08-27), verified against tempfile 3.27.0 source — the SIBLING
+    // constructors/closers the create/persist verb list above never reached:
+    //
+    // `Builder::make`/`make_in` (lib.rs:716,739) are the crate's OWN documented escape hatch for a
+    // caller-supplied factory (`Builder::new().make_in(dir, |path| UnixListener::bind(path))`) — real
+    // disk creation via `util::create_helper`, same mechanism as `Builder::tempfile`/`tempfile_in`
+    // two lines up, just a different entry verb.
+    // `NamedTempFile::with_prefix`/`with_prefix_in`/`with_suffix`/`with_suffix_in` (file/mod.rs:630-677)
+    // are one-call convenience wrappers documented as equivalent to `Builder::new().prefix(..).tempfile()`
+    // — real creation, missing because the verb list matched `NamedTempFile::new`/`new_in` but not these.
+    // `NamedTempFile::reopen` (file/mod.rs:951) calls the platform `imp::reopen`, a real `open`/`fstat`
+    // pair (found the original file was replaced, or hands back a fresh handle to it).
+    // `TempPath::close` (file/mod.rs:161) and `TempDir::close` (dir/mod.rs:470) `fs::remove_file`/
+    // `remove_dir_all` the real path — `NamedTempFile::close` (file/mod.rs:727) is a thin `self.path.close()`
+    // delegate to the same `TempPath::close`, so matching the `::close` suffix (crate-gated, and the ONLY
+    // three `pub fn close` in this crate) catches it too without a separate rule.
+    // `SpooledTempFile::set_len` (spooled.rs:134) calls `File::set_len` on the real disk file once the
+    // in-memory buffer has spilled past `max_size` — the crate's own roll-over threshold, not a corner case.
+    //
+    // NOT included: `tempfile::create`/`create_named`/`reopen` (dir/imp/any.rs, file/imp/windows.rs,
+    // file/imp/unix.rs) — despite being `pub fn`, `mod dir;`/`mod file;` are PRIVATE at the crate root
+    // (lib.rs:202,204) with no re-export of the `imp` submodules, so no external consumer can ever name
+    // these paths; the ratchet's generator guesses a crate-root alias for every candidate regardless of
+    // whether one is real (the same "second, related shape" gap the previous pass's rusqlite/lettre
+    // private-module findings already documented — restricted_types()/is_bare_pub check a type's or fn's
+    // OWN visibility keyword, not its enclosing module chain). Removed from open.tsv rather than guessed.
+    if crate_name == "tempfile"
+        && (path == "tempfile::Builder::make"
+            || path == "tempfile::Builder::make_in"
+            || path == "tempfile::NamedTempFile::with_prefix"
+            || path == "tempfile::NamedTempFile::with_prefix_in"
+            || path == "tempfile::NamedTempFile::with_suffix"
+            || path == "tempfile::NamedTempFile::with_suffix_in"
+            || path == "tempfile::NamedTempFile::reopen"
+            || path == "tempfile::SpooledTempFile::set_len"
+            || path.ends_with("::close"))
+    {
+        return Some("Fs");
+    }
     // glob: walks the filesystem to expand a pattern (the returned iterator reads directories).
     // `Pattern::matches` is pure string matching — match only the directory-walking entry points.
     if crate_name == "glob" && (path.ends_with("::glob") || path.ends_with("::glob_with")) {
@@ -1586,6 +1881,15 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // Exec. SUBTRACT only what is provably pure — when unrecognised, KEEP Exec (the safe direction).
     if crate_name == "async_process" || crate_name == "portable_pty" {
         let m = path.rsplit("::").next().unwrap_or(path);
+        // THE COVERAGE-GATE SWEEP (2026-08-27): `CommandBuilder::get_shell` (cmdbuilder.rs:544, unix)
+        // LOOKS like a config read-back getter — same `get_` naming as the pure getters below — but its
+        // unix body calls `nix::unistd::access(shell, X_OK)`, a real filesystem-access syscall, before
+        // falling back to a password-database lookup if `$SHELL` isn't set or isn't executable. Carved
+        // out of the `get_` prefix exemption BEFORE it, not folded into it — the one getter this crate
+        // exposes that is not actually pure. Verified against portable-pty 0.9.0.
+        if m == "get_shell" {
+            return Some("Fs");
+        }
         // configuration read-back getters — pure (no spawn).
         if m.starts_with("get_") || m == "as_unix_command_line" {
             return None;
@@ -1608,7 +1912,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         && (path.ends_with("::run")
             || path.ends_with("::read")
             || path.ends_with("::start")
-            || path.ends_with("::read_chars"))
+            || path.ends_with("::read_chars")
+            // `Expression::reader` (lib.rs:357) calls the already-covered `.start()` internally to
+            // launch the child and hands back a streaming `ReaderHandle` — a distinct public entry
+            // point from `start` itself, so the suffix match above never reached it.
+            || path.ends_with("Expression::reader"))
     {
         return Some("Exec");
     }
@@ -1629,6 +1937,28 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::load")
             || path.ends_with("::var")
             || path.ends_with("::vars"))
+    {
+        return Some("Env");
+    }
+    // THE COVERAGE-GATE SWEEP (2026-08-27), verified against dotenv 0.15.0 and dotenvy 0.15.7
+    // (byte-identical shape in both crates) — the ITERATOR-returning siblings of the load verbs above,
+    // which return the parsed pairs instead of mutating the environment but still touch disk to get
+    // them: `dotenv_iter`/`from_filename_iter` (lib.rs) resolve and open a `.env`-shaped file exactly
+    // like `dotenv`/`from_filename` two lines up (same `Finder::new().find()` call); `from_path_iter`
+    // opens the given path directly. Bucketed `Env` for consistency with the rest of this family rather
+    // than `Fs` (self-scan's raw signal): the crate's OWN purpose is env-var loading, and splitting the
+    // iterator variants into a different effect bucket from their non-iterator siblings would be an
+    // arbitrary distinction a reviewer gains nothing from.
+    //
+    // NOT included: `Finder::find` / the free fn `find` (find.rs) — both are used only via a PRIVATE
+    // `use crate::find::Finder;` (no `pub use`) inside a private `mod find;` (lib.rs), so neither
+    // `dotenv(y)::Finder` nor `dotenv(y)::find` is a path any external consumer can compile a call to;
+    // the ratchet's generator still guesses a crate-root alias for every candidate (the same private-
+    // module shape as tempfile's `imp::` functions above). Removed from open.tsv rather than guessed.
+    if matches!(crate_name, "dotenvy" | "dotenv")
+        && (path.ends_with("::dotenv_iter")
+            || path.ends_with("::from_filename_iter")
+            || path.ends_with("::from_path_iter"))
     {
         return Some("Env");
     }
@@ -1769,6 +2099,39 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         {
             return Some("Db");
         }
+        // THE COVERAGE-GATE SWEEP (2026-08-27), verified against sqlx-core 0.8.6/0.9.0 (identical
+        // shape in both) — the free-function surface under `pub mod fs`/`pub mod net::tls`/
+        // `pub mod migrate`, none of which end in the connect/fetch/execute verbs above:
+        //
+        // `fs::{read,read_to_string,create_dir_all,remove_file,remove_dir,remove_dir_all,read_dir}`
+        // (fs.rs) are direct `std::fs::*` calls off-loaded to `spawn_blocking` — sqlx's OWN async
+        // filesystem shim, used by the migrator to read `.sql` files and by SQLite to manage on-disk
+        // databases. `net::tls::handshake` (net/tls/mod.rs:69) is the real TLS handshake dispatch
+        // reqwest/ureq-style crates already model — sqlx has its OWN copy because it drives the
+        // handshake over its own `Socket` trait rather than a `TcpStream` directly.
+        // `migrate::resolve_blocking`/`resolve_blocking_with_config` (migrate/source.rs:151,156) are
+        // `#[doc(hidden)]` but still `pub use`-exported at `sqlx_core::migrate` (mod.rs:16) — real,
+        // callable, and reads the migrations directory off disk (`fs::read_dir` + per-file `canonicalize`).
+        //
+        // NOT included: `net::tls::tls_rustls::RustlsSocket::poll_{flush,read_ready,write_ready,
+        // shutdown}` — `RustlsSocket` is declared inside `mod tls_rustls;` (net/tls/mod.rs), which is
+        // PRIVATE with no re-export, so no external consumer can ever name it (the same private-module
+        // shape as tempfile's `imp::` functions above). Removed from open.tsv rather than guessed.
+        if path == "sqlx_core::fs::read"
+            || path == "sqlx_core::fs::read_to_string"
+            || path == "sqlx_core::fs::create_dir_all"
+            || path == "sqlx_core::fs::remove_file"
+            || path == "sqlx_core::fs::remove_dir"
+            || path == "sqlx_core::fs::remove_dir_all"
+            || path == "sqlx_core::fs::read_dir"
+            || path.ends_with("::migrate::resolve_blocking")
+            || path.ends_with("::migrate::resolve_blocking_with_config")
+        {
+            return Some("Fs");
+        }
+        if path.ends_with("::net::tls::handshake") {
+            return Some("Net");
+        }
         return None;
     }
     // `walkdir` — recursive directory traversal. Charged at `WalkDir::new` (construction), the SAME
@@ -1860,6 +2223,9 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         if path.ends_with("::TimeZone::system") || path.ends_with("::TimeZone::get")
             || path.ends_with("::TimeZoneDatabase::get")
+            // `TimeZone::try_system` (tz/timezone.rs:391) is `TimeZone::system`'s fallible sibling —
+            // same `crate::tz::system::get(crate::tz::db())` call, real localtime/zoneinfo disk read.
+            || path.ends_with("::TimeZone::try_system")
         {
             return Some("Fs");
         }
@@ -1885,6 +2251,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::interact_opt") || path.ends_with("::interact_on_opt")
         {
             return Some("Ipc");
+        }
+        // `Editor::edit` (edit.rs:93) writes the caller's string to a real tempfile, spawns
+        // `$VISUAL`/`$EDITOR` on it via `process::Command::spawn().wait()`, then reads the result back
+        // — a real subprocess launch, not a terminal-dialogue read/write like the verbs above.
+        if path.ends_with("Editor::edit") {
+            return Some("Exec");
         }
         return None;
     }
@@ -1933,6 +2305,20 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::size") || path.ends_with("::window_size")
             || path.ends_with("::is_raw_mode_enabled")
         {
+            return Some("Ipc");
+        }
+        // `terminal::supports_keyboard_enhancement` (terminal/sys/unix.rs:188, re-exported `pub use
+        // sys::supports_keyboard_enhancement` in terminal.rs) drives the SAME channel as
+        // `event::read`/`enable_raw_mode` above (it toggles raw mode, then reads/polls terminal events
+        // to detect the kitty keyboard protocol) — bucketed `Ipc` for consistency with the rest of this
+        // tty-dialogue family rather than the `Fs` self-scan's raw signal reports (that signal traces
+        // through the crate's internal event source opening `/dev/tty` as a fallback fd, the same
+        // primitive `tty_fd` below wraps — not a distinct effect from the terminal channel itself).
+        //
+        // NOT modelled: `tty_fd` (terminal/sys/file_descriptor.rs:124) — declared inside `pub(crate) mod
+        // sys;` (terminal.rs:99), so despite being `pub fn` it is unreachable from outside the crate
+        // (only used internally by the event source). Removed from open.tsv rather than guessed.
+        if path.ends_with("::supports_keyboard_enhancement") {
             return Some("Ipc");
         }
         return None;
@@ -2032,6 +2418,34 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     if crate_name == "grep_cli" {
         if path.ends_with("::build") {
             return Some("Exec");
+        }
+        // THE COVERAGE-GATE SWEEP (2026-08-27), verified against grep-cli 0.1.12 — the sibling entry
+        // points to `::build` above, none of which end in that suffix:
+        //
+        // `CommandReader::new` (process.rs:195) is `CommandReaderBuilder::new().build(cmd)` — the same
+        // spawn, reached through the type's own one-call constructor instead of the builder.
+        // `CommandReader::close` (process.rs:218) drops the child's stdout handle then calls
+        // `self.child.wait()` — `std::process::Child::wait` is ALREADY classified `Exec` elsewhere in
+        // this file (reaping/blocking on a spawned child is part of the subprocess lifecycle this
+        // project tracks), and self-scan resolves `self.child`'s concrete `process::Child` type to
+        // confirm it, not a guess.
+        // `DecompressionMatcher::command` (decompress.rs:179) builds a REAL `Command::new(&decomp_cmd.bin)`
+        // naming an actual decompressor binary (gzip/xz/bzip2/…) and returns it un-spawned — the same
+        // "constructs a real argv, caller spawns it" shape `Cred::credential_helper` was classified for
+        // in git2 (see the FQN-exact rule near this file's top).
+        // `DecompressionReader::new` (decompress.rs:352) is `DecompressionReaderBuilder::new().build(path)`,
+        // which calls the already-covered `CommandReaderBuilder::build` two hops down.
+        // `patterns_from_path` (pattern.rs:82) opens and reads the given file directly (`std::fs::File::
+        // open`) — unrelated to the Exec family above, genuinely Fs.
+        if path == "grep_cli::CommandReader::new"
+            || path == "grep_cli::CommandReader::close"
+            || path == "grep_cli::DecompressionMatcher::command"
+            || path == "grep_cli::DecompressionReader::new"
+        {
+            return Some("Exec");
+        }
+        if path == "grep_cli::patterns_from_path" {
+            return Some("Fs");
         }
         return None;
     }
@@ -3498,6 +3912,20 @@ mod tests {
         // the LIVE manager still round-trips (Db).
         assert_eq!(classify("redis", "redis::aio::ConnectionManager::new"), Some("Db"));
         assert_eq!(classify("redis", "redis::Commands::get"), Some("Db"));
+    }
+
+    #[test]
+    fn redis_get_connection_info_is_a_pure_accessor_not_swept_by_the_substring() {
+        // coverage-gate sweep (2026-08-27): `contains("::get_connection")` also matched
+        // `Client::get_connection_info` (a pure accessor over an already-stored field) because it is a
+        // literal substring of that name — the real connection-getters stay caught.
+        assert_eq!(classify("redis", "redis::Client::get_connection_info"), None);
+        assert_eq!(classify("redis", "redis::Client::get_connection"), Some("Db"));
+        assert_eq!(classify("redis", "redis::Client::get_async_connection"), Some("Db"));
+        assert_eq!(
+            classify("redis", "redis::Client::get_multiplexed_async_connection"),
+            Some("Db")
+        );
     }
 
     #[test]

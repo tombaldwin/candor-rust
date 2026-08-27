@@ -359,6 +359,41 @@ after upgrading; review policies and regenerate baselines with the new build.
   every already-charged git2 remote verb (`fetch`/`push`/`download`/`connect`/`connect_auth`/`ls`/
   `upload`) is unmoved, and a tree with no git2 usage scans byte-identical to before.
 
+- **⚠ Second (closing) triage pass over the completeness-gate ratchet: all remaining 103 rows resolved —
+  `eval/coverage-gate/open.tsv` is now EMPTY.** 74 real rules added to `covered.tsv` (tempfile 10,
+  sqlx_core 9, ureq 8, isahc 8, ignore 8, grep_cli 5, async_nats 4, dotenv 3, dotenvy 3, mongodb 3,
+  mysql_async 2, native_tls_crate 2, and one each for reqwest/crossterm/rustls/dialoguer/duct/jiff/
+  notify/portable_pty/tokio_postgres), 5 entries added to `REVIEWED_PURE_ENTRIES` (curl's own documented
+  `Multi::timeout` exception, `execute::command`/`shell`'s own documented build-not-spawn exception,
+  `elasticsearch::Response::content_type` — a pure accessor over an already-received response — and
+  `rusqlite::Context::get_connection`, whose non-effect this file already argued for by name but never
+  formally closed), and 24 rows removed as generator false positives across FOUR distinct shapes: (1)
+  private modules with no re-export (`tempfile::{create,create_named,reopen}`, `mysql::{MyTcpBuilder::
+  connect,Stream::connect_tcp,Stream::make_secure}`, `mysql_async::PathOrBuf::read`,
+  `sqlx_core::RustlsSocket::*`, `memmap2::file_len`, `dotenv(y)::{Finder::find,find}`,
+  `crossterm::tty_fd`, `reqwest::PoolClient::send_request`); (2) `impl Trait for Container<ForeignType>`
+  stripping generics down to a bogus type name (`ureq::Arc::connect`, `tungstenite::TcpStream::
+  set_nodelay`); (3) a `pub(super)` fn the generator's visibility check should have excluded but a stale
+  registry snapshot recorded as bare `pub` (`diesel::StatementUse::step`); (4) NEW — a proc-macro DSL
+  fn name self-scan found in the macro's literal input but that never survives into the compiled public
+  API (`mongodb::{CreateDataKey,Encrypt}::execute`: the `#[action_impl]` macro consumes an `async fn
+  execute` and re-emits it as `IntoFuture::into_future`, so no consumer can ever spell `.execute()` —
+  proven by a fixture where that exact call fails to compile). Every new/moved rule backed by a real
+  vendored-source read and a compiling consumer fixture (two throwaway fixture crates, ~20 crates,
+  pinned to the exact vendored versions the ratchet's rows were generated from); `ignore`'s and
+  `mongodb`'s CSFLE rules needed a SECOND fixture-driven correction after the first draft used the
+  generator's crate-root-alias guess instead of the real re-export path (`ignore::gitignore::Gitignore::
+  new`, not bare `ignore::Gitignore::new`) — the fixture caught it, a source read alone had not.
+  Also fixed IN PASSING, found while reading the redis rule for an unrelated reason: `path.contains(
+  "::get_connection")` is a substring match, so it also fabricated `Db` on `Client::get_connection_info`
+  — a pure accessor over an already-stored field, no round-trip. And: `classify_check` now actually
+  consults `REVIEWED_PURE_ENTRIES` (it previously only existed for `coverage_gate.rs`'s regression check
+  on `covered.tsv`; a `REVIEWED_PURE_ENTRIES` addition would have kept reappearing in every regenerated
+  `open.tsv` otherwise). The cross-crate `Unknown` gap (an effect reached only by crossing into a
+  DIFFERENT uncalibrated crate) is unchanged by this pass and remains open — `mongodb`'s `CreateDataKey`/
+  `Encrypt` above is a related but DIFFERENT gap: not a crate boundary, an `IntoFuture` desugaring the
+  scanner would need to resolve to see the same effect its own macro-body self-scan already found.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (crates and `Cargo.lock`); no analyzer change.
