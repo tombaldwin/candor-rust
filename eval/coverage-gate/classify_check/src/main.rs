@@ -82,6 +82,18 @@ fn is_known_false_positive(krate: &str, guesses: &[String]) -> bool {
     })
 }
 
+// The other half of `KNOWN_FALSE_POSITIVES`'s job, but for entries a human read and found genuinely
+// pure rather than mis-resolved by self-scan: `candor_classify::REVIEWED_PURE_ENTRIES` (the coverage
+// gate's own escape hatch, see its doc comment in crates/candor-classify/src/lib.rs). Without this check
+// a `REVIEWED_PURE_ENTRIES` entry would keep reappearing in every regenerated `open.tsv` forever — the
+// gate has no OTHER way to learn that a human already closed the question, since `classify()` correctly
+// still returns `None` for something that performs no effect.
+fn is_reviewed_pure(krate: &str, guesses: &[String]) -> bool {
+    candor_classify::REVIEWED_PURE_ENTRIES
+        .iter()
+        .any(|(k, p)| *k == krate && guesses.iter().any(|g| g == p))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
@@ -106,6 +118,9 @@ fn main() {
                 continue;
             }
             if is_known_false_positive(krate, &e.guesses) {
+                continue;
+            }
+            if is_reviewed_pure(krate, &e.guesses) {
                 continue;
             }
             core_total += 1;
