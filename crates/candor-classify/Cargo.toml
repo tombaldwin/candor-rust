@@ -2,7 +2,14 @@
 # Scan outputs are never part of the published crate. Four crates shipped `.candor/report.*.json`
 # stamped `spec 0.23` inside their 0.25 and 0.26 tarballs — stale self-scans, referenced by nothing,
 # and IMMUTABLE once on crates.io. This is the guard, since `git rm` alone only fixes it once.
-exclude = [".candor/**"]
+#
+# `tests/coverage_gate.rs` is excluded too, for a different reason: its `include_str!` reads
+# `../../../eval/coverage-gate/covered.tsv`, OUTSIDE this crate's own directory — correct for a workspace
+# checkout (where the gate needs to run), fatal for `cargo publish`'s isolated verification build, which
+# unpacks only this package's own files and would fail to find a file three directories above it. The
+# gate itself is unaffected: `exclude` only governs the crates.io tarball, never the local `cargo test`
+# this repo's CI actually runs.
+exclude = [".candor/**", "tests/coverage_gate.rs"]
 name = "candor-classify"
 version = "0.33.0"
 edition = "2021"

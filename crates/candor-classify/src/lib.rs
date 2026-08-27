@@ -124,6 +124,19 @@ pub const PATH_CALIBRATED_CRATES: [&str; 3] = ["tokio", "async_std", "mio"];
 /// syscall of its own, so charging it would double-count an effect the caller already carries.
 pub const REVIEWED_PURE_CRATES: [&str; 5] = ["serde_json", "serde_yml", "toml", "regex", "sha2"];
 
+/// The completeness gate's escape hatch (`eval/coverage-gate/`, `tests/coverage_gate.rs`): exact
+/// (crate, consumer-facing path) pairs a human has read and found genuinely pure, despite `candor-scan`
+/// self-scanning the crate's own vendored source finding a reachable Fs/Net/Db/Exec effect there. SEPARATE
+/// from `REVIEWED_PURE_CRATES` — that list exempts a WHOLE crate from the coverage LEDGER's crate-level
+/// disclosure; this one exempts a single ENTRY from the completeness GATE's per-function differential.
+/// Empty today: the gate's generator run (2026-08-27) found 669 self-scan-confirmed entries `classify()`
+/// already recognizes (checked in as `covered.tsv`, asserted every push) and 251 it does not yet
+/// recognize under any guessed spelling (checked in as `open.tsv`, a ratchet — NOT individually
+/// hand-verified, see that file's header). An `open.tsv` row belongs here ONLY once read against the
+/// crate's real source and confirmed to perform no effect (the SAME evidence bar `REVIEWED_PURE_CRATES`
+/// documents) — until then it stays in the ratchet as an open question, not a silent assumption.
+pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[];
+
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
 /// liveness test probes: at least one must match for every `CALIBRATED_CRATES` entry, else the entry is
 /// dead. Exported as ONE source of truth because the nightly lint crate (`src/lib.rs`) runs the SAME

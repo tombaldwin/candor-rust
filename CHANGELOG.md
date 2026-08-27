@@ -11,6 +11,39 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.33.0] — 2026-08-26
 
+- **A completeness GATE for `CALIBRATED_CRATES`, closing the generator behind the ten silent
+  under-reports below, not another instance of it.** The coverage ledger (`scan.rs:2458-2479`) is
+  deliberately crate-level: once a crate is calibrated, an unmatched path is a claim of reviewed purity
+  with no `coverage.uncovered` disclosure — so an incomplete verb table in a calibrated crate was silent
+  in the dangerous direction, and nothing enforced that the table was complete. `crates/candor-classify/
+  tests/coverage_gate.rs` (riding the existing `cargo test --workspace` step, no new CI surface) asserts,
+  for 669 checked-in `(crate, consumer-facing path)` pairs across 74 of the 82 calibrated crates, that
+  `classify()` still recognizes each one as effectful — a REGRESSION gate (removing a rule makes it fail,
+  naming the exact entry; verified by reverting and restoring `ignore::Walk::new`'s rule). The 669 come
+  from a differential, not a hand list: `eval/coverage-gate/generate.py` self-scans each crate's OWN real
+  vendored source with `candor-scan` (a ground truth independent of whether the entry point itself has a
+  top-level rule — proven by self-scanning `ignore` against the classify.rs commit BEFORE `Walk::new` had
+  one; it still reports `Fs`, via real local call-graph propagation through `.build()`), and keeps every
+  candidate where self-scan found a real Fs/Net/Db/Exec reach that `classify()` also already recognizes.
+  A second, SEPARATE list (`eval/coverage-gate/open.tsv`, 251 rows across 39 crates — git2, sea_orm and
+  rusqlite dominate) is everything self-scan found effectful that no rule recognizes yet: a ratchet, not
+  a hard gate (a hard gate over all 82 crates today would be unlandable in one pass), refreshed weekly
+  against LIVE crates.io by `.github/workflows/coverage-gate-refresh.yml` — the only place this needs
+  network; the per-push gate reads only the checked-in manifest. `REVIEWED_PURE_ENTRIES` (beside
+  `REVIEWED_PURE_CRATES` in candor-classify) is the escape hatch for an `open.tsv` row read and confirmed
+  pure. Measured against the pre-19ce144 classify.rs, this gate's differential would have caught 5 of the
+  ten incident groups below outright (`ignore`, both `git2::Submodule` sites, `mongodb::with_options`,
+  `mysql_async::Conn::new`, and all five rusqlite sites) by self-scan alone, with no per-crate hand tuning.
+  It misses the other five (diesel's `establish`, `mysql::Conn::new`, `sea_orm::connect_proxy`,
+  `tokio_postgres::connect_raw`, most of tungstenite): each reaches its effect by crossing into a
+  DIFFERENT, uncalibrated external crate, which self-scan can only report `Unknown` for, not a concrete
+  effect — broadening the trigger to include `Unknown` was measured and rejected (987 candidates -> 2423,
+  260 uncovered -> 1323: a flood for a modest recall gain). Excludes `tokio_tcp`/`tokio_udp`/`async_net`
+  (classified blanket, immune to a verb-list gap by construction), `rustc_lint`/`rustc_errors`
+  (compiler-internal, not on crates.io), and `libc`/`nix`/`rustix` (exhaustive syscall-name tables, a
+  different audit shape than a wrapper crate's verb allowlist) — each a different reason, not one blanket
+  "too hard".
+
 - **⚠ `ignore::Walk::new`/`Walk::from_iter` reported ZERO effects — `deny Fs` passed at exit 0 over
   code that walks the filesystem.** `Walk::new(path)` is `WalkBuilder::new(path).build()` in ignore's
   own source (walk.rs:1128-1146) — the crate's own top-level doc example (`for entry in
