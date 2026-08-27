@@ -1371,13 +1371,32 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         return None;
     }
-    // `walkdir` — recursive directory traversal. The disk read (`read_dir` + `stat`) happens lazily in
-    // `IntoIter::next` (driving the iterator), and `DirEntry::metadata` issues a `stat`. The
-    // `WalkDir::new`/`max_depth`/`follow_links`/`sort_by` BUILDERS, `WalkDir::into_iter` (constructs the
-    // iterator, no I/O until pulled), and the cached `DirEntry::path`/`file_name`/`file_type`/`depth`
-    // accessors (`file_type` makes NO syscall) are PURE. (Companion to the already-modeled `ignore`.)
+    // `walkdir` — recursive directory traversal. Charged at `WalkDir::new` (construction), the SAME
+    // point `ignore::WalkBuilder::build`/`glob::glob` are charged, and NOT at `IntoIter::next` (driving
+    // the iterator) as this rule originally read. The disk read (`read_dir`+`stat`) is technically lazy
+    // — nothing happens until the value is iterated — but `.next()` is reached ONLY through a receiver
+    // typed as `walkdir::IntoIter`, and candor-scan's receiver-typing (`ctor_type`/`resolve_recv_type`)
+    // hard-blocks the `.into_iter()` verb (a guard against fabricating onto a DIFFERENT std type, e.g.
+    // `Vec::into_iter()` -> `std::vec::IntoIter`) with no per-crate exception for the SAME-crate case.
+    // `WalkDir::into_iter()` returns `walkdir::IntoIter` (same crate as `WalkDir` itself, exactly the
+    // shape the blocklist exists to protect, not the shape it should be blocking) — so every idiomatic
+    // form (`for e in WalkDir::new(p)`, `.into_iter().count()`, `.into_iter().filter_map(..)`, an
+    // untyped `let it = ...into_iter(); it.next()`) never reaches a typed `IntoIter::next` receiver and
+    // read silent-pure under the OLD rule, with `deny Fs` exiting 0 over code that walks the filesystem.
+    // Charging at `WalkDir::new` needs no receiver typing at all — it's a plain `Expr::Call`, robust to
+    // however the iterator is later consumed. `max_depth`/`follow_links`/`sort_by`/`into_iter` (the
+    // BUILDER chain, no I/O until pulled) and the cached `DirEntry::path`/`file_name`/`file_type`/`depth`
+    // accessors (`file_type` makes NO syscall) stay PURE — matched by nothing here, so they fall through.
+    // The `IntoIter::next`/`DirEntry::metadata` rule is KEPT, not dead: it still fires whenever the
+    // concrete `walkdir::IntoIter` type reaches `.next()` by a route the blocklist doesn't gate — an
+    // EXPLICIT type annotation (`let it: walkdir::IntoIter = ...`), a struct field declared with that
+    // type, or a local fn's declared return type — real, if rarer, shapes than the inline-chain idiom.
+    // (Companion to the already-modeled `ignore`.)
     if crate_name == "walkdir" {
-        if path.ends_with("::IntoIter::next") || path.ends_with("::DirEntry::metadata") {
+        if path.ends_with("::WalkDir::new")
+            || path.ends_with("::IntoIter::next")
+            || path.ends_with("::DirEntry::metadata")
+        {
             return Some("Fs");
         }
         return None;
@@ -2450,11 +2469,18 @@ mod tests {
         assert_eq!(classify("sqlx_core", "sqlx_core::pool::Pool::acquire"), Some("Db"));
         assert_eq!(classify("sqlx_core", "sqlx_core::pool::PoolOptions::max_connections"), None); // pure builder
 
-        // walkdir — the lazy read happens in next()/metadata(); builders + cached accessors pure.
+        // walkdir — charged at construction (`WalkDir::new`, mirroring `ignore`/`glob`), NOT solely at
+        // the lazy `next()`/`metadata()` read: candor-scan's receiver-typing blocklist hard-blocks
+        // `.into_iter()`, so a typed `IntoIter::next` receiver is unreachable from the idiomatic
+        // `WalkDir::new(p).into_iter()...` chain — `WalkDir::new` is the only point every real usage
+        // (for-loop, `.count()`, untyped `.next()`) actually reaches. `IntoIter::next`/`DirEntry::metadata`
+        // stay Some("Fs") as a secondary rule for the narrower explicit-type-annotation case. Builder
+        // setters (`into_iter` itself, `max_depth`, …) and cached accessors stay pure.
+        assert_eq!(classify("walkdir", "walkdir::WalkDir::new"), Some("Fs"));
         assert_eq!(classify("walkdir", "walkdir::IntoIter::next"), Some("Fs"));
         assert_eq!(classify("walkdir", "walkdir::DirEntry::metadata"), Some("Fs"));
-        assert_eq!(classify("walkdir", "walkdir::WalkDir::new"), None); // builder
         assert_eq!(classify("walkdir", "walkdir::WalkDir::into_iter"), None); // no I/O until pulled
+        assert_eq!(classify("walkdir", "walkdir::WalkDir::max_depth"), None); // builder setter
         assert_eq!(classify("walkdir", "walkdir::DirEntry::file_type"), None); // cached, no syscall
 
         // filetime — set_* are utimes (Fs), now is Clock; from_* constructors pure.
