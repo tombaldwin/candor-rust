@@ -9,6 +9,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.33.1] — 2026-08-27
+
 - **⚠ First triage pass over the completeness-gate ratchet (`eval/coverage-gate/open.tsv`): 148 of the
   251 rows closed — 96 real rules added to `covered.tsv` (git2 37, sea_orm 24, rusqlite 16, lettre 16,
   tonic 3) plus 52 rows removed as GENERATOR false positives, none reachable by any external consumer.**
