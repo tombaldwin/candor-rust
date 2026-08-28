@@ -62,6 +62,77 @@ after upgrading; review policies and regenerate baselines with the new build.
     and it does not touch java/ts/swift's own FFI mechanisms (tracked separately, see SOUNDNESS.md R58/
     R61).
 
+- **⚠ The ~79-crate audit R59's own commit named as open: does every OTHER `CALIBRATED_CRATES` member's
+  rule set cover its real effectful surface, or does a verb classify() declines to label fall silently
+  into the calibrated-crate purity exemption the same way libc's fd verbs did? Three real instances
+  found and fixed, all verified against each crate's real vendored source and a compiling fixture; the
+  remaining ~76 were checked (rule read + spot-checked against real source, prioritising the
+  fd/handle-like and generic-verb-surface crates the method calls out) and found complete.**
+  - **`clap::Arg::env`** (`candor-classify`) called `env::var_os(&name)` directly at builder time
+    (clap_builder 4.6.6, builder/arg.rs:2205) — a real `Env` read, independent of and long before
+    `Command::get_matches()`'s own already-classified read. classify()'s own comment called the verb
+    "too generic to gate safely" and left it unmodeled, the same words used for libc's genuinely
+    ambiguous fd verbs — but this arm is already crate-gated on `crate_name == "clap"`, and
+    clap_builder has exactly ONE `pub fn` ending `::env` in its whole source, so no ambiguity survives
+    the gate. `Arg::new("x").env("MY_VAR")` with no `get_matches` call anywhere produced
+    `"functions": []`. Now classified `Env` directly (not carved into
+    `CALIBRATED_BUT_PARTIAL_CRATES` — the effect is unambiguous once actually checked).
+  - **`console::Term`'s raw `io::{Read,Write}` impl** (`candor-classify`) — `Term::write`/`Term::flush`
+    (console 0.15.11, term.rs:622-633) call `self.write_through(buf)`, the SAME primitive
+    `Term::write_line` already charges `Ipc` for; `Term::read` (term.rs:650) calls
+    `io::stdin().read(buf)` directly. classify()'s own comment already NOTED the trait impl ("no
+    `write_str` — `Term` impls `io::Write`") without covering it. A fn calling only
+    `term.write_all(..)` (no `write_line`) produced `"functions": []`. Now classified `Ipc`,
+    `Term::`-scoped so it cannot spread to console's other types.
+  - **`arboard::{Get,Set}::file_list` + `Clear::default`** (`candor-classify`) — `file_list`
+    (arboard 3.6.1, lib.rs:205,251) is the same builder-then-terminal shape as the already-covered
+    `text`/`image`/`html`, and `Clear::default` (lib.rs:265) is `Clipboard::clear`'s own documented
+    alternate entry point (`clear() { self.clear_with().default() }`) — neither shares a leaf with an
+    already-matched verb. Not missed for ambiguity: missed because
+    `eval/coverage-gate/generate.py`'s generator only triggers on a self-scan `inferred` set containing
+    Fs/Net/Db/Exec, and Clipboard isn't in that trigger set — a missing Clipboard verb is structurally
+    invisible to the completeness gate regardless of phrasing. A fn taking an already-constructed
+    `arboard::Get`/`Set`/`Clear` value (isolating the terminal from the already-classified `get()`/
+    `set()` constructors) and calling `file_list`/`default` produced `"functions": []`. Now classified
+    `Clipboard`.
+  - New `candor-scan` tests `clap_arg_env_reads_env_var_directly_at_builder_time`,
+    `console_term_raw_write_and_read_trait_impls_are_the_same_ipc_channel`,
+    `arboard_file_list_terminal_is_the_same_clipboard_effect_as_text` (all red on the pre-fix binary:
+    `"functions": []`; green after, each with a control proving an unrelated pure sibling method on the
+    same crate stays unclassified beside the fix).
+  - **Corpus quantification** (`~/.cargo/registry`, the same 1202 cached crates, standalone scans,
+    before/after binary diff): **0 crates differ** — none of the 1202 published library crates happen
+    to spell `Arg::new(..).env(..)` with no `get_matches` call, call `Term::write`/`read` directly
+    (rather than through `write_line`/`read_line`), or hold an `arboard::Get`/`Set`/`Clear` value across
+    a function boundary. This is the expected shape, not a red flag: CLI-parsing/tty/clipboard code is
+    overwhelmingly written in application binaries, not the library crates this registry mirror caches
+    — the fixtures above (not this corpus) are what proves each fix fires.
+  - `wild::ArgsOs`/`Args`'s `Iterator::next` impl (Windows only, argsiter.rs:47) calls
+    `glob::glob_with` — a real Fs read — but ONLY when the returned iterator is actually driven; the
+    dominant real-world idiom (`Command::get_matches_from(wild::args_os())`) hands the un-iterated value
+    straight into another crate's function, where the drive happens inside clap's own body, invisible to
+    any classify() rule on either side. Filed, not fixed: low reachability, Windows-only, and the
+    coverage-gate's own candidate generator structurally cannot see it either (a foreign `Iterator` impl
+    is excluded from its candidate list by design, the same reason `walkdir::IntoIter::next` needed a
+    hand-written rule rather than a generated one).
+  - Crates checked against real vendored source beyond the three fixed and `wild`: `git2`, `ignore`,
+    `notify`, `reqwest`/`isahc`/`ureq`/`curl`, the DB family (`rusqlite`/`postgres`/`tokio_postgres`/
+    `diesel`/`redis`/`mongodb`/`mysql`/`mysql_async`/`sea_orm`/`deadpool_postgres`), `memmap2`/`fs_err`/
+    `async_fs`/`tempfile`/`glob`, the rand family (`rand`/`getrandom`/`fastrand`/`rand_core`/`argon2`/
+    `bcrypt`/`scrypt`/`pbkdf2`/`password_hash`), `portable_pty`/`async_process`/`duct`, `dotenvy`/
+    `dotenv`, `chrono`/`time`, `tracing`/`log`/`rustc_lint`/`rustc_errors`, `rustls`/`native_tls_crate`/
+    `tokio_native_tls`, `etcetera`, `sqlx_core`, `walkdir`/`filetime`/`clircle`, `execute`/`ctrlc`/
+    `jiff`/`env_logger`, `dialoguer`, `crossterm`/`ratatui`, `terminal_colorsaurus`/`backoff`/
+    `grep_cli`/`lscolors`, `tracing_subscriber`, `elasticsearch`, `tonic`/`rdkafka`/`lapin`/
+    `async_nats`/`lettre`/`tungstenite`/`pnet` — all found complete for this class (most already carry
+    their own "verified against `<crate> X.Y.Z`" citations from the 2026-08-27 coverage-gate sweep,
+    which independently closes the DIFFERENT question of missing Fs/Net/Db/Exec entry points).
+    `aws_config`/`aws_sdk_*`/`aws_smithy*`/`cap_*` were reasoned about against their existing rules but
+    not re-verified against fresh source this pass.
+  - Does not touch `CALIBRATED_BUT_PARTIAL_CRATES`, the coverage-gate ratchet (`open.tsv` stayed empty
+    throughout — this class is orthogonal to what it tracks), or rust-deep's still-open, separately
+    named question (its `invisible` mechanism is crate-name-keyed everywhere except the R59 seam).
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family

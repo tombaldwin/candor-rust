@@ -2070,6 +2070,20 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // `to_string()`. Match the handle verbs; everything else returns None. `Clipboard::new` opens the
     // connection to the clipboard server, so it's an effect too; `get`/`set` return the
     // builder-then-read `Get`/`Set` cursors whose `text`/`image`/`html` terminals do the I/O.
+    //
+    // THE ~79-CRATE R59-CLASS AUDIT (2026-08-28), verified against arboard 3.6.1: `file_list`
+    // (lib.rs:205,251, `Get::file_list`/`Set::file_list`) is the SAME builder-then-terminal shape as
+    // `text`/`image`/`html` two lines up — reading/writing the clipboard's file-path list — but was
+    // missing, not because it's ambiguous (it's the only `file_list` in the crate) but because
+    // `eval/coverage-gate/generate.py`'s own generator only triggers on a self-scan `inferred` set
+    // containing Fs/Net/Db/Exec; Clipboard isn't in that trigger set, so a missing Clipboard verb is
+    // structurally invisible to the completeness gate regardless of phrasing. `Clear::default`
+    // (lib.rs:265) is `Clipboard::clear`'s own documented alternate entry point
+    // (`clear() { self.clear_with().default() }`, lib.rs:156-158) — the SAME "sibling constructor"
+    // shape as `ignore::Walk::new` beside `WalkBuilder::build`; `clear_with()` itself doesn't share
+    // `clear`'s leaf, so neither the constructor nor its terminal was covered. `default` is otherwise
+    // unused in this crate (no derived `Default` impls), so the bare leaf carries no fabrication risk
+    // once crate-gated.
     if crate_name == "arboard" {
         let m = path.rsplit("::").next().unwrap_or(path);
         if m == "new"
@@ -2084,6 +2098,8 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || m == "text"
             || m == "image"
             || m == "html"
+            || m == "file_list"
+            || m == "default"
         {
             return Some("Clipboard");
         }
@@ -2226,12 +2242,25 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // effect (Env): `get_matches`/`get_matches_mut`/`try_get_matches` and the derive `parse`/`try_parse`.
     // clap is MOSTLY PURE: the ENTIRE builder surface (`Command::new`/`arg`/`about`/`Arg::new`) stays
     // None, and crucially the `*_from`/`*_parse_from` variants take an EXPLICIT iterator (they do NOT
-    // read argv) so they stay pure too. (`Arg::env` reads an env var at builder time but bare `::env` is
-    // too generic to gate safely, so it's left unmodeled — under-report over fabrication.)
+    // read argv) so they stay pure too.
+    //
+    // THE ~79-CRATE R59-CLASS AUDIT (2026-08-28): this file used to leave `Arg::env` unmodeled, calling
+    // bare `::env` "too generic to gate safely" — the same words used for libc's genuinely ambiguous fd
+    // verbs. It isn't the same shape: `Arg::env(name)` calls `env::var_os(&name)` DIRECTLY at builder
+    // time (verified against clap_builder 4.6.6, builder/arg.rs:2205-2213 — real, immediate, not
+    // deferred to `get_matches()`), and — unlike a bare fd, which could be Fs/Net/Ipc — `clap_builder`
+    // has exactly ONE `pub fn` ending `::env` in its entire source (`Arg::env`; the deprecated
+    // `Arg::env_os` is a one-line delegate to it). This whole match arm is already crate-gated on
+    // `crate_name == "clap"`, so no ambiguity survives to fabricate on: a fixture proved the untreated
+    // gap silently vanishes the function ("functions": [] — the exact R59 shape, worse than an
+    // uncalibrated dependency, since `clap` is fully `CALIBRATED_CRATES` and the miss reads as
+    // reviewed-pure rather than disclosed). Classified, not carved into
+    // `CALIBRATED_BUT_PARTIAL_CRATES`, because the effect IS unambiguous once actually checked.
     if crate_name == "clap" {
         if path.ends_with("::get_matches") || path.ends_with("::get_matches_mut")
             || path.ends_with("::try_get_matches")
             || path.ends_with("::parse") || path.ends_with("::try_parse")
+            || path.ends_with("::env") || path.ends_with("::env_os")
         {
             return Some("Env");
         }
@@ -2386,11 +2415,23 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
     // dialogue channel; note there is NO `write_str` — `Term` impls `io::Write`). The free-fn terminal
     // detection (`colors_enabled`/`user_attended`) reads `CLICOLOR`/`CLICOLOR_FORCE` (Env). The `Style`
     // color/format methods and the text utils (`strip_ansi_codes`/`pad_str`/`measure_text_width`) are PURE.
+    //
+    // THE ~79-CRATE R59-CLASS AUDIT (2026-08-28): the note above ("no `write_str` — `Term` impls
+    // `io::Write`") RECORDED the trait impl without covering it. `Term::write`/`Term::flush` (console
+    // 0.15.11, term.rs:622-633) call `self.write_through(buf)` — the SAME primitive `write_line` already
+    // charges Ipc for — and `Term::read` (term.rs:650-654) calls `io::stdin().read(buf)` directly. These
+    // are a second, real entry point to the identical tty channel, missed because `read`/`write`/`flush`
+    // are the names every I/O type shares — but crate-gated on `crate_name == "console"`, term.rs
+    // defines exactly one of each (verified against the real source; no ambiguity survives the gate,
+    // same shape as `clap::Arg::env`). Left unclassified, a fn calling only `term.write_all(..)` (no
+    // `write_line`) read as reviewed-pure, since `console` is fully `CALIBRATED_CRATES`.
     if crate_name == "console" {
         if path.ends_with("::write_line") || path.ends_with("::read_line")
             || path.ends_with("::read_line_initial_text") || path.ends_with("::read_char")
             || path.ends_with("::read_key") || path.ends_with("::read_key_raw")
             || path.ends_with("::read_secure_line")
+            || path.ends_with("Term::write") || path.ends_with("Term::flush")
+            || path.ends_with("Term::read")
         {
             return Some("Ipc");
         }
@@ -3346,6 +3387,11 @@ mod tests {
         assert_eq!(classify("clap", "clap::Command::new"), None); // builder
         assert_eq!(classify("clap", "clap::Arg::about"), None); // builder
         assert_eq!(classify("clap", "clap::Command::get_matches_from"), None); // explicit args, no argv read
+        // R59-class audit: `Arg::env` calls `env::var_os` DIRECTLY at builder time (verified against
+        // clap_builder 4.6.6) — unambiguous (the crate's only `::env` method), so classify it rather
+        // than leave a real effect to fall silently into the CALIBRATED_CRATES purity exemption.
+        assert_eq!(classify("clap", "clap::Arg::env"), Some("Env"));
+        assert_eq!(classify("clap", "clap::Arg::env_os"), Some("Env"));
 
         // jiff — now* is Clock; tz lookups read the tzdb (Fs); span/civil math pure.
         assert_eq!(classify("jiff", "jiff::Timestamp::now"), Some("Clock"));
@@ -3417,6 +3463,12 @@ mod tests {
         assert_eq!(classify("console", "console::colors_enabled"), Some("Env"));
         assert_eq!(classify("console", "console::Style::cyan"), None); // pure styling
         assert_eq!(classify("console", "console::strip_ansi_codes"), None); // pure text util
+        // R59-class audit: `Term` also implements raw `io::{Read,Write}` (console 0.15.11) — the same
+        // tty channel as `write_line`/`read_key`, reached through the generic trait methods instead of
+        // the crate's own named convenience methods. Crate-gated and `Term::`-scoped, so it cannot spread.
+        assert_eq!(classify("console", "console::Term::write"), Some("Ipc"));
+        assert_eq!(classify("console", "console::Term::flush"), Some("Ipc"));
+        assert_eq!(classify("console", "console::Term::read"), Some("Ipc"));
 
         // terminal_colorsaurus — tty colour query (Ipc).
         assert_eq!(classify("terminal_colorsaurus", "terminal_colorsaurus::background_color"), Some("Ipc"));
@@ -3751,6 +3803,12 @@ mod tests {
         assert_eq!(classify("arboard", "arboard::Error::to_string"), None); // error formatting — pure
         assert_eq!(classify("arboard", "arboard::Error::fmt"), None); // Display impl — pure
         assert_eq!(classify("arboard", "arboard::ImageData::to_owned_img"), None); // pure data type
+        // R59-class audit: `file_list` is `Get`/`Set`'s sibling terminal beside `text`/`image`/`html`
+        // (verified against arboard 3.6.1 — the only `file_list` in the crate, so no ambiguity survives
+        // the crate gate); `Clear::default` is `clear()`'s own alternate entry point.
+        assert_eq!(classify("arboard", "arboard::Get::file_list"), Some("Clipboard"));
+        assert_eq!(classify("arboard", "arboard::Set::file_list"), Some("Clipboard"));
+        assert_eq!(classify("arboard", "arboard::Clear::default"), Some("Clipboard"));
         // fastrand: value draws + entropy-seeded entry points are Rand; the DETERMINISTIC seeded ctor
         // `with_seed` and state split/copy (`fork`/`clone`) are PURE (whole-crate Rand fabricated Rand).
         assert_eq!(classify("fastrand", "fastrand::u32"), Some("Rand")); // top-level draw
