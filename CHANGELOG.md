@@ -308,6 +308,47 @@ after upgrading; review policies and regenerate baselines with the new build.
     the same impostor with no Cargo.lock present falls back to the pre-fix behavior unchanged — a stated
     residual limit, not a silent one.
 
+- **⚠ The above's own "stated residual" was true of the codebase and false of the OUTPUT: `non_registry_
+  lock_names` alone returns empty with no Cargo.lock, so EVERY `CALIBRATED_CRATES`/`PATH_CALIBRATED_CRATES`/
+  `CALIBRATED_PREFIXES` exemption reverted to the pre-fix, unconditional, name-only behaviour — with
+  nothing in the JSON saying so. Adversarial review (2026-08-28) reproduced it live: the `log`-named `path`
+  dependency from the fix above, scanned with no Cargo.lock in the tree, performing a real `Net` call,
+  still printed `"functions": []`, exit 0, zero disclosure — and candor-scan exists to scan source WITHOUT
+  building it, so a Rust library repo (which routinely does not commit `Cargo.lock`) is not an edge case
+  of this residual, it is the residual's target population.**
+  - **Fixed by widening the identity check to a source that is NEVER absent**: new `non_registry_manifest_
+    names` (`deps.rs`) reads the scanned dir's own Cargo.toml manifest(s) — inline-table (`name = { path =
+    "…" }` / `{ git = "…" }`) and header-table (`[dependencies.name]` followed by a bare `path =`/`git =`
+    line) forms both — for `path`/`git` source evidence, independent of Cargo.lock. Unioned with
+    `non_registry_lock_names` at the one call site (`scan.rs`) that consumes either. No new wire key: the
+    reproduced defect and the manifest-detectable cases it covers now disclose through the SAME `invisible`
+    / κ-coverage-ledger machinery the lock-based check already used — same treatment, exit 0, no
+    `incomplete` escalation, for consistency with how that machinery already treats the Cargo.lock-
+    confirmed impostor case one entry up.
+  - **Why this closes the realistic case without a lockfile**: you cannot get crates.io to publish a
+    second `log` — a name-squatting impostor is attached to a project via `path`/`git`, which Cargo.toml
+    must state directly on the dependency declaration (there is no way to depend on a path/git source
+    without writing `path =`/`git =` somewhere). A bare-version declaration (`log = "0.4"`) is therefore
+    strong evidence of a genuine registry dependency even absent a lockfile.
+  - **Verdict, not just disclosure, left unchanged on purpose**: this does NOT force `incomplete`/exit 2.
+    Escalating every lockfile-less scan that happens to depend on a calibrated crate would be the exact
+    over-charge the brief this fix responds to warned against — the ordinary, honest, unlocked Rust library
+    is the common case, not the exception.
+  - **STATED, NARROWER RESIDUAL, not silently absorbed**: a bare-version dependency with NO Cargo.lock and
+    no `path`/`git` anywhere in the manifest cannot be told apart from a genuine registry crate by anything
+    in the scanned tree — a `[patch.*]` table override or `.cargo/config.toml` source-replacement can still
+    swap the real artifact out invisibly. Closing the `[patch]` half needs the identical `path=`/`git=`
+    check extended to `[patch.*]` tables (not implemented here); closing the `.cargo/config.toml` half
+    needs reading outside the scanned tree entirely, which candor-scan does not do anywhere else in the
+    codebase. Disclosing THIS residual would require a new wire key (something weaker than `invisible` —
+    "exemption applied, identity unverifiable" — since forcing it into `invisible`/`uncovered` for every
+    unlocked bare-version calibrated dependency is precisely the over-charge just above) — that is a
+    candor-spec decision, not made here.
+  - Four new/expanded `candor-scan` tests: the reproduced defect (`path` dep, no lockfile) now disclosing,
+    a `git`-sourced equivalent, the header-table manifest form, and the sharpest over-charge guard in the
+    file — a bare-version dependency with no lockfile keeps the exemption, proving the fix does not scream
+    on every unlocked project.
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family

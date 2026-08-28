@@ -2459,7 +2459,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // workspace-sourced (not the real registry crate `classify`'s rules were reviewed against) never
     // gets the exemption, regardless of which of the three lists it happens to string-match — see
     // `non_registry_lock_names`'s doc for the reproduced silent-drop this closes.
-    let non_registry_names = non_registry_lock_names(dir);
+    //
+    // UNION with the manifest-based check: Cargo.lock is routinely absent from a library tree — an
+    // adversarial review found that with no lockfile, `non_registry_lock_names` alone returns empty, so
+    // a `path`/`git` impostor sharing a CALIBRATED_CRATES name reverted to the pre-⟨caca530⟩ silent
+    // exemption. Cargo.toml is never absent, and a name squatting a calibrated crate almost always
+    // declares its own `path =`/`git =` right there — see `non_registry_manifest_names`'s doc for the
+    // shape this covers and the narrower residual (a `[patch]` table, or `.cargo/config.toml` source
+    // replacement) it does not.
+    let non_registry_names: std::collections::HashSet<String> =
+        non_registry_lock_names(dir).into_iter().chain(non_registry_manifest_names(dir)).collect();
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {

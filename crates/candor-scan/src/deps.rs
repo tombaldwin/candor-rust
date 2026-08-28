@@ -921,6 +921,39 @@ pub(crate) fn non_registry_lock_names(dir: &str) -> std::collections::HashSet<St
     out
 }
 
+/// Does `l` carry `key = "…"` at a token boundary (`{ … key = "value" … }` inline-table style, OR a
+/// bare `key = "value"` scalar line) — `key` must be preceded by `{`, `,`, space/tab, or line-start,
+/// and followed (after whitespace) by `=`, so it is never a substring of a longer key or a value.
+/// Returns the quoted value, unprocessed. SHARED by `cargo_toml_deps`'s `package = "real"` rename
+/// lookup and `non_registry_manifest_deps`'s `path =`/`git =` non-registry evidence below, so the one
+/// boundary rule can't drift between the two call sites.
+fn toml_inline_value<'a>(l: &'a str, key: &str) -> Option<&'a str> {
+    let bytes = l.as_bytes();
+    let mut search = 0;
+    while let Some(rel) = l[search..].find(key) {
+        let i = search + rel;
+        let boundary = i == 0 || matches!(bytes[i - 1], b'{' | b',' | b' ' | b'\t');
+        if boundary {
+            if let Some(rest) = l[i + key.len()..].trim_start().strip_prefix('=') {
+                if let Some(rest) = rest.trim_start().strip_prefix('"') {
+                    return rest.split('"').next();
+                }
+            }
+        }
+        search = i + key.len();
+    }
+    None
+}
+
+/// A `package = "real"` rename target inside a dependency's inline table (`{ … package = "real" }`) or
+/// a `[dependencies.name]` header-table body (`package = "real"`) — the manifest KEY is what the code
+/// imports while the registry/report knows the REAL package. Without this, `--deps` scanned the real
+/// crate and the join/ledger missed it under the manifest key (found live on ebman: `tui_common` stayed
+/// "invisible" with its report sitting right there).
+fn toml_package_rename(l: &str) -> Option<String> {
+    toml_inline_value(l, "package").map(|v| v.replace('-', "_"))
+}
+
 /// One manifest's dependency names, all four header forms: `[dependencies]` /
 /// `[workspace.dependencies]` / `[target.….dependencies]` sections, and the table-header
 /// declarations `[dependencies.name]` / `[target.….dependencies.name]` (review: the old
@@ -931,30 +964,6 @@ pub(crate) fn cargo_toml_deps(
     out: &mut std::collections::HashSet<String>,
     renames: &mut HashMap<String, String>,
 ) {
-    // A dependency RENAME (`tui-common = { package = "tb-tui-common" }`) means the manifest KEY is
-    // what the code imports while the registry/report knows the REAL package — without the map,
-    // --deps scanned the real crate and the join/ledger missed it under the key (found live on
-    // ebman: tui_common stayed "invisible" with its report sitting right there).
-    // Match `package` only as a KEY (`{ … package = "real" }`), not as a substring of a dependency
-    // KEY (`my-package = "1.2"` previously parsed its own version as a rename target) or a value:
-    // `package` must sit at a token boundary and be followed by `=`.
-    let pkg_re = |l: &str| -> Option<String> {
-        let bytes = l.as_bytes();
-        let mut search = 0;
-        while let Some(rel) = l[search..].find("package") {
-            let i = search + rel;
-            let boundary = i == 0 || matches!(bytes[i - 1], b'{' | b',' | b' ' | b'\t');
-            if boundary {
-                if let Some(rest) = l[i + "package".len()..].trim_start().strip_prefix('=') {
-                    if let Some(rest) = rest.trim_start().strip_prefix('"') {
-                        return rest.split('"').next().map(|s| s.replace('-', "_"));
-                    }
-                }
-            }
-            search = i + "package".len();
-        }
-        None
-    };
     let mut in_deps = false;
     let mut header_key: Option<String> = None; // the `[dependencies.name]` we're inside, if any
     for line in text.lines() {
@@ -984,7 +993,7 @@ pub(crate) fn cargo_toml_deps(
         // inside a `[dependencies.name]` table: a `package = "real"` line is the rename
         if let Some(key) = &header_key {
             if l.starts_with("package") {
-                if let Some(real) = pkg_re(l) {
+                if let Some(real) = toml_package_rename(l) {
                     renames.insert(key.clone(), real);
                 }
             }
@@ -1001,7 +1010,7 @@ pub(crate) fn cargo_toml_deps(
                 // never as a bare `package = "0.1"` (which is a dependency NAMED package) — so search
                 // only inside the braces.
                 if let Some(brace) = l.find('{') {
-                    if let Some(real) = pkg_re(&l[brace..]) {
+                    if let Some(real) = toml_package_rename(&l[brace..]) {
                         if real != key {
                             renames.insert(key.clone(), real);
                         }
@@ -1011,6 +1020,127 @@ pub(crate) fn cargo_toml_deps(
             }
         }
     }
+}
+
+/// Package names this scan's OWN Cargo.toml manifest(s) declare with a `path`/`git` source — positive
+/// non-registry evidence available with NO Cargo.lock at all. `non_registry_lock_names`'s identity check
+/// reads Cargo.lock, which a library tree routinely does not commit; Cargo.toml is never absent (there is
+/// no scan without it), and a dependency squatting a `CALIBRATED_CRATES` name almost always declares
+/// itself `path`/`git` right there, because that IS the mechanism for attaching a local/forked artifact
+/// to a name cargo would otherwise resolve from the registry — the reproduced defect's own fixture
+/// (`log = { path = "../logfake" }`) is exactly this shape. Same DENYLIST contract as the lock-based
+/// check: returns the REAL crate name (post `package = "…"` rename, `-` -> `_`) and returns members only
+/// on POSITIVE evidence, so a bare `name = "1.2"` version dependency — the overwhelming common case —
+/// gives none and an honest project's ordinary dependency never appears here.
+///
+/// Walks every `Cargo.toml` under `dir`, the same nested-package boundary as `cargo_deps`.
+///
+/// RESIDUAL, narrower than the pre-⟨caca530⟩ one and STATED rather than silent: a dependency that
+/// resolves away from the registry through a mechanism invisible to manifest text — a `[patch]` table
+/// entry, or `.cargo/config.toml` source-replacement — cannot be seen from here. Both are real gaps;
+/// closing the first needs the same `path=`/`git=` evidence check extended to `[patch.*]` tables (not
+/// done here — flagged, not silently absorbed), and the second reads outside the scanned tree entirely.
+pub(crate) fn non_registry_manifest_names(dir: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 || !e.file_type().is_dir() {
+                return true;
+            }
+            let name = e.file_name().to_str().unwrap_or("");
+            if name == "target" || (name.starts_with('.') && name != "." && name != "..") {
+                return false;
+            }
+            !e.path().join("Cargo.toml").is_file()
+        })
+        .filter_map(Result::ok)
+    {
+        let p = entry.path();
+        if p.file_name().and_then(|n| n.to_str()) != Some("Cargo.toml") {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(p) {
+            non_registry_manifest_deps(&text, &mut out);
+        }
+    }
+    out
+}
+
+/// One manifest's `non_registry_manifest_names` body. Two shapes, both handled by
+/// `cargo_toml_deps`'s own section/header-key tracking so a manifest-syntax quirk is read once: the
+/// INLINE form (`name = { path = "../fake" }`, evidence scanned only from the `{` onward — never the
+/// whole line, so a dependency merely NAMED `path`/`git` declared as a plain version (`git = "1.0"`,
+/// no braces) is not mistaken for one) and the HEADER-TABLE form (`[dependencies.name]` followed by a
+/// bare `path = "…"`/`git = "…"` line, where the whole line legitimately IS that field).
+fn non_registry_manifest_deps(text: &str, out: &mut std::collections::HashSet<String>) {
+    let mut in_deps = false;
+    let mut header_key: Option<String> = None;
+    let mut header_non_registry = false;
+    let mut header_package: Option<String> = None;
+    let flush = |key: &Option<String>, non_registry: bool, package: &Option<String>,
+                 out: &mut std::collections::HashSet<String>| {
+        if non_registry {
+            if let Some(k) = key {
+                out.insert(package.clone().unwrap_or_else(|| k.clone()));
+            }
+        }
+    };
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(inner) = toml_section(line) {
+            flush(&header_key, header_non_registry, &header_package, out);
+            header_key = None;
+            header_non_registry = false;
+            header_package = None;
+            let harness = inner.contains("dev-dependencies") || inner.contains("build-dependencies");
+            in_deps = !harness && (inner == "dependencies" || inner.ends_with(".dependencies"));
+            if !harness && !in_deps {
+                let name = inner
+                    .rfind(".dependencies.")
+                    .map(|i| &inner[i + ".dependencies.".len()..])
+                    .or_else(|| inner.strip_prefix("dependencies."));
+                if let Some(name) = name {
+                    if !name.is_empty() && !name.contains('.') {
+                        header_key = Some(name.trim_matches('"').replace('-', "_"));
+                    }
+                }
+            }
+            continue;
+        }
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        if header_key.is_some() {
+            if let Some(v) = toml_package_rename(l) {
+                header_package = Some(v);
+            }
+            if toml_inline_value(l, "path").is_some() || toml_inline_value(l, "git").is_some() {
+                header_non_registry = true;
+            }
+            continue;
+        }
+        if !in_deps {
+            continue;
+        }
+        if let Some(name) = l.split('=').next() {
+            let name = name.trim().trim_matches('"');
+            if name.is_empty() {
+                continue;
+            }
+            let key = name.replace('-', "_");
+            if let Some(brace) = l.find('{') {
+                let inline = &l[brace..];
+                let has_source =
+                    toml_inline_value(inline, "path").is_some() || toml_inline_value(inline, "git").is_some();
+                if has_source {
+                    let real = toml_package_rename(inline).unwrap_or(key);
+                    out.insert(real);
+                }
+            }
+        }
+    }
+    flush(&header_key, header_non_registry, &header_package, out);
 }
 
 /// The cargo registry source roots (`~/.cargo/registry/src/<index-hash>/`), where unbuilt
