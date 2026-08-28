@@ -30,7 +30,7 @@ use candor_report::ReportEntry;
 // `gate --report` itself is judged from, and take the ANSWERABILITY set from the same object.
 
 pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true });
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true, verb: "unverified" });
     let Some(prefix) = report_or_discover(&g) else {
         eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
         return 2;

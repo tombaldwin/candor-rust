@@ -248,7 +248,7 @@ pub(crate) fn cmd_parsepolicy(args: &[String]) -> i32 {
 /// "if I add a network call here, what happens and is it allowed?" BEFORE the edit, instead of edit →
 /// run the gate → revert. Read-only over the call-graph sidecar + the policy file.
 pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: true });
+    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: true, verb: "whatif" });
     let (Some(target), Some(effect)) = (g.positional.first().cloned(), g.positional.get(1).cloned()) else {
         eprintln!("usage: candor-query whatif <fn> <Effect> [--report <locator>] [--policy <file>] [--json]");
         return 2;

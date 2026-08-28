@@ -9,6 +9,30 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ `--policy` is now a usage error (exit 2) on ten descriptive verbs that accepted and silently
+  dropped it: `show`/`where`/`callers`/`map`/`containment`/`reachable`/`path`/`impact`/`blindspots`/
+  `tour`.** BACKLOG "`--policy` accept-and-drop is THREE engines, not one" (candor-java `37c9b10` fixed
+  the same defect on the same set first). The shared query grammar (`candor-query/src/grammar.rs`)
+  accepts `--policy <file>` on every verb — the SPEC §3.3.1 grammar line requires that — but these ten
+  never read the parsed value back: verified at HEAD, byte-identical output with and without `--policy`,
+  no diagnostic either way. None of SPEC §3.1's pinned JSON shapes for these ten carries a
+  policy-derived field (checked per-verb, not assumed — `blindspots`/`containment` were the two the
+  intuition said might want one, and do not), so there is nothing for `--policy` to do here: the same
+  shape `gains`/`diff`/`rewire` already carry and already refuse with their own bespoke parsers. Applies
+  the identical rule in the ONE place all ten verbs share (`Shape.has_policy` in the shared grammar) via
+  a single check, naming `gate --report`/`whatif`/`fix`/`fix-gate`/`unverified` as the policy-relative
+  alternatives. `CANDOR_POLICY` is likewise inert on these ten — matching `gains`, the model this fix
+  follows, so this is an existing spec-sanctioned gap rather than something the fix introduces.
+  **Controls (falsified against the pre-fix binary):** every verb that already threads `--policy`
+  (`gate`/`whatif`/`fix`/`fix-gate`/`unverified`/`gains`, plus `diff`/`rewire`'s existing loud rejection)
+  is byte-identical pre/post with `--policy` present; every one of the ten newly-rejecting verbs is
+  byte-identical to the pre-fix binary when `--policy` is ABSENT (only the `--policy`-present case
+  changes, from a silent wrong answer to a loud refusal naming the problem and the remedy); the pre-fix
+  binary's WITH-`--policy` output was proven byte-identical to its WITHOUT-`--policy` output on all ten,
+  confirming the silent drop actually existed rather than being assumed. `diff` and `rewire` (candor-rust's
+  own bespoke parsers) already rejected `--policy` loud before this fix and are unchanged — the twelfth
+  verb from the four-engine sweep (`rewire`) needed no rust-side work for that reason.
+
 - **⚠ R59/R60 (SOUNDNESS.md): two independent FFI cardinal sins closed — a local `extern "C"` call
   disclosed NOTHING in rust-deep despite its own callgraph proving it visited the call, and an
   unclassified `libc`/`nix`/`rustix` generic-fd-verb call (`read`/`write`/`close`/...) vanished

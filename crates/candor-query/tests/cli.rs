@@ -1011,16 +1011,32 @@ fn a_report_with_no_analyzed_manifest_hedges_as_row_three_across_every_verb() {
          serde_json::from_str(&text).unwrap_or_else(|e| panic!("{args:?}: not JSON ({e}):\n{text}")))
     };
 
-    for verb in [
-        vec!["where", "Fs"],
-        vec!["blindspots"],
-        vec!["reachable"],
-        vec!["map"],
-        vec!["unverified"],
-        vec!["fix-gate"],
+    // ⟨0.34⟩ BACKLOG "`--policy` accept-and-drop is THREE engines, not one": `where`/`blindspots`/
+    // `reachable`/`map` have NO policy-relative verdict and now REFUSE `--policy` (exit 2) rather than
+    // silently dropping it — the `--policy` in this loop's args was always incidental to what this test
+    // checks (the row-three hedge, which has nothing to do with policy), riding on the old accept-and-
+    // drop behaviour. `unverified`/`fix-gate` genuinely need a policy to run at all, so they keep it.
+    for (verb, needs_policy) in [
+        (vec!["where", "Fs"], false),
+        (vec!["blindspots"], false),
+        (vec!["reachable"], false),
+        (vec!["map"], false),
+        (vec!["unverified"], true),
+        (vec!["fix-gate"], true),
     ] {
-        let mut a = verb.clone();
-        a.extend(["--report", &row3, "--policy", &pol, "--json"]);
+        fn with_report<'a>(verb: &[&'a str], needs_policy: bool, pol: &'a str, report: &'a str) -> Vec<&'a str> {
+            let mut a: Vec<&str> = verb.to_vec();
+            a.push("--report");
+            a.push(report);
+            if needs_policy {
+                a.push("--policy");
+                a.push(pol);
+            }
+            a.push("--json");
+            a
+        }
+
+        let a = with_report(&verb, needs_policy, &pol, &row3);
         let (rc, v) = json(&a);
         assert_eq!(rc, 0, "{verb:?}: row 3 is a DISCLOSURE, not an exit code — the gate exits 0 too");
         assert_eq!(v["incomplete"], serde_json::json!(true),
@@ -1032,8 +1048,7 @@ fn a_report_with_no_analyzed_manifest_hedges_as_row_three_across_every_verb() {
                  `analyzed.count: 0` that is not on the wire, and makes one key mean two things: {v}");
 
         // CONTROL, ROW 1: `analyzed.count: 0` keeps `judgedNothing` and never becomes `noManifest`.
-        let mut a = verb.clone();
-        a.extend(["--report", &row1, "--policy", &pol, "--json"]);
+        let a = with_report(&verb, needs_policy, &pol, &row1);
         let (rc, v) = json(&a);
         assert_eq!(rc, 0);
         assert_eq!(v["judgedNothing"], serde_json::json!([row1_file]),
@@ -1042,8 +1057,7 @@ fn a_report_with_no_analyzed_manifest_hedges_as_row_three_across_every_verb() {
 
         // CONTROL, ROW 2: `count: 7` + `functions: []` is a legitimate all-pure claim §2 rule 3
         // requires a consumer to BELIEVE. A fix that hedges all three rows has disabled the feature.
-        let mut a = verb.clone();
-        a.extend(["--report", &row2, "--policy", &pol, "--json"]);
+        let a = with_report(&verb, needs_policy, &pol, &row2);
         let (rc, v) = json(&a);
         assert_eq!(rc, 0);
         assert!(v.get("incomplete").is_none() && v.get("noManifest").is_none()
@@ -1133,6 +1147,53 @@ fn valueless_policy_flag_exits_2_not_silent() {
     assert_eq!(out.status.code(), Some(2), "a valueless --policy must exit 2");
     assert!(String::from_utf8_lossy(&out.stderr).contains("--policy requires"),
         "must name the missing argument");
+}
+
+#[test]
+fn descriptive_verbs_refuse_policy_as_a_usage_error_never_a_silent_drop() {
+    // ⟨0.34⟩ BACKLOG "`--policy` accept-and-drop is THREE engines, not one" (candor-java `37c9b10`
+    // fixed the identical defect first; rust and ts were the still-open siblings). None of SPEC §3.1's
+    // pinned JSON shapes for these ten verbs carries a policy-derived field, so `--policy` here used to
+    // parse into a value that was never read again — accepted with no diagnostic, computed WITHOUT it.
+    // This pins the CORRECTED behaviour (exit 2, naming the verb and a remedy) for every verb on the
+    // shared grammar's `has_policy: false` set, one call site per verb so a future verb added to that
+    // set without threading `--policy` is caught here even if it never appears in a hedge-shaped test.
+    let f = Fixture::new("descriptive-policy-refusal");
+    f.write_report();
+    let pol = write_policy(&f, "p.policy", "deny Net app\n");
+    for args in [
+        vec!["show", "outer"],
+        vec!["where", "Fs"],
+        vec!["callers", "outer"],
+        vec!["map"],
+        vec!["containment"],
+        vec!["reachable"],
+        vec!["path", "outer", "Fs"],
+        vec!["impact", "outer"],
+        vec!["blindspots"],
+        vec!["tour"],
+    ] {
+        let mut a = args.clone();
+        a.extend(["--report", &f.prefix, "--policy", &pol]);
+        let out = Command::new(bin()).args(&a).output().expect("run candor-query");
+        assert_eq!(out.status.code(), Some(2),
+            "{args:?} --policy must be a usage error, not a silently-computed answer");
+        assert!(out.stdout.is_empty(), "{args:?}: a refused --policy must emit no answer at all");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(err.contains("--policy") && err.contains(args[0]),
+            "{args:?}: the message must name the flag AND the verb, got:\n{err}");
+        assert!(err.contains("no policy-relative verdict"),
+            "{args:?}: the message must name WHY, not just refuse, got:\n{err}");
+        assert!(err.contains("gate --report") || err.contains("whatif") || err.contains("fix"),
+            "{args:?}: the message must carry a remedy (candor-ux-pass: failures carry remedies), got:\n{err}");
+
+        // CONTROL: the SAME verb with NO --policy must still succeed (this is a refusal of the FLAG,
+        // not a break of the verb).
+        let mut b = args.clone();
+        b.extend(["--report", &f.prefix]);
+        let clean = Command::new(bin()).args(&b).output().expect("run candor-query");
+        assert_eq!(clean.status.code(), Some(0), "{args:?} without --policy must still work: {clean:?}");
+    }
 }
 
 #[test]
