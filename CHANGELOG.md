@@ -185,6 +185,37 @@ after upgrading; review policies and regenerate baselines with the new build.
     ⟨0.33.0⟩'s coverage-gate sweep and rejected, roughly triples the candidate count for modest recall —
     and a foreign `Iterator::next` impl, the `wild::ArgsOs` shape named above).
 
+- **⟨0.34⟩ ITEM 1: the ⟨0.33⟩ cross-policy remedy now names its ACTUAL cause — message-only, verdict and
+  `--gate-json` unchanged.** `gate --report`/`whatif`/`fix`/`fix-gate`/`unverified` name a report whose
+  peek was bounded by a deny set narrower than the policy in force as *"this report's peek was bounded by
+  the deny set its producing scan held, and that set does not cover N rule(s) of this policy"* — TRUE of
+  a ≥⟨0.33⟩ producer that genuinely scanned under a different deny set, but MISLEADING of a report that
+  predates ⟨0.33⟩ entirely: such a producer never had a `scannedUnder` key to hold ANY deny set in, so
+  "does not cover" reads as "chose a different policy" where the truth is "could not yet record one".
+  Both readers now check the report's own envelope `spec` (new `candor_report::report_spec`/
+  `spec_predates`, unparseable/absent treated as predating — the same direction `ReportMeta::spec`'s doc
+  comment already commits to) and print a second sentence naming the real cause and the remedy ("re-scan
+  with a 0.33+ engine under THE SAME policy") whenever every report that contributed to the cause predates
+  the rung; a SINGLE ≥⟨0.33⟩ contributor keeps the original sentence, because for that report the
+  narrower deny set is real. The version is used ONLY to choose which of two already-true sentences to
+  print — SPEC ⟨0.34⟩ explicitly RULED OUT a version floor for the VERDICT (a report's age cannot license
+  certification: a 0.32 producer's peek was still bounded by SOME policy nobody here can see, so refusing
+  is correct either way). `gate --report`'s own eprintln and `crate::completeness`'s shared writer (the
+  other of the two places this engine ever prints the cause, feeding `whatif`/`fix`/`fix-gate`/
+  `unverified`) each carry the same spec-driven choice, derived from the identical per-report accounting
+  (a rule ends up "old-caused" only when EVERY contributing report predates ⟨0.33⟩); route inventory swept
+  every `--report`-driven surface in this engine (CLI verbs, `gate-verdict`, the MCP wrapper, which shells
+  out with no logic of its own) and found exactly these two independently-coded texts — `candor-scan`'s
+  own `--policy` route structurally cannot raise this cause at all (`scannedUnder` always covers its own
+  run's policy by construction), so §3.1 byte-equality against it was never at risk. Two test fixtures
+  that combined a pre-⟨0.33⟩ `spec` with a `scannedUnder` key no real engine at that spec could have
+  written were corrected to `"0.33"` (a report that WRITES the key cannot predate it) rather than left to
+  coincidentally still pass. Controls (falsified against the pre-change binary before the fix, matching
+  after): a ≥⟨0.33⟩ report's message is byte-identical to the pre-⟨0.34⟩ text on both routes; a pre-⟨0.33⟩
+  report's message names the real cause on both routes and never says "does not cover"; the exit code,
+  `ok`, `incomplete` and the full `--gate-json`/`whatif --json` documents are identical between the two
+  causes and between the pre- and post-change binaries.
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family

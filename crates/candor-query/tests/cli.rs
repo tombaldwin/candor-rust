@@ -5424,6 +5424,15 @@ fn write_excluded_report(f: &Fixture, excluded: &str, out_of_scope: Option<&str>
 /// function keeps writing: `outOfScope` PRESENT with NO `scannedUnder` beside it is exactly the report
 /// SPEC §2 ⟨0.33⟩ says must fail closed once a class comes back `peeked: true` — an absent
 /// `scannedUnder` is the EMPTY SET for the subset test, never a licence.
+///
+/// ⟨0.34⟩ the envelope `spec` TRACKS `scanned_under`, not a fixed literal: `"0.33"` when the key is
+/// present, `"0.32"` when it is not. A report that WRITES `scannedUnder` cannot, in reality, predate the
+/// rung that introduced it — a fixture combining `scanned_under: Some(_)` with a pre-⟨0.33⟩ `spec` is not
+/// a shape any real engine emits, and PART 70's `whatif`/gate cross-policy tests below rely on being read
+/// as a GENUINE, current-spec mismatch (SPEC §2 ⟨0.34⟩ keeps their message the pre-rung text precisely
+/// because a ≥⟨0.33⟩ producer really did hold a different deny set). `scanned_under: None` keeps writing
+/// `"0.32"` exactly as before, so every caller exercising the ⟨0.32⟩ unread-class cause (which does not
+/// look at `spec` at all) is untouched.
 fn write_excluded_report_under(
     f: &Fixture,
     excluded: &str,
@@ -5434,9 +5443,10 @@ fn write_excluded_report_under(
     let su = scanned_under
         .map(|d| format!("\"scannedUnder\": {{ \"deny\": {d} }},\n  "))
         .unwrap_or_default();
+    let spec = if scanned_under.is_some() { "0.33" } else { "0.32" };
     let report = format!(
         r#"{{
-  "candor": {{ "version": "scan-test", "toolchain": "stable", "spec": "0.32" }},
+  "candor": {{ "version": "scan-test", "toolchain": "stable", "spec": "{spec}" }},
   "package": "rpt",
   "analyzed": {{ "count": 1, "digest": "0000000000000000" }},
   "excluded": {excluded},
@@ -5679,8 +5689,12 @@ fn gate_report_refuses_a_peek_bounded_by_a_different_deny_set() {
     // outranks incomplete (2) in this gate's precedence, so an effectful `inner` would dominate with a
     // REAL finding and the row would measure nothing about `pure`'s flattening. Written by hand rather
     // than through `write_excluded_report_under` (whose `inner` always performs `Fs`) for that reason.
+    // ⟨0.34⟩ `spec: "0.33"`, not `"0.32"` — a report that WRITES `scannedUnder` cannot really predate the
+    // rung that introduced it, and this control's whole point is a GENUINE current-spec mismatch (the
+    // `pure` flattening trap), not the "producer predates ⟨0.33⟩" cause `write_excluded_report_under`'s
+    // own doc comment now calls out for the same reason.
     let report = r#"{
-  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.32" },
+  "candor": { "version": "scan-test", "toolchain": "stable", "spec": "0.33" },
   "package": "rpt",
   "analyzed": { "count": 1, "digest": "0000000000000000" },
   "excluded": [{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }],
@@ -5697,6 +5711,97 @@ fn gate_report_refuses_a_peek_bounded_by_a_different_deny_set() {
     assert_eq!(out.status.code(), Some(2),
         "`pure` denies every effect except `Unknown` — a peek bounded by `deny Net` alone must not \
          satisfy it: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+// ── candor-spec ⟨0.34⟩ ITEM 1: the cross-policy remedy names its ACTUAL cause ────────────────────────
+
+/// ⟨0.34⟩ **THE REMEDY MUST NAME THE ACTUAL CAUSE, NOT A COMPARISON THE REPORT NEVER MADE.**
+///
+/// `gate --report`'s ⟨0.33⟩ cross-policy cause reads *"this report's peek was bounded by the deny set
+/// its producing scan held, and that set does not cover N rule(s) of this policy"* — TRUE of a ≥⟨0.33⟩
+/// producer that genuinely scanned under a different deny set, and MISLEADING of a report that predates
+/// ⟨0.33⟩ entirely: such a producer never had a `scannedUnder` key to hold ANY deny set in, so "does not
+/// cover" reads as "chose a different policy" where the truth is "could not yet record one". SPEC ⟨0.34⟩
+/// ITEM 1: use the envelope `spec` to tell the two apart in the MESSAGE only — same verdict, same exit,
+/// same `--gate-json` document either way (a report's age cannot license certification: a 0.32
+/// producer's peek was still bounded by SOME policy nobody here can see).
+///
+/// THE FIRST BLOCK IS THE CONTROL, WRITTEN FIRST: a report at spec ⟨0.33⟩+ whose peek genuinely ran
+/// under a different deny set must print EXACTLY today's sentence, character for character — this is
+/// the byte-identical-on-the-unaffected-arm control every rung in this file ships with. The SECOND block
+/// is the defect this test pins the fix for.
+#[test]
+fn gate_report_names_the_pre_033_cause_instead_of_a_different_deny_set() {
+    // CONTROL — spec ⟨0.33⟩+, scanned under a DIFFERENT deny set (`deny Net`): a GENUINE cross-policy
+    // mismatch. `write_excluded_report_under` writes `spec: "0.33"` automatically whenever
+    // `scanned_under` is `Some(_)` (⟨0.34⟩ — see its doc comment), matching what a real engine emits.
+    let f_current = Fixture::new("r34-gate-current-spec");
+    let exec = write_policy(&f_current, "exec.policy", "deny Exec\n");
+    write_excluded_report_under(
+        &f_current,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        Some(r#"["deny Net"]"#),
+    );
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f_current.prefix, "--policy", &exec, "--json"])
+        .output().expect("run candor-query");
+    let err_current = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2), "{err_current}");
+    assert_eq!(
+        err_current,
+        "candor-query gate: NOT certified — this report's peek was bounded by the deny set its \
+         producing scan held, and that set does not cover 1 rule(s) of this policy: deny Exec. The \
+         excluded files it reports as read were searched for OTHER effects, so an empty finding there \
+         is not an answer to this question, and the verdict is INCOMPLETE rather than a pass. Re-run \
+         the producing scan under THE SAME policy this gate is applying (candor-scan <dir> --policy \
+         <file> --out <report>) — not merely under a policy.\n",
+        "a ≥⟨0.33⟩ report's genuine cross-policy message must be BYTE-IDENTICAL to the pre-⟨0.34⟩ text — \
+         this rung must not touch the arm it was not written for: {err_current}"
+    );
+    let stdout_current = out.stdout.clone();
+
+    // THE DEFECT — spec ⟨0.32⟩ (predates ⟨0.33⟩), NO `scannedUnder` at all: the producer could not have
+    // written the key. Today's sentence ("does not cover... the deny set its producing scan held") is
+    // FALSE of this report — it never held any deny set to compare, it simply predates the field.
+    let f_old = Fixture::new("r34-gate-old-spec");
+    write_excluded_report_under(
+        &f_old,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        None,
+    );
+    let out = Command::new(bin())
+        .args(["gate", "--report", &f_old.prefix, "--policy", &exec, "--json"])
+        .output().expect("run candor-query");
+    let err_old = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(2), "SAME verdict/exit as the control — ⟨0.34⟩ is message-only: {err_old}");
+    assert!(!err_old.contains("does not cover"),
+        "the misleading comparison must be GONE for a report that predates ⟨0.33⟩: {err_old}");
+    assert!(err_old.contains("before ⟨0.33⟩"),
+        "the remedy must NAME the actual cause — the report predates the rung: {err_old}");
+    assert!(err_old.contains("0.33+ engine"),
+        "the remedy must say to re-scan with a 0.33+ ENGINE, not merely re-scan: {err_old}");
+    assert!(err_old.contains("THE SAME policy"),
+        "SPEC ⟨0.33⟩'s wording ruling still applies verbatim to the NEW sentence — \"THE SAME\" policy, \
+         never merely \"a\" policy: {err_old}");
+    assert!(err_old.contains("deny Exec"),
+        "the refusal must still NAME the unasked rule, exactly as the control does: {err_old}");
+
+    // THE ENVELOPE MUST NOT MOVE. ⟨0.34⟩ is a message-only change (SPEC ⟨0.34⟩ ITEM 1: "no schema
+    // change") — the `--gate-json` document for the OLD-spec cause must be STRUCTURALLY IDENTICAL to the
+    // control's (same `ok`, same `incomplete`, same `analyzed.count`, no new key), even though the
+    // fixtures' `scannedUnder` differ in a way that is invisible on the wire. `analyzed.count` and the
+    // rule name are the only fixture-dependent facts, and both fixtures were built to agree on them.
+    let v_current: serde_json::Value = serde_json::from_slice(&stdout_current).unwrap();
+    let v_old: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v_current, v_old,
+        "the ⟨0.34⟩ message split must be invisible on the machine channel — old={v_old} \
+         current={v_current}");
+    let keys: Vec<&str> = v_old.as_object().unwrap().keys().map(String::as_str).collect();
+    assert!(keys.iter().all(|k| ["spec", "ok", "analyzed", "violations", "incomplete"].contains(k)),
+        "no `unasked_rules`/`scannedUnder`/spec-derived key was minted on the wire — SPEC ⟨0.33⟩'s own \
+         ruling (\"NO NEW WIRE KEY\") still holds one rung later: {keys:?}");
 }
 
 /// ⟨0.32⟩ **THE ADVISORY SIBLINGS CERTIFIED WHAT THE GATE HAD JUST STARTED REFUSING** — SPEC §3.2's
@@ -6297,4 +6402,81 @@ fn whatif_raises_the_cross_policy_cause_over_a_peek_bounded_by_a_narrower_deny_s
     assert!(v.get("incomplete").is_none(),
         "no policy means no deny set to compare `scannedUnder` against — ⟨0.33⟩ structurally cannot \
          fire, mirroring `diff`'s reasoning for holding no policy at all: {v}");
+}
+
+/// ⟨0.34⟩ ITEM 1's message-only fix, DERIVED IDENTICALLY on `whatif`'s route — the OTHER of the two
+/// places in this engine that ever print the ⟨0.33⟩ cross-policy sentence
+/// ([`crate::completeness`]'s shared writer, also used by `fix`/`fix-gate`/`unverified`; `gate --report`
+/// has its own independently-coded text, pinned by
+/// `gate_report_names_the_pre_033_cause_instead_of_a_different_deny_set`). Same fixtures, same two
+/// causes, same three assertions: a ≥⟨0.33⟩ genuine mismatch keeps the pre-⟨0.34⟩ prose byte-identical,
+/// a report that predates ⟨0.33⟩ gets the new sentence, and the JSON document is unmoved either way.
+#[test]
+fn whatif_names_the_pre_033_cause_instead_of_a_different_deny_set() {
+    // CONTROL — spec ⟨0.33⟩+, scanned under a DIFFERENT deny set: the SAME fixture PART 70's test above
+    // uses, re-asserted here at BYTE-IDENTICAL precision (that test only checked JSON `incomplete`).
+    let f_current = Fixture::new("r34-whatif-current-spec");
+    let exec = write_policy(&f_current, "exec.policy", "deny Exec\n");
+    write_excluded_report_under(
+        &f_current,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        Some(r#"["deny Net"]"#),
+    );
+    let out = Command::new(bin())
+        .args(["whatif", "inner", "Exec", "--report", &f_current.prefix, "--policy", &exec])
+        .output().expect("run candor-query");
+    let human_current = String::from_utf8(out.stdout.clone()).unwrap();
+    assert!(
+        human_current.contains(
+            "⚠ INCOMPLETE — the report(s) under this locator were peeked under a deny set that does not \
+             cover 1 rule(s) of THIS policy,"
+        ) && human_current.contains(
+            "deny Exec — never asked of the excluded files a peeked class's producer read: the empty \
+             finding there answers a DIFFERENT question, not this one. Re-run the producing scan under \
+             THE SAME policy this verb is applying (candor-scan <dir> --policy <p>) — not merely under \
+             a policy"
+        ),
+        "a ≥⟨0.33⟩ report's genuine cross-policy prose must stay BYTE-IDENTICAL to the pre-⟨0.34⟩ text: \
+         {human_current}"
+    );
+    let stdout_current = {
+        let out = Command::new(bin())
+            .args(["whatif", "inner", "Exec", "--report", &f_current.prefix, "--policy", &exec, "--json"])
+            .output().expect("run candor-query");
+        out.stdout
+    };
+
+    // THE DEFECT — spec ⟨0.32⟩ (predates ⟨0.33⟩), NO `scannedUnder` at all.
+    let f_old = Fixture::new("r34-whatif-old-spec");
+    write_excluded_report_under(
+        &f_old,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        None,
+    );
+    let out = Command::new(bin())
+        .args(["whatif", "inner", "Exec", "--report", &f_old.prefix, "--policy", &exec])
+        .output().expect("run candor-query");
+    let human_old = String::from_utf8(out.stdout.clone()).unwrap();
+    assert!(!human_old.contains("does not cover"),
+        "the misleading comparison must be GONE for a report that predates ⟨0.33⟩: {human_old}");
+    assert!(human_old.contains("predate ⟨0.33⟩") || human_old.contains("before ⟨0.33⟩"),
+        "the remedy must NAME the actual cause — the report predates the rung: {human_old}");
+    assert!(human_old.contains("0.33+ engine"),
+        "the remedy must say to re-scan with a 0.33+ ENGINE: {human_old}");
+    assert!(human_old.contains("THE SAME policy"),
+        "SPEC ⟨0.33⟩'s wording ruling still applies to the NEW sentence — \"THE SAME\" policy, never \
+         merely \"a\" policy: {human_old}");
+    assert!(human_old.contains("deny Exec"), "{human_old}");
+
+    // THE ENVELOPE MUST NOT MOVE, on this route too.
+    let out = Command::new(bin())
+        .args(["whatif", "inner", "Exec", "--report", &f_old.prefix, "--policy", &exec, "--json"])
+        .output().expect("run candor-query");
+    let v_current: serde_json::Value = serde_json::from_slice(&stdout_current).unwrap();
+    let v_old: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v_current, v_old,
+        "the ⟨0.34⟩ message split must be invisible on the machine channel — old={v_old} \
+         current={v_current}");
 }
