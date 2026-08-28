@@ -878,6 +878,49 @@ pub(crate) fn cargo_deps(dir: &str) -> (std::collections::HashSet<String>, HashM
     (out, renames)
 }
 
+/// Package names in `dir`'s Cargo.lock CONFIRMED not registry-sourced — a `path`/`git` dependency, or a
+/// workspace-local package (no `source` line at all). The identity check behind the
+/// `CALIBRATED_CRATES`/`PATH_CALIBRATED_CRATES`/`CALIBRATED_PREFIXES` ledger exemption in scan.rs: that
+/// exemption means "the REAL, published crate at this name — the one `classify`'s rules were written
+/// against — was reviewed and an unmatched call is a reviewed-pure verdict, not a gap". A `path`/`git`
+/// dependency, or a workspace member, merely SHARES the name; it is a different artifact candor never
+/// looked at, and granting it the exemption silently swallows whatever it actually does (BACKLOG "rust-
+/// deep's crate-name-keyed `invisible` mechanism, everywhere else", the COLLISION direction — a crate
+/// name used as an identity when it is not one). Live-reproduced: a path dependency literally named
+/// `log` calling an unmodelled effectful fn read `"functions": []` — zero disclosure — purely because
+/// `log` is a `CALIBRATED_CRATES` entry; the identical shape under an uncalibrated name disclosed
+/// `invisible` correctly (see `ledger_exemption_requires_registry_source` below).
+///
+/// Returns EMPTY when there is no Cargo.lock to read (most fixtures/tests, and any scan of a workspace
+/// member whose lockfile lives at a workspace root this `dir` doesn't reach) or when a name isn't listed
+/// in it at all — a DENYLIST narrowing, not an allowlist: the exemption behaves exactly as before unless
+/// this returns POSITIVE evidence of non-registry sourcing, so an unreadable/absent lockfile costs
+/// nothing (never a new false positive) and only a confirmed impostor loses the exemption.
+pub(crate) fn non_registry_lock_names(dir: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(lock) = std::fs::read_to_string(format!("{dir}/Cargo.lock")) else { return out };
+    let (mut name, mut registry) = (String::new(), false);
+    let flush = |name: &mut String, registry: &mut bool, out: &mut std::collections::HashSet<String>| {
+        if !name.is_empty() && !*registry {
+            out.insert(std::mem::take(name).replace('-', "_"));
+        }
+        name.clear();
+        *registry = false;
+    };
+    for line in lock.lines() {
+        let l = line.trim();
+        if l == "[[package]]" {
+            flush(&mut name, &mut registry, &mut out);
+        } else if let Some(v) = l.strip_prefix("name = ") {
+            name = v.trim_matches('"').to_string();
+        } else if l.starts_with("source = ") && l.contains("registry+") {
+            registry = true;
+        }
+    }
+    flush(&mut name, &mut registry, &mut out);
+    out
+}
+
 /// One manifest's dependency names, all four header forms: `[dependencies]` /
 /// `[workspace.dependencies]` / `[target.….dependencies]` sections, and the table-header
 /// declarations `[dependencies.name]` / `[target.….dependencies.name]` (review: the old

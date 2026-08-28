@@ -243,6 +243,47 @@ after upgrading; review policies and regenerate baselines with the new build.
   `candor-report` unit test, `strips_ascii_whitespace_before_the_ladder_parse`, pins the ladder parse
   itself.
 
+- **⚠ The residual R59/R60 left named, closed: rust-scan's coverage-ledger `CALIBRATED_CRATES`/
+  `PATH_CALIBRATED_CRATES`/`CALIBRATED_PREFIXES` exemptions are STRING matches against the call's
+  syntactic first path segment, with no check that the crate wearing that name is the actual, reviewed,
+  published artifact `classify()`'s rules were written against — the COLLISION half of "a crate name used
+  as an identity when it is not one" (BACKLOG "rust-deep's crate-name-keyed `invisible` mechanism,
+  everywhere else"). A `path`/`git` dependency can be named anything, including one of the 82
+  `CALIBRATED_CRATES` entries: a `path` dependency literally named `log` performing an un-modelled
+  effectful call reproduced EXACTLY like R59/R60 — `"functions": []`, total silence — purely because
+  `log` is calibrated; the identical call shape under an uncalibrated name (`logimpostor`, the only
+  variable changed) correctly disclosed `invisible`.** Note the correction this cost: the original filing
+  called the class "a key assumed unique that isn't", which names only the collision half — the ABSENCE
+  half (no crate name to key on at all) is R60's actual mechanism above, and an audit briefed on
+  uniqueness alone would have walked past it.
+  - **Fixed (`candor-scan`)**: new `non_registry_lock_names` (`deps.rs`) reads the scanned dir's
+    Cargo.lock and returns every package name CONFIRMED not registry-sourced (a `path`/`git` source, or a
+    workspace-local package with no `source` line at all). The coverage-ledger filter (`scan.rs`) strips
+    all three CALIBRATED_* exemptions for any name in that set, checked on the Cargo.lock-resolved real
+    package name (not a caller-chosen manifest alias). A DENYLIST narrowing, not an allowlist: the
+    exemption behaves exactly as before unless Cargo.lock gives POSITIVE evidence of non-registry
+    sourcing, so an absent/unreadable lockfile costs nothing.
+  - **Rust-deep (`src/lib.rs`) already immune to this direction, verified rather than assumed**: its
+    `invisible_direct` disclosure keys on `cx.tcx.crate_name(def_id.krate)` — the compiler's OWN resolved
+    identity for the callee's defining crate, not a syntactic guess — and applies NO CALIBRATED_CRATES
+    shortcut at all (every unclassified non-local, non-std call is disclosed unconditionally). Confirmed
+    a dependency cannot even be compiled under the name `std` alongside the real one (`error: cannot
+    resolve a prelude import` — verified live); `core`/`alloc` CAN be colliding-named (verified live,
+    both compile), but every consumer of those three names in rust-deep is either gated on the exact
+    trait-name allowlist `is_pure_std_trait` already carries (Display/Debug/Error/ToString/Clone/
+    PartialEq/Eq/PartialOrd/Ord/Hash/Default — Iterator/Fn*/Drop/io::Write deliberately excluded) or
+    disambiguated by an already-existing crate-type suffix on self-identity lookups — narrowing the
+    residual to a deliberately-adversarial dependency named `core`/`alloc` ALSO defining a trait under one
+    of those 11 names with unresolved dynamic dispatch. Filed as a stated, unfixed, very-low-severity
+    residual rather than left unmeasured: real-world accidental collision (unlike `log`, a plausible
+    internal-shim name) is implausible here, and narrowing the hot trait-purity path carries its own
+    over-charge risk against a threat model this narrow.
+  - New `candor-scan` test `crate_name_collision_with_a_calibrated_crate_loses_the_ledger_exemption` (red
+    on the pre-fix binary: `"functions": []` for the `log`-named path dependency) with two controls: the
+    same name as a genuine registry dependency keeps the exemption unchanged (the over-charge guard), and
+    the same impostor with no Cargo.lock present falls back to the pre-fix behavior unchanged — a stated
+    residual limit, not a silent one.
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family
