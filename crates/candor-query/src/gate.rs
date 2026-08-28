@@ -48,6 +48,15 @@ struct GateReport {
     /// per-report subtraction would let a policy-scanned report's deny set answer for a no-policy
     /// sibling's peeked classes (the §2.2 name-join hazard arriving on a different key).
     unasked_rules: BTreeSet<String>,
+    /// ⟨0.34⟩ **NAMES THE CAUSE, NEVER MOVES THE VERDICT** — the SAME predicate
+    /// [`crate::completeness::arm_unasked_rules`] computes for `whatif`/`fix`/`fix-gate`/`unverified`,
+    /// derived here rather than shared through that function because this route's `GateReport` is its
+    /// own reader (see the module doc's "no re-derivation" MUST). `true` when `unasked_rules` is
+    /// non-empty AND every report that contributed to it predates ⟨0.33⟩
+    /// ([`candor_report::spec_predates`] against `"0.33"`) — a SINGLE ≥⟨0.33⟩ contributor keeps this
+    /// `false`, because for that report the gap is real: it could have recorded covering this policy's
+    /// rules and did not.
+    unasked_rules_predates_033: bool,
     /// ⟨0.31⟩ one record per report that carried the key — a prefix can match several.
     net_partners: Vec<candor_report::NetPartners>,
     /// ⟨0.15⟩ the κ ledger's package NAMES, unioned across reports — the verdict's advisory note.
@@ -130,11 +139,17 @@ fn load_gate_report(prefix: &str, own_rules: &[String]) -> Result<GateReport, St
         out_of_scope: Vec::new(),
         unpeeked: Vec::new(),
         unasked_rules: BTreeSet::new(),
+        unasked_rules_predates_033: false,
         net_partners: Vec::new(),
         coverage_packages: BTreeSet::new(),
         judged_nothing_pkgs: Vec::new(),
     };
     let mut hard_fail = false;
+    // ⟨0.34⟩ did ANY report ≥⟨0.33⟩ ALSO fail to cover a rule that ended up in `out.unasked_rules`? See
+    // `GateReport::unasked_rules_predates_033`'s doc — one such report is enough to keep the flag `false`
+    // even if every OTHER contributing report predates the rung, because for that one the omission is a
+    // real different-policy fact, not an artifact of an engine that could not yet record `scannedUnder`.
+    let mut unasked_rules_from_current_spec = false;
     for path in &paths {
         let Ok(text) = std::fs::read_to_string(path) else {
             eprintln!("candor-query gate: report {} could not be read", path.display());
@@ -312,9 +327,16 @@ fn load_gate_report(prefix: &str, own_rules: &[String]) -> Result<GateReport, St
         );
         if any_peeked && !own_rules.is_empty() {
             let theirs: BTreeSet<&str> = scanned_under.iter().map(String::as_str).collect();
-            out.unasked_rules.extend(
-                own_rules.iter().filter(|r| !theirs.contains(r.as_str())).cloned(),
-            );
+            let missing: Vec<&String> = own_rules.iter().filter(|r| !theirs.contains(r.as_str())).collect();
+            if !missing.is_empty() {
+                // ⟨0.34⟩ this report's own declared contract version — read ONCE, here, beside the
+                // `scannedUnder` fact it qualifies, for the same reason `any_peeked`/`scanned_under` are
+                // read beside each other rather than re-parsed later.
+                if !candor_report::spec_predates(&candor_report::report_spec(&text), "0.33") {
+                    unasked_rules_from_current_spec = true;
+                }
+                out.unasked_rules.extend(missing.into_iter().cloned());
+            }
         }
         out.out_of_scope.extend(strict!(
             candor_report::report_out_of_scope(&text),
@@ -341,6 +363,7 @@ fn load_gate_report(prefix: &str, own_rules: &[String]) -> Result<GateReport, St
         eprintln!("candor-query gate: {why}");
         return Err(why);
     }
+    out.unasked_rules_predates_033 = !out.unasked_rules.is_empty() && !unasked_rules_from_current_spec;
     Ok(out)
 }
 
@@ -1826,16 +1849,37 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         // THE REMEDY SAYS **THE SAME** POLICY, NOT *A* POLICY — that wording is part of the rung. ⟨0.32⟩'s
         // remedy read loosely ("scan with the policy") is what PRODUCES this hole: the operator DID scan
         // with a policy, and got a report whose peek answered a different one.
-        eprintln!(
-            "candor-query gate: NOT certified — this report's peek was bounded by the deny set its \
-             producing scan held, and that set does not cover {} rule(s) of this policy: {}. The \
-             excluded files it reports as read were searched for OTHER effects, so an empty finding there \
-             is not an answer to this question, and the verdict is INCOMPLETE rather than a pass. \
-             Re-run the producing scan under THE SAME policy this gate is applying \
-             (candor-scan <dir> --policy <file> --out <report>) — not merely under a policy.",
-            unasked_rules.len(),
-            unasked_rules.join(", ")
-        );
+        //
+        // ⟨0.34⟩ TWO SENTENCES, ONE CAUSE, SAME VERDICT AND EXIT — `rep.unasked_rules_predates_033`
+        // (computed in `load_gate_report`, never re-derived here) picks the wording. When every
+        // contributing report predates ⟨0.33⟩ the "does not cover" framing names the wrong culprit — the
+        // producer never had a way to WRITE `scannedUnder` at all, so it did not "hold" a narrower deny
+        // set, it simply predates the field. A single ≥⟨0.33⟩ contributor is enough to fall back to the
+        // `else`, which is character-for-character the pre-⟨0.34⟩ text — the control this rung ships with.
+        if rep.unasked_rules_predates_033 {
+            eprintln!(
+                "candor-query gate: NOT certified — this report was produced before ⟨0.33⟩, when a \
+                 producing scan did not yet record the deny set its peek ran under (`scannedUnder`), so \
+                 it cannot say whether {} rule(s) of this policy were ever asked: {}. The excluded files \
+                 it reports as read may have been searched for OTHER effects, or for none at all — there \
+                 is no way to tell from a report this old — so the verdict is INCOMPLETE rather than a \
+                 pass. Re-scan with a 0.33+ engine under THE SAME policy this gate is applying \
+                 (candor-scan <dir> --policy <file> --out <report>) — not merely under a policy.",
+                unasked_rules.len(),
+                unasked_rules.join(", ")
+            );
+        } else {
+            eprintln!(
+                "candor-query gate: NOT certified — this report's peek was bounded by the deny set its \
+                 producing scan held, and that set does not cover {} rule(s) of this policy: {}. The \
+                 excluded files it reports as read were searched for OTHER effects, so an empty finding \
+                 there is not an answer to this question, and the verdict is INCOMPLETE rather than a \
+                 pass. Re-run the producing scan under THE SAME policy this gate is applying \
+                 (candor-scan <dir> --policy <file> --out <report>) — not merely under a policy.",
+                unasked_rules.len(),
+                unasked_rules.join(", ")
+            );
+        }
         2
     } else {
         eprintln!("candor-query gate: policy ✓ (the report's own signature — no re-scan, no re-derivation)");

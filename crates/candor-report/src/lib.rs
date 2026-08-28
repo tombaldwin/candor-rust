@@ -1678,6 +1678,68 @@ pub fn report_version(text: &str) -> Option<String> {
     serde_json::from_str::<Env>(text).ok().and_then(|e| e.candor).and_then(|m| m.version)
 }
 
+/// ⟨0.34⟩ The candor-spec CONTRACT version a report's own envelope DECLARES (`candor.spec`) — verbatim,
+/// distinct from [`report_version`] (the engine BUILD id, not the contract it implements). The empty
+/// string for a legacy v0.1 bare array (no `candor` envelope at all) or a v0.2 envelope with no `spec`
+/// key — the same "absent ⇒ pre-spec-field, treat as ≤ 0.2" reading [`ReportMeta::spec`]'s own doc
+/// comment already commits to, so a caller does not need a second `Option` layer to get there.
+pub fn report_spec(text: &str) -> String {
+    #[derive(Deserialize)]
+    struct Meta {
+        #[serde(default)]
+        spec: String,
+    }
+    #[derive(Deserialize)]
+    struct Env {
+        candor: Option<Meta>,
+    }
+    serde_json::from_str::<Env>(text).ok().and_then(|e| e.candor).map(|m| m.spec).unwrap_or_default()
+}
+
+/// Parse a candor-spec contract version (`"0.33"`, `"0.6"`) as `(major, minor)` FOR ORDERING ONLY — the
+/// spec ladder is major.minor (SPEC has no patch component; that lives on the engine/crate version
+/// instead, see [`ReportMeta::version`]). `None` on anything that does not parse, including the empty
+/// string an absent `spec` key reads as.
+fn parse_spec_ladder(spec: &str) -> Option<(u32, u32)> {
+    let (maj, min) = spec.split_once('.')?;
+    Some((maj.parse().ok()?, min.parse().ok()?))
+}
+
+/// ⟨0.34⟩ Does `spec` sit STRICTLY BEFORE `floor` on the spec ladder? Unparseable input — including the
+/// empty string [`report_spec`] returns for a pre-spec-field report — answers `true`, the same direction
+/// [`ReportMeta::spec`]'s own doc comment already commits to ("absent ⇒ pre-spec-field, treat as ≤ 0.2").
+///
+/// **MESSAGE-ONLY, NEVER A VERDICT INPUT.** SPEC ⟨0.34⟩ explicitly ruled out a version floor for the
+/// VERDICT: a report's age cannot license certification, because a 0.32 producer's peek was still
+/// bounded by SOME policy nobody here can see, so refusing is correct either way the age falls. What the
+/// age DOES license is naming the actual cause in a REMEDY sentence — "these reports predate ⟨0.33⟩,
+/// before producers recorded their deny set" is a true, actionable statement a report that simply
+/// scanned under a narrower or different policy cannot make. Callers must not let this function's
+/// answer change `ok`, an exit code, or any `--gate-json` field — only which of two already-true
+/// sentences gets printed.
+pub fn spec_predates(spec: &str, floor: &str) -> bool {
+    let Some(f) = parse_spec_ladder(floor) else { return false };
+    parse_spec_ladder(spec).is_none_or(|s| s < f)
+}
+
+#[cfg(test)]
+mod spec_predates_tests {
+    use super::*;
+
+    #[test]
+    fn orders_the_ladder_and_fails_closed_on_garbage() {
+        assert!(spec_predates("0.32", "0.33"));
+        assert!(spec_predates("0.9", "0.33")); // NOT a lexicographic trap: 9 < 33 numerically too
+        assert!(!spec_predates("0.33", "0.33"));
+        assert!(!spec_predates("0.34", "0.33"));
+        assert!(!spec_predates("1.0", "0.33"));
+        // absent/garbage ⇒ predates, matching `ReportMeta::spec`'s own "treat as ≤ 0.2" doc comment.
+        assert!(spec_predates("", "0.33"));
+        assert!(spec_predates("not-a-version", "0.33"));
+        assert!(spec_predates("0.", "0.33"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

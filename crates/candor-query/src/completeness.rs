@@ -227,7 +227,13 @@ pub(crate) struct ReportCompleteness {
     /// [`crate::gate`]'s equivalent per report: `scannedUnder` and `peeked` are facts about ONE producing
     /// scan, and unioning them before comparing would let a policy-scanned report's deny set answer for a
     /// no-policy sibling's peeked classes.
-    pub(crate) scanned_under_facts: Vec<(bool, Option<Vec<String>>)>,
+    ///
+    /// ⟨0.34⟩ the THIRD element is that report's own declared `candor.spec` ([`candor_report::report_spec`],
+    /// verbatim, empty for a pre-spec-field producer) — carried alongside rather than re-read later,
+    /// for the reason `any_peeked`/`scanned_under` are captured here instead of re-parsing `text`: a
+    /// second read of one report is how a fact drifts from the one [`arm_unasked_rules`] compares it
+    /// against.
+    pub(crate) scanned_under_facts: Vec<(bool, Option<Vec<String>>, String)>,
     /// ⟨0.33⟩ The rules THIS run's policy holds that some report's peek was never asked about (SPEC §2
     /// ⟨0.33⟩) — canonical, deduplicated, code-point sorted. Empty until [`arm_unasked_rules`] is called;
     /// mirrors [`Self::unread_armed`]'s split between raw collection and policy-scoped arming, but needs
@@ -235,6 +241,14 @@ pub(crate) struct ReportCompleteness {
     /// deny set is empty (an allow/forbid/only-only policy, or no policy at all) — the over-charge control
     /// falls out of the computation rather than needing a second conjunct.
     pub(crate) unasked_rules: Vec<String>,
+    /// ⟨0.34⟩ **NAMES THE CAUSE, NEVER MOVES THE VERDICT.** `true` when [`Self::unasked_rules`] is
+    /// non-empty AND every report that contributed to it predates ⟨0.33⟩ ([`candor_report::spec_predates`]
+    /// against `"0.33"`) — i.e. the gap is fully explained by producers that could not yet have written
+    /// `scannedUnder` at all, never by one that ran under a genuinely different or narrower deny set. A
+    /// SINGLE ≥⟨0.33⟩ contributing report is enough to keep this `false`, because for that report the
+    /// omission is real: it COULD have recorded covering this run's rules and did not. See
+    /// [`arm_unasked_rules`] for the per-report accounting this is built from.
+    pub(crate) unasked_rules_predates_033: bool,
 }
 
 /// ⟨0.32⟩ **ARM THE UNREAD-CLASS CAUSE FOR THIS RUN'S POLICY** — the one place the condition is applied
@@ -281,21 +295,33 @@ pub(crate) fn arm_unasked_rules(
 ) -> ReportCompleteness {
     let own = candor_classify::policy::canonical_deny_set(&p.rules);
     let mut missing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // ⟨0.34⟩ SPEC §2 ⟨0.34⟩ — did ANY report ≥⟨0.33⟩ ALSO fail to cover a rule that ended up in
+    // `missing`? One such report is enough: for it the gap is real (it could have recorded covering
+    // this run's rules and did not), so a message naming "before producers recorded their deny set"
+    // would be false of it even if every OTHER contributing report predates the rung. Tracked beside
+    // the union rather than derived from it afterward, because `missing` alone has already forgotten
+    // which report each entry came from — the same reason `scanned_under_facts` is per-report above.
+    let mut missing_from_current_spec = false;
     if !own.is_empty() {
-        for (any_peeked, scanned_under) in &c.scanned_under_facts {
+        for (any_peeked, scanned_under, spec) in &c.scanned_under_facts {
             if !*any_peeked {
                 continue;
             }
             let theirs: std::collections::BTreeSet<&str> =
                 scanned_under.as_deref().unwrap_or(&[]).iter().map(String::as_str).collect();
+            let predates = candor_report::spec_predates(spec, "0.33");
             for r in &own {
                 if !theirs.contains(r.as_str()) {
                     missing.insert(r.clone());
+                    if !predates {
+                        missing_from_current_spec = true;
+                    }
                 }
             }
         }
     }
     c.unasked_rules = missing.into_iter().collect();
+    c.unasked_rules_predates_033 = !c.unasked_rules.is_empty() && !missing_from_current_spec;
     c
 }
 
@@ -476,6 +502,21 @@ impl ReportCompleteness {
         // than a reachable path, and it is what keeps a future armed caller from silently losing one side
         // of a diff.
         self.scanned_under_facts.extend(other.scanned_under_facts);
+        // ⟨0.34⟩ computed BEFORE the union below overwrites the per-side emptiness this needs: a plain
+        // `|=` would let one side's `true` (its OWN `unasked_rules` was small and fully pre-⟨0.33⟩) paper
+        // over the other side's `false` (a genuine ≥⟨0.33⟩ mismatch), on a MERGED list neither side's flag
+        // was computed against. A side that contributed NOTHING (`unasked_rules` empty, flag `false` by
+        // [`arm_unasked_rules`]'s invariant) must not veto the other's true answer either — hence the
+        // match on which side(s) actually had something to say, not a blanket AND. Symmetry with
+        // `unread_armed` above, not a reachable path: `containment` never arms `unasked_rules` today.
+        self.unasked_rules_predates_033 = match
+            (!self.unasked_rules.is_empty(), !other.unasked_rules.is_empty())
+        {
+            (false, false) => false,
+            (true, false) => self.unasked_rules_predates_033,
+            (false, true) => other.unasked_rules_predates_033,
+            (true, true) => self.unasked_rules_predates_033 && other.unasked_rules_predates_033,
+        };
         self.unasked_rules.extend(other.unasked_rules);
     }
 
@@ -701,19 +742,40 @@ impl ReportCompleteness {
         // ⟨0.33⟩ …and the rules THIS policy holds that some peeked class's producer was never asked about
         // (SPEC §2 ⟨0.33⟩). Needs no `_armed` check the way `unread` does above — `arm_unasked_rules`
         // already leaves this structurally empty whenever the policy in force asks nothing.
+        //
+        // ⟨0.34⟩ TWO SENTENCES FOR ONE CAUSE, chosen by `unasked_rules_predates_033` — SAME verdict, SAME
+        // exit, ONLY the head sentence's wording moves. When every contributing report predates ⟨0.33⟩ the
+        // "does not cover" phrasing is misleading: it reads as "a producer chose a different policy", and
+        // the true statement is "no producer here could yet WRITE the policy it peeked under". The `else`
+        // arm is character-for-character the pre-⟨0.34⟩ text — the control this rung ships with.
         if !self.unasked_rules.is_empty() {
             let n = self.unasked_rules.len();
-            append(
-                &mut head,
-                format!(
-                    "the report(s) under this locator were peeked under a deny set that does not cover \
-                     {n} rule(s) of THIS policy,"
-                ),
-                format!(
-                    ", and {n} rule(s) of THIS policy the report(s) were peeked under a DIFFERENT deny \
-                     set,"
-                ),
-            );
+            if self.unasked_rules_predates_033 {
+                append(
+                    &mut head,
+                    format!(
+                        "the report(s) under this locator predate ⟨0.33⟩ — before a producing scan \
+                         recorded the deny set its peek ran under — so they cannot say whether {n} \
+                         rule(s) of THIS policy were ever asked,"
+                    ),
+                    format!(
+                        ", and {n} rule(s) of THIS policy the report(s) — from before ⟨0.33⟩ — cannot say \
+                         they were asked about,"
+                    ),
+                );
+            } else {
+                append(
+                    &mut head,
+                    format!(
+                        "the report(s) under this locator were peeked under a deny set that does not cover \
+                         {n} rule(s) of THIS policy,"
+                    ),
+                    format!(
+                        ", and {n} rule(s) of THIS policy the report(s) were peeked under a DIFFERENT deny \
+                         set,"
+                    ),
+                );
+            }
         }
         writeln!(w, "  ⚠ INCOMPLETE — {head}")?;
         writeln!(w, "      so {so_what}:")?;
@@ -765,14 +827,20 @@ impl ReportCompleteness {
             )?;
         }
         if !self.unasked_rules.is_empty() {
-            writeln!(
-                w,
-                "      {} — never asked of the excluded files a peeked class's producer read: the empty \
-                 finding there answers a DIFFERENT question, not this one. Re-run the producing scan \
-                 under THE SAME policy this verb is applying (candor-scan <dir> --policy <p>) — not \
-                 merely under a policy",
-                self.unasked_rules.join(", ")
-            )?;
+            // ⟨0.34⟩ ONE FACT, TWO REMEDIES — same split as `unread`'s `remedy` above, and for the same
+            // reason: the CAUSE differs, so the REPAIR does. `else` is the pre-⟨0.34⟩ sentence, unchanged.
+            let cause_and_remedy = if self.unasked_rules_predates_033 {
+                "these reports were produced before ⟨0.33⟩, when a producing scan did not yet record the \
+                 deny set its peek ran under — so an empty finding there cannot be read as an answer to \
+                 THIS policy's question. Re-scan with a 0.33+ engine under THE SAME policy this verb is \
+                 applying (candor-scan <dir> --policy <p>) — not merely under a policy"
+            } else {
+                "never asked of the excluded files a peeked class's producer read: the empty finding \
+                 there answers a DIFFERENT question, not this one. Re-run the producing scan under THE \
+                 SAME policy this verb is applying (candor-scan <dir> --policy <p>) — not merely under a \
+                 policy"
+            };
+            writeln!(w, "      {} — {cause_and_remedy}", self.unasked_rules.join(", "))?;
         }
         writeln!(w, "      {tail}")
     }
@@ -806,6 +874,7 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         unread_armed: false,
         scanned_under_facts: Vec::new(),
         unasked_rules: Vec::new(),
+        unasked_rules_predates_033: false,
     };
     for path in glob_reports(prefix) {
         let p = path.display().to_string();
@@ -872,9 +941,13 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         // its permissive value would MANUFACTURE coverage this report's producer never claimed. Recorded
         // per report (never unioned yet) for [`arm_unasked_rules`] to consume once this run's policy is
         // known.
+        // ⟨0.34⟩ this report's own declared contract version, carried alongside the fact it qualifies —
+        // see the field doc on `scanned_under_facts` for why it travels with the tuple instead of being
+        // re-read from `text` later, once `arm_unasked_rules` knows which rules are missing.
+        let spec = candor_report::report_spec(&text);
         match candor_report::report_scanned_under(&text) {
-            candor_report::KeyRead::Present(d) => out.scanned_under_facts.push((any_peeked, Some(d))),
-            candor_report::KeyRead::Absent => out.scanned_under_facts.push((any_peeked, None)),
+            candor_report::KeyRead::Present(d) => out.scanned_under_facts.push((any_peeked, Some(d), spec)),
+            candor_report::KeyRead::Absent => out.scanned_under_facts.push((any_peeked, None, spec)),
             candor_report::KeyRead::Corrupt => {
                 out.unreadable.push(Unreadable { path: p, key_present: true });
                 continue;
