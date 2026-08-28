@@ -1700,8 +1700,16 @@ pub fn report_spec(text: &str) -> String {
 /// spec ladder is major.minor (SPEC has no patch component; that lives on the engine/crate version
 /// instead, see [`ReportMeta::version`]). `None` on anything that does not parse, including the empty
 /// string an absent `spec` key reads as.
+///
+/// ⟨0.34⟩ **SURROUNDING ASCII WHITESPACE IS STRIPPED BEFORE THE PARSE, not treated as part of it** (SPEC
+/// §2 ⟨0.34⟩, echoing §3.4's identical ruling for a config version token: "a trailing `\r` is whitespace,
+/// not part of the version"). `" 0.33"` names the version `0.33` with incidental padding, not a different
+/// or corrupt value — parsing the untrimmed token would manufacture a false "predates ⟨0.33⟩" reading on
+/// a report that is not, in fact, old. `trim_ascii` (not `trim`, which is Unicode-whitespace-aware and so
+/// slightly wider than the spec's "ASCII whitespace" wording) matches the family's other spec-ladder
+/// lexers, which likewise split on ASCII whitespace only.
 fn parse_spec_ladder(spec: &str) -> Option<(u32, u32)> {
-    let (maj, min) = spec.split_once('.')?;
+    let (maj, min) = spec.trim_ascii().split_once('.')?;
     Some((maj.parse().ok()?, min.parse().ok()?))
 }
 
@@ -1737,6 +1745,23 @@ mod spec_predates_tests {
         assert!(spec_predates("", "0.33"));
         assert!(spec_predates("not-a-version", "0.33"));
         assert!(spec_predates("0.", "0.33"));
+    }
+
+    /// ⟨0.34⟩ SPEC §2 ⟨0.34⟩: surrounding ASCII whitespace is stripped BEFORE the unparseable test, so
+    /// `" 0.33"` is the version 0.33 with incidental padding — NOT predating — the same rule §3.4 states
+    /// for a config version token. The over-charge control (`"0.32"`, `"0.9"`) MUST still predate: a fix
+    /// that makes everything parse would pass the whitespace cases while deleting this rung's own feature.
+    #[test]
+    fn strips_ascii_whitespace_before_the_ladder_parse() {
+        assert!(!spec_predates(" 0.33", "0.33"), "leading space is padding, not a different value");
+        assert!(!spec_predates("0.33 ", "0.33"), "trailing space is padding, not a different value");
+        assert!(!spec_predates("\t0.33", "0.33"), "leading tab is ASCII whitespace too");
+        assert!(!spec_predates(" 0.33 ", "0.33"), "padding on both sides");
+        assert!(!spec_predates("\r\n0.33\r\n", "0.33"), "CRLF is ASCII whitespace, per §3.4's identical rule");
+        // the over-charge control: whitespace-tolerance must not swallow the real predating cases.
+        assert!(spec_predates(" 0.32", "0.33"), "padding does not rescue a genuinely old spec");
+        assert!(spec_predates(" 0.9", "0.33"), "padding does not rescue the lexicographic-trap case either");
+        assert!(spec_predates("   ", "0.33"), "whitespace alone is still unparseable garbage, fails closed");
     }
 }
 

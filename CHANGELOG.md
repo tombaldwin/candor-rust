@@ -216,6 +216,33 @@ after upgrading; review policies and regenerate baselines with the new build.
   `ok`, `incomplete` and the full `--gate-json`/`whatif --json` documents are identical between the two
   causes and between the pre- and post-change binaries.
 
+- **⚠ SPEC §2 ⟨0.34⟩'s F2 ruling: `parse_spec_ladder` now strips surrounding ASCII whitespace before
+  parsing, so a `spec` value like `" 0.33"` reads as 0.33 rather than unparseable.** `candor_report::
+  spec_predates` (added in the ⟨0.34⟩ ITEM 1 fix above) fed `major.parse::<u32>()`/`minor.parse::<u32>()`
+  directly off `spec.split_once('.')`, and neither Rust integer parser tolerates surrounding whitespace —
+  `" 0.33".parse::<u32>()` on the split major segment errs, so a report whose `spec` carried incidental
+  padding (a config template, a hand-edited envelope, anything upstream of the JSON literal) misread as
+  unparseable and therefore as predating ⟨0.33⟩: the cross-policy refusal's remedy would wrongly claim
+  "this report was produced before ⟨0.33⟩, when a producing scan did not yet record the deny set its peek
+  ran under" of a report whose `scannedUnder` key was plainly present in the same document — a false
+  diagnosis manufactured by a formatting artifact, exactly the misdiagnosis the ⟨0.34⟩ rung exists to
+  retire (candor-spec `conformance/run.sh` PART 80's `ws` cell, MEASURED: candor-java and candor-ts already
+  trim; candor-rust and candor-swift did not). Fixed by `spec.trim_ascii()` (ASCII-only, not `trim`'s wider
+  Unicode whitespace, matching the family's other spec-ladder lexers and SPEC §3.4's identical ruling for a
+  config version token: "a trailing `\r` is whitespace, not part of the version") before the `split_once`.
+  Message-only, like the fix above: this rung mints no wire key and moves neither `ok` nor the exit code —
+  only which already-true sentence prints. Controls (falsified against the pre-change binary first): `"
+  0.33"`, `"0.33 "`, `"\t0.33"`, `" 0.33 "` and a CRLF-wrapped `"\r\n0.33\r\n"` all read as 0.33 post-fix
+  (pre-fix, all five wrongly predated); the over-charge control — `"0.32"` (genuinely old) and `"0.9"` (the
+  lexicographic-ladder trap, 9 < 33 numerically despite `"9" > "3"` as strings) — still correctly predates
+  on both binaries, so the fix does not swallow the real case; absent/garbage (`""`, `"abc"`, whitespace-
+  only) still predate, fail-closed, on both binaries. The full `--gate-json` document is byte-identical
+  across every case above, both cross-binary (pre-fix vs. post-fix) and cross-case (same shape whichever
+  sentence printed) — confirmed by hand-built fixtures run through `gate --report` rather than by unit
+  test alone, since the defect's user-visible effect is on the CLI's human-channel message. A new
+  `candor-report` unit test, `strips_ascii_whitespace_before_the_ladder_parse`, pins the ladder parse
+  itself.
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family
