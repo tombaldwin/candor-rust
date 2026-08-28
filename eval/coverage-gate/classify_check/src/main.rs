@@ -3,9 +3,13 @@
 //! binary the result as JSON; this binary is the ONLY place that calls the real `candor_classify::classify`
 //! (rather than re-deriving its rules in Python, which would be a second, driftable copy of the truth).
 //!
-//! For every candidate whose self-scan `inferred` set contains a CORE effect (Fs/Net/Db/Exec — see
-//! `generate.py`'s header for why Log/Env/Clock/Rand/Ipc/Unknown/bare-`invisible` are excluded), this
-//! tries every guessed consumer-facing path and asks `classify(crate, guess)`:
+//! For every candidate whose self-scan `inferred` set contains a CORE effect — originally just
+//! Fs/Net/Db/Exec, widened 2026-08-28 to the FULL effect vocabulary (+Clipboard/Ipc/Env/Clock/Rand/Log;
+//! see `generate.py`'s header for why Unknown/bare-`invisible` alone still don't qualify) after an
+//! audit found `arboard::{Get,Set}::file_list` invisible to this gate for exactly the reason a narrow
+//! trigger set predicts: Clipboard was outside it, so a missing Clipboard verb was structurally
+//! invisible regardless of phrasing — this tries every guessed consumer-facing path and asks
+//! `classify(crate, guess)`:
 //!   - any guess resolves        -> COVERED (written to covered.tsv, the HARD/regression-proof list)
 //!   - no guess resolves         -> OPEN (written to open.tsv, the ratchet list)
 //!
@@ -39,17 +43,34 @@ struct Entry {
     invisible: Option<Vec<String>>,
 }
 
-// The four "dangerous" effects the ten real incidents were all shaped like. Deliberately excludes
-// Log/Env/Clock/Rand/Ipc (self-scan picks these up from ubiquitous, low-stakes instrumentation — nearly
-// every function in a real crate transitively logs or reads a clock) and excludes a bare non-empty
-// `invisible` with empty `inferred` (near-universal in real-world code — almost everything transitively
-// touches an uncalibrated dependency, so it carries no discriminating signal). `Unknown` alone is ALSO
-// excluded even though it is a much rarer/stronger signal than `invisible`: it would have caught more of
-// last night's ten (diesel's `establish`, `tokio_postgres::connect_raw`, `sea_orm::connect_proxy` all
-// cross into a DIFFERENT uncalibrated crate and self-scan can only say `Unknown`, not `Db`/`Net`) but it
-// also roughly triples the open-list size (measured: 987 -> 2423 candidates, 260 -> 1323 uncovered) —
-// see REPORT for the full measurement. Precision over recall was the deliberate call.
-const CORE: [&str; 4] = ["Fs", "Net", "Db", "Exec"];
+// The full concrete effect vocabulary classify() can return (see crates/candor-classify/src/lib.rs).
+// Originally just the four "dangerous" effects the ten real incidents were shaped like (Fs/Net/Db/Exec);
+// WIDENED 2026-08-28 (see REPORT for the commit) after `arboard::{Get,Set}::file_list` shipped a real,
+// silent Clipboard gap that this generator was structurally incapable of ever flagging — Clipboard
+// wasn't in the trigger set, so a missing Clipboard verb never became a candidate at all, regardless of
+// how the crate's rule was phrased. The narrowing to just Fs/Net/Db/Exec was a real, deliberate,
+// MEASURED call (see the retained comment below) — but it traded away recall on every OTHER concrete
+// effect, not just the four it was tuned against, and the arboard incident is proof that trade landed on
+// a real crate, not just a hypothetical one. `Llm` is deliberately NOT listed here even though it is a
+// real classify() return: it is a REFINEMENT that always co-occurs with `Net` on the same call (see
+// lib.rs:2611's doc comment — a statically-known model-provider host adds Llm IN ADDITION to Net, never
+// instead of it), so any candidate that could trigger on Llm alone already triggers on Net; listing it
+// separately would be redundant, not additive. `Unknown` and a bare non-empty `invisible` with empty
+// `inferred` remain excluded for the reason below.
+//
+// Retained from the original, narrower cut — the same reasoning now applies to EACH of the newly-added
+// effects, not just Log/Env/Clock/Rand/Ipc, so re-verify it didn't just relocate the flood: self-scan
+// picks up low-stakes, ubiquitous instrumentation (nearly every function transitively logs or reads a
+// clock), and a bare non-empty `invisible` with empty `inferred` carries no discriminating signal
+// (near-universal — almost everything transitively touches an uncalibrated dependency). `Unknown` alone
+// is ALSO excluded even though it is a much rarer/stronger signal than `invisible`: it would have caught
+// more of the ten incidents (diesel's `establish`, `tokio_postgres::connect_raw`, `sea_orm::
+// connect_proxy` all cross into a DIFFERENT uncalibrated crate and self-scan can only say `Unknown`, not
+// `Db`/`Net`) but it also roughly triples the open-list size (measured: 987 -> 2423 candidates, 260 ->
+// 1323 uncovered) — see REPORT for the full measurement. Precision over recall was the deliberate call.
+const CORE: [&str; 10] = [
+    "Fs", "Net", "Db", "Exec", "Clipboard", "Ipc", "Env", "Clock", "Rand", "Log",
+];
 
 // KNOWN SELF-SCAN FALSE POSITIVES — traced, not guessed. `async_process::Command::{arg,arg0,args,
 // current_dir,env,env_clear,env_remove,envs,new}` are documented pure builder setters, and
@@ -107,8 +128,20 @@ fn main() {
     let map: HashMap<String, Vec<Entry>> = serde_json::from_str(&data)
         .unwrap_or_else(|e| panic!("parsing {entries_path}: {e}"));
 
-    let mut covered: HashMap<(String, String), Vec<String>> = HashMap::new();
-    let mut open: HashMap<(String, String), (Vec<String>, String)> = HashMap::new();
+    // Keyed by (crate, self_scan_key) — NOT by (crate, guess) — because a guess string is not unique:
+    // sibling types/fns in different modules (async/blocking/wasm variants of the same name is the
+    // dominant real shape — see generate.py's `root_reexport_prefixes` docstring, 610 such guess-strings
+    // measured shared across >1 distinct self-scan key in the 74 calibrated crates) can legitimately
+    // guess the IDENTICAL crate-root alias. Keying insertion on the guess string let a second entry
+    // silently overwrite (and thereby DROP — the exact silent-under-report shape this whole gate exists
+    // to prevent, now happening inside the gate's own generator) a first, real, still-open entry the
+    // moment both entries' effects happened to intersect CORE at once — invisible under the narrower
+    // Fs/Net/Db/Exec-only CORE (the two colliding entries rarely shared a CORE-qualifying effect), and
+    // exposed once CORE widened to cover more of the vocabulary. `self_scan_key` (module + type + fn) is
+    // the thing that's actually guaranteed unique per candidate; the guess is only ever used for display
+    // and for the classify() lookup itself, never as identity.
+    let mut covered: HashMap<(String, String), (String, Vec<String>)> = HashMap::new();
+    let mut open: HashMap<(String, String), (String, Vec<String>, String)> = HashMap::new();
     let mut core_total = 0usize;
 
     for (krate, entries) in &map {
@@ -124,54 +157,75 @@ fn main() {
                 continue;
             }
             core_total += 1;
+            let dedup_key = (krate.clone(), e.self_scan_key.clone());
             let matched = e.guesses.iter().find(|g| candor_classify::classify(krate, g).is_some());
             if let Some(g) = matched {
-                covered.insert((krate.clone(), g.clone()), inf.clone());
+                covered.insert(dedup_key, (g.clone(), inf.clone()));
             } else {
                 // Report the SHORTEST guess (usually the crate-root re-export alias, i.e. the shape a
                 // real consumer would actually spell — `ignore::Walk::new`, not `ignore::walk::Walk::new`).
                 let mut gs = e.guesses.clone();
                 gs.sort_by_key(|g| g.len());
                 let chosen = gs.first().cloned().unwrap_or_default();
-                open.insert((krate.clone(), chosen), (inf.clone(), e.file.clone()));
+                open.insert(dedup_key, (chosen, inf.clone(), e.file.clone()));
             }
         }
     }
 
-    let mut cov: Vec<_> = covered.into_iter().collect();
-    cov.sort();
+    // Two DIFFERENT self_scan_keys can still print the same consumer_path guess (the reqwest
+    // async_impl/wasm case is a REAL, correct instance: mutually exclusive cfg targets both legitimately
+    // re-export `ClientBuilder` at the crate root). Rendering to text lines and deduping THOSE (rather
+    // than deduping on the map key, which is what caused the original bug) collapses only genuine
+    // duplicate rows — two entries that also agree on effects — while still keeping two rows visible
+    // when the effects actually differ, which is real information a reader should see.
+    let mut cov_lines: Vec<String> = covered
+        .into_iter()
+        .map(|((krate, _sk), (g, eff))| format!("{krate}\t{g}\t{}", eff.join(",")))
+        .collect();
+    cov_lines.sort();
+    cov_lines.dedup();
     let mut cov_out = String::from(
         "# crate\tconsumer_path\teffects\n\
          # GENERATED by eval/coverage-gate/generate.py — see that file's header for the method.\n\
          # HARD list: crates/candor-classify/tests/coverage_gate.rs asserts classify() still returns\n\
          # Some(effect) for every row. Regenerate via `python3 eval/coverage-gate/generate.py`.\n",
     );
-    for ((k, g), eff) in &cov {
-        cov_out.push_str(&format!("{k}\t{g}\t{}\n", eff.join(",")));
+    for line in &cov_lines {
+        cov_out.push_str(line);
+        cov_out.push('\n');
     }
     std::fs::write(covered_path, cov_out).unwrap_or_else(|e| panic!("writing {covered_path}: {e}"));
 
-    let mut op: Vec<_> = open.into_iter().collect();
-    op.sort();
+    let mut uncovered_pkgs: HashSet<String> = HashSet::new();
+    let mut open_lines: Vec<String> = open
+        .into_iter()
+        .map(|((krate, _sk), (g, eff, f))| {
+            uncovered_pkgs.insert(krate.clone());
+            format!("{krate}\t{g}\t{}\t{f}", eff.join(","))
+        })
+        .collect();
+    open_lines.sort();
+    open_lines.dedup();
     let mut open_out = String::from(
         "# crate\tconsumer_path\teffects\tsource_file\n\
          # GENERATED by eval/coverage-gate/generate.py — the RATCHET list (may shrink, must never grow\n\
          # without review — see .github/workflows/coverage-gate-refresh.yml). Each row is a public entry\n\
-         # point self-scan found reaching a real Fs/Net/Db/Exec effect that classify() does not (yet)\n\
-         # recognize under any guessed consumer-facing spelling, OR REVIEWED_PURE_ENTRIES does not list.\n\
+         # point self-scan found reaching a real effect (see generate.py / this file's CORE constant for\n\
+         # the current trigger vocabulary) that classify() does not (yet) recognize under any guessed\n\
+         # consumer-facing spelling, OR REVIEWED_PURE_ENTRIES does not list.\n\
          # NOT individually hand-verified — this is a generated worklist, not a set of confirmed defects;\n\
          # triage before treating a row as an action item (see REPORT for a worked false-positive example).\n",
     );
-    for ((k, g), (eff, f)) in &op {
-        open_out.push_str(&format!("{k}\t{g}\t{}\t{f}\n", eff.join(",")));
+    for line in &open_lines {
+        open_out.push_str(line);
+        open_out.push('\n');
     }
     std::fs::write(open_path, open_out).unwrap_or_else(|e| panic!("writing {open_path}: {e}"));
 
-    let uncovered_pkgs: HashSet<&str> = op.iter().map(|((k, _), _)| k.as_str()).collect();
     println!(
         "core-effect candidates: {core_total} | covered: {} | open: {} across {} crates",
-        cov.len(),
-        op.len(),
+        cov_lines.len(),
+        open_lines.len(),
         uncovered_pkgs.len()
     );
 }

@@ -133,6 +133,58 @@ after upgrading; review policies and regenerate baselines with the new build.
     throughout — this class is orthogonal to what it tracks), or rust-deep's still-open, separately
     named question (its `invisible` mechanism is crate-name-keyed everywhere except the R59 seam).
 
+- **The completeness-gate GENERATOR's own trigger set was structurally blind to 6 of the 10 concrete
+  effects in the vocabulary — widened Fs/Net/Db/Exec to the full Fs/Net/Db/Exec/Clipboard/Ipc/Env/
+  Clock/Rand/Log (`eval/coverage-gate/classify_check`'s `CORE` constant).** The R59-class audit above
+  named this precisely: `arboard::{Get,Set}::file_list` was missed "not for ambiguity" but because
+  Clipboard was outside the generator's trigger set, so a missing Clipboard verb could never become a
+  candidate at all, regardless of how a crate's rule was phrased — true of the other 5 excluded effects
+  too, not just Clipboard. Widening surfaced two more classes of finding, isolated with an A/B holding
+  the self-scan snapshot and every other variable constant (only the `CORE` list differs between arms):
+  - **A real generator bug the widening exposed, not caused**: `covered`/`open` were keyed by the
+    GUESSED consumer path string, which is not unique — sibling types/fns across modules (async/
+    blocking/wasm variants of the same name is the dominant real shape; 610 such guess-strings measured
+    shared across >1 distinct self-scan key in the 74 calibrated crates) can legitimately guess the
+    identical crate-root alias. A second entry silently overwrote — and thereby DROPPED — a first, real,
+    still-open entry whenever both entries' effects happened to intersect `CORE` at once. Latent since
+    the generator's first version (proven: reproduces at the OLD narrow `CORE` too, e.g. `filetime::
+    open`'s three platform variants collapsed to one), just far less likely to fire with only 4
+    qualifying effects to collide on. Fixed by keying on `self_scan_key` (module+type+fn, guaranteed
+    unique) instead of the guess string, with output-line deduplication so two entries that legitimately
+    share both a guess AND identical effects still collapse to one printed row.
+  - **A false-positive class TRIED and REJECTED**: a `pub fn`/`pub struct` living inside a top-level
+    `mod NAME;` with no bare `pub` is not reachable by an external consumer at all (found via
+    dialoguer's `mod paging;` and mysql's `mod io;`, both containing real effectful `pub fn`s no
+    consumer can ever name). A generator-level fix for this was implemented, measured, and reverted:
+    `mod internal; pub use internal::Thing;` (re-exporting OUT of an otherwise-private module) is a
+    common, idiomatic pattern, not a rare exception — the check dropped `covered.tsv` 1018 → 680 rows
+    (~338 genuinely-reachable, already-verified rows) to catch 2 real ones, the opposite of the
+    established "loses recall, never shrinks the hard gate" trade. The two known instances are handled
+    individually via `REVIEWED_PURE_ENTRIES` instead (a new category there: "genuinely unreachable", not
+    "no effect" — same escape hatch, different reason, documented as such).
+  - **One real, unambiguous classify() gap fixed**: `dialoguer::Editor::new`/`::default` call
+    `get_default_editor()` (edit.rs:31), reading `env::var_os("VISUAL")` then `("EDITOR")` immediately at
+    construction — independent of `Editor::edit`'s already-classified `Exec`, the same "builder-time
+    env read, separate from the terminal verb" shape as `clap::Arg::env` above. Verified against
+    dialoguer 0.12.0: `get_default_editor` is the only caller of either `env::var_os`, no ambiguity.
+  - **Quantified** (holding the self-scan snapshot constant across arms): widening added 177 `covered.tsv`
+    rows (already-recognized effects that only now qualify as candidates) and, after the two fixes above,
+    252 new `open.tsv` ratchet rows — dominated by `Log` (136) and `Unknown`-paired noise (81), then
+    `Clock` (58), `Env` (49), `Rand` (28); zero new `Clipboard` candidates (arboard's three verbs above
+    were the only gap that effect had). Sampling confirmed the ratchet's `Log` rows are mostly real but
+    low-value (e.g. `jiff::tz::db()`'s one-time `debug!` on its `OnceLock` lazy-init transitively tags
+    every timezone-lookup convenience function) — the exact "ubiquitous, low-stakes instrumentation"
+    flood risk the original narrow cut was tuned to avoid, now visible as a ratchet backlog rather than
+    hidden by never looking. `covered.tsv`'s hard gate (`coverage_gate.rs`) stays green throughout; every
+    row already in `covered.tsv`/`open.tsv` before this change is untouched (proven by set-difference
+    against the pre-change files, not by inspection). NOT the full ratchet: 252 of ~429 widening-surfaced
+    candidates remain untriaged, same "may shrink, must never grow without review" contract as before.
+    The trigger set now covers the full concrete effect vocabulary (`Llm` deliberately excluded — it
+    always co-occurs with `Net` on the same call, so nothing can trigger on it alone); the two named,
+    accepted blind spots are unchanged from before this pass (`Unknown` as a qualifying signal — tried at
+    ⟨0.33.0⟩'s coverage-gate sweep and rejected, roughly triples the candidate count for modest recall —
+    and a foreign `Iterator::next` impl, the `wild::ArgsOs` shape named above).
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family

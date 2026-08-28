@@ -22,9 +22,12 @@ THE PIPELINE, per calibrated crate:
      `pub(super)`, so its inherent `pub fn exec` is not actually reachable by any external consumer).
   3. Self-scan the crate's own source with `candor-scan --json`, correlating each candidate to its
      self-scan report entry by the module-qualified path candor-scan itself derives.
-  4. For every candidate whose self-scan `inferred` set contains Fs/Net/Db/Exec (see classify_check's
-     header for why this is the trigger, not a bare `invisible` or `Unknown`), guess the consumer-facing
-     spelling(s) a caller would actually use (the raw module path AND, if the type/fn is re-exported at
+  4. For every candidate whose self-scan `inferred` set contains a CONCRETE effect — the full vocabulary
+     Fs/Net/Db/Exec/Clipboard/Ipc/Env/Clock/Rand/Log, widened 2026-08-28 from just Fs/Net/Db/Exec after
+     `arboard::{Get,Set}::file_list` shipped a real Clipboard gap structurally invisible to the narrower
+     trigger (see classify_check's header for the full before/after and why a bare `invisible` or
+     `Unknown` still don't qualify) — guess the consumer-facing spelling(s) a caller would actually use
+     (the raw module path AND, if the type/fn is re-exported at
      the crate root via `pub use`, the shorter root-alias form — `ignore::Walk::new`, not
      `ignore::walk::Walk::new`) and hand them to `classify_check` (a tiny Rust binary — the ONLY thing
      that calls the real `candor_classify::classify`, so this script never re-derives its rules).
@@ -311,6 +314,22 @@ def restricted_types(concat_src):
         if vis is not None and not vis.startswith('pub('):
             seen_public.add(name)
     return seen_any - seen_public
+
+
+# TRIED AND REJECTED (2026-08-28): a `restricted_top_modules()` pass that treated a `pub fn`/`pub
+# struct` inside a top-level `mod NAME;` with no bare `pub` as unreachable, one level up the tree from
+# what `restricted_types()` already covers for types. It correctly diagnosed the widened trigger's two
+# new `Ipc` false positives (dialoguer's `mod paging;` containing `pub struct Paging`/`pub fn
+# render_prompt`, and mysql's `mod io;` containing `pub enum Stream`/`pub fn connect_socket` — neither
+# re-exported anywhere, confirmed against real source) but was FAR too aggressive as a general rule:
+# `mod internal; pub use internal::Thing;` (re-exporting a public item OUT of an otherwise-private
+# module) is a common, idiomatic Rust organization pattern, not a rare exception — measured, applying
+# the check across all 74 calibrated crates dropped total candidate entries 19985 -> 13662 and
+# `covered.tsv` 1018 -> 680 rows, i.e. it silently discarded ~338 GENUINELY reachable, already-verified
+# rows as a side effect of catching 2 real ones. Unlike `root_reexports`'s "loses recall, never
+# fabricates" trade, this one actively shrinks the HARD gate itself — the risk profile is backwards.
+# The two known instances are handled individually instead (see `REVIEWED_PURE_ENTRIES`, "unreachable"
+# rows use the same escape hatch as "no effect" ones — either way, no consumer can ever observe it).
 
 
 def root_reexports(lib_rs_src):
