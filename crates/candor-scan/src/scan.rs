@@ -2455,6 +2455,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // "may this report's silence speak?" and the last one the wire can currently express. Same treatment
     // as incompleteness (chained, not covered, entries untouched), and the same single conjunct, because
     // this ledger is still the only place coverage is consumed. See `DepIndex::judged_nothing_pkgs`.
+    // Cargo.lock identity check for the CALIBRATED_* exemptions below: a name CONFIRMED path/git/
+    // workspace-sourced (not the real registry crate `classify`'s rules were reviewed against) never
+    // gets the exemption, regardless of which of the three lists it happens to string-match — see
+    // `non_registry_lock_names`'s doc for the reproduced silent-drop this closes.
+    let non_registry_names = non_registry_lock_names(dir);
     let mut coverage_ledger: Vec<(String, usize)> = dep_seen
         .iter()
         .filter(|(cr, _)| {
@@ -2467,6 +2472,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !deps_idx.untrusted.contains(real)
                 && !deps_idx.incomplete_pkgs.contains(real)
                 && !deps_idx.judged_nothing_pkgs.contains(real);
+            // A name Cargo.lock confirms is NOT the real registry crate loses every one of the three
+            // CALIBRATED_* exemptions below outright — it is a different artifact wearing a reviewed
+            // name, not the thing that was reviewed. Checked on `real` (Cargo.lock records the actual
+            // package identity, not a caller-chosen manifest alias).
+            let impostor = non_registry_names.contains(real);
             // `CALIBRATED_CRATES` normally exempts a crate outright — "classify has rules here" is read
             // as "an unmatched call was reviewed and found pure". `CALIBRATED_BUT_PARTIAL_CRATES` (R59,
             // SOUNDNESS.md) carves the FFI-thin syscall crates OUT of that exemption: `libc`/`nix`/
@@ -2475,16 +2485,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // there is an honest gap, not a reviewed verdict — it must still reach the ledger and
             // disclose `invisible`, exactly like a call into an uncalibrated dependency.
             let fully_calibrated = candor_classify::CALIBRATED_CRATES.contains(&cr.as_str())
-                && !candor_classify::CALIBRATED_BUT_PARTIAL_CRATES.contains(&cr.as_str());
+                && !candor_classify::CALIBRATED_BUT_PARTIAL_CRATES.contains(&cr.as_str())
+                && !impostor;
             !covered
                 && !fully_calibrated
-                && !candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str())
-                && !candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p))
+                && !(candor_classify::PATH_CALIBRATED_CRATES.contains(&cr.as_str()) && !impostor)
+                && !(candor_classify::CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p)) && !impostor)
                 // REVIEWED-PURE: read and found to perform no effect of its own, so its silence is an
                 // answer rather than a gap. A separate list from the calibrated ones because those must
                 // carry a live rule (`calibrated_crates_are_live`) and a pure crate has none — see the
-                // evidence requirement on `REVIEWED_PURE_CRATES`.
-                && !candor_classify::REVIEWED_PURE_CRATES.contains(&cr.as_str())
+                // evidence requirement on `REVIEWED_PURE_CRATES`. Same impostor carve-out: a reviewed-
+                // pure verdict is about the real crate too.
+                && !(candor_classify::REVIEWED_PURE_CRATES.contains(&cr.as_str()) && !impostor)
         })
         .map(|(cr, n)| (cr.clone(), *n))
         .collect();
