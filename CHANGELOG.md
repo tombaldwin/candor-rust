@@ -349,6 +349,50 @@ after upgrading; review policies and regenerate baselines with the new build.
     file — a bare-version dependency with no lockfile keeps the exemption, proving the fix does not scream
     on every unlocked project.
 
+- **⚠ BACKLOG B4: `eval/coverage-gate`'s hard gate asserted PRESENCE, not AGREEMENT — a rule narrowed to a
+  still-non-`None` but WRONG effect passed silently.** `coverage_gate.rs` asserted only
+  `classify(krate, path).is_some()`. Reproduced live before touching anything: changing async_nats's
+  `connect`/`publish`/`subscribe`/`request`/`flush` from `Some("Net")` to `Some("Log")` left `cargo test -p
+  candor-classify --test coverage_gate` green — a `deny Net` policy would wave through code opening a NATS
+  connection, exactly the class this gate exists to stop.
+  - **The fix is bigger than a comparison operator.** `covered.tsv`'s existing third column
+    (`effects`) is NOT classify()'s own answer — it is the self-scan oracle's independent, full
+    `inferred` set for that entry point (real call-graph reachability over the crate's own source), and
+    the two legitimately disagree by design: `async_nats::connect`'s self-scan set is `Fs,Log,Net,Rand,
+    Unknown` (auth touches a creds file, connecting logs, etc.), so `Log` was ALREADY a member of it —
+    a naive "classify() result must be a member of column 3" fix would have MISSED the reviewer's exact
+    mutation. It also breaks the other way: `async_nats::Consumer::request_batch`'s self-scan set is
+    `Log` alone while classify() correctly returns `Net` for it, so membership-testing column 3 would
+    flag today's genuinely-correct row as a false regression. classify() returns one label per call site;
+    `covered.tsv` recorded a different oracle's superset. Fixed by adding a fourth column, `classified_as`
+    — the actual `classify(crate, consumer_path)` return value at generation time — and asserting EXACT
+    equality against it (`classify_check` now captures this alongside the matched guess;
+    `coverage_gate.rs` parses 4 columns and compares). The existing 1014 rows were migrated in place
+    (crate/path/self_scan_effects columns byte-unchanged; `classified_as` computed by calling today's
+    `classify()`, which agrees with generation time on every row — HEAD has not touched `classify()`
+    since the commit that generated the checked-in manifest).
+  - **All three controls, falsified against the pre-fix gate:** (1) the defect case — Net->Log on
+    `async_nats::connect`/`ConnectOptions::connect`/`Consumer::request_batch`/`Context::request` PASSED
+    pre-fix, FAILS post-fix, naming the recorded vs. actual effect for each of the 4 affected rows
+    (`connect_with_options` is a separate `if` block untouched by the mutation and correctly unaffected).
+    (2) over-charge control — the unmodified tree still passes all 1014 rows post-fix. (3) a second,
+    opposite-shape mutation — widening `tracing_subscriber::fmt::try_init` from `Some("Log")` to
+    `Some("Net")` — also FAILS post-fix, proving the check is symmetric, not one-directional.
+  - **Sweep for the same shape found no other instance in this repo.** Checked every other manifest/CSV-
+    driven regression gate (`ci/gate-equivalence.sh`, `ci/self-gate.sh`, `eval/scaled`, `soundness/
+    confirmatory`) and every other `is_some()`-based assertion in `candor-classify`'s own test module.
+    `calibrated_crates_are_live` and `ci/self-gate.sh`'s denylist membership check are presence-checks BY
+    DESIGN (crate-rule liveness / denylist inclusion, not equality against a per-row recorded expected
+    value) — a different shape, not this defect.
+  - **Residual, NOT folded into this fix, reported not fixed (out of this fix's scope):** the local
+    `entries.json`/`~/.cargo/registry` cache this machine already had on disk is independently stale
+    relative to the checked-in manifest (crate version drift — e.g. `ureq`'s API surface moved) —
+    regenerating `covered.tsv` from that cache via `generate.py`/`classify_check` as-is would silently mix
+    ~76 unrelated candidate-set changes into this fix. The migration above instead computed `classified_as`
+    directly from the checked-in rows against current `classify()`, leaving the candidate set untouched.
+    The weekly `coverage-gate-refresh` workflow is the correct place to reconcile that drift against a
+    FRESH `cargo fetch`, not a hand-edit here.
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family
