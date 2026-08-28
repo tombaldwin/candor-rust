@@ -42,7 +42,7 @@ pub(crate) struct ShowHedgedJson {
 }
 
 pub(crate) fn cmd_show(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
+    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false, verb: "show" });
     let Some(q) = g.positional.first().map(String::as_str) else {
         eprintln!("usage: candor-query show <fn> [--report <locator>] [--json]");
         return 2;
@@ -187,7 +187,7 @@ pub(crate) struct WhereJson {
 }
 
 pub(crate) fn cmd_where(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
+    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false, verb: "where" });
     let Some(eff) = g.positional.first().map(String::as_str) else {
         eprintln!("usage: candor-query where <Effect> [--report <locator>] [--json]");
         return 2;
@@ -300,7 +300,7 @@ pub(crate) struct MapHedgedJson {
 }
 
 pub(crate) fn cmd_map(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false });
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false, verb: "map" });
     let Some(pre) = report_or_discover(&g) else {
         eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
         return 2;

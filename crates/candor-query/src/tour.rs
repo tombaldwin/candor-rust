@@ -51,7 +51,7 @@ fn packages_label(pkgs: &[&str]) -> Option<String> {
 /// ready-to-run `candor path <fn> <effect>` command. §3.3.1 grammar: report DISCOVERED or via `--report`,
 /// `--json` for machines. The optional positional integer sets how many to list. Read-only.
 pub(crate) fn cmd_tour(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 1, sentinel: false, has_policy: false });
+    let g = parse(args, Shape { verb_args: 1, sentinel: false, has_policy: false, verb: "tour" });
     let want_json = g.want_json;
     // The lone optional positional is N (how many to list); default 10. It MUST be a positive integer —
     // a non-integer OR zero is a usage error (exit 2). `tour 0` must never print the honest-sounding

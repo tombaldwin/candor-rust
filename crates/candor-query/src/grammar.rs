@@ -103,8 +103,17 @@ pub(crate) struct Shape {
     pub(crate) verb_args: usize,
     /// Whether the OLD grammar appended a `0|1` JSON sentinel to this verb (all report queries did).
     pub(crate) sentinel: bool,
-    /// Whether this verb ever accepted a positional policy (whatif/fix/fix-gate/unverified).
+    /// Whether this verb has a policy-relative verdict at all (whatif/fix/fix-gate/unverified — the ONLY
+    /// four verbs on the shared grammar whose SPEC §3.1 shape carries a policy-derived field). Doubles as
+    /// the OLD grammar's positional-policy eligibility, which is why it predates this doc comment: those
+    /// are exactly the same four verbs, not a coincidence. `false` here now means MORE than "no positional
+    /// policy alias" — see the `--policy` check in [`parse`] below, ⟨0.34⟩ BACKLOG "`--policy` accept-and-
+    /// drop is THREE engines, not one".
     pub(crate) has_policy: bool,
+    /// The verb name, for the `--policy` usage-error message below. Not used for dispatch — `main.rs`
+    /// still owns that match — only for naming the problem in the diagnostic (candor-ux-pass: a failure
+    /// names the problem AND a remedy, not just "no").
+    pub(crate) verb: &'static str,
 }
 
 /// Parse the canonical grammar, accepting the deprecated old forms with a stderr note.
@@ -234,6 +243,29 @@ pub(crate) fn parse(args: &[String], shape: Shape) -> Query {
             _ => positional.push(args[i].clone()),
         }
         i += 1;
+    }
+
+    // ⟨0.34⟩ BACKLOG "`--policy` accept-and-drop is THREE engines, not one": a verb with
+    // `has_policy: false` has NO policy-relative verdict — none of SPEC §3.1's pinned JSON shapes for
+    // show/where/callers/map/containment/reachable/path/impact/blindspots/tour carries a policy-derived
+    // field (checked per-verb against SPEC.md, not assumed; `blindspots`/`containment` were the two the
+    // intuition said might want one, and do not). Before this check, `--policy` on these ten parsed into
+    // `policy` above and was silently never read again — accepted with no diagnostic, computed WITHOUT
+    // it, the config-disclosure class inverted (a flag honoured-while-reported-ignored elsewhere; here a
+    // flag DROPPED while reported as accepted). `gains`/`diff`/`rewire`/`gate` already refuse this shape
+    // with their own bespoke parsers (they never route through this shared grammar); this applies the
+    // identical rule here, in the ONE place all ten descriptive verbs share, rather than ten times.
+    // FIRST — before the deprecated-alias peeling and any report resolution — a usage error should not
+    // pay for work it discards.
+    if policy.is_some() && !shape.has_policy {
+        eprintln!(
+            "candor-query {}: unknown flag `--policy` — `{}` is a descriptive query with no \
+             policy-relative verdict (its SPEC §3.1 JSON shape carries no policy-derived field); apply a \
+             policy to this report with `candor-query gate --report <locator> --policy <file>`, or use \
+             whatif/fix/fix-gate/unverified for a policy-relative pre-edit check.",
+            shape.verb, shape.verb
+        );
+        std::process::exit(2);
     }
 
     // Pass 2: peel the DEPRECATED old-form positionals off the TAIL, then decide the leading report by

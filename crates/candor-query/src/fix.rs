@@ -348,7 +348,7 @@ fn reverse_graph(entries: &[ReportEntry]) -> BTreeMap<&str, Vec<&str>> {
 }
 
 pub(crate) fn cmd_fix(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: true });
+    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: true, verb: "fix" });
     let (Some(target), Some(effect)) = (g.positional.first().cloned(), g.positional.get(1).cloned()) else {
         eprintln!("usage: candor-query fix <fn> <Effect> [--report <locator>] [--policy <file>] [--json]");
         return 2;
@@ -553,7 +553,7 @@ pub(crate) fn cmd_fix(args: &[String]) -> i32 {
 /// allowlist/layering findings are a different shape and are left to the gate's own message. Advisory: the
 /// gate re-scan stays the ground truth.
 pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true });
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: true, verb: "fix-gate" });
     let Some(prefix) = report_or_discover(&g) else {
         eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
         return 2;

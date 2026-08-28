@@ -57,7 +57,7 @@ pub(crate) fn cmd_callers(args: &[String]) -> i32 {
     // excludes them for free; keying off `ReasonClass::classify(w) == Dispatch` would admit all 8710 of
     // them on this engine's census. Pinned by
     // `callers_include_unknown_keys_off_the_kind_so_ambiguous_and_off_vocabulary_stay_out`.
-    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
+    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false, verb: "callers" });
     let include_unknown = g.include_unknown;
     let Some(q) = g.positional.first().map(String::as_str) else {
         eprintln!("usage: candor-query callers <fn> [--report <locator>] [--json] [--include-unknown]");
@@ -425,7 +425,7 @@ pub(crate) fn callers_via_callgraph(cg: &BTreeMap<String, Vec<String>>, q: &str,
 }
 
 pub(crate) fn cmd_impact(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false });
+    let g = parse(args, Shape { verb_args: 1, sentinel: true, has_policy: false, verb: "impact" });
     let want_json = g.want_json;
     let Some(fn_arg) = g.positional.first().cloned() else {
         eprintln!("usage: candor-query impact <fn-substring> [--report <locator>] [--json]");
@@ -574,7 +574,7 @@ fn path_note(comp: &ReportCompleteness) {
 /// source), through callees that carry the effect. Answers "this performs Net — through WHAT?", the chain
 /// `where`/`callers` describe the ends of but don't connect. Mirrors the JVM port's `path`. Read-only.
 pub(crate) fn cmd_path(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: false });
+    let g = parse(args, Shape { verb_args: 2, sentinel: true, has_policy: false, verb: "path" });
     let want_json = g.want_json;
     let (Some(fn_arg), Some(effect)) = (g.positional.first().cloned(), g.positional.get(1).cloned()) else {
         eprintln!("usage: candor-query path <fn-substring> <Effect> [--report <locator>] [--json]");
@@ -719,7 +719,7 @@ pub(crate) fn cmd_path(args: &[String]) -> i32 {
 /// `inferred` is already transitive, a root's set IS its full reachable surface, so the union answers
 /// "what does this binary actually do" without a per-fn dump. Mirrors the JVM port's `reachable`.
 pub(crate) fn cmd_reachable(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false });
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false, verb: "reachable" });
     let want_json = g.want_json;
     let Some(pre) = report_or_discover(&g) else {
         eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");

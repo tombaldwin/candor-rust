@@ -90,7 +90,7 @@ pub(crate) const AMBIENT: &[&str] = &["Log", "Clock", "Rand", "Env"];
 /// Reverse-BFS over the report's effect-relevant `calls` edges (the channel `Unknown` propagates along),
 /// the same graph `impact` uses.
 pub(crate) fn cmd_blindspots(args: &[String]) -> i32 {
-    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false });
+    let g = parse(args, Shape { verb_args: 0, sentinel: true, has_policy: false, verb: "blindspots" });
     let want_json = g.want_json;
     let Some(pre) = report_or_discover(&g) else {
         eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
@@ -271,7 +271,7 @@ pub(crate) fn cmd_containment(args: &[String]) -> i32 {
     // deprecated old form drove the report as a leading positional AHEAD of the baseline; it is arity-
     // gated (only when positionals EXCEED 1), so `<report> <baseline>` still peels the report and leaves
     // the baseline in slot 0.
-    let g = parse(args, Shape { verb_args: 1, sentinel: false, has_policy: false });
+    let g = parse(args, Shape { verb_args: 1, sentinel: false, has_policy: false, verb: "containment" });
     let want_json = g.want_json;
     let Some(cur_pre) = report_or_discover(&g) else {
         eprintln!("candor: no report found (no --report and no .candor/ discovered) — scan the crate first.");
