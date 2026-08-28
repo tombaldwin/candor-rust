@@ -179,12 +179,32 @@ pub const REVIEWED_PURE_CRATES: [&str; 5] = ["serde_json", "serde_yml", "toml", 
 ///     it hands back a `ConnectionRef` BORROWED from the ALREADY-established connection a running SQL
 ///     function executes within (`ffi::sqlite3_context_db_handle`, not a syscall) — the same "handle
 ///     accessor, not a syscall" shape as `TcpStream::local_addr`.
+///
+/// The next two (2026-08-28, the widened-CORE audit's `Ipc` batch — see `eval/coverage-gate/generate.py`
+/// for why `Ipc` only entered the trigger set that day) are a DIFFERENT reason than the five above: not
+/// "no effect", but genuinely UNREACHABLE — the item really does perform the effect self-scan found, but
+/// no external consumer can ever name it, because the module it lives in is declared with no `pub` at
+/// all and neither the module nor the item is re-exported anywhere in the crate root (checked against
+/// real source, both ways):
+///   - `dialoguer::Paging::render_prompt` — `dialoguer::paging` is a bare `mod paging;` (dialoguer
+///     0.12.0, lib.rs:62: `use paging::Paging;`, not `pub use`), so `pub struct Paging` and its `pub fn
+///     render_prompt` (which DOES call `Term::flush`, a real Ipc effect per this file's own `console`
+///     rule) are internal machinery every `Select`/`MultiSelect`-style prompt uses to render its own
+///     paginated view — the effect is already charged at THOSE public entry points' own `::interact*`
+///     rule (above), not double-counted here.
+///   - `mysql::Stream::connect_socket` — `mysql::io` is a bare `mod io;` (mysql 28.0.0, lib.rs:897, no
+///     `pub use` of `io::*` or `Stream` anywhere), so `pub enum Stream` and its `pub fn connect_socket`
+///     (a real Unix-domain-socket `connect()`, Ipc) are reachable only from within the crate's own
+///     connection-establishment code — a real consumer can't name `mysql::Stream` at all, let alone call
+///     a bare constructor on it.
 pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     ("curl", "curl::Multi::timeout"),
     ("execute", "execute::command"),
     ("execute", "execute::shell"),
     ("elasticsearch", "elasticsearch::Response::content_type"),
     ("rusqlite", "rusqlite::Context::get_connection"),
+    ("dialoguer", "dialoguer::Paging::render_prompt"),
+    ("mysql", "mysql::Stream::connect_socket"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -2311,6 +2331,16 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         if path.ends_with("Editor::edit") {
             return Some("Exec");
         }
+        // WIDENED-CORE AUDIT (2026-08-28): `Editor::new`/`Editor::default` (edit.rs:54,44) call
+        // `get_default_editor()` (edit.rs:31), which reads `env::var_os("VISUAL")` then `("EDITOR")`
+        // IMMEDIATELY at construction — a real, independent Env read a consumer triggers just by
+        // building an `Editor`, whether or not `.edit()` is ever called (the SAME "builder-time env
+        // read, separate from the terminal verb" shape as `clap::Arg::env`, R59-class). Verified against
+        // dialoguer 0.12.0: `get_default_editor` is the ONLY caller of either `env::var_os`, so there is
+        // no ambiguity gating this to just these two constructors.
+        if path.ends_with("Editor::new") || path.ends_with("Editor::default") {
+            return Some("Env");
+        }
         return None;
     }
     // `tracing_subscriber` — the subscriber that gives `tracing` somewhere to go. TWO effects, and the
@@ -3456,6 +3486,12 @@ mod tests {
         assert_eq!(classify("dialoguer", "dialoguer::Confirm::interact"), Some("Ipc"));
         assert_eq!(classify("dialoguer", "dialoguer::Select::interact_opt"), Some("Ipc"));
         assert_eq!(classify("dialoguer", "dialoguer::Input::with_prompt"), None); // builder
+        // widened-CORE audit: `Editor::new`/`::default` read VISUAL/EDITOR at construction, independent
+        // of `Editor::edit`'s already-covered Exec (spawning that editor is a separate, later step).
+        assert_eq!(classify("dialoguer", "dialoguer::Editor::new"), Some("Env"));
+        assert_eq!(classify("dialoguer", "dialoguer::Editor::default"), Some("Env"));
+        assert_eq!(classify("dialoguer", "dialoguer::Editor::edit"), Some("Exec"));
+        assert_eq!(classify("dialoguer", "dialoguer::Editor::extension"), None); // pure setter
 
         // console — Term I/O is Ipc, detection is Env, Style is pure.
         assert_eq!(classify("console", "console::Term::write_line"), Some("Ipc"));
