@@ -7532,6 +7532,167 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         assert_eq!(fn_entry(&mixed, "read_it")["invisible"], serde_json::json!(["libc"]),
             "the unclassified read() must still be disclosed even with a classified sibling call:\n{mixed:#}");
     }
+
+    /// R59-CLASS PROBE (the ~79-crate audit `3cb1906`'s own commit message named as still open):
+    /// `clap::Arg::env(name)` calls `env::var_os(&name)` DIRECTLY at builder time (clap_builder
+    /// 4.6.6, builder/arg.rs:2205-2213) — a real `Env` read, independent of and long before
+    /// `Command::get_matches()`'s own (already-classified) argv/env read. classify()'s own comment
+    /// calls the verb "too generic to gate safely" and leaves it unmodeled — but unlike libc's fd
+    /// verbs (genuinely ambiguous: a fd could be Fs/Net/Ipc), `::env` inside the `crate_name == "clap"`
+    /// arm is crate-gated already, and clap_builder has exactly ONE `pub fn` ending `::env`
+    /// (`Arg::env`; `env_os` is a deprecated one-line delegate to it) — no ambiguity survives the
+    /// crate gate. Because `clap` sits in `CALIBRATED_CRATES` and NOT `CALIBRATED_BUT_PARTIAL_CRATES`,
+    /// the coverage ledger reads the miss as reviewed-pure: a fn whose entire effectful surface is
+    /// `Arg::new("x").env("MY_VAR")` (no `get_matches` call anywhere) vanishes with zero effects AND
+    /// zero disclosure — the exact R59 shape, not a hypothetical.
+    #[test]
+    fn clap_arg_env_reads_env_var_directly_at_builder_time() {
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-clapenv-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\nclap = \"4\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // A fn whose ONLY effect is `Arg::env` — no `get_matches` anywhere. THE FIX: `Arg::env` is now
+        // classified `Env` directly (verified unambiguous — see classify()'s own comment), not carved
+        // into `CALIBRATED_BUT_PARTIAL_CRATES`, so this must be a precise Env charge, not a disclosure.
+        let bare = run("clapenvbare",
+            "pub fn declare(name: &str) -> clap::Arg { clap::Arg::new(name).env(\"MY_VAR\") }\n");
+        assert!(
+            !bare["functions"].as_array().unwrap().is_empty(),
+            "a real env-var read must not vanish the function from the report entirely:\n{bare:#}"
+        );
+        assert_eq!(effs(fn_entry(&bare, "declare")), vec!["Env"],
+            "`Arg::env` performs a real, unambiguous env::var_os read at builder time — before the fix \
+             this vanished with zero effects AND zero disclosure (the R59 shape: a calibrated crate's \
+             unclassified verb reading as reviewed-pure):\n{bare:#}");
+        assert!(fn_entry(&bare, "declare").get("invisible").is_none(),
+            "a classified clap call must not ALSO be flagged invisible:\n{bare:#}");
+        // CONTROL: mixing the real effect with a pure builder setter keeps exactly one effect — this fix
+        // must not spray Env over clap's other setters (`classify()`'s own unit tests separately pin
+        // `Arg::about` -> None; this proves it end-to-end through the scanner too).
+        let mixed = run("clapenvmixed",
+            "pub fn declare(name: &str) -> clap::Arg { \
+             clap::Arg::new(name).about(\"desc\").env(\"MY_VAR\") }\n");
+        assert_eq!(effs(fn_entry(&mixed, "declare")), vec!["Env"],
+            "`Arg::about` must stay pure beside the real `Arg::env` effect:\n{mixed:#}");
+    }
+
+    /// R59-CLASS PROBE #2: `console::Term` implements raw `std::io::{Read,Write}` (console 0.15.11,
+    /// term.rs:622-659) — `Term::write`/`Term::flush` call `self.write_through(buf)` (a real terminal
+    /// write, the SAME primitive `Term::write_line` — already classified Ipc — uses), and `Term::read`
+    /// calls `io::stdin().read(buf)` directly. classify()'s existing `console` rule only names the
+    /// crate's OWN convenience methods (`write_line`/`read_line`/`read_char`/...); the generic
+    /// `Read`/`Write` trait methods are a SEPARATE real entry point to the identical tty channel, missed
+    /// because their names (`read`/`write`/`flush`) are the ones every I/O type shares — but crate-gated
+    /// on `crate_name == "console"`, term.rs defines exactly one `write`/`flush`/`read` each (no
+    /// ambiguity survives the gate, same shape as `clap::Arg::env` above). `console` is fully
+    /// `CALIBRATED_CRATES`, so a fn that only does `term.write_all(b"x")` (no `write_line` call) reads
+    /// as reviewed-pure today.
+    #[test]
+    fn console_term_raw_write_and_read_trait_impls_are_the_same_ipc_channel() {
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-consoleio-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\nconsole = \"0.15\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let bare = run("consoleiobare",
+            "pub fn shout(t: &mut console::Term) { use std::io::Write; let _ = t.write(b\"hi\"); }\n");
+        assert!(
+            !bare["functions"].as_array().unwrap().is_empty(),
+            "a real tty write must not vanish the function from the report entirely:\n{bare:#}"
+        );
+        assert_eq!(effs(fn_entry(&bare, "shout")), vec!["Ipc"],
+            "`Term::write` performs the same real tty write `Term::write_line` is already classified \
+             Ipc for — before the fix this vanished with zero effects AND zero disclosure:\n{bare:#}");
+        // `Term::read` — the read-side sibling (`io::stdin().read(buf)` directly).
+        let read = run("consoleioread",
+            "pub fn listen(t: &mut console::Term) -> [u8; 4] { \
+             use std::io::Read; let mut b = [0u8; 4]; let _ = t.read(&mut b); b }\n");
+        assert_eq!(effs(fn_entry(&read, "listen")), vec!["Ipc"],
+            "`Term::read` reads real stdin, the same channel `read_line`/`read_char` already cover:\n{read:#}");
+        // CONTROL: mixing the real effect with an unrelated pure `Style` call keeps exactly one effect —
+        // the fix's `Term::`-scoped match must not spread to console's other types (classify()'s own
+        // unit tests separately pin `Style::cyan` -> None; this proves it end-to-end through the scanner).
+        let mixed = run("consoleiomixed",
+            "pub fn shout(t: &mut console::Term) -> console::Style { \
+             use std::io::Write; let _ = t.write(b\"hi\"); console::Style::new().cyan() }\n");
+        assert_eq!(effs(fn_entry(&mixed, "shout")), vec!["Ipc"],
+            "`Style::cyan` must stay pure beside the real `Term::write` effect:\n{mixed:#}");
+    }
+
+    /// R59-CLASS PROBE #3: `arboard`'s `Get`/`Set` cursor terminals cover `text`/`image`/`html` but not
+    /// their SIBLING `file_list` (arboard 3.6.1, lib.rs:205,251 — `Get::file_list`/`Set::file_list`, the
+    /// same builder-then-terminal shape, reading/writing the OS clipboard's file-path list). Missed not
+    /// because it's ambiguous (it's the only `file_list` in the crate) but because the completeness
+    /// gate's OWN generator only triggers on a self-scan `inferred` set containing Fs/Net/Db/Exec
+    /// (`eval/coverage-gate/generate.py`'s own documented trigger) — Clipboard isn't in that set, so a
+    /// missing Clipboard verb is structurally invisible to the gate regardless of how it's phrased.
+    /// `arboard` is fully `CALIBRATED_CRATES`, so `clipboard.set().file_list(&paths)` reads reviewed-pure.
+    #[test]
+    fn arboard_file_list_terminal_is_the_same_clipboard_effect_as_text() {
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-arbfl-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n[dependencies]\narboard = \"3\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // Isolated from `Clipboard::get()`/`::set()` (which ALREADY classify Clipboard on their own,
+        // since the constructor verbs `get`/`set` share this crate's match arm) by taking an
+        // ALREADY-CONSTRUCTED cursor as a parameter — the exact shape `Get::text`/`Set::text` are
+        // already covered for, proving `file_list` specifically, not the constructor, is the gap.
+        let get = run("arbflget",
+            "pub fn paste_paths(g: arboard::Get) -> Vec<std::path::PathBuf> { g.file_list().unwrap() }\n");
+        assert_eq!(effs(fn_entry(&get, "paste_paths")), vec!["Clipboard"],
+            "`Get::file_list` is the same clipboard read `Get::text` already covers — before the fix \
+             this vanished with zero effects AND zero disclosure:\n{get:#}");
+        let set = run("arbflset",
+            "pub fn copy_paths(s: arboard::Set, p: &[std::path::PathBuf]) { let _ = s.file_list(p); }\n");
+        assert_eq!(effs(fn_entry(&set, "copy_paths")), vec!["Clipboard"],
+            "`Set::file_list` is the same clipboard write `Set::text` already covers:\n{set:#}");
+        // `Clipboard::clear_with().default()` is `clear()`'s own documented alternate entry point
+        // (lib.rs:156-163: `clear()` is literally `self.clear_with().default()`) — same shape as
+        // `ignore::Walk::new` beside `WalkBuilder::build`.
+        let clear = run("arbflclear",
+            "pub fn wipe(c: &mut arboard::Clipboard) { let _ = c.clear_with().default(); }\n");
+        assert_eq!(effs(fn_entry(&clear, "wipe")), vec!["Clipboard"],
+            "`Clear::default` is `Clipboard::clear`'s own sibling entry point:\n{clear:#}");
+    }
+
     /// `CANDOR_PANIC_ON_FILE` is process-global and `INCREMENTAL` is a thread-local the tests set by
     /// hand, so the abort tests take this lock rather than race each other's injection window.
     fn abort_injection_lock() -> std::sync::MutexGuard<'static, ()> {
