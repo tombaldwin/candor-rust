@@ -3818,6 +3818,53 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     (guard_code, json_body)
 }
 
+/// Fan a resolved workspace MEMBER `m` into the leaf crate dir(s) `scan_target`'s loop should hand to
+/// `scan_one`: `m` itself, unless `m` ALSO declares its own `[workspace]` table, in which case `m` is
+/// expanded exactly the way `scan_target` expands its own root — `m`'s own root package (if it has one)
+/// plus every one of ITS resolved members, each checked again for the same thing.
+///
+/// `cargo metadata` refuses this layout outright ("multiple workspace roots found in the same
+/// workspace") — but that is an argument about whether `cargo build` would accept the tree, not about
+/// whether this scanner should read it, and `find_workspace_root`'s own doc comment (`verified_workspace_root`,
+/// deps.rs) already rejects "cargo would refuse to build this" as grounds for trusting a scan: candor-scan's
+/// stated purpose is reading source WITHOUT building it, so unbuildable or adversarial layouts are
+/// exactly the population it is asked to see. A member that is a nested workspace root is real,
+/// reachable input, not a hostile edge case invented for this fix.
+///
+/// RECURSIVE, and capped at `depth` 64 (matching the fixpoint caps elsewhere in this file) — not because
+/// a legitimate tree nests this deep, but because a manifest's own `exclude`/glob resolving back onto an
+/// ancestor is an authoring mistake this function must not spin on; past the cap `m` is scanned as a
+/// single leaf crate with a loud warning rather than silently dropped.
+fn expand_nested_workspace_member(m: String, depth: u32, out: &mut Vec<String>) {
+    let mp = Path::new(&m);
+    if !has_workspace_table(mp) {
+        out.push(m);
+        return;
+    }
+    if depth > 64 {
+        eprintln!("candor-scan: workspace nesting under `{m}` exceeds 64 levels — scanning it as a \
+                   single crate rather than recursing further");
+        out.push(m);
+        return;
+    }
+    let inner = workspace_members(mp);
+    if inner.is_empty() {
+        // Mirrors `scan_target`'s own top-level "zero resolved members" arm: warn loudly and still
+        // scan `m` as one crate (covering its own root package's sources, if any) rather than dropping
+        // it — an unresolved nested workspace must not vanish either.
+        eprintln!("candor-scan: `{m}` declares [workspace] but no members resolved — check \
+                   `members`/globs; scan member crates directly to gate them");
+        out.push(m);
+        return;
+    }
+    if read_crate_name(mp).is_some() {
+        out.push(m.clone()); // the nested workspace manifest also declares its own root package
+    }
+    for im in inner {
+        expand_nested_workspace_member(im, depth + 1, out);
+    }
+}
+
 /// Scan a TARGET — a single crate, or a `[workspace]` root fanned out into one report per member
 /// under the shared prefix. The one place both the plain and `--deps` paths funnel through, so a
 /// workspace is never scanned as one merged package (colliding same-named fns) nor pruned to an
@@ -3871,7 +3918,19 @@ pub(crate) fn scan_target(
     if read_crate_name(Path::new(dir)).is_some() {
         dirs.push(dir.to_string()); // the workspace manifest also declares a root package
     }
-    dirs.extend(members);
+    // ⟨2026-08-29, adversarial review⟩ EVERY RESOLVED MEMBER, FANNED OUT AGAIN if it is ITSELF a
+    // `[workspace]` root — see `expand_nested_workspace_member` below for why this is not exotic-input
+    // paranoia: `workspace_members` was computed ONCE here and never asked whether a resolved member
+    // needed its own fan-out, so a member that is itself a workspace root fell straight into `scan_one`
+    // as a plain crate. `scan_one`'s OWN nested-package filter then pruned that member's inner members —
+    // they carry their own Cargo.toml, the identical "different package" rule this very fan-out exists
+    // to honour — with NO `excluded` entry, NO `outOfScope` entry, and no stderr: an entire subtree
+    // vanished from the report as if it had never been part of the scan, not merely unread within it.
+    // Reproduced live: `deny Net` exited 0, `policy ✓`, over an inner member reaching Net through an
+    // impostor `{ workspace = true }` dependency.
+    for m in members {
+        expand_nested_workspace_member(m, 1, &mut dirs);
+    }
     // DEDUPE BY CANONICAL PATH — the root can also be a MEMBER, spelled differently.
     //
     // `members = ["codegen/swagger", "codegen/proto", "."]` is a real and legal layout (bollard ships

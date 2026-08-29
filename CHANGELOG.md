@@ -9,6 +9,44 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ Third adversarial review (2026-08-29): TWO silent gate-passes in `[workspace]` member
+  resolution, both pre-existing and untouched by the same day's TOML-parser move. Fixed by replacing
+  the hand-rolled resolver with a real `glob` matcher and a recursive nested-workspace fan-out — the
+  same "a hand-rolled scanner missed a spelling twice in a week" argument that moved manifest identity
+  parsing onto the real `toml` crate, applied one level up to MEMBER resolution.**
+  - **(1) NESTED WORKSPACE: a member that is itself a `[workspace]` root vanished with ZERO
+    disclosure.** `scan_target` computed `workspace_members` once and handed each resolved member
+    straight to `scan_one` as a plain crate; if that member declared its OWN `[workspace]` table,
+    `scan_one`'s nested-package filter (the same "a subdir with its own Cargo.toml is a different
+    package" rule the outer fan-out itself relies on) pruned every one of its inner members from the
+    walk — not into `excluded`, not into `outOfScope`, no stderr, nothing. Reproduced: an inner member
+    reaching `Net` through an impostor `{ workspace = true }` dependency was completely absent from the
+    report (not even a package entry), `deny Net` printed "policy ✓" at exit 0. `cargo metadata`
+    refuses this layout ("multiple workspace roots found"), but candor-scan's own stated purpose is
+    reading source WITHOUT building it — the identical reasoning `verified_workspace_root` already
+    applies to the ancestor-coincidence fix below. Fixed by `expand_nested_workspace_member`: every
+    resolved member that itself declares `[workspace]` is fanned out recursively (its own root package,
+    if any, plus its own resolved members, checked again for the same thing), instead of being scanned
+    as one flat crate. A nested workspace with zero resolved members warns and falls back to scanning
+    itself as one crate, mirroring the top-level "declares \[workspace\] but no members resolved" arm
+    exactly.
+  - **(2) MULTI-LEVEL GLOB: `members = ["crates/*/*"]` — an ORDINARY layout, not exotic — resolved to
+    ZERO members.** `workspace_members`'s matcher special-cased a bare `*` and a single trailing `/*`;
+    anything else fell through `.strip_suffix("/*")` and looked for a LITERAL directory named
+    `crates/*`, found none, and returned empty. `cargo metadata` on the same tree reports 3 real
+    members. Reproduced: `scan_target` read "no members resolved", fell back to a single-crate scan of
+    the root, and `deny Net` exited 0 over a real, unscanned `Net` call three directories down. Fixed by
+    routing every `members`/`exclude` entry through the `glob` crate — the SAME crate cargo's own
+    workspace resolver expands these fields through, not a third hand-rolled special case — so any glob
+    shape (`*`, `prefix/*`, `a/*/b`, …) resolves exactly as cargo resolves it. An entry that is a real
+    glob but matches nothing, or a literal path with no manifest, still resolves to nothing (unchanged,
+    pinned behaviour — see `workspace_members_expand_globs_and_honour_exclude`); an invalid glob pattern
+    is warned rather than silently dropped.
+  - **Over-charge control (byte-identical, old binary vs. new, before vs. after):** an ordinary
+    single-level `members = ["crates/*"]` workspace, a plain single crate, this repo's OWN real
+    workspace via `ci/self-gate.sh`, and a direct `candor-scan .` of this repo's own root — all
+    byte-for-byte unchanged. Every `caca530`/`fda08ad`/`75045f0`/`2e0521a` test and control passes
+    unchanged (250 candor-scan unit tests + 74 CLI tests).
 - **⚠ Second adversarial review (2026-08-29) of the ⟨caca530⟩/⟨fda08ad⟩/⟨75045f0⟩ calibrated-crate
   ledger fix, plus a third finding from the same reviewer round: TWO real defects closed, one measured
   and explicitly ACCEPTED as a stated, safe-direction residual.**
