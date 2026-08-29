@@ -34,6 +34,10 @@ DROP_FORMS = {
     "arc":    "std::sync::Arc::new(Guard)",
     "hashmap": "{ let mut m = std::collections::HashMap::new(); m.insert(0u8, Guard); m }",
     "nested": "vec![Box::new(Guard)]",          # container-of-container
+    # a CLOSURE that captured the guard by move, dropped WITHOUT ever being called. Closures are their
+    # own `TyKind` (not `TyKind::Adt`), so the field/element walker needs a dedicated arm for them — a
+    # real hole found 2026-08-29 (a captured effectful Drop was silently lost on scope-exit-only drop).
+    "closure": "{ let g = Guard; move || { let _ = &g; } }",
 }
 
 

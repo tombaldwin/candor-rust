@@ -482,7 +482,32 @@ absent "trait-object drop with no local Drop impl does NOT flood (drops_err)"   
 printf 'use std::ptr::NonNull;\nstruct Guard;\nimpl Drop for Guard { fn drop(&mut self){ let _=std::net::TcpStream::connect("10.0.0.2:9"); } }\nstruct MyBox { p: NonNull<Guard> }\nimpl Drop for MyBox { fn drop(&mut self){ unsafe { std::ptr::drop_in_place(self.p.as_ptr()); } } }\nfn via_mybox(m: MyBox){ let _ = m; }\nfn main(){ let b = Box::new(Guard); via_mybox(MyBox{ p: NonNull::from(Box::leak(b)) }); }\n' > "$DR/src/main.rs"
 pout=$(dl "$DR")
 want   "Drop via ptr::drop_in_place propagates (MyBox::drop gains Net)"  "$pout" 'MyBox as std::ops::Drop>::drop` effects: { Net'
+
+# ── 9c-ii. Explicit `drop(x)` relocating a destructor OWNED (not directly implemented) by `x`'s type ──
+# `mem::drop(x)` moves `x` into a non-local std body, so the scope-exit MIR-terminator path above never
+# sees it — a SEPARATE hand-rolled resolver (mem_drop_local_edge) recovers the edge. Until it walked the
+# same field/container walker as scope-exit, it only found `<T as Drop>::drop` when T ITSELF implements
+# Drop — so `drop(Wrapper{g})` (Wrapper has no `impl Drop`, only a Drop-carrying FIELD), `drop(Box::new(
+# Guard))`, and `drop(vec![Guard])` were all silently pure, while the IDENTICAL value falling out of scope
+# without the explicit `drop(..)` call was already caught. Two routes answering "what drops when this
+# value drops" must not disagree.
+printf 'struct Guard;\nimpl Drop for Guard { fn drop(&mut self){ let _=std::net::TcpStream::connect("10.0.0.2:9"); } }\nstruct Wrapper { g: Guard }\nfn explicit_wrapper(){ let w = Wrapper{ g: Guard }; drop(w); }\nfn explicit_box(){ let b = Box::new(Guard); drop(b); }\nfn explicit_vec(){ let v = vec![Guard]; drop(v); }\nfn main(){ explicit_wrapper(); explicit_box(); explicit_vec(); }\n' > "$DR/src/main.rs"
+eout=$(dl "$DR")
+want   "explicit drop() of a field-only Drop-carrying struct propagates (explicit_wrapper gains Net)" "$eout" '`explicit_wrapper` effects: { Net'
+want   "explicit drop() of a Box<Guard> propagates (explicit_box gains Net)"                           "$eout" '`explicit_box` effects: { Net'
+want   "explicit drop() of a Vec<Guard> propagates (explicit_vec gains Net)"                            "$eout" '`explicit_vec` effects: { Net'
 rm -rf "$(dirname "$DR")"
+
+# ── 9c-iii. A CLOSURE that captured an effectful-Drop value BY MOVE, dropped WITHOUT ever being called ──
+# Closures/coroutines are their own `TyKind` (not `TyKind::Adt`), so the field/element walker used by
+# both the scope-exit and explicit-drop() paths above needs its own arm for them — without it, a guard
+# captured into a closure that is stored and then dropped unused (never invoked) was silently pure.
+DC=$(mktemp -d)/dc; mkdir -p "$DC/src"
+printf '[package]\nname="dc"\nversion="0.1.0"\nedition="2021"\n' > "$DC/Cargo.toml"
+printf 'struct Guard;\nimpl Drop for Guard { fn drop(&mut self){ let _=std::net::TcpStream::connect("10.0.0.2:9"); } }\nfn closure_scope_exit(){ let g = Guard; let _c = move || { let _ = &g; }; }\nfn main(){ closure_scope_exit(); }\n' > "$DC/src/main.rs"
+cout=$(dl "$DC")
+want   "a closure capturing an effectful Drop by move propagates on scope exit, even if never called (closure_scope_exit gains Net)" "$cout" '`closure_scope_exit` effects: { Net'
+rm -rf "$(dirname "$DC")"
 
 # ── 9d. Layering with a CRATE-NAME from-scope (the real-world fix: not a silent no-op) ──
 echo "== layering crate-name from-scope (AS-EFF-009) =="

@@ -9,6 +9,46 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN, closed (rust-deep, two forms): a value whose destructor was reached through a
+  CLOSURE capture, or through an explicit `drop(x)` on anything that doesn't implement `Drop` itself,
+  was silently reported pure.** rust-deep is the only engine of the family with a MIR-derived model of
+  implicit `Drop` at all (the `Bet 4` fix, `mir_spike::drop_edges`, already closed the ORIGINAL hole —
+  scope-exit dropping a bare guard, or one behind a struct field / tuple / array / `Box`/`Vec`/`Rc`/`Arc`/
+  `HashMap` / `Box<dyn Trait>`). Both new holes are in code that walks the SAME question — "what local
+  `Drop::drop` impls does dropping a value of this type run?" — by two different, incompletely-shared
+  routes.
+  **(1) Closures/coroutines.** `local_drop_impls` (the walker `drop_edges` calls) pattern-matches
+  `Ty::kind()` and had arms for `Adt`/`Tuple`/`Array`/`Slice`/`Dynamic`, but a closure or `async` block is
+  its own `TyKind` (`Closure`/`Coroutine`/`CoroutineClosure`), not an `Adt` — so it fell into the `_ => {}`
+  catch-all. A guard captured BY MOVE into a closure that is stored and dropped WITHOUT ever being called
+  (`let g = Guard; let _c = move || { let _ = &g; };` — `_c` drops at scope exit, running `Guard::drop`)
+  was invisible: the enclosing fn was reported with no effect at all, not even `Unknown`. Fixed by adding
+  arms that recurse into `ClosureArgs`/`CoroutineArgs`/`CoroutineClosureArgs::upvar_tys()` exactly like the
+  existing arms recurse into fields/elements.
+  **(2) Explicit `drop(x)`.** `core::mem::drop(x)` moves `x` into a non-local std body, so it never
+  produces a MIR `Drop` terminator in the CALLER — `mem_drop_local_edge` exists specifically to recover
+  that edge, but it only ever resolved `<T as Drop>::drop` directly on `T`, i.e. only when `T` ITSELF
+  implements `Drop`. It never walked fields or containers, so `drop(Wrapper { g: Guard })` (`Wrapper` has
+  no `impl Drop`, only a Drop-carrying FIELD), `drop(Box::new(Guard))`, and `drop(vec![Guard])` were all
+  silently pure — while letting the IDENTICAL value fall out of scope without the explicit `drop(..)` call
+  was already caught by fix (1)'s sibling machinery. Two hand-rolled paths answering the same question
+  must not disagree; fixed by making `mem_drop_local_edge` call the SAME `local_drop_impls` walker
+  `drop_edges` uses (now `pub(crate)`), returning every local `Drop::drop` reachable from the argument's
+  type instead of at most one.
+  Both are realistic, not adversarial-only: capturing a resource guard in a closure that outlives its
+  invocation, and `drop(guard)` / `drop(Box::new(x))` / `drop(vec)` for early release, are ordinary Rust.
+  MEASURED against the pre-fix binary: a closure-scope-exit fixture and three explicit-`drop()` fixtures
+  (struct-field, `Box`, `Vec`) all went from zero disclosure (the function omitted from the report
+  entirely — candor's own convention for "judged pure") to correctly carrying the guard's effect, with a
+  genuinely pure sibling fn in the same crate staying clean throughout. Over-charge control: byte-identical
+  reports, zero diffs, running rust-deep over this repo's own four real crates (331 function entries
+  across `candor-report`/`candor-classify`/`candor-scan`/`candor-query`) before and after. Four new
+  `tests/integration.sh` cases pin both defects (`explicit_wrapper`/`explicit_box`/`explicit_vec`/
+  `closure_scope_exit`), each independently falsified against the pre-fix binary. `soundness/gen_drop.py`
+  gained a `closure` form so the existing drop-soundness fuzzer (`soundness/run_drop.sh`) covers this
+  shape going forward — pre-fix, 300 fuzzer seeds gave 135 failures, every one naming a `closure`-form
+  function; post-fix, 300/300 pass.
+
 - **⚠ CARDINAL SIN, closed: a peek finding was scope-matched against the WRONG ENTITY, silently
   defeating any policy rule scoped to an in-scope CALLER (BACKLOG "a peek finding is scope-matched
   against the wrong entity"; candor-swift's `7378f4f` closed the analogous case for its own, differently

@@ -1225,27 +1225,33 @@ fn return_type_driver_local_edge<'tcx>(
 /// `core::mem::drop(x)` runs `x`'s destructor INSIDE mem::drop's non-local body — so an effectful local
 /// `Drop` impl reached via an explicit `drop(guard)` (early lock/file/connection release) was silent-pure
 /// (scope-end drop-glue IS modeled, but moving the value into `mem::drop` relocates the destructor to a
-/// std fn the engine doesn't walk). Resolve `<T as Drop>::drop` for the argument type and edge it if local.
+/// std fn the engine doesn't walk).
+///
+/// Walk `local_drop_impls` — the SAME field/tuple/array/std-owning-container/trait-object/closure walker
+/// the scope-exit (implicit MIR `Drop` terminator) path uses — over the argument's type, rather than only
+/// resolving `<T as Drop>::drop` directly on `T` itself. The direct-only version missed every case where
+/// `T` has NO `Drop` impl of its own but OWNS a field/element that does: `drop(Wrapper { g: EffectfulGuard
+/// })` (no `impl Drop for Wrapper`), `drop(Box::new(guard))`, `drop(vec![guard])` all relocate an
+/// effectful destructor into `mem::drop`'s body exactly like a bare `drop(guard)` does, and were silently
+/// judged pure — while the IDENTICAL value falling out of scope naturally (no explicit `drop(..)`) was
+/// already caught by MIR's `Drop` terminator. Two hand-rolled paths answering the same question must not
+/// disagree; unifying them on one walker is the fix.
 fn mem_drop_local_edge<'tcx>(
     cx: &LateContext<'tcx>,
     expr: &Expr<'tcx>,
     callee_did: DefId,
-) -> Option<DefId> {
+) -> Vec<DefId> {
     if !cx.tcx.is_diagnostic_item(rustc_span::sym::mem_drop, callee_did) {
-        return None;
+        return Vec::new();
     }
-    let ExprKind::Call(_, args) = expr.kind else { return None };
-    let typeck = cx.maybe_typeck_results()?;
-    let arg_ty = typeck.expr_ty_adjusted(args.first()?);
-    let drop_trait = cx.tcx.lang_items().drop_trait()?;
-    let drop_fn = cx
-        .tcx
-        .associated_item_def_ids(drop_trait)
-        .iter()
-        .copied()
-        .find(|d| matches!(cx.tcx.def_kind(*d), DefKind::AssocFn))?;
-    let gargs = cx.tcx.mk_args(&[arg_ty.into()]); // Drop's only param is Self
-    resolve_local_method(cx, drop_fn, gargs)
+    let ExprKind::Call(_, args) = expr.kind else { return Vec::new() };
+    let Some(typeck) = cx.maybe_typeck_results() else { return Vec::new() };
+    let Some(first) = args.first() else { return Vec::new() };
+    let arg_ty = typeck.expr_ty_adjusted(first);
+    let mut out = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+    mir_spike::local_drop_impls(cx.tcx, arg_ty, &mut out, &mut seen);
+    out.into_iter().map(|l| l.to_def_id()).collect()
 }
 
 /// Resolve a COMPARISON-operator call (`==`/`!=` -> PartialEq::eq, `<`/`<=`/`>`/`>=` -> PartialOrd::
@@ -3384,9 +3390,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             add_edge(self, driver_did);
         }
 
-        // `mem::drop(x)` relocates `x`'s destructor into the non-local mem::drop body — recover the edge
-        // to the local `Drop::drop` (explicit early-release of an effectful guard, else silent-pure).
-        if let Some(drop_did) = mem_drop_local_edge(cx, expr, def_id) {
+        // `mem::drop(x)` relocates `x`'s destructor into the non-local mem::drop body — recover the edge(s)
+        // to every local `Drop::drop` reachable from `x`'s type (its own impl, plus fields/elements —
+        // see mem_drop_local_edge), else silent-pure.
+        for drop_did in mem_drop_local_edge(cx, expr, def_id) {
             add_edge(self, drop_did);
         }
 
