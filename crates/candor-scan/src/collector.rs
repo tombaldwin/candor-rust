@@ -928,14 +928,61 @@ impl<'a> CallCollector<'a> {
             // callable (the fn-typed sentinel). Without this, `g()` resolves as a phantom free-fn `g` and
             // is silently dropped (or fabricates a same-named local fn). Over-approximating to fn-typed
             // only marks `g()` Unknown — the safe direction for a missed-effect-is-a-hole tool.
-            syn::Expr::Call(c) => match &*c.func {
-                syn::Expr::Path(p) => p
-                    .path
-                    .get_ident()
-                    .and_then(|id| self.returns.get(&id.to_string()))
-                    .is_some_and(|t| t == RET_FN_TYPED),
-                _ => false,
-            },
+            syn::Expr::Call(c) => {
+                if let syn::Expr::Path(p) = &*c.func {
+                    if p.path
+                        .get_ident()
+                        .and_then(|id| self.returns.get(&id.to_string()))
+                        .is_some_and(|t| t == RET_FN_TYPED)
+                    {
+                        return true;
+                    }
+                    // `std::mem::transmute::<Src, Dst>(ptr)` (any spelling reaching here — bare
+                    // `transmute` via `use std::mem::transmute;`, `core::mem::transmute`, fully
+                    // qualified — matched by LEAF NAME, not full path) INTO AN UNTYPED `let`: the
+                    // caller names the target type at the CALL SITE via turbofish rather than on the
+                    // `let`, so `is_callable_type` never got a `Pat::Type` annotation to look at and
+                    // `func(..)` resolved as a phantom free-fn call and was silently dropped
+                    // (SOUNDNESS.md — the libc `dlopen`+`dlsym`+`transmute` shape). This is the call
+                    // site's twin of that annotation: if the transmute's own explicit target type is
+                    // itself callable, invoking the result is exactly as opaque. `Src` is frequently
+                    // `_` (inferred) and `Dst` is the LAST type argument when both are given, so take
+                    // the last rather than assuming position 1.
+                    if p.path.segments.last().is_some_and(|s| s.ident == "transmute") {
+                        if let Some(syn::PathArguments::AngleBracketed(args)) =
+                            p.path.segments.last().map(|s| &s.arguments)
+                        {
+                            return args
+                                .args
+                                .iter()
+                                .rev()
+                                .find_map(|a| match a {
+                                    syn::GenericArgument::Type(t) => Some(t),
+                                    _ => None,
+                                })
+                                .is_some_and(|t| is_callable_type(t, &self.generic_bounds));
+                        }
+                    }
+                }
+                false
+            }
+            // `lib.get::<T>(b"sym").unwrap()` (libloading's `Library::get<T>`, and the identical shape
+            // through `.expect(..)`): the turbofish names the target type at the call site exactly like
+            // `transmute::<Src, Dst>` above, and `.unwrap()`/`.expect()` is a transparent pass-through of
+            // the `Result`/`Option`'s inner type, so fn-typed-ness propagates through it unchanged.
+            // Without this an untyped `let func = lib.get::<extern fn(i32)>(b"f").unwrap(); func(5);`
+            // resolved `func` as a phantom free fn and dropped the call silently, the same hole as the
+            // `transmute` shape one call form over.
+            syn::Expr::MethodCall(m) => {
+                if matches!(m.method.to_string().as_str(), "unwrap" | "expect") {
+                    return self.expr_is_fn_typed(&m.receiver);
+                }
+                m.turbofish.as_ref().is_some_and(|tf| {
+                    tf.args.iter().any(|a| {
+                        matches!(a, syn::GenericArgument::Type(t) if is_callable_type(t, &self.generic_bounds))
+                    })
+                })
+            }
             _ => false,
         }
     }

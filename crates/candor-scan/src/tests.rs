@@ -5916,6 +5916,93 @@ trait G {
         assert!(!m["f"], "a normal value rebind must not be flagged unresolved");
     }
 
+    /// CARDINAL SIN, reproduced and closed: a function pointer resolved at RUNTIME (a dynamically-loaded
+    /// library symbol, or a raw `dlopen`/`dlsym` pointer) and then INVOKED read silent-pure. The same
+    /// invocation machinery `fn_typed_callback_invocation_is_unresolved` covers for a `fn()`/`impl Fn`
+    /// annotation missed two shapes that never spell one of those recognised forms:
+    ///
+    /// 1. `libloading::Symbol<T>` — a NAMED wrapper type `is_callable_type` didn't peel, so a `let` typed
+    ///    with it (the ordinary way to use `Library::get`) was not recorded as fn-typed at all, and the
+    ///    later call resolved as a phantom free-fn and was dropped.
+    /// 2. `std::mem::transmute::<Src, Dst>(ptr)` into an UNTYPED `let` — `Dst` is the caller's target
+    ///    type, but it lives in the CALL's turbofish, not a `Pat::Type` annotation, so nothing read it.
+    ///
+    /// Both are the honest `Unknown` (never a fabricated effect): rust-scan cannot know what the runtime
+    /// symbol actually does, only that the code calls through a boundary it cannot see. This is a NAME
+    /// match (`Symbol`, `transmute`), not a type-resolved one — rust-deep (rustc-typed) does not need it.
+    #[test]
+    fn runtime_resolved_pointer_invocation_is_unresolved() {
+        // Shape 1: `libloading::Symbol<T>` (and the `os::unix`/`os::windows` twin, same leaf) as an
+        // explicit `let` annotation — the "TYPED local" the bug report describes as reading silent-pure
+        // despite having a type annotation, because that annotation's wrapper wasn't recognised.
+        for src in [
+            r#"unsafe fn run(lib: libloading::Library) {
+                 let func: libloading::Symbol<unsafe extern "C" fn(i32) -> i32> = lib.get(b"f").unwrap();
+                 func(5);
+               }"#,
+            r#"unsafe fn run(lib: libloading::Library) {
+                 let func: libloading::os::unix::Symbol<extern "C" fn()> = lib.get(b"f").unwrap();
+                 func();
+               }"#,
+            // A boxed/shared bare fn pointer — the same wrapper-peeling closes this identical
+            // (independently unnoticed) hole for `Box`/`Rc`/`Arc<fn()>`.
+            "fn run(b: Box<fn()>) { b(); }",
+        ] {
+            let m = unresolved_of(src);
+            assert!(m["run"], "runtime-resolved pointer through a named wrapper type silently dropped: {src}");
+        }
+        // Shape 2: `transmute::<_, Dst>(ptr)` into an UNTYPED let — the libc `dlopen`+`dlsym` shape.
+        for src in [
+            r#"unsafe fn run(sym: *mut std::ffi::c_void) {
+                 let func = std::mem::transmute::<_, unsafe extern "C" fn(i32) -> i32>(sym);
+                 func(5);
+               }"#,
+            // `use`-imported bare `transmute` — matched by leaf name, not the fully-qualified path.
+            r#"use std::mem::transmute;
+               unsafe fn run(sym: *mut std::ffi::c_void) {
+                 let func = transmute::<_, extern "C" fn()>(sym);
+                 func();
+               }"#,
+            // The libloading twin of shape 2: an UNTYPED `let` relying on `.get::<T>()`'s own turbofish
+            // (found sweeping the same class) rather than a `let`-side annotation.
+            r#"unsafe fn run(lib: libloading::Library) {
+                 let func = lib.get::<unsafe extern "C" fn(i32) -> i32>(b"f").unwrap();
+                 func(5);
+               }"#,
+        ] {
+            let m = unresolved_of(src);
+            assert!(m["run"], "runtime-resolved pointer via untyped transmute/turbofish silently dropped: {src}");
+        }
+        // ALREADY-CORRECT controls (must not regress): a `fn()`-typed local built via `transmute`, and
+        // the transmute-and-call fused into one expression with no local at all.
+        for src in [
+            r#"unsafe fn run(sym: *mut std::ffi::c_void) {
+                 let func: unsafe extern "C" fn(i32) -> i32 = std::mem::transmute(sym);
+                 func(5);
+               }"#,
+            r#"unsafe fn run(sym: *mut std::ffi::c_void) {
+                 std::mem::transmute::<_, extern "C" fn()>(sym)();
+               }"#,
+        ] {
+            let m = unresolved_of(src);
+            assert!(m["run"], "an already-correct shape regressed: {src}");
+        }
+        // OVER-CHARGE CONTROL: a pointer OBTAINED but never called must stay quiet — marking a binding
+        // fn-typed changes nothing unless it is actually invoked with call syntax.
+        for src in [
+            r#"unsafe fn run(lib: libloading::Library) {
+                 let _func: libloading::Symbol<unsafe extern "C" fn(i32) -> i32> = lib.get(b"f").unwrap();
+               }"#,
+            r#"unsafe fn run(sym: *mut std::ffi::c_void) {
+                 let _func = std::mem::transmute::<_, extern "C" fn()>(sym);
+               }"#,
+            "fn run(_b: Box<fn()>) {}",
+        ] {
+            let m = unresolved_of(src);
+            assert!(!m["run"], "a runtime-resolved pointer never called must NOT be flagged (over-charge): {src}");
+        }
+    }
+
     /// A `#[cfg(test)]` free fn / impl block / impl method at module scope is test-only and must NOT
     /// appear in the default (non-`--include-tests`) report — the guard was on `mod` only.
     #[test]
