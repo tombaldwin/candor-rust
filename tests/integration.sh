@@ -509,6 +509,50 @@ cout=$(dl "$DC")
 want   "a closure capturing an effectful Drop by move propagates on scope exit, even if never called (closure_scope_exit gains Net)" "$cout" '`closure_scope_exit` effects: { Net'
 rm -rf "$(dirname "$DC")"
 
+# ── 9c-iv. A `path`/`git` dependency named `core`/`alloc`/`std`/`proc_macro`/`test` — a same-name
+# IMPOSTOR of the sysroot frontier, not a rename ──
+# `record_resolved_call`'s coverage/invisible-floor skip and `is_pure_std_trait`'s trait-purity
+# exemption both trust `cx.tcx.crate_name(krate)`'s STRING alone. crates.io blocks publishing under
+# these five names, but a `path`/`git` dependency is not a registry crate — Cargo compiles and
+# `--extern`s one under WHATEVER name its own `[package]` declares, so a dependency named `core`
+# compiles ALONGSIDE the real sysroot `core` and the string can't tell them apart. Unlike the
+# renamed-dependency case (a manifest alias still gets its own honest, differently-named identity), the
+# attacker's crate answers to the TRUSTED name directly — both a plain call into it and a `dyn` call
+# through a trait it defines itself (matching one of `is_pure_std_trait`'s 11 names) must stay disclosed,
+# not silently floored to pure. `is_real_sysroot_frontier` (lib.rs) closes this by asking rustc where the
+# crate actually loaded from (`used_crate_source`): the real sysroot always resolves under the active
+# toolchain's own sysroot directory; a `path` dependency never does.
+CI=$(mktemp -d)/ci; mkdir -p "$CI/corelib/src" "$CI/bin/src" "$CI/bin/.candor"
+printf '[package]\nname="core"\nversion="0.1.0"\nedition="2021"\n' > "$CI/corelib/Cargo.toml"
+printf 'pub fn sneaky_write() { let _ = std::fs::write("/tmp/candor-core-impostor-it", b"hit"); }\npub trait Display { fn show(&self) -> String; }\npub struct Impostor;\nimpl Display for Impostor { fn show(&self) -> String { let _ = std::fs::write("/tmp/candor-core-impostor-it2", b"hit"); "impostor".to_string() } }\n' > "$CI/corelib/src/lib.rs"
+printf '[package]\nname="ci-bin"\nversion="0.1.0"\nedition="2021"\n\n[dependencies]\ncore = { path = "../corelib" }\n' > "$CI/bin/Cargo.toml"
+printf 'fn call_direct() { core::sneaky_write(); }\nfn via_dyn(x: &dyn core::Display) -> String { x.show() }\nfn main() { call_direct(); let _ = via_dyn(&core::Impostor); }\n' > "$CI/bin/src/main.rs"
+dl "$CI/bin" env CANDOR_JSON="$CI/bin/.candor/r" >/dev/null
+ci_summary=$(python3 - "$CI/bin/.candor" <<'PY'
+import json, glob, sys
+d = {}
+for f in glob.glob(sys.argv[1] + '/r.ci_bin.Executable.json'):
+    data = json.load(open(f))
+    funcs = data['functions'] if isinstance(data, dict) else data
+    for e in funcs:
+        d[e['fn']] = e
+for fn in ('call_direct', 'via_dyn'):
+    e = d.get(fn, {})
+    print(f"{fn} inferred={sorted(e.get('inferred', []))} invisible={sorted(e.get('invisible', []))} unknownWhy={sorted(e.get('unknownWhy', []))}")
+PY
+)
+# `call_direct`'s effectful call into the impostor must not be floored to a bare, unqualified "pure" —
+# it must carry the SAME `invisible` disclosure an ordinary uncalibrated dependency gets. This is a
+# JSON-report check, not a `dl`-warning one: a floored-pure-but-invisible fn (empty `inferred`) never
+# gets a text warning either way — the fix's effect is only visible in the report's `invisible` field.
+want "an impostor `core`'s direct call is disclosed like any other uncovered dependency (call_direct)" \
+     "$ci_summary" "call_direct inferred=[] invisible=['core']"
+# `via_dyn` dispatches through a trait the IMPOSTOR itself defines, named `Display` — one of
+# `is_pure_std_trait`'s 11 exempted names. It must read honestly Unknown, not silently pure.
+want "the impostor's own same-named trait dispatch is honestly Unknown, not pure-std-trait-exempt (via_dyn)" \
+     "$ci_summary" "via_dyn inferred=['Unknown']"
+rm -rf "$(dirname "$CI")"
+
 # ── 9d. Layering with a CRATE-NAME from-scope (the real-world fix: not a silent no-op) ──
 echo "== layering crate-name from-scope (AS-EFF-009) =="
 LC=$(mktemp -d)/lc; mkdir -p "$LC/src"

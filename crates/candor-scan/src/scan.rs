@@ -1751,6 +1751,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .any(|r| fields.contains_key(r) || merged.drop_types.contains(r));
         for c in &f.calls {
             let cr = c.path.split("::").next().unwrap_or("");
+            // The dependency's REAL package identity (post `package = "…"` manifest rename), hoisted
+            // once per call and reused by every crate-identity-keyed lookup below (the cross-crate joins,
+            // and — since ⟨renamed-dep classify() alias⟩ — the direct classifier too): `cr` is only ever
+            // the alias a project's own Cargo.toml key chose (and the source text a call site actually
+            // spells), which is meaningless to a rule table written against the published crate's name.
+            let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
             // A DEP-LAZY MARKER (`<crate>::<lazy>::NAME`, emitted for a qualified mention of what may be a
             // dependency's lazy static) is consumed by the cross-crate join BELOW and by nothing else: it
             // is a speculative name, so letting it reach local resolution or the classifier would invent
@@ -1759,7 +1765,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // Cross-crate DROP GLUE: `cr::<drop>::Type` — binding a dependency's value runs its `Drop` at
             // scope exit. Joined here and nowhere else, for the same reason as the lazy marker below.
             if let Some(ty) = c.path.strip_prefix(&format!("{cr}::{DROP_MARKER}::")) {
-                let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
                 if deps_idx.crates.contains(cr_real) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{ty}::drop")) {
                         apply_dep_fn(de, &f.qual, DepSink {
@@ -1784,7 +1789,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // disclosure lost. That filtering is right for keyed-and-missed and wrong here; the two need
             // different spellings. See DEP-RECEIVER-TYPING-DESIGN.md.
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
-                let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
                 // THIRD conjunct, and it is what makes this precise rather than noisy: the dep must be
                 // CHAINED. For an UNCHAINED dep the κ ledger already discloses `invisible: [cr]`, so the
                 // reader is warned and a second disclosure buys nothing but false uncertainty — measured,
@@ -1843,7 +1847,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 continue;
             }
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{LAZY_UNIT_PREFIX}::")) {
-                let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
                 if deps_idx.crates.contains(cr_real) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{LAZY_UNIT_PREFIX}::{rest}")) {
                         apply_dep_fn(de, &f.qual, DepSink {
@@ -1856,12 +1859,36 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 continue;
             }
+            // ⟨renamed-dep classify() alias⟩ SOUNDNESS finding: `classify()`'s rule tables (and
+            // `scan_builder_entry_effect`'s/`is_model_sdk_crate`'s) are written against the REAL published
+            // crate — `cr` is the manifest's own alias when `[dependencies] alias = { package = "real" }`
+            // renames it, so a call through the alias (`htclient::blocking::get` for `reqwest` renamed to
+            // `htclient`) previously never matched any rule at all. NOT a cardinal sin — the miss still
+            // fell through to the honest `invisible`-qualified floor below, never a fabricated purity claim
+            // — but it silently downgraded a KNOWN, calibrated effect (`deny Net` exiting 1 on the
+            // unaliased crate) to an advisory `invisible` disclosure that a `deny` gate does not act on
+            // (`deny Net` exits 0 on the byte-identical renamed call). Live-reproduced against this fix's
+            // pre-fix binary: a `reqwest` dependency renamed `htclient` read `inferred: []`,
+            // `invisible: ["htclient"]`, `deny Net` exit 0; the SAME call unaliased read `inferred:
+            // ["Net"]`, `deny Net` exit 1. rust-deep is unaffected (`cx.tcx.crate_name` resolves the
+            // compiled crate's true identity independent of any local extern alias) — verified via
+            // `cargo dylint` against the identical renamed-reqwest fixture, `inferred: ["Net"]` unchanged.
+            // Fixed by resolving `cr_real` (already computed above, and already used by every OTHER
+            // crate-identity-keyed lookup in this loop — the CANDOR_DEPS joins) before classification, and
+            // rewriting the path's own leading segment too: several `classify()` rules match a full EXACT
+            // path (`path == "git2::Repository::clone"`), which a resolved crate_name paired with an
+            // alias-prefixed path would still never satisfy.
+            let path_real: std::borrow::Cow<str> = if cr_real == cr {
+                std::borrow::Cow::Borrowed(c.path.as_str())
+            } else {
+                std::borrow::Cow::Owned(format!("{cr_real}{}", &c.path[cr.len()..]))
+            };
             // SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface (candor_classify::MODEL_SDK_CRATES): a qualified call
             // into a curated model-provider client → `Llm` + `Net` (Net is never dropped — a model call IS
             // network I/O). No method gating (single-purpose clients), the analog of java's isModelSdkOwner.
-            let model_sdk = c.path.contains("::") && candor_classify::is_model_sdk_crate(cr);
-            let classified = candor_classify::classify(cr, &c.path)
-                .or_else(|| scan_builder_entry_effect(cr, &c.path))
+            let model_sdk = c.path.contains("::") && candor_classify::is_model_sdk_crate(cr_real);
+            let classified = candor_classify::classify(cr_real, &path_real)
+                .or_else(|| scan_builder_entry_effect(cr_real, &path_real))
                 .or(if model_sdk { Some("Llm") } else { None });
             // DROP-GLUE detection: a `T::assoc()` ASSOCIATED-FN call (a CONSTRUCTOR like `Guard::new`)
             // where `T` is a LOCAL drop type means a `T` value is CREATED in this scope and dropped at exit.
@@ -2165,8 +2192,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // sibling report covers inherits that fn's recorded effects + literal surfaces — UNLESS the call
             // resolved to a local target or names a local bare leaf (then the local is authoritative; the
             // join would fabricate). Joined unambiguous-tail2-first, then unambiguous leaf, like resolve_target.
-            // A renamed dep joins under its real package name.
-            let cr_real: &str = dep_renames.get(cr).map(String::as_str).unwrap_or(cr);
+            // A renamed dep joins under its real package name (`cr_real`, hoisted above).
             let mut dep_join_hit = false;
             if classified.is_none() && !resolved_local && !suppress_bare_leaf
                 && c.path.contains("::") && deps_idx.crates.contains(cr_real)

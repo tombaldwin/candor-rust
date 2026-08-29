@@ -9,6 +9,82 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **Coverage-only, no behavior change (rust-scan): `is_callable_type`'s `Rc<fn()>`/`Arc<fn()>` wrapper
+  peeling — verified sound, then given the fixture it was missing.** The `defe53d` widening's own doc
+  comment and match arm name `Box`/`Rc`/`Arc`/`Symbol<T>` symmetrically, but
+  `runtime_resolved_pointer_invocation_is_unresolved` only asserted `Box<fn()>` end to end — `Rc`/`Arc`
+  were sound by code inspection only, never independently measured. Verified directly (a real scan of
+  `fn run(b: std::rc::Rc<fn()>) { b(); }` / the `Arc` twin reads `Unknown`/`callback:unresolved call`,
+  and a never-called binding of either stays pure) before adding both shapes to the existing test's
+  positive and over-charge arrays, closing the untested half of an already-correct claim.
+
+- **⚠ CARDINAL SIN, closed (rust-deep): a `path`/`git` dependency named `core`/`alloc`/`std`/
+  `proc_macro`/`test` — the sysroot's own five names, not a rename — read silent-pure, both for a
+  direct call into it and for `dyn` dispatch through a trait it defines itself under one of
+  `is_pure_std_trait`'s 11 exempted names.** `record_resolved_call`'s coverage/`invisible`-floor skip
+  and `is_pure_std_trait`'s trait-purity exemption both trusted `cx.tcx.crate_name(krate)`'s STRING
+  alone. crates.io blocks publishing under these five names, but a `path`/`git` dependency is not a
+  registry crate — Cargo compiles and `--extern`s one under whatever `[package]` name its own manifest
+  declares, and two different `CrateNum`s can carry the identical name string. Unlike a manifest
+  `package = "…"` RENAME (below) — where the source spells an alias and the real dependency still gets
+  its own honest, differently-named identity — this attacker doesn't rename anything; their own crate
+  answers to the trusted name directly. Live-reproduced: a `path` dependency named `core` performing a
+  real `std::fs::write`, called directly and through its own `dyn Display`-shaped trait, produced
+  `"functions": []` (total silence, not even `invisible`) and `deny Fs Unknown` exited 0 with zero
+  warnings. The exact class R59/R60/`caca530`/`fda08ad`/`75045f0` already closed for rust-scan's
+  `CALIBRATED_CRATES` exemption ("a name is not an identity") — unfixed here because rust-deep's
+  crate-name gates were assumed immune BY CONSTRUCTION (rustc resolves real identity, unlike rust-
+  scan's syntactic string match), which is true for a renamed dependency and false for this one: the
+  string can still lie when TWO real `CrateNum`s share it.
+  Fixed by asking rustc's own authority rather than re-deriving one: a new `is_real_sysroot_frontier`
+  (`src/lib.rs`) uses `used_crate_source` to check where a crate actually loaded from — the real sysroot
+  `std`/`core`/`alloc`/`proc_macro`/`test` always resolve under the active toolchain's OWN sysroot
+  directory; a `path`/`git` dependency never does. Gated into all three exemption sites (the trait-
+  dispatch purity check, and the coverage/invisible-floor skip's two call sites). An impostor with no
+  located source at all (declared but never actually needed) can't be told apart from the genuine
+  article either way; that residual fails toward TRUST, unchanged from today and the same posture
+  `non_registry_lock_names`'s absent-lockfile arm already takes — never assumed from silence. This also
+  costs the exemption for a genuine `-Z build-std` project (std/core/alloc rebuilt from source under the
+  project's own `target/`, a real but rare nightly-only configuration) — the SAFE direction, extra
+  disclosure on real code, never a new false purity claim.
+  CONTROLS, falsified against the pre-fix binary (`tests/integration.sh` §9c-iv): the impostor's direct
+  call now discloses `invisible: ["core"]` instead of vanishing; its own-defined `Display` trait's `dyn`
+  dispatch now reads `Unknown` instead of the pure-std-trait exemption; both are silent/exempt on the
+  pre-fix binary. OVER-CHARGE CONTROLS: `ui/trust.rs`'s `format_error` (a REAL `&dyn std::error::Error`)
+  stays exempt, unchanged — the genuine sysroot frontier is untouched; `soundness/run_drop.sh` (60/60)
+  and the full `tests/integration.sh` (156/156, up from 154 — two new cases) are unaffected; this repo's
+  own dogfood fixtures (`sample/`, `sample-capstd/`, the latter with cap-std's real dependency tree) are
+  byte-identical before and after under `cargo dylint`.
+
+- **⚠ SOUNDNESS finding, closed (rust-scan) — NOT a cardinal sin (never silent; see below), but a real
+  `deny`-gate coverage loss: a manifest `package = "…"` RENAMED dependency's calls never reached
+  `classify()` under the crate's real identity.** `classify()`, `scan_builder_entry_effect()` and
+  `is_model_sdk_crate()` were all called with `cr` — the call's syntactic first path segment, which is
+  the manifest ALIAS when
+  `[dependencies] alias = { package = "real" }` renames a dependency — never `cr_real` (`dep_renames`'s
+  resolved identity, already used by every OTHER crate-identity lookup in the same loop: the CANDOR_DEPS
+  cross-crate joins). A renamed `reqwest` (`htclient = { package = "reqwest" }`) calling
+  `htclient::blocking::get(url)` matched no rule in `classify()`'s table (which is written against
+  `reqwest`, not the caller's chosen alias) and fell to the honest uncalibrated-dependency floor: NOT
+  silent — `invisible: ["htclient"]` was correctly disclosed — but a `deny Net` gate does not act on
+  `invisible`, so the byte-identical unaliased call gated correctly (`deny Net` exit 1) while the renamed
+  one exited 0 ("policy ✓"). rust-deep is unaffected by this class: `cx.tcx.crate_name` resolves the
+  compiled crate's TRUE identity independent of any local extern alias (verified via `cargo dylint`
+  against the identical renamed-reqwest fixture: `inferred: ["Net"]`, unchanged by the rename).
+  Fixed by resolving `cr_real` once per call (hoisted to the top of the loop, replacing four separate
+  redundant re-derivations) and using it for `classify()`/`scan_builder_entry_effect()`/
+  `is_model_sdk_crate()` — and rewriting the call PATH's own leading segment too, not just the crate-name
+  argument: several `classify()` rules match a full EXACT path (`path == "git2::Repository::clone"`),
+  which a resolved crate_name paired with an alias-prefixed path would still never satisfy.
+  CONTROLS, falsified against the pre-fix binary (`crates/candor-scan/src/tests.rs`,
+  `renamed_dependency_calls_classify_under_the_real_package_name`): a renamed `reqwest` now classifies
+  `Net` exactly like the unaliased call (byte-identical report, minus the fn name), and a renamed `git2`
+  still hits the FULL-PATH-keyed `Repository::clone` rule — both silent/uncalibrated-floored on the
+  pre-fix binary. OVER-CHARGE CONTROL: this repo's own four real crates
+  (`candor-report`/`candor-classify`/`candor-scan`/`candor-query`, none of which rename a dependency)
+  are byte-identical before and after, save for `loc` line-number shifts from this fix's own added
+  comments.
+
 - **⚠ CARDINAL SIN, closed (rust-scan): a function pointer resolved at RUNTIME and then INVOKED read
   silent-pure.** `is_callable_type` (`lang.rs`) recognised a `fn()`/`impl Fn*`/`dyn Fn*` annotation
   directly, and `expr_is_fn_typed` (`collector.rs`) propagated fn-typed-ness through a rebind — but

@@ -362,6 +362,70 @@
         assert_eq!(ren3.get("real").map(String::as_str), Some("renamed_crate"), "real rename lost: {ren3:?}");
     }
 
+    /// ⟨renamed-dep classify() alias⟩ SOUNDNESS finding, end to end (unlike the unit-level
+    /// `cargo_toml_deps_handles_all_header_forms` above, which only proves the rename MAP is built
+    /// correctly — nothing previously proved a renamed call site actually got CLASSIFIED through it).
+    /// `[dependencies] alias = { package = "real" }` means the source spells `alias::…`, but `classify()`'s
+    /// rule tables — including a rule keyed on a FULL EXACT path, `git2`'s `Repository::clone` — are
+    /// written against `real`. Before the fix this fell all the way through to the honest
+    /// `invisible`-qualified floor: disclosed, not silent (never a false purity claim), but a `deny`
+    /// gate does not act on `invisible`, so a KNOWN, calibrated effect silently lost its gate coverage
+    /// purely because of a manifest rename — the byte-identical unaliased call already gated correctly.
+    /// rust-deep is unaffected by this class (`cx.tcx.crate_name` resolves the compiled crate's true
+    /// identity, independent of any local extern alias) — verified separately via `cargo dylint` against
+    /// the identical renamed-reqwest shape.
+    #[test]
+    fn renamed_dependency_calls_classify_under_the_real_package_name() {
+        let build = |manifest: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!(
+                "candor-rename-classify-{}-{}", manifest.len() ^ src.len(), std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!(
+                "[package]\nname = \"victim\"\nversion = \"0.1.0\"\n[dependencies]\n{manifest}\n"
+            )).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            let v = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        // A SUFFIX-matched rule (reqwest's Net classification keys on the receiver type + a terminal
+        // verb) through a renamed dependency.
+        let aliased = build(
+            "htclient = { version = \"0.11\", package = \"reqwest\" }",
+            "pub fn fetch(u: &str) -> String { htclient::blocking::get(u).unwrap().text().unwrap() }\n",
+        );
+        assert_eq!(effs(fn_entry(&aliased, "fetch")), vec!["Net".to_string()],
+            "a renamed reqwest call must classify Net exactly like the unaliased call — got:\n{aliased:#}");
+        assert!(fn_entry(&aliased, "fetch").get("invisible").is_none(),
+            "a correctly-classified renamed call must not ALSO carry the uncalibrated-floor `invisible` \
+             qualifier — that's reserved for calls classify() genuinely can't resolve:\n{aliased:#}");
+        // The identical call, unaliased — proves the rename is the only variable and the two must agree.
+        let unaliased = build(
+            "reqwest = { version = \"0.11\" }",
+            "pub fn fetch(u: &str) -> String { reqwest::blocking::get(u).unwrap().text().unwrap() }\n",
+        );
+        assert_eq!(aliased["functions"], unaliased["functions"],
+            "renamed and unaliased reports must be byte-identical in their effect fields:\naliased:\
+             {aliased:#}\nunaliased:{unaliased:#}");
+        // A FULL-EXACT-PATH rule (`git2`'s `path == "git2::Repository::clone"`, chosen specifically because
+        // it cannot be satisfied by crate_name alone — it also requires the PATH's own leading segment to
+        // read the real name, proving the fix rewrites the path, not just the crate_name argument).
+        let git_aliased = build(
+            "vcs = { version = \"0.18\", package = \"git2\" }",
+            "pub fn clone_it(u: &str, p: &str) { vcs::Repository::clone(u, p).unwrap(); }\n",
+        );
+        assert_eq!(effs(fn_entry(&git_aliased, "clone_it")), vec!["Net".to_string()],
+            "a renamed git2 must still hit the FULL-PATH-keyed `Repository::clone` rule:\n{git_aliased:#}");
+    }
+
     #[test]
     fn dep_report_chaining_joins_unambiguously_and_distrusts_stale_versions() {
         let d = std::env::temp_dir().join(format!("candor-deps-test-{}", std::process::id()));
@@ -5945,8 +6009,13 @@ trait G {
                  func();
                }"#,
             // A boxed/shared bare fn pointer — the same wrapper-peeling closes this identical
-            // (independently unnoticed) hole for `Box`/`Rc`/`Arc<fn()>`.
+            // (independently unnoticed) hole for `Box`/`Rc`/`Arc<fn()>`. All three are asserted, not just
+            // `Box`: the doc comment and `is_callable_type`'s match arm name all three symmetrically, but
+            // ⟨2026-08-29, verifying the corpus-attack brief's "worth attacking" item⟩ found only `Box`
+            // had a fixture — `Rc`/`Arc` were sound by code inspection only, never independently measured.
             "fn run(b: Box<fn()>) { b(); }",
+            "fn run(b: std::rc::Rc<fn()>) { b(); }",
+            "fn run(b: std::sync::Arc<fn()>) { b(); }",
         ] {
             let m = unresolved_of(src);
             assert!(m["run"], "runtime-resolved pointer through a named wrapper type silently dropped: {src}");
@@ -5997,6 +6066,8 @@ trait G {
                  let _func = std::mem::transmute::<_, extern "C" fn()>(sym);
                }"#,
             "fn run(_b: Box<fn()>) {}",
+            "fn run(_b: std::rc::Rc<fn()>) {}",
+            "fn run(_b: std::sync::Arc<fn()>) {}",
         ] {
             let m = unresolved_of(src);
             assert!(!m["run"], "a runtime-resolved pointer never called must NOT be flagged (over-charge): {src}");
