@@ -2204,6 +2204,45 @@ fn is_pure_fmt_write(crate_name: &str, item_name: &str) -> bool {
     crate_name == "core" && item_name == "Write"
 }
 
+/// ⟨core/alloc-impostor⟩ SOUNDNESS finding: `is_pure_std_trait`/`is_pure_fmt_write` (and
+/// `record_resolved_call`'s own std/core/alloc/proc_macro/test skip, two call sites below) all trust
+/// `cx.tcx.crate_name(krate)`'s STRING alone. crates.io blocks publishing a crate literally named
+/// `std`/`core`/`alloc`/`proc_macro`/`test`, but a `path`/`git` dependency is not a registry crate —
+/// Cargo compiles and `--extern`s one under any `[package] name` its own manifest declares, so a local
+/// dependency named `core` (or the other four) compiles ALONGSIDE the real sysroot crate of that name,
+/// and `crate_name` cannot tell the two apart: rustc gives every dependency an independent `CrateNum`,
+/// but two different `CrateNum`s can carry the identical name string. MEASURED, live-reproduced: a
+/// `path` dependency named `core` with a real `std::fs::write` — called BOTH directly and through a
+/// local `dyn Display`-shaped trait it defines itself — produced `"functions": []` (total silence, not
+/// even `invisible`) and `deny Fs` exited 0. The exact class R59/R60/`caca530`/`fda08ad`/`75045f0`
+/// already closed for rust-scan's `CALIBRATED_CRATES` exemption ("a name is not an identity"), unfixed
+/// here because rust-deep's crate-name gates were assumed immune BY CONSTRUCTION (rustc resolves real
+/// identity, unlike rust-scan's syntactic string match) — true for a MANIFEST ALIAS (a renamed dep still
+/// gets its OWN honest `CrateNum`+name), false here: the attacker doesn't rename anything, they make
+/// their OWN crate ANSWER to the trusted name.
+///
+/// Ask the authority rather than re-deriving it: rustc's own `used_crate_source` records where a crate
+/// was actually loaded from. The real sysroot `std`/`core`/`alloc`/`proc_macro`/`test` always resolve
+/// from the ACTIVE toolchain's sysroot directory (`session.opts.sysroot`); nothing else — not a
+/// registry cache, not a workspace `target/` — can produce that path, so a same-named crate loaded from
+/// anywhere else is not the crate its name claims to be. An impostor with genuinely NO located file
+/// (declared but never actually needed, so `used_crate_source` has nothing) can't be distinguished from
+/// the genuine article by this check either way; that residual case fails toward TRUST (unchanged from
+/// today), the same posture `non_registry_lock_names`' absent-lockfile arm already takes — a denylist
+/// narrowing only fires on POSITIVE evidence of impersonation, never assumes it from silence. This also
+/// means a `-Z build-std` project (real std/core/alloc rebuilt from source under the project's own
+/// `target/`, a genuine but rare nightly-only configuration) loses the exemption too — the SAFE
+/// direction (extra disclosure on real code), never a new false purity claim.
+fn is_real_sysroot_frontier(cx: &LateContext<'_>, krate: rustc_span::def_id::CrateNum) -> bool {
+    if krate == rustc_span::def_id::LOCAL_CRATE {
+        // The local crate is never itself the sysroot frontier, and `used_crate_source` panics on it.
+        return false;
+    }
+    let sysroot = cx.tcx.sess.opts.sysroot.path();
+    let mut paths = cx.tcx.used_crate_source(krate).paths().peekable();
+    paths.peek().is_none() || paths.into_iter().all(|p| p.starts_with(sysroot))
+}
+
 /// Collect the capability tokens a type carries, peeling common WRAPPERS so a cap behind
 /// `Option<&Fs>` / `Vec<&Fs>` / `Box<&Fs>` / `Result<&Fs, _>` / a tuple is still recognised — not just
 /// a bare `&Fs`. Without this, wrapping a capability produced a FALSE AS-EFF-001 ("performs Fs but
@@ -2665,7 +2704,10 @@ impl Candor {
             let ti = cx.tcx.item_name(td);
             let ti = ti.as_str();
             // `core::fmt::Write` is pure formatting — never `Unknown`, even via `&mut dyn fmt::Write`.
-            let pure = is_pure_std_trait(tk, ti) || is_pure_fmt_write(tk, ti);
+            // ⟨core/alloc-impostor⟩: the exemption is for the REAL sysroot trait, not any trait a same-
+            // named `path`/`git` dependency happens to define — see `is_real_sysroot_frontier`'s doc.
+            let pure = (is_pure_std_trait(tk, ti) || is_pure_fmt_write(tk, ti))
+                && is_real_sysroot_frontier(cx, td.krate);
             // Generic (non-`dyn`) dispatch is assumed pure by default (marking it all Unknown floods —
             // that's `CANDOR_PARANOID`). EXCEPT over a known-effectful std trait (`io::Read`/`Write`/…),
             // where "assumed pure" is a real under-report: the reader/writer behind the generic could be
@@ -2693,12 +2735,14 @@ impl Candor {
                                   caller: LocalDefId, def_id: DefId, trait_did: Option<DefId>) {
         // Record a directly-performed effect (built-in classifier, then project rules).
         let crate_name = cx.tcx.crate_name(def_id.krate);
+        // ⟨core/alloc-impostor⟩: a name match alone is not enough to trust a call as the sysroot
+        // frontier — see `is_real_sysroot_frontier`'s doc. Computed once, reused by both skips below.
+        let std_frontier = matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
+            && is_real_sysroot_frontier(cx, def_id.krate);
         // Note every EXTERNAL crate we actually saw a resolved call into — ground truth for
         // the coverage blind-spot check (catches deps declared in workspace members, which a
         // root-manifest scan misses). std/local are excluded; the consumer filters the rest.
-        if !def_id.is_local()
-            && !matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
-        {
+        if !def_id.is_local() && !std_frontier {
             self.encountered.insert(crate_name.to_string());
         }
         let path = cx.tcx.def_path_str(def_id);
@@ -2722,9 +2766,7 @@ impl Candor {
         // cannot see through. The deep engine floors it to pure like the syntactic engines; record the crate
         // so the fn's `invisible` qualifies its pure verdict (the honesty contract, propagated below). std-
         // like crates are known-pure-frontier, excluded — matching the `encountered` coverage filter.
-        if effect.is_none() && trait_did.is_none() && !def_id.is_local()
-            && !matches!(crate_name.as_str(), "std" | "core" | "alloc" | "proc_macro" | "test")
-        {
+        if effect.is_none() && trait_did.is_none() && !def_id.is_local() && !std_frontier {
             self.invisible_direct.entry(caller).or_default().insert(crate_name.to_string());
         }
         if let Some(effect) = effect {

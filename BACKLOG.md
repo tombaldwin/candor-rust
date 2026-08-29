@@ -2,6 +2,53 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+## 2026-08-29 — `is_pure_std_trait`'s 11-trait allowlist: a MEASURED, real, silent gap in a
+## DELIBERATE, tested, documented trade-off — filed, not fixed here
+
+`is_pure_std_trait` (`src/lib.rs`) exempts dynamic/generic dispatch over
+Display/Debug/Error/ToString/Clone/PartialEq/Eq/PartialOrd/Ord/Hash/Default — WHEN the trait's defining
+crate is the genuine sysroot `core`/`std`/`alloc` (now enforced by `is_real_sysroot_frontier`, this
+session's fix for the impostor-crate class, above) — from ever reading `Unknown`, on the stated,
+measured rationale that flagging all of them floods reports (`ui/trust.rs`'s `format_error` pins this
+choice deliberately: a `&dyn std::error::Error` dispatch produces ZERO diagnostic, by design, not by
+omission).
+
+**Nothing stops a REAL (non-impostor) external crate's Display/Clone/Hash/… impl from doing arbitrary
+I/O** — unlike `Drop::drop`, which Rust forbids calling explicitly (E0040, checked and confirmed sound
+2026-08-29), there is no language guarantee these traits are pure. Live-reproduced with an ORDINARY
+`path` dependency (no name games at all): a crate `effectlib` with
+
+    impl std::fmt::Display for Sneaky {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            let _ = std::fs::write("/tmp/sneaky-display-poc", b"hit");
+            write!(f, "sneaky")
+        }
+    }
+
+called from the CONSUMER crate through `&dyn Display` (`show`) and a monomorphized generic
+`T: Display` (`show_generic`) — both genuinely non-local, non-CHA-resolvable dispatch, the exact
+condition `is_pure_std_trait`'s doc comment describes — produced `"functions": []` for both callers:
+total silence, and `deny Fs` exited 0 with no warning at all. `SneakyClone`'s effectful `Clone` impl,
+called via `.clone()`, was silent the same way.
+
+**Deliberately not fixed in this session.** A blanket removal of the exemption was already tried and
+measured too costly (`ui/trust.rs`'s own comment: "found in the wild: `dyn Error` error-formatting
+taints whole call trees") — my repro doesn't invalidate that measurement, it only measures the OTHER
+side (the cost of staying silent) that the original decision didn't have data for either. The closest
+safe fix — a non-gating disclosure (mirroring `invisible`'s "floored to pure, but flagged" convention,
+distinct from `Unknown` so it doesn't reopen the flood) for dispatch through one of these 11 traits when
+the concrete impl is non-local and unverifiable — would add a new wire-format signal, which is a
+cross-engine SPEC decision (candor-spec is owned by a different agent this session; java/ts/swift almost
+certainly share the identical Display/toString/equals/hashCode purity assumption and the identical
+exposure). Filing rather than guessing at a fix candor-spec hasn't ratified.
+
+Reproduction kept as a real two-crate fixture (path dependency + consumer), not minimised further —
+built this session under this machine's scratchpad, `puretrait-fixture/{effectlib,main}`; regenerate from
+the `effectlib` snippet above (a consumer crate calling `show`/`show_generic`/`clone_it` over it) if the
+scratch dir is gone. Not covered by any existing conformance row or unit test; `ui/trust.rs` only pins the
+ACCEPTED-exempt case (`format_error`), never an effectful one, so this class has zero regression coverage
+in either direction today.
+
 ## ⟨0.29⟩ hardening round, 2026-08-17 — two MEASURED gaps, deliberately not fixed here
 
 Both found by generating fixtures against the std API surface rather than reading the tables. Filed
