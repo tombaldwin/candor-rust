@@ -10675,3 +10675,39 @@ pub fn go() {{ imp::doit(); }}
                 "the glob-imported `platform::doit` is SHADOWED by the declaration and must not be \
                  charged onto the caller:\n{v:#}");
     }
+
+    /// GUARD-DELETION AUDIT (2026-08-30): `candor_report::resolve_sink_artifact` — which `same_artifact`
+    /// (the §3.3.1 sink-collision guard) falls back to for a symlink whose target does not exist yet —
+    /// had ZERO coverage anywhere in the family; deleting its whole symlink-following loop left
+    /// `cargo test --workspace` fully green. `same_artifact`'s own doc comment names the exact bug this
+    /// closes: "same file, different spelling" (originally a plain path-component miss, then a
+    /// device+inode miss) let `--policy P --gate-json <other-spelling-of-P>` destroy the policy with
+    /// `exit 0, ok: true`. A DANGLING symlink is the one shape `canonicalize` cannot resolve at all
+    /// (the ordinary case both `--policy`/`--gate-json` targets already exist, so device+inode alone
+    /// catches those) — this pins that both a symlink and its dangling target are one artifact.
+    #[cfg(unix)]
+    #[test]
+    fn same_artifact_catches_a_policy_and_gate_json_collision_through_a_dangling_symlink() {
+        let dir = std::env::temp_dir()
+            .join(format!("candor-scan-dangling-collision-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("policy.P");
+        let link = dir.join("link-to-P");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(!real.exists(), "setup: the symlink's target must not exist yet");
+
+        assert!(
+            crate::scan::same_artifact_pub(real.to_str().unwrap(), link.to_str().unwrap()),
+            "a dangling symlink naming `real` must be recognised as the SAME artifact as `real` \
+             itself — the guard `same_artifact` exists for exactly the case a naive `canonicalize` \
+             comparison cannot resolve (a target that doesn't exist yet)"
+        );
+        // Control: an unrelated dangling symlink must NOT collide.
+        let other = dir.join("policy.Q");
+        assert!(
+            !crate::scan::same_artifact_pub(other.to_str().unwrap(), link.to_str().unwrap()),
+            "an unrelated path must not be swept in just because both are unresolvable"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }

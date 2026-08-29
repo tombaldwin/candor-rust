@@ -1,0 +1,22 @@
+warning: `<EffIter as std::iter::Iterator>::next` effects: { Clock }   (* = via callee)
+  --> $DIR/opaque_dyn_iterator.rs:16:5
+   |
+LL |     fn next(&mut self) -> Option<i32> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `main` effects: { Unknown* }   (* = via callee)
+  --> $DIR/opaque_dyn_iterator.rs:31:1
+   |
+LL | fn main() {
+   | ^^^^^^^^^
+
+warning: `use_it` effects: { Unknown }   (* = via callee)
+  --> $DIR/opaque_dyn_iterator.rs:26:1
+   |
+LL | fn use_it() {
+   | ^^^^^^^^^^^
+
+warning: 3 warnings emitted
+

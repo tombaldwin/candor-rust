@@ -9,6 +9,40 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **Coverage-only, no behavior change: a guard-deletion sweep across `candor-report`/`candor-scan`/
+  rust-deep found four guards on the silent-vs-disclosed boundary with ZERO test coverage — each
+  confirmed by actually deleting the guard and watching `cargo test --workspace` (plus, for the
+  rust-deep case, the `ui` fixture suite) stay fully green.** Method: `bin/AGENT-CORPUS-BRIEF.md`
+  attack C. Every new test below is confirmed RED with its guard deleted and GREEN at HEAD.
+  - **rust-deep, `is_dyn_receiver`'s OPAQUE-ALIAS arm** (the fix for the historical `which`-crate bug —
+    `all_results().and_then(|mut i| i.next())` reading silent-pure through a local `-> impl Iterator`
+    hiding a `Box<dyn Iterator>`) shipped with no fixture pinning it. New `ui/opaque_dyn_iterator.rs`
+    reproduces the exact failure mode with the arm deleted: the callee (`use_it`) still self-reports
+    `Unknown`, but that `Unknown` stops PROPAGATING to its caller, which drops out of the report
+    entirely — reads as fully pure two hops from unresolved dispatch. (The sibling `Box`/`Rc`/`Arc`/
+    `Pin` unwrap arm was also guard-deletion-tested and found genuinely redundant — `devirtualize`'s
+    independent instance-resolution catches every shape tried once the structural check is disabled —
+    so it is left as documented defense-in-depth, not given a fixture that couldn't discriminate it.)
+  - **`candor-report::write_atomic`'s multiply-linked-target guard** (writes in place rather than
+    `rename(2)`, so an operator with two hard-linked names for one verdict file doesn't get a fresh
+    document at one name and a stale one at the other) had never been exercised: no test anywhere
+    created a hard link. New `write_atomic_updates_a_multiply_linked_target_in_place` (plus the
+    single-link control) pins both halves.
+  - **`candor-report::resolve_sink_artifact`'s symlink-following loop** — used by `write_atomic` and by
+    candor-scan's `same_artifact` §3.3.1 sink-collision guard for the one shape `canonicalize` can't
+    resolve on its own (a symlink whose target doesn't exist yet) — had no coverage at all. New
+    `resolve_sink_artifact_follows_an_ordinary_symlink` and
+    `..._resolves_a_dangling_symlink_to_its_named_target` pin it directly; new
+    `same_artifact_catches_a_policy_and_gate_json_collision_through_a_dangling_symlink` (candor-scan)
+    pins the real guard this backs — the historical `--policy P --gate-json <other spelling of P>`
+    class the guard's own doc comment names.
+  - Not reached (bounded scope; reported per `bin/AGENT-CORPUS-BRIEF.md` rule 7): the `candor-classify`
+    effect-classification allowlist/denylist functions (`is_net_establishing` et al. — spot-checked,
+    already have direct unit tests), the AS-EFF-005 baseline-guard branches in `candor-scan/src/gate.rs`
+    (heavily exercised — 97 references in `tests.rs`), and `candor-query`'s `unanswerable_pairs` fail-
+    closed branches (spot-checked against `tests/cli.rs` fixtures carrying an absent `netClass`/
+    `reasonClass` field — both already discriminating).
+
 - **Coverage-only, no behavior change (rust-scan): `is_callable_type`'s `Rc<fn()>`/`Arc<fn()>` wrapper
   peeling — verified sound, then given the fixture it was missing.** The `defe53d` widening's own doc
   comment and match arm name `Box`/`Rc`/`Arc`/`Symbol<T>` symmetrically, but
