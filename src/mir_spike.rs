@@ -125,7 +125,7 @@ fn is_std_owning_container(tcx: TyCtxt<'_>, did: rustc_hir::def_id::DefId) -> bo
 /// Collect the LOCAL `Drop::drop` impls reachable when a value of `ty` is dropped: the type's own
 /// destructor, plus (transitively) those of its fields / elements that run via drop glue. References
 /// and raw pointers don't drop their pointee, so they're not followed. `seen` guards recursive types.
-fn local_drop_impls<'tcx>(
+pub(crate) fn local_drop_impls<'tcx>(
     tcx: TyCtxt<'tcx>,
     ty: Ty<'tcx>,
     out: &mut std::collections::HashSet<LocalDefId>,
@@ -163,6 +163,31 @@ fn local_drop_impls<'tcx>(
             }
         }
         TyKind::Array(t, _) | TyKind::Slice(t) => local_drop_impls(tcx, *t, out, seen),
+        // A CLOSURE/COROUTINE that captured an effectful-Drop value BY MOVE carries it as an upvar —
+        // dropping the closure/coroutine (scope exit, `drop(c)`, or as the concrete type behind a
+        // `Box<dyn Fn*>` the Dynamic arm below already resolves to here) drops every upvar in turn.
+        // Closures/coroutines are NOT `TyKind::Adt` (rustc gives them their own `TyKind` variants), so
+        // without this arm they fell into the `_ => {}` catch-all and an effectful guard captured by a
+        // closure that is dropped WITHOUT ever being called was silently lost — the fn was reported
+        // pure despite the guard's `Drop::drop` running. `CoroutineClosure` covers an `async || {}`
+        // closure before it's called (which itself produces a `Coroutine` on call, covered by the
+        // `Coroutine` arm). No `seen`-dedup key exists for these (no `DefId` naming a single ADT to
+        // guard recursion on), but upvars are a fixed, finite field list, so plain recursion terminates.
+        TyKind::Closure(_, args) => {
+            for t in args.as_closure().upvar_tys() {
+                local_drop_impls(tcx, t, out, seen);
+            }
+        }
+        TyKind::Coroutine(_, args) => {
+            for t in args.as_coroutine().upvar_tys() {
+                local_drop_impls(tcx, t, out, seen);
+            }
+        }
+        TyKind::CoroutineClosure(_, args) => {
+            for t in args.as_coroutine_closure().upvar_tys() {
+                local_drop_impls(tcx, t, out, seen);
+            }
+        }
         // Dropping a TRAIT OBJECT (`Box<dyn Trait>` etc.) runs the CONCRETE type's destructor through
         // the vtable — statically unknown. Sound over-approximation (the §4 trust contract): CHA the
         // impls of the object's principal trait and follow each self type's LOCAL Drop, so a local
