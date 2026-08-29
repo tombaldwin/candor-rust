@@ -302,16 +302,47 @@ pub(crate) fn trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<
 }
 
 /// Whether a type is an INVOKABLE callback — a bare fn pointer (`fn()`), an `impl`/`dyn Fn[Mut/Once]`, a
-/// generic param bound by `Fn*`, or a `Box`/`Rc`/`Arc<dyn Fn*>`. A value of such a type called as `cb()`
-/// invokes a body the syntactic scan cannot see, so the enclosing fn can't be certified pure — it MUST
-/// read `Unknown`, never silently pure (SPEC §4). The non-bare forms are exactly where `trait_leaves`
-/// finds an `Fn`/`FnMut`/`FnOnce` leaf; `Type::BareFn` carries no trait so it's matched explicitly.
+/// generic param bound by `Fn*`, a `Box`/`Rc`/`Arc<dyn Fn*>`, or a `Box`/`Rc`/`Arc`/`Symbol<T>` wrapping
+/// any of the above (peeled and re-checked recursively, `Symbol` being `libloading`'s opaque
+/// runtime-resolved-FFI-symbol handle). A value of such a type called as `cb()` invokes a body the
+/// syntactic scan cannot see, so the enclosing fn can't be certified pure — it MUST read `Unknown`, never
+/// silently pure (SPEC §4). The non-bare forms are exactly where `trait_leaves` finds an
+/// `Fn`/`FnMut`/`FnOnce` leaf; `Type::BareFn` carries no trait so it's matched explicitly.
 pub(crate) fn is_callable_type(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<String>>) -> bool {
     match ty {
         syn::Type::BareFn(_) => true,
         syn::Type::Reference(r) => is_callable_type(&r.elem, generic_bounds),
         syn::Type::Paren(p) => is_callable_type(&p.elem, generic_bounds),
         syn::Type::Group(g) => is_callable_type(&g.elem, generic_bounds),
+        syn::Type::Path(p) => {
+            if trait_leaves(ty, generic_bounds).iter().any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce")) {
+                return true;
+            }
+            // An OPAQUE RUNTIME-RESOLVED-SYMBOL wrapper. `libloading::Symbol<T>` (and its
+            // `os::unix`/`os::windows` twins, which share the leaf name) is a `Deref<Target = T>` handle
+            // onto a dynamically-loaded symbol; invoking it runs T's body, which is exactly as opaque to
+            // this syntactic scan as a bare `fn()` — a pointer resolved at runtime and then called through
+            // this wrapper read silent-pure (SOUNDNESS.md) because `is_callable_type` matched a `fn()`/
+            // `dyn Fn*` ANNOTATION directly but never a NAMED type wrapping one. `Box`/`Rc`/`Arc` are
+            // peeled the same way, closing the identical (previously unnoticed) hole for a boxed/shared
+            // bare fn pointer (`Box<fn()>`), which nothing here recognised either.
+            //
+            // This is a NAME match on the leaf segment, not a type-resolved one: rust-scan is syntactic
+            // and has no way to ask rustc whether some OTHER crate's unrelated `Symbol<T>` is the one in
+            // scope. That can only ever turn a call `sym()` into an honest `Unknown` (never fabricate a
+            // specific effect) — and the call syntax `sym()` only compiles at all if T really is callable,
+            // so a same-named non-callable `Symbol<T>` from an unrelated crate is not even reachable here.
+            // rust-deep (rustc-typed) does not need this special case: it asks rustc what the type is.
+            let Some(seg) = p.path.segments.last() else { return false };
+            let wrapper = matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc" | "Symbol");
+            if !wrapper {
+                return false;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return false };
+            args.args
+                .iter()
+                .any(|a| matches!(a, syn::GenericArgument::Type(inner) if is_callable_type(inner, generic_bounds)))
+        }
         _ => trait_leaves(ty, generic_bounds)
             .iter()
             .any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce")),

@@ -9,6 +9,50 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN, closed (rust-scan): a function pointer resolved at RUNTIME and then INVOKED read
+  silent-pure.** `is_callable_type` (`lang.rs`) recognised a `fn()`/`impl Fn*`/`dyn Fn*` annotation
+  directly, and `expr_is_fn_typed` (`collector.rs`) propagated fn-typed-ness through a rebind — but
+  neither recognised the two shapes real FFI code actually uses to hold a dynamically-resolved symbol:
+  **(1)** a `let` typed with a NAMED wrapper the annotation-matcher never peeled — `libloading::Symbol<T>`
+  (and its `os::unix`/`os::windows` twins), the ordinary return type of `Library::get`; and **(2)**
+  `std::mem::transmute::<Src, Dst>(ptr)` into an UNTYPED `let` — `Dst` is the caller's declared target
+  type, but it lives in the CALL's turbofish, not a `Pat::Type` annotation, so nothing read it. Both
+  reproduced: `deny Exec Unknown` over either shape exited 0 with `ok:true, violations:[]` and no
+  disclosure at all, while the SAME code with a `fn()`-typed local (`let f: fn(i32)->i32 =
+  transmute(sym)`) or a fused transmute-and-call (`transmute::<_, fn()>(sym)()`) was already correctly
+  `Unknown`-disclosed — the machinery existed, these two shapes were simply invisible to it.
+  Fixed by widening both sides of the SAME mechanism, not adding a new one: `is_callable_type` now peels
+  a `Box`/`Rc`/`Arc`/`Symbol<T>` wrapper and recurses on `T` (closing, as a side effect, the identical
+  and previously unnoticed `Box<fn()>`/`Rc<fn()>` hole — nothing peeled a smart pointer around a BARE fn
+  pointer before, only around a `dyn Fn*`); and `expr_is_fn_typed` now reads a `transmute::<.., Dst>(..)`
+  call's own turbofish target, and a method call's own turbofish (`lib.get::<T>(..)`, transparently
+  through a trailing `.unwrap()`/`.expect()`), checking each the same way. Every new rule is a NAME match
+  on the leaf segment (`Symbol`, `transmute`), not a type-resolved one — rust-scan is syntactic by
+  design and cannot ask rustc whether some unrelated crate's own `Symbol<T>` is the one in scope, the way
+  rust-deep already can. That is a stated, accepted gap, not a silent one: the call syntax `sym(..)` only
+  compiles at all if the receiver really is callable, so a same-named non-callable type can't reach this
+  path in code that builds; and every new rule only ever turns a call into `Unknown`, never fabricates a
+  specific effect, so a false hit costs an extra honest disclosure, never a false purity claim.
+  `libloading` is deliberately left OUT of `CALIBRATED_CRATES`/`CALIBRATED_BUT_PARTIAL_CRATES`: the gap
+  fixed here is call-RESOLUTION (does `sym(..)` reach the honest `Unknown` at all), not effect
+  CLASSIFICATION of `Library::new`/`Library::get` themselves — those already surface correctly today as
+  an ordinary uncalibrated-dependency `invisible` disclosure, and calibrating them would answer a
+  different question than the one this fix closes.
+  CONTROLS, each independently falsified against the pre-fix binary (`runtime_resolved_pointer_invocation_is_unresolved`,
+  `crates/candor-scan/src/tests.rs`): both silent shapes (`Symbol<T>`-typed local, untyped
+  `transmute`-into-`let`) now disclose `Unknown`; a same-shape `libloading::Library::get::<T>(..)`
+  turbofish left untyped by the `let` (the sweep's extra find, same mechanism) now discloses too; the two
+  already-correct shapes (bare `fn()`-typed local, fused transmute-and-call) are pinned unchanged; and
+  the OVER-CHARGE CONTROL — a pointer OBTAINED but never called must stay quiet, since marking a binding
+  fn-typed changes nothing unless call syntax is actually used on it — holds for all three new-rule
+  shapes. Measured over this repo's own four real crates (`candor-report`/`candor-classify`/
+  `candor-scan`/`candor-query`) under `.candor/policy`'s real `deny Net Db Exec Ipc`: reports are
+  byte-identical before and after (none of the four uses `libloading`/`transmute`/`Box<fn()>`, so this is
+  a necessary-but-not-sufficient check, not a substitute for the seeded fixtures above).
+  **Filed, not mine to close: `candor-spec` has zero conformance pinning for rust-deep's own correct
+  `fn()`-typed-callback-pointer disclosure** (`grep "callback:fn-pointer" candor-spec` returns nothing) —
+  sound today, unguarded against regression tomorrow.
+
 - **⚠ CARDINAL SIN, closed (rust-deep, two forms): a value whose destructor was reached through a
   CLOSURE capture, or through an explicit `drop(x)` on anything that doesn't implement `Drop` itself,
   was silently reported pure.** rust-deep is the only engine of the family with a MIR-derived model of
