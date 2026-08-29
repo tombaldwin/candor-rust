@@ -2926,3 +2926,123 @@ fn a_workspace_verdict_tells_two_same_named_units_apart() {
     let names: Vec<&str> = rows.iter().map(|r| r["fn"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["go", "go"], "`fn` stays the bare name: {doc}");
 }
+
+/// ⟨dd90fae, 2026-08-29⟩ NESTED WORKSPACE: a resolved member that is ITSELF a `[workspace]` root.
+///
+/// Pre-fix, `scan_target` computed `workspace_members` once and handed each resolved member straight
+/// to `scan_one` as a plain crate. `scan_one`'s OWN nested-package filter ("a subdir carrying its own
+/// Cargo.toml is a different package") then pruned every one of THAT member's inner members out of the
+/// walk — with no `excluded` entry, no `outOfScope` entry, and no stderr. `analyzed.count` for the
+/// member came back 0 and `deny Net` printed "policy ✓" at exit 0 over a real, unread Net call one
+/// level further down.
+///
+/// This layout is real, reachable input, not an invented edge case: `cargo metadata` refuses it
+/// ("multiple workspace roots found"), but that is an argument about `cargo build`, not about whether a
+/// static scanner reading source WITHOUT building it should see the tree.
+///
+/// PROVEN to discriminate the fix (see the task's reproduction step): reverting only
+/// `expand_nested_workspace_member` / its call site in `scan_target` (scan.rs) turns this test red
+/// while the full existing suite (254 unit + 74 CLI) stays green — which is exactly the gap that let
+/// `dd90fae` ship without a dedicated test in the first place.
+#[test]
+fn nested_workspace_member_is_fanned_out_and_deny_net_catches_the_inner_call() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-nestedws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("mid/inner/src")).unwrap();
+    // outer root: a workspace whose one member ("mid") is not a package, only a nested workspace root.
+    std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"mid\"]\n").unwrap();
+    // "mid": itself a `[workspace]` root, no `[package]` of its own — a real, if unusual, layout.
+    std::fs::write(d.join("mid/Cargo.toml"), "[workspace]\nmembers = [\"inner\"]\n").unwrap();
+    std::fs::write(d.join("mid/inner/Cargo.toml"), "[package]\nname = \"inner\"\n").unwrap();
+    std::fs::write(d.join("mid/inner/src/lib.rs"),
+        "pub fn go() { let _ = std::net::TcpStream::connect(\"evil.example.com:80\"); }\n").unwrap();
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Net\n").unwrap();
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    let _ = std::fs::remove_dir_all(&d);
+
+    assert_eq!(out.status.code(), Some(1),
+        "a nested-workspace member's inner member must be scanned, not pruned into an empty report: \
+         `deny Net` should catch its real Net call, got exit {:?}\nstdout:\n{stdout}", out.status.code());
+    let docs: serde_json::Value = serde_json::from_str(stdout.trim()).expect("--json emits valid JSON");
+    let names: Vec<&str> = docs.as_array().expect("an array over the fanned-out members").iter()
+        .map(|x| x["package"].as_str().unwrap_or("")).collect();
+    assert!(names.contains(&"inner"),
+        "the nested workspace's inner member must appear in the fan-out, not vanish: {names:?}");
+}
+
+/// ⟨dd90fae, 2026-08-29⟩ MULTI-LEVEL GLOB: `members = ["crates/*/*"]` over an ordinary two-level
+/// layout `cargo metadata` resolves to real members.
+///
+/// Pre-fix, `workspace_members`'s hand-rolled matcher special-cased a bare `*` and a single trailing
+/// `/*`; a two-level glob fell through `.strip_suffix("/*")`, which looked for a literal directory
+/// named `crates/*`, found none, and returned ZERO members with no glob-specific disclosure.
+/// `scan_target` then fell back to a single-crate scan of the root and `deny Net` printed "policy ✓" at
+/// exit 0 over three real, unscanned crates three directories down.
+///
+/// `cargo metadata` is the ground truth this fixture is checked against: this is not an exotic or
+/// invalid layout, it is a shape cargo itself expands the same way `glob` does.
+///
+/// PROVEN to discriminate the fix: reverting only `expand_member_glob` / its call site in
+/// `workspace_members` (deps.rs) turns this test red while the full existing suite stays green.
+#[test]
+fn multi_level_glob_workspace_members_resolve_and_deny_net_catches_the_violation() {
+    let d = std::env::temp_dir().join(format!("candor-scan-cli-globws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    for p in ["crates/a/x", "crates/b/y", "crates/c/z"] {
+        std::fs::create_dir_all(d.join(p).join("src")).unwrap();
+    }
+    std::fs::write(d.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*/*\"]\n").unwrap();
+    std::fs::write(d.join("crates/a/x/Cargo.toml"), "[package]\nname = \"a_x\"\n").unwrap();
+    std::fs::write(d.join("crates/a/x/src/lib.rs"), "pub fn noop() -> u32 { 1 }\n").unwrap();
+    std::fs::write(d.join("crates/b/y/Cargo.toml"), "[package]\nname = \"b_y\"\n").unwrap();
+    std::fs::write(d.join("crates/b/y/src/lib.rs"),
+        "pub fn go() { let _ = std::net::TcpStream::connect(\"evil.example.com:80\"); }\n").unwrap();
+    std::fs::write(d.join("crates/c/z/Cargo.toml"), "[package]\nname = \"c_z\"\n").unwrap();
+    std::fs::write(d.join("crates/c/z/src/lib.rs"), "pub fn noop2() -> u32 { 2 }\n").unwrap();
+
+    // GROUND TRUTH: `cargo metadata` resolves this ordinary layout to exactly the 3 leaf crates.
+    let meta = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .current_dir(&d)
+        .output()
+        .expect("run cargo metadata");
+    let meta_json: serde_json::Value =
+        serde_json::from_slice(&meta.stdout).expect("cargo metadata emits JSON");
+    let mut meta_names: Vec<String> = meta_json["packages"].as_array().expect("packages array")
+        .iter().map(|p| p["name"].as_str().unwrap_or("").to_string()).collect();
+    meta_names.sort();
+    assert_eq!(meta_names, vec!["a_x", "b_y", "c_z"],
+        "ground truth: cargo metadata must resolve `crates/*/*` to the 3 real members, or this fixture \
+         is not testing an ordinary layout: {meta_names:?}");
+
+    let pp = d.join("candor.policy");
+    std::fs::write(&pp, "deny Net\n").unwrap();
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--policy").arg(pp.to_string_lossy().as_ref())
+        .arg("--json")
+        .output()
+        .expect("run candor-scan");
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    let _ = std::fs::remove_dir_all(&d);
+
+    assert_eq!(out.status.code(), Some(1),
+        "a multi-level glob `crates/*/*` must resolve to its real members, not fall back to a \
+         single-crate scan of the root: `deny Net` should catch b_y's real Net call, got exit {:?}\n\
+         stdout:\n{stdout}", out.status.code());
+    let docs: serde_json::Value = serde_json::from_str(stdout.trim()).expect("--json emits valid JSON");
+    let mut names: Vec<String> = docs.as_array().expect("an array over the resolved members").iter()
+        .map(|x| x["package"].as_str().unwrap_or("").to_string()).collect();
+    names.sort();
+    assert_eq!(names, vec!["a_x", "b_y", "c_z"],
+        "all three multi-level-glob members must be fanned out, matching cargo metadata's ground \
+         truth, not collapsed into a single root-level scan: {names:?}");
+}

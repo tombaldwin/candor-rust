@@ -677,6 +677,38 @@ after upgrading; review policies and regenerate baselines with the new build.
     The weekly `coverage-gate-refresh` workflow is the correct place to reconcile that drift against a
     FRESH `cargo fetch`, not a hand-edit here.
 
+- **`dd90fae` (nested-workspace vanish / multi-level glob) shipped with no test that would notice its own
+  deletion** — the only one of that day's ten commits without one; every sibling was swept and confirmed
+  to have a genuine, discriminating test (below). Two `candor-scan` CLI tests added, each proven RED
+  against a worktree with only that fix reverted and GREEN at HEAD:
+  - `nested_workspace_member_is_fanned_out_and_deny_net_catches_the_inner_call` — an outer `[workspace]`
+    whose one member is itself a `[workspace]` root with no `[package]` of its own, whose inner member
+    performs a real `Net` call. Reverting `expand_nested_workspace_member`/its call site in `scan_target`
+    (scan.rs) reproduces the exact gap `dd90fae` describes: exit 0, `policy ✓`, `analyzed.count: 0`, the
+    inner member absent from the fan-out with no `excluded`/`outOfScope` entry.
+  - `multi_level_glob_workspace_members_resolve_and_deny_net_catches_the_violation` — `members =
+    ["crates/*/*"]` over an ordinary `crates/{a/x,b/y,c/z}` layout, one real `Net` call, checked against
+    `cargo metadata`'s own resolution as ground truth (asserted 3 members, matching the fixture).
+    Reverting `expand_member_glob`/its call site in `workspace_members` (deps.rs) reproduces the exact
+    gap: zero members resolved, fallback to a single-crate scan of the root, exit 0 over three real,
+    unscanned crates.
+  - **Sweep of the day's other nine commits** (`caca530`, `fda08ad`, `75045f0`, `2e0521a`, `27f4beb`,
+    `3e9848c`, `79546f3`, `e4bc419`, `7401af9`): each commit's own production change was reverted in
+    isolation (test additions kept in place) and its dedicated test(s) checked. Every one went RED on the
+    revert — a clean sweep, confirming the reviewer's claim that every sibling had a test, not just an
+    absence of counter-evidence. (`2e0521a`'s and `27f4beb`'s over-charge/residual controls correctly
+    stayed GREEN, as designed — they pin behavior the fix must NOT change, not the fix itself.)
+  - **Controls**: all 254 candor-scan unit tests + 76 CLI tests (74 existing + 2 new) green; both clippy
+    legs (stable, -D warnings; pinned nightly whole-workspace, -D warnings) clean; `ci/gate-equivalence.sh`,
+    `ci/self-gate.sh`, `ci/wrapper-smoke.sh`, `tests/integration.sh` all green; runtime unaffected (full
+    `candor-scan` CLI suite in ~0.5s).
+  - **Reported, not fixed (candor-swift, a different repo/owner)**: swift's `7a89dbc` test
+    `testSiblingCallIntoAHOFStillGetsJudged` cannot discriminate its fix from its absence — both its
+    callers land on `Unknown` regardless of whether the guard is present. The shape that WOULD
+    discriminate: one tracked caller (explicit receiver) plus one untracked sibling caller into the same
+    HOF — with the guard deleted, the untracked caller should vanish from the report entirely (not just
+    read `Unknown`), which is the observable a correct test needs to assert against.
+
 ## [0.33.1] — 2026-08-27
 
 - **`ci.yml`'s `stable-crates-macos` job gains a `timeout-minutes` — the last job in the family
