@@ -818,10 +818,31 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     idx
 }
 
-// ── shared Cargo.toml line primitives (line-based on purpose — no toml dependency) ────────────────
-// The ONE place table-header and scalar parsing live, so a manifest-syntax quirk (`[ spaced ]`
-// headers, a trailing `# comment`) is handled once across the three readers below rather than
-// drifting between them.
+// ── shared Cargo.toml parsing — TWO TIERS, deliberately split ──────────────────────────────────────
+//
+// LINE-BASED, still no `toml` dependency (`toml_section`/`toml_scalar` right below, `toml_string_array`/
+// `has_workspace_table`/`workspace_members`/`read_crate_name` further down): package-NAME reading and
+// workspace-member glob expansion. A missed spelling here is LOUD, not silent — a workspace member that
+// doesn't resolve is warned explicitly (`scan_target`'s "declares [workspace] but no members resolved"),
+// and an unread package name just falls back to the filename. Kept line-based on purpose: the ONE place
+// table-header and scalar parsing live, so a manifest-syntax quirk (`[ spaced ]` headers, a trailing
+// `# comment`) is handled once across the readers below rather than drifting between them.
+//
+// REAL TOML PARSING, via the `toml` crate (`manifest_dependency_tables`, `cargo_toml_deps`,
+// `non_registry_manifest_names` below): the dependency-IDENTITY surface — "what is this crate's real
+// name" and "is this a `path`/`git` impostor wearing a reviewed crate's name". This is precisely the
+// surface an adversarial (or merely unusual) manifest gets to pick its OWN spelling for, and a line
+// scanner's enumerated branch list is a spelling ALLOWLIST wearing a parser's clothes —
+// [[candor-denylist-over-allowlist]] applies one level up from the CALIBRATED_* lists it usually names.
+// MEASURED TWICE IN ONE WEEK on this exact function: the inline-table/header-table split (already two
+// branches, `crates/candor-scan/src/deps.rs` history) missed a THIRD spelling, a dotted key
+// (`log.path = "…"`) — not a bug in either branch, a hole in the branch list itself, because TOML defines
+// dotted keys, inline tables and header-table sections as three surface spellings of ONE structure (a
+// nested table under the dependency's key). A real parser needs exactly one check for that structure,
+// not one branch per spelling anyone happened to write a test for — which is also why this tier is where
+// the ⟨caca530⟩/adversarial-review `{ workspace = true }` cross-file resolution lives: chasing a
+// redirect into another file's table is exactly the kind of structural walk a line scanner cannot do
+// without becoming a second, worse parser.
 
 /// A `[section]` header line → its inner name, surrounding spaces tolerated (`[ workspace ]` →
 /// "workspace"); None for any non-header line.
@@ -921,127 +942,132 @@ pub(crate) fn non_registry_lock_names(dir: &str) -> std::collections::HashSet<St
     out
 }
 
-/// Does `l` carry `key = "…"` at a token boundary (`{ … key = "value" … }` inline-table style, OR a
-/// bare `key = "value"` scalar line) — `key` must be preceded by `{`, `,`, space/tab, or line-start,
-/// and followed (after whitespace) by `=`, so it is never a substring of a longer key or a value.
-/// Returns the quoted value, unprocessed. SHARED by `cargo_toml_deps`'s `package = "real"` rename
-/// lookup and `non_registry_manifest_deps`'s `path =`/`git =` non-registry evidence below, so the one
-/// boundary rule can't drift between the two call sites.
-fn toml_inline_value<'a>(l: &'a str, key: &str) -> Option<&'a str> {
-    let bytes = l.as_bytes();
-    let mut search = 0;
-    while let Some(rel) = l[search..].find(key) {
-        let i = search + rel;
-        let boundary = i == 0 || matches!(bytes[i - 1], b'{' | b',' | b' ' | b'\t');
-        if boundary {
-            if let Some(rest) = l[i + key.len()..].trim_start().strip_prefix('=') {
-                if let Some(rest) = rest.trim_start().strip_prefix('"') {
-                    return rest.split('"').next();
-                }
-            }
+/// Walk UP from `dir` (`dir` itself included) to the nearest ancestor whose Cargo.toml declares a
+/// `[workspace]` table — the root a member's `{ workspace = true }` dependency inherits its real source
+/// from. Bounded by the filesystem's own depth (`Path::parent` strictly shortens the path every step, so
+/// this terminates without a manual counter).
+///
+/// HEURISTIC, NOT MEMBERSHIP-VERIFIED: it does not re-derive `workspace_members`'s glob-expansion/
+/// `exclude`/dedup logic to confirm `dir` is actually a resolved member of what it finds — that check
+/// belongs to that function, and duplicating it here for a lookup that only needs "which manifest
+/// declares the dependency" would be scope creep. Cargo does not support nested/overlapping workspaces,
+/// so any real `cargo build` of `dir` can only ever have resolved `workspace = true` against the nearest
+/// enclosing `[workspace]` — exactly what this returns. The one way this over-reaches is a directory that
+/// is NOT actually a workspace member sitting under an unrelated ancestor that happens to declare
+/// `[workspace]` (e.g. a vendored tree one directory too deep in the scan root); `cargo` itself would
+/// refuse to build such a layout if it truly contained a `workspace = true` reference, so this cannot
+/// manufacture a false EXEMPTION — the only direction it can err is toward the fail-toward-disclosure
+/// arm below firing on a directory that turns out not to have needed it, which is the safe direction.
+pub(crate) fn find_workspace_root(dir: &Path) -> Option<std::path::PathBuf> {
+    let mut cur = Some(dir.to_path_buf());
+    while let Some(d) = cur {
+        if has_workspace_table(&d) {
+            return Some(d);
         }
-        search = i + key.len();
+        cur = d.parent().map(Path::to_path_buf);
     }
     None
 }
 
-/// A `package = "real"` rename target inside a dependency's inline table (`{ … package = "real" }`) or
-/// a `[dependencies.name]` header-table body (`package = "real"`) — the manifest KEY is what the code
-/// imports while the registry/report knows the REAL package. Without this, `--deps` scanned the real
-/// crate and the join/ledger missed it under the manifest key (found live on ebman: `tui_common` stayed
-/// "invisible" with its report sitting right there).
-fn toml_package_rename(l: &str) -> Option<String> {
-    toml_inline_value(l, "package").map(|v| v.replace('-', "_"))
+/// All of `doc`'s Cargo RUNTIME dependency tables: the root `[dependencies]`, `[workspace.dependencies]`,
+/// and every `[target.<cfg>.dependencies]`. `dev-dependencies`/`build-dependencies` (the harness's and
+/// the build script's universe, not the crate's runtime one) are excluded BY CONSTRUCTION — they are
+/// different KEYS ("dev-dependencies" is not "dependencies"), so unlike the old line scanner there is no
+/// prefix/substring confusion to guard against here at all.
+fn manifest_dependency_tables(doc: &toml::Table) -> Vec<&toml::Table> {
+    let mut out = Vec::new();
+    if let Some(t) = doc.get("dependencies").and_then(toml::Value::as_table) {
+        out.push(t);
+    }
+    if let Some(t) = doc
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .and_then(|w| w.get("dependencies"))
+        .and_then(toml::Value::as_table)
+    {
+        out.push(t);
+    }
+    if let Some(target) = doc.get("target").and_then(toml::Value::as_table) {
+        for entry in target.values() {
+            if let Some(t) = entry
+                .as_table()
+                .and_then(|e| e.get("dependencies"))
+                .and_then(toml::Value::as_table)
+            {
+                out.push(t);
+            }
+        }
+    }
+    out
 }
 
-/// One manifest's dependency names, all four header forms: `[dependencies]` /
-/// `[workspace.dependencies]` / `[target.….dependencies]` sections, and the table-header
-/// declarations `[dependencies.name]` / `[target.….dependencies.name]` (review: the old
-/// `ends_with("dependencies]")` gate made the header-form branch unreachable — a table-header
-/// dep was invisible to the ledger, execution-verified).
+/// One manifest's dependency names + `package = "real"` renames — EVERY spelling of "this key names a
+/// dependency", because a real parser answers that question once per key instead of once per SURFACE
+/// SYNTAX. `[dependencies]` (bare version or inline table), `[dependencies.name]` header-table sections,
+/// and a dotted key (`name.path = "…"`) all parse to the IDENTICAL structure (`name` mapped to a `Value`,
+/// a `Table` for anything but a bare version) — there is exactly one code path here, not the
+/// three-then-missed-a-fourth branch list the line-based predecessor grew.
+///
+/// The rename lookup: a `package = "real"` entry inside the dependency's table (`{ package = "real",
+/// version = "0.1" }` or the header-table equivalent) — the manifest KEY is what the code imports while
+/// the registry/report knows the REAL package. Without this, `--deps` scanned the real crate and the
+/// join/ledger missed it under the manifest key (found live on ebman: `tui_common` stayed "invisible"
+/// with its report sitting right there).
 pub(crate) fn cargo_toml_deps(
     text: &str,
     out: &mut std::collections::HashSet<String>,
     renames: &mut HashMap<String, String>,
 ) {
-    let mut in_deps = false;
-    let mut header_key: Option<String> = None; // the `[dependencies.name]` we're inside, if any
-    for line in text.lines() {
-        let l = line.trim();
-        if let Some(inner) = toml_section(line) {
-            let harness = inner.contains("dev-dependencies") || inner.contains("build-dependencies");
-            in_deps = !harness && (inner == "dependencies" || inner.ends_with(".dependencies"));
-            header_key = None;
-            if !harness && !in_deps {
-                let name = inner
-                    .rfind(".dependencies.")
-                    .map(|i| &inner[i + ".dependencies.".len()..])
-                    .or_else(|| inner.strip_prefix("dependencies."));
-                if let Some(name) = name {
-                    if !name.is_empty() && !name.contains('.') {
-                        let key = name.trim_matches('"').replace('-', "_");
-                        out.insert(key.clone());
-                        header_key = Some(key);
+    let Ok(doc) = text.parse::<toml::Table>() else { return };
+    for table in manifest_dependency_tables(&doc) {
+        for (key, value) in table.iter() {
+            let base = key.replace('-', "_");
+            if let Some(t) = value.as_table() {
+                if let Some(pkg) = t.get("package").and_then(|v| v.as_str()) {
+                    let real = pkg.replace('-', "_");
+                    if real != base {
+                        renames.insert(base.clone(), real);
                     }
                 }
             }
-            continue;
-        }
-        if l.is_empty() || l.starts_with('#') {
-            continue;
-        }
-        // inside a `[dependencies.name]` table: a `package = "real"` line is the rename
-        if let Some(key) = &header_key {
-            if l.starts_with("package") {
-                if let Some(real) = toml_package_rename(l) {
-                    renames.insert(key.clone(), real);
-                }
-            }
-            continue;
-        }
-        if !in_deps {
-            continue;
-        }
-        if let Some(name) = l.split('=').next() {
-            let name = name.trim().trim_matches('"');
-            if !name.is_empty() {
-                let key = name.replace('-', "_");
-                // A rename only appears in an INLINE TABLE value (`key = { … package = "real" }`),
-                // never as a bare `package = "0.1"` (which is a dependency NAMED package) — so search
-                // only inside the braces.
-                if let Some(brace) = l.find('{') {
-                    if let Some(real) = toml_package_rename(&l[brace..]) {
-                        if real != key {
-                            renames.insert(key.clone(), real);
-                        }
-                    }
-                }
-                out.insert(key);
-            }
+            out.insert(base);
         }
     }
 }
 
-/// Package names this scan's OWN Cargo.toml manifest(s) declare with a `path`/`git` source — positive
-/// non-registry evidence available with NO Cargo.lock at all. `non_registry_lock_names`'s identity check
-/// reads Cargo.lock, which a library tree routinely does not commit; Cargo.toml is never absent (there is
-/// no scan without it), and a dependency squatting a `CALIBRATED_CRATES` name almost always declares
-/// itself `path`/`git` right there, because that IS the mechanism for attaching a local/forked artifact
-/// to a name cargo would otherwise resolve from the registry — the reproduced defect's own fixture
-/// (`log = { path = "../logfake" }`) is exactly this shape. Same DENYLIST contract as the lock-based
-/// check: returns the REAL crate name (post `package = "…"` rename, `-` -> `_`) and returns members only
-/// on POSITIVE evidence, so a bare `name = "1.2"` version dependency — the overwhelming common case —
-/// gives none and an honest project's ordinary dependency never appears here.
+/// Package names this scan's OWN Cargo.toml manifest(s) declare with a `path`/`git` source, OR inherit
+/// one through `{ workspace = true }` from the enclosing workspace root's `[workspace.dependencies]` —
+/// positive non-registry evidence available with NO Cargo.lock at all. `non_registry_lock_names`'s
+/// identity check reads Cargo.lock, which a library tree routinely does not commit; Cargo.toml is never
+/// absent (there is no scan without it), and a dependency squatting a `CALIBRATED_CRATES` name almost
+/// always declares itself `path`/`git` somewhere reachable from here, because that IS the mechanism for
+/// attaching a local/forked artifact to a name cargo would otherwise resolve from the registry.
+///
+/// Same DENYLIST contract as the lock-based check: returns the REAL crate name (post `package = "…"`
+/// rename, `-` → `_`) and returns members only on POSITIVE evidence (or an UNRESOLVABLE `workspace = true`
+/// redirect — see `non_registry_manifest_deps`'s fail-toward-disclosure arm), so a bare `name = "1.2"`
+/// version dependency — the overwhelming common case — gives none and an honest project's ordinary
+/// dependency never appears here.
 ///
 /// Walks every `Cargo.toml` under `dir`, the same nested-package boundary as `cargo_deps`.
 ///
 /// RESIDUAL, narrower than the pre-⟨caca530⟩ one and STATED rather than silent: a dependency that
-/// resolves away from the registry through a mechanism invisible to manifest text — a `[patch]` table
-/// entry, or `.cargo/config.toml` source-replacement — cannot be seen from here. Both are real gaps;
-/// closing the first needs the same `path=`/`git=` evidence check extended to `[patch.*]` tables (not
-/// done here — flagged, not silently absorbed), and the second reads outside the scanned tree entirely.
+/// resolves away from the registry through a mechanism invisible to manifest text ANYWHERE this scan can
+/// reach — a `[patch]` table entry, or `.cargo/config.toml` source-replacement — cannot be seen from
+/// here. Both are real gaps; closing the first needs the same `path=`/`git=` evidence check extended to
+/// `[patch.*]` tables (not done here — flagged, not silently absorbed), and the second reads outside the
+/// scanned tree entirely.
 pub(crate) fn non_registry_manifest_names(dir: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
+    // The enclosing workspace root's OWN parsed manifest — consulted only when some dependency under
+    // `dir` declares `workspace = true`. `None` means "could not find, read or parse a root at all",
+    // which the fail-toward-disclosure arm below turns into an impostor verdict rather than a silent
+    // pass: unlike a bare version (which cannot exist without a real registry entry backing it),
+    // `workspace = true` carries ZERO source evidence of its own — it is a pure redirect — so an
+    // unresolvable redirect cannot be trusted to be the reviewed registry crate.
+    let root_doc: Option<toml::Table> = find_workspace_root(Path::new(dir))
+        .and_then(|root| std::fs::read_to_string(root.join("Cargo.toml")).ok())
+        .and_then(|t| t.parse::<toml::Table>().ok());
     for entry in walkdir::WalkDir::new(dir)
         .into_iter()
         .filter_entry(|e| {
@@ -1061,86 +1087,63 @@ pub(crate) fn non_registry_manifest_names(dir: &str) -> std::collections::HashSe
             continue;
         }
         if let Ok(text) = std::fs::read_to_string(p) {
-            non_registry_manifest_deps(&text, &mut out);
+            non_registry_manifest_deps(&text, root_doc.as_ref(), &mut out);
         }
     }
     out
 }
 
-/// One manifest's `non_registry_manifest_names` body. Two shapes, both handled by
-/// `cargo_toml_deps`'s own section/header-key tracking so a manifest-syntax quirk is read once: the
-/// INLINE form (`name = { path = "../fake" }`, evidence scanned only from the `{` onward — never the
-/// whole line, so a dependency merely NAMED `path`/`git` declared as a plain version (`git = "1.0"`,
-/// no braces) is not mistaken for one) and the HEADER-TABLE form (`[dependencies.name]` followed by a
-/// bare `path = "…"`/`git = "…"` line, where the whole line legitimately IS that field).
-fn non_registry_manifest_deps(text: &str, out: &mut std::collections::HashSet<String>) {
-    let mut in_deps = false;
-    let mut header_key: Option<String> = None;
-    let mut header_non_registry = false;
-    let mut header_package: Option<String> = None;
-    let flush = |key: &Option<String>, non_registry: bool, package: &Option<String>,
-                 out: &mut std::collections::HashSet<String>| {
-        if non_registry {
-            if let Some(k) = key {
-                out.insert(package.clone().unwrap_or_else(|| k.clone()));
-            }
-        }
-    };
-    for line in text.lines() {
-        let l = line.trim();
-        if let Some(inner) = toml_section(line) {
-            flush(&header_key, header_non_registry, &header_package, out);
-            header_key = None;
-            header_non_registry = false;
-            header_package = None;
-            let harness = inner.contains("dev-dependencies") || inner.contains("build-dependencies");
-            in_deps = !harness && (inner == "dependencies" || inner.ends_with(".dependencies"));
-            if !harness && !in_deps {
-                let name = inner
-                    .rfind(".dependencies.")
-                    .map(|i| &inner[i + ".dependencies.".len()..])
-                    .or_else(|| inner.strip_prefix("dependencies."));
-                if let Some(name) = name {
-                    if !name.is_empty() && !name.contains('.') {
-                        header_key = Some(name.trim_matches('"').replace('-', "_"));
-                    }
+/// One manifest's `non_registry_manifest_names` body, over a REAL parsed document. `root_doc` is the
+/// enclosing workspace root's own already-parsed manifest (see `non_registry_manifest_names`), consulted
+/// only for a dependency declaring `workspace = true`.
+fn non_registry_manifest_deps(
+    text: &str,
+    root_doc: Option<&toml::Table>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    let Ok(doc) = text.parse::<toml::Table>() else { return };
+    for table in manifest_dependency_tables(&doc) {
+        for (key, value) in table.iter() {
+            // A bare version string (`log = "0.4"`) is never non-registry evidence — the overwhelming
+            // common, honest case, and the sharpest over-charge guard: it gives NEITHER branch below
+            // anything to act on, so it is skipped before either runs.
+            let Some(t) = value.as_table() else { continue };
+            let identity = || -> String {
+                t.get("package")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.replace('-', "_"))
+                    .unwrap_or_else(|| key.replace('-', "_"))
+            };
+            if t.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                // `{ workspace = true }` carries no source evidence of its own — resolve it against the
+                // workspace ROOT's `[workspace.dependencies]` entry under the SAME key (Cargo requires an
+                // exact match; a member cannot rename the key it inherits under). FAIL TOWARD DISCLOSURE
+                // when that lookup cannot be completed for any reason (no root found at all, the root
+                // unreadable/unparseable, or the root simply not declaring this key) — every one of those
+                // is "cannot verify this is the reviewed registry crate", not "verified registry", and
+                // trusting an unresolved redirect is exactly how the reproduced defect passed silently.
+                let resolved: Option<&toml::Value> = root_doc.and_then(|d| {
+                    d.get("workspace")
+                        .and_then(|w| w.get("dependencies"))
+                        .and_then(toml::Value::as_table)
+                        .and_then(|rt| rt.get(key.as_str()))
+                });
+                let non_registry = match resolved {
+                    Some(root_val) => root_val
+                        .as_table()
+                        .is_some_and(|rt| rt.contains_key("path") || rt.contains_key("git")),
+                    None => true, // unresolvable redirect — fail toward disclosure, never toward trust
+                };
+                if non_registry {
+                    out.insert(identity());
                 }
-            }
-            continue;
-        }
-        if l.is_empty() || l.starts_with('#') {
-            continue;
-        }
-        if header_key.is_some() {
-            if let Some(v) = toml_package_rename(l) {
-                header_package = Some(v);
-            }
-            if toml_inline_value(l, "path").is_some() || toml_inline_value(l, "git").is_some() {
-                header_non_registry = true;
-            }
-            continue;
-        }
-        if !in_deps {
-            continue;
-        }
-        if let Some(name) = l.split('=').next() {
-            let name = name.trim().trim_matches('"');
-            if name.is_empty() {
                 continue;
             }
-            let key = name.replace('-', "_");
-            if let Some(brace) = l.find('{') {
-                let inline = &l[brace..];
-                let has_source =
-                    toml_inline_value(inline, "path").is_some() || toml_inline_value(inline, "git").is_some();
-                if has_source {
-                    let real = toml_package_rename(inline).unwrap_or(key);
-                    out.insert(real);
-                }
+            if t.contains_key("path") || t.contains_key("git") {
+                out.insert(identity());
             }
         }
     }
-    flush(&header_key, header_non_registry, &header_package, out);
 }
 
 /// The cargo registry source roots (`~/.cargo/registry/src/<index-hash>/`), where unbuilt
