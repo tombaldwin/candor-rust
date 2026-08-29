@@ -1238,15 +1238,30 @@ pub(crate) fn has_workspace_table(root: &Path) -> bool {
 }
 
 /// Member directories of the root manifest's `[workspace]`, joined to `root`, honouring `exclude`,
-/// expanding globs (a bare `*` = root's immediate children, `prefix/*` = a dir's children), and
-/// DEDUPLICATED (a member listed explicitly AND matched by a glob otherwise scans/prints twice).
-/// Empty when there is no `members` key. A `*`-pattern this simple matcher can't expand is WARNED,
-/// never silently dropped (a dropped member yields a vacuous gate, the §6.2 forbidden state).
+/// expanding globs, and DEDUPLICATED (a member listed explicitly AND matched by a glob otherwise
+/// scans/prints twice). Empty when there is no `members` key.
+///
+/// ⟨2026-08-29, adversarial review⟩ THE GLOB EXPANSION USED TO BE HAND-ROLLED — a bare `*` meant
+/// "root's immediate children", `prefix/*` meant "that dir's children", and anything else containing
+/// `*` was warned and dropped. MEASURED FALSE against an ORDINARY, non-exotic layout:
+/// `members = ["crates/*/*"]` (a two-level glob — a real shape `cargo metadata` resolves to every
+/// crate two directories down) matched NEITHER special case, so it fell to the bare `.strip_suffix
+/// ("/*")` branch, which stripped only the LAST `/*` and looked for a literal directory named
+/// `crates/*` — found none, and returned ZERO members with no glob-specific disclosure at all. The
+/// caller (`scan_target`) then read "no members resolved" and fell back to a single-crate scan of the
+/// root, so `deny Net` printed "policy ✓" at exit 0 over three real, unscanned crates.
+///
+/// FIXED by expanding every `members`/`exclude` entry through the real `glob` crate — the SAME crate
+/// cargo's own workspace resolver expands these fields through (`glob::glob(root.join(pattern))`, one
+/// call per entry, no special-casing of `*` vs `prefix/*` vs a pattern with a `*` in the middle). This
+/// is the dependency-tier lesson ONE LEVEL UP: `2e0521a` moved manifest IDENTITY parsing onto the real
+/// `toml` crate because a hand-rolled scanner "missed a spelling twice in a week"; the identical
+/// argument applies to a hand-rolled PATTERN matcher for a field whose syntax is `glob`'s to define, not
+/// this engine's to re-derive a third time. `expand_member_glob` below is the one place a `members`/
+/// `exclude` string turns into paths.
 ///
 /// REAL TOML for the `members`/`exclude` ARRAYS too, for the same reason as `has_workspace_table` right
-/// above — `workspace.members = […]` must resolve identically to `[workspace]\nmembers = […]`. The glob
-/// expansion / exclude-matching / dedup logic below is UNCHANGED: only how the two raw string lists are
-/// read out of the manifest moved off the line scanner.
+/// above — `workspace.members = […]` must resolve identically to `[workspace]\nmembers = […]`.
 pub(crate) fn workspace_members(root: &Path) -> Vec<String> {
     let Some(doc) = read_manifest_table(root) else { return Vec::new() };
     let Some(ws) = doc.get("workspace").and_then(toml::Value::as_table) else { return Vec::new() };
@@ -1263,37 +1278,60 @@ pub(crate) fn workspace_members(root: &Path) -> Vec<String> {
         return Vec::new();
     }
     let exclude = str_array("exclude");
-    // Expand a `<base>/*` (base "" for a bare `*`) to its child dirs carrying a Cargo.toml.
-    let expand = |base: &str| -> Vec<String> {
-        let dir = if base.is_empty() { root.to_path_buf() } else { root.join(base) };
-        let mut found: Vec<String> = std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|e| e.path().join("Cargo.toml").is_file())
-            .map(|e| {
-                let n = e.file_name().to_string_lossy().into_owned();
-                if base.is_empty() { n } else { format!("{base}/{n}") }
-            })
-            .collect();
-        found.sort();
-        found
-    };
     let mut rels: Vec<String> = Vec::new();
-    for m in members {
-        if m == "*" {
-            rels.extend(expand(""));
-        } else if let Some(base) = m.strip_suffix("/*") {
-            rels.extend(expand(base));
-        } else if m.contains('*') {
-            eprintln!("candor-scan: workspace member glob `{m}` is not a trailing `*` — not expanded; \
-                       scan its crates directly or list them explicitly");
-        } else if root.join(&m).join("Cargo.toml").is_file() {
-            rels.push(m);
-        }
+    for m in &members {
+        rels.extend(expand_member_glob(root, m));
     }
     rels.retain(|m| !exclude.iter().any(|e| m == e || m.starts_with(&format!("{e}/"))));
     rels.sort();
     rels.dedup();
     rels.into_iter().map(|m| root.join(m).to_string_lossy().into_owned()).collect()
+}
+
+/// Expand ONE `members`/`exclude` string against `root` through the real `glob` crate, filtered to
+/// matches that actually carry a `Cargo.toml` (a bare `*` or a directory-shaped glob can match plain,
+/// non-crate directories — `.git`-adjacent tooling dirs, fixture folders — and those are silently
+/// excluded here exactly as the pre-existing single-level matcher already did; this is a DENYLIST
+/// narrowing an over-broad glob match, not a new failure mode).
+///
+/// A pattern containing no glob metacharacter that `glob::glob` matches nothing for (or a pattern that
+/// IS a real glob but matches nothing at all — a typo, an exclude-only fragment) falls back to treating
+/// `m` as a literal path and re-running the SAME Cargo.toml check: this mirrors cargo's own
+/// `members_paths`, which explicitly keeps the un-globbed literal in its expansion when the glob finds
+/// no matches, and it collapses "was this a plain path" and "did this glob match anything" into the one
+/// check below instead of two branches that could drift.
+///
+/// An invalid glob pattern (an unmatched `[`) is a real authoring error, not silence: warned, contributes
+/// nothing, same posture as every other unresolved-member case in this function's caller.
+fn expand_member_glob(root: &Path, m: &str) -> Vec<String> {
+    // Canonicalize ROOT before building the pattern, purely so `strip_prefix` below can recover the
+    // relative form reliably. `glob::glob` normalizes away a `./` prefix in what it RETURNS — with
+    // `root` == `.` (the ordinary shape for `candor-scan .`, the default target) a match comes back as
+    // the bare `crates/a/x`, which does not literally start with the path `.`'s single `CurDir`
+    // component, so `Path::strip_prefix(".")` fails even though both name the same directory —
+    // `strip_prefix` compares COMPONENTS, not meaning. Canonicalizing only for THIS computation: every
+    // returned string is still relative, and the caller re-joins it to the ORIGINAL, uncanonicalized
+    // `root` (same posture as `verified_workspace_root`'s canonicalize-to-compare, not
+    // canonicalize-to-store).
+    let root_abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let pattern = root_abs.join(m).to_string_lossy().into_owned();
+    let mut matched: Vec<String> = match glob::glob(&pattern) {
+        Ok(paths) => paths
+            .filter_map(Result::ok)
+            .filter(|p| p.join("Cargo.toml").is_file())
+            .filter_map(|p| p.strip_prefix(&root_abs).ok().map(|r| r.to_string_lossy().into_owned()))
+            .collect(),
+        Err(e) => {
+            eprintln!(
+                "candor-scan: workspace member `{m}` is not a valid glob pattern ({e}) — not \
+                 expanded; scan it directly or fix the `members` entry"
+            );
+            Vec::new()
+        }
+    };
+    if matched.is_empty() && root.join(m).join("Cargo.toml").is_file() {
+        matched.push(m.to_string());
+    }
+    matched.sort();
+    matched
 }

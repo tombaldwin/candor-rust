@@ -42,3 +42,12 @@ rayon = "1"
 # (a transitive dependency of `dylint_internal`, pulled in by the sibling `candor` lint crate) at
 # 1.1.2+spec-1.1.0, so this adds an edge, not a new version to vet.
 toml = "1"
+# REAL glob matching for `[workspace] members`/`exclude`, replacing the hand-rolled `strip_suffix("/*")`
+# special case that only stripped ONE trailing `/*` — so `members = ["crates/*/*"]` (an ordinary,
+# non-exotic layout: `cargo metadata` resolves it to real members) looked for a literal directory named
+# `crates/*`, found none, and `workspace_members` silently returned zero members with no glob-specific
+# disclosure. `glob` is the SAME crate cargo itself resolves `members`/`exclude` patterns through
+# (`glob::glob(root.join(pattern))`, one pattern per entry, no special-casing of `*` vs `prefix/*` vs
+# `a/*/b`) — see the module doc on `workspace_members` below for the full argument. Tiny, dependency-free,
+# and the reference implementation for the exact syntax this field's own semantics are defined by.
+glob = "0.3"
