@@ -349,6 +349,70 @@ after upgrading; review policies and regenerate baselines with the new build.
     file — a bare-version dependency with no lockfile keeps the exemption, proving the fix does not scream
     on every unlocked project.
 
+- **⚠ The above's own enumeration was still short two spellings, both live-reproduced against the shipped
+  binary before this fix, and one of them turned out NOT to be the exemption bug the brief describing it
+  assumed.**
+  - **(1) Workspace inheritance.** A member declaring `log = { workspace = true }` while the REAL
+    `log = { path = "../evil-log" }` sits in the WORKSPACE ROOT's `[workspace.dependencies]` reproduced the
+    exact silent drop (`"functions": []`, exit 0) — `non_registry_manifest_names` walked the scanned
+    member's own directory only and never the workspace root, so a real `Net`-performing impostor named
+    `log` kept the `CALIBRATED_CRATES` exemption with no Cargo.lock involved at all. Isolation control:
+    renaming the SAME shape to a non-calibrated name (`logimpostor`) correctly disclosed `invisible` on the
+    pre-fix binary — the only variable was the name, not the shape.
+  - **(2) Dotted-key TOML — and the premise about it was wrong.** `log.path = "../evil-log"` inside a flat
+    `[dependencies]` table is valid TOML (`cargo metadata` resolves it as a path dependency); the
+    line-based `cargo_toml_deps` had never modelled this PRODUCTION at all (only the inline-table and
+    header-table spellings), so it parsed the whole `log.path` token as one dependency NAME. That is a
+    defect one layer BELOW `non_registry_manifest_names`: it corrupted `cargo_toml_deps`'s base
+    "declared dependency" set itself, so `deps.contains("log")` was FALSE and the call skipped the κ ledger
+    entirely — reproduced silent (`"functions": []`) on BOTH a calibrated name (`log`) and a
+    non-calibrated one (`logimpostor`), which a calibrated-exemption bypass could never do. Fixing only
+    `non_registry_manifest_names` would have left this reproduced defect completely unaffected, because the
+    call never reached the CALIBRATED_* check to begin with. The brief describing this class named the
+    mechanism as the exemption; measured, the mechanism for this spelling was one level upstream of it.
+  - **Both are closed by the same structural fix, not two patches**: `cargo_toml_deps` and
+    `non_registry_manifest_names` now parse Cargo.toml with a REAL TOML parser (the `toml` crate, added as
+    a direct `candor-scan` dependency — already resolved in this workspace's own `Cargo.lock` at
+    `1.1.2+spec-1.1.0` as a transitive dependency of the sibling `candor` lint crate via `dylint_internal`,
+    so this adds a graph edge, not a new version to vet) instead of enumerating surface spellings line by
+    line. Argued in `deps.rs`'s module doc: inline tables, header-table sections and dotted keys are three
+    surface spellings of ONE TOML structure (a nested table under the dependency's key), so a line scanner
+    that branches per spelling is a spelling ALLOWLIST wearing a parser's clothes — measured TWICE in one
+    week to have missed a spelling ([[candor-denylist-over-allowlist]] applies one level up from the
+    `CALIBRATED_*` lists it usually names). A real parser needs exactly one check (`Value::as_table` +
+    `contains_key("path"/"git")`) instead of an ever-growing branch list, closing the entire class rather
+    than the two instances measured. New `find_workspace_root` (walks UP from the scanned directory to the
+    nearest ancestor declaring `[workspace]` — bounded by the filesystem's own depth) resolves a
+    `{ workspace = true }` entry against that root's `[workspace.dependencies]` table under the same key.
+    **FAIL TOWARD DISCLOSURE, not toward trust**, when that resolution cannot be completed for any
+    reason — no root found, root unreadable/unparseable, or the root simply silent on that key — because
+    `workspace = true` carries ZERO source evidence of its own (unlike a bare version, which cannot exist
+    without a real registry entry backing it); trusting an unresolved redirect is exactly how defect (1)
+    passed silently. The REST of the manifest-reading surface (`toml_section`/`toml_scalar`/
+    `toml_string_array`/`has_workspace_table`/`workspace_members`/`read_crate_name` — package-name reading
+    and workspace-member glob expansion) is deliberately UNCHANGED and stays line-based: a missed spelling
+    there is loud (an explicit "no members resolved" warning, or a filename fallback), never a silent
+    purity claim, so the identity-verification-grade fix does not belong there and widening the rewrite to
+    cover it would have been scope creep against this fix's own trigger.
+  - **Controls, each isolating exactly one variable, ALL FALSIFIED AGAINST THE PRE-FIX BINARY**:
+    (a) OVER-CHARGE GUARD — an honest workspace member (`log = { workspace = true }` where the root's
+    `[workspace.dependencies].log` is a genuine bare version) stays byte-identical (`"functions": []`), so
+    the fix does not turn ordinary workspace inheritance into noise; (b) OVER-CHARGE GUARD — a dotted-key
+    dependency with a genuine bare version (`log.version = "0.4"`) also stays byte-identical, confirming
+    the `cargo_toml_deps` rewrite does not over-charge the common case either; (c) FAIL-TOWARD-DISCLOSURE —
+    a member declaring `{ workspace = true }` with NO discoverable workspace root at all (a partial
+    checkout) now discloses `invisible`, where the pre-fix code (which never attempted cross-file
+    resolution) also happened to disclose here only because the exemption path was never reached — this
+    control exists so a future change to the lookup cannot silently regress it into a trust default;
+    (d) both reproduced defects — the workspace-inheritance impostor and the dotted-key impostor, calibrated
+    name — now disclose `invisible: ["log"]` with `coverage.uncovered` counting the call, matching the
+    shape every other κ-ledger disclosure in this file already carries; (e) REGRESSION — `caca530`'s and
+    `fda08ad`'s own tests (`crate_name_collision_with_a_calibrated_crate_loses_the_ledger_exemption` and its
+    header-table sibling) pass unchanged against the rewrite, including their own over-charge and
+    no-lockfile controls.
+  - **STATED RESIDUAL, unchanged from the note above and not widened by this fix**: a `[patch.*]` table
+    override or `.cargo/config.toml` source-replacement still cannot be seen from manifest text alone.
+
 - **⚠ BACKLOG B4: `eval/coverage-gate`'s hard gate asserted PRESENCE, not AGREEMENT — a rule narrowed to a
   still-non-`None` but WRONG effect passed silently.** `coverage_gate.rs` asserted only
   `classify(krate, path).is_some()`. Reproduced live before touching anything: changing async_nats's

