@@ -9,6 +9,82 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ Second adversarial review (2026-08-29) of the ⟨caca530⟩/⟨fda08ad⟩/⟨75045f0⟩ calibrated-crate
+  ledger fix, plus a third finding from the same reviewer round: TWO real defects closed, one measured
+  and explicitly ACCEPTED as a stated, safe-direction residual.**
+  - **(1) `find_workspace_root` granted a false exemption on ANCESTOR NAME COINCIDENCE, not just
+    resolution — the code's own doc comment claimed this "cannot manufacture a false exemption"; that
+    was measured false.** Reproduced on a real `rust-lang/cargo` clone: a `vendor/fake-lib/` directory
+    that is NOT a declared workspace member (`cargo metadata` run there errors "believes it's in a
+    workspace when it's not") declares `log = { workspace = true }` and performs a real, unmodelled
+    effectful call. The outer, real workspace ALSO happens to declare an unrelated, genuine, bare-version
+    `log` in `[workspace.dependencies]` — pure ANCESTRY, not membership — and `find_workspace_root`'s
+    upward walk resolved against it, granting the `CALIBRATED_CRATES` exemption to an impostor the outer
+    workspace has nothing to do with: `"functions": []`, exit 0. Fixed by `verified_workspace_root`:
+    before trusting an ancestor's `[workspace]` table, confirm the scanned directory IS that ancestor (a
+    non-virtual manifest resolving against its own table) OR is one of its own RESOLVED members (real
+    glob expansion + `exclude`, via `workspace_members` — not re-derived, called), FAILING TOWARD
+    DISCLOSURE on any ambiguity, exactly like the redirect-resolution arm it feeds. The doc comment's
+    disproven claim is corrected in place. Over-charge guard: a GENUINE member inheriting a genuine,
+    honest `workspace = true` registry dependency from the SAME root stays byte-identical.
+  - **(2) A THIRD finding, surfaced while fixing (1) and taking priority over it: `has_workspace_table`/
+    `workspace_members` were STILL line-based, matching only the literal string `"[workspace]"` — the
+    exact class of missed spelling ⟨75045f0⟩'s own doc block claimed was safe here ("a missed spelling
+    here is LOUD, not silent"). MEASURED FALSE.** A workspace declared via TOML dotted keys
+    (`workspace.members = […]`, real and `cargo metadata`-resolved, identical to the header form) made
+    `has_workspace_table` return `false`: `scan_target` fell through to a single, package-less crate
+    scan, `analyzed.count` read 0, zero stderr, and a `--policy "deny Net"` gate over the member's real
+    Net call printed "policy ✓" at exit 0 — a silent, gate-passing false all-clear over the WHOLE
+    workspace, not a loud fallback. A SIBLING of the same shape: `read_crate_name`'s `[package]`+`name =`
+    line pair missed `package.name = "…"` (also valid, dotted). Reproduced live: a workspace root naming
+    itself this way had its OWN package silently dropped from the fan-out (`scan_target`'s
+    `if read_crate_name(dir).is_some() { dirs.push(dir) }`) — a real `TcpStream::connect` at the root
+    vanished completely: absent from `functions`, absent from `excluded`, zero stderr, `deny Net` exit 0.
+    Fixed by moving `has_workspace_table`, `workspace_members` and `read_crate_name` onto the same real
+    `toml`-crate parsing ⟨75045f0⟩ already uses for the dependency-identity surface, through one shared
+    `read_manifest_table` — a dotted key and a header section are the SAME structure to a real parser, so
+    there is now one tier, not two. The line-based `toml_scalar`/`toml_string_array` primitives, left with
+    no remaining production caller, are deleted rather than kept as cruft; `toml_section` survives (its
+    one caller, `parse_features`, closes over local feature names, not an identity/membership surface, so
+    a missed spelling there is a feature-gating miss, not a silent purity claim).
+  - **(3) MEASURED AND ACCEPTED, NOT FIXED: `blind_direct` and its per-fn siblings (`direct`, `hosts`,
+    `cmds`, `paths`, `tables`, `incomplete`, `unknown_why`) are keyed on the bare qualified name, which
+    two `#[cfg(...)]` branches of one same-named function share** — real `crates/cargo-util/src/paths.rs`
+    shape (a `#[cfg(target_os = "macos")]` body calling an unmodelled FFI crate beside a
+    `#[cfg(not(...))]` no-op stub). Reproduced live: BOTH branches' report entries carried
+    `"invisible": ["core_foundation"]`, one of them on the branch that provably makes no such call.
+    PRE-EXISTING and INDEPENDENT of all three prior commits (`core_foundation` is not a
+    `CALIBRATED_CRATES` entry) — ⟨75045f0⟩ only widened which calls reach genuine disclosure, which made
+    this always-present, always-over-reporting keying quirk visible in more cases without creating it.
+    **The obvious quick fix (deduplicate the report so one qualified name yields one entry) was tried and
+    REVERTED**: it silently drops a report entry, which
+    `a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two` pins as required
+    ("the report itself still lists both units, so this is a GATE de-duplication, not a lost entry") —
+    that test's own fixture never caught this finding because its two cfg branches happen to perform the
+    identical call, so the cross-contamination is invisible whenever the branches agree. **Accepted**
+    because: the union is a TRUE, SAFE-DIRECTION statement about the shared name (a syntactic scanner
+    cannot know the build target, and `#[cfg(unix)]`/`cfg_if!` arms are deliberately unioned elsewhere in
+    this file on exactly that argument) and never weakens a gate — a real violation on either branch
+    still fires on the shared name; a correct per-declaration fix needs the DIRECT-write maps
+    disambiguated while `calls`/the propagated `*acc` maps stay on bare names (a caller genuinely cannot
+    know which cfg branch of a callee will run, so edges must stay name-keyed) — a cross-cutting change to
+    this function's core data model and, since `"fn"` is the identity candor-query/gate baselines/
+    `whatif`/`callers`/the other three engines' matching convention all key on, a cross-engine SPEC
+    question this family's own "write the row before the port" rule reserves for its own design pass, not
+    a patch bundled into an unrelated adversarial-review response. STATED, not silently absorbed — a
+    characterization test (`cfg_branch_pair_shares_one_invisible_disclosure_stated_residual`) pins the
+    current shape so a future change either preserves it deliberately or revisits this ruling explicitly.
+  - **Controls, falsified against the pre-fix binary**: (a) the ancestor-coincidence case now discloses
+    `invisible: ["log"]`, no fabrication; (b) the dotted-key workspace now fans out to its member and
+    catches the Net violation under `--policy`, where it previously read `analyzed.count: 0` / exit 0; (c)
+    OVER-CHARGE GUARDS — a genuine workspace member, a header-syntax workspace, and an ordinary
+    single crate all stay byte-identical; (d) REGRESSION — every ⟨caca530⟩/⟨fda08ad⟩/⟨75045f0⟩ test
+    passes unchanged, and `ci/self-gate.sh` (this repo's own real, header-syntax Cargo workspace) is
+    unaffected.
+  - Full local verification: `cargo test --workspace` (250 candor-scan unit tests + 74 CLI tests, both up
+    from before), both clippy legs (`-D warnings`), `ci/gate-equivalence.sh`, `ci/self-gate.sh`,
+    `ci/wrapper-smoke.sh`, `tests/integration.sh` — all green.
+
 - **⚠ `--policy` is now a usage error (exit 2) on ten descriptive verbs that accepted and silently
   dropped it: `show`/`where`/`callers`/`map`/`containment`/`reachable`/`path`/`impact`/`blindspots`/
   `tour`.** BACKLOG "`--policy` accept-and-drop is THREE engines, not one" (candor-java `37c9b10` fixed

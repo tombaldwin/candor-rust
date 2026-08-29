@@ -818,48 +818,66 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     idx
 }
 
-// ── shared Cargo.toml parsing — TWO TIERS, deliberately split ──────────────────────────────────────
+// ── shared Cargo.toml parsing — ONE TIER, not two — ─────────────────────────────────────────────────
 //
-// LINE-BASED, still no `toml` dependency (`toml_section`/`toml_scalar` right below, `toml_string_array`/
-// `has_workspace_table`/`workspace_members`/`read_crate_name` further down): package-NAME reading and
-// workspace-member glob expansion. A missed spelling here is LOUD, not silent — a workspace member that
-// doesn't resolve is warned explicitly (`scan_target`'s "declares [workspace] but no members resolved"),
-// and an unread package name just falls back to the filename. Kept line-based on purpose: the ONE place
-// table-header and scalar parsing live, so a manifest-syntax quirk (`[ spaced ]` headers, a trailing
-// `# comment`) is handled once across the readers below rather than drifting between them.
+// REAL TOML PARSING, via the `toml` crate, for EVERYTHING: the dependency-identity surface
+// (`manifest_dependency_tables`, `cargo_toml_deps`, `non_registry_manifest_names`) AND, as of
+// ⟨2026-08-29, finding 3⟩, workspace/package identity too (`read_manifest_table`, `has_workspace_table`,
+// `workspace_members`, `read_crate_name` below).
 //
-// REAL TOML PARSING, via the `toml` crate (`manifest_dependency_tables`, `cargo_toml_deps`,
-// `non_registry_manifest_names` below): the dependency-IDENTITY surface — "what is this crate's real
-// name" and "is this a `path`/`git` impostor wearing a reviewed crate's name". This is precisely the
-// surface an adversarial (or merely unusual) manifest gets to pick its OWN spelling for, and a line
-// scanner's enumerated branch list is a spelling ALLOWLIST wearing a parser's clothes —
-// [[candor-denylist-over-allowlist]] applies one level up from the CALIBRATED_* lists it usually names.
-// MEASURED TWICE IN ONE WEEK on this exact function: the inline-table/header-table split (already two
-// branches, `crates/candor-scan/src/deps.rs` history) missed a THIRD spelling, a dotted key
-// (`log.path = "…"`) — not a bug in either branch, a hole in the branch list itself, because TOML defines
-// dotted keys, inline tables and header-table sections as three surface spellings of ONE structure (a
-// nested table under the dependency's key). A real parser needs exactly one check for that structure,
-// not one branch per spelling anyone happened to write a test for — which is also why this tier is where
-// the ⟨caca530⟩/adversarial-review `{ workspace = true }` cross-file resolution lives: chasing a
-// redirect into another file's table is exactly the kind of structural walk a line scanner cannot do
-// without becoming a second, worse parser.
+// THIS WAS TWO TIERS UNTIL THAT FINDING, and the split's own justification is what fell: this comment
+// used to argue the line-based tier was safe because "a missed spelling here is LOUD, not silent — a
+// workspace member that doesn't resolve is warned explicitly, and an unread package name just falls back
+// to the filename." MEASURED FALSE, live, on the SAME class of spelling the dependency tier had already
+// been widened for twice:
+//
+//   (1) `has_workspace_table`/`workspace_members` matched only the literal header string `"[workspace]"`.
+//       A root declared instead as `workspace.members = […]` — real, `cargo metadata`-resolved TOML,
+//       the identical dotted-key production that forced `cargo_toml_deps` onto a real parser the week
+//       before — made `has_workspace_table` return `false`. `scan_target` then fell through to a single,
+//       package-less crate scan: `analyzed.count: 0`, zero stderr, and `--policy "deny Net"` printed
+//       "policy ✓" at exit 0 over a tree whose member genuinely reached Net through an impostor. Not
+//       loud. Not a fallback. A silent, gate-passing false all-clear over the WHOLE workspace.
+//   (2) `read_crate_name` matched only `[package]` + `name = "…"` as two separate lines. A root
+//       package declared instead as `package.name = "…"` (also real, valid TOML) made it return `None`,
+//       and `scan_target`'s `if read_crate_name(dir).is_some() { dirs.push(dir) }` silently dropped the
+//       ROOT PACKAGE from the workspace fan-out — not a filename fallback, an entire package's sources
+//       never entered `all` at all. Reproduced live: a root `pub fn root_net()` performing a real
+//       `TcpStream::connect` disappeared from the report completely — absent from `functions`, absent
+//       from `excluded`, no stderr — and `--policy "deny Net"` again exited 0.
+//
+// Both are the SAME lesson this tier's dependency half already learned: a line scanner enumerating
+// header spellings is a spelling ALLOWLIST wearing a parser's clothes
+// ([[candor-denylist-over-allowlist]] one level up from the `CALIBRATED_*` lists it usually names), and
+// "the failure mode is loud" is a claim about the SPELLINGS SOMEONE THOUGHT OF, not about TOML. There is
+// now exactly one tier, and exactly one parse per manifest per reader (`read_manifest_table`).
+//
+// `toml_string_array`/`toml_scalar` — the line-based array/scalar primitives this rewrite replaced —
+// are DELETED rather than kept dead: their only production callers were `workspace_members` and
+// `read_crate_name`, both moved to the `toml` crate above, and a primitive whose sole remaining
+// reference is its own pinned unit test is cruft wearing a test's clothes (deps.rs's own precedent,
+// `load_dep_reports`: "a guard that costs nothing needs deleting"). `toml_section` SURVIVES: `lang.rs`'s
+// `parse_features` still calls it for `[features]` — a closure over LOCAL feature names, not an
+// identity/membership surface, so a missed spelling there is a feature-flag miss, not a silent purity
+// claim, and rewriting it is out of this fix's scope (it was not measured to reproduce anything).
 
 /// A `[section]` header line → its inner name, surrounding spaces tolerated (`[ workspace ]` →
-/// "workspace"); None for any non-header line.
+/// "workspace"); None for any non-header line. SURVIVES the line-based → real-TOML migration below
+/// (see the tier note above) because its one remaining caller, `lang.rs`'s `parse_features`, is a
+/// feature-flag closure, not an identity/membership surface.
 pub(crate) fn toml_section(line: &str) -> Option<&str> {
     let l = line.trim();
     Some(l.strip_prefix('[')?.strip_suffix(']')?.trim())
 }
 
-/// A scalar `key = "value"` / `key = value` on this line — `key` matched as the WHOLE key (then `=`),
-/// the value quote-trimmed and an out-of-quotes trailing `# comment` stripped. None if not this key.
-pub(crate) fn toml_scalar<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    let rest = line.trim().strip_prefix(key)?.trim_start().strip_prefix('=')?.trim();
-    Some(if let Some(q) = rest.strip_prefix('"') {
-        q.split('"').next().unwrap_or(q)
-    } else {
-        rest.split('#').next().unwrap_or(rest).trim()
-    })
+/// This scan's own Cargo.toml, parsed once as a real TOML document — `None` when absent, unreadable or
+/// unparseable. THE ONE PLACE `has_workspace_table`, `workspace_members` and `read_crate_name` read a
+/// manifest, so the three questions they answer ("is this a workspace", "who are its members", "what is
+/// this package called") can never drift into disagreeing about what dotted-key/header-table spelling
+/// counts as which structure — the exact drift ⟨finding 3⟩ found between this trio and the dependency
+/// tier's already-real parser.
+fn read_manifest_table(root: &Path) -> Option<toml::Table> {
+    std::fs::read_to_string(root.join("Cargo.toml")).ok()?.parse::<toml::Table>().ok()
 }
 
 /// Dependency names declared by EVERY Cargo.toml under the scan root (a workspace's members each
@@ -943,30 +961,62 @@ pub(crate) fn non_registry_lock_names(dir: &str) -> std::collections::HashSet<St
 }
 
 /// Walk UP from `dir` (`dir` itself included) to the nearest ancestor whose Cargo.toml declares a
-/// `[workspace]` table — the root a member's `{ workspace = true }` dependency inherits its real source
-/// from. Bounded by the filesystem's own depth (`Path::parent` strictly shortens the path every step, so
-/// this terminates without a manual counter).
+/// `[workspace]` table, VERIFY `dir` IS ACTUALLY A RESOLVED MEMBER OF IT (or is the root itself), and
+/// only then return it as the root a member's `{ workspace = true }` dependency inherits its real source
+/// from. The upward walk is bounded by the filesystem's own depth (`Path::parent` strictly shortens the
+/// path every step, so this terminates without a manual counter).
 ///
-/// HEURISTIC, NOT MEMBERSHIP-VERIFIED: it does not re-derive `workspace_members`'s glob-expansion/
-/// `exclude`/dedup logic to confirm `dir` is actually a resolved member of what it finds — that check
-/// belongs to that function, and duplicating it here for a lookup that only needs "which manifest
-/// declares the dependency" would be scope creep. Cargo does not support nested/overlapping workspaces,
-/// so any real `cargo build` of `dir` can only ever have resolved `workspace = true` against the nearest
-/// enclosing `[workspace]` — exactly what this returns. The one way this over-reaches is a directory that
-/// is NOT actually a workspace member sitting under an unrelated ancestor that happens to declare
-/// `[workspace]` (e.g. a vendored tree one directory too deep in the scan root); `cargo` itself would
-/// refuse to build such a layout if it truly contained a `workspace = true` reference, so this cannot
-/// manufacture a false EXEMPTION — the only direction it can err is toward the fail-toward-disclosure
-/// arm below firing on a directory that turns out not to have needed it, which is the safe direction.
+/// ⟨2026-08-29 ADVERSARIAL REVIEW, finding 1⟩ MEASURED THIS FALSE: this function used to return the
+/// nearest `[workspace]`-declaring ancestor UNCHECKED, on the argument below (verbatim, and wrong) that
+/// doing so "cannot manufacture a false exemption" because "`cargo` itself would refuse to build such a
+/// layout". Reproduced live on a real `rust-lang/cargo` clone: a `vendor/fake-lib/` directory that is
+/// NOT a declared workspace member (confirmed — `cargo metadata` run there errors "current package
+/// believes it's in a workspace when it's not") declares `log = { workspace = true }` and performs a real
+/// Net call through it. The outer clone's genuine root ALSO declares an unrelated, honest
+/// `log = "0.4"` in `[workspace.dependencies]` — pure ancestry, not membership, put that entry within
+/// reach of the walk, `non_registry_manifest_deps` resolved against it, found a bare version, and granted
+/// the `CALIBRATED_CRATES` exemption to an impostor that has nothing to do with the outer workspace:
+/// `"functions": []`, exit 0, over a real Net call.
+///
+/// THE OLD ARGUMENT'S ERROR: it reasoned about whether `cargo build` would accept the layout, but
+/// candor-scan's own stated purpose is reading source WITHOUT building it (see `non_registry_manifest_names`'s
+/// doc) — unbuildable, adversarial or merely-not-actually-connected source is exactly the population a
+/// static scanner is asked to read. Whether `dir` is really wired into the ancestor's workspace is a
+/// factual question this module can already answer (`workspace_members`), and answering it is not scope
+/// creep the way the old doc claimed: skipping it is what let a directory's mere FILESYSTEM POSITION
+/// stand in for its WORKSPACE MEMBERSHIP.
+///
+/// FAILS TOWARD DISCLOSURE, never toward trust, exactly like the redirect-resolution arm this feeds: an
+/// ancestor found but not verified is treated identically to no ancestor found at all (`None`), so
+/// `non_registry_manifest_deps`'s existing "no root found" arm already does the right thing with it —
+/// no new failure mode, just a stricter gate on this function's own answer.
 pub(crate) fn find_workspace_root(dir: &Path) -> Option<std::path::PathBuf> {
     let mut cur = Some(dir.to_path_buf());
     while let Some(d) = cur {
         if has_workspace_table(&d) {
-            return Some(d);
+            return verified_workspace_root(dir, &d);
         }
         cur = d.parent().map(Path::to_path_buf);
     }
     None
+}
+
+/// `root` declares `[workspace]`; confirm `dir` (the directory whose OWN manifest declared
+/// `workspace = true`) is entitled to inherit from it — either `dir` IS `root` (a non-virtual manifest
+/// resolving its own dependency against its own `[workspace.dependencies]` table, no membership question
+/// to ask) or `dir` is one of `root`'s own RESOLVED members (real glob expansion + `exclude`, the same
+/// computation `scan_target` uses to fan out — not re-derived, called). `None` on any ambiguity
+/// (unreadable/uncanonicalizable path) — fail toward disclosure, the same posture as the caller.
+fn verified_workspace_root(dir: &Path, root: &Path) -> Option<std::path::PathBuf> {
+    let canon_dir = std::fs::canonicalize(dir).ok()?;
+    let canon_root = std::fs::canonicalize(root).ok()?;
+    if canon_root == canon_dir {
+        return Some(root.to_path_buf());
+    }
+    workspace_members(root)
+        .iter()
+        .any(|m| std::fs::canonicalize(m).map(|c| c == canon_dir).unwrap_or(false))
+        .then(|| root.to_path_buf())
 }
 
 /// All of `doc`'s Cargo RUNTIME dependency tables: the root `[dependencies]`, `[workspace.dependencies]`,
@@ -1161,72 +1211,30 @@ pub(crate) fn dirs_cargo_registry_src() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// This scan's own package NAME, from `[package].name` — real TOML (⟨finding 3⟩: a header-table
+/// `[package]` + a `name = "…"` line and a dotted `package.name = "…"` key are the SAME structure to a
+/// parser, and the line-based predecessor only matched the first spelling. That was not a loud fallback:
+/// reproduced live, a workspace root naming itself via `package.name = "…"` made this return `None`,
+/// `scan_target`'s `if read_crate_name(dir).is_some() { dirs.push(dir) }` silently skipped the root
+/// package, and its real `TcpStream::connect` never entered `all` — absent from `functions`, absent from
+/// `excluded`, zero stderr, `--policy "deny Net"` exit 0).
 pub(crate) fn read_crate_name(root: &Path) -> Option<String> {
-    let txt = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    let mut in_package = false;
-    for line in txt.lines() {
-        if let Some(section) = toml_section(line) {
-            in_package = section == "package"; // only [package]'s `name` is the crate name
-            continue;
-        }
-        // `name` inside `[package]` only (a `name =` in `[[bin]]`/`[dependencies]` is not the crate name).
-        if in_package {
-            if let Some(v) = toml_scalar(line, "name") {
-                return Some(v.replace('-', "_"));
-            }
-        }
-    }
-    None
-}
-
-/// The string entries of `key = [ ... ]` inside `[table]` — line-based (the manifest subset that
-/// matters), multi-line arrays included. No TOML dependency, same trade as the parsers above.
-pub(crate) fn toml_string_array(txt: &str, table: &str, key: &str) -> Vec<String> {
-    let (mut in_table, mut collecting) = (false, false);
-    let mut out = Vec::new();
-    for line in txt.lines() {
-        let l = line.trim();
-        if !collecting {
-            if let Some(section) = toml_section(line) {
-                in_table = section == table;
-                continue;
-            }
-        }
-        if !in_table {
-            continue;
-        }
-        let rest = if let Some(r) = l.strip_prefix(key) {
-            let r = r.trim_start();
-            let Some(r) = r.strip_prefix('=') else { continue };
-            collecting = true;
-            r
-        } else if collecting {
-            l
-        } else {
-            continue;
-        };
-        let mut parts = rest.split('"');
-        parts.next();
-        while let Some(s) = parts.next() {
-            out.push(s.to_string());
-            if parts.next().is_none() {
-                break;
-            }
-        }
-        if rest.contains(']') {
-            collecting = false;
-        }
-    }
-    out
+    let name = read_manifest_table(root)?.get("package")?.as_table()?.get("name")?.as_str()?.to_string();
+    Some(name.replace('-', "_"))
 }
 
 /// True if the manifest declares a `[workspace]` table at all (distinct from "has members"): a
 /// workspace root with zero RESOLVED members must warn, not silently fall through to a single-crate
 /// scan whose nested-package filter then prunes every member into an empty report.
+///
+/// REAL TOML (⟨finding 3⟩): a header `[workspace]` and a dotted `workspace.members = […]` are the SAME
+/// structure — a top-level `workspace` key mapping to a table — to any real parser. The line-based
+/// predecessor matched only the literal string `"[workspace]"`, so a manifest declaring its workspace via
+/// dotted keys made THE WHOLE WORKSPACE INVISIBLE: `scan_target` fell through to a single, package-less
+/// crate scan, `analyzed.count` read 0, zero stderr, and `--policy "deny Net"` printed "policy ✓" at exit
+/// 0 over a tree whose member genuinely reached Net through an impostor. Reproduced live before this fix.
 pub(crate) fn has_workspace_table(root: &Path) -> bool {
-    std::fs::read_to_string(root.join("Cargo.toml"))
-        .map(|t| t.lines().any(|l| l.trim() == "[workspace]"))
-        .unwrap_or(false)
+    read_manifest_table(root).is_some_and(|doc| doc.contains_key("workspace"))
 }
 
 /// Member directories of the root manifest's `[workspace]`, joined to `root`, honouring `exclude`,
@@ -1234,13 +1242,27 @@ pub(crate) fn has_workspace_table(root: &Path) -> bool {
 /// DEDUPLICATED (a member listed explicitly AND matched by a glob otherwise scans/prints twice).
 /// Empty when there is no `members` key. A `*`-pattern this simple matcher can't expand is WARNED,
 /// never silently dropped (a dropped member yields a vacuous gate, the §6.2 forbidden state).
+///
+/// REAL TOML for the `members`/`exclude` ARRAYS too, for the same reason as `has_workspace_table` right
+/// above — `workspace.members = […]` must resolve identically to `[workspace]\nmembers = […]`. The glob
+/// expansion / exclude-matching / dedup logic below is UNCHANGED: only how the two raw string lists are
+/// read out of the manifest moved off the line scanner.
 pub(crate) fn workspace_members(root: &Path) -> Vec<String> {
-    let Ok(txt) = std::fs::read_to_string(root.join("Cargo.toml")) else { return Vec::new() };
-    let members = toml_string_array(&txt, "workspace", "members");
+    let Some(doc) = read_manifest_table(root) else { return Vec::new() };
+    let Some(ws) = doc.get("workspace").and_then(toml::Value::as_table) else { return Vec::new() };
+    let str_array = |key: &str| -> Vec<String> {
+        ws.get(key)
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
+    };
+    let members = str_array("members");
     if members.is_empty() {
         return Vec::new();
     }
-    let exclude = toml_string_array(&txt, "workspace", "exclude");
+    let exclude = str_array("exclude");
     // Expand a `<base>/*` (base "" for a bare `*`) to its child dirs carrying a Cargo.toml.
     let expand = |base: &str| -> Vec<String> {
         let dir = if base.is_empty() { root.to_path_buf() } else { root.join(base) };

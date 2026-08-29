@@ -1877,6 +1877,61 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // report — both of which someone reviewed.
                 if classified.is_none() {
                     *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                    // ⟨2026-08-29 ADVERSARIAL REVIEW, finding 2 — MEASURED, ACCEPTED, NOT FIXED HERE⟩
+                    // `blind_direct` (and every sibling per-fn map keyed the same way: `direct`, `hosts`,
+                    // `cmds`, `paths`, `tables`, `fskinds`, `incomplete`, `unknown_why`) is keyed on the
+                    // BARE qualified name `f.qual`, which two `#[cfg(...)]` branches of one same-named
+                    // function SHARE — `#[cfg(target_os = "macos")] fn get_thing() { core_foundation::… }`
+                    // beside `#[cfg(not(target_os = "macos"))] fn get_thing() {}` is real
+                    // `crates/cargo-util/src/paths.rs` shape. Reproduced live: BOTH branches' report
+                    // entries carried `"invisible": ["core_foundation"]`, one of them on the branch that
+                    // provably makes no such call — this insertion charges the crate to `f.qual`, and the
+                    // OTHER branch's entry later reads the SAME bucket back.
+                    //
+                    // PRE-EXISTING, INDEPENDENT OF ⟨caca530⟩/⟨fda08ad⟩/⟨75045f0⟩: `core_foundation` is not
+                    // a `CALIBRATED_CRATES` entry, so this keying collision has always fired for an
+                    // ordinary uncalibrated blind spot. ⟨75045f0⟩ only widened WHICH calls reach genuine
+                    // disclosure (closing the impostor-exemption false-negative); it made this pre-existing,
+                    // always-over-reporting quirk visible in more cases, it did not create the mechanism.
+                    //
+                    // NOT FIXED HERE, and the reason is a genuine constraint, not a schedule excuse:
+                    //   1. SAFE DIRECTION. The union is still a TRUE statement about the qualified name
+                    //      ("`get_thing` reaches `core_foundation` under some configuration") and a syntactic
+                    //      scanner cannot know the build target — `#[cfg(unix)]`/`cfg_if!` arms are
+                    //      DELIBERATELY unioned elsewhere in this file on exactly that argument (see
+                    //      collector.rs's cfg_if handling). No `deny` gate is weakened: a real violation on
+                    //      either branch still fires on the shared name, which is MORE conservative, never
+                    //      less. This is over-report noise, never the family's cardinal sin (a silent
+                    //      under-report).
+                    //   2. A per-declaration-instance fix cannot be a local key rename. `direct`/
+                    //      `blind_direct`/etc. are populated once per `FnInfo`'s OWN body walk (unambiguous
+                    //      — this call site knows exactly which cfg branch it is in), but `calls` edges
+                    //      point at callees BY BARE NAME, because a CALLER genuinely cannot know which cfg
+                    //      branch of a callee will run — so `propagate`/`propagate_str`'s transitive closure
+                    //      MUST keep resolving callees by bare name; that is not a bug, it is the same
+                    //      unavoidable-ambiguity argument as (1) one hop further out. Disambiguating the
+                    //      DIRECT maps' keys while leaving `calls`/the propagated `*acc` maps on bare names
+                    //      means reconciling two key spaces at the entry-building loop, which currently
+                    //      assumes one — a real, cross-cutting change to this function's core data model,
+                    //      not a narrow patch.
+                    //   3. THE OBVIOUS QUICK FIX IS WRONG, MEASURED: deduplicating `all` so each qual
+                    //      produces one report entry was tried and reverted — it collapses two GENUINELY
+                    //      DISTINCT source declarations (own `loc` each) into one, which
+                    //      `a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two`
+                    //      (candor-scan/tests/cli.rs) pins as WRONG: the report must list both units
+                    //      (their own comment: "so this is a GATE de-duplication, not a lost entry"). That
+                    //      test's own fixture never caught this finding because both its cfg branches
+                    //      genuinely perform the identical call — the cross-contamination is invisible
+                    //      whenever the branches AGREE, which is why this shipped for as long as it did.
+                    //   4. BLAST RADIUS. `f.qual`/the report's `"fn"` field is the cross-engine identity
+                    //      candor-query, gate baselines, `whatif`/`callers` and the other three engines'
+                    //      matching convention all key on. A same-file keying fix is tractable; verifying it
+                    //      doesn't disturb any of those consumers, and deciding whether java/ts/swift need
+                    //      the identical treatment for their own multi-release-jar/conditional-export/
+                    //      `#if os()` equivalents, is a cross-engine SPEC question (this family's own "write
+                    //      the row before the port" rule) — not a one-file patch bundled into an unrelated
+                    //      adversarial-review response. STATED, not silently absorbed: needs its own design
+                    //      pass and a BACKLOG entry.
                     blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
                 }
             }
@@ -2350,6 +2405,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
     }
 
+    // `all` DELIBERATELY KEEPS ONE ENTRY PER `FnInfo`, DUPLICATES INCLUDED — see the doc note on
+    // `blind_direct`'s population loop above for why a genuine per-cfg-branch keying fix belongs there,
+    // not here, and why deduplicating THIS list is the wrong repair (it was tried and reverted: it
+    // silently drops a report entry, which `a_qualified_name_carried_by_two_cfg_gated_units_yields_one_violation_not_two`
+    // (candor-scan/tests/cli.rs) pins as a REQUIRED shape — "the report itself still lists both units,
+    // so this is a GATE de-duplication, not a lost entry").
     let all: Vec<String> = fns.iter().map(|f| f.qual.clone()).collect();
     let inferred = propagate(&direct, &calls, &all);
     let hostsacc = propagate_str(&hosts, &calls, &all);
