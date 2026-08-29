@@ -1565,6 +1565,43 @@ pub(crate) fn tail2(path: &str) -> Option<String> {
     Some(format!("{}::{}", segs[n - 2], segs[n - 1]))
 }
 
+/// ⟨peek-scope-attribution⟩ Every qual reachable by walking `rev` (callee -> callers, the inverse of the
+/// normal `calls` graph) BACKWARD from `start` — i.e. `start` itself plus every ANCESTOR that could call
+/// into it, directly or transitively. Cycle-safe (a `seen` set, not a depth bound): a caller cycle in real
+/// code — mutual recursion, an event loop re-entering its own dispatcher — must not loop forever, and
+/// candor's own call graph already tolerates cycles elsewhere (propagation runs to a fixpoint over the
+/// SAME graph this inverts).
+///
+/// Used ONLY to widen which function NAMES a policy's scope string is tested against for a peeked
+/// (excluded) finding — never to attribute the finding itself, and never to alter any inferred effect. A
+/// normal (non-excluded) effect already gets this for free: propagation carries a callee's effect up
+/// through every intermediate caller before the gate ever tests a scope string against a fn's OWN
+/// (already-propagated) inferred set. This is the same treatment for the one edge the primary scan cannot
+/// see at all — an excluded file's trait implementation — without re-running propagation or unioning the
+/// excluded file into this scan's own universe.
+pub(crate) fn reaching_ancestors<'a>(
+    start: impl IntoIterator<Item = &'a str>,
+    rev: &HashMap<&'a str, Vec<&'a str>>,
+) -> std::collections::BTreeSet<String> {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut stack: Vec<&str> = Vec::new();
+    for s in start {
+        if seen.insert(s.to_string()) {
+            stack.push(s);
+        }
+    }
+    while let Some(cur) = stack.pop() {
+        if let Some(callers) = rev.get(cur) {
+            for c in callers {
+                if seen.insert((*c).to_string()) {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+    seen
+}
+
 /// A CONSUMING iterator combinator: one that drives `Iterator::next` to completion (or short-circuits
 /// after forcing some elements). Calling one on a custom-iterator value runs its `next` — so if the
 /// receiver is a concrete local `impl Iterator`, the consumer reaches that `next`'s effect (handled by

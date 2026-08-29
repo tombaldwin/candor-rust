@@ -255,7 +255,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -305,7 +305,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -560,7 +560,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
             const_strings: &consts, local_macros: &macros, macro_expanding: Default::default(),
             str_locals: Default::default(),
-            local_uses: Default::default(), bound_names: Default::default(),
+            local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(),
         };
         // Every table gets an entry for the SAME name the binder is about to shadow.
         let n = "x";
@@ -3912,6 +3912,260 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert!(ex.is_empty(), "nothing was excluded, so the list must be empty: {ex:?}");
     }
 
+    /// ⟨peek-scope-attribution⟩ THE CARDINAL SIN (BACKLOG "a peek finding is scope-matched against the
+    /// WRONG ENTITY"): the peek names the excluded declaration correctly, but the SCOPE test ran only
+    /// against that name — so a rule scoped to the IN-SCOPE CALLER that reaches it through dynamic
+    /// dispatch could never match, and the exact same effect a bare `deny Net` catches went silent under
+    /// `deny Net Runner` on the identical tree.
+    ///
+    /// `Runner::dispatch(&dyn Doer)` is in scope and resolves its ONE locally-visible `impl Doer`
+    /// (`PureDoer`, pure) confidently — CHA has no reason to doubt it, because it never sees the excluded
+    /// `tests/evil.rs`'s `impl Doer for EvilDoer` at all. `EvilDoer::work` performs `Net`. THREE rows:
+    ///
+    /// - SCOPED (`deny Net Runner`) — the defect. Before this fix: exit 0, `outOfScope: []`. Must now
+    ///   name `EvilDoer::work` (never `Runner::dispatch` — attribution must not shift to the caller) and
+    ///   go exit 2/incomplete.
+    /// - UNSCOPED (`deny Net`) — the pre-existing control. Already caught before this fix (the excluded
+    ///   declaration's own name matches a scopeless rule trivially); must still catch it, exactly once,
+    ///   not twice now that TWO routes (its own name AND the reaching caller) could plausibly match.
+    /// - NON-MATCHING SCOPE (`deny Net NoSuchCaller`) — the over-charge control on the SAME tree: a
+    ///   scope that matches neither the excluded declaration NOR any function that reaches it must stay
+    ///   exit 0, proving the widened scope test does not degrade into "any exclusion, any scope".
+    #[test]
+    fn peek_scope_attribution_reaches_the_dispatching_caller_and_never_double_reports() {
+        let d = std::env::temp_dir().join(format!("candor-peek-scope-attr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("tests")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"psa\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), concat!(
+            "pub trait Doer { fn work(&self); }\n",
+            "pub struct PureDoer;\n",
+            "impl Doer for PureDoer { fn work(&self) {} }\n",
+            "pub struct Runner;\n",
+            "impl Runner { pub fn dispatch(d: &dyn Doer) { d.work(); } }\n",
+        )).unwrap();
+        std::fs::write(d.join("tests/evil.rs"), concat!(
+            "use psa::Doer;\n",
+            "pub struct EvilDoer;\n",
+            "impl Doer for EvilDoer { fn work(&self) { \
+                 let _ = std::net::TcpStream::connect(\"evil.example.com:80\"); } }\n",
+            "#[test]\nfn calls_it() { EvilDoer.work(); }\n",
+        )).unwrap();
+        std::fs::write(d.join("scoped.pol"), "deny Net Runner\n").unwrap();
+        std::fs::write(d.join("unscoped.pol"), "deny Net\n").unwrap();
+        std::fs::write(d.join("nomatch.pol"), "deny Net NoSuchCaller\n").unwrap();
+        let idx = load_dep_reports(None);
+        crate::gate::reset_gate_run_state();
+        let run = |pol: &str, tag: &str| -> (i32, serde_json::Value) {
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join(format!("out/{tag}")).to_string_lossy().into_owned(),
+                want_json: true, include_tests: false,
+                policy: Some(d.join(pol).to_string_lossy().into_owned()),
+                baseline: None, quiet: true, ws_member: false, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            (rc, serde_json::from_str(&body.unwrap()).unwrap())
+        };
+
+        // THE DEFECT, closed.
+        let (rc_scoped, v_scoped) = run("scoped.pol", "scoped");
+        let oos = v_scoped["outOfScope"].as_array().expect("a configured policy must answer");
+        assert_eq!(oos.len(), 1,
+                   "exactly the excluded conformer, named once: {oos:?}");
+        assert_eq!(oos[0]["fn"].as_str(), Some("tests::evil::EvilDoer::work"),
+                   "ATTRIBUTION CONTROL: the finding must name the excluded declaration, never the \
+                    in-scope caller it was reached through: {oos:?}");
+        assert_eq!(oos[0]["effects"][0].as_str(), Some("Net"));
+        assert_eq!(rc_scoped, 2,
+                   "a policy scoped to the IN-SCOPE CALLER must still see an effect reached only through \
+                    an excluded implementor dispatched to dynamically — this is the cardinal sin: {v_scoped:#}");
+
+        // THE UNSCOPED CONTROL: still caught, and not doubled now that two routes could match
+        // `EvilDoer::work` (its own name AND the reaching `Runner::dispatch` caller). The excluded
+        // `#[test] fn calls_it()` ALSO performs Net directly (it calls `EvilDoer.work()` itself) — a
+        // second, genuinely distinct excluded function, unrelated to this fix and unaffected by it.
+        let (rc_unscoped, v_unscoped) = run("unscoped.pol", "unscoped");
+        let oos_u = v_unscoped["outOfScope"].as_array().unwrap();
+        assert_eq!(oos_u.len(), 2,
+                   "two DISTINCT excluded functions genuinely perform Net (EvilDoer::work and the test \
+                    fn that calls it) — the widened scope test must not ALSO add a duplicate on top: {oos_u:?}");
+        let names: std::collections::BTreeSet<&str> =
+            oos_u.iter().filter_map(|e| e["fn"].as_str()).collect();
+        assert_eq!(names, std::collections::BTreeSet::from(["tests::evil::EvilDoer::work", "tests::evil::calls_it"]),
+                   "each name exactly once — no duplicate from the two attribution routes: {oos_u:?}");
+        assert_eq!(rc_unscoped, 2);
+
+        // OVER-CHARGE CONTROL: a scope matching neither the declaration nor any reaching caller.
+        let (rc_no, v_no) = run("nomatch.pol", "nomatch");
+        assert_eq!(v_no["outOfScope"].as_array().map(|a| a.len()), Some(0),
+                   "a scope matching nothing reachable must stay silent, not widen to \"any exclusion\": \
+                    {:?}", v_no["outOfScope"]);
+        assert_eq!(rc_no, 0);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ⟨peek-scope-attribution⟩ TRANSITIVE ANCESTORS. A normal (non-excluded) effect already propagates
+    /// through every intermediate caller before the gate tests a scope string — `App::main` calling
+    /// `Service::run` calling something that performs `Net` is caught by `deny Net App` today. This pins
+    /// that the SAME thing works when the effect is reached only through an excluded dynamic-dispatch
+    /// target two hops below the direct dispatcher (`Runner::dispatch`), not just at the direct dispatcher
+    /// itself — `rev_calls`/`reaching_ancestors`, not merely `direct_dispatchers`. A scope matching NONE
+    /// of the three in-scope names is the over-charge control on the identical tree.
+    #[test]
+    fn peek_scope_attribution_reaches_a_transitive_ancestor_of_the_dispatching_caller() {
+        let d = std::env::temp_dir().join(format!("candor-peek-scope-attr-trans-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("tests")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"psat\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), concat!(
+            "pub trait Doer { fn work(&self); }\n",
+            "pub struct PureDoer;\n",
+            "impl Doer for PureDoer { fn work(&self) {} }\n",
+            "pub struct Runner;\n",
+            "impl Runner { pub fn dispatch(d: &dyn Doer) { d.work(); } }\n",
+            "pub struct Service;\n",
+            "impl Service { pub fn run() { Runner::dispatch(&PureDoer); } }\n",
+            "pub struct App;\n",
+            "impl App { pub fn main() { Service::run(); } }\n",
+        )).unwrap();
+        std::fs::write(d.join("tests/evil.rs"), concat!(
+            "use psat::Doer;\n",
+            "pub struct EvilDoer;\n",
+            "impl Doer for EvilDoer { fn work(&self) { \
+                 let _ = std::net::TcpStream::connect(\"evil.example.com:80\"); } }\n",
+            "#[test]\nfn calls_it() { EvilDoer.work(); }\n",
+        )).unwrap();
+        std::fs::write(d.join("app.pol"), "deny Net App\n").unwrap();
+        std::fs::write(d.join("nomatch.pol"), "deny Net NoSuchCaller\n").unwrap();
+        let idx = load_dep_reports(None);
+        crate::gate::reset_gate_run_state();
+        let run = |pol: &str, tag: &str| -> (i32, serde_json::Value) {
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join(format!("out/{tag}")).to_string_lossy().into_owned(),
+                want_json: true, include_tests: false,
+                policy: Some(d.join(pol).to_string_lossy().into_owned()),
+                baseline: None, quiet: true, ws_member: false, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            (rc, serde_json::from_str(&body.unwrap()).unwrap())
+        };
+
+        let (rc_app, v_app) = run("app.pol", "app");
+        let oos = v_app["outOfScope"].as_array().unwrap();
+        assert_eq!(oos.len(), 1, "exactly the excluded conformer: {oos:?}");
+        assert_eq!(oos[0]["fn"].as_str(), Some("tests::evil::EvilDoer::work"));
+        assert_eq!(rc_app, 2,
+                   "`App` is TWO calls away from the dyn-dispatch site (App::main -> Service::run -> \
+                    Runner::dispatch); a policy scoped there must reach the excluded implementor exactly \
+                    as it would if the effect were an ordinary in-scope one propagated up the call graph: \
+                    {v_app:#}");
+
+        let (rc_no, v_no) = run("nomatch.pol", "nomatch");
+        assert_eq!(v_no["outOfScope"].as_array().map(|a| a.len()), Some(0));
+        assert_eq!(rc_no, 0);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ⟨peek-scope-attribution⟩ OVER-CHARGE CONTROL: an excluded conformer that NOTHING in scope ever
+    /// dispatches to dynamically. `Runner::dispatch` here calls the CONCRETE `PureDoer` directly (no
+    /// `&dyn Doer` receiver anywhere in scope), so there is no dispatch site for `direct_dispatchers` to
+    /// hold at all — the widened scope test must contribute NOTHING, and the report must be identical to
+    /// what an ordinary (pre-fix) peek already produced for an unreachable excluded declaration: nothing.
+    #[test]
+    fn peek_scope_attribution_an_excluded_conformer_nothing_dispatches_to_is_unaffected() {
+        let d = std::env::temp_dir().join(format!("candor-peek-scope-attr-unreached-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("tests")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"psau\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), concat!(
+            "pub trait Doer { fn work(&self); }\n",
+            "pub struct PureDoer;\n",
+            "impl Doer for PureDoer { fn work(&self) {} }\n",
+            "pub struct Runner;\n",
+            // No `&dyn Doer` anywhere — a concrete call only.
+            "impl Runner { pub fn dispatch() { PureDoer.work(); } }\n",
+        )).unwrap();
+        std::fs::write(d.join("tests/evil.rs"), concat!(
+            "use psau::Doer;\n",
+            "pub struct EvilDoer;\n",
+            "impl Doer for EvilDoer { fn work(&self) { \
+                 let _ = std::net::TcpStream::connect(\"evil.example.com:80\"); } }\n",
+            "#[test]\nfn calls_it() { EvilDoer.work(); }\n",
+        )).unwrap();
+        std::fs::write(d.join("scoped.pol"), "deny Net Runner\n").unwrap();
+        let idx = load_dep_reports(None);
+        crate::gate::reset_gate_run_state();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: d.join("out/unreached").to_string_lossy().into_owned(),
+            want_json: true, include_tests: false,
+            policy: Some(d.join("scoped.pol").to_string_lossy().into_owned()),
+            baseline: None, quiet: true, ws_member: false, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(v["outOfScope"].as_array().map(|a| a.len()), Some(0),
+                   "no dispatch site exists to widen through, so scoping must not manufacture one: {v:#}");
+        assert_eq!(rc, 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ⟨peek-scope-attribution⟩ SECOND DISPATCH SITE: implicit STRINGIFICATION through a dispatch-typed
+    /// bound (`charge_stringify_bound`, separate code path from the method-call dispatch site above) has
+    /// the identical hazard and must get the identical fix — `Logger::log` never calls `.fmt()` by name;
+    /// `println!("{}", e)` desugars to it. The excluded `EvilEntry`'s `Display::fmt` performing `Net`
+    /// must be reachable from `deny Net Logger` exactly as the method-dispatch case is.
+    #[test]
+    fn peek_scope_attribution_covers_the_stringify_dispatch_site_too() {
+        let d = std::env::temp_dir().join(format!("candor-peek-scope-attr-fmt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("tests")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"psaf\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), concat!(
+            "use std::fmt;\n",
+            "pub trait Entry: fmt::Display {}\n",
+            "pub struct PureEntry;\n",
+            "impl fmt::Display for PureEntry { \
+                 fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, \"pure\") } }\n",
+            "impl Entry for PureEntry {}\n",
+            "pub struct Logger;\n",
+            "impl Logger { pub fn log(e: &dyn Entry) { println!(\"{}\", e); } }\n",
+        )).unwrap();
+        std::fs::write(d.join("tests/evil.rs"), concat!(
+            "use psaf::Entry;\n",
+            "use std::fmt;\n",
+            "pub struct EvilEntry;\n",
+            "impl fmt::Display for EvilEntry {\n",
+            "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n",
+            "        let _ = std::net::TcpStream::connect(\"evil.example.com:80\");\n",
+            "        write!(f, \"evil\")\n",
+            "    }\n",
+            "}\n",
+            "impl Entry for EvilEntry {}\n",
+            "#[test]\nfn calls_it() { println!(\"{}\", &EvilEntry as &dyn fmt::Display); }\n",
+        )).unwrap();
+        std::fs::write(d.join("scoped.pol"), "deny Net Logger\n").unwrap();
+        let idx = load_dep_reports(None);
+        crate::gate::reset_gate_run_state();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: d.join("out/fmt").to_string_lossy().into_owned(),
+            want_json: true, include_tests: false,
+            policy: Some(d.join("scoped.pol").to_string_lossy().into_owned()),
+            baseline: None, quiet: true, ws_member: false, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let oos = v["outOfScope"].as_array().unwrap();
+        assert_eq!(oos.len(), 1, "exactly the excluded Display impl: {oos:?}");
+        assert_eq!(oos[0]["fn"].as_str(), Some("tests::evil::EvilEntry::fmt"));
+        assert_eq!(oos[0]["effects"][0].as_str(), Some("Net"));
+        assert_eq!(rc, 2,
+                   "the stringify-dispatch CHA site has the identical exclusion-blindness hazard as the \
+                    method-call dispatch site, and must be fixed the same way: {v:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn implicit_stringification_through_a_bound_reaches_the_local_formatter() {
         // THE IMPLICIT-STRINGIFICATION VEIN (candor-spec/SOUNDNESS-VEIN-implicit-stringify.md) — a
@@ -4064,7 +4318,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
+                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -4104,7 +4358,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -4128,7 +4382,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -4175,7 +4429,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -4211,7 +4465,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(),
+                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -8378,13 +8632,17 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///   rev8 -> rev9  `FileDecls.reexports`. An old entry deserializes as an EMPTY vec — "this file
     ///                 re-exports nothing" — restoring the submodule-re-export under-report from a warm
     ///                 cache, where no test that scans from scratch would ever see it.
+    ///   rev9 -> rev10 `FnInfo.dispatch` (⟨peek-scope-attribution⟩). An old entry deserializes as an
+    ///                 EMPTY Vec — "this fn dispatches on no local trait" — which for a warm-cached fn
+    ///                 that genuinely dispatches on one is exactly the silent under-report the field
+    ///                 exists to close in the peek's out-of-scope scope-matching.
     ///
     /// The schema token is the only thing standing between those readings, so it is pinned rather than
-    /// trusted. (The `aborted` disclosure is what this fixture MEASURES in both cases: it is the visible
-    /// consequence a mis-read entry produces, and the same discard covers both fields.)
+    /// trusted. (The `aborted` disclosure is what this fixture MEASURES in every case: it is the visible
+    /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        for stale in ["rev7", "rev8"] {
+        for stale in ["rev7", "rev8", "rev9"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -8395,7 +8653,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev9/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev10/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

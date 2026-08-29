@@ -9,6 +9,72 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN, closed: a peek finding was scope-matched against the WRONG ENTITY, silently
+  defeating any policy rule scoped to an in-scope CALLER (BACKLOG "a peek finding is scope-matched
+  against the wrong entity"; candor-swift's `7378f4f` closed the analogous case for its own, differently
+  shaped peek).** The ⟨0.29⟩ peek re-analyses the excluded file set and reports findings under the
+  EXCLUDED declaration's own qualified name — correctly, and unchanged by this fix. But the scope test
+  ran ONLY against that name, so `deny Net Runner` (scoped to the in-scope caller `Runner`) could never
+  match a finding named `EvilDoer::work`, even when `Runner::dispatch(&dyn Doer)` is exactly the
+  in-scope code that dynamically dispatches into it. MEASURED against the pre-fix binary: an in-scope
+  `trait Doer`, an in-scope `Runner::dispatch(&dyn Doer)` (its one visible `impl Doer` is pure, so CHA
+  resolves it confidently — it never sees the excluded conformer at all), and an excluded
+  `tests/evil.rs` `impl Doer for EvilDoer` performing `Net`: `deny Net Runner` → exit 0, `outOfScope:
+  []`, `excluded: [{class:"non-library-target", peeked:true}]`; the identical tree under an UNSCOPED
+  `deny Net` → exit 2, naming `EvilDoer::work` directly. Held constant: same tree, same binary, same
+  effect — only the policy's scope string varied.
+  Unlike candor-swift's peek (which unions in-scope files into the child's own CHA and needed a
+  CHA-union effect-set diff), **rust's peek never sees in-scope files at all** — it re-analyses the
+  excluded set in total isolation, so there is no re-analysis to fix. The mechanism instead reuses two
+  facts the PRIMARY scan already computes in the course of its own single pass, cross-referenced only
+  after both halves have run: (1) `FnInfo::dispatch` — a new, purely SYNTACTIC record, per in-scope
+  function, of every `(trait_leaf, method_leaf)` it dispatches on through a local bounded-CHA-eligible
+  receiver (`&dyn T`/`impl T`/a field/a loop element/a stringified bound), recorded regardless of the
+  impl-count/ambiguity gates that guard the EFFECT edge itself — reachability doesn't depend on either,
+  only the edge does, and this field never contributes an effect; and (2) the peek's OWN
+  `type_to_traits` (which trait(s) an excluded declaration's owning type implements, learned purely from
+  the peek's separate parse of the excluded file), smuggled to the enclosing frame via a same-thread
+  side channel (`gate::PEEK_TYPE_TO_TRAITS`, cleared before every peek invocation) the same way
+  `while_peeking`'s `IN_PEEK` already is. For each peeked finding, every in-scope function that could
+  reach it — the direct dispatcher(s) plus every transitive ANCESTOR via a `rev_calls` BFS
+  (`lang::reaching_ancestors`), so a policy scoped several hops above the dispatch site is treated
+  exactly as an ordinary propagated effect already is — is added to the scope test. ATTRIBUTION IS
+  UNCHANGED: the finding still names the excluded declaration, never a caller; only which RULES are
+  considered to have scope-matched it widens. Two CHA-bound dispatch sites share the identical hazard and
+  both are covered: the main method-call dispatch route (`visit_expr_method_call`, which is also the
+  funnel for field/loop/tuple/factory-return dispatch-typed receivers) and the separate implicit
+  STRINGIFICATION dispatch route (`charge_stringify_bound` — `println!("{}", e)` on a dispatch-typed
+  `e`, which never calls `.method()` by name at all). Left explicitly unexamined, as a documented
+  residual rather than a silent narrowing: the self-typed trait-DEFAULT-body dispatch (`scan.rs`'s
+  separate `t_type`-keyed CHA fallback) and the cross-dependency workspace-chaining union (gated off by
+  default behind `CANDOR_WORKSPACE_CHAIN`) — both share the same `trait_impls`-bounded shape and the same
+  theoretical exposure, but neither was reached by any real corpus evidence and closing them was judged
+  a larger, separately-scoped change.
+  Five controls, falsified against the pre-fix binary: the scoped defect case now exits 2, naming the
+  excluded declaration (never relabeled to the caller); the unscoped control still exits 2, unchanged,
+  with no duplicate finding now that two routes (the declaration's own name and the reaching caller) can
+  both match; a scope matching neither the declaration nor any reaching caller stays exit 0 on the
+  identical tree; a two-hop TRANSITIVE ancestor (`App::main` → `Service::run` → `Runner::dispatch`) is
+  reached exactly like an ordinary propagated effect; and an excluded conformer NOTHING in scope ever
+  dispatches to dynamically is provably unaffected — both as a dedicated fixture and, more importantly,
+  as a byte-identical diff against the pre-fix binary on this repo's own four real crates under its own
+  `deny Net Db Exec Ipc` policy (which genuinely exercises the peek on real `tests/` content: 77 and 128
+  real `outOfScope` findings on two of them) AND under a synthetic but real scoped policy matching dozens
+  of this codebase's actual function names. Four new process tests
+  (`peek_scope_attribution_*` in `crates/candor-scan/src/tests.rs`) pin the defect, the transitive case,
+  the over-charge control, and the stringify-dispatch site. `FnInfo` gained a new analysis-only field
+  (`dispatch`) — NOT part of the public report schema (`candor_report::ReportEntry` is untouched, so an
+  ordinary scan's published report is byte-identical) — cached like any other Pass-B result
+  (`cache_schema` rev9 → rev10).
+  **Owed alongside this fix, not mine to write:** a SPEC clause and a conformance PART for "a peek
+  finding's scope test must consider every in-scope function that can reach it via dynamic dispatch, not
+  only its own name" — interchange behaviour, four-way, per `[[candor-034]]`'s own "row before port"
+  rule. Designed to interact with candor-swift's `dispatch-widened` exclusion class (also unspec'd):
+  rust's fix never needed that class (its peek's attribution was already unambiguous — the excluded
+  declaration is always the sole source, since the peek never unions anything), so the clause should
+  cover the property ("which in-scope names may a peeked finding's scope test match") without assuming
+  every engine needs a `dispatch-widened`-shaped fallback to get there.
+
 - **⚠ Third adversarial review (2026-08-29): TWO silent gate-passes in `[workspace]` member
   resolution, both pre-existing and untouched by the same day's TOML-parser move. Fixed by replacing
   the hand-rolled resolver with a real `glob` matcher and a recursive nested-workspace fan-out — the

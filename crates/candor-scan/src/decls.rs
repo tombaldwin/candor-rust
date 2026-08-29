@@ -797,6 +797,7 @@ pub(crate) fn fninfo(
         // Empty at entry: filled as body-level `use` items are visited (`visit_item_use`).
         local_uses: std::collections::HashMap::new(),
         bound_names: bound_idents(sig, block),
+        dispatch_sites: std::collections::BTreeSet::new(),
     };
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
@@ -834,6 +835,7 @@ pub(crate) fn fninfo(
         unresolved: c.unresolved,
         ret_idents,
         ret_bound_type,
+        dispatch: c.dispatch_sites.into_iter().collect(),
     }
 }
 

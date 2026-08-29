@@ -87,6 +87,15 @@ pub(crate) struct FnInfo {
     /// MODULE-QUALIFIED fn qual beside it, which a leaf-keyed index does not have.
     #[serde(rename = "b", default, skip_serializing_if = "Option::is_none")]
     pub(crate) ret_bound_type: Option<String>,
+    /// ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf)` pairs this fn dispatches on through a local
+    /// bounded-CHA-eligible receiver — see `CallCollector::dispatch_sites` for the full rationale. NOT
+    /// part of `candor_report::ReportEntry` (the public wire schema): an ordinary scan's published report
+    /// is untouched by this field's existence. It exists so `scan.rs`'s out-of-scope block can test a
+    /// policy's scope against every in-scope function that could REACH a peeked (excluded) declaration
+    /// through dynamic dispatch, not only the excluded declaration's own name. Cached like any other
+    /// Pass-B result (`cache_schema` rev bump on this field's addition).
+    #[serde(rename = "ds", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) dispatch: Vec<(String, String)>,
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.

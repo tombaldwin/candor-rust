@@ -153,6 +153,29 @@ pub(crate) struct CallCollector<'a> {
     /// Flow-INSENSITIVE and body-wide, matching `vars`' existing discipline: a false shadow costs a
     /// forcing edge (a miss), where a missed shadow charges a static's effect to a local (a fabrication).
     pub(crate) bound_names: std::collections::HashSet<String>,
+    /// ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf)` pairs this fn DISPATCHES on through a
+    /// receiver whose concrete implementor(s) are resolved by LOCAL bounded CHA — recorded whenever the
+    /// dispatch is attempted, REGARDLESS of how many local implementors are visible (0, 1..12, >12) or
+    /// whether the local trait leaf is ambiguous. This is a purely SYNTACTIC reachability fact ("this fn
+    /// dynamically dispatches on trait T's method M"), deliberately decoupled from the bounded-CHA EFFECT
+    /// edge (`calls`), which stays gated exactly as before — this field never influences an inferred
+    /// effect.
+    ///
+    /// WHY IT EXISTS: `trait_impls`/`local_traits` are built from `merged`, i.e. from the files THIS
+    /// scan walked — in a normal scan, in-scope files only; in the ⟨0.29⟩ peek recursion (`scan_one`
+    /// with `peek_excluded: true`), excluded files only. So a `&dyn Doer` dispatch inside an in-scope
+    /// `Runner::dispatch` resolves CHA over only the in-scope `impl Doer` set — confidently, if exactly
+    /// one is visible — with NO knowledge that an EXCLUDED file also `impl Doer for EvilDoer`. Read alone,
+    /// `Runner::dispatch`'s own inferred effects stay whatever the VISIBLE impl(s) produce, so a policy
+    /// rule scoped to `Runner` can never see the excluded impl's effect: the peek names `EvilDoer::work`
+    /// correctly, but `scope_matches("EvilDoer::work", "Runner")` is false, and nothing else tests
+    /// `Runner`'s name against it. This field is the fix's raw material: the primary scan records which
+    /// (trait, method) pairs an in-scope function dispatches on — without re-analysing anything and
+    /// without seeing the excluded file at all — and `scan.rs`'s out-of-scope block cross-references it
+    /// against what the PEEK separately learns (which trait(s) an excluded declaration's owning type
+    /// implements), entirely after both recursion halves have already run. See the module doc at the
+    /// `out_of_scope` block in `scan.rs` for the full mechanism and its soundness argument.
+    pub(crate) dispatch_sites: std::collections::BTreeSet<(String, String)>,
 }
 
 impl<'a> CallCollector<'a> {
@@ -624,6 +647,13 @@ impl<'a> CallCollector<'a> {
         // conflict with holding a borrow into it.
         let trait_impls = self.trait_impls;
         for (cha, target_method) in sources {
+            // ⟨peek-scope-attribution⟩ Same reachability recording as the main method-dispatch site
+            // (`visit_expr_method_call`), for the SAME reason: an excluded `impl Display for EvilFmt`
+            // reachable only through this stringify coercion is invisible to `trait_impls` here (built
+            // from files THIS scan walked), so this fn's own inferred effects can never carry it — a
+            // policy scoped to THIS fn's name needs this fact to test against, independent of the
+            // impl-count bound below.
+            self.dispatch_sites.insert((cha.to_string(), target_method.to_string()));
             match trait_impls.get(cha) {
                 // Narrow dispatch → edge to every local implementor's formatter. The 12-impl bound is
                 // the same cross-engine one `visit_expr_method_call` uses.
@@ -1558,6 +1588,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if !self.trait_declares_method(&tr, &leaf, 0) {
                     continue; // blanket/unrelated call — not this trait's dispatch
                 }
+                // ⟨peek-scope-attribution⟩ Record the reachability fact BEFORE the ambiguity/bound gates
+                // below — those two gates decide whether an EFFECT edge is safe to fabricate (never guess
+                // between colliding traits; never enumerate a >12-impl fan-out), but "this fn dispatches
+                // on trait-leaf `tr`'s method `leaf`" is true regardless of either, and recording it here
+                // costs nothing extra (a BTreeSet insert) and never influences `calls`/`unresolved`.
+                self.dispatch_sites.insert((tr.clone(), leaf.clone()));
                 if lt.count > 1 {
                     self.unresolved = true; // ambiguous local leaf — never guess between traits
                     continue;
