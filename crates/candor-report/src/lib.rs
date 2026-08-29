@@ -2247,4 +2247,111 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// GUARD-DELETION AUDIT (2026-08-30): `write_atomic`'s `#[cfg(unix)]` nlink>1 branch had ZERO
+    /// coverage anywhere in the family — `cargo test --workspace` stayed fully green with the whole
+    /// branch deleted. The ⟨0.28⟩ doc comment on `write_atomic` explains why it exists: `rename(2)`
+    /// gives the destination a NEW inode, so the ordinary temp+rename path silently breaks a hard
+    /// link — an operator with two names for one verdict file would get the fresh document at one
+    /// name and a PREVIOUS run's stale document at the other. This pins the behavior the comment
+    /// claims: both linked names must observe the new content, and the link itself must survive.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_updates_a_multiply_linked_target_in_place() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("candor-report-hardlink-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.json");
+        let b = dir.join("b.json");
+        std::fs::write(&a, b"old").unwrap();
+        std::fs::hard_link(&a, &b).unwrap();
+        assert_eq!(std::fs::metadata(&a).unwrap().nlink(), 2, "setup: both names must share one inode");
+
+        write_atomic(&a, b"new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "new", "the written-to name sees the update");
+        assert_eq!(
+            std::fs::read_to_string(&b).unwrap(),
+            "new",
+            "THE GUARD: the sibling hard link must see the SAME update, not a previous run's content \
+             left behind by a rename(2) that gave `a` a fresh inode"
+        );
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().nlink(),
+            2,
+            "the link must survive an in-place write, not be silently severed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The control for the test above: an ORDINARY single-link target (the overwhelming common case)
+    /// still gets a correct write via the temp+rename path. Without this, a fix that broke the
+    /// nlink==1 branch while "fixing" the nlink>1 one would pass the hardlink test alone.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_updates_a_single_linked_target() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("candor-report-singlelink-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.json");
+        std::fs::write(&a, b"old").unwrap();
+        assert_eq!(std::fs::metadata(&a).unwrap().nlink(), 1);
+
+        write_atomic(&a, b"new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GUARD-DELETION AUDIT (2026-08-30): `resolve_sink_artifact`'s entire symlink-following loop had
+    /// ZERO coverage — deleting it (returning the input path verbatim) left `cargo test --workspace`
+    /// fully green. It backs two real call sites: `write_atomic` (resolve before writing) and
+    /// candor-scan's `same_artifact` §3.3.1 sink-collision guard, whose own doc comment says a
+    /// symlink "whose target does not exist YET still names that target" must resolve to that target
+    /// because `canonicalize` fails outright on a dangling link. Basic case: an ordinary (non-dangling)
+    /// symlink resolves through to its target's path.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_sink_artifact_follows_an_ordinary_symlink() {
+        let dir = std::env::temp_dir().join(format!("candor-report-symlink-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.json");
+        let link = dir.join("link.json");
+        std::fs::write(&real, b"{}").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_eq!(resolve_sink_artifact(&link), real, "an ordinary symlink resolves to its target");
+        assert_eq!(
+            resolve_sink_artifact(&real),
+            real,
+            "control: a plain (non-symlink) path resolves to itself"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE CASE THE GUARD EXISTS FOR: a DANGLING symlink (target does not exist yet) must still
+    /// resolve to the NAME it names, not be left unresolved or mistaken for the symlink itself — this
+    /// is exactly the scenario `same_artifact` relies on to catch `--policy P --gate-json <symlink to
+    /// P-not-yet-created>` as one artifact under two names.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_sink_artifact_resolves_a_dangling_symlink_to_its_named_target() {
+        let dir = std::env::temp_dir().join(format!("candor-report-dangling-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.json");
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+        assert!(!missing.exists(), "setup: the link target must not exist");
+
+        assert_eq!(
+            resolve_sink_artifact(&link),
+            missing,
+            "a dangling symlink must resolve to the target it NAMES, not be returned unresolved"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
