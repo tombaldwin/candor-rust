@@ -586,6 +586,23 @@ pub(crate) fn recording_suppressed() -> bool {
     IN_PEEK.with(|p| p.get())
 }
 
+thread_local! {
+    /// ⟨peek-scope-attribution⟩ The PEEK's own `type_to_traits` (type-leaf -> the trait leaves it locally
+    /// implements), smuggled out of the recursive `scan_one` call the same way `IN_PEEK` is: a same-thread
+    /// return-value side channel, not a new field threaded through `scan_one`'s signature everywhere it is
+    /// called. The peek walks ONLY excluded files, so this is built from `impl Trait for Type` syntax the
+    /// PRIMARY scan never saw — exactly the piece the primary side needs to know "this excluded
+    /// declaration's owning type implements trait T" without re-parsing anything itself.
+    ///
+    /// CLEARED before every peek invocation (never merely overwritten): a peek that short-circuits (no
+    /// deny rules, nothing excluded) or fails to parse leaves this thread-local exactly as it found it
+    /// otherwise, and on a thread that scanned a PRIOR workspace member or a PRIOR test, "as it found it"
+    /// is a stale non-empty map from a completely different crate — an over-charge waiting to happen the
+    /// day something reads it without clearing first.
+    pub(crate) static PEEK_TYPE_TO_TRAITS: std::cell::RefCell<HashMap<String, Vec<String>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 /// Record one scan's gate violations toward the final `--gate-json` verdict. A no-op unless the flag was
 /// given (the direct-`scan_one` test/selftest paths never record).
 /// Does this run already hold a CERTAIN violation? (SPEC §3.1 ⟨0.24⟩ precedence.)

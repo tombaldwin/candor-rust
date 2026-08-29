@@ -1569,6 +1569,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             by_tail2.entry(t2).or_default().push(f.qual.clone());
         }
     }
+    // ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf) -> the in-scope fns that DIRECTLY dispatch
+    // there` (see `FnInfo::dispatch`'s doc comment for why this exists and what it does NOT do — it
+    // never contributes an effect, only a reachability fact). Built once, from this run's own Pass-B
+    // output; consulted only by the ⟨0.29⟩ peek's out-of-scope block, far below, to test a policy's scope
+    // against every in-scope function that could REACH a peeked declaration via dynamic dispatch — not
+    // only the peeked declaration's own name.
+    let mut direct_dispatchers: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
+    for f in &fns {
+        for site in &f.dispatch {
+            direct_dispatchers.entry(site.clone()).or_default().insert(f.qual.clone());
+        }
+    }
     // The SUBMODULE-level `pub use` alias index — the tails a definition also answers to because a module
     // re-exported it (`pub use self::platform::*` makes `imp::platform::doit` nameable as `imp::doit`).
     // A FALLBACK, never a competitor: `reexport_target` consults it only where `by_tail2` holds nothing at
@@ -1587,6 +1599,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let ty_leaf = ty.rsplit("::").next().unwrap_or(ty).to_string();
             type_to_traits.entry(ty_leaf).or_default().push(tr_leaf.clone());
         }
+    }
+    // ⟨peek-scope-attribution⟩ THIS run's own `type_to_traits`, published for the ENCLOSING (primary)
+    // frame to read — see `gate::PEEK_TYPE_TO_TRAITS`'s doc comment. Only meaningful, and only written,
+    // when THIS scan_one call IS the peek (`peek_excluded`): the peek walks excluded files only, so its
+    // `type_to_traits` answers "which trait(s) does this EXCLUDED declaration's owning type implement" —
+    // exactly the fact the primary frame needs and cannot compute itself (it never parses excluded files
+    // at all). A normal (non-peek) scan never touches this thread-local.
+    if peek_excluded {
+        crate::gate::PEEK_TYPE_TO_TRAITS.with(|c| *c.borrow_mut() = type_to_traits.clone());
     }
     // A type whose ONLY impl is an (empty / non-overriding) trait impl has NO fn unit of its own, so it
     // never entered `local_types` (built from fn quals above) — which made its typed calls un-`resolvable`
@@ -2861,6 +2882,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // those cases, never *nothing was asked* (absent) — the same emission rule `outOfScope` follows, and
     // deliberately the same reasoning: present-and-empty and absent are different claims (⟨0.26⟩).
     let scanned_under_rules: std::cell::RefCell<Option<Vec<String>>> = std::cell::RefCell::new(None);
+    // ⟨peek-scope-attribution⟩ Invert `calls` (caller -> callees) once, so the out-of-scope block below
+    // can walk from a DIRECT dispatcher (`direct_dispatchers`) up to every in-scope ANCESTOR that could
+    // reach it — a policy scoped several hops above the dispatch site (`deny Net App`, where `App::main`
+    // calls `Service::run` calls `Runner::dispatch(&dyn Doer)`) needs the same treatment a normal,
+    // non-excluded effect gets for free: propagation already carries an ordinary callee's effect up
+    // through every intermediate caller before the gate ever tests a scope string. This mirrors that for
+    // the one edge the primary scan cannot see (the excluded implementor), without re-running propagation.
+    let mut rev_calls: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (caller, callees) in &calls {
+        for callee in callees {
+            rev_calls.entry(callee.as_str()).or_default().push(caller.as_str());
+        }
+    }
     let out_of_scope: Option<Vec<candor_report::OutOfScopeFinding>> = policy_path
         .as_ref()
         .and_then(|pp| std::fs::read_to_string(pp).ok())
@@ -2908,6 +2942,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // The peek's findings are not lost: it RETURNS a report body and this frame reads it, which
             // is how `outOfScope` has always worked. The peek is a source of data, never a writer of
             // verdict state.
+            // ⟨peek-scope-attribution⟩ CLEARED, not merely about-to-be-overwritten: a peek that
+            // short-circuits inside `scan_one` before reaching its OWN `type_to_traits` build (nothing
+            // excluded, or a parse abort) would otherwise leave THIS thread's PRIOR value in place —
+            // stale data from a different workspace member or a different `cargo test` case sharing the
+            // thread, read below as if it were this crate's own.
+            crate::gate::PEEK_TYPE_TO_TRAITS.with(|c| c.borrow_mut().clear());
             let (_, peeked) = crate::gate::while_peeking(|| scan_one(dir, ScanOpts {
                 prefix: format!("{prefix}.peek"),
                 want_json: true,
@@ -2921,6 +2961,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 deps_idx,
                 peek_excluded: true,
             }, run));
+            // ⟨peek-scope-attribution⟩ The peek's OWN trait-implementation index (built from files ONLY
+            // the peek walked), read back via the same-thread side channel `while_peeking` already
+            // establishes is safe for this recursion shape. Used below to learn which trait(s) an
+            // excluded declaration's owning type implements, so its scope test can be widened to every
+            // in-scope function that dispatches on that trait — see `direct_dispatchers`/`rev_calls`
+            // above and their use a few dozen lines down.
+            let peek_type_to_traits = crate::gate::PEEK_TYPE_TO_TRAITS.with(|c| c.borrow().clone());
             let Some(body) = peeked else { return Some(Vec::new()) };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Some(Vec::new()) };
             peek_read = true;   // the recursion returned a report this run could read — see `peek_read`
@@ -2960,12 +3007,59 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     .filter_map(|e| e.as_str())
                     .map(String::from)
                     .collect();
+                // ⟨peek-scope-attribution⟩ THE FIX. Before ⟨0.34⟩, the scope test just below ran ONLY
+                // against `qual` — the peeked (excluded) declaration's OWN name — which a policy scoped
+                // to an in-scope CALLER can never match: `deny Net Runner` tests `scope_matches("EvilDoer
+                // ::work", "Runner")`, always false, so the excluded conformer's Net was never disclosed
+                // under that rule even though `Runner::dispatch(&dyn Doer)` is precisely the code path
+                // that reaches it (SPEC §2 ⟨0.29⟩ peek; BACKLOG "a peek finding is scope-matched against
+                // the WRONG ENTITY"). candor-swift's `7378f4f` hit the analogous case via CHA-union;
+                // rust's peek never unions the excluded file into any in-scope analysis at all, so the
+                // fix here is smaller — no re-analysis, no union. It reuses two facts this run already
+                // has lying around: `direct_dispatchers` (which in-scope fns dispatch on which
+                // trait+method, recorded during THIS scan's own Pass B, `FnInfo::dispatch`) and
+                // `peek_type_to_traits` (which trait(s) THIS excluded declaration's owning type
+                // implements, learned from the peek's own — separate — parse of the excluded file, never
+                // from re-analysing anything in-scope). Neither requires the primary scan to have ever
+                // seen the excluded file's contents.
+                //
+                // `extra_scope_names` is every in-scope fn NAME that could reach this exact excluded
+                // declaration through dynamic dispatch: for each trait the owning type implements, look
+                // up who directly dispatches on (trait, this fn's own method leaf), then walk `rev_calls`
+                // to include every transitive ANCESTOR of a direct dispatcher too — a policy scoped
+                // several hops above the dispatch site must see it exactly as it would if this fn's own
+                // effect had propagated there normally (see `rev_calls`'s doc comment). Attribution is
+                // UNCHANGED: the finding pushed below still names `qual` (the excluded declaration
+                // itself), never a caller — only which RULES are considered to have scope-matched it
+                // widens. A rule that denies nothing this fn performs still contributes nothing, exactly
+                // as before.
+                let method_leaf = qual.rsplit("::").next().unwrap_or(qual);
+                let owner_leaf = qual
+                    .rsplit_once("::")
+                    .map(|(rest, _)| rest)
+                    .and_then(|s| s.rsplit("::").next())
+                    .unwrap_or("");
+                let mut extra_scope_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                if let Some(implemented) = peek_type_to_traits.get(owner_leaf) {
+                    for tr in implemented {
+                        if let Some(direct) = direct_dispatchers.get(&(tr.clone(), method_leaf.to_string())) {
+                            extra_scope_names.extend(crate::lang::reaching_ancestors(
+                                direct.iter().map(|s| s.as_str()),
+                                &rev_calls,
+                            ));
+                        }
+                    }
+                }
                 // ⟨0.30⟩ the gate's own firing decision, per (rule, function) — scope test here, exactly
                 // as `candor_classify::gate` does it, then `rule_hits` for what the rule charges.
                 let mut hit_set: std::collections::BTreeSet<String> = Default::default();
                 for r in &parsed.rules {
                     if let Some(sc) = &r.scope {
-                        if !candor_classify::policy::scope_matches(qual, sc) {
+                        let own_matches = candor_classify::policy::scope_matches(qual, sc);
+                        let reached_matches = extra_scope_names
+                            .iter()
+                            .any(|caller| candor_classify::policy::scope_matches(caller, sc));
+                        if !own_matches && !reached_matches {
                             continue;
                         }
                     }
