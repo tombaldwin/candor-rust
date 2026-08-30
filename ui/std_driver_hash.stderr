@@ -1,0 +1,58 @@
+warning: `<Effectful as std::hash::Hash>::hash` effects: { Fs }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:25:5
+   |
+LL |     fn hash<H: Hasher>(&self, _state: &mut H) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `<EqEffectful as std::cmp::PartialEq>::eq` effects: { Exec }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:63:5
+   |
+LL |     fn eq(&self, other: &Self) -> bool {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `<Ordered as std::cmp::Ord>::cmp` effects: { Env }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:52:5
+   |
+LL |     fn cmp(&self, _other: &Self) -> std::cmp::Ordering {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `<Ordered as std::cmp::PartialOrd>::partial_cmp` effects: { Env* }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:47:5
+   |
+LL |     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `btreeset_insert_effectful` effects: { Env* }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:102:1
+   |
+LL | fn btreeset_insert_effectful() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `main` effects: { Env*, Exec*, Fs* }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:107:1
+   |
+LL | fn main() {
+   | ^^^^^^^^^
+
+warning: `set_insert_effectful` effects: { Fs* }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:81:1
+   |
+LL | fn set_insert_effectful() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `set_insert_effectful_eq` effects: { Exec* }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:89:1
+   |
+LL | fn set_insert_effectful_eq() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `vec_contains_effectful_eq` effects: { Exec* }   (* = via callee)
+  --> $DIR/std_driver_hash.rs:85:1
+   |
+LL | fn vec_contains_effectful_eq() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 9 warnings emitted
+
