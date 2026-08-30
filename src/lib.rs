@@ -4384,6 +4384,27 @@ fn in_scope(var: Option<&str>, name: &str) -> bool {
     }
 }
 
+/// HOW TO READ A FAILURE HERE, because the raw output is misleading in two specific ways and both
+/// cost real time on 2026-08-30 (a correct commit was reverted partly on a misread of it).
+///
+/// `cargo test --lib` prints THREE `test result:` lines, and only the middle one names its test:
+///   1. the INNER compiletest harness for `ui/` — one row per `ui/*.rs` fixture;
+///   2. the INNER harness for `ui-2021/` — currently a single fixture;
+///   3. the OUTER libtest summary, whose N is every `#[test]` in this crate (~39), not fixtures.
+///
+/// Read positionally and 3 is easily labelled as 1's. "39 passed" is the outer total; the `ui/`
+/// battery's own count is a different, smaller number.
+///
+/// Second, and worse: `ui` and `ui_edition_2021` DO NOT FAIL INDEPENDENTLY. `dylint_testing` 6.0.1
+/// serialises the library build behind a global mutex, so when this test panics the other one dies
+/// with `called Result::unwrap() on an Err value: PoisonError`. MEASURED by breaking exactly one
+/// `.stderr` file: the outer line reads `37 passed; 2 failed` — ONE real defect, one cascade.
+/// A `2 failed` here is evidence of at most one problem until you have read the panic messages.
+///
+/// Finally, these fixtures compare rendered diagnostics, so any ambient `CANDOR_*` variable that adds
+/// output (`CANDOR_BASELINE`, `CANDOR_JSON`) turns nearly every row red with "actual stderr differed"
+/// — a shell-state failure that looks exactly like a lint regression. Check `env | grep CANDOR` before
+/// concluding the engine changed.
 #[test]
 fn ui() {
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
