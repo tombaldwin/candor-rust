@@ -9,6 +9,52 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ Fixed: candor ICE'd the build on `HashSet::insert` of a local type.** `local_trait_method_by_did`
+  built `Instance::try_resolve`'s generic args with `mk_args(&[self_ty])` — one argument, for methods
+  that declare more. `Hash::hash<H: Hasher>` carries its own `H`, so the set-`insert` driver edge was
+  exactly one argument short, and a short list is not a soft `None`: rustc raises a `span_delayed_bug`
+  ("missing value for assoc item in impl") that surfaces at the end of the build as an INTERNAL COMPILER
+  ERROR. Eight lines reproduce it, `#[derive(Hash)]` included, and the edge it was hiding (a local
+  effectful `Hash`/`Ord` impl reached only through a std container verb) never landed. All seven
+  `mk_args` call sites now go through a shared `trait_args_for`, which asks `GenericArgs::for_item` for
+  a WELL-FORMED list and REFUSES (returns `None`) rather than invent a const-parameter filler. New
+  fixture `ui/std_driver_hash.rs`. The comment above `local_trait_method_for_self` documents a SIBLING
+  of this ICE and reads as though the class were handled — a LOCAL element type sails straight through
+  the gate it describes, which is why this one was never measured.
+- **⚠ Fixed (silent under-report): a trait method named as a fn VALUE edged to the trait DECLARATION.**
+  `<S as T>::run` types as a `FnDef` whose `DefId` is the trait's item, which is local and an `AssocFn`
+  — so the old "local + `Fn`/`AssocFn` ⇒ resolvable" test said yes and then edged to a body that does
+  not exist. `register(<S as T>::run)` read silently PURE however effectful `S`'s impl was, while the
+  identical `<S as T>::run()` CALL one line away resolved correctly. New `fn_value_targets` answers with
+  the same authority the call path uses: `Instance::try_resolve` first (which is also what finally
+  reaches a LOCAL impl of a NON-LOCAL trait — the old code tested `is_local` on the trait item), then
+  CHA over the trait's local impls when `Self` is unpinned, PLUS the trait's own default body when some
+  impl takes it (`impl_item_implementor_ids` lists only what an impl DEFINES, so CHA alone silently
+  dropped the default's effects — measured, `Fs` reported and `Exec` lost). New fixture
+  `ui/fn_value_trait_method.rs`, with both over-charge controls: a pure sibling impl stays pure, and a
+  default that no impl can reach is not charged.
+- **⚠ Fixed (silent under-report): the `Drop` walker's recursion guard was keyed on the ADT's `DefId`.**
+  That made the walk ORDER-DEPENDENT — the first instantiation of a generic ADT claimed the key, so
+  every later one returned immediately. Fields are walked in DECLARATION ORDER, so
+  `struct S { a: Cellish<u8>, b: Cellish<Guard> }` lost `Guard::drop` while the same struct with its two
+  fields SWAPPED was caught, and `Mutex<Guard>` / `RwLock<Guard>` / `RefCell<Guard>` all read
+  silent-pure (each reaches its payload through `UnsafeCell<T>`, behind a *different* `UnsafeCell`). The
+  memo is now keyed on the whole TYPE, and the recursion bound is a DEPTH rather than a set of ancestor
+  `DefId`s: a nested same-ADT type (`Box<Box<Guard>>`, `Option<Option<Guard>>`,
+  `Cellish<Cellish<Guard>>`) is its own "ancestor" while being an ordinary finite type, and an ancestor
+  set cut all three — the same class, one construct over. `PhantomData` joins the owning-container
+  list; it is not another curated name but the language's own declaration of the property that list
+  hand-enumerates, and it is what recovers `std::vec::IntoIter<Guard>` and hand-written arenas. New
+  fixture `ui/drop_container_reuse.rs` covers all eleven curated container names (nine had never been
+  driven by any fixture), the three nested shapes, and four over-charge controls (`PhantomData<&'a T>`,
+  `PhantomData<fn() -> T>`, `ManuallyDrop`, and a container over a payload with no destructor).
+  MEASURED across eleven corpora (1626 units — 9 real third-party crates plus 2 of candor's own): zero
+  fabrications; five tempfile units correctly GAINED `Fs` through the pre-existing trait-object arm the
+  `DefId` memo had been cutting short; two clap_builder units correctly LOST a bogus `Unknown`.
+- **Fixed: the nightly-bump workflow's ui re-bless step matched nothing.** It grepped for
+  `/<base>.stderr`, but compiletest_rs 0.11.2 saves to `<base>.stage-id.stderr` — so the step blessed
+  zero files on every run, and the verification `cargo test` below it then failed the job for exactly
+  the diagnostic shift it exists to absorb. Fail-closed, but never once useful.
 - **Coverage-only, no behavior change: a THIRD guard-deletion sweep, scoped to the one area the first
   two passes explicitly named as not reached — `src/lib.rs`'s ~2000-line callback/thread-local/
   coroutine-capture machinery (rust-deep), which needs the dylint `ui/` harness (`cargo test --lib`)

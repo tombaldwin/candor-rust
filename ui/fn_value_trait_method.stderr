@@ -1,0 +1,112 @@
+warning: `<Effectful as Hook>::hook` effects: { Fs }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:50:5
+   |
+LL |     fn hook() {
+   |     ^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `<Effectful as Run>::run` effects: { Fs }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:37:5
+   |
+LL |     fn run() {
+   |     ^^^^^^^^
+
+warning: `<Ov1 as AllOverride>::m` effects: { Fs }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:142:5
+   |
+LL |     fn m() {
+   |     ^^^^^^
+
+warning: `<Parsed as std::str::FromStr>::from_str` effects: { Env }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:68:5
+   |
+LL |     fn from_str(_: &str) -> Result<Parsed, ()> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `<SigOverrider as Sig>::sig` effects: { Fs }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:114:5
+   |
+LL |     fn sig() {
+   |     ^^^^^^^^
+
+warning: `AllOverride::m` effects: { Exec }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:136:5
+   |
+LL |     fn m() {
+   |     ^^^^^^
+
+warning: `Reporter::report` effects: { Env }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:58:5
+   |
+LL |     fn report() {
+   |     ^^^^^^^^^^^
+
+warning: `Sig::sig` effects: { Exec }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:108:5
+   |
+LL |     fn sig() {
+   |     ^^^^^^^^
+
+warning: `default_body_really_runs` effects: { Env* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:94:1
+   |
+LL | fn default_body_really_runs() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `generic_all_override_no_default` effects: { Fs* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:150:1
+   |
+LL | fn generic_all_override_no_default<X: AllOverride>() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `generic_self` effects: { Fs* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:87:1
+   |
+LL | fn generic_self<X: Run>() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `generic_self_keeps_default` effects: { Exec*, Fs* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:121:1
+   |
+LL | fn generic_self_keeps_default<X: Sig>() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `local_impl_of_nonlocal_trait` effects: { Env* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:90:1
+   |
+LL | fn local_impl_of_nonlocal_trait() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `main` effects: { Env*, Exec*, Fs* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:154:1
+   |
+LL | fn main() {
+   | ^^^^^^^^^
+
+warning: `overridden_default` effects: { Fs* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:84:1
+   |
+LL | fn overridden_default() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `qualified_path` effects: { Fs* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:78:1
+   |
+LL | fn qualified_path() {
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: `register` effects: { Unknown }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:74:1
+   |
+LL | fn register(f: fn()) {
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: `short_path` effects: { Fs* }   (* = via callee)
+  --> $DIR/fn_value_trait_method.rs:81:1
+   |
+LL | fn short_path() {
+   | ^^^^^^^^^^^^^^^
+
+warning: 18 warnings emitted
+
