@@ -345,6 +345,61 @@ fn containment_ratchet_clean_exits_0() {
             "the cleanup is noted informationally");
 }
 
+/// GUARD-DELETION AUDIT (bin/AGENT-CORPUS-BRIEF.md attack C), 2026-08-30: `cmd_containment`'s ratchet
+/// branch calls `comp.absorb(report_completeness(base_pre))` specifically because "A DIFFERENCE IS
+/// UNSOUND IF EITHER SIDE IS PARTIAL" (the module's own comment) — a leak sitting in an unread BASELINE
+/// unit must still surface as a hedge, exactly as `diff`/`gains` already fold in their baseline side.
+/// Confirmed live: deleting that one `comp.absorb(…)` line left `cargo test -p candor-query` fully
+/// green — neither existing containment test (both use two ordinary, complete reports) can see it.
+/// Without the absorb, a judged-nothing or `unanalyzed` BASELINE would let `containment`'s ratchet
+/// answer a clean `{"leaks":[],"cleanups":[]}` with no caveat at all, over a comparison whose floor
+/// candor never read.
+#[test]
+fn containment_ratchet_hedges_when_the_baseline_report_is_incomplete() {
+    let f = Fixture::new("cnt-baseline-incomplete");
+    // CURRENT: complete, ordinary — no CONTAINED effect at all, so the ratchet itself finds no leak and
+    // the test is isolated to the completeness disclosure, not the leak-detection logic.
+    let cur_prefix = f.dir.join("cur").to_string_lossy().into_owned();
+    std::fs::write(format!("{cur_prefix}.cnt.scan.json"), r#"{
+        "candor": {"version": "t", "toolchain": "stable", "spec": "0.28"},
+        "package": "cnt",
+        "analyzed": {"count": 1, "digest": "0000000000000000"},
+        "functions": [{"fn": "app::x::go", "inferred": ["Log"], "direct": ["Log"]}]
+    }"#).unwrap();
+    // BASELINE: JUDGED NOTHING (`analyzed.count: 0`, no functions) — the standard post-failure artifact,
+    // and the identical shape `unverified_and_fix_gate_answer_a_judged_nothing_report_at_exit_0_with_the_caveat`
+    // uses for the CURRENT side above. Here it is the comparison FLOOR, not the report in hand.
+    let base_prefix = f.dir.join("base").to_string_lossy().into_owned();
+    let base_file = format!("{base_prefix}.cnt.scan.json");
+    std::fs::write(&base_file, r#"{
+        "candor": {"version": "t", "toolchain": "stable", "spec": "0.28"},
+        "package": "cnt",
+        "analyzed": {"count": 0, "digest": "0000000000000000"},
+        "functions": []
+    }"#).unwrap();
+
+    let out = Command::new(bin())
+        .args(["containment", &cur_prefix, &base_prefix, "--json"])
+        .output().expect("run candor-query");
+    assert_eq!(out.status.code(), Some(0), "no CONTAINED effect on either side — the ratchet itself is clean");
+    let doc = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    assert_eq!(v["incomplete"], serde_json::json!(true),
+        "a judged-nothing BASELINE must still hedge the ratchet's `{{\"leaks\":[],\"cleanups\":[]}}` — a \
+         clean diff against an unread floor is not evidence of anything: {doc}");
+    assert_eq!(v["judgedNothing"], serde_json::json!([base_file]),
+        "the disclosure must NAME the baseline report, not just flag the run: {doc}");
+
+    // Human channel too — the note must print BEFORE the ratchet's own verdict line, same as the
+    // CURRENT-side hedge the two neighbouring tests already exercise.
+    let out = Command::new(bin())
+        .args(["containment", &cur_prefix, &base_prefix])
+        .output().expect("run candor-query");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("INCOMPLETE"),
+        "the human channel must hedge over an incomplete baseline too: {stdout}");
+}
+
 // ── gate-verdict: assemble the §3.3 verdict from NDJSON records ────────────────────────────────────
 
 #[test]
@@ -5930,6 +5985,73 @@ fn advisory_verbs_refuse_a_deny_rule_over_classes_the_producer_never_read() {
     let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
     assert_eq!(v["incomplete"], serde_json::json!(true),
         "`fix`'s remedy is computed over a universe it cannot fully see, and the document must say so: {doc}");
+}
+
+/// GUARD-DELETION AUDIT (bin/AGENT-CORPUS-BRIEF.md attack C), 2026-08-30: `completeness.rs`'s
+/// `incomplete()` has FIVE arms — `unanalyzed`, `unreadable`, `out_of_scope`, `unread_armed`,
+/// `unasked_rules` — and this file's own doc comment on `must_hedge` names `out_of_scope` as the FIRST
+/// cause the ⟨0.30⟩/⟨0.32⟩ rung closed on the gate and left its siblings behind ("`outOfScope` did it
+/// first"). The test above this one (`advisory_verbs_refuse_a_deny_rule_over_classes_the_producer_never_read`)
+/// is the regression for the SECOND time that happened (`unread_armed`) — but grepping this whole suite
+/// for a non-empty `"outOfScope": [{`, the shape a real peek finding takes, finds NONE: every existing
+/// fixture writes `outOfScope: []` or omits the key. Confirmed live: deleting the `out_of_scope` arm from
+/// `incomplete()` (`!self.out_of_scope.is_empty() ||` → `false ||`) left `cargo test -p candor-query -p
+/// candor-scan` fully green — 0 failures. `unverified --strict`/`fix-gate --strict` reading a report
+/// whose peek found a REAL denied effect outside the scan's scope would answer `{"ok": true}` at exit 0
+/// — the EXACT historical defect this module's header measures ("PROVABLY clean … ✓" over a report
+/// naming the class) — with nothing in the suite able to notice the regression.
+#[test]
+fn advisory_verbs_refuse_over_a_peeked_out_of_scope_finding() {
+    let f = Fixture::new("outofscope-advisory");
+    let deny = write_policy(&f, "deny.policy", "deny Exec\n");
+    // ISOLATED to the out_of_scope cause alone: `peeked: true` + a `scannedUnder` covering exactly this
+    // policy's deny set keeps the unread-class and cross-policy causes both quiet (see the neighbouring
+    // "asked-and-clear" control above), so ONLY a populated `outOfScope` can move these verbs here.
+    write_excluded_report_under(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some(
+            r#"[{ "fn": "build::main", "path": "build.rs", "effects": ["Exec"], "class": "build-script", "reason": "peeked and found Exec; the gate did NOT judge it" }]"#
+        ),
+        Some(r#"["deny Exec"]"#),
+    );
+    for verb in ["fix-gate", "unverified"] {
+        let out = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &deny, "--strict", "--json"])
+            .output().expect("run candor-query");
+        let doc = String::from_utf8(out.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(out.status.code(), Some(2),
+            "`{verb} --strict` must answer 2 wherever `gate --report` does over the same bytes (SPEC \
+             §3.2) — the gate refuses this report for a peeked, denied effect outside its scope. \
+             doc: {doc}");
+        assert_eq!(v["incomplete"], serde_json::json!(true),
+            "the DOCUMENT must carry the same finding as the exit: {doc}");
+        assert!(v.get("ok").is_none(),
+            "`ok` must be WITHHELD over a universe the peek found a denied effect outside — never set \
+             false, since neither verb's own analysis found a hole or crossing: {doc}");
+    }
+
+    // OVER-CHARGE CONTROL: the identical peeked/scannedUnder shape with `outOfScope: []` (nothing
+    // found) must certify exactly as before — the arm must fire on the FINDING, not on the class merely
+    // having been peeked.
+    write_excluded_report_under(
+        &f,
+        r#"[{ "class": "build-script", "count": 1, "peeked": true, "reason": "compile time" }]"#,
+        Some("[]"),
+        Some(r#"["deny Exec"]"#),
+    );
+    for verb in ["fix-gate", "unverified"] {
+        let out = Command::new(bin())
+            .args([verb, "--report", &f.prefix, "--policy", &deny, "--strict", "--json"])
+            .output().expect("run candor-query");
+        let doc = String::from_utf8(out.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        assert_eq!(out.status.code(), Some(0),
+            "an empty `outOfScope` must not itself trigger the hedge: {doc}");
+        assert_eq!(v["ok"], serde_json::json!(true), "`{verb}` must certify a clean peek: {doc}");
+        assert!(v.get("incomplete").is_none(), "no hedge is owed over an empty outOfScope: {doc}");
+    }
 }
 
 /// ⟨0.32⟩ THE THREE OVER-CHARGE CONTROLS for the row above, written BEFORE the fix. Each one is a way
