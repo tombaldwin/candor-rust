@@ -9,6 +9,55 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **Coverage-only, no behavior change: a THIRD guard-deletion sweep, scoped to the one area the first
+  two passes explicitly named as not reached — `src/lib.rs`'s ~2000-line callback/thread-local/
+  coroutine-capture machinery (rust-deep), which needs the dylint `ui/` harness (`cargo test --lib`)
+  rather than plain `cargo test`.** Found TWO more guards on the silent-vs-disclosed boundary with ZERO
+  fixture coverage — the exact area that produced `e43eec0`'s and `3e9848c`'s cardinal sins. Every new
+  test is confirmed RED with its guard deleted and GREEN at HEAD.
+  - **`mir_spike::local_drop_impls`'s `TyKind::Coroutine` and `TyKind::CoroutineClosure` arms** — added
+    in `3e9848c` alongside `TyKind::Closure` (a `move || {}` closure capturing an effectful-Drop value,
+    dropped without ever being called), but only the `Closure` arm ever got a fixture
+    (`tests/integration.sh` 9c-iii, driving `sink()` via a plain closure). The Coroutine form (`async
+    move { … }`, a Future dropped without being polled) and CoroutineClosure form (`async move || { …
+    }`, dropped without being called) were never independently exercised — a textbook instance of a test
+    inheriting the blind spot of the bug report that prompted it (`bin/AGENT-CORPUS-BRIEF.md` A.2:
+    "every fixture drove only the crate/shape the original bug happened to involve"). Deleting either
+    arm alone (leaving the other two intact) makes exactly its own function vanish from the report —
+    independently confirmed for both. New `ui-2021/coroutine_drop.rs` (its own `--edition=2021` UI
+    battery, `ui_edition_2021` in `src/lib.rs` — the default `ui_test` compiles at rustc's 2015 default,
+    where `async {}`/`async || {}` are a hard parse error) pins both `coroutine_scope_exit` and
+    `coroutine_closure_scope_exit`.
+  - **`edge_fn_value_reference`'s cast-STAYS-callable branch** (`f as fn()`) — the function's own comment
+    claims "a cast that STAYS callable (`f as fn()`) … DOES keep the effect," but no fixture anywhere
+    used an explicit `as fn()` cast: the one existing "keeps the edge" case (`callbacks.rs`'s
+    `passes_cb`) passes the fn by an implicit coercion at an argument position, which never even visits
+    the `ExprKind::Cast` arm of the `cast_away` match. Removing `TyKind::FnPtr` from that arm's "still
+    callable" set silently drops the edge for an explicit `f as fn()` cast (the whole existing suite,
+    including every other case in `callbacks.rs`, stays green). New `keeps_via_fn_ptr_cast` in
+    `ui/callbacks.rs` pins it.
+  - **⚠ CARDINAL SIN found, FILED NOT FIXED (needs new machinery, see BACKLOG.md):** a closure/coroutine
+    capturing an effectful Drop by move, coerced into `Box<dyn Fn*>` and dropped without ever being
+    called, is silently pure — the identical class to the two above, one hop further through a trait
+    object. `local_drop_impls`'s `TyKind::Dynamic` arm CHAs the principal trait's registered `impl`
+    blocks to find the concrete type behind a `Box<dyn Trait>`, but a closure satisfies `Fn`/`FnMut`/
+    `FnOnce` through compiler-synthesized dispatch, never a registered `impl Fn for X` — confirmed with a
+    debug probe that `trait_impls_of(Fn)` never contains the closure's own type, so no amount of
+    widening the CHA trait list closes this. A sound fix needs to track the concrete type at its
+    unsizing-coercion site (construction), not at the (type-erased) `Drop` terminator; two candidate
+    designs and why a naive one is unsound are in BACKLOG.md. Not reached further this session.
+  - Not reached (bounded scope, reported per `bin/AGENT-CORPUS-BRIEF.md` rule 7): `edge_static_force`/
+    `edge_thread_local_force`/`local_key_init_fns`/`FnRefCollector` (spot-attacked — the `NestedFilter::
+    All` visitor's descent into nested bodies IS load-bearing and already caught by the existing
+    `ui/thread_local_effects.rs` fixture when neutered; a hypothesized "bare inline effect with no named
+    helper fn" gap was attacked and found NOT to reproduce — the `thread_local!` macro always synthesizes
+    a genuine named `fn` for the deferred init, so this path was never actually exposed); `resolve_callback_sites`/
+    `record_callback_flow`'s `DefKind::AssocFn` handling (a method-as-callback-value shape, untested, but
+    judged lower priority — its failure mode is a precision loss to `Unknown`, not a silent vanish);
+    `is_std_owning_container`'s non-Box/Vec members (`Rc`/`Arc`/`BTreeMap`/`BTreeSet`/`HashMap`/
+    `HashSet`/`LinkedList`/`BinaryHeap`) and the general `TyKind::Adt`/`Tuple`/`Array`/`Slice` recursion
+    in `local_drop_impls` — outside the callback/thread-local/coroutine-capture scope this pass was given.
+
 - **Coverage-only, no behavior change: a SECOND guard-deletion sweep (`bin/AGENT-CORPUS-BRIEF.md`
   attack C), scoped to what the first pass named as unreached — `candor-scan/src/deps.rs`'s
   `CALIBRATED_*` impostor-exemption guards first (highest churn: five cardinal sins fixed there the

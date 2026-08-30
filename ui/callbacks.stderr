@@ -1,5 +1,5 @@
 warning: `apply` effects: { Unknown }   (* = via callee)
-  --> $DIR/callbacks.rs:61:1
+  --> $DIR/callbacks.rs:70:1
    |
 LL | fn apply(g: fn()) {
    | ^^^^^^^^^^^^^^^^^
@@ -7,19 +7,19 @@ LL | fn apply(g: fn()) {
    = note: `#[warn(candor)]` on by default
 
 warning: `cb_env` effects: { Env }   (* = via callee)
-  --> $DIR/callbacks.rs:57:1
+  --> $DIR/callbacks.rs:66:1
    |
 LL | fn cb_env() {
    | ^^^^^^^^^^^
 
 warning: `cb_fs` effects: { Fs }   (* = via callee)
-  --> $DIR/callbacks.rs:54:1
+  --> $DIR/callbacks.rs:63:1
    |
 LL | fn cb_fs() {
    | ^^^^^^^^^^
 
 warning: `fetch_remote` effects: { Fs }   (* = via callee)
-  --> $DIR/callbacks.rs:39:1
+  --> $DIR/callbacks.rs:48:1
    |
 LL | fn fetch_remote() -> i32 {
    | ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -31,40 +31,46 @@ LL | fn fs_helper() {
    | ^^^^^^^^^^^^^^
 
 warning: `handler_io` effects: { Fs* }   (* = via callee)
-  --> $DIR/callbacks.rs:46:1
+  --> $DIR/callbacks.rs:55:1
    |
 LL | fn handler_io() -> i32 {
    | ^^^^^^^^^^^^^^^^^^^^^^
 
+warning: `keeps_via_fn_ptr_cast` effects: { Fs* }   (* = via callee)
+  --> $DIR/callbacks.rs:34:1
+   |
+LL | fn keeps_via_fn_ptr_cast() -> fn() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 warning: `passes_cb` effects: { Fs* }   (* = via callee)
-  --> $DIR/callbacks.rs:28:1
+  --> $DIR/callbacks.rs:37:1
    |
 LL | fn passes_cb() {
    | ^^^^^^^^^^^^^^
 
 warning: `register` effects: { Unknown }   (* = via callee)
-  --> $DIR/callbacks.rs:31:1
+  --> $DIR/callbacks.rs:40:1
    |
 LL | fn register(f: fn()) {
    | ^^^^^^^^^^^^^^^^^^^^
 
 warning: `site_env` effects: { Env* }   (* = via callee)
-  --> $DIR/callbacks.rs:67:1
+  --> $DIR/callbacks.rs:76:1
    |
 LL | fn site_env() {
    | ^^^^^^^^^^^^^
 
 warning: `site_fs` effects: { Fs* }   (* = via callee)
-  --> $DIR/callbacks.rs:64:1
+  --> $DIR/callbacks.rs:73:1
    |
 LL | fn site_fs() {
    | ^^^^^^^^^^^^
 
 warning: `with_retry` effects: { Unknown }   (* = via callee)
-  --> $DIR/callbacks.rs:36:1
+  --> $DIR/callbacks.rs:45:1
    |
 LL | fn with_retry<F: Fn() -> i32>(f: F) -> i32 {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-warning: 11 warnings emitted
+warning: 12 warnings emitted
 
