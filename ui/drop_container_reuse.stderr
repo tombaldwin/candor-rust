@@ -1,0 +1,154 @@
+warning: `<Guard as std::ops::Drop>::drop` effects: { Net }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:34:5
+   |
+LL |     fn drop(&mut self) {
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `decl_order_explicit_drop` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:53:1
+   |
+LL | fn decl_order_explicit_drop() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `decl_order_field` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:45:1
+   |
+LL | fn decl_order_field() {
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `decl_order_tuple` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:49:1
+   |
+LL | fn decl_order_tuple() {
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `main` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:211:1
+   |
+LL | fn main() {
+   | ^^^^^^^^^
+
+warning: `nested_box` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:140:1
+   |
+LL | fn nested_box() {
+   | ^^^^^^^^^^^^^^^
+
+warning: `nested_option` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:144:1
+   |
+LL | fn nested_option() {
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: `nested_user_generic` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:148:1
+   |
+LL | fn nested_user_generic() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `nested_vec` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:152:1
+   |
+LL | fn nested_vec() {
+   | ^^^^^^^^^^^^^^^
+
+warning: `via_arc` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:94:1
+   |
+LL | fn via_arc() {
+   | ^^^^^^^^^^^^
+
+warning: `via_binary_heap` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:123:1
+   |
+LL | fn via_binary_heap() {
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_box` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:77:1
+   |
+LL | fn via_box() {
+   | ^^^^^^^^^^^^
+
+warning: `via_btreemap` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:98:1
+   |
+LL | fn via_btreemap() {
+   | ^^^^^^^^^^^^^^^^^
+
+warning: `via_btreeset` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:103:1
+   |
+LL | fn via_btreeset() {
+   | ^^^^^^^^^^^^^^^^^
+
+warning: `via_hashmap` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:108:1
+   |
+LL | fn via_hashmap() {
+   | ^^^^^^^^^^^^^^^^
+
+warning: `via_hashset` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:113:1
+   |
+LL | fn via_hashset() {
+   | ^^^^^^^^^^^^^^^^
+
+warning: `via_linked_list` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:118:1
+   |
+LL | fn via_linked_list() {
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_mutex` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:59:1
+   |
+LL | fn via_mutex() {
+   | ^^^^^^^^^^^^^^
+
+warning: `via_phantom_arena` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:171:1
+   |
+LL | fn via_phantom_arena() {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_rc` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:90:1
+   |
+LL | fn via_rc() {
+   | ^^^^^^^^^^^
+
+warning: `via_refcell` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:67:1
+   |
+LL | fn via_refcell() {
+   | ^^^^^^^^^^^^^^^^
+
+warning: `via_rwlock` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:63:1
+   |
+LL | fn via_rwlock() {
+   | ^^^^^^^^^^^^^^^
+
+warning: `via_vec` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:81:1
+   |
+LL | fn via_vec() {
+   | ^^^^^^^^^^^^
+
+warning: `via_vec_into_iter` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:158:1
+   |
+LL | fn via_vec_into_iter() {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `via_vecdeque` effects: { Net* }   (* = via callee)
+  --> $DIR/drop_container_reuse.rs:85:1
+   |
+LL | fn via_vecdeque() {
+   | ^^^^^^^^^^^^^^^^^
+
+warning: 25 warnings emitted
+
