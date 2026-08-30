@@ -931,80 +931,6 @@ fn cha_targets(tcx: TyCtxt<'_>, method_did: DefId) -> Vec<DefId> {
     out
 }
 
-/// The function(s) a `FnDef` used as a VALUE will actually run — the fn-value analogue of the
-/// devirtualization the CALL path does.
-///
-/// A trait method NAMED as a value (`<S as T>::m`, `S::m`, `X::m`) types as a `FnDef` whose `DefId` is
-/// the TRAIT's item: the declaration, not the impl. That `DefId` is local and an `AssocFn`, so the old
-/// test ("local + `Fn`/`AssocFn` ⇒ a resolvable target") said yes and then edged to a body that does not
-/// exist — `register(<S as T>::run)` read silently PURE however effectful `S`'s impl was, while the
-/// identical `<S as T>::run()` CALL one line away was resolved correctly. Worse when the trait method
-/// has a DEFAULT body: the caller was charged the default's effects instead of the overriding impl's, so
-/// a pure default in front of an effectful impl is a silent under-report that still prints a plausible
-/// answer. The call path already states the rule this one broke — "NEVER edge to the bodyless trait
-/// method" — so answer the question the same way it does, with the same authority.
-///
-/// Resolution order, mirroring the call path: `Instance::try_resolve` (the one true target for a pinned
-/// `Self`, and the reason a LOCAL impl of a NON-LOCAL trait is now reached at all — the old code tested
-/// `is_local` on the trait item and dropped those on the floor), then CHA over the trait's local impls
-/// PLUS the default body when some impl takes it, when `Self` is generic. A non-trait `DefId` already
-/// names its own body and is returned unchanged.
-fn fn_value_targets<'tcx>(
-    cx: &LateContext<'tcx>,
-    did: DefId,
-    args: rustc_middle::ty::GenericArgsRef<'tcx>,
-) -> Vec<DefId> {
-    // `Instance::try_resolve` asserts the def is a Fn/AssocFn/Const — never hand it anything else (an
-    // effect checker must degrade, never ICE the build).
-    if cx.tcx.trait_of_assoc(did).is_none()
-        || !matches!(cx.tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn)
-    {
-        return vec![did];
-    }
-    // `Ok(Some(inst))` landing back ON `did` is not a failure: it means the trait's DEFAULT body is what
-    // runs here (no impl overrides it), which is the correct target.
-    if let Ok(Some(inst)) =
-        rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), did, args)
-    {
-        return vec![inst.def_id()];
-    }
-    // `Self` isn't pinned (`fn f<X: T>() { register(X::m) }`). CHA the trait's LOCAL impls, exactly as
-    // the call path's `cha` fallback does. When CHA is empty — a NON-local trait, whose impl bodies we
-    // cannot see either way — keep the original target: that is the same calibrated "generic dispatch is
-    // assumed pure unless the trait is a known-effectful std one" default `note_unresolved_dispatch`
-    // applies to calls, not a new hole, and diverging here would flood exactly what that calibration
-    // exists to prevent.
-    let mut cha = cha_targets(cx.tcx, did);
-    if cha.is_empty() {
-        return vec![did];
-    }
-    // …AND the trait's own DEFAULT body, when some impl does not override it. `cha_targets` reads
-    // `impl_item_implementor_ids`, which lists only the methods an impl DEFINES — an `impl T for S {}`
-    // that takes the default contributes NOTHING to that list, so CHA alone answers "every body that can
-    // run here" with the overriders only. MEASURED: with an effectful default, one overriding impl and
-    // one impl taking the default, `fn f<X: Hook>() { register(X::hook) }` reported the overrider's `Fs`
-    // and dropped the default's `Env` — the fix's own version of the bug it closes, in the other
-    // direction. Adding `did` back is exactly the union CHA is: `Self` is unpinned, so the default IS one
-    // of the bodies reachable here.
-    if cx.tcx.defaultness(did).has_value()
-        && cha_targets_miss_some_impl(cx.tcx, did, cha.len())
-    {
-        cha.push(did);
-    }
-    cha
-}
-
-/// Does some impl of `method_did`'s trait NOT define that method (i.e. take the trait's default body)?
-/// `cha_len` is what `cha_targets` returned; every impl either defines the method or inherits the
-/// default, so a shortfall against the impl count is exactly "the default is reachable".
-fn cha_targets_miss_some_impl(tcx: TyCtxt<'_>, method_did: DefId, cha_len: usize) -> bool {
-    let Some(trait_did) = tcx.trait_of_assoc(method_did) else { return false };
-    let impls = tcx.trait_impls_of(trait_did);
-    let total =
-        impls.non_blanket_impls().values().map(|v| v.len()).sum::<usize>() + impls.blanket_impls().len();
-    cha_len < total
-}
-
 /// The outcome of trying to devirtualize a trait-method dispatch.
 #[derive(Clone, Copy)]
 enum Devirt {
@@ -1122,7 +1048,7 @@ fn overloaded_deref_steps<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>) -> Ve
             // Self = the pointee type T (peel the `&`/`&mut` the deref operates through).
             let self_ty = cur.peel_refs();
             // The Deref/DerefMut traits have a single generic param (Self); resolve to the concrete impl.
-            let Some(gargs) = trait_args_for(cx, method_did, &[self_ty]) else { continue };
+            let gargs = cx.tcx.mk_args(&[self_ty.into()]);
             let resolve = |env: rustc_middle::ty::TypingEnv<'tcx>| {
                 rustc_middle::ty::Instance::try_resolve(cx.tcx, env, method_did, gargs)
                     .ok()
@@ -1189,54 +1115,12 @@ fn from_residual_local_edge<'tcx>(
         .iter()
         .copied()
         .find(|d| matches!(cx.tcx.def_kind(*d), DefKind::AssocFn))?;
-    let gargs = trait_args_for(cx, from_fn, &[e2, e1])?; // From's args are [Self=E2, T=E1]
+    let gargs = cx.tcx.mk_args(&[e2.into(), e1.into()]); // From's args are [Self=E2, T=E1]
     let inst = rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), from_fn, gargs)
         .ok()
         .flatten()?;
     let did = inst.def_id();
     did.is_local().then_some(did)
-}
-
-/// A WELL-FORMED generic-args list for `def_id`: the leading arguments come from `known`, and whatever
-/// the item declares BEYOND them is padded.
-///
-/// `Instance::try_resolve` wants args covering an assoc fn's FULL generic signature — the trait's
-/// parameters AND the method's own. A short list is not a soft failure that returns `None`: rustc raises
-/// a `span_delayed_bug` ("missing value for assoc item in impl") which surfaces at the end of the build
-/// as an INTERNAL COMPILER ERROR. `<K as Hash>::hash` carries its own `H: Hasher`, so the one-element
-/// `mk_args(&[K])` behind the set-`insert` driver edge was exactly one argument short, and any crate
-/// doing `HashSet::insert` on a local type FAILED TO COMPILE under candor — six lines reproduce it. The
-/// walker-style local-ADT gate a few lines below was added for a sibling of this ICE and reads as if it
-/// covered the class; it does not, because a LOCAL element type sails straight through it.
-///
-/// Padding is sound for what these call sites ask, which is only ever "which impl does this land on":
-/// impl selection is driven by the TRAIT's parameters (`Self` first), and a method's own parameters ride
-/// along without choosing it. They are filled with `()` / erased regions purely to make the list
-/// well-formed. A CONST parameter has no such filler, so this REFUSES (returns `None`) rather than
-/// invent one — no std trait these call sites name has one, and refusing is the fail-closed direction if
-/// that ever changes.
-fn trait_args_for<'tcx>(
-    cx: &LateContext<'tcx>,
-    def_id: DefId,
-    known: &[rustc_middle::ty::Ty<'tcx>],
-) -> Option<rustc_middle::ty::GenericArgsRef<'tcx>> {
-    use rustc_middle::ty::GenericParamDefKind as ParamKind;
-    let mut generics = Some(cx.tcx.generics_of(def_id));
-    while let Some(g) = generics {
-        if g.own_params.iter().any(|p| {
-            matches!(p.kind, ParamKind::Const { .. }) && known.get(p.index as usize).is_none()
-        }) {
-            return None;
-        }
-        generics = g.parent.map(|p| cx.tcx.generics_of(p));
-    }
-    Some(rustc_middle::ty::GenericArgs::for_item(cx.tcx, def_id, |param, _| match param.kind {
-        ParamKind::Lifetime => cx.tcx.lifetimes.re_erased.into(),
-        _ => match known.get(param.index as usize) {
-            Some(t) => (*t).into(),
-            None => cx.tcx.types.unit.into(),
-        },
-    }))
 }
 
 /// Instance-resolve a (generic) callee to its concrete impl method and keep it only if LOCAL.
@@ -1291,7 +1175,7 @@ fn return_type_driver_local_edge<'tcx>(
         let result_ty = typeck.expr_ty(expr);
         let src_ty = typeck.expr_ty_adjusted(receiver).peel_refs();
         let from_trait = cx.tcx.get_diagnostic_item(rustc_span::sym::From)?;
-        let gargs = trait_args_for(cx, assoc_fn(from_trait)?, &[result_ty, src_ty])?; // [Self=Result, T=Src]
+        let gargs = cx.tcx.mk_args(&[result_ty.into(), src_ty.into()]); // From's args [Self=Result, T=Src]
         return resolve_local_method(cx, assoc_fn(from_trait)?, gargs);
     }
     // `s.parse::<T>()` → `<T as FromStr>::from_str` (T is the Ok type of the `Result<T, T::Err>` return).
@@ -1303,7 +1187,7 @@ fn return_type_driver_local_edge<'tcx>(
             let did = tp.def_id();
             (cx.tcx.item_name(did).as_str() == "FromStr").then_some(did)
         })?;
-        let gargs = trait_args_for(cx, assoc_fn(fromstr_trait)?, &[target])?; // FromStr's only param is Self
+        let gargs = cx.tcx.mk_args(&[target.into()]); // FromStr's only param is Self
         return resolve_local_method(cx, assoc_fn(fromstr_trait)?, gargs);
     }
     // `it.collect::<T>()` → `<T as FromIterator<Item>>::from_iter`. from_iter needs [Self=T, A=Item,
@@ -1332,7 +1216,7 @@ fn return_type_driver_local_edge<'tcx>(
             )
             .ok()?;
         let fromiter_trait = cx.tcx.get_diagnostic_item(rustc_span::sym::FromIterator)?;
-        let gargs = trait_args_for(cx, assoc_fn(fromiter_trait)?, &[result_ty, item_ty, iter_ty])?;
+        let gargs = cx.tcx.mk_args(&[result_ty.into(), item_ty.into(), iter_ty.into()]);
         return resolve_local_method(cx, assoc_fn(fromiter_trait)?, gargs);
     }
     None
@@ -1399,7 +1283,7 @@ fn resolve_cmp_op<'tcx>(
     // PartialEq<Rhs = Self> / PartialOrd<Rhs = Self>: the impl is pinned by [Self = T, Rhs = T] where T is
     // the operand type (peel the auto-ref the `&self`/`&Rhs` receiver adds).
     let t = typeck.expr_ty_adjusted(lhs).peel_refs();
-    let gargs = trait_args_for(cx, trait_fn, &[t, t])?;
+    let gargs = cx.tcx.mk_args(&[t.into(), t.into()]);
     let resolve = |env: rustc_middle::ty::TypingEnv<'tcx>| {
         rustc_middle::ty::Instance::try_resolve(cx.tcx, env, trait_fn, gargs).ok().flatten()
     };
@@ -1626,7 +1510,7 @@ fn local_trait_method_by_did<'tcx>(
         .in_definition_order()
         .find(|a| a.is_fn() && a.name().as_str() == method_sym)?
         .def_id;
-    let gargs = trait_args_for(cx, trait_fn, &[self_ty])?;
+    let gargs = cx.tcx.mk_args(&[self_ty.into()]);
     let inst = rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), trait_fn, gargs)
         .ok()
         .flatten()
@@ -1904,7 +1788,7 @@ fn fmt_impl_for<'tcx>(
         .in_definition_order()
         .find(|a| a.is_fn() && a.name().as_str() == "fmt")?
         .def_id;
-    let gargs = trait_args_for(cx, fmt_fn, &[self_ty])?;
+    let gargs = cx.tcx.mk_args(&[self_ty.into()]);
     let inst = rustc_middle::ty::Instance::try_resolve(cx.tcx, cx.typing_env(), fmt_fn, gargs)
         .ok()
         .flatten()
@@ -2623,8 +2507,9 @@ impl Candor {
         // harmless no-op on the `calls` set.)
         if let ExprKind::Path(..) = expr.kind
             && let Some(typeck) = cx.maybe_typeck_results()
-                && let rustc_middle::ty::TyKind::FnDef(did, fn_args) = typeck.expr_ty(expr).kind()
-                    && let Some(caller) = enclosing_named_fn(cx.tcx, expr.hir_id)
+                && let rustc_middle::ty::TyKind::FnDef(did, _) = typeck.expr_ty(expr).kind()
+                    && let (Some(local), Some(caller)) =
+                        (did.as_local(), enclosing_named_fn(cx.tcx, expr.hir_id))
                     {
                         // A `FnDef` path being CAST AWAY from callability (`fs_helper as usize`,
                         // `f as *const ()`) is never invoked through that cast value — a `usize` /
@@ -2647,21 +2532,9 @@ impl Candor {
                             },
                             _ => false,
                         };
-                        // Edge to the body that will actually RUN, not to the `DefId` the path was
-                        // spelled with — see `fn_value_targets`. Locality is tested on the RESOLVED
-                        // target, which is what lets a LOCAL impl of a NON-LOCAL trait
-                        // (`register(<MyType as std::str::FromStr>::from_str)`) produce an edge at all.
-                        if !cast_away {
-                            for target in fn_value_targets(cx, *did, fn_args) {
-                                if let Some(local) = target.as_local()
-                                    && matches!(
-                                        cx.tcx.def_kind(target),
-                                        DefKind::Fn | DefKind::AssocFn
-                                    )
-                                {
-                                    self.calls.entry(caller).or_default().insert(local);
-                                }
-                            }
+                        if !cast_away && matches!(cx.tcx.def_kind(*did), DefKind::Fn | DefKind::AssocFn)
+                        {
+                            self.calls.entry(caller).or_default().insert(local);
                         }
                     }
     }
@@ -2798,30 +2671,14 @@ impl Candor {
                     // callback's effects reach the specific fn that passed it, never every caller of
                     // the HOF (the union fabrication — see `callback_sites`).
                     match typeck.expr_ty(arg).kind() {
-                        // Resolve the `FnDef` to the body that will RUN before judging it resolvable.
-                        // Testing `is_local` + `AssocFn` on the SPELLED `DefId` said "resolvable" for a
-                        // trait method (`apply(<S as T>::run)`) and then recorded the bodyless trait
-                        // DECLARATION as the target — the caller inherited nothing and read pure. See
-                        // `fn_value_targets`.
-                        rustc_middle::ty::TyKind::FnDef(t, fn_args) => {
-                            let targets: Vec<DefId> = fn_value_targets(cx, *t, fn_args)
-                                .into_iter()
-                                .filter(|d| {
-                                    d.is_local()
-                                        && matches!(
-                                            cx.tcx.def_kind(*d),
-                                            DefKind::Fn | DefKind::AssocFn
-                                        )
-                                })
-                                .collect();
-                            if targets.is_empty() {
-                                self.callback_site_unknown.insert((caller, def_id, i));
-                            } else {
-                                self.callback_sites
-                                    .entry((caller, def_id, i))
-                                    .or_default()
-                                    .extend(targets);
-                            }
+                        rustc_middle::ty::TyKind::FnDef(t, _)
+                            if t.as_local().is_some()
+                                && matches!(cx.tcx.def_kind(*t), DefKind::Fn | DefKind::AssocFn) =>
+                        {
+                            self.callback_sites
+                                .entry((caller, def_id, i))
+                                .or_default()
+                                .insert(*t);
                         }
                         _ => {
                             self.callback_site_unknown.insert((caller, def_id, i));
@@ -3126,24 +2983,7 @@ impl Candor {
                             .filter(|t| matches!(cx.tcx.def_kind(**t), DefKind::Fn | DefKind::AssocFn))
                             .filter_map(|t| t.as_local())
                             .collect();
-                        if locals.is_empty() {
-                            // FAIL CLOSED. `record_callback_flow`'s own SOUNDNESS note names this exact
-                            // shape as how a false `pure` gets manufactured: a NON-EMPTY target set
-                            // filtered down to an empty `locals` added neither an edge nor the
-                            // `Unknown`, so the caller read pure with nothing recording that a target
-                            // had been dropped.
-                            //
-                            // NOT COVERED BY A FIXTURE, and unreachable today by construction: the
-                            // sending side already admits only local `Fn`/`AssocFn` targets, so this
-                            // filter cannot remove anything. It is here because the two filters are
-                            // separated by 300 lines and the failure mode of their drifting apart is
-                            // SILENT. Treat it as the direction the drift falls in, not as a checked
-                            // guard.
-                            self.direct.entry(*caller).or_default().insert(UNKNOWN);
-                            self.unknown_why.entry(*caller).or_default().insert(
-                                "callback:callback target resolved to no analyzable body".to_string(),
-                            );
-                        } else {
+                        if !locals.is_empty() {
                             self.calls.entry(*caller).or_default().extend(locals);
                         }
                     }

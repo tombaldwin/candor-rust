@@ -97,15 +97,9 @@ jobs:
             out="$(cargo test --lib ui 2>&1 || true)"
             for f in ui/*.rs; do
               base="$(basename "$f" .rs)"
-              # Anchor on `/<base>…stderr` (a path-segment boundary), NOT a substring — else `base=main`
+              # Anchor on `/<base>.stderr` (a path-segment boundary), NOT a substring — else `base=main`
               # would also match `…/domain.stderr` and cross-bless an unrelated fixture.
-              #
-              # The middle `(\.[^ /]*)*` is load-bearing and was missing: compiletest_rs 0.11.2 saves to
-              # `<base>.stage-id.stderr`, NOT `<base>.stderr`, so the old pattern matched NOTHING and this
-              # step blessed nothing on every run — the `cargo test` below then failed the job for a
-              # shift it was supposed to absorb. MEASURED 2026-08-30 by running it against a real
-              # diagnostic shift: zero `blessed …` lines, two fixtures still red.
-              saved="$(printf '%s\n' "$out" | grep -oE "/[^ ]*/${base}(\.[^ /]*)*\.stderr" | head -1)"
+              saved="$(printf '%s\n' "$out" | grep -oE "/[^ ]*/${base}\.stderr" | head -1)"
               [ -n "$saved" ] && [ -f "$saved" ] && cp "$saved" "ui/$base.stderr" && echo "blessed ui/$base.stderr"
             done
             cargo test --lib ui # must pass after blessing, else the change is non-trivial → fail

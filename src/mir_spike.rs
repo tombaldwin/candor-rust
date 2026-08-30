@@ -102,15 +102,6 @@ fn facts_for(tcx: TyCtxt<'_>, did: LocalDefId) -> FnFacts {
 /// glue (so the element is hidden behind a raw pointer in its fields). Curated by name + crate (alloc /
 /// std / core), so a user type that merely shares a name isn't matched. `Rc`/`Arc` only drop on the
 /// last reference, but candor over-approximates (the drop CAN run), which is the sound direction.
-///
-/// `PhantomData` is not a container; it is the LANGUAGE'S OWN declaration of this property. `PhantomData
-/// <T>` in a struct's fields is precisely how a raw-pointer container tells drop-check "dropping me can
-/// drop a `T`" — so following its argument is asking the authority rather than growing this name list
-/// one victim at a time. Measured: it is what recovers `std::vec::IntoIter<Guard>` (a `for` loop left
-/// early still drops the remaining elements), and it generalises to every hand-written arena / smart
-/// pointer that marks ownership the documented way. It cannot over-charge on the variance-only spellings
-/// — `PhantomData<&'a T>` / `PhantomData<fn() -> T>` present a reference / fn-pointer argument, and
-/// neither is followed by the walker.
 fn is_std_owning_container(tcx: TyCtxt<'_>, did: rustc_hir::def_id::DefId) -> bool {
     if !matches!(tcx.crate_name(did.krate).as_str(), "alloc" | "std" | "core") {
         return false;
@@ -128,65 +119,30 @@ fn is_std_owning_container(tcx: TyCtxt<'_>, did: rustc_hir::def_id::DefId) -> bo
             | "HashSet"
             | "LinkedList"
             | "BinaryHeap"
-            | "PhantomData"
     )
 }
 
 /// Collect the LOCAL `Drop::drop` impls reachable when a value of `ty` is dropped: the type's own
 /// destructor, plus (transitively) those of its fields / elements that run via drop glue. References
 /// and raw pointers don't drop their pointee, so they're not followed. `seen` guards recursive types.
-///
-/// `seen` is keyed on the whole TYPE, not on the ADT's `DefId`. Keying it on the `DefId` made the walk
-/// order-dependent and silently lossy: the FIRST instantiation of a generic ADT claimed the key, so
-/// every LATER one — a different type argument, a different drop set — returned immediately. Because a
-/// struct's fields are walked in DECLARATION ORDER, `struct S { a: Cell<u8>, b: Cell<Guard> }` lost
-/// `Guard::drop` entirely while the same struct with its two fields SWAPPED was caught. That is not a
-/// corner case: it is why `Mutex<Guard>`, `RwLock<Guard>` and `RefCell<Guard>` all read silent-pure —
-/// each one reaches its payload through `UnsafeCell<T>`, and each one walks a *different* `UnsafeCell`
-/// (inside a poison flag / borrow counter / platform lock) first.
 pub(crate) fn local_drop_impls<'tcx>(
     tcx: TyCtxt<'tcx>,
     ty: Ty<'tcx>,
     out: &mut std::collections::HashSet<LocalDefId>,
-    seen: &mut std::collections::HashSet<Ty<'tcx>>,
+    seen: &mut std::collections::HashSet<rustc_hir::def_id::DefId>,
 ) {
-    walk_drop_tys(tcx, ty, out, seen, 0);
-}
-
-/// How deep the drop walk may descend. Termination already comes from the type-keyed `seen` memo for
-/// every type rustc can lay out; this is the backstop for a type whose ownership chain reaches ITSELF at
-/// a DIFFERENT instantiation, where every level is a distinct `Ty` and `seen` therefore never repeats.
-/// A bound, not an ancestor set: an ancestor set keyed on the ADT's `DefId` cuts `Vec<Vec<Guard>>`,
-/// `Box<Box<Guard>>`, `Option<Option<Guard>>` and every user generic nested in itself — MEASURED, three
-/// of those four went silent-pure under one — because a nested same-ADT type is its own "ancestor" while
-/// being a perfectly ordinary, finite type. The bound is far past anything a real type reaches (the
-/// deepest std container chain here is a handful of levels), so it never truncates real code.
-const DROP_WALK_MAX_DEPTH: u32 = 128;
-
-/// `local_drop_impls`'s body — see `DROP_WALK_MAX_DEPTH` for why the recursion bound is a depth and not
-/// an ancestor set.
-fn walk_drop_tys<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    ty: Ty<'tcx>,
-    out: &mut std::collections::HashSet<LocalDefId>,
-    seen: &mut std::collections::HashSet<Ty<'tcx>>,
-    depth: u32,
-) {
-    if depth > DROP_WALK_MAX_DEPTH {
-        return;
-    }
-    if !seen.insert(ty) {
-        return;
-    }
     match ty.kind() {
         TyKind::Adt(adt, args) => {
+            if !seen.insert(adt.did()) {
+                return;
+            }
             if let Some(dtor) = adt.destructor(tcx)
                 && let Some(l) = dtor.did.as_local()
             {
                 out.insert(l);
             }
             for field in adt.all_fields() {
-                walk_drop_tys(tcx, field.ty(tcx, args).skip_normalization(), out, seen, depth + 1);
+                local_drop_impls(tcx, field.ty(tcx, args).skip_normalization(), out, seen);
             }
             // A std OWNING container (Box/Vec/Rc/Arc/HashMap/…) holds its element behind a heap pointer,
             // so field-recursion stops at the raw pointer — yet dropping the container DOES drop the
@@ -196,17 +152,17 @@ fn walk_drop_tys<'tcx>(
             if is_std_owning_container(tcx, adt.did()) {
                 for arg in args.iter() {
                     if let Some(t) = arg.as_type() {
-                        walk_drop_tys(tcx, t, out, seen, depth + 1);
+                        local_drop_impls(tcx, t, out, seen);
                     }
                 }
             }
         }
         TyKind::Tuple(tys) => {
             for t in tys.iter() {
-                walk_drop_tys(tcx, t, out, seen, depth + 1);
+                local_drop_impls(tcx, t, out, seen);
             }
         }
-        TyKind::Array(t, _) | TyKind::Slice(t) => walk_drop_tys(tcx, *t, out, seen, depth + 1),
+        TyKind::Array(t, _) | TyKind::Slice(t) => local_drop_impls(tcx, *t, out, seen),
         // A CLOSURE/COROUTINE that captured an effectful-Drop value BY MOVE carries it as an upvar —
         // dropping the closure/coroutine (scope exit, `drop(c)`, or as the concrete type behind a
         // `Box<dyn Fn*>` the Dynamic arm below already resolves to here) drops every upvar in turn.
@@ -219,17 +175,17 @@ fn walk_drop_tys<'tcx>(
         // guard recursion on), but upvars are a fixed, finite field list, so plain recursion terminates.
         TyKind::Closure(_, args) => {
             for t in args.as_closure().upvar_tys() {
-                walk_drop_tys(tcx, t, out, seen, depth + 1);
+                local_drop_impls(tcx, t, out, seen);
             }
         }
         TyKind::Coroutine(_, args) => {
             for t in args.as_coroutine().upvar_tys() {
-                walk_drop_tys(tcx, t, out, seen, depth + 1);
+                local_drop_impls(tcx, t, out, seen);
             }
         }
         TyKind::CoroutineClosure(_, args) => {
             for t in args.as_coroutine_closure().upvar_tys() {
-                walk_drop_tys(tcx, t, out, seen, depth + 1);
+                local_drop_impls(tcx, t, out, seen);
             }
         }
         // Dropping a TRAIT OBJECT (`Box<dyn Trait>` etc.) runs the CONCRETE type's destructor through
@@ -251,7 +207,7 @@ fn walk_drop_tys<'tcx>(
                     .copied()
                 {
                     let self_ty = tcx.type_of(impl_did).instantiate_identity().skip_normalization();
-                    walk_drop_tys(tcx, self_ty, out, seen, depth + 1);
+                    local_drop_impls(tcx, self_ty, out, seen);
                 }
             }
         }
