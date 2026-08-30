@@ -2,6 +2,70 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+## 2026-08-30 — CARDINAL SIN: a closure/coroutine capturing an effectful Drop by move, boxed as
+## `dyn Fn*` and dropped without ever being called, is silently pure — filed, not fixed here
+
+Found during a guard-deletion sweep of `src/lib.rs`'s callback/thread-local/coroutine-capture
+machinery (the same area that produced e43eec0 and 3e9848c). Live-reproduced on unmodified HEAD, no
+code changes needed to trigger it:
+
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) { let _ = std::net::TcpStream::connect("10.0.0.2:9"); }
+    }
+    fn boxed_dyn_fn_scope_exit() {
+        let g = Guard;
+        let _b: Box<dyn Fn()> = Box::new(move || { let _ = &g; });
+    }
+
+`cargo dylint` over this produces zero warnings for `boxed_dyn_fn_scope_exit` — it vanishes from the
+report entirely, the identical shape to 3e9848c's `closure_scope_exit` (a `move || {}` captured Guard,
+dropped unused) except boxed as a trait object first. The bare (unboxed) case IS caught, correctly —
+this is specifically the `Box<dyn Fn*>` path.
+
+**Root cause**, confirmed with a debug probe (not guessed): `mir_spike::local_drop_impls`'s
+`TyKind::Dynamic` arm resolves the concrete type behind a `Box<dyn Trait>` by CHA — `tcx.trait_impls_of
+(principal)` — and recurses `local_drop_impls` on each impl's self type. For `principal = std::ops::Fn`
+this returned 13 non-blanket impls on this fixture, none of them the closure's own type: a closure
+satisfies `Fn`/`FnMut`/`FnOnce` through compiler-synthesized dispatch, never a registered `impl Fn for
+X` item, so ordinary CHA is structurally blind to it — no amount of widening the trait list fixes this,
+the closure is simply not in the set CHA enumerates. The arm's own comment ("most trait objects
+(`Box<dyn Error/Any/Fn…>`) have no local impl carrying a Drop, so produce no edge") is wrong for exactly
+this case — the CORRECTNESS COMMENT suppressed the measurement that would have falsified it (the review
+class from 2026-08-16/29: "when you meet a comment explaining why something is safe, treat it as the
+highest-value thing in the file to attack").
+
+**Deliberately not fixed in this session** — this needs new machinery, not a one-line CHA widening, and
+a rushed version risks trading this under-report for a fabrication:
+
+- The `Drop` terminator `drop_edges()` walks only carries the STATIC (erased) type of the dropped
+  place — by the time a `Box<dyn Fn()>` local reaches its `Drop` terminator in MIR, the concrete closure
+  type used to construct it is already gone. There is no CHA-style trick that recovers it from the drop
+  site alone.
+- **Candidate fix A (bounded, sound, in-function only):** at the *construction* site — an unsizing
+  coercion (`CastKind::PointerCoercion(Unsize)` in MIR, or the HIR adjustment) of a local closure/
+  coroutine literal into a `dyn Fn*` trait object — record which concrete closure type was assigned to
+  which local, and thread that through to the later `Drop` terminator on the SAME local within the SAME
+  function body. No flood: it only ever fires for a closure actually coerced into that exact place, so
+  it can't leak onto an unrelated `Box<dyn Fn()>` elsewhere (unlike a blanket "assume every closure in
+  the crate" CHA-widen, which WOULD flood and is not being proposed).
+- **Candidate fix B (charge at construction, rejected):** charge the effect directly to the closure's
+  enclosing function at its construction/coercion site, skipping the drop-site tracking entirely. Sound
+  within a single function, but wrong across functions: `fn make() -> Box<dyn Fn()> { let g = Guard;
+  Box::new(move || { let _ = &g; }) }` constructs the closure in `make`, but a caller that never invokes
+  it and simply lets the return value drop is the one that actually RUNS the guard's effect — charging
+  `make` either misses the caller's exposure or (if propagated further) double-charges/mis-locates it.
+  Not proposed as the fix; recorded so the next attempt doesn't re-discover it costs a design decision.
+- A cross-function-sound version of Candidate A (the return-value case above) needs the coercion fact to
+  travel through the return type / field / whatever carries the `Box<dyn Fn*>` onward — genuinely a
+  small interprocedural extension, not a local one.
+
+This is a THIRD instance of the "guard captured by a closure that never runs" class in the same file (the
+other two — bare `move || {}` and the `async`/`async ||` coroutine forms — are now regression-tested,
+see `ui-2021/coroutine_drop.rs` and `tests/integration.sh` 9c-iii). Translate the question once B (or A)
+lands: swift's `deinit` and java/kotlin's lambda-capturing-a-`Closeable`-never-invoked shape should be
+asked the identical question (rule F, corpus brief) — untested here, not investigated this session.
+
 ## 2026-08-29 — `is_pure_std_trait`'s 11-trait allowlist: a MEASURED, real, silent gap in a
 ## DELIBERATE, tested, documented trade-off — filed, not fixed here
 

@@ -4194,6 +4194,18 @@ fn ui() {
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
 }
 
+/// A second, `--edition=2021` UI battery. The default `ui_test` above compiles `ui/*.rs` at rustc's
+/// default (2015) edition, where `async {}` blocks and `async || {}` closures are a hard parse error
+/// — so any fixture needing them can't live in `ui/`. Kept as its own directory + test (rather than
+/// bumping the shared `ui_test` call's edition) so this doesn't change what every existing `ui/`
+/// fixture is compiled against.
+#[test]
+fn ui_edition_2021() {
+    dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui-2021")
+        .rustc_flags(["--edition=2021"])
+        .run();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,28 @@
+warning: `<Guard as std::ops::Drop>::drop` effects: { Net }   (* = via callee)
+  --> $DIR/coroutine_drop.rs:14:5
+   |
+LL |     fn drop(&mut self) {
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(candor)]` on by default
+
+warning: `coroutine_closure_scope_exit` effects: { Net* }   (* = via callee)
+  --> $DIR/coroutine_drop.rs:30:1
+   |
+LL | fn coroutine_closure_scope_exit() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `coroutine_scope_exit` effects: { Net* }   (* = via callee)
+  --> $DIR/coroutine_drop.rs:21:1
+   |
+LL | fn coroutine_scope_exit() {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `main` effects: { Net* }   (* = via callee)
+  --> $DIR/coroutine_drop.rs:37:1
+   |
+LL | fn main() {
+   | ^^^^^^^^^
+
+warning: 4 warnings emitted
+

@@ -25,6 +25,15 @@ fn fs_helper() {
 fn just_address() -> usize {
     fs_helper as *const () as usize // cast away from callability -> PURE (no Fs)
 }
+// The "stays callable" half of Finding A's claim (`f as fn()`) had NO fixture at all — every existing
+// case either casts AWAY (just_address) or passes the fn by name without a `Cast` node at all
+// (passes_cb: an implicit FnDef->fn() coercion at an argument position never visits the `ExprKind::Cast`
+// arm of the cast_away match). An EXPLICIT `as fn()` cast is the one shape that actually exercises the
+// match's `TyKind::FnPtr` arm — guard-deletion confirms it's load-bearing: dropping `FnPtr` from that
+// match silently drops this edge (Fs vanishes) while every other fixture in this file stays green.
+fn keeps_via_fn_ptr_cast() -> fn() {
+    fs_helper as fn() // explicit cast to a callable fn-pointer type -> Fs still flows (not cast away)
+}
 fn passes_cb() {
     register(fs_helper); // passed by name to a HOF -> Fs flows
 }
