@@ -27,6 +27,15 @@ N="${1:-40}"
 SEEDS="${SEEDS:-$(seq 1 "$N")}"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
+# Every per-crate `cargo dylint` stream, kept somewhere a human can grep AFTER the run — $WORK is
+# deleted on exit, and a `>/dev/null 2>&1` here once cost a real measurement: an instrumented engine
+# probing its own construction-marker code path reported "0 probe hits over 60 seeds", indistinguishable
+# from a genuine clean negative, because the eprintln!s that would have shown 262 hits were discarded
+# before anyone could read them. Truncated once per RUN (not per seed), so it always reflects the most
+# recent invocation; gitignored (a debugging aid, not a checked-in artifact).
+DYLOG="$ROOT/soundness/.last-run.dylint.log"
+: > "$DYLOG"
+
 pass=0; fail=0; failed_seeds=""
 for s in $SEEDS; do
   d="$WORK/s$s"
@@ -35,7 +44,8 @@ for s in $SEEDS; do
   if ! ( cd "$d" && cargo build -q >/dev/null 2>&1 ); then
     echo "  seed $s: GENERATOR BUG — crate does not compile"; fail=$((fail+1)); continue
   fi
-  ( cd "$d" && CANDOR_JSON="$d/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 )
+  echo "=== seed $s ===" >> "$DYLOG"
+  ( cd "$d" && CANDOR_JSON="$d/r" cargo dylint --lib-path "$LIB" ) >>"$DYLOG" 2>&1
   if ! ls "$d"/r.candor_fuzz.*.json >/dev/null 2>&1; then
     echo "  seed $s: NO REPORT (build failed under dylint?)"; fail=$((fail+1)); continue
   fi
@@ -52,4 +62,5 @@ done
 echo
 echo "soundness: $pass passed, $fail failed"
 [ -n "$failed_seeds" ] && echo "soundness: failing seeds:$failed_seeds"
+echo "soundness: per-seed dylint output kept at $DYLOG"
 [ "$fail" -eq 0 ]

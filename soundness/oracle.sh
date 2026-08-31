@@ -12,11 +12,15 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# SELF-SKIP exits 3, never 0 — the family convention, so a caller (`bin/gate-run.sh`) can tell "ran and
+# passed" from "did not run" without pattern-matching this prose. Before this, the ONLY thing keeping a
+# failed `strace` install from reading as a GREEN job over an unrun oracle was the separate `apt-get`
+# step failing first — an accident, not a guard.
 case "$(uname -s)" in
   Linux) : ;;
-  *) echo "soundness oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;;
+  *) echo "soundness oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 3 ;;
 esac
-command -v strace >/dev/null 2>&1 || { echo "soundness oracle: strace not installed — skipping."; exit 0; }
+command -v strace >/dev/null 2>&1 || { echo "soundness oracle: strace not installed — skipping."; exit 3; }
 
 echo "soundness oracle: building candor…"
 cargo build -q 2>/dev/null || { echo "FAIL: candor did not build"; exit 1; }

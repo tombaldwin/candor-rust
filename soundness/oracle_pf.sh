@@ -12,11 +12,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# SELF-SKIP exits 3, never 0 — see soundness/oracle.sh's identical comment for why.
 case "$(uname -s)" in
   Linux) : ;;
-  *) echo "per-function oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;;
+  *) echo "per-function oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 3 ;;
 esac
-command -v strace >/dev/null 2>&1 || { echo "per-function oracle: strace not installed — skipping."; exit 0; }
+command -v strace >/dev/null 2>&1 || { echo "per-function oracle: strace not installed — skipping."; exit 3; }
 
 echo "per-function oracle: building candor…"
 cargo build -q 2>/dev/null || { echo "FAIL: candor did not build"; exit 1; }

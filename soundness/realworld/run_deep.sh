@@ -14,15 +14,16 @@
 # and discloses NOWHERE (no Unknown / invisible / incomplete) is a silent under-report — the dangerous lie.
 #
 # Linux + strace only, AND needs the pinned nightly + `dylint-link` linker (rust-toolchain + the repo's
-# .cargo/config). On macOS / without strace it SKIPs (exit 0), like run.sh.
+# .cargo/config). On macOS / without strace it SELF-SKIPs, exit 3 (never 0 — see soundness/oracle.sh's
+# identical comment for why), like run.sh.
 #
 #   bash soundness/realworld/run_deep.sh
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 
-case "$(uname -s)" in Linux) : ;; *) echo "realworld DEEP oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
-command -v strace >/dev/null 2>&1 || { echo "realworld DEEP oracle: strace not installed — skipping."; exit 0; }
+case "$(uname -s)" in Linux) : ;; *) echo "realworld DEEP oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 3 ;; esac
+command -v strace >/dev/null 2>&1 || { echo "realworld DEEP oracle: strace not installed — skipping."; exit 3; }
 
 # Retry a (cargo) command — crates.io fetches flake transiently in CI (SSL eof), which is NOT an oracle
 # finding; a retry keeps a network hiccup from masquerading as a failure. (Mirrors run.sh.)
