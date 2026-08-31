@@ -9,6 +9,20 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **UPGRADING FROM 0.33.1 — re-baselining is not review.** ⟨0.34⟩ is NON-ADDITIVE and this wave
+  corrects the classifier in BOTH directions. After regenerating a baseline, **diff it against the
+  old one**: effects this release REMOVES will never trip any gate, because `gains` and the baseline
+  guard alarm only on effects appearing. A scoped `deny` that went quiet needs eyes, not a re-run.
+  Full note, with the measured per-engine numbers and the loud-vs-quiet split, is in the
+  [umbrella changelog](https://github.com/tombaldwin/candor/blob/main/CHANGELOG.md).
+
+- **⟨0.33⟩ era markers on permanent prior-floor literals.** `release-preflight [2]` hunts the prior
+  floor to catch a bump-miss, and a rung's own ladder comparisons (`spec_predates(spec, "0.33")`)
+  reference 0.33 FOREVER by design — so [2] could never go green by fixing anything. Those sites now
+  carry a `⟨0.33⟩` marker saying the literal is the RUNG this code names, not a version that bumps.
+  Comment-only; no behaviour change.
+
+
 - **⚠ Fixed: effectful-`Drop` glue fired on the BINDER, so 16 of 17 executed positions were silent —
   and the TUPLE-STRUCT (newtype) guard, the commonest shape in real Rust, had no route in ANY position.**
   Two rules answered one question and had drifted: an assoc-fn `T::assoc()` CALL walk in `scan.rs`

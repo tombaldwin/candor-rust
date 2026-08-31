@@ -1696,7 +1696,7 @@ pub fn report_spec(text: &str) -> String {
     serde_json::from_str::<Env>(text).ok().and_then(|e| e.candor).map(|m| m.spec).unwrap_or_default()
 }
 
-/// Parse a candor-spec contract version (`"0.33"`, `"0.6"`) as `(major, minor)` FOR ORDERING ONLY — the
+/// Parse a candor-spec contract version (`"0.33"`, `"0.6"` — ⟨0.33⟩ era examples, not live pins) as `(major, minor)` FOR ORDERING ONLY — the
 /// spec ladder is major.minor (SPEC has no patch component; that lives on the engine/crate version
 /// instead, see [`ReportMeta::version`]). `None` on anything that does not parse, including the empty
 /// string an absent `spec` key reads as.
@@ -1759,7 +1759,7 @@ mod spec_predates_tests {
         assert!(!spec_predates(" 0.33 ", "0.33"), "padding on both sides");
         assert!(!spec_predates("\r\n0.33\r\n", "0.33"), "CRLF is ASCII whitespace, per §3.4's identical rule");
         // the over-charge control: whitespace-tolerance must not swallow the real predating cases.
-        assert!(spec_predates(" 0.32", "0.33"), "padding does not rescue a genuinely old spec");
+        assert!(spec_predates(" 0.32", "0.33"), "padding does not rescue a genuinely old spec");  // ⟨0.33⟩ ladder fixture
         assert!(spec_predates(" 0.9", "0.33"), "padding does not rescue the lexicographic-trap case either");
         assert!(spec_predates("   ", "0.33"), "whitespace alone is still unparseable garbage, fails closed");
     }
