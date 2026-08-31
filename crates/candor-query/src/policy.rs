@@ -551,7 +551,8 @@ pub(crate) fn cmd_rewire(args: &[String]) -> i32 {
             "--json" => want_json = true,
             "--text" | "--human" => {}
             other if other.starts_with('-') && other.len() > 1 => {
-                eprintln!("candor-query rewire: unknown flag `{other}`\n  known flags: --json");
+                let hint = if other == "--policy" { " — `rewire` is a descriptive query with no policy-relative verdict (its SPEC §3.1 JSON shape carries no policy-derived field); apply a policy to this report with `candor-query gate --report <locator> --policy <file>`, or use whatif/fix/fix-gate/unverified for a policy-relative pre-edit check." } else { "" };
+                eprintln!("candor-query rewire: unknown flag `{other}`{hint}\n  known flags: --json");
                 return 2;
             }
             _ => pos.push(a),
