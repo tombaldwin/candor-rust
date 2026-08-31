@@ -309,7 +309,7 @@ pub(crate) fn arm_unasked_rules(
             }
             let theirs: std::collections::BTreeSet<&str> =
                 scanned_under.as_deref().unwrap_or(&[]).iter().map(String::as_str).collect();
-            let predates = candor_report::spec_predates(spec, "0.33");
+            let predates = candor_report::spec_predates(spec, "0.33");  // ⟨0.33⟩ — the RUNG this comparison names, not a version that bumps
             for r in &own {
                 if !theirs.contains(r.as_str()) {
                     missing.insert(r.clone());
