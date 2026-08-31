@@ -20,6 +20,12 @@ pub(crate) const LAZY_UNIT_PREFIX: &str = "<lazy>";
 /// inflated the coverage ledger's call counts, which the envelope test caught.
 pub(crate) const DROP_MARKER: &str = "<drop>";
 
+/// `Type::<construct>` — a LOCAL construction of a type whose `Drop` is effectful (or that transitively
+/// owns one through a field), emitted by `CallCollector::note_construction` at the construction
+/// EXPRESSION and consumed only by scan.rs's drop-glue block. Same containment as the markers above:
+/// the angle-bracket leaf cannot collide with a real fn name or a crate root.
+pub(crate) const CONSTRUCT_MARKER: &str = "<construct>";
+
 /// `cr::<untyped>::method` — a method call on a local bound from a call into `cr` whose return type we
 /// could not determine (`let c = deplib::build(); c.fetch()`). Same containment rules as `DROP_MARKER`:
 /// consumed by the call loop and skipped everywhere else. UNLIKE the other markers this one resolves to

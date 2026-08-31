@@ -255,7 +255,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -305,7 +305,7 @@
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -625,6 +625,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             const_strings: &consts, local_macros: &macros, macro_expanding: Default::default(),
             str_locals: Default::default(),
             local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(),
+            drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), in_pattern: false,
         };
         // Every table gets an entry for the SAME name the binder is about to shadow.
         let n = "x";
@@ -4382,7 +4383,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
+                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts {
                 c.visit_stmt(stmt);
@@ -4422,7 +4423,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
-                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
+                closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts { c.visit_stmt(stmt); }
             assert!(!c.calls.iter().any(|x| x.path == "RowIter::next"),
@@ -4446,7 +4447,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
-                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
+                    closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), in_pattern: false,
                 };
                 for stmt in &blk.stmts { c.visit_stmt(stmt); }
                 (c.calls.iter().filter(|x| x.typed).count(), c.unresolved)
@@ -4493,7 +4494,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
             unresolved: false,
             err_ret_leaf: None,
-            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
+            const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), in_pattern: false,
         };
         for stmt in &block.stmts {
             c.visit_stmt(stmt);
@@ -4529,7 +4530,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             forced_lazies: std::collections::HashSet::new(),
                 unresolved: false,
                 err_ret_leaf: None,
-                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(),
+                const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), in_pattern: false,
             };
             for stmt in &blk.stmts {
                 cc.visit_stmt(stmt);
@@ -5388,6 +5389,201 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let _ = std::fs::remove_dir_all(&d);
     }
 
+
+    /// ⟨drop-glue POSITION⟩ The charge fired on the BINDER, so sixteen of seventeen executed positions
+    /// were silent, and the TUPLE-STRUCT (newtype) spelling had no route in ANY position — including the
+    /// bound local.
+    ///
+    /// GROUND TRUTH EXECUTED, not inferred: each shape was compiled and run with the destructor
+    /// appending to a log interleaved against per-function call/return markers, and every one printed
+    /// before its function returned. Across 166 units the pre-fix binary was silent on 76 of the 99 that
+    /// genuinely release a guard; after, on 1 (a generic `T::mk()`, which no syntactic scan can key).
+    ///
+    /// The two routes that produced that were a `T::assoc()` CALL walk in scan.rs (construction-keyed,
+    /// so sound, but blind to `Guard(f)` — a single-segment `Expr::Call` with no `::` to test, whose
+    /// imported spelling `m::Guard` presents the MODULE as the type) and a `T::<construct>` marker in
+    /// the collector emitted only under `Pat::Ident`. The rule is now stated once, at the construction
+    /// expression (`CallCollector::note_construction`, reached from the three expression shapes), and
+    /// the binder site is REMOVED rather than left beside it.
+    #[test]
+    fn drop_glue_fires_at_the_construction_not_at_the_binder() {
+        let v = scan_fixture("dropposition", r#"
+            pub struct BraceG { pub n: u32 }
+            impl BraceG { pub fn noop(&self) {} }
+            impl Drop for BraceG { fn drop(&mut self) { let _ = std::fs::write("/tmp/b", "x"); } }
+            pub struct TupleG(pub u32);
+            impl Drop for TupleG { fn drop(&mut self) { let _ = std::fs::write("/tmp/t", "x"); } }
+            pub struct UnitG;
+            impl Drop for UnitG { fn drop(&mut self) { let _ = std::fs::write("/tmp/u", "x"); } }
+            pub enum EnumG { A, B }
+            impl Drop for EnumG { fn drop(&mut self) { let _ = std::fs::write("/tmp/e", "x"); } }
+            pub struct Plain { pub n: u32 }
+            pub struct PlainT(pub u32);
+            pub fn sink<T>(_t: T) {}
+
+            // TUPLE-STRUCT / NEWTYPE — the spelling with no route at all, in the position the binder
+            // route did cover.
+            pub fn tuple_bound() { let _g = TupleG(0); }
+            // …and in the positions it never covered, one per construction spelling.
+            pub fn tuple_bare_stmt() { TupleG(0); }
+            pub fn brace_let_wild() { let _ = BraceG { n: 0 }; }
+            pub fn brace_call_arg() { sink(BraceG { n: 0 }); }
+            pub fn brace_match_scrutinee() { match (BraceG { n: 0 }) { _ => {} } }
+            pub fn brace_method_receiver() { (BraceG { n: 0 }).noop(); }
+            pub fn unit_array_elem() { let _a = [UnitG]; }
+            pub fn enum_tuple_destructuring() { let (_a, _b) = (EnumG::A, 1u32); }
+            pub fn tuple_vec_push() { let mut v = Vec::new(); v.push(TupleG(0)); sink(&v); }
+
+            // CONTROL: the same seventeen positions with a type that has NO `Drop` fabricate nothing.
+            pub fn plain_bare_stmt() { PlainT(0); }
+            pub fn plain_call_arg() { sink(Plain { n: 0 }); }
+        "#);
+        for f in ["tuple_bound", "tuple_bare_stmt", "brace_let_wild", "brace_call_arg",
+                  "brace_match_scrutinee", "brace_method_receiver", "unit_array_elem",
+                  "enum_tuple_destructuring", "tuple_vec_push"] {
+            assert!(fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` releases a guard in this scope and must inherit its Drop's Fs:\n{v:#}");
+        }
+        for f in ["plain_bare_stmt", "plain_call_arg"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "`{f}` constructs a type with no Drop — nothing may be fabricated:\n{v:#}");
+        }
+    }
+
+    /// ⟨drop-glue ESCAPE⟩ The load-bearing half, and the one that reverted the first attempt at the
+    /// field route (candor-spec SOUNDNESS R49: 14 false `Unknown`s on flate2, from constructors that
+    /// CONSTRUCT AND RETURN the owner). Widening the construction route without a lexical escape gate
+    /// multiplies that over every constructor of every guard type in a crate — so every control here is
+    /// a shape whose destructor provably runs in someone ELSE'S frame.
+    ///
+    /// A/B against flate2 1.1.9 itself: all thirteen of its constructor rows (`ZlibEncoder::new`,
+    /// `gz_encoder`, `DeflateDecoder::new`, …) are refused, and its sixteen genuinely-releasing
+    /// `finish`/`into_inner` rows are gained.
+    #[test]
+    fn drop_glue_refuses_a_construction_that_escapes_the_scope() {
+        let v = scan_fixture("dropescape", r#"
+            pub struct G { pub n: u32 }
+            impl Drop for G { fn drop(&mut self) { let _ = std::fs::write("/tmp/g", "x"); } }
+            pub struct T(pub u32);
+            impl Drop for T { fn drop(&mut self) { let _ = std::fs::write("/tmp/t", "x"); } }
+            pub struct Owner { pub g: G }
+            pub fn with_slot<R>(f: impl FnOnce() -> R) -> R { f() }
+
+            // ESCAPES — the destructor runs in the CALLER. Every one must stay PURE.
+            pub fn make_brace() -> G { G { n: 0 } }
+            pub fn make_tuple() -> T { T(0) }
+            pub fn make_owner() -> Owner { Owner { g: G { n: 0 } } }
+            pub fn wrap_owner() -> Owner { let g = G { n: 0 }; Owner { g } }
+            pub fn make_result() -> Result<G, ()> { Ok(G { n: 0 }) }
+            pub fn make_boxed() -> Box<T> { Box::new(T(0)) }
+            pub fn make_vec() -> Vec<T> { vec![T(0)] }
+            pub fn store(slot: &mut Option<G>) { *slot = Some(G { n: 0 }); }
+            pub fn build_pushed() -> Vec<T> { let mut v = Vec::new(); v.push(T(0)); v }
+            pub fn closure_returns() -> Option<T> { with_slot(|| Some(T(0))) }
+            // SUPPRESSED DESTRUCTORS — `Drop` provably never runs.
+            pub fn forgotten() { let g = G { n: 0 }; std::mem::forget(g); }
+            pub fn manually() { let _m = std::mem::ManuallyDrop::new(T(0)); }
+
+            // …and the guard that does NOT escape is still charged, in a fn that returns an aggregate.
+            // This is what the previous `returns_escapable` gate could not express: it skipped EVERY
+            // type as soon as the signature returned one.
+            pub fn local_guard_beside_a_returned_owner() -> Owner {
+                let _local = T(0);
+                Owner { g: G { n: 0 } }
+            }
+        "#);
+        for f in ["make_brace", "make_tuple", "make_owner", "wrap_owner", "make_result", "make_boxed",
+                  "make_vec", "store", "build_pushed", "closure_returns", "forgotten", "manually"] {
+            // `Fs` is the guard's own effect and the only thing under test. Not `is_empty()`:
+            // `closure_returns` calls a generic callback and carries an honest `Unknown` for it, which
+            // is a different mechanism and would make this assertion pass for the wrong reason.
+            assert!(!fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` does not release the value in this scope — charging it FABRICATES:\n{v:#}");
+        }
+        assert!(fixture_effects(&v, "local_guard_beside_a_returned_owner").contains(&"Fs".to_string()),
+                "a guard that does NOT escape must still be charged in an aggregate-returning fn:\n{v:#}");
+    }
+
+    /// ⟨drop-glue PARAMETER-OWNED⟩ A mechanism construction-keying cannot reach BY DEFINITION: `fn
+    /// take(g: Guard) {}` runs `Guard::drop` inside `take`, and the scan never saw the value built. The
+    /// borrow controls are where this is one keystroke from a fabrication — and `self: Pin<&mut Self>`
+    /// is the one that actually bit: syn parses it as a `Receiver` whose `reference` is `None`, so the
+    /// obvious test read every `poll_read`/`poll_flush` in the ecosystem as consuming its receiver
+    /// (measured: seven tokio drop types charged to a `poll_flush` whose body is `Poll::Ready(Ok(()))`).
+    #[test]
+    fn drop_glue_charges_a_by_value_parameter_and_never_a_borrowed_one() {
+        let v = scan_fixture("dropparam", r#"
+            pub struct G { pub n: u32 }
+            impl Drop for G { fn drop(&mut self) { let _ = std::fs::write("/tmp/g", "x"); } }
+            pub fn sink<T>(_t: T) {}
+            pub fn owned(g: G) { sink(&g); }
+            pub fn boxed(g: Box<G>) { sink(&g); }
+            impl G {
+                pub fn consume_self(self) -> u32 { self.n + 1 }
+                // BORROW CONTROLS — none of these releases anything.
+                pub fn by_ref(&self) -> u32 { self.n }
+                pub fn by_ref_mut(&mut self) -> u32 { self.n }
+                pub fn pinned(self: std::pin::Pin<&mut Self>) -> u32 { 0 }
+                // ESCAPE CONTROL — `self` is handed to the caller, not released here.
+                pub fn into_n(self) -> u32 { self.n }
+            }
+            pub fn borrowed(g: &G) { sink(g); }
+            pub fn pointed(g: *const G) { sink(g); }
+        "#);
+        for f in ["owned", "boxed", "G::consume_self"] {
+            assert!(fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` owns its argument by value and releases it here:\n{v:#}");
+        }
+        for f in ["G::by_ref", "G::by_ref_mut", "G::pinned", "G::into_n", "borrowed", "pointed"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "`{f}` never releases the value — charging it FABRICATES:\n{v:#}");
+        }
+    }
+
+    /// ⟨drop-glue COLLISIONS⟩ `drop_types` and `owned_drops` are keyed by type LEAF (they have to be —
+    /// `type_path` yields leaves), so widening the construction route to bare VALUE PATHS put every
+    /// same-leaf name in reach. Both of these were measured on real crates, and neither is reachable
+    /// from a fixture that only tests the happy path.
+    ///
+    ///  · tokio: `use std::sync::atomic::Ordering::*;` beside `struct Acquire<'a>` with a
+    ///    tracing-instrumented `Drop`. `self.permits.load(Acquire)` read the atomic-ordering CONSTANT
+    ///    as a construction of the FUTURE, so every `is_closed`/`is_idle`/`available_permits` in
+    ///    `batch_semaphore` and `mpsc` inherited its `Log`. A struct WITH fields cannot be written as a
+    ///    bare path at all, which is the discriminator.
+    ///  · isahc: syn 2 represents `Pat::Path` with the very same `ExprPath` node an expression uses, so
+    ///    a `match` ARM PATTERN reached the construction site. `AsyncBody::len(&self)` — one `match`
+    ///    over three arms — was charged the agent `Handle`'s `Drop`.
+    #[test]
+    fn drop_glue_reads_neither_a_shadowed_constant_nor_a_match_pattern_as_a_construction() {
+        let v = scan_fixture("dropcollide", r#"
+            pub mod guard {
+                pub struct Acquire { pub n: u32 }
+                impl Drop for Acquire { fn drop(&mut self) { let _ = std::fs::write("/tmp/a", "x"); } }
+                // A SECOND `Inner`, one module over, that owns the guard — which is what puts the
+                // LEAF `Inner` into the drop-relevant set and makes the pattern below reachable.
+                // (isahc's real shape: `agent::Inner` holds the `Handle`; `body::Inner` is an enum.)
+                pub struct Inner { pub a: Acquire }
+            }
+            pub mod user {
+                use std::sync::atomic::Ordering::*;
+                pub enum Inner { Empty, Buf(u32) }
+                pub struct Body { pub state: std::sync::atomic::AtomicUsize, pub inner: Inner }
+                impl Body {
+                    // `Acquire` here is the std ORDERING, not the guard one module over.
+                    pub fn is_closed(&self) -> bool { self.state.load(Acquire) == 0 }
+                    // `Inner::Empty` here is a PATTERN, which matches a value and never builds one.
+                    pub fn len(&self) -> u64 {
+                        match &self.inner { Inner::Empty => 0, Inner::Buf(n) => *n as u64 }
+                    }
+                }
+            }
+        "#);
+        for f in ["user::Body::is_closed", "user::Body::len"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "`{f}` constructs nothing — a leaf collision must not fabricate a Drop:\n{v:#}");
+        }
+    }
+
     #[test]
     fn drop_glue_never_fabricates_for_an_external_type() {
         // CONTROL (b) for #3, isolated: a fn that binds an EXTERNAL type (whose Drop we cannot see) must
@@ -5846,7 +6042,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), &mut us2, &mut fns);
         fns.into_iter()
             .map(|f| (f.qual, f.calls.into_iter().filter(|c| c.typed).map(|c| c.path).collect()))
             .collect()
@@ -5877,7 +6073,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.unresolved)).collect()
     }
 
@@ -5906,7 +6102,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut locs = Vec::new();
         fn_locs(&file.items, "lib.rs", false, &mut locs);
         let mut loc_idx = 0usize;
-        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &mut us2, &mut fns);
+        scan_items(&file.items, "", &locs, &mut loc_idx, false, &fields, &returns, traits, elems, &std::collections::HashSet::new(), &std::collections::HashMap::new(), &std::collections::HashMap::new(), &std::collections::HashSet::new(), &mut us2, &mut fns);
         fns.into_iter().map(|f| (f.qual, f.loc)).collect()
     }
 
@@ -8921,6 +9117,12 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 EMPTY Vec — "this fn dispatches on no local trait" — which for a warm-cached fn
     ///                 that genuinely dispatches on one is exactly the silent under-report the field
     ///                 exists to close in the peek's out-of-scope scope-matching.
+    ///   rev10 -> rev11 the `Type::<construct>` DROP-GLUE marker moved from the `let` BINDER to the
+    ///                 construction EXPRESSION, and now covers the tuple-struct/unit/enum spellings and
+    ///                 by-value parameters. A `FnInfo` cached by an older binary carries the OLD, sparse
+    ///                 marker set, so a warm cache would replay the binder-keyed reading — a guard
+    ///                 released in any of sixteen other positions read PURE — with no test that scans
+    ///                 cold able to see it.
     ///
     /// The schema token is the only thing standing between those readings, so it is pinned rather than
     /// trusted. (The `aborted` disclosure is what this fixture MEASURES in every case: it is the visible
@@ -8938,7 +9140,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev10/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev11/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -9044,7 +9246,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
                 ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev },
-                empty_lazy(), &consts, &lmac, &mut uses, &mut out,
+                empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
         })
@@ -9094,7 +9296,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
                 ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev },
-                empty_lazy(), &consts, &lmac, &mut uses, &mut out,
+                empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
         })

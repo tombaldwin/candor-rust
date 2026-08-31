@@ -48,6 +48,9 @@ pub(crate) fn scan_items(
     lazy_statics: &std::collections::HashSet<String>,
     const_strings: &HashMap<String, String>,
     local_macros: &HashMap<String, String>,
+    // DROP-GLUE: the local type leaves worth emitting a `<construct>` marker for (see
+    // `CallCollector::drop_relevant`). Threaded from scan.rs, where the merged decl index is complete.
+    drop_relevant: &std::collections::HashSet<String>,
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
@@ -68,7 +71,7 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
+                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -86,7 +89,7 @@ pub(crate) fn scan_items(
                             None => qual(&n),
                         };
                         let loc = next_loc(locs, loc_idx);
-                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
+                        out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
             }
@@ -99,7 +102,7 @@ pub(crate) fn scan_items(
                     // The file's imports do NOT reach into an inline module's own declarations — see
                     // `submodule_uses`, and the `mod mine { struct Command }` fabrication it closes.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
-                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, &mut subuses, out);
+                    scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant, &mut subuses, out);
                 }
             }
             // A trait's PROVIDED (default) methods have bodies that can perform effects directly
@@ -123,7 +126,7 @@ pub(crate) fn scan_items(
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
                         out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
-                            Some(&tname), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
+                            Some(&tname), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
             }
@@ -143,7 +146,7 @@ pub(crate) fn scan_items(
                 let sig: syn::Signature = syn::parse_quote!(fn __candor_lazy_init());
                 let loc = next_loc(locs, loc_idx);
                 let q = lazy_qual(modpath, &name);
-                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros));
+                out.push(fninfo(&name, &q, modpath, &loc, &sig, &block, None, uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
             }
         }
     }
@@ -706,6 +709,7 @@ pub(crate) fn fninfo(
     lazy_statics: &std::collections::HashSet<String>,
     const_strings: &HashMap<String, String>,
     local_macros: &HashMap<String, String>,
+    drop_relevant: &std::collections::HashSet<String>,
 ) -> FnInfo {
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
@@ -751,6 +755,7 @@ pub(crate) fn fninfo(
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
     let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, uses);
+    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
         uses,
@@ -798,7 +803,21 @@ pub(crate) fn fninfo(
         local_uses: std::collections::HashMap::new(),
         bound_names: bound_idents(sig, block),
         dispatch_sites: std::collections::BTreeSet::new(),
+        drop_relevant,
+        // Computed ONCE per body, before the walk, because the answer is a property of the whole
+        // function (a value constructed on line 2 may escape through a `return` on line 40) and the
+        // visitor sees each expression without its ancestors. (See `escapes`, hoisted above.)
+        escaping_ctors: escapes.leaves,
+        marked_ctors: std::collections::HashSet::new(),
+        in_pattern: false,
     };
+    // PARAMETER-OWNED DROP, marked before the walk: a by-value parameter of a drop-relevant type dies
+    // in THIS scope, and no construction expression in this body says so. Same marker, same consumer —
+    // the marker's meaning is "a value of this type is RELEASED here", of which construction is the
+    // dominant but not the only cause.
+    for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names) {
+        c.note_construction(Some(leaf));
+    }
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
     }
