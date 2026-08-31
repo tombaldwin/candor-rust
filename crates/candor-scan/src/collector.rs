@@ -187,6 +187,12 @@ pub(crate) struct CallCollector<'a> {
     /// Marker de-duplication: one `T::<construct>` per type per body is all the consumer needs (it
     /// inserts into a set), and a hot loop constructing guards would otherwise push thousands.
     pub(crate) marked_ctors: std::collections::HashSet<String>,
+    /// The cross-crate sibling of `marked_ctors`, for `note_cross_construction`'s `cr::<drop>::Type`
+    /// marker (SOUNDNESS R68(1)). A SEPARATE set, deliberately: `marked_ctors` is keyed on the bare type
+    /// leaf alone ("Guard"), and a crate boundary can put a same-named LOCAL type beside a dependency's
+    /// same-named type in the same body — sharing one set would let whichever fires first suppress the
+    /// other's marker even though they name different constructions. Keyed `"crate\0Type"`.
+    pub(crate) marked_cross_ctors: std::collections::HashSet<String>,
     /// Are we inside a PATTERN? syn 2 represents `Pat::Path` with the very same `ExprPath` node an
     /// expression uses, so `match &self.0 { Inner::Empty => .. }` reaches `visit_expr_path` and reads
     /// as a construction of `Inner`. Measured on isahc: `AsyncBody::len(&self)`, whose body is one
@@ -226,6 +232,54 @@ impl<'a> CallCollector<'a> {
         self.calls.push(Call {
             path: format!("{leaf}::{CONSTRUCT_MARKER}"),
             leaf: CONSTRUCT_MARKER.to_string(),
+            str_arg: None,
+            path_lits_partial: false,
+            path_lit2: None,
+            typed: false,
+            method: false,
+            is_macro: false,
+        });
+    }
+
+    /// DROP-GLUE, the CROSS-CRATE sibling of `note_construction` — SOUNDNESS R68(1): "the same vein one
+    /// boundary over". `note_construction`'s `drop_relevant` gate is built entirely from `impl Drop`
+    /// blocks THIS scan parsed, so a dependency's drop-relevant type can never be a member of it — the
+    /// in-crate authority is structurally blind to a cross-crate construction, whatever the spelling.
+    /// Emits the marker `scan.rs`'s cross-crate join already understands (`cr::<drop>::Type`, joined
+    /// against `deps_idx.by_key["{cr_real}#{Type}::drop"]`), reached from the SAME three expression
+    /// shapes as the in-crate marker — a CALL, a STRUCT LITERAL and a bare VALUE PATH — so a cross-crate
+    /// construction gets the SAME position-independence `7af62f1` gave the in-crate one, not just the
+    /// one 2-segment spelling (`deplib::UnitGuard`) that happened to reach a correctly-keyed marker by
+    /// accident through the lazy-static forcing code's `dep_lazy_keys` derivation (right only when the
+    /// written path has exactly two segments — `deplib::Guard::new(1)` derived the key `"Guard::new"`,
+    /// which cannot match the join's `"Guard"`).
+    ///
+    /// GATED BY THE SAME ESCAPE CHECK as the in-crate route, and for the same reason: `escaping_ctors`
+    /// is built by `lang::escaping_ctor_leaves`, which is crate-agnostic (its own leaf functions strip
+    /// every path down to a bare type name, never checking origin) — so a cross-crate factory that
+    /// constructs-and-RETURNS the guard (`fn make() -> deplib::Guard { deplib::Guard::new() }`, the
+    /// flate2 shape that reverted R49's first prototype) is refused here exactly as the in-crate case is,
+    /// with no extra plumbing needed.
+    ///
+    /// Speculative and self-limiting, like the lazy-static marker beside it: the crate segment is
+    /// whatever the WRITTEN path's head resolves to after `use`-expansion, not validated against the
+    /// real dependency graph (this layer can't see it) — a local module that merely looks crate-qualified
+    /// produces a marker too, and `scan.rs`'s join is what makes that free (`deps_idx.crates.contains`
+    /// gates consumption, so an unmatched crate/type resolves to nothing).
+    pub(crate) fn note_cross_construction(&mut self, ctor: Option<(String, String)>) {
+        let Some((cr, leaf)) = ctor else { return };
+        if self.escaping_ctors.contains(&leaf) {
+            return;
+        }
+        if !self.marked_cross_ctors.insert(format!("{cr}\u{0}{leaf}")) {
+            return;
+        }
+        if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
+            eprintln!("CTOR-MARK-CROSS {cr}::{leaf} in {}", self.modpath);
+        }
+        self.calls.push(Call {
+            path: format!("{cr}::{DROP_MARKER}::{leaf}"),
+            leaf: "drop".to_string(),
             str_arg: None,
             path_lits_partial: false,
             path_lit2: None,
@@ -1383,6 +1437,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // fn-alias and qself restoration, so `<Daemon>::new()` still keys on Daemon.
                         let ctor = crate::lang::ctor_leaf_from_call_path(&path, self.uses);
                         self.note_construction(ctor);
+                        // CROSS-CRATE sibling — R68(1). `path` is already the resolved (use-expanded)
+                        // callee path, exactly what `cross_ctor_leaf_from_call_path` needs to recover the
+                        // crate segment `ctor_leaf_from_call_path` discards.
+                        self.note_cross_construction(
+                            crate::lang::cross_ctor_leaf_from_call_path(&path, self.uses));
                         self.calls.push(Call { path, leaf, str_arg, typed: false, method,
                                                is_macro: false, path_lits_partial, path_lit2 });
                     }
@@ -1999,21 +2058,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             leaf: name.clone(), str_arg: None,
                             typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None,
                         });
-                        // DROP GLUE across the boundary. Naming a dependency's type as a value (`let _g =
-                        // deplib::Guard;`) binds it here, so its `Drop::drop` runs at scope exit — an
-                        // implicit edge the syntactic call graph never sees. `drop_types` is built from
-                        // LOCAL `impl Drop` blocks only, so the dependency case emitted nothing and the
-                        // scope read pure while the same code in one crate reads `Fs`
-                        // (SOUNDNESS-VEIN-crossing-the-scan-boundary.md). Emit the shape the cross-crate
-                        // join already understands — `cr::Type::drop`, whose tail2 is exactly the dep
-                        // report's key. Speculative but self-limiting: a dep report only carries
-                        // `Type::drop` when that drop is EFFECTFUL (pure units are omitted), so a type with
-                        // no Drop, or no chained report, resolves to nothing.
-                        self.calls.push(Call {
-                            path: format!("{cr}::{DROP_MARKER}::{key}"),
-                            leaf: "drop".to_string(), str_arg: None,
-                            typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None,
-                        });
+                        // DROP GLUE across the boundary used to be emitted HERE, piggybacked on this same
+                        // lazy-static-forcing derivation — SOUNDNESS R68(1) found it silently wrong for
+                        // anything but a 2-segment written path (`deplib::Guard::new` derived the key
+                        // `"Guard::new"`, which cannot match the join's `"Guard"`), and it never fired at
+                        // all for a struct literal (syn never routes one through `visit_expr_path`). Moved
+                        // to `note_cross_construction`, reached from all THREE construction shapes with the
+                        // SAME construction-keyed authority (and escape gate) the in-crate route uses — see
+                        // its doc comment and the call sites in `visit_expr_call`/`visit_expr_struct`/below.
                     }
                 }
                 if !locally_bound && self.lazy_statics.contains(&name) {
@@ -2056,9 +2108,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // nothing. A path in CALLEE position (`Guard::new`) has a non-type leaf and yields nothing too,
         // so the call arm above owns that spelling.
         if node.qself.is_none() && !self.in_pattern {
-            let ctor = crate::lang::ctor_leaf_from_value_path(
-                &path_to_string(&node.path), self.uses, self.fields);
+            let full = path_to_string(&node.path);
+            let ctor = crate::lang::ctor_leaf_from_value_path(&full, self.uses, self.fields);
             self.note_construction(ctor);
+            // CROSS-CRATE sibling — R68(1). Before this, this was the ONLY spelling reaching a
+            // correctly-keyed cross-crate marker, and only by accident (the lazy-static forcing code's
+            // `dep_lazy_keys` shared this same visit and derived the right key purely because a
+            // 2-segment written path's "rest" happens to equal the type leaf).
+            self.note_cross_construction(
+                crate::lang::cross_ctor_leaf_from_value_path(&full, self.uses, self.fields));
         }
         syn::visit::visit_expr_path(self, node);
     }
@@ -2071,6 +2129,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let ctor = crate::lang::ctor_leaf_of_expr(
                 &syn::Expr::Struct(node.clone()), self.uses, self.fields);
             self.note_construction(ctor);
+            // CROSS-CRATE sibling — R68(1). This spelling had NO route to a cross-crate marker at all
+            // before this fix; `deplib::Guard { n: 1 }` read silent-pure regardless of what deplib's own
+            // report said.
+            let full = path_to_string(&node.path);
+            self.note_cross_construction(
+                crate::lang::cross_ctor_leaf_from_struct_path(&full, self.uses));
         }
         syn::visit::visit_expr_struct(self, node);
     }

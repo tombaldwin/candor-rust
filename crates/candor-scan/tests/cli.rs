@@ -767,6 +767,90 @@ fn kappa_ledger_honors_an_empty_chained_report_as_coverage() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// SOUNDNESS R68(1): the drop-glue vein, one boundary over. `7af62f1`/`0576b8c` gave the IN-CRATE
+/// construction authority position-independence across a CALL / STRUCT-LITERAL / bare VALUE PATH, with
+/// an every-path escape gate — but the CROSS-CRATE marker at the old `collector.rs:1948` piggybacked on
+/// unrelated lazy-static-forcing code and only got the right join key by ACCIDENT, for a 2-segment
+/// written path. Measured pre-fix: `deplib::UnitGuard` (bare value path, 2 segments) and
+/// `deplib::TupleGuard(1)` (tuple-struct CALL, also 2 segments) both charged; `deplib::Guard::new(1)`
+/// (assoc-fn CALL, 3 segments — wrong key `"Guard::new"`) and `deplib::Guard { n: 1 }` (STRUCT LITERAL —
+/// never reached the old code at all) were SILENT. Ground-truthed by real execution in a two-crate
+/// `CANDOR_DEPS` chain outside this suite (the destructor appends to a log; call/return markers bracket
+/// each spelling) before this fix was written; this test pins the same four spellings plus the
+/// over-charge controls against a hand-written chained dep report so CI catches a regression cheaply.
+#[test]
+fn cross_crate_drop_glue_charges_every_construction_spelling() {
+    let d = make_crate(
+        "r68one",
+        r#"
+        pub fn spell_unit() { deplib::UnitGuard; }
+        pub fn spell_call() { deplib::Guard::new(1); }
+        pub fn spell_struct() { deplib::Guard { n: 1 }; }
+        pub fn spell_tuple() { deplib::TupleGuard(1); }
+        // OVER-CHARGE CONTROL A: constructs-and-RETURNS — the flate2 shape. Must stay PURE; the escape
+        // gate (`escaping_ctors`) is crate-agnostic, so it must cover this cross-crate case exactly as
+        // it covers the in-crate one, with no extra plumbing.
+        pub fn direct_escape() -> deplib::Guard { deplib::Guard::new(2) }
+        pub fn direct_escape_struct() -> deplib::Guard { deplib::Guard { n: 3 } }
+        // CONTROL B: a value that escapes on ONE path and dies on the OTHER (the R69 shape) must stay
+        // CHARGED — only an escape on EVERY terminal exit may suppress.
+        pub fn conditional_escape(flag: bool) -> Option<deplib::Guard> {
+            let g = deplib::Guard::new(4);
+            if flag { Some(g) } else { None }
+        }
+        // OVER-CHARGE CONTROL C: a cross-crate type with NO Drop impl at all must stay ABSENT in every
+        // spelling — the dep report below never mentions `Plain`, so a by_key miss must resolve to
+        // nothing, never a fabricated disclosure.
+        pub fn plain_call() { deplib::Plain::new(1); }
+        pub fn plain_struct() { deplib::Plain { n: 1 }; }
+        "#,
+    );
+    std::fs::write(
+        d.join("Cargo.toml"),
+        "[package]\nname = \"r68one\"\n\n[dependencies]\ndeplib = \"1\"\n",
+    )
+    .unwrap();
+    let dep_report = d.join("deplib.json");
+    std::fs::write(&dep_report, format!(r#"{{
+        "candor": {{"version": "scan-{}", "toolchain": "stable", "spec": "0.34"}},
+        "package": "deplib",
+        "analyzed": {{"count": 4, "digest": "0"}},
+        "functions": [
+            {{"fn": "Guard::drop", "inferred": ["Fs"], "hash": "deplib#Guard::drop"}},
+            {{"fn": "TupleGuard::drop", "inferred": ["Fs"], "hash": "deplib#TupleGuard::drop"}},
+            {{"fn": "UnitGuard::drop", "inferred": ["Fs"], "hash": "deplib#UnitGuard::drop"}}
+        ]}}"#, env!("CARGO_PKG_VERSION"))).unwrap();
+
+    let out = Command::new(bin())
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .env("CANDOR_DEPS", dep_report.to_string_lossy().as_ref())
+        .output()
+        .expect("run candor-scan");
+    let _ = std::fs::remove_dir_all(&d);
+
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8(out.stdout).unwrap().trim()).expect("pure JSON report");
+    let charged = |name: &str| -> Option<Vec<String>> {
+        v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == name).map(|f| {
+            f["inferred"].as_array().unwrap().iter().map(|e| e.as_str().unwrap().to_string()).collect()
+        })
+    };
+
+    for spelling in ["spell_unit", "spell_call", "spell_struct", "spell_tuple"] {
+        assert_eq!(charged(spelling), Some(vec!["Fs".to_string()]),
+            "R68(1): {spelling} must charge the dependency's effectful Drop — got {:?}\n{v:#}",
+            charged(spelling));
+    }
+    for pure_fn in ["direct_escape", "direct_escape_struct", "plain_call", "plain_struct"] {
+        assert_eq!(charged(pure_fn), None,
+            "over-charge control: {pure_fn} must stay PURE (omitted) — got {:?}\n{v:#}",
+            charged(pure_fn));
+    }
+    assert_eq!(charged("conditional_escape"), Some(vec!["Fs".to_string()]),
+        "SOME-path (not EVERY-path) escape must still CHARGE — the R69 shape, cross-crate edition: {v:#}");
+}
+
 /// A crate whose whole body is `calls` qualified calls spread over two DECLARED-but-unvendored
 /// dependencies — the κ ledger's raw material, at an exact call VOLUME. Split over two deps so the
 /// fixture also proves the trigger is the SUM, not the dependency count (2 either side of the line).

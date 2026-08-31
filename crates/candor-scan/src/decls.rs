@@ -809,6 +809,7 @@ pub(crate) fn fninfo(
         // visitor sees each expression without its ancestors. (See `escapes`, hoisted above.)
         escaping_ctors: escapes.leaves,
         marked_ctors: std::collections::HashSet::new(),
+        marked_cross_ctors: std::collections::HashSet::new(),
         in_pattern: false,
     };
     // PARAMETER-OWNED DROP, marked before the walk: a by-value parameter of a drop-relevant type dies
