@@ -3236,6 +3236,150 @@ pub fn nested_concrete(xs: Vec<Option<Plain>>) { for x in xs { if let Some(d) = 
         assert!(eff(&v, "nested_concrete").is_empty(), "a nested concrete-payload container must stay pure:\n{v}");
     }
 
+    /// R71 (SOUNDNESS, cardinal sin, live in published 0.34.0): a closure invoked through an `if let`
+    /// binding was silently dropped as pure — `if let Some(f) = &self.cb { f() }` left the invoking fn
+    /// ABSENT from `functions[]` entirely (no effects, no `Unknown`, no disclosure), while the SAME
+    /// closure invoked directly (`(self.cb.as_ref().unwrap())()`) already read the honest
+    /// `Unknown`/`unresolved:true`/`unknownWhy: ["callback:unresolved call"]`.
+    ///
+    /// ROOT CAUSE (measured, not the premise this fix was handed): `resolve_elem_trait_leaves` DOES
+    /// return non-empty (`["Fn"]`) for an `Option<Box<dyn Fn()>>` field — the claim that Fn/FnMut/FnOnce
+    /// yield no CHA leaves does not hold — and the binding DOES land in `trait_vars`. The gap is that
+    /// `trait_vars` feeds ONLY the `.method()`-call CHA/dispatch resolver; the CALL-SYNTAX resolver
+    /// (`visit_expr_call`'s bare-`Path` arm) consults only `fn_typed_vars`. A `Fn`-family binding that
+    /// stops at `trait_vars` is therefore live and irrelevant, and `f()` resolves as a phantom free-fn
+    /// call and drops silently. The fix hedges every such binding into `fn_typed_vars` too.
+    ///
+    /// AUDIT BOUNDARY: every OTHER binding-producing position sharing the identical shape — match-arm
+    /// `Some`/`Ok`, for-loop var, let-else, while-let (previously UNHANDLED for ANY trait, not just Fn),
+    /// a HOF closure param, an unannotated/annotated tuple destructure, an annotated closure param — is
+    /// exercised here too, each with ground truth checked by hand against the built binary before this
+    /// test was written (scratchpad fx1/fx5/fx13, R71 report). NOT covered (a documented, separate gap,
+    /// left open): a bare closure carried as a single-field tuple-variant ENUM payload — `EnumVariantIndex`
+    /// only records a variant whose payload resolves via `type_path`, which returns `None` for a `dyn`
+    /// position, and nothing mirrors the `trait_fields`/`field_elem_trait` PARALLEL-index pattern that
+    /// closes the identical hole for struct fields.
+    #[test]
+    fn callback_invoked_through_a_binding_position_reads_unknown_not_silent_pure() {
+        let run = |name: &str, src: &str| -> serde_json::Value {
+            let d = std::env::temp_dir().join(format!("candor-r71-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), src).unwrap();
+            let prefix = d.join("out/r").to_string_lossy().into_owned();
+            let idx = load_dep_reports(None);
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix, want_json: true, include_tests: false, policy: None, baseline: None, ws_member: false, quiet: true, deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0);
+            let v: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            v
+        };
+        let eff = |v: &serde_json::Value, needle: &str| -> Vec<String> {
+            v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str().is_some_and(|q| q.ends_with(needle)))
+                .flat_map(|f| f["inferred"].as_array().into_iter().flatten()
+                    .filter_map(|e| e.as_str().map(String::from)).collect::<Vec<_>>()).collect()
+        };
+        let src = r#"
+use std::fs;
+
+// --- primary R71 shape: if-let over a struct field ---
+pub struct IfLetHolder { cb: Option<Box<dyn Fn()>> }
+impl IfLetHolder {
+    pub fn new() -> Self { IfLetHolder { cb: Some(Box::new(|| { let _ = fs::write("/x", "y"); })) } }
+    pub fn go(&self) { if let Some(f) = &self.cb { f(); } }
+}
+// honest baseline this fix must PRESERVE (already correct pre-fix): direct field call
+pub struct DirectHolder { cb: Box<dyn Fn()> }
+impl DirectHolder {
+    pub fn new() -> Self { DirectHolder { cb: Box::new(|| { let _ = fs::write("/x", "y"); }) } }
+    pub fn go(&self) { (self.cb)(); }
+}
+// while-let — previously had NO handler at all for ANY trait shape, not just Fn
+pub struct WhileLetHolder { cb: Option<Box<dyn Fn()>> }
+impl WhileLetHolder {
+    pub fn new() -> Self { WhileLetHolder { cb: Some(Box::new(|| { let _ = fs::write("/x", "y"); })) } }
+    pub fn go(&self) { while let Some(f) = &self.cb { f(); break; } }
+}
+// match Some/Ok arm
+pub struct MatchHolder { cb: Option<Box<dyn Fn()>> }
+impl MatchHolder {
+    pub fn new() -> Self { MatchHolder { cb: Some(Box::new(|| { let _ = fs::write("/x", "y"); })) } }
+    pub fn go(&self) { match &self.cb { Some(f) => f(), None => {} } }
+}
+// let-else
+pub struct LetElseHolder { cb: Option<Box<dyn Fn()>> }
+impl LetElseHolder {
+    pub fn new() -> Self { LetElseHolder { cb: Some(Box::new(|| { let _ = fs::write("/x", "y"); })) } }
+    pub fn go(&self) { let Some(f) = &self.cb else { return }; f(); }
+}
+// for-loop var over a collection of callbacks
+pub struct ForHolder { callbacks: Vec<Box<dyn Fn()>> }
+impl ForHolder {
+    pub fn new() -> Self { ForHolder { callbacks: vec![Box::new(|| { let _ = fs::write("/x", "y"); })] } }
+    pub fn go(&self) { for f in &self.callbacks { f(); } }
+}
+// HOF closure param over a collection of callbacks
+pub struct HofHolder { callbacks: Vec<Box<dyn Fn()>> }
+impl HofHolder {
+    pub fn new() -> Self { HofHolder { callbacks: vec![Box::new(|| { let _ = fs::write("/x", "y"); })] } }
+    pub fn go(&self) { self.callbacks.iter().for_each(|f| f()); }
+}
+// unannotated + annotated tuple destructure
+pub fn tuple_unannotated(pair: (Box<dyn Fn()>, u32)) { let (f, _n) = pair; f(); }
+pub fn tuple_annotated(pair: (Box<dyn Fn()>, u32)) { let (f, _n): (Box<dyn Fn()>, u32) = pair; f(); }
+// annotated closure parameter
+pub fn invoke_via_closure_param() {
+    let invoker = |f: Box<dyn Fn()>| { f(); };
+    invoker(Box::new(|| { let _ = fs::write("/x", "y"); }));
+}
+
+// --- OVER-CHARGE CONTROL 1: a PURE closure through if-let must match the EXISTING direct-field
+// ceiling (Unknown — the scan has never been able to prove purity through an opaque callback), not
+// something WORSE (a fabricated specific effect would be the actual regression to watch for).
+pub struct PureDirectHolder { cb: Box<dyn Fn()> }
+impl PureDirectHolder {
+    pub fn new() -> Self { PureDirectHolder { cb: Box::new(|| {}) } }
+    pub fn go(&self) { (self.cb)(); }
+}
+pub struct PureIfLetHolder { cb: Option<Box<dyn Fn()>> }
+impl PureIfLetHolder {
+    pub fn new() -> Self { PureIfLetHolder { cb: Some(Box::new(|| {})) } }
+    pub fn go(&self) { if let Some(f) = &self.cb { f(); } }
+}
+
+// --- OVER-CHARGE CONTROL 2: an if-let over an ORDINARY, non-callable Option field must NOT start
+// reading Unknown — the overwhelmingly common if-let-over-Option shape must stay exactly as before.
+pub struct PlainHolder { name: Option<String> }
+impl PlainHolder {
+    pub fn new() -> Self { PlainHolder { name: Some("hi".to_string()) } }
+    pub fn go(&self) { if let Some(n) = &self.name { let _ = fs::write("/x", n); } }
+}
+"#;
+        let v = run("r71", src);
+        for f in ["IfLetHolder::go", "DirectHolder::go", "WhileLetHolder::go", "MatchHolder::go",
+                  "LetElseHolder::go", "ForHolder::go", "HofHolder::go",
+                  "tuple_unannotated", "tuple_annotated"] {
+            assert!(eff(&v, f).contains(&"Unknown".to_string()),
+                    "{f} lost the callback disclosure — silently pure again (R71):\n{v}");
+        }
+        assert!(eff(&v, "invoke_via_closure_param").contains(&"Unknown".to_string()),
+                "the closure-param call inside `invoker` lost its Unknown disclosure (R71):\n{v}");
+        // over-charge control 1: PARITY, not "stays pure" — both must read the identical answer.
+        let direct_pure = eff(&v, "PureDirectHolder::go");
+        let iflet_pure = eff(&v, "PureIfLetHolder::go");
+        assert_eq!(direct_pure, iflet_pure,
+            "if-let over a PURE closure diverged from the established direct-field ceiling — over-charge:\ndirect={direct_pure:?} if-let={iflet_pure:?}\n{v}");
+        assert!(direct_pure.contains(&"Unknown".to_string()), "sanity: the direct-field pure control itself must read Unknown:\n{v}");
+        // over-charge control 2: an ordinary if-let-over-Option must be untouched by this fix.
+        let plain = eff(&v, "PlainHolder::go");
+        assert!(plain.contains(&"Fs".to_string()) && !plain.contains(&"Unknown".to_string()),
+                "a non-callable if-let regressed into a spurious Unknown: {plain:?}\n{v}");
+    }
+
     #[test]
     fn trait_default_dispatches_required_to_impl_witness() {
         // A LOCAL trait DEFAULT method calling a REQUIRED method (`fn save_all(&self){ self.persist() }`)

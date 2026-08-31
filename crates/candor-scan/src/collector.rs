@@ -1020,6 +1020,21 @@ impl<'a> CallCollector<'a> {
 }
 
 impl<'a> CallCollector<'a> {
+    /// R71 — SOUNDNESS: a binding typed into `trait_vars` (bounded-CHA dispatch, for `.method()`
+    /// resolution) with `Fn`/`FnMut`/`FnOnce` leaves can ONLY ever be invoked with CALL SYNTAX
+    /// (`f()`) — Rust exposes no stable `.call()`/`.go()`-style method on those built-in traits, so
+    /// the CHA/method-dispatch machinery `trait_vars` feeds is dead for them by construction. The
+    /// call-site resolver (`visit_expr_call`'s `Expr::Path` arm) never consults `trait_vars` at
+    /// all — only `fn_typed_vars` — so a binding site that types a name into `trait_vars` with these
+    /// leaves and STOPS there leaves `f()` to resolve as a phantom free-fn call and drop silently.
+    /// Every such site must ALSO hedge the name into `fn_typed_vars`. Measured on `if let Some(f) =
+    /// &self.cb { f() }` where `self.cb: Option<Box<dyn Fn()>>`: `resolve_elem_trait_leaves` DOES
+    /// return `["Fn"]` (non-empty — the premise that it returns empty for Fn/FnMut/FnOnce does not
+    /// hold), `trait_vars["f"]` DOES get set, and `f()` was STILL silently dropped — the binding was
+    /// live and simply never consulted by the invoking form.
+    fn leaves_are_callable(leaves: &[String]) -> bool {
+        leaves.iter().any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce"))
+    }
     /// Whether an expression evaluates to a fn-typed (callback) value — a fn-typed binding, through
     /// `&`/paren/group wrappers, or an `if` whose then-branch tail yields one. Lets `let g = cb`
     /// propagate fn-typed-ness so a later `g()` reads the honest `Unknown` instead of a phantom free-fn
@@ -1215,6 +1230,16 @@ impl<'a> CallCollector<'a> {
             if let Some(name) = single_pat_ident(pat_el) {
                 self.vars.remove(&name);
                 self.elem_of.remove(&name);
+                // R71: an ANNOTATED tuple destructure position of a callable type (`let (f, _):
+                // (Box<dyn Fn()>, usize) = pair;`) — `type_path` returns None for it (same as any
+                // `dyn` position), so without this the name was left in NO side-table at all and
+                // `f()` resolved as a phantom free-fn call. Mirrors the single-ident annotated `let`
+                // route (`is_callable_type` check ahead of `trait_leaves`/`type_path`, line ~2216).
+                if is_callable_type(ty_el, &self.generic_bounds) {
+                    self.fn_typed_vars.insert(name.clone());
+                } else {
+                    self.fn_typed_vars.remove(&name);
+                }
                 if let Some(ty) = type_path(ty_el, self.uses) {
                     self.vars.insert(name.clone(), ty);
                 }
@@ -1868,6 +1893,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if let syn::Expr::Closure(cl) = a {
                     if cl.inputs.len() == 1 && single_pat_ident(cl.inputs.first().unwrap()).as_deref() == Some(name.as_str()) {
                         if !elem_leaves.is_empty() {
+                            // R71: `handlers.iter().for_each(|h| h())` over `Vec<Box<dyn Fn()>>` — the
+                            // closure param is invoked with call syntax, so hedge it too.
+                            if Self::leaves_are_callable(&elem_leaves) {
+                                self.fn_typed_vars.insert(name.clone());
+                            }
                             self.scoped_binding(&name, Bound::Traits(elem_leaves.clone()), |s| s.visit_expr(&cl.body));
                         } else {
                             self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
@@ -1894,6 +1924,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 let leaves = self.resolve_elem_trait_leaves(&el.expr);
                 if !leaves.is_empty() {
                     self.visit_expr(&el.expr);
+                    // R71: `Fn`/`FnMut`/`FnOnce` leaves mean `binding` is only ever invoked as
+                    // `binding()`, a call site `trait_vars` cannot reach — hedge it too.
+                    if Self::leaves_are_callable(&leaves) {
+                        self.fn_typed_vars.insert(binding.clone());
+                    }
                     self.scoped_binding(&binding, Bound::Traits(leaves), |s| s.visit_block(&node.then_branch));
                     if let Some((_, else_b)) = &node.else_branch {
                         self.visit_expr(else_b);
@@ -1903,6 +1938,27 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         syn::visit::visit_expr_if(self, node);
+    }
+    /// `while let Some(f) = &self.cb { f(); ... }` — the WHILE-LET twin of `visit_expr_if`'s if-let
+    /// handling, previously entirely UNHANDLED (no override existed at all: `syn::visit::visit_expr_while`
+    /// walked `cond`+`body` with no pattern binding, so even a genuine user-trait payload — not just an
+    /// `Fn`-typed one — fell through untyped). Scoped to the BODY, like the if-let form; the condition is
+    /// re-evaluated each iteration so it's visited on every pass via the default walk below, not specially.
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        if let syn::Expr::Let(el) = &*node.cond {
+            if let Some(binding) = some_ok_binding(&el.pat) {
+                let leaves = self.resolve_elem_trait_leaves(&el.expr);
+                if !leaves.is_empty() {
+                    self.visit_expr(&el.expr);
+                    if Self::leaves_are_callable(&leaves) {
+                        self.fn_typed_vars.insert(binding.clone());
+                    }
+                    self.scoped_binding(&binding, Bound::Traits(leaves), |s| s.visit_block(&node.body));
+                    return;
+                }
+            }
+        }
+        syn::visit::visit_expr_while(self, node);
     }
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
         // `match <opt> { Some(d) => d.go(), None => {} }` — when the scrutinee is an Option/Result OF A
@@ -1914,6 +1970,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.visit_expr(&node.expr);
             for arm in &node.arms {
                 if let Some(binding) = some_ok_binding(&arm.pat) {
+                    // R71: hedge a callable-leaved arm payload into `fn_typed_vars` — `d()` is
+                    // invoked with call syntax, which `trait_vars`' method-dispatch route never sees.
+                    if Self::leaves_are_callable(&leaves) {
+                        self.fn_typed_vars.insert(binding.clone());
+                    }
                     self.scoped_binding(&binding, Bound::Traits(leaves.clone()), |s| {
                         if let Some((_, guard)) = &arm.guard {
                             s.visit_expr(guard);
@@ -1952,6 +2013,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // would wrongly take the (dead) concrete route. A concrete-element collection has empty leaves.
             let leaves = self.resolve_elem_trait_leaves(&node.expr);
             if !leaves.is_empty() {
+                // R71: `for f in self.callbacks { f() }` over a `Vec<Box<dyn Fn()>>` — call syntax,
+                // so hedge into `fn_typed_vars` alongside the `trait_vars` dispatch binding.
+                if Self::leaves_are_callable(&leaves) {
+                    self.fn_typed_vars.insert(name.clone());
+                }
                 self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.body));
             } else {
                 self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
@@ -2150,8 +2216,25 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // resolves — the annotation was discarded, so an effectful method on it read silent-pure (sweep
         // [29]). Save+restore scopes the bindings to the closure body (closures are walked lexically here).
         let mut saved: Vec<(String, Option<String>)> = Vec::new();
+        // R71: an ANNOTATED closure param of a callable type (`|f: Box<dyn Fn()>| f()`) — `type_path`
+        // returns None for it (a `dyn` position), so without this the name landed in NO side-table
+        // and a call-syntax `f()` inside the closure body resolved as a phantom free-fn call and
+        // dropped. Scoped like the `vars` bindings just below: saved/restored so it can't leak past
+        // this closure into a later same-named local.
+        let mut saved_fn_typed: Vec<(String, bool)> = Vec::new();
         for input in &node.inputs {
             if let syn::Pat::Type(pt) = input {
+                if let Some(name) = single_pat_ident(&pt.pat) {
+                    let was = self.fn_typed_vars.contains(&name);
+                    if is_callable_type(&pt.ty, &self.generic_bounds) {
+                        self.fn_typed_vars.insert(name.clone());
+                        saved_fn_typed.push((name, was));
+                        continue;
+                    } else if was {
+                        self.fn_typed_vars.remove(&name);
+                        saved_fn_typed.push((name, was));
+                    }
+                }
                 if let (Some(name), Some(ty)) = (single_pat_ident(&pt.pat), type_path(&pt.ty, self.uses)) {
                     let prev = self.vars.insert(name.clone(), ty);
                     saved.push((name, prev));
@@ -2163,6 +2246,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             match prev {
                 Some(v) => { self.vars.insert(name, v); }
                 None => { self.vars.remove(&name); }
+            }
+        }
+        for (name, was) in saved_fn_typed {
+            if was {
+                self.fn_typed_vars.insert(name);
+            } else {
+                self.fn_typed_vars.remove(&name);
             }
         }
     }
@@ -2177,6 +2267,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 let leaves = self.resolve_elem_trait_leaves(&init.expr);
                 if !leaves.is_empty() {
                     self.vars.remove(&binding);
+                    // R71: `let Some(f) = &self.cb else { return }; f();` — same call-syntax gap as
+                    // if-let/while-let/match; hedge a callable-leaved binding into `fn_typed_vars`.
+                    if Self::leaves_are_callable(&leaves) {
+                        self.fn_typed_vars.insert(binding.clone());
+                    }
                     self.trait_vars.insert(binding, leaves);
                 }
             }
@@ -2358,6 +2453,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.vars.insert(name.clone(), ty);
                 }
                 if let Some(l) = leaves {
+                    // R71: `let (f, _) = (cb, 1);` where `cb: Box<dyn Fn()>` (a cast literal or a
+                    // source var's `tuple_trait_of`) — `f()` is call syntax; hedge alongside the
+                    // `trait_vars` dispatch binding, or it resolves as a phantom free-fn call.
+                    if Self::leaves_are_callable(&l) {
+                        self.fn_typed_vars.insert(name.clone());
+                    }
                     self.trait_vars.insert(name, l);
                 }
             }
