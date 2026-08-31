@@ -1718,6 +1718,78 @@ pub(crate) fn ctor_leaf_of_expr(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// CROSS-CRATE DROP-GLUE — SOUNDNESS R68(1). The three functions above answer "what type leaf does this
+// construction build" for the IN-CRATE authority (`CallCollector::note_construction`, gated on
+// `drop_relevant`, which can only ever be built from `impl Drop` blocks this scan actually parsed — so a
+// DEPENDENCY's drop-relevant type is invisible to it by construction, no matter how the site is spelled).
+// The cross-crate join in `scan.rs` needs the SAME construction-keyed authority one boundary further out:
+// `cr::<drop>::Type`, not `Type::<construct>`. Before this, only a bare 2-segment VALUE PATH
+// (`deplib::UnitGuard`) reached a correctly-keyed marker, and only by ACCIDENT — it shared code with the
+// lazy-static forcing route, whose `dep_lazy_keys` derivation uses the WRITTEN PATH'S REST verbatim as the
+// key. That happens to equal the type leaf for a 2-segment path, and is wrong for anything longer:
+// `deplib::Guard::new(1)` derived the key `"Guard::new"` (and `"new"`), neither of which is the `"Guard"`
+// the join's `{ty}::drop` lookup needs — silent. A STRUCT LITERAL never reached that code at all: syn
+// walks a literal's type as a bare `syn::Path`, never as an `ExprPath`, so `visit_expr_path` never sees it.
+//
+// Each function below returns `(crate, type leaf)` instead of stripping the crate the way
+// `local_type_leaf` does — that stripped segment IS the piece the cross-crate marker needs. The crate
+// segment is NOT validated against this project's real dependency graph here (collector.rs has no
+// visibility into it); a local module that merely LOOKS crate-qualified (`mymod::Guard::new()`) produces a
+// marker too, exactly like the lazy-static marker beside it — self-limiting, because `scan.rs`'s join only
+// ever consumes the marker when the head resolves to a real, CHAINED `CANDOR_DEPS` crate
+// (`deps_idx.crates.contains(cr_real)`); anything else costs nothing.
+
+/// A crate-qualified path's leading segment, or `None` if it names no crate at all (single-segment) or
+/// is explicitly LOCAL (`crate`/`self`/`super`, already the in-crate route's territory) or is one of the
+/// three roots no `CANDOR_DEPS` report is ever emitted for.
+fn cross_crate_head(expanded: &str) -> Option<&str> {
+    let (head, _) = expanded.split_once("::")?;
+    if matches!(head, "crate" | "self" | "super" | "std" | "core" | "alloc") {
+        return None;
+    }
+    Some(head)
+}
+
+/// The cross-crate sibling of `ctor_leaf_from_call_path`: `deplib::Guard::new(1)` (assoc-fn) and
+/// `deplib::TupleGuard(1)` (tuple-struct call) both resolve here, keeping the crate the in-crate leaf
+/// function discards.
+pub(crate) fn cross_ctor_leaf_from_call_path(
+    full: &str,
+    uses: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let leaf = ctor_leaf_from_call_path(full, uses)?;
+    let expanded = expand(full, uses);
+    let cr = cross_crate_head(&expanded)?;
+    Some((cr.to_string(), leaf))
+}
+
+/// The cross-crate sibling of `ctor_leaf_from_value_path`: a bare VALUE PATH rooted in another crate
+/// (`deplib::UnitGuard`, `deplib::State::Open`).
+pub(crate) fn cross_ctor_leaf_from_value_path(
+    full: &str,
+    uses: &HashMap<String, String>,
+    fields: &FieldIndex,
+) -> Option<(String, String)> {
+    let leaf = ctor_leaf_from_value_path(full, uses, fields)?;
+    let expanded = expand(full, uses);
+    let cr = cross_crate_head(&expanded)?;
+    Some((cr.to_string(), leaf))
+}
+
+/// The cross-crate sibling of the `ctor_leaf_of_expr` STRUCT-LITERAL arm: `deplib::Guard { n: 1 }` /
+/// `deplib::E::V { .. }`. No `fields`-based fieldless test — a struct literal is a construction
+/// precisely because it names fields, the same reasoning `ctor_leaf_of_expr`'s own comment gives.
+pub(crate) fn cross_ctor_leaf_from_struct_path(
+    full: &str,
+    uses: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let ty_path = type_from_value_path(full, uses)?;
+    let cr = cross_crate_head(&ty_path)?;
+    let leaf = ty_path.rsplit("::").next().unwrap_or(&ty_path).to_string();
+    Some((cr.to_string(), leaf))
+}
+
 /// LEXICAL ESCAPE GATE — the type leaves whose construction in this body does NOT die in this scope,
 /// so charging their `Drop` here would FABRICATE an effect that runs in someone else's frame.
 ///
