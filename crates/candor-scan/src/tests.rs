@@ -5504,6 +5504,99 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 "a guard that does NOT escape must still be charged in an aggregate-returning fn:\n{v:#}");
     }
 
+    /// ⟨drop-glue ESCAPE — CONDITIONAL⟩ Regression for a bug shipped and caught the same day (measured,
+    /// not inferred: 166 units executed, destructor writes interleaved against call/return markers).
+    /// The escape gate above was NAME-based, not PATH-based: it suppressed the charge as soon as the
+    /// constructed name reached ANY return/tail position, regardless of whether that return happens on
+    /// EVERY path. `let g = G{..}; if f { Some(g) } else { None } }` escapes only when `f` is true and
+    /// drops `g` — genuinely, executing the write — on the other branch, so the old gate read the whole
+    /// function pure unconditionally.
+    ///
+    /// The fix (`escaping_ctor_leaves`'s doc comment has the full contract): suppress only when the
+    /// construction escapes on EVERY terminal exit — each independent exit analysed separately and
+    /// intersected, and an `if`/`match` arm must ALL agree, not just one. Every fixture below drops the
+    /// guard on the specific input given, so `Fs` must be charged for all seven; the two controls prove
+    /// the fix did not touch the UNCONDITIONAL-escape case it must leave alone.
+    #[test]
+    fn drop_glue_charges_a_construction_that_escapes_only_on_some_paths() {
+        let v = scan_fixture("dropcondescape", r#"
+            pub struct G { pub n: u32 }
+            impl Drop for G { fn drop(&mut self) { let _ = std::fs::write("/tmp/g", "x"); } }
+
+            // Every one of these drops `G` on at least one reachable path — `Fs` must be charged.
+            pub fn c_if(f: bool) -> Option<G> { let g = G{n:1}; if f { Some(g) } else { None } }
+            pub fn c_guard(f: bool) -> Option<G> { let g = G{n:2}; if !f { return None; } Some(g) }
+            pub fn c_match(f: bool) -> Option<G> {
+                let g = G{n:3};
+                match f { true => Some(g), false => None }
+            }
+            pub fn c_early(f: bool) -> Option<G> { let g = G{n:4}; if f { return None; } Some(g) }
+            pub fn c_loop(n: u32) -> Option<G> {
+                for i in 0..n { let g = G{n:5}; if i > 100 { return Some(g); } }
+                None
+            }
+            pub fn c_result(f: bool) -> Result<G, u32> { let g = G{n:6}; if f { Ok(g) } else { Err(1) } }
+            pub fn c_question(f: bool) -> Option<G> {
+                let g = G{n:7};
+                let _x: u32 = if f { Some(1) } else { None }?;
+                Some(g)
+            }
+
+            // CONTROLS — unconditional escape must stay pure; the fix must not touch this case.
+            pub fn u_always() -> G { G{n:90} }
+            pub fn u_always_wrapped() -> Option<G> { Some(G{n:91}) }
+        "#);
+        for f in ["c_if", "c_guard", "c_match", "c_early", "c_loop", "c_result", "c_question"] {
+            assert!(fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` drops the guard on a reachable path — the escape gate must not suppress it \
+                     just because ANOTHER path escapes:\n{v:#}");
+        }
+        for f in ["u_always", "u_always_wrapped"] {
+            assert!(!fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` escapes on every path (there is only one) — must stay pure:\n{v:#}");
+        }
+    }
+
+    /// ⟨drop-glue ESCAPE — VACUOUS ARM⟩ Over-charge control for the fix above, on REAL code: lapin
+    /// 2.5.5's `channel::Channel::new` —
+    /// `let channel_closer = if id == 0 { None } else { Some(Arc::new(ChannelCloser::new(..))) };`
+    /// then returns `Channel { .., channel_closer, .. }`. `ChannelCloser` is built and escapes in the
+    /// SAME arm; the `then` arm never builds one at all, so it has no opinion on whether it escapes —
+    /// intersecting leaves across arms (as the fix above does for NAMES) let that silent arm veto a
+    /// fact it never touched, and `Channel::new` fabricated a `Log` charge that A/B against the crate
+    /// caught. Fixed by unioning LEAVES discovered via a direct in-arm construction, while still
+    /// intersecting NAMES (`mark_escape`'s doc comment on the `If`/`Match` case has the full argument
+    /// for why the two must be treated differently).
+    #[test]
+    fn drop_glue_does_not_let_a_construction_free_arm_veto_a_sibling_that_never_builds_it() {
+        let v = scan_fixture("dropvacuousarm", r#"
+            pub struct Closer { pub id: u32 }
+            impl Drop for Closer { fn drop(&mut self) { let _ = std::fs::write("/tmp/c", "x"); } }
+            pub struct Channel { pub id: u32, pub closer: Option<std::sync::Arc<Closer>> }
+            pub fn make(id: u32) -> Channel {
+                let closer = if id == 0 {
+                    None
+                } else {
+                    Some(std::sync::Arc::new(Closer { id }))
+                };
+                Channel { id, closer }
+            }
+            // MATCH shape of the same thing (isahc/tokio commonly branch this way instead).
+            pub fn make_match(id: u32) -> Channel {
+                let closer = match id {
+                    0 => None,
+                    _ => Some(std::sync::Arc::new(Closer { id })),
+                };
+                Channel { id, closer }
+            }
+        "#);
+        for f in ["make", "make_match"] {
+            assert!(!fixture_effects(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` only ever builds `Closer` on the arm that also escapes it — the sibling arm, \
+                     which never builds one, must not veto that:\n{v:#}");
+        }
+    }
+
     /// ⟨drop-glue PARAMETER-OWNED⟩ A mechanism construction-keying cannot reach BY DEFINITION: `fn
     /// take(g: Guard) {}` runs `Guard::drop` inside `take`, and the scan never saw the value built. The
     /// borrow controls are where this is one keystroke from a fabrication — and `self: Pin<&mut Self>`

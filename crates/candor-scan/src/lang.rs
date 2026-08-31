@@ -1743,22 +1743,87 @@ pub(crate) fn ctor_leaf_of_expr(
 /// and locally collapses to "escapes", losing the local charge. That is strictly more precise than the
 /// `returns_escapable` gate it replaces (which skipped EVERY type as soon as the fn returned an
 /// aggregate) and it fails toward not-charging, which is the direction that cannot fabricate.
+///
+/// MUST, NOT MAY. A NAME-BASED gate that suppresses whenever the constructed name reaches *some*
+/// return/tail is unsound: `let g = Guard{..}; if f { Some(g) } else { None } }` escapes only on the
+/// `f` branch and drops `g` locally — and genuinely runs its `Drop` — on the other, so a single "does
+/// ANY exit use the name" test silently suppressed the charge for every conditional shape (`if`/`match`,
+/// an early-return guard, a `for`/`?` continuation). This function's contract is the CONSERVATIVE
+/// sufficient condition the family's denylist-over-allowlist rule asks for (a narrowing must carve out
+/// PROVEN-safe cases, never merely POSSIBLE ones): a leaf is suppressed only when the construction
+/// escapes on *every* terminal exit reachable from it — never charging is unsound, never suppressing is
+/// merely expensive, so the two implementing passes below both fail toward CHARGING, which is the
+/// direction that cannot fabricate:
+///   · every independent terminal exit of the function (the tail, each `return`'s operand — including
+///     one nested inside a loop/if/match — and `?`'s own implicit early-return, which carries nothing)
+///     is analysed SEPARATELY, seeded from nothing but that one exit, and only what every exit agrees on
+///     survives the intersection (`escape_from_root`, below);
+///   · within a single exit, an `if`/`else` or `match` is exactly one of its arms at runtime, so a name
+///     or leaf must appear in *every* arm to count, not just one (`mark_escape`'s `If`/`Match` case).
+/// An exit with NO reachable value at all (a bare `return;`, or `?`'s failure residual) is a real,
+/// present counterexample — represented as an EMPTY set, not skipped — because a name that does not
+/// reach it is proven to sometimes stay behind.
+///
+/// A known gap, not attempted here per this family's "no full path-sensitive analysis in a syntactic
+/// scanner" rule: a `let` whose ESCAPE is unconditional but which follows an EARLIER, wholly unrelated
+/// early return (`if unrelated { return Err(..); } let g = Guard::new(); Ok(g)`) is intersected against
+/// that unrelated exit too and reads as conditional, over-charging a value that in fact always escapes.
+/// Measured cost of that gap: see the corpus A/B in the commit this fixes.
 pub(crate) fn escaping_ctor_leaves(
     block: &syn::Block,
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
 ) -> Escapes {
-    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut leaves: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Every binding/assignment/method-call site in the body, gathered once; the fixpoint below only
-    // re-reads this table, never re-walks the tree.
+    // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
+    // this table (running its own copy of the fixpoint), never re-walks the tree.
     let mut sites = EscapeSites::default();
     sites.walk_block(block, true);
+    // A body with NO terminal exit (a `()`-returning fn with no trailing value — `store` below) still
+    // has to run the fixpoint: the field/index/deref `assigns` route is UNCONDITIONAL (not gated on any
+    // root, by design — see `escape_from_root`), so `*slot = Some(G::new());` must still be seen. A
+    // single call seeded from `None` runs exactly that unconditional half and nothing root-dependent,
+    // which is the correct answer when there is no root to be dependent ON.
+    if sites.roots.is_empty() {
+        return escape_from_root(None, &sites, uses, fields);
+    }
+    let mut roots = sites.roots.iter();
+    let first = roots.next().expect("checked non-empty above");
+    let mut acc = escape_from_root(*first, &sites, uses, fields);
+    for r in roots {
+        if acc.names.is_empty() && acc.leaves.is_empty() {
+            break; // the intersection can only shrink further; every remaining root would too.
+        }
+        let next = escape_from_root(*r, &sites, uses, fields);
+        acc.names.retain(|n| next.names.contains(n));
+        acc.leaves.retain(|l| next.leaves.contains(l));
+    }
+    acc
+}
+
+/// The escape fixpoint (root use, then the `lets`/`assigns`/`method_args` transitive closure — same
+/// rules as before this fix), seeded from exactly ONE of the function's terminal exits. `root` is
+/// `None` for an exit proven to carry nothing (see `escaping_ctor_leaves`'s doc comment); such a call
+/// simply returns the empty sets, which is what makes it veto any name/leaf during the caller's
+/// intersection.
+fn escape_from_root(
+    root: Option<&syn::Expr>,
+    sites: &EscapeSites<'_>,
+    uses: &HashMap<String, String>,
+    fields: &FieldIndex,
+) -> Escapes {
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut leaves: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(e) = root {
+        mark_escape(e, uses, fields, &mut names, &mut leaves);
+    }
+    // Unconditional escape ROUTES (a closure body, a `mem::forget`/`ManuallyDrop::new` operand) — not
+    // gated on `root` at all, and identical on every `escape_from_root` call, which is what lets them
+    // survive `escaping_ctor_leaves`'s intersection across roots undiminished.
+    for e in &sites.escapes {
+        mark_escape(e, uses, fields, &mut names, &mut leaves);
+    }
     for _ in 0..8 {
         let before = (names.len(), leaves.len());
-        for e in &sites.roots {
-            mark_escape(e, uses, fields, &mut names, &mut leaves);
-        }
         for (name, init) in &sites.lets {
             if names.contains(name) {
                 mark_escape(init, uses, fields, &mut names, &mut leaves);
@@ -1766,13 +1831,15 @@ pub(crate) fn escaping_ctor_leaves(
         }
         for (lhs, rhs) in &sites.assigns {
             match lhs {
-                // `x = Guard::new()` — only an escape if `x` itself escapes.
+                // `x = Guard::new()` — only an escape if `x` itself escapes (in THIS root).
                 Some(n) => {
                     if names.contains(n) {
                         mark_escape(rhs, uses, fields, &mut names, &mut leaves);
                     }
                 }
-                // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own.
+                // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own,
+                // unconditionally (not gated on this root, same as before this fix: a store is a store
+                // regardless of which exit the function eventually takes).
                 None => mark_escape(rhs, uses, fields, &mut names, &mut leaves),
             }
         }
@@ -1877,8 +1944,18 @@ pub(crate) fn owned_drop_params(
 
 #[derive(Default)]
 struct EscapeSites<'a> {
-    /// `return e` operands and the body's tail expression.
-    roots: Vec<&'a syn::Expr>,
+    /// `return e` operands and the body's tail expression — each one an independent terminal exit of
+    /// the function. `None` marks an exit that provably carries nothing out of this scope (a bare
+    /// `return;`, or the implicit early-return a `?` can take): a real, present counterexample, not an
+    /// absence of information, so it must veto a name/leaf exactly like an exit that visibly drops it.
+    roots: Vec<Option<&'a syn::Expr>>,
+    /// Escape ROUTES that are not an exit of THIS function at all, so they must never be intersected
+    /// against `roots`: a closure's own return value (which flows out through the closure's eventual
+    /// invocation, not through this function returning) and the operand of `mem::forget`/
+    /// `ManuallyDrop::new` (which flows to suppression, not to a caller). Each is unconditional — exactly
+    /// like a field/deref `assigns` entry — so it is applied once per `escape_from_root` call regardless
+    /// of which root that call was seeded from, which is what lets it survive the intersection.
+    escapes: Vec<&'a syn::Expr>,
     /// `let NAME = init` — single-ident binders only (a destructuring binder cannot name the value).
     lets: Vec<(String, &'a syn::Expr)>,
     /// `lhs = rhs`; `Some(name)` for a plain local lvalue, `None` for a field/index/deref lvalue.
@@ -1906,7 +1983,7 @@ impl<'a> EscapeSites<'a> {
                 }
                 syn::Stmt::Expr(e, semi) => {
                     if tail && last && semi.is_none() {
-                        self.roots.push(e);
+                        self.roots.push(Some(e));
                     }
                     self.walk_expr(e);
                 }
@@ -1916,11 +1993,19 @@ impl<'a> EscapeSites<'a> {
     }
     fn walk_expr(&mut self, e: &'a syn::Expr) {
         match e {
-            syn::Expr::Return(r) => {
-                if let Some(v) = &r.expr {
-                    self.roots.push(v);
-                }
-            }
+            syn::Expr::Return(r) => match &r.expr {
+                Some(v) => self.roots.push(Some(v)),
+                // Bare `return;` — this exit is `()`-typed and provably carries nothing out.
+                None => self.roots.push(None),
+            },
+            // `expr?`'s implicit early-return is a genuine, separate exit of the FUNCTION (not just
+            // this block), and it carries only the error/`None` residual — never a name bound earlier in
+            // this scope. Left unmodelled, a construction that only escapes on the SUCCESS continuation
+            // (`let g = Guard::new(); fallible()?; Some(g)`) read as escaping unconditionally, because
+            // the only root the old flat-union walk saw was the success-path tail. Recorded regardless of
+            // this Try's own position (tail or not): every `?` is a possible early exit the moment it is
+            // evaluated.
+            syn::Expr::Try(_) => self.roots.push(None),
             syn::Expr::Assign(a) => match &*a.left {
                 // `x = Guard::new()` — an escape only if `x` itself escapes. A MULTI-segment path is a
                 // static/const (`GLOBAL = …`), which is storage this scope does not own.
@@ -1963,8 +2048,12 @@ impl<'a> EscapeSites<'a> {
                         || full == "ManuallyDrop::new"
                         || full.ends_with("::ManuallyDrop::new");
                     if suppresses {
+                        // An unconditional ESCAPE ROUTE, not an exit of this function — see `escapes`'s
+                        // doc comment. Must NOT go through `roots`: it would then be intersected against
+                        // an unrelated return/tail and could be vetoed by a path that never reaches this
+                        // call at all.
                         for a in &c.args {
-                            self.roots.push(a);
+                            self.escapes.push(a);
                         }
                     }
                 }
@@ -1974,8 +2063,10 @@ impl<'a> EscapeSites<'a> {
             // `shard.with_slot(key, |slot| … Some(Entry { .. }))` and returns it through TWO frames,
             // so without this the guard's `Drop` was charged to a `&self` accessor that releases
             // nothing. Closure bodies are walked lexically by the collector, so the two halves have
-            // to agree about them.
-            syn::Expr::Closure(c) => self.roots.push(&c.body),
+            // to agree about them. An unconditional ESCAPE ROUTE (see `escapes`'s doc comment), not an
+            // exit of THIS function — the closure's return flows out through its own eventual
+            // invocation, so it must not be intersected against this function's unrelated exits.
+            syn::Expr::Closure(c) => self.escapes.push(&c.body),
             _ => {}
         }
         for_each_child_expr(e, &mut |c| self.walk_expr(c));
@@ -2029,13 +2120,85 @@ fn mark_escape(
         }
         return;
     }
+    // BRANCH POINT — an `if`/`else` or `match` produces exactly ONE of its arms at runtime, so a NAME
+    // only escapes THROUGH this expression if it is present in EVERY arm; one arm that doesn't use it
+    // is a live counterexample (the value drops locally on that arm), same as an independent exit that
+    // doesn't use it (`escaping_ctor_leaves`'s doc comment) — so NAMES are intersected across arms.
+    //
+    // LEAVES found DIRECTLY within one arm (a construction expression textually inside that arm's own
+    // subtree, with no name indirection) are different: measured on lapin's `Channel::new` —
+    // `let channel_closer = if id == 0 { None } else { Some(Arc::new(ChannelCloser::new(..))) };` — the
+    // `else` arm both BUILDS and ESCAPES `ChannelCloser` in the same breath, and `then` never builds it
+    // at all. Intersecting made the `then` arm's vacuous silence veto a fact the `then` arm has no
+    // opinion on, reintroducing a silent under-report. A leaf discovered this way is a complete,
+    // self-contained fact about the one arm that has it (whenever THAT arm runs, the construction and
+    // its escape happen together, regardless of any sibling arm that never runs it at all) — so leaves
+    // are UNIONED across arms, never intersected. This cannot reopen the bug this file exists to fix:
+    // that bug was about a NAME bound BEFORE the branch, present on every path reaching it, whose FATE
+    // the branch decides — untouched here, since such a leaf is never found by a direct in-arm
+    // recursion (it only reaches `leaves` later, through `escape_from_root`'s `lets` fixpoint, keyed on
+    // the intersected `names`). Every OTHER value-carrying position handled by `for_each_value_child`
+    // below (`Struct`/`Tuple`/`Ok(x)`/…) is unconditional once its parent executes, so union-across-
+    // children stays correct there too — `If`/`Match` are the only node kinds needing a NAME/leaf split.
+    match e {
+        syn::Expr::If(iff) => {
+            let mut then_names = std::collections::HashSet::new();
+            let mut then_leaves = std::collections::HashSet::new();
+            if let Some(t) = tail_expr_of(&iff.then_branch) {
+                mark_escape(t, uses, fields, &mut then_names, &mut then_leaves);
+            }
+            // No `else` means the implicit value is `()`, which can carry no NAME — an empty set, which
+            // (correctly) vetoes any name the `then` arm alone found. A `()`-typed branch cannot carry a
+            // real leaf either (its tail would have to be unit-typed), so this never veto-by-omission a
+            // leaf in practice; leaves are unioned regardless, per this fn's doc comment above.
+            let (else_names, else_leaves) = match &iff.else_branch {
+                Some((_, eb)) => {
+                    let mut n = std::collections::HashSet::new();
+                    let mut l = std::collections::HashSet::new();
+                    mark_escape(eb, uses, fields, &mut n, &mut l);
+                    (n, l)
+                }
+                None => (std::collections::HashSet::new(), std::collections::HashSet::new()),
+            };
+            names.extend(then_names.intersection(&else_names).cloned());
+            leaves.extend(then_leaves.union(&else_leaves).cloned());
+            return;
+        }
+        syn::Expr::Match(m) => {
+            let mut arms = m.arms.iter().map(|a| {
+                let mut n = std::collections::HashSet::new();
+                let mut l = std::collections::HashSet::new();
+                mark_escape(&a.body, uses, fields, &mut n, &mut l);
+                (n, l)
+            });
+            if let Some((first_n, first_l)) = arms.next() {
+                let (names_int, leaves_union) = arms.fold((first_n, first_l), |(an, al), (n, l)| {
+                    (
+                        an.intersection(&n).cloned().collect(),
+                        al.union(&l).cloned().collect(),
+                    )
+                });
+                names.extend(names_int);
+                leaves.extend(leaves_union);
+            }
+            return;
+        }
+        _ => {}
+    }
     for_each_value_child(e, &mut |c| mark_escape(c, uses, fields, names, leaves));
 }
 
 /// Value-position children of an expression — the positions through which a constructed value can
 /// travel OUT of the expression it was written in (`Ok(g)`, `Owner { g }`, `(g, 1)`, `[g]`, `&g`,
-/// `Box::new(g)`, `if c { g } else { h }`, `vec![g]`). Deliberately NOT the whole subtree: a `while`
-/// condition or a `for` iterator carries nothing outward.
+/// `Box::new(g)`, `vec![g]`). Deliberately NOT the whole subtree: a `while` condition or a `for` iterator
+/// carries nothing outward.
+///
+/// `If`/`Match` are DELIBERATELY ABSENT: unlike every case below, they are a FORK (exactly one arm
+/// executes), so "found in a child" is not the right test for them — `mark_escape` intercepts both
+/// before reaching this function and requires the name/leaf to be present in EVERY arm, never just one.
+/// Two routes computing that one fact was exactly how the conditional-escape regression this replaces
+/// opened (this fn used to answer "does any arm carry it", `mark_escape` had no opinion, and their
+/// disagreement was silent); keeping only one route is the fix, not an incidental cleanup.
 fn for_each_value_child<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Expr)) {
     match e {
         syn::Expr::Paren(p) => f(&p.expr),
@@ -2061,13 +2224,6 @@ fn for_each_value_child<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Expr)) 
         syn::Expr::Tuple(t) => t.elems.iter().for_each(&mut *f),
         syn::Expr::Array(a) => a.elems.iter().for_each(&mut *f),
         syn::Expr::Repeat(r) => f(&r.expr),
-        syn::Expr::If(i) => {
-            tail_expr_of(&i.then_branch).into_iter().for_each(&mut *f);
-            if let Some((_, e)) = &i.else_branch {
-                f(e);
-            }
-        }
-        syn::Expr::Match(m) => m.arms.iter().for_each(|a| f(&a.body)),
         _ => {}
     }
 }
