@@ -9,6 +9,17 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R68(1): cross-crate drop-glue now uses the same construction authority as the
+  in-crate case (candor-spec ⟨0.34⟩'s R66/R69 fixes), for a CALL, a STRUCT LITERAL and a bare VALUE
+  PATH.** Before this, a dependency's effectful `Drop` reached the caller only through a bare
+  2-segment value path (`deplib::UnitGuard`) — and only by accident, via code shared with the
+  lazy-static forcing route. `deplib::Guard::new(1)` (an assoc-fn call) and `deplib::Guard { n: 1 }`
+  (a struct literal) read silent-pure regardless of what the dependency's own chained report said.
+  Additive only: a function that already charged the effect still does; a function that constructs
+  a cross-crate guard and RETURNS it stays pure, exactly as the in-crate case does. A `CANDOR_DEPS`-
+  chained scan may now surface a `Fs`/`Unknown`/etc. that a previous run did not — re-baseline and
+  diff, per the note above.
+
 ## [0.34.0] — 2026-08-31
 
 - **UPGRADING FROM 0.33.1 — re-baselining is not review.** ⟨0.34⟩ is NON-ADDITIVE and this wave
