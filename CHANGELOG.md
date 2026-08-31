@@ -9,6 +9,49 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ Fixed: effectful-`Drop` glue fired on the BINDER, so 16 of 17 executed positions were silent —
+  and the TUPLE-STRUCT (newtype) guard, the commonest shape in real Rust, had no route in ANY position.**
+  Two rules answered one question and had drifted: an assoc-fn `T::assoc()` CALL walk in `scan.rs`
+  (construction-keyed, so sound, but blind to `Guard(f)` — a single-segment `Expr::Call` with no `::` to
+  test, whose imported spelling `m::Guard` presents the MODULE as the type) and a `T::<construct>` marker
+  emitted only under `Pat::Ident`. So `let _ = Guard{..}`, `_ = …`, a bare statement, a call argument, an
+  array/tuple element, `Some(..)`, `&temp`, a `match` scrutinee, `if let`, a tuple destructuring, a method
+  receiver, `v.push(..)`, a ternary arm, `.unwrap()` and `.into_iter().next()` all read silent-pure.
+  GROUND TRUTH EXECUTED, not inferred: 166 units compiled and run with the destructor appending to a log
+  interleaved against per-function call/return markers — 76 of the 99 that genuinely release a guard were
+  silent before, 1 after (a generic `T::mk()`, which no syntactic scan can key). Under a scoped
+  `deny Fs`, that is caller attribution: the `Type::drop` units are in the report either way, so it
+  defeats scoped policies, `path`, `gains` and `fix-gate` rather than a blanket deny. The rule is now
+  stated once, at the construction expression, and the binder site is REMOVED rather than left beside it.
+  Also closed: PARAMETER-OWNED release (`fn take(g: Guard) {}` runs `Guard::drop` inside `take`, and the
+  scan never saw the value built), which construction-keying cannot reach by definition.
+
+- **⚠ THE ESCAPE GATE IS THE LOAD-BEARING HALF, and it now covers the DIRECT route too.** Widening the
+  construction route without one multiplies candor-spec SOUNDNESS R49's revert (14 false `Unknown`s on
+  flate2, from constructors that CONSTRUCT AND RETURN the owner) over every constructor of every guard
+  type. A construction escapes via `return`/the body's tail, an assignment into a field/index/deref, a
+  binding whose name is returned, an argument to a method on an escaping receiver, a closure's own
+  return, or `mem::forget`/`ManuallyDrop::new`. Keyed by type LEAF, which is strictly more precise than
+  the `returns_escapable` signature test it replaces on the direct route — that one skipped EVERY type as
+  soon as the fn returned an aggregate. A/B over 256 real crates with an `impl Drop` (31,121 effectful
+  functions): **+132 rows, −295**, and the removals are the point. flate2's own thirteen constructor rows
+  are refused and its sixteen genuinely-releasing `finish`/`into_inner` rows are gained. 163 more removals
+  are other returns-the-drop-type escapes and 109 are `&self` accessors that were being charged off a
+  SYNTHETIC `Type::method` edge — an `==` operator overload, a `{}` format hole, a `?`-`From` conversion —
+  which the old `tail2`-over-every-call rule could not tell from a construction. `format!("{}", guard)`
+  does not drop the guard.
+
+- **Three fabrications the corpus A/B caught and nothing else did** (the suite was green for all three):
+  a bare value path resolving to a GLOB-imported std constant (tokio's `use Ordering::*` beside its own
+  `struct Acquire` with a tracing `Drop` — every `is_closed`/`is_idle` in `batch_semaphore` inherited the
+  future's `Log`); `self: Pin<&mut Self>`, which syn parses as a `Receiver` whose `reference` is `None`,
+  so the obvious by-value test read every `poll_read`/`poll_flush` in the ecosystem as consuming its
+  receiver; and a `match` ARM PATTERN, because syn 2 represents `Pat::Path` with the very same `ExprPath`
+  node an expression uses (isahc's `AsyncBody::len(&self)`, one `match` over three arms, charged the
+  agent `Handle`'s `Drop`). Each has a fixture; each fixture was falsified by degrading its own guard.
+  `CANDOR_CTOR_DEBUG=1` prints the marker stream — all three were found by reading it, and by reasoning
+  about the report diff not at all.
+
 - **⚠ Fixed: candor ICE'd the build on `HashSet::insert` of a local type.** `local_trait_method_by_did`
   built `Instance::try_resolve`'s generic args with `mk_args(&[self_ty])` — one argument, for methods
   that declare more. `Hash::hash<H: Hasher>` carries its own `H`, so the set-`insert` driver edge was

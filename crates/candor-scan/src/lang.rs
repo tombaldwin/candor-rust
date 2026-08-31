@@ -1596,6 +1596,575 @@ pub(crate) fn tail2(path: &str) -> Option<String> {
     Some(format!("{}::{}", segs[n - 2], segs[n - 1]))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// DROP-GLUE: the ONE place that says what a construction expression BUILDS, and the ONE place that
+// says whether that value ESCAPES the scope that built it.
+//
+// These two questions used to be answered in three places that had drifted apart — an assoc-fn CALL
+// route in scan.rs (construction-keyed, sound), a `T::<construct>` marker in collector.rs emitted only
+// under `Pat::Ident` (BINDER-keyed, so 16 of 17 positions were silent and the tuple-struct/newtype
+// spelling had no route at all), and an escape gate that existed on the field route and not the direct
+// one. Two paths computing one fact are free to disagree, and that is exactly how the vein opened; the
+// rule is now stated once, here, and every caller asks it rather than re-deriving it.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// UpperCamel = TYPE-shaped, distinguishing `Guard` from a `snake_case` local and a `SCREAMING_SNAKE`
+/// const. A single CHARACTER counts (`struct S;`), counted in `chars()` not bytes so a non-ASCII single
+/// -codepoint ident (`struct É;`) is not read as multi-segment.
+pub(crate) fn is_type_ident(s: &str) -> bool {
+    let mut ch = s.chars();
+    ch.next().is_some_and(|c| c.is_uppercase())
+        && (s.chars().count() == 1 || s.chars().any(|c| c.is_lowercase()))
+}
+
+/// The type LEAF a CALLEE path constructs: a tuple-struct / tuple-variant literal (`Guard(f)`,
+/// `E::V(f)`) or an associated-fn call on a nominal type (`Guard::new()`, `a::b::Guard::open(p)`).
+/// `None` for a free fn (`compute()`), a module fn (`serde_json::from_str`) and `Type::drop` itself.
+///
+/// The tuple-struct arm is what the assoc-fn route could NEVER see: `Guard(f)` is a single-segment
+/// `Expr::Call`, so it fails a `contains("::")` test, and `use m::Guard; Guard(f)` expands to
+/// `m::Guard`, whose `tail2` head is the MODULE. It fell between both routes in every position,
+/// including the bound local — and the newtype guard is the commonest effectful-`Drop` shape in Rust.
+pub(crate) fn ctor_leaf_from_call_path(full: &str, uses: &HashMap<String, String>) -> Option<String> {
+    let full = expand(full, uses);
+    // `Guard(f)` / `E::V(f)` — the callee path IS the value's type path.
+    if let Some(t) = type_from_value_path(&full, uses) {
+        return local_type_leaf(&t);
+    }
+    // `Type::assoc(..)`. NOT restricted to `is_ctor` names: a guard type's `open_at`/`acquire`/`spawn`
+    // returns `Self` just as `new` does, and narrowing to the constructor-name list here would convert
+    // the shipped, measured behaviour of the assoc-fn route into a fresh crop of silent under-reports.
+    let (head, last) = full.rsplit_once("::")?;
+    if last == "drop" {
+        return None;
+    }
+    let ty = head.rsplit("::").next().unwrap_or(head);
+    if !is_type_ident(ty) {
+        return None;
+    }
+    local_type_leaf(head)
+}
+
+/// The LEAF of a type path, unless the path is rooted in `std`/`core`/`alloc` — in which case it names
+/// no local type and a leaf COLLISION with one would fabricate. `drop_types` is leaf-keyed (it has to
+/// be: `type_path` produces leaves), so the collision is invisible one layer down and has to be refused
+/// here, where the full path is still in hand.
+///
+/// MEASURED, not hypothetical. tokio declares `impl Drop for Acquire<'_>` (a tracing-instrumented
+/// future) AND imports `std::sync::atomic::Ordering::Acquire`. `self.permits.load(Acquire)` writes the
+/// enum variant as a bare value path, which is a construction spelling — so every `is_closed`,
+/// `is_idle`, `available_permits` in `batch_semaphore`/`mpsc` picked up the FUTURE's `Log` + `Unknown`
+/// off an atomic ordering constant. Expanding the path before classifying is what makes
+/// `type_from_value_path`'s existing `Enum::Variant` rule fire and answer `Ordering` instead.
+fn local_type_leaf(ty: &str) -> Option<String> {
+    if matches!(ty.split("::").next(), Some("std") | Some("core") | Some("alloc")) {
+        return None;
+    }
+    Some(ty.rsplit("::").next().unwrap_or(ty).to_string())
+}
+
+/// The type LEAF a bare VALUE path denotes: a unit struct (`Guard`) or a unit enum variant
+/// (`State::Open`, whose value's type is the ENUM). `None` for a local, a const, a module path.
+pub(crate) fn ctor_leaf_from_value_path(
+    full: &str,
+    uses: &HashMap<String, String>,
+    fields: &FieldIndex,
+) -> Option<String> {
+    let full = expand(full, uses);
+    let leaf = type_from_value_path(&full, uses).as_deref().and_then(local_type_leaf)?;
+    // A bare value path constructs only a FIELDLESS type — a unit struct (`UnitGuard`) or an enum
+    // variant (`State::Open`). A struct WITH fields cannot be written as a bare path at all, so a path
+    // resolving to one is a name collision, not a construction.
+    //
+    // MEASURED on tokio, and it is exactly the collision the leaf keying invites. `batch_semaphore.rs`
+    // has `use std::sync::atomic::Ordering::*;` — a GLOB, so `Acquire` in `self.permits.load(Acquire)`
+    // does not expand — beside `pub(crate) struct Acquire<'a> { .. }` with a tracing-instrumented
+    // `impl Drop`. Every `is_closed`/`is_idle`/`available_permits` in `batch_semaphore` and `mpsc` read
+    // the atomic-ordering CONSTANT as a construction of the FUTURE and inherited its `Log` + `Unknown`.
+    // The real `Acquire` has fields; the constant does not name a type at all.
+    let variant = {
+        let segs: Vec<&str> = full.split("::").collect();
+        segs.len() >= 2 && is_type_ident(segs[segs.len() - 2]) && is_type_ident(segs[segs.len() - 1])
+    };
+    if !variant && fields.get(&leaf).is_some_and(|m| !m.is_empty()) {
+        return None;
+    }
+    Some(leaf)
+}
+
+/// The type LEAF a construction EXPRESSION builds — the expression-shaped form of the two path
+/// functions above, used by the escape pre-pass (which walks raw syntax rather than the collector's
+/// already-expanded call paths).
+pub(crate) fn ctor_leaf_of_expr(
+    expr: &syn::Expr,
+    uses: &HashMap<String, String>,
+    fields: &FieldIndex,
+) -> Option<String> {
+    match expr {
+        // A struct LITERAL names its type directly, so the fieldless test above does not apply to it
+        // (`Guard { .. }` is a construction precisely because it has fields).
+        syn::Expr::Struct(s) => {
+            let full = expand(&path_to_string(&s.path), uses);
+            type_from_value_path(&full, uses).as_deref().and_then(local_type_leaf)
+        }
+        syn::Expr::Path(p) if p.qself.is_none() => {
+            ctor_leaf_from_value_path(&path_to_string(&p.path), uses, fields)
+        }
+        syn::Expr::Call(c) => {
+            let syn::Expr::Path(p) = &*c.func else { return None };
+            ctor_leaf_from_call_path(&path_to_string(&p.path), uses)
+        }
+        _ => None,
+    }
+}
+
+/// LEXICAL ESCAPE GATE — the type leaves whose construction in this body does NOT die in this scope,
+/// so charging their `Drop` here would FABRICATE an effect that runs in someone else's frame.
+///
+/// This is the load-bearing half. candor-spec SOUNDNESS R49: the analogous field-route fix went
+/// regression-green and was reverted on the A/B for fabricating 14 false `Unknown`s on flate2 —
+/// `Compress::new`/`Decompress::new` CONSTRUCT AND RETURN the owner, whose destructor runs in the
+/// CALLER. Widening the construction route without this would multiply that over every constructor of
+/// every guard type in a real crate.
+///
+/// A construction escapes when it is (transitively, through value positions) part of:
+///   · a `return` expression, or the body's TAIL expression (the implicit return);
+///   · an assignment into a FIELD / INDEX / DEREF lvalue (a stored property, a global, `self.g = …`);
+///   · an assignment into, or a `let` binding of, a NAME that itself escapes (fixpoint);
+///   · an argument of a method call whose RECEIVER is an escaping name (`let mut v = …; v.push(g); v`
+///     — the builder shape, which is otherwise the commonest way a guard leaves by the back door).
+///
+/// STATED LIMIT, not a claim of completeness: a value handed to a FREE callee that RETAINS it is
+/// charged, because syntax cannot see the callee's retention. That is the same over-approximation the
+/// bound-local path has always made (`let g = Guard::new(); REGISTRY.lock().push(g)`), and extending
+/// it rather than special-casing it is what keeps the answers equal across positions.
+///
+/// Keyed by type LEAF, not by expression identity: a body that constructs the SAME type both escaping
+/// and locally collapses to "escapes", losing the local charge. That is strictly more precise than the
+/// `returns_escapable` gate it replaces (which skipped EVERY type as soon as the fn returned an
+/// aggregate) and it fails toward not-charging, which is the direction that cannot fabricate.
+pub(crate) fn escaping_ctor_leaves(
+    block: &syn::Block,
+    uses: &HashMap<String, String>,
+    fields: &FieldIndex,
+) -> Escapes {
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut leaves: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Every binding/assignment/method-call site in the body, gathered once; the fixpoint below only
+    // re-reads this table, never re-walks the tree.
+    let mut sites = EscapeSites::default();
+    sites.walk_block(block, true);
+    for _ in 0..8 {
+        let before = (names.len(), leaves.len());
+        for e in &sites.roots {
+            mark_escape(e, uses, fields, &mut names, &mut leaves);
+        }
+        for (name, init) in &sites.lets {
+            if names.contains(name) {
+                mark_escape(init, uses, fields, &mut names, &mut leaves);
+            }
+        }
+        for (lhs, rhs) in &sites.assigns {
+            match lhs {
+                // `x = Guard::new()` — only an escape if `x` itself escapes.
+                Some(n) => {
+                    if names.contains(n) {
+                        mark_escape(rhs, uses, fields, &mut names, &mut leaves);
+                    }
+                }
+                // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own.
+                None => mark_escape(rhs, uses, fields, &mut names, &mut leaves),
+            }
+        }
+        for (recv, args) in &sites.method_args {
+            if names.contains(recv) {
+                for a in args {
+                    mark_escape(a, uses, fields, &mut names, &mut leaves);
+                }
+            }
+        }
+        if (names.len(), leaves.len()) == before {
+            break;
+        }
+    }
+    Escapes { leaves, names }
+}
+
+/// What `escaping_ctor_leaves` learned: the constructed type LEAVES that leave this scope, and the
+/// local/param NAMES that do. The names half is what the PARAMETER-OWNED rule needs — an owned param
+/// is not constructed here, so it has no construction expression to key a leaf on.
+pub(crate) struct Escapes {
+    pub(crate) leaves: std::collections::HashSet<String>,
+    pub(crate) names: std::collections::HashSet<String>,
+}
+
+/// Does this type mention a reference or raw pointer ANYWHERE — `&T`, `Pin<&mut T>`, `*const T`,
+/// `Option<&T>`? A parameter of such a type does not own what it names, so its `Drop` does not run in
+/// the callee. Checked structurally rather than at the top level, which is the whole point: an
+/// arbitrary-self-type `Pin<&mut Self>` hides the `&` one layer down.
+fn type_borrows(ty: &syn::Type) -> bool {
+    struct V(bool);
+    impl<'a> syn::visit::Visit<'a> for V {
+        fn visit_type_reference(&mut self, _: &'a syn::TypeReference) { self.0 = true; }
+        fn visit_type_ptr(&mut self, _: &'a syn::TypePtr) { self.0 = true; }
+    }
+    let mut v = V(false);
+    syn::visit::Visit::visit_type(&mut v, ty);
+    v.0
+}
+
+/// PARAMETER-OWNED DROP — a mechanism construction-keying cannot reach BY DEFINITION. `fn take(g:
+/// Guard) {}` runs `Guard::drop` inside `take` (proven by executing the destructor against call/return
+/// markers), and the scan never saw the value built, so it read `take` PURE in every spelling.
+///
+/// Returns the type LEAVES released here: a BY-VALUE parameter (or a by-value `self`) whose type is
+/// drop-relevant and whose NAME does not escape the body. A `&T`/`&mut T`/`*const T` parameter is
+/// BORROWED and must never be charged — that is the fabrication this rule is one keystroke away from,
+/// and it is the same distinction the `!c.method` guard makes on the construction side.
+///
+/// The escape half is deliberately generous: `fn finish(self) -> Vec<u8> { self.inner.finish() }`
+/// mentions `self` in the tail, so nothing is charged even though `self` really does die there. That
+/// over-skips a consuming method that derives its result from `self` — the direction that cannot
+/// fabricate, and the one where a wrong answer is a miss rather than a false claim about someone
+/// else's frame.
+pub(crate) fn owned_drop_params(
+    sig: &syn::Signature,
+    self_ty: Option<&str>,
+    uses: &HashMap<String, String>,
+    escaping_names: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let leaf_of = |t: String| t.rsplit("::").next().unwrap_or(&t).to_string();
+    for input in &sig.inputs {
+        match input {
+            // `self` / `mut self` — by VALUE. `&self`/`&mut self` carry a `reference`, and consume
+            // nothing.
+            // `self` / `mut self` / `self: Box<Self>` — by VALUE. NOT `&self`, and NOT an ARBITRARY
+            // self type that borrows: `self: Pin<&mut Self>` parses as a `Receiver` whose `reference`
+            // is `None` (the `&` is inside the `Pin`, not on the binder), so the obvious
+            // `r.reference.is_none()` reads every `poll_read`/`poll_flush`/`poll_shutdown` in the
+            // ecosystem as consuming its receiver. Measured on tokio: seven drop types charged to
+            // `net::unix::pipe::Sender::poll_flush`, whose entire body is `Poll::Ready(Ok(()))`.
+            // The test is therefore "the declared self type contains no reference anywhere", which
+            // keeps `Box<Self>`/`Pin<Box<Self>>` (genuinely consuming) and rejects the borrowing ones.
+            syn::FnArg::Receiver(r)
+                if r.reference.is_none() && !type_borrows(&r.ty) =>
+            {
+                if escaping_names.contains("self") {
+                    continue;
+                }
+                if let Some(t) = self_ty {
+                    out.push(leaf_of(t.to_string()));
+                }
+            }
+            syn::FnArg::Typed(pt) => {
+                if type_borrows(&pt.ty) {
+                    continue;
+                }
+                let Some(name) = single_pat_ident(&pt.pat) else { continue };
+                if escaping_names.contains(&name) {
+                    continue;
+                }
+                if let Some(t) = type_path(&pt.ty, uses) {
+                    out.push(leaf_of(t));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[derive(Default)]
+struct EscapeSites<'a> {
+    /// `return e` operands and the body's tail expression.
+    roots: Vec<&'a syn::Expr>,
+    /// `let NAME = init` — single-ident binders only (a destructuring binder cannot name the value).
+    lets: Vec<(String, &'a syn::Expr)>,
+    /// `lhs = rhs`; `Some(name)` for a plain local lvalue, `None` for a field/index/deref lvalue.
+    assigns: Vec<(Option<String>, &'a syn::Expr)>,
+    /// `recv.m(args…)` where the receiver is a plain local name.
+    method_args: Vec<(String, Vec<&'a syn::Expr>)>,
+}
+
+impl<'a> EscapeSites<'a> {
+    /// `tail` says whether this block's trailing expression is in RETURN position for the unit.
+    fn walk_block(&mut self, b: &'a syn::Block, tail: bool) {
+        for (i, st) in b.stmts.iter().enumerate() {
+            let last = i + 1 == b.stmts.len();
+            match st {
+                syn::Stmt::Local(l) => {
+                    if let Some(init) = &l.init {
+                        if let Some(n) = single_pat_ident(&l.pat) {
+                            self.lets.push((n, &init.expr));
+                        }
+                        self.walk_expr(&init.expr);
+                        if let Some((_, d)) = &init.diverge {
+                            self.walk_expr(d);
+                        }
+                    }
+                }
+                syn::Stmt::Expr(e, semi) => {
+                    if tail && last && semi.is_none() {
+                        self.roots.push(e);
+                    }
+                    self.walk_expr(e);
+                }
+                syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+            }
+        }
+    }
+    fn walk_expr(&mut self, e: &'a syn::Expr) {
+        match e {
+            syn::Expr::Return(r) => {
+                if let Some(v) = &r.expr {
+                    self.roots.push(v);
+                }
+            }
+            syn::Expr::Assign(a) => match &*a.left {
+                // `x = Guard::new()` — an escape only if `x` itself escapes. A MULTI-segment path is a
+                // static/const (`GLOBAL = …`), which is storage this scope does not own.
+                syn::Expr::Path(p) if p.qself.is_none() => {
+                    self.assigns
+                        .push((p.path.get_ident().map(|i| i.to_string()), &a.right));
+                }
+                // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own.
+                syn::Expr::Field(_) | syn::Expr::Index(_) | syn::Expr::Unary(_) => {
+                    self.assigns.push((None, &a.right));
+                }
+                // `_ = Guard::new();` — the DISCARD spelling. It is not an escape at all: the value is
+                // dropped at the end of the statement, in THIS scope. Recording it as one made the
+                // wildcard-assign position silent in every construction spelling and REGRESSED the
+                // assoc-fn spelling, which the shipped code charged. (Caught by the position matrix,
+                // not by reading the code.)
+                _ => {}
+            },
+            syn::Expr::MethodCall(m) => {
+                if let syn::Expr::Path(p) = &*m.receiver {
+                    if let Some(id) = p.path.get_ident() {
+                        self.method_args
+                            .push((id.to_string(), m.args.iter().collect()));
+                    }
+                }
+            }
+            // SUPPRESSED DESTRUCTORS. `mem::forget(g)` and `ManuallyDrop::new(g)` are the two std
+            // spellings whose whole purpose is that the value's `Drop` never runs. Charging them is a
+            // FABRICATION, not a conservative over-approximation, and it is one the shipped assoc-fn
+            // route already made. Routed through the escape machinery rather than a special case at the
+            // construction site, so the BOUND form (`let g = Guard::new(); mem::forget(g);`) and the
+            // inline form (`ManuallyDrop::new(Guard(f))`) get the same answer. Matched on the LEAF
+            // (`forget` / `ManuallyDrop::new`) so `std::mem::forget`, `mem::forget` and a
+            // `use std::mem::forget;` bare call all land.
+            syn::Expr::Call(c) => {
+                if let syn::Expr::Path(p) = &*c.func {
+                    let full = path_to_string(&p.path);
+                    let suppresses = full == "forget"
+                        || full.ends_with("mem::forget")
+                        || full == "ManuallyDrop::new"
+                        || full.ends_with("::ManuallyDrop::new");
+                    if suppresses {
+                        for a in &c.args {
+                            self.roots.push(a);
+                        }
+                    }
+                }
+            }
+            // A CLOSURE's own return value leaves the closure, and from there this scope cannot see
+            // where it goes. Measured on sharded-slab: `Slab::get` builds its `Entry` inside
+            // `shard.with_slot(key, |slot| … Some(Entry { .. }))` and returns it through TWO frames,
+            // so without this the guard's `Drop` was charged to a `&self` accessor that releases
+            // nothing. Closure bodies are walked lexically by the collector, so the two halves have
+            // to agree about them.
+            syn::Expr::Closure(c) => self.roots.push(&c.body),
+            _ => {}
+        }
+        for_each_child_expr(e, &mut |c| self.walk_expr(c));
+        // A nested block is walked ONLY to find further escape SITES (`return`, an assignment, a method
+        // call on an escaping name). Its trailing expression is NOT a root: `let x = if c { Guard::new()
+        // } else { … };` has an if-block whose tail is a value, but the value lands in `x`, not in the
+        // caller. Treating every nested tail as a return made the ternary position silent in all five
+        // construction spellings. Tail position propagates through `mark_escape`'s value-child walk
+        // instead, which only ever descends from a genuine root.
+        for_each_child_block(e, &mut |b| self.walk_block(b, false));
+    }
+}
+
+/// Mark one escaping expression: record any construction leaf it builds, any local NAME it hands
+/// out, and recurse through the value positions that carry a value outward.
+fn mark_escape(
+    e: &syn::Expr,
+    uses: &HashMap<String, String>,
+    fields: &FieldIndex,
+    names: &mut std::collections::HashSet<String>,
+    leaves: &mut std::collections::HashSet<String>,
+) {
+    if let Some(l) = ctor_leaf_of_expr(e, uses, fields) {
+        leaves.insert(l);
+    }
+    if let syn::Expr::Path(p) = e {
+        if p.qself.is_none() {
+            if let Some(id) = p.path.get_ident() {
+                names.insert(id.to_string());
+            }
+        }
+    }
+    // A FIELD/INDEX of a name also hands that name's storage outward (`fn into_inner(self) -> T
+    // { self.0 }` must not charge `self`'s Drop — the value moves to the caller).
+    if let syn::Expr::Field(f) = e {
+        if let syn::Expr::Path(p) = &*f.base {
+            if let Some(id) = p.path.get_ident() {
+                names.insert(id.to_string());
+            }
+        }
+    }
+    // `vec![Guard::new()]` / `Some(g)` written through a macro, in tail position. syn does not parse a
+    // macro body, so without this the idiomatic collection literal reads as NOT escaping and every
+    // `fn make() -> Vec<Guard> { vec![Guard::new()] }` fabricates the guard's Drop onto the factory.
+    if let syn::Expr::Macro(m) = e {
+        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        if let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) {
+            for sub in &exprs {
+                mark_escape(sub, uses, fields, names, leaves);
+            }
+        }
+        return;
+    }
+    for_each_value_child(e, &mut |c| mark_escape(c, uses, fields, names, leaves));
+}
+
+/// Value-position children of an expression — the positions through which a constructed value can
+/// travel OUT of the expression it was written in (`Ok(g)`, `Owner { g }`, `(g, 1)`, `[g]`, `&g`,
+/// `Box::new(g)`, `if c { g } else { h }`, `vec![g]`). Deliberately NOT the whole subtree: a `while`
+/// condition or a `for` iterator carries nothing outward.
+fn for_each_value_child<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Expr)) {
+    match e {
+        syn::Expr::Paren(p) => f(&p.expr),
+        syn::Expr::Group(g) => f(&g.expr),
+        syn::Expr::Try(t) => f(&t.expr),
+        syn::Expr::Await(a) => f(&a.base),
+        syn::Expr::Reference(r) => f(&r.expr),
+        syn::Expr::Unary(u) => f(&u.expr),
+        syn::Expr::Cast(c) => f(&c.expr),
+        syn::Expr::Unsafe(u) => tail_expr_of(&u.block).into_iter().for_each(&mut *f),
+        syn::Expr::Block(b) => tail_expr_of(&b.block).into_iter().for_each(&mut *f),
+        syn::Expr::Call(c) => c.args.iter().for_each(&mut *f),
+        // ARGUMENTS ONLY, never the RECEIVER. `fn hash_xof(..) -> Result<()> { let mut h =
+        // Hasher::new(t)?; h.update(data)?; h.finish_xof(buf) }` (openssl) has a tail method call whose
+        // receiver is a local that DIES here — reading it as an escape suppressed the guard in every
+        // such shape, which is the commonest way a local guard is used at all. And a receiver that
+        // really IS consumed (`g.into_inner()`) hands the value to a callee that this same rule charges
+        // for its by-value parameter, so the caller still inherits the effect transitively. Both
+        // readings therefore land on "charge", by different routes; escaping the receiver only ever
+        // lost rows.
+        syn::Expr::MethodCall(m) => m.args.iter().for_each(f),
+        syn::Expr::Struct(s) => s.fields.iter().for_each(|fv| f(&fv.expr)),
+        syn::Expr::Tuple(t) => t.elems.iter().for_each(&mut *f),
+        syn::Expr::Array(a) => a.elems.iter().for_each(&mut *f),
+        syn::Expr::Repeat(r) => f(&r.expr),
+        syn::Expr::If(i) => {
+            tail_expr_of(&i.then_branch).into_iter().for_each(&mut *f);
+            if let Some((_, e)) = &i.else_branch {
+                f(e);
+            }
+        }
+        syn::Expr::Match(m) => m.arms.iter().for_each(|a| f(&a.body)),
+        _ => {}
+    }
+}
+
+fn tail_expr_of(b: &syn::Block) -> Option<&syn::Expr> {
+    match b.stmts.last() {
+        Some(syn::Stmt::Expr(e, None)) => Some(e),
+        _ => None,
+    }
+}
+
+/// Sub-expressions to keep SCANNING for escape SITES (`return`/assignment/method-call), as opposed to
+/// the narrower value-carrying positions above. This one is the whole expression subtree.
+fn for_each_child_expr<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Expr)) {
+    use syn::Expr::*;
+    match e {
+        Array(x) => x.elems.iter().for_each(f),
+        Assign(x) => {
+            f(&x.left);
+            f(&x.right);
+        }
+        Await(x) => f(&x.base),
+        Binary(x) => {
+            f(&x.left);
+            f(&x.right);
+        }
+        Break(x) => x.expr.iter().for_each(|e| f(e)),
+        Call(x) => {
+            f(&x.func);
+            x.args.iter().for_each(&mut *f);
+        }
+        Cast(x) => f(&x.expr),
+        Field(x) => f(&x.base),
+        ForLoop(x) => f(&x.expr),
+        Group(x) => f(&x.expr),
+        If(x) => {
+            f(&x.cond);
+            if let Some((_, e)) = &x.else_branch {
+                f(e);
+            }
+        }
+        Index(x) => {
+            f(&x.expr);
+            f(&x.index);
+        }
+        Let(x) => f(&x.expr),
+        Match(x) => {
+            f(&x.expr);
+            x.arms.iter().for_each(|a| f(&a.body));
+        }
+        MethodCall(x) => {
+            f(&x.receiver);
+            x.args.iter().for_each(&mut *f);
+        }
+        Paren(x) => f(&x.expr),
+        Range(x) => {
+            x.start.iter().for_each(|e| f(e));
+            x.end.iter().for_each(|e| f(e));
+        }
+        Closure(x) => f(&x.body),
+        Reference(x) => f(&x.expr),
+        Repeat(x) => {
+            f(&x.expr);
+            f(&x.len);
+        }
+        Return(x) => x.expr.iter().for_each(|e| f(e)),
+        Struct(x) => x.fields.iter().for_each(|fv| f(&fv.expr)),
+        Try(x) => f(&x.expr),
+        Tuple(x) => x.elems.iter().for_each(f),
+        Unary(x) => f(&x.expr),
+        While(x) => f(&x.cond),
+        Yield(x) => x.expr.iter().for_each(|e| f(e)),
+        _ => {}
+    }
+}
+
+/// Blocks reachable from an expression, walked to find further escape SITES. A closure body is
+/// included: `let f = || REGISTRY.push(Guard::new());` is walked lexically by the collector too, so
+/// the two must agree about what it does.
+fn for_each_child_block<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Block)) {
+    use syn::Expr::*;
+    match e {
+        Block(x) => f(&x.block),
+        Unsafe(x) => f(&x.block),
+        If(x) => f(&x.then_branch),
+        ForLoop(x) => f(&x.body),
+        Loop(x) => f(&x.body),
+        While(x) => f(&x.body),
+        TryBlock(x) => f(&x.block),
+        Async(x) => f(&x.block),
+        // The closure's own tail was pushed as an escape ROOT above; its body is walked for further
+        // sites through `for_each_child_expr`.
+        Closure(_) => {}
+        _ => {}
+    }
+}
+
 /// ⟨peek-scope-attribution⟩ Every qual reachable by walking `rev` (callee -> callers, the inverse of the
 /// normal `calls` graph) BACKWARD from `start` — i.e. `start` itself plus every ANCESTOR that could call
 /// into it, directly or transitively. Cycle-safe (a `seen` set, not a depth bound): a caller cycle in real

@@ -1337,6 +1337,80 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;
 
+    // TRANSITIVE DROP-OWNER closure (#3, FIELD edition — R49): constructing a struct `T` also runs the drop
+    // glue of any LOCAL drop-type `T` OWNS through a field — directly (`_g: Guard`), via a collection element
+    // (`_v: Vec<Guard>`, carried by `field_elem`), or transitively (`_s: Session` where `Session` owns a
+    // Guard). The per-call drop detection charges only a local OF the drop-type itself; a guard held as a
+    // FIELD dropped silent-pure. `owned_drops[T]` = the local drop-types edged when a `T` is constructed.
+    // Gated to LOCAL drop-types reached through LOCAL field types, so an external field's invisible Drop is
+    // never fabricated. Computed to a fixpoint (monotone; a struct owning itself via `Box` terminates).
+    let owned_drops: HashMap<String, BTreeSet<String>> = if merged.drop_types.is_empty() {
+        HashMap::new()
+    } else {
+        // A field type's LEAF (`type_path` may qualify it — `inner: ffi::Deflate` — but `owned_drops`,
+        // `drop_types`, and the struct keys are all LEAF-keyed, so compare by leaf or the transitive
+        // owner chain breaks across modules).
+        let candidates = |t: &str| -> Vec<String> {
+            let leaf = |ty: &String| ty.rsplit("::").next().unwrap_or(ty).to_string();
+            let mut v: Vec<String> = Vec::new();
+            if let Some(m) = fields.get(t) {
+                v.extend(m.values().map(&leaf));
+            }
+            if let Some(m) = field_elem.get(t) {
+                v.extend(m.values().map(&leaf));
+            }
+            v
+        };
+        let all_types: BTreeSet<String> = fields.keys().chain(field_elem.keys()).cloned().collect();
+        let mut owned: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for t in &all_types {
+            let s: BTreeSet<String> = candidates(t)
+                .into_iter()
+                .filter(|c| merged.drop_types.contains(c))
+                .collect();
+            if !s.is_empty() {
+                owned.insert(t.clone(), s);
+            }
+        }
+        loop {
+            let mut changed = false;
+            for t in &all_types {
+                let mut add: BTreeSet<String> = BTreeSet::new();
+                for c in candidates(t) {
+                    if &c != t {
+                        if let Some(inner) = owned.get(&c) {
+                            add.extend(inner.iter().cloned());
+                        }
+                    }
+                }
+                if !add.is_empty() {
+                    let e = owned.entry(t.clone()).or_default();
+                    for d in add {
+                        if e.insert(d) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        owned
+    };
+    // DROP-RELEVANT LEAVES — the set the collector gates its `<construct>` markers on. Hoisted ABOVE
+    // Pass B (it used to sit beside the call loop) because the marker is now emitted at the construction
+    // EXPRESSION, inside the walk, and the walk needs to know which types are worth marking: without a
+    // gate every `Some(..)`/`Ok(..)`/`Vec::new()` in the tree would push a synthetic call nobody reads.
+    // Both halves belong in it — a type with its own `impl Drop`, and a type that OWNS one through a
+    // field (the R49 field edition, whose charge is keyed on constructing the OWNER).
+    let drop_relevant: std::collections::HashSet<String> = merged
+        .drop_types
+        .iter()
+        .cloned()
+        .chain(owned_drops.keys().cloned())
+        .collect();
+
     // ROUND 2 PARSE (parallel): files whose decls were cached but whose FnInfos are STALE (the merged
     // decl index moved) — exactly the files a decl-changing edit invalidates. On a body-only edit this
     // set is empty; on a decl edit it is "everything else", re-parsed in parallel (degrade-to-full).
@@ -1440,7 +1514,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let mut out: Vec<FnInfo> = Vec::new();
             let mut idx = loc_idx;
             let mut u = uses.clone();
-            scan_items(&file.items, &modpath, locs, &mut idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &mut u, &mut out);
+            scan_items(&file.items, &modpath, locs, &mut idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &drop_relevant, &mut u, &mut out);
             (out, idx, u)
         }));
         match walked {
@@ -1658,67 +1732,6 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // join (`dispatch:<owner>.<member>` has a normative detail that re-deriving would destroy), so the set
     // can no longer be only compile-time literals.
     let mut unknown_why: HashMap<String, BTreeSet<String>> = HashMap::new();
-    // TRANSITIVE DROP-OWNER closure (#3, FIELD edition — R49): constructing a struct `T` also runs the drop
-    // glue of any LOCAL drop-type `T` OWNS through a field — directly (`_g: Guard`), via a collection element
-    // (`_v: Vec<Guard>`, carried by `field_elem`), or transitively (`_s: Session` where `Session` owns a
-    // Guard). The per-call drop detection charges only a local OF the drop-type itself; a guard held as a
-    // FIELD dropped silent-pure. `owned_drops[T]` = the local drop-types edged when a `T` is constructed.
-    // Gated to LOCAL drop-types reached through LOCAL field types, so an external field's invisible Drop is
-    // never fabricated. Computed to a fixpoint (monotone; a struct owning itself via `Box` terminates).
-    let owned_drops: HashMap<String, BTreeSet<String>> = if merged.drop_types.is_empty() {
-        HashMap::new()
-    } else {
-        // A field type's LEAF (`type_path` may qualify it — `inner: ffi::Deflate` — but `owned_drops`,
-        // `drop_types`, and the struct keys are all LEAF-keyed, so compare by leaf or the transitive
-        // owner chain breaks across modules).
-        let candidates = |t: &str| -> Vec<String> {
-            let leaf = |ty: &String| ty.rsplit("::").next().unwrap_or(ty).to_string();
-            let mut v: Vec<String> = Vec::new();
-            if let Some(m) = fields.get(t) {
-                v.extend(m.values().map(&leaf));
-            }
-            if let Some(m) = field_elem.get(t) {
-                v.extend(m.values().map(&leaf));
-            }
-            v
-        };
-        let all_types: BTreeSet<String> = fields.keys().chain(field_elem.keys()).cloned().collect();
-        let mut owned: HashMap<String, BTreeSet<String>> = HashMap::new();
-        for t in &all_types {
-            let s: BTreeSet<String> = candidates(t)
-                .into_iter()
-                .filter(|c| merged.drop_types.contains(c))
-                .collect();
-            if !s.is_empty() {
-                owned.insert(t.clone(), s);
-            }
-        }
-        loop {
-            let mut changed = false;
-            for t in &all_types {
-                let mut add: BTreeSet<String> = BTreeSet::new();
-                for c in candidates(t) {
-                    if &c != t {
-                        if let Some(inner) = owned.get(&c) {
-                            add.extend(inner.iter().cloned());
-                        }
-                    }
-                }
-                if !add.is_empty() {
-                    let e = owned.entry(t.clone()).or_default();
-                    for d in add {
-                        if e.insert(d) {
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        owned
-    };
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
@@ -1890,28 +1903,37 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let classified = candor_classify::classify(cr_real, &path_real)
                 .or_else(|| scan_builder_entry_effect(cr_real, &path_real))
                 .or(if model_sdk { Some("Llm") } else { None });
-            // DROP-GLUE detection: a `T::assoc()` ASSOCIATED-FN call (a CONSTRUCTOR like `Guard::new`)
-            // where `T` is a LOCAL drop type means a `T` value is CREATED in this scope and dropped at exit.
-            // Record `T` so we edge to `T::drop` after the loop. CRUCIALLY gated to `!c.method`: a METHOD
-            // call (`reg.poll()`, recorded typed as `Registration::poll`) operates on a BORROW and does NOT
-            // own/drop the value here — including those over-connected every borrow-site to the drop body
-            // (tokio: 170 fns). A constructor is `Type::fn(..)` syntax (an associated fn, `method=false`).
-            // Excludes `T::drop` itself.
-            if !merged.drop_types.is_empty() && !c.method && c.path.contains("::") && c.leaf != "drop" {
-                if let Some(ty) = tail2(&c.path).and_then(|t2| t2.split("::").next().map(str::to_string)) {
-                    // Direct: a local of the drop-type itself (UNCHANGED — the shipped behavior).
-                    if merged.drop_types.contains(&ty) {
-                        drops_here.insert(ty.clone());
-                    }
-                    // FIELD edition (R49): constructing `ty` also runs the drop glue of any local drop-type
-                    // it transitively OWNS through a field — ADDITIVE, and charged only when the value can't
-                    // escape via the return (the conservative gate above), so it never fabricates.
-                    if !returns_escapable {
-                        if let Some(owned) = owned_drops.get(&ty) {
-                            drops_here.extend(owned.iter().cloned());
-                        }
+            // DROP-GLUE detection, ONE route. A `Type::<construct>` marker says the collector saw this
+            // body CONSTRUCT a `Type` — in ANY position, in any of the three construction spellings —
+            // and that the value does not lexically escape the scope. Its `Drop::drop` therefore runs
+            // at scope exit: an implicit edge the syntactic call graph never sees.
+            //
+            // This REPLACES a `tail2`-on-every-call heuristic that lived here, and the replacement is
+            // the point rather than a refactor. That rule could only see the `Type::assoc()` spelling,
+            // so `Guard(f)` — a single-segment `Expr::Call`, the newtype-guard idiom — failed its
+            // `contains("::")` test and `use m::Guard; Guard(f)` presented `m` as the type. Beside it
+            // sat a BINDER-keyed marker in the collector, which is where the other half of the vein
+            // was. Keying both on the construction expression is what makes the positions equal, and
+            // deleting the second authority is what stops them drifting apart again.
+            if c.leaf == CONSTRUCT_MARKER {
+                let ty = c.path.split("::").next().unwrap_or("").to_string();
+                if merged.drop_types.contains(&ty) {
+                    drops_here.insert(ty.clone());
+                }
+                // FIELD edition (R49): constructing `ty` also runs the drop glue of any local drop-type
+                // it transitively OWNS through a field. The collector's lexical escape gate has already
+                // refused an escaping construction; `returns_escapable` is kept here as a SECOND, purely
+                // NARROWING conjunct on this half alone, so the field route can only lose charges
+                // relative to what shipped — R49's A/B is not being re-opened by this change.
+                if !returns_escapable {
+                    if let Some(owned) = owned_drops.get(&ty) {
+                        drops_here.extend(owned.iter().cloned());
                     }
                 }
+                // The marker is consumed HERE and nowhere else: it names no crate, resolves to no unit,
+                // and must not reach the κ ledger's call tally (an earlier cross-crate marker inflated
+                // exactly that count, which the envelope test caught).
+                continue;
             }
             // κ ledger: a qualified call into a declared dependency. (A bare leaf has no `::`, so it
             // can't name a crate; a local module sharing a dep's name is the rare accepted ambiguity.)

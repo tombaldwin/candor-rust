@@ -176,9 +176,65 @@ pub(crate) struct CallCollector<'a> {
     /// implements), entirely after both recursion halves have already run. See the module doc at the
     /// `out_of_scope` block in `scan.rs` for the full mechanism and its soundness argument.
     pub(crate) dispatch_sites: std::collections::BTreeSet<(String, String)>,
+    /// DROP-GLUE: the local type leaves whose construction is worth marking — every type with a local
+    /// `impl Drop`, plus every type that transitively OWNS one through a field (`owned_drops`' keys).
+    /// The gate is here, not at consumption, purely so the marker stream stays tiny: without it every
+    /// `Some(..)`/`Ok(..)`/`Vec::new()` in the tree would push a synthetic call nobody reads.
+    pub(crate) drop_relevant: &'a std::collections::HashSet<String>,
+    /// …and the leaves whose construction ESCAPES this body, which must NOT be marked. See
+    /// `lang::escaping_ctor_leaves` for what counts as an escape and why this half is load-bearing.
+    pub(crate) escaping_ctors: std::collections::HashSet<String>,
+    /// Marker de-duplication: one `T::<construct>` per type per body is all the consumer needs (it
+    /// inserts into a set), and a hot loop constructing guards would otherwise push thousands.
+    pub(crate) marked_ctors: std::collections::HashSet<String>,
+    /// Are we inside a PATTERN? syn 2 represents `Pat::Path` with the very same `ExprPath` node an
+    /// expression uses, so `match &self.0 { Inner::Empty => .. }` reaches `visit_expr_path` and reads
+    /// as a construction of `Inner`. Measured on isahc: `AsyncBody::len(&self)`, whose body is one
+    /// `match` over three arms, was charged the agent `Handle`'s `Drop`. A pattern MATCHES a value,
+    /// it never builds one.
+    pub(crate) in_pattern: bool,
 }
 
 impl<'a> CallCollector<'a> {
+    /// DROP-GLUE, the single emission point. `leaf` is whatever `lang::ctor_leaf_from_*` returned for
+    /// the construction expression in hand; a type with no local `Drop` (and owning none) is not
+    /// `drop_relevant` and costs nothing, and a construction whose value ESCAPES this scope is refused
+    /// because its destructor runs in the caller's frame (R49).
+    ///
+    /// Called from the three expression shapes a construction can take — a CALL (`Guard::new()`,
+    /// `Guard(f)`, `E::V(f)`), a STRUCT LITERAL (`Guard { .. }`, `E::V { .. }`) and a bare VALUE PATH
+    /// (`UnitGuard`, `E::V`) — and from nowhere else. It is deliberately NOT hung off a binder: the
+    /// vein this closes was 16 of 17 executed positions silent because the marker fired only under
+    /// `Pat::Ident`, so `let _ = Guard{..}`, a bare statement, a call argument, an array element, a
+    /// `match` scrutinee, a tuple destructuring, `v.push(..)` and ten more read silent-pure.
+    pub(crate) fn note_construction(&mut self, leaf: Option<String>) {
+        let Some(leaf) = leaf else { return };
+        if !self.drop_relevant.contains(&leaf) || self.escaping_ctors.contains(&leaf) {
+            return;
+        }
+        if !self.marked_ctors.insert(leaf.clone()) {
+            return;
+        }
+        // Instrument the PRECONDITION, not just the output (the standing bar, and the sibling of
+        // `CANDOR_TYPESURFACE_DEBUG` in scan.rs): a report diff cannot show that a marker fired on the
+        // WRONG leaf, only that some row moved. Every collision found while building this — tokio's
+        // `Ordering::Acquire`, isahc's `match` pattern, the `self: Pin<&mut Self>` receiver — was
+        // identified by reading this stream, and by reasoning about the diff not at all.
+        if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
+            eprintln!("CTOR-MARK {} in {}", leaf, self.modpath);
+        }
+        self.calls.push(Call {
+            path: format!("{leaf}::{CONSTRUCT_MARKER}"),
+            leaf: CONSTRUCT_MARKER.to_string(),
+            str_arg: None,
+            path_lits_partial: false,
+            path_lit2: None,
+            typed: false,
+            method: false,
+            is_macro: false,
+        });
+    }
+
     /// What a bare NAME was imported as, consulting the body-level `use` map first and the file-level one
     /// second (a body-level `use` shadows a file-level import of the same name). Returns `None` for a name
     /// no `use` brought in — which is the honest answer for a name declared in this very module.
@@ -1319,6 +1375,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             && candor_classify::fs_path_arity(&leaf) == 2;
                         let path_lit2 = if two_path { positional_str_lit(&node.args, 1) } else { None };
                         let path_lits_partial = two_path && path_lit2.is_none();
+                        // DROP-GLUE, spelling 1 of 3: a CALL that constructs. `Guard::new()` (the
+                        // assoc-fn form scan.rs used to key on directly) and `Guard(f)` / `E::V(f)`
+                        // (the tuple-struct form, which had NO route at all — it is a single-segment
+                        // `Expr::Call`, so it failed the old `contains("::")` test, and the qualified
+                        // spelling's `tail2` head is the MODULE). Read off the RESOLVED path, after
+                        // fn-alias and qself restoration, so `<Daemon>::new()` still keys on Daemon.
+                        let ctor = crate::lang::ctor_leaf_from_call_path(&path, self.uses);
+                        self.note_construction(ctor);
                         self.calls.push(Call { path, leaf, str_arg, typed: false, method,
                                                is_macro: false, path_lits_partial, path_lit2 });
                     }
@@ -1986,7 +2050,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
             }
         }
+        // DROP-GLUE, spelling 3 of 3: a bare VALUE PATH that constructs — a unit struct (`UnitGuard`)
+        // or a unit enum variant (`State::Open`, typed as the ENUM). Gated by `is_type_ident` inside
+        // `ctor_leaf_from_value_path`, so a local, a `SCREAMING_SNAKE` const and a module path yield
+        // nothing. A path in CALLEE position (`Guard::new`) has a non-type leaf and yields nothing too,
+        // so the call arm above owns that spelling.
+        if node.qself.is_none() && !self.in_pattern {
+            let ctor = crate::lang::ctor_leaf_from_value_path(
+                &path_to_string(&node.path), self.uses, self.fields);
+            self.note_construction(ctor);
+        }
         syn::visit::visit_expr_path(self, node);
+    }
+    /// DROP-GLUE, spelling 2 of 3: a STRUCT LITERAL (`Guard { .. }`, or `E::V { .. }`, typed as the
+    /// enum). syn walks the literal's `Path` as a `Path`, never as an `ExprPath`, so neither of the
+    /// other two arms can see it — and the previous marker only fired when such a literal was the
+    /// initializer of a `Pat::Ident` `let`, which is one position out of seventeen.
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if node.qself.is_none() {
+            let ctor = crate::lang::ctor_leaf_of_expr(
+                &syn::Expr::Struct(node.clone()), self.uses, self.fields);
+            self.note_construction(ctor);
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+    /// See `in_pattern`. Scoped rather than set-once: a pattern can contain a nested expression
+    /// (`Pat::Const`, a range bound), and an `if` guard's body is walked after the pattern.
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        let saved = std::mem::replace(&mut self.in_pattern, true);
+        syn::visit::visit_pat(self, node);
+        self.in_pattern = saved;
     }
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
         // Type each ANNOTATED closure param (`|c: &Conn| c.send()`) into `vars` so the body's `c.method()`
@@ -2261,28 +2354,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             self.vars.insert(id.ident.to_string(), ty.clone());
                             // It typed after all — the provenance marker is redundant and must not fire.
                             self.dep_bound_vars.remove(&id.ident.to_string());
-                            // DROP-GLUE via STRUCT-LITERAL / UNIT construction (#6). The existing drop-glue
-                            // catches only `let g = T::new()` constructor CALLS — a `let g = Guard { .. };`
-                            // or bare `let g = UnitGuard;` builds a `T` value just the same (its `impl Drop`
-                            // runs at scope exit) but emits NO call, so an effectful-Drop guard built this
-                            // way read silent-pure. Emit a synthetic CONSTRUCTION marker (`T::<construct>`,
-                            // method=false, an angle-bracket leaf that can't collide with a real fn or a
-                            // crate classifier) so the call-loop's drop detection — gated on `drop_types`
-                            // (LOCAL `impl Drop` only) — picks `T` up and edges to `T::drop`. A non-drop
-                            // type's marker is inert (filtered out there); a plain typed binding (a CALL
-                            // init, already handled) is excluded — only literal construction emits this.
-                            if matches!(&*init.expr, syn::Expr::Struct(_) | syn::Expr::Path(_)) {
-                                let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
-                                self.calls.push(Call {
-                                    path: format!("{ty_leaf}::<construct>"),
-                                    leaf: "<construct>".to_string(),
-                                    str_arg: None,
-                                    path_lits_partial: false, path_lit2: None,
-                                    typed: false,
-                                    method: false,
-                                    is_macro: false,
-                                });
-                            }
+                            // (The DROP-GLUE marker used to be emitted HERE, off the `Pat::Ident` binder.
+                            // That is what made the charge BINDER-keyed: `let g = Guard{..}` was charged
+                            // and the other sixteen executed positions a construction can occupy were
+                            // silent, while the tuple-struct spelling `Guard(f)` never typed through
+                            // `ctor_type` at all and so had no route in ANY position. The rule now lives
+                            // at the construction expression — `note_construction`, reached from the
+                            // three expression shapes — and this site is REMOVED rather than left beside
+                            // it, because two paths computing one fact are free to disagree and that is
+                            // exactly how this vein opened.)
                         } else if let syn::Expr::MethodCall(m) = &*init.expr {
                             // A `.clone()` REBIND is type-preserving — `Clone::clone(&self) -> Self`, so the
                             // binding has the receiver's type: `let b = a.clone(); b.run()` must resolve
