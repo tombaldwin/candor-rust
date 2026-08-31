@@ -144,6 +144,7 @@ pub(crate) fn cmd_diff(args: &[String]) -> i32 {
                 } else {
                     ""
                 };
+                let hint = if other == "--policy" { " — `diff` is a comparative query with no policy-relative verdict (its SPEC §3.1 JSON shape carries no policy-derived field); apply a policy to this report with `candor-query gate --report <locator> --policy <file>`, or use whatif/fix/fix-gate/unverified for a policy-relative pre-edit check." } else { hint };
                 eprintln!("candor-query diff: unknown flag `{other}`{hint}\n  known flags: --json");
                 return 2;
             }
