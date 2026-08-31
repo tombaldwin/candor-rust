@@ -21,8 +21,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORACLE="$HERE/../run.sh"
 OUT="$HERE/.recall-out"
 
-case "$(uname -s)" in Linux) : ;; *) echo "disclosure-recall battery: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
-command -v strace >/dev/null 2>&1 || { echo "disclosure-recall battery: strace not installed — skipping."; exit 0; }
+# SELF-SKIP exits 3, never 0 — see soundness/oracle.sh's identical comment for why.
+case "$(uname -s)" in Linux) : ;; *) echo "disclosure-recall battery: needs Linux + strace (got $(uname -s)) — skipping."; exit 3 ;; esac
+command -v strace >/dev/null 2>&1 || { echo "disclosure-recall battery: strace not installed — skipping."; exit 3; }
 
 mkdir -p "$OUT"
 rc=0

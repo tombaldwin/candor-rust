@@ -16,12 +16,13 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 
-case "$(uname -s)" in Linux) : ;; *) echo "realworld oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
-command -v strace >/dev/null 2>&1 || { echo "realworld oracle: strace not installed — skipping."; exit 0; }
+# SELF-SKIP exits 3, never 0 — see soundness/oracle.sh's identical comment for why.
+case "$(uname -s)" in Linux) : ;; *) echo "realworld oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 3 ;; esac
+command -v strace >/dev/null 2>&1 || { echo "realworld oracle: strace not installed — skipping."; exit 3; }
 # The verdict is computed by an inline python3 reader. Without it every prediction reads EMPTY and the
 # harness reports a violation on every effectful driver — a missing interpreter would masquerade as a wall
 # of findings. Fail fast and say so, rather than report a violation on every driver at once.
-command -v python3 >/dev/null 2>&1 || { echo "realworld oracle: python3 not found — cannot read candor's report; skipping."; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "realworld oracle: python3 not found — cannot read candor's report; skipping."; exit 3; }
 
 # The repo's .cargo/config forces `-C linker=dylint-link` (for the nightly lint). This oracle uses only
 # candor-scan (stable, no dylint), so override RUSTFLAGS to the normal linker — avoids needing dylint-link

@@ -8,6 +8,12 @@ __pycache__/
 .candor/*.callgraph.json
 .DS_Store
 soundness/realworld/**/r.*.json
+# a rustc ICE during a corpus/A-B run dumps its backtrace into the CWD, which is the repo root when a
+# script `cd`s there first — six landed here in one afternoon (2026-08-31).
+/rustc-ice-*.txt
+# soundness/run.sh's per-run dylint stream (see its own comment) — a debugging aid, not a checked-in
+# artifact.
+soundness/.last-run.dylint.log
 # coverage-gate: entries.json is a regeneratable ~9MB intermediate (per-crate self-scan output feeding
 # classify_check); only covered.tsv/open.tsv, its checked-in DERIVED artifacts, are meant to be committed.
 /eval/coverage-gate/entries.json
