@@ -2598,36 +2598,55 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
     }
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        // R88 SELF-SHADOW GUARD: the bare `let` binder's `trait_vars` mutation (below, in the `Pat::Ident`
-        // arm) must NOT take effect until AFTER this statement's own RHS has been walked — the RHS is
-        // walked a SECOND time, independently, by the trailing `syn::visit::visit_local(self, node)` call
-        // at the bottom of this fn, and a SELF-SHADOWING rebind's RHS refers to the SAME name being bound
-        // (`let mut conn = conn.to_connection()...;`, real shape, mysql_async 0.37.0 `Query::run`). An
-        // EARLY clear of `trait_vars[name]` — correct for every later statement — is ALSO visible to that
-        // second walk of THIS statement's own RHS, which still means the OUTER "conn", and loses ITS
-        // dispatch typing: measured, `Q::run` read `Unknown` (honest — an opaque `run` dispatch through
-        // `ToConnection`) before the R88 patch that added the clear, and fell CONSPICUOUSLY SILENT (zero
-        // calls, zero unresolved, absent from `functions[]` entirely) once it was added — a fabricated
-        // false-clean regression the corpus A/B caught before this commit, not after. Deferred here and
-        // applied once, after the trailing walk, so the RHS resolves against the PRE-rebind state (matching
-        // real Rust scoping) and only LATER statements see the new binding.
-        let mut r88_pending_trait_vars: Option<(String, Vec<String>)> = None;
+        // R88/R92 SELF-SHADOW GUARD: any binder's `vars`/`trait_vars` mutation for the name(s) THIS
+        // statement binds must NOT take effect until AFTER this statement's own RHS has been walked — the
+        // RHS is walked a SECOND time, independently, by the trailing `syn::visit::visit_local(self, node)`
+        // call at the bottom of this fn, and a SELF-SHADOWING rebind's RHS refers to the SAME name being
+        // bound (`let mut conn = conn.to_connection()...;`, real shape, mysql_async 0.37.0 `Query::run`;
+        // `let Msg::Cb(f) = f.produce() else { return }; f.go();`, R92). An EARLY clear of `trait_vars[name]`
+        // — correct for every later statement — is ALSO visible to that second walk of THIS statement's own
+        // RHS, which still means the OUTER binding, and loses ITS dispatch typing: measured, `Q::run` read
+        // `Unknown` (honest — an opaque `run` dispatch through `ToConnection`) before the R88 patch that
+        // first added the clear, and fell CONSPICUOUSLY SILENT (zero calls, zero unresolved, absent from
+        // `functions[]` entirely) once it was added — a fabricated false-clean regression the corpus A/B
+        // caught before that commit shipped, not after. Deferred here and applied once, after the trailing
+        // walk, so the RHS resolves against the PRE-rebind state (matching real Rust scoping) and only
+        // LATER statements see the new binding.
+        //
+        // R88 introduced this ONLY for the bare unannotated `let` (the `Pat::Ident` arm below, which still
+        // pushes its own entry with `clear_vars: false` — its `vars` mutation is more elaborate than a
+        // single insert/remove and stays immediate, unchanged from R88). R92 found the SAME early-mutation
+        // shape, unfixed, in both let-else binders (tuple-variant and struct-variant) below — reused here
+        // rather than given a third ordering rule, per the family rule against two hand-rolled paths
+        // answering one question. `concrete_ty`/`clear_vars` generalise the tuple so a let-else binder's
+        // "no trait leaves, but a concrete field type" alternative (`vars.insert`, not `trait_vars.insert`)
+        // defers exactly like the trait-leaves case — that alternative can ALSO be fed a self-shadowing
+        // RHS and was equally wrong to apply early.
+        let mut pending_bindings: Vec<(String, Vec<String>, Option<String>, bool)> = Vec::new();
         // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
         // TRAIT OBJECT is valid for the REST of the fn (let-else binds fn-wide), so type `d` into
         // `trait_vars` (fn-wide, like any top-level let) → `d.go()` dispatches. Only a `Some`/`Ok` pattern
         // reaches `some_ok_binding` (a refutable `let` without `else` won't compile); a concrete payload
         // yields no leaves. The init/else are walked by the trailing `syn::visit::visit_local` below.
+        //
+        // R92 — SOUNDNESS: this branch (and its two `else if`/`else` siblings below) used to apply its
+        // `vars`/`trait_vars` mutation IMMEDIATELY, before the trailing walk re-resolves this statement's
+        // own RHS. `let Some(f) = f.maybe_produce() else { return }; f.go();` (self-shadow, same shape as
+        // the tuple-variant fixture below) measured identically silent: `resolve_elem_trait_leaves` reads
+        // `self.returns`/`self.trait_vars` for the OLD `f` to decide the NEW `f`'s leaves — a correct read
+        // — but the immediate `insert` then overwrote `trait_vars["f"]` before the trailing walk asked what
+        // `f.maybe_produce()` itself dispatches to, so the producer's own effect vanished the same way.
+        // Deferred into `pending_bindings` (this fn's opening comment) rather than given its own fix.
         if let Some(binding) = some_ok_binding(&node.pat) {
             if let Some(init) = &node.init {
                 let leaves = self.resolve_elem_trait_leaves(&init.expr);
                 if !leaves.is_empty() {
-                    self.vars.remove(&binding);
                     // R71: `let Some(f) = &self.cb else { return }; f();` — same call-syntax gap as
                     // if-let/while-let/match; hedge a callable-leaved binding into `fn_typed_vars`.
                     if Self::leaves_are_callable(&leaves) {
                         self.fn_typed_vars.insert(binding.clone());
                     }
-                    self.trait_vars.insert(binding, leaves);
+                    pending_bindings.push((binding, leaves, None, true));
                 }
             }
         } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&node.pat) {
@@ -2637,36 +2656,39 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // shadows an outer binding can't have its NEW payload resolve to the STALE outer entry via
             // precedence (the exact fabrication class `scoped_binding`'s own doc comment describes: "a
             // shadow that resolves to NOTHING writes nothing... trait_vars still answers").
+            //
+            // R92 — SOUNDNESS: that clear/set used to run HERE, immediately — `enum_variant_binding` reads
+            // the STATIC declared field type of the matched variant (`enum_variant_traits`/`enum_variants`,
+            // independent of any current `vars`/`trait_vars` state), so the values `leaves`/`ty` compute
+            // are correct either way; the bug was applying them before the trailing walk re-resolved this
+            // statement's OWN init expression, which for a self-shadowing bind (`let Msg::Cb(f) = f.produce()
+            // else { return };`) is the same name. Measured: `f.produce()`'s dispatch then looked up the
+            // NEW (wrong) leaves and silently failed to match any method, losing the producer's effect with
+            // `unresolved` never set — see the fixture this fn's opening comment references. Deferred via
+            // `pending_bindings`, reusing R88's mechanism rather than adding a third ordering rule.
             if node.init.is_some() {
-                self.vars.remove(&name);
-                self.trait_vars.remove(&name);
-                if !leaves.is_empty() {
-                    if Self::leaves_are_callable(&leaves) {
-                        self.fn_typed_vars.insert(name.clone());
-                    }
-                    self.trait_vars.insert(name, leaves);
-                } else if let Some(t) = ty {
-                    self.vars.insert(name, t);
+                if Self::leaves_are_callable(&leaves) {
+                    self.fn_typed_vars.insert(name.clone());
                 }
+                pending_bindings.push((name, leaves, ty, true));
             }
         } else {
             // R77 RESIDUAL: the let-else twin of the struct-variant branches above — `let Msg::CbField
             // { f } = m else { return }; f()`. Fn-wide like the tuple-variant let-else form (let-else
             // binds for the REST of the fn), so each bound field is cleared+set directly rather than
             // nested via `scoped_binding` (there is no enclosing block to scope TO).
+            //
+            // R92 — SOUNDNESS: same deferral as the tuple-variant branch immediately above, same reason —
+            // a struct-variant let-else can self-shadow exactly like the tuple-variant form
+            // (`let Msg::CbField { f } = f.produce() else { return }; f.go();`), and each bound field needs
+            // its OWN deferred entry (a struct-variant pattern can bind several fields from one statement).
             let bindings = self.enum_struct_variant_bindings(&node.pat);
             if !bindings.is_empty() && node.init.is_some() {
                 for (name, leaves, ty) in bindings {
-                    self.vars.remove(&name);
-                    self.trait_vars.remove(&name);
-                    if !leaves.is_empty() {
-                        if Self::leaves_are_callable(&leaves) {
-                            self.fn_typed_vars.insert(name.clone());
-                        }
-                        self.trait_vars.insert(name, leaves);
-                    } else if let Some(t) = ty {
-                        self.vars.insert(name, t);
+                    if Self::leaves_are_callable(&leaves) {
+                        self.fn_typed_vars.insert(name.clone());
                     }
+                    pending_bindings.push((name, leaves, ty, true));
                 }
             }
         }
@@ -2894,14 +2916,17 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // routed here rather than reimplemented (the family rule against a second hand-rolled
                     // path answering a question one already owns). Computed against the PRE-rebind state
                     // (safe — a read, not a mutation); the actual `trait_vars` clear/insert is DEFERRED to
-                    // `r88_pending_trait_vars` (see this fn's opening comment) rather than applied here, so
+                    // `pending_bindings` (see this fn's opening comment) rather than applied here, so
                     // a self-shadowing RHS (`let mut conn = conn.to_connection()...;`) still resolves
                     // against the OUTER binding when the trailing walk revisits it. A non-empty result
                     // takes the dispatch route and skips the concrete-type routes below — a dispatch RHS is
                     // a `Field`/`Path`/`MethodCall` receiver shape, never a `ctor_type`/clone-typed concrete
-                    // one, so nothing is lost by skipping them.
+                    // one, so nothing is lost by skipping them. `clear_vars: false` — this arm's own `vars`
+                    // mutation (immediately below, and the ctor_type/clone/tuple routes further down) is
+                    // more elaborate than a single insert/remove and is left immediate, unchanged from R88;
+                    // only the `trait_vars` half defers here.
                     let dispatch_leaves = self.resolve_recv_traits(&init.expr);
-                    r88_pending_trait_vars = Some((id.ident.to_string(), dispatch_leaves.clone()));
+                    pending_bindings.push((id.ident.to_string(), dispatch_leaves.clone(), None, false));
                     if !dispatch_leaves.is_empty() {
                         self.vars.remove(&id.ident.to_string());
                         self.dep_bound_vars.remove(&id.ident.to_string());
@@ -3020,12 +3045,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         syn::visit::visit_local(self, node);
-        // R88 SELF-SHADOW GUARD, continued (see this fn's opening comment): apply the bare `let` dispatch
-        // binding NOW, after the RHS has been walked under the PRE-rebind state — never before.
-        if let Some((name, leaves)) = r88_pending_trait_vars {
+        // R88/R92 SELF-SHADOW GUARD, continued (see this fn's opening comment): apply every deferred
+        // binder's `vars`/`trait_vars` mutation NOW, after the RHS has been walked under the PRE-rebind
+        // state — never before. One entry per bound name (a struct-variant let-else can bind several from
+        // one statement); `clear_vars` and `concrete_ty` are both no-ops for the bare-`let` entry (R88),
+        // which pushes `(name, leaves, None, false)` and so only ever exercises the `trait_vars` half below.
+        for (name, leaves, concrete_ty, clear_vars) in pending_bindings {
+            if clear_vars {
+                self.vars.remove(&name);
+            }
             self.trait_vars.remove(&name);
             if !leaves.is_empty() {
                 self.trait_vars.insert(name, leaves);
+            } else if let Some(t) = concrete_ty {
+                self.vars.insert(name, t);
             }
         }
     }
