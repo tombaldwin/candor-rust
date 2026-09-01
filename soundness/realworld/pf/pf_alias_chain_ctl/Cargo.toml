@@ -1,0 +1,9 @@
+[package]
+name = "pf_alias_chain_ctl"
+version = "0.0.0"
+edition = "2021"
+[[bin]]
+name = "pf_alias_chain_ctl"
+path = "src/main.rs"
+
+[workspace]

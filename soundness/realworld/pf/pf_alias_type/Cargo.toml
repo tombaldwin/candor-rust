@@ -1,0 +1,9 @@
+[package]
+name = "pf_alias_type"
+version = "0.0.0"
+edition = "2021"
+[[bin]]
+name = "pf_alias_type"
+path = "src/main.rs"
+
+[workspace]

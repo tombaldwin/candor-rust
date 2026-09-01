@@ -1,0 +1,9 @@
+[package]
+name = "pf_alias_glob"
+version = "0.0.0"
+edition = "2021"
+[[bin]]
+name = "pf_alias_glob"
+path = "src/main.rs"
+
+[workspace]
