@@ -230,7 +230,7 @@
         .unwrap();
         let returns = ReturnIndex::new();
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
-        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let (fe, ev, evt) = (FieldElemIndex::new(), EnumVariantIndex::new(), EnumVariantTraitIndex::new());
         let fet = FieldElemTraitIndex::new();
         let mut c = CallCollector {
             modpath: String::new(),
@@ -245,7 +245,7 @@
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev,
+            enum_variants: &ev, enum_variant_traits: &evt,
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -278,7 +278,7 @@
         vars.insert("self".to_string(), "App".to_string());
         let returns = ReturnIndex::new();
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
-        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let (fe, ev, evt) = (FieldElemIndex::new(), EnumVariantIndex::new(), EnumVariantTraitIndex::new());
         let fet = FieldElemTraitIndex::new();
         let block: syn::Block =
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
@@ -295,7 +295,7 @@
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev,
+            enum_variants: &ev, enum_variant_traits: &evt,
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -607,6 +607,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let field_elem = FieldElemIndex::new();
         let field_elem_trait = FieldElemTraitIndex::new();
         let enum_variants = EnumVariantIndex::new();
+        let enum_variant_traits = EnumVariantTraitIndex::new();
         let lazy = std::collections::HashSet::new();
         let consts = std::collections::HashMap::new();
         let macros = std::collections::HashMap::new();
@@ -616,7 +617,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
             local_traits: &local_traits, returns: &returns, has_dyn_return: false,
-            field_elem: &field_elem, enum_variants: &enum_variants, elem_of: HashMap::new(),
+            field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, elem_of: HashMap::new(),
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
@@ -4493,7 +4494,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         // struct App { store: Box<dyn Store> }
         tf.entry("App".into()).or_default().insert("store".into(), vec!["Store".into()]);
-        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let (fe, ev, evt) = (FieldElemIndex::new(), EnumVariantIndex::new(), EnumVariantTraitIndex::new());
         let fet = FieldElemTraitIndex::new();
         let run = |src: &str, sig: &str| {
             let sig: syn::Signature = syn::parse_str(sig).unwrap();
@@ -4517,7 +4518,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 returns: &returns,
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
-                enum_variants: &ev,
+                enum_variants: &ev, enum_variant_traits: &evt,
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -4565,7 +4566,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             modpath: String::new(),
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
+                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
@@ -4589,7 +4590,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             modpath: String::new(),
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
+                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
@@ -4611,7 +4612,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut returns = ReturnIndex::new();
         returns.insert("create_pool".to_string(), "sqlx::PgPool".to_string());
         let (ti, td, tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
-        let (fe, ev) = (FieldElemIndex::new(), EnumVariantIndex::new());
+        let (fe, ev, evt) = (FieldElemIndex::new(), EnumVariantIndex::new(), EnumVariantTraitIndex::new());
         let fet = FieldElemTraitIndex::new();
         let block: syn::Block =
             syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
@@ -4628,7 +4629,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev,
+            enum_variants: &ev, enum_variant_traits: &evt,
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -4664,7 +4665,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 returns: &returns,
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
-                enum_variants: &ev,
+                enum_variants: &ev, enum_variant_traits: &evt,
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -5212,7 +5213,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -6246,7 +6247,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -6263,17 +6264,21 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut field_elem_trait = FieldElemTraitIndex::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_variant_traits_tmp: HashMap<String, Option<Vec<String>>> = HashMap::new();
         let mut ti = TraitImplIndex::new();
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
                       &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
-        let enum_variants: EnumVariantIndex =
+        let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let mut enum_variant_traits: EnumVariantTraitIndex =
+            enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -6294,17 +6299,21 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut field_elem_trait = FieldElemTraitIndex::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_variant_traits_tmp: HashMap<String, Option<Vec<String>>> = HashMap::new();
         let mut ti = TraitImplIndex::new();
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
                       &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
-        let enum_variants: EnumVariantIndex =
+        let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let mut enum_variant_traits: EnumVariantTraitIndex =
+            enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -6323,17 +6332,21 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut field_elem_trait = FieldElemTraitIndex::new();
         let mut rets: HashMap<String, Option<String>> = HashMap::new();
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_variant_traits_tmp: HashMap<String, Option<Vec<String>>> = HashMap::new();
         let mut ti = TraitImplIndex::new();
         let mut td: HashMap<String, LocalTrait> = HashMap::new();
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
                       &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
-        let enum_variants: EnumVariantIndex =
+        let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        let mut enum_variant_traits: EnumVariantTraitIndex =
+            enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -6671,13 +6684,197 @@ trait G {
         let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
-                      &mut enum_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut enum_tmp, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
                       &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
         assert_eq!(ev.get("Unit"), None);                           // unit variant: not indexed
         assert_eq!(ev.get("Two"), None);                            // conflicting payloads: dropped
+    }
+
+    /// R77 Pass-A: the `enum_variant_traits` twin of the test above — a DISPATCH-typed (`dyn`/`impl`/
+    /// bounded-generic) single-field payload records its trait leaves, unambiguous ones only.
+    #[test]
+    fn enum_variant_trait_index_records_dispatch_leaves_and_drops_ambiguous() {
+        let src = "enum A { Cb(Box<dyn Fn()>), Pair(i32, i32), Unit, Plain(String) }\n\
+                   trait Greeter { fn greet(&self); }\n\
+                   enum B { Hi(Box<dyn Greeter>) }\n\
+                   enum C { Hi(Box<dyn std::fmt::Debug>) }\n"; // `Hi` conflicts across B and C → ambiguous
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let mut uses = HashMap::new();
+        let mut fields = FieldIndex::new();
+        let mut field_elem = FieldElemIndex::new();
+        let mut field_elem_trait = FieldElemTraitIndex::new();
+        let mut rets: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_tmp: HashMap<String, Option<String>> = HashMap::new();
+        let mut enum_variant_traits_tmp: HashMap<String, Option<Vec<String>>> = HashMap::new();
+        let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
+                      &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new());
+        let evt: EnumVariantTraitIndex =
+            enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        assert_eq!(evt.get("Cb"), Some(&vec!["Fn".to_string()]), "dyn Fn() payload must record the Fn leaf");
+        assert_eq!(evt.get("Plain"), None, "a concrete String payload has no dispatch leaves");
+        assert_eq!(evt.get("Pair"), None, "multi-field variant: not indexed");
+        assert_eq!(evt.get("Unit"), None, "unit variant: not indexed");
+        assert_eq!(evt.get("Hi"), None, "conflicting trait leaves across B/C: dropped, never guess");
+        // The two indexes are mutually exclusive per leaf: `Cb` is dispatch-typed (present here) and
+        // therefore absent from `enum_tmp`/`EnumVariantIndex` (its `type_path` is None for a dyn type).
+        let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
+        assert_eq!(ev.get("Cb"), None, "a dyn payload must not ALSO appear in the plain-type index");
+    }
+
+    /// R77 — SOUNDNESS.md: `match m { Msg::Cb(f) => f() }` silently dropped a callable enum-variant
+    /// payload (`visit_arm` never consulted the dispatch-leaves route the other four binder families
+    /// use). Ground truth: `Cb`'s payload IS called with call syntax, so the function must read
+    /// `Unknown` (an opaque invocation, not a phantom free-fn drop), never silent-pure.
+    #[test]
+    fn r77_enum_tuple_variant_callable_match_arm_reads_unknown_not_silent_pure() {
+        let src = "enum Msg { Cb(Box<dyn Fn()>) }\n\
+                   fn f(m: Msg) { match m { Msg::Cb(cb) => cb() } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "callable tuple-variant match-arm payload must read Unknown: {unres:?}");
+    }
+
+    /// R77 — the if-let TWIN of the match-arm case, explicitly named as a separate open shape in
+    /// SOUNDNESS.md R77 (`visit_expr_if` only ever handled `Some`/`Ok`, never a general local variant).
+    #[test]
+    fn r77_enum_tuple_variant_callable_iflet_reads_unknown() {
+        let src = "enum Msg { Cb(Box<dyn Fn()>) }\n\
+                   fn f(m: Msg) { if let Msg::Cb(cb) = m { cb() } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "callable tuple-variant if-let payload must read Unknown: {unres:?}");
+    }
+
+    /// R77 — the while-let form of the same shape (`visit_expr_while` had the identical Some/Ok-only gap).
+    #[test]
+    fn r77_enum_tuple_variant_callable_whilelet_reads_unknown() {
+        let src = "enum Msg { Cb(Box<dyn Fn()>) }\n\
+                   fn next_msg() -> Msg { Msg::Cb(Box::new(|| {})) }\n\
+                   fn f() { while let Msg::Cb(cb) = next_msg() { cb(); break; } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "callable tuple-variant while-let payload must read Unknown: {unres:?}");
+    }
+
+    /// R77 — the let-else form (`visit_local`'s let-else route had the identical Some/Ok-only gap).
+    #[test]
+    fn r77_enum_tuple_variant_callable_letelse_reads_unknown() {
+        let src = "enum Msg { Cb(Box<dyn Fn()>) }\n\
+                   fn f(m: Msg) { let Msg::Cb(cb) = m else { return }; cb() }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "callable tuple-variant let-else payload must read Unknown: {unres:?}");
+    }
+
+    /// R77 NEVER-CALLED CONTROLS — the over-charge direction. A callable payload BOUND but never invoked
+    /// with call syntax must stay silently pure in every one of the four binder forms: the fix must not
+    /// widen `Unknown` onto a function that never actually calls its payload.
+    #[test]
+    fn r77_enum_tuple_variant_callable_never_called_stays_pure_all_four_forms() {
+        let src = "enum Msg { Cb(Box<dyn Fn()>) }\n\
+                   fn m1(m: Msg) -> bool { match m { Msg::Cb(_cb) => true } }\n\
+                   fn m2(m: Msg) -> bool { if let Msg::Cb(_cb) = m { true } else { false } }\n\
+                   fn next_msg() -> Msg { Msg::Cb(Box::new(|| {})) }\n\
+                   fn m3() -> u32 { let mut n = 0; while let Msg::Cb(_cb) = next_msg() { n += 1; if n > 3 { break; } } n }\n\
+                   fn m4(m: Msg) -> bool { let Msg::Cb(_cb) = m else { return false }; true }\n";
+        let unres = unresolved_of(src);
+        for f in ["m1", "m2", "m3", "m4"] {
+            assert_eq!(unres.get(f), Some(&false), "{f}: a bound-but-never-called payload must stay pure: {unres:?}");
+        }
+    }
+
+    /// R77 REGRESSION GUARD — a genuinely CONCRETE (non-dispatch) tuple-variant payload must still
+    /// resolve via the pre-existing plain-type route (match arm: unchanged since before R77; if-let/
+    /// while-let/let-else: a NEW capability this fix adds, since those forms had NO tuple-variant
+    /// handling at all before R77, dyn or concrete). Must NOT gain Unknown — it types precisely.
+    #[test]
+    fn r77_enum_tuple_variant_concrete_payload_resolves_typed_not_unknown() {
+        let src = "enum Msg { Data(String) }\n\
+                   fn via_match(m: Msg) { match m { Msg::Data(s) => { let _ = s.len(); } } }\n\
+                   fn via_iflet(m: Msg) { if let Msg::Data(s) = m { let _ = s.len(); } }\n";
+        let typed = typed_calls_of(src);
+        assert!(typed.get("via_match").is_some_and(|c| c.iter().any(|p| p == "String::len")),
+                "match-arm concrete payload must type-resolve s.len(): {typed:?}");
+        assert!(typed.get("via_iflet").is_some_and(|c| c.iter().any(|p| p == "String::len")),
+                "if-let concrete payload must type-resolve s.len(): {typed:?}");
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("via_match"), Some(&false), "a typed concrete call must not also read Unknown");
+        assert_eq!(unres.get("via_iflet"), Some(&false), "a typed concrete call must not also read Unknown");
+    }
+
+    /// R77 RESIDUAL — struct-variant fields (`Msg::CbField { f } => f()`) are a DOCUMENTED, still-open
+    /// gap (SOUNDNESS.md R77): no struct-variant-field binder exists yet, for ANY payload type, callable
+    /// or not. This canary pins TODAY's behaviour (still silently pure) so the day someone closes it,
+    /// this test fails loudly instead of the SOUNDNESS row silently going stale.
+    #[test]
+    fn r77_enum_struct_variant_field_is_still_a_documented_open_gap() {
+        let src = "enum Msg { CbField { f: Box<dyn Fn()> } }\n\
+                   fn f(m: Msg) { match m { Msg::CbField { f } => f() } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&false),
+                   "struct-variant field binding is not implemented (SOUNDNESS.md R77, open) — if this \
+                    now reads Unknown, the gap has been closed: update R77 and this canary together: {unres:?}");
+    }
+
+    /// R77 CROSS-INDEX AMBIGUITY REGRESSION GUARD — measured on reqwest 0.13.4's real source in the
+    /// 256-crate A/B: `enum Matcher_ { Custom(Custom) }` (a concrete struct payload) and an UNRELATED
+    /// `enum PolicyKind { Custom(Box<dyn Fn(..)->..>) }` (a callable payload) share the bare variant leaf
+    /// `Custom`. Both `enum_variants`/`enum_variant_traits` are keyed crate-wide by leaf alone, so without
+    /// the cross-index ambiguity guard in `scan_one`, `Matcher_::Custom(ref c) => c.call(dst)` took the
+    /// WRONG (dispatch) route from the unrelated enum, typed `c` as a bare `Fn` with no local impl, and
+    /// SILENTLY DROPPED a call that resolved correctly before R77 (an under-report R77 itself introduced
+    /// on `intercept`, an unrelated concrete-payload function nowhere near a closure). The guard makes a
+    /// colliding leaf ambiguous in BOTH directions and drops it from both indexes (never guess) — this
+    /// pins the SAFE, non-fabricating result: neither side's payload silently inherits the OTHER's route.
+    #[test]
+    fn r77_colliding_variant_leaf_across_unrelated_enums_never_fabricates() {
+        let src = "struct Foo;\n\
+                   impl Foo { fn call(&self) { let _ = std::fs::metadata(\"/x\"); } }\n\
+                   enum A { Same(Foo) }\n\
+                   enum B { Same(Box<dyn Fn()>) }\n\
+                   fn via_a(a: A) { match a { A::Same(x) => x.call() } }\n\
+                   fn via_b(b: B) { match b { B::Same(f) => f() } }\n";
+        let typed = typed_calls_of(src);
+        assert!(!typed.get("via_a").is_some_and(|c| c.iter().any(|p| p == "Foo::call")),
+                "an ambiguous leaf must not resolve to the OTHER enum's shape either: {typed:?}");
+        // The critical safety property: `via_a`'s concrete struct payload must NEVER be typed as a
+        // callable (`fn_typed_vars`) and invoked with call syntax — that would be a fabricated dispatch
+        // resolving through the wrong enum's route. `via_b`'s callable payload correctly stays a target of
+        // `f()` in ITS OWN source, so nothing here can silently attribute a WRONG effect to either
+        // function; both may honestly go silent (never-guess) rather than resolve — see the assertion
+        // below documents that current, safe state so a future change to it is a deliberate decision.
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("via_a"), Some(&false), "via_a must not fabricate Unknown from B's route: {unres:?}");
+        assert_eq!(unres.get("via_b"), Some(&false), "via_b must not fabricate Unknown from A's route: {unres:?}");
+    }
+
+    /// R77 SELF-COLLISION REGRESSION GUARD — measured on moka 0.12.16's real source in the 256-crate A/B.
+    /// `enum ValueOrFunction<V, F: FnOnce() -> V> { Value(V), Function(F) }`: the `Function` variant's
+    /// payload is a BOUNDED GENERIC, not a `dyn` type — `type_path` doesn't fail on a bare generic ident
+    /// the way it does on `dyn`/`impl`; a `Type::Path` with a single segment IS what `type_path` matches,
+    /// so it returns the USELESS LITERAL STRING `"F"` as if it were a real nominal type, alongside
+    /// `trait_leaves` correctly finding the `FnOnce` bound. Both `enum_tmp` and `enum_variant_traits` got
+    /// an entry for leaf `Function` from this ONE variant declaration — not two different enums — and the
+    /// cross-index ambiguity guard (built for the two-enum case) wrongly treated that as a foreign
+    /// collision and dropped both, undoing R77's own fix for this shape. `collect_decls` now tries
+    /// dispatch-typing FIRST (`else if` mirroring the struct-field route's established precedence), so a
+    /// bounded-generic payload contributes to `enum_variant_traits` ONLY, never also spuriously to
+    /// `enum_tmp` — no self-collision, and the real fix survives.
+    #[test]
+    fn r77_bounded_generic_payload_self_collision_still_resolves() {
+        let src = "enum ValueOrFunction<V, F: FnOnce() -> V> { Value(V), Function(F) }\n\
+                   fn into_value<V, F: FnOnce() -> V>(vf: ValueOrFunction<V, F>) -> V {\n\
+                       match vf {\n\
+                           ValueOrFunction::Value(v) => v,\n\
+                           ValueOrFunction::Function(f) => f(),\n\
+                       }\n\
+                   }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("into_value"), Some(&true),
+                   "a bounded-generic FnOnce payload invoked with call syntax must read Unknown, not be \
+                    silently dropped by a spurious self-collision with its own useless type_path literal: \
+                    {unres:?}");
     }
 
     #[test]
@@ -7889,6 +8086,9 @@ trait G {
             field_elem_trait => |m| { m.field_elem_trait.entry("S".into()).or_default().insert("f".into(), vec!["Tr".into()]); },
             rets => |m| { m.rets.insert("f".into(), Some("T".into())); },
             enum_tmp => |m| { m.enum_tmp.insert("v".into(), Some("E".into())); },
+            // R77: a DISPATCH-typed single-field tuple-variant payload's trait leaves — the Vec-valued
+            // twin of `enum_tmp`, for a `dyn`/`impl`/bounded-generic payload `type_path` can't name.
+            enum_variant_traits => |m| { m.enum_variant_traits.insert("v".into(), Some(vec!["Fn".into()])); },
             trait_impls => |m| { m.trait_impls.entry("Tr".into()).or_default().push("Ty".into()); },
             trait_decls => |m| { m.trait_decls.entry("Tr".into()).or_default().count += 1; },
             trait_fields => |m| { m.trait_fields.entry("S".into()).or_default().insert("f".into(), vec!["b".into()]); },
@@ -9475,6 +9675,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let (impls, tdecls, tfields): (TraitImplIndex, HashMap<String, LocalTrait>, TraitFieldIndex) =
                 Default::default();
             let (fe, fet, ev): (FieldElemIndex, FieldElemTraitIndex, EnumVariantIndex) = Default::default();
+            let evt: EnumVariantTraitIndex = Default::default();
             let (consts, lmac): (HashMap<String, String>, HashMap<String, String>) = Default::default();
             let mut uses = HashMap::new();
             let mut out = Vec::new();
@@ -9482,7 +9683,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
-                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
@@ -9527,12 +9728,13 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let (impls, tdecls, tfields): (TraitImplIndex, HashMap<String, LocalTrait>, TraitFieldIndex) =
                 Default::default();
             let (fe, fet, ev): (FieldElemIndex, FieldElemTraitIndex, EnumVariantIndex) = Default::default();
+            let evt: EnumVariantTraitIndex = Default::default();
             let (consts, lmac): (HashMap<String, String>, HashMap<String, String>) = Default::default();
             let (mut uses, mut out, mut li) = (HashMap::new(), Vec::new(), 0usize);
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
-                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out

@@ -781,6 +781,7 @@ pub(crate) fn fninfo(
         field_elem: elems.field_elem,
         field_elem_trait: elems.field_elem_trait,
         enum_variants: elems.enum_variants,
+        enum_variant_traits: elems.enum_variant_traits,
         elem_of,
         elem_trait_of,
         tuple_of,
@@ -1010,6 +1011,7 @@ pub(crate) fn collect_decls(
     field_elem_trait: &mut FieldElemTraitIndex,
     rets: &mut HashMap<String, Option<String>>,
     enum_tmp: &mut HashMap<String, Option<String>>,
+    enum_variant_traits: &mut HashMap<String, Option<Vec<String>>>,
     trait_impls: &mut TraitImplIndex,
     local_traits: &mut HashMap<String, LocalTrait>,
     trait_fields: &mut TraitFieldIndex,
@@ -1159,6 +1161,9 @@ pub(crate) fn collect_decls(
             // single-field tuple form is recorded; a leaf two enums share with conflicting payloads is
             // marked ambiguous (None) and dropped by the caller — never guess (the return-index rule).
             syn::Item::Enum(en) => {
+                // R77: the enum's OWN generic bounds (`enum Msg<T: Doer> { Cb(T) }`), mirroring the
+                // struct field route just above — a bounded-generic single-field payload dispatches too.
+                let enum_bounds = generic_bounds_of_generics(&en.generics);
                 for v in &en.variants {
                     if has_cfg(&v.attrs) {
                         continue;
@@ -1167,16 +1172,43 @@ pub(crate) fn collect_decls(
                     if unnamed.unnamed.len() != 1 {
                         continue;
                     }
-                    let Some(tp) = type_path(&unnamed.unnamed[0].ty, uses) else { continue };
+                    let payload_ty = &unnamed.unnamed[0].ty;
                     let leaf = v.ident.to_string();
-                    match enum_tmp.get(&leaf) {
-                        None => {
-                            enum_tmp.insert(leaf, Some(tp));
+                    // R77: DISPATCH-TYPING FIRST — same precedence as the struct-field route just above
+                    // ("Dispatch-typing first: `store: Box<dyn Store>` reads as concrete `Box` to
+                    // `type_path`"). A BOUNDED GENERIC payload (`enum Msg<F: FnOnce() -> V> { Function(F) }`)
+                    // is worse than that struct case: `type_path` doesn't just mis-name it, it SUCCEEDS —
+                    // a bare generic ident IS a `Type::Path`, so `type_path` returns the literal, USELESS
+                    // string `"F"` as if it were a real nominal type. Recording that into `enum_tmp`
+                    // alongside the correct `enum_variant_traits` entry made this ONE variant collide with
+                    // ITSELF crate-wide once R77's cross-index ambiguity guard shipped (moka's
+                    // `ValueOrFunction::Function(F: FnOnce() -> V)`, measured in the 256-crate A/B): both
+                    // maps had "Function", so the guard — designed for two DIFFERENT enums sharing a leaf —
+                    // dropped a single variant's own correct dispatch claim as if it were a foreign
+                    // collision. `else if` (not two independent `if`s) makes them mutually exclusive PER
+                    // OCCURRENCE, exactly like the struct-field route, so a bounded-generic payload only
+                    // ever contributes to `enum_variant_traits`, never also to `enum_tmp`.
+                    let leaves = trait_leaves(payload_ty, &enum_bounds);
+                    if !leaves.is_empty() {
+                        match enum_variant_traits.get(&leaf) {
+                            None => {
+                                enum_variant_traits.insert(leaf, Some(leaves));
+                            }
+                            Some(Some(prev)) if *prev != leaves => {
+                                enum_variant_traits.insert(leaf, None); // conflicting leaf sets — ambiguous, drop
+                            }
+                            _ => {}
                         }
-                        Some(Some(prev)) if *prev != tp => {
-                            enum_tmp.insert(leaf, None); // conflicting payloads — ambiguous, drop
+                    } else if let Some(tp) = type_path(payload_ty, uses) {
+                        match enum_tmp.get(&leaf) {
+                            None => {
+                                enum_tmp.insert(leaf.clone(), Some(tp));
+                            }
+                            Some(Some(prev)) if *prev != tp => {
+                                enum_tmp.insert(leaf.clone(), None); // conflicting payloads — ambiguous, drop
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
@@ -1313,7 +1345,7 @@ pub(crate) fn collect_decls(
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods);
                 }
             }
             _ => {}
