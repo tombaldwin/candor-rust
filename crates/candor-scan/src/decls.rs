@@ -782,6 +782,7 @@ pub(crate) fn fninfo(
         field_elem_trait: elems.field_elem_trait,
         enum_variants: elems.enum_variants,
         enum_variant_traits: elems.enum_variant_traits,
+        ambiguous_enum_leaves: elems.ambiguous_enum_leaves,
         elem_of,
         elem_trait_of,
         tuple_of,

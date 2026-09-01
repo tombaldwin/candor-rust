@@ -151,20 +151,37 @@ pub(crate) type EnumVariantTraitIndex = HashMap<String, Vec<String>>;
 ///
 /// A leaf present in BOTH indexes can't be told apart by leaf alone: drop it from both (never guess),
 /// same as the existing same-index rule. This does not recover the accidental cross-enum precision the
-/// pre-R77 code had here (dispatch payloads being invisible was never a designed guarantee) — it converts
-/// a WRONGLY-ROUTED result into an HONEST unresolved-receiver one. Called from every place that finalises
-/// these two indexes (the real scan path AND the test helpers that replicate it), so a unit test actually
-/// exercises the same guard the CLI does.
+/// pre-R77 code had here (dispatch payloads being invisible was never a designed guarantee).
+///
+/// R90 — SOUNDNESS, comment correction: this used to claim the drop "converts a WRONGLY-ROUTED result
+/// into an HONEST unresolved-receiver one". **The first half was true and MEASURED; the second was never
+/// measured and was false.** Dropping the leaf from BOTH indexes made `enum_variant_binding` /
+/// `enum_struct_variant_bindings` return `(name, [], None)` — no dispatch leaves, no plain type — and
+/// every consumer (match-arm/if-let/while-let/let-else) treats that exactly like a payload it could not
+/// resolve at all: it binds nothing and visits the arm body with no type info, so a call on the payload
+/// (`Custom::call` in the fixture above) drops SILENTLY — no `Unknown`, no disclosure, on BOTH arms whose
+/// leaf collided, not just the one this doc used to describe. The collision-detection half was attacked
+/// and HELD (measured on the reqwest 0.13.4 shape above, re-verified this round); only the "honest"
+/// half was asserted, not measured, and cost the SOUNDNESS entry that quoted it.
+///
+/// The RETURNED set records exactly which leaves were dropped, so a caller can now do what the comment
+/// always claimed: thread it to `CallCollector` (`ambiguous_enum_leaves`) and disclose `Unknown` at the
+/// binder — the same `self.unresolved = true` an ambiguous LOCAL trait name or an unbounded dispatch fan-
+/// out already uses (collector.rs's `dispatch_calls_for_trait_method`), not a new mechanism. Called from
+/// every place that finalises these two indexes (the real scan path AND the test helpers that replicate
+/// it), so a unit test actually exercises the same guard the CLI does.
+#[must_use]
 pub(crate) fn drop_cross_ambiguous_enum_leaves(
     enum_variants: &mut EnumVariantIndex,
     enum_variant_traits: &mut EnumVariantTraitIndex,
-) {
-    let colliding: Vec<String> =
+) -> HashSet<String> {
+    let colliding: HashSet<String> =
         enum_variants.keys().filter(|k| enum_variant_traits.contains_key(*k)).cloned().collect();
-    for leaf in colliding {
-        enum_variants.remove(&leaf);
-        enum_variant_traits.remove(&leaf);
+    for leaf in &colliding {
+        enum_variants.remove(leaf);
+        enum_variant_traits.remove(leaf);
     }
+    colliding
 }
 
 /// `fn-leaf -> expanded return-type-path`, e.g. `create_pool -> sqlx::Pool` (Result/Option unwrapped).
@@ -308,6 +325,12 @@ pub(crate) struct ElemIndexes<'a> {
     pub(crate) field_elem_trait: &'a FieldElemTraitIndex,
     pub(crate) enum_variants: &'a EnumVariantIndex,
     pub(crate) enum_variant_traits: &'a EnumVariantTraitIndex,
+    /// R90 — the leaves `drop_cross_ambiguous_enum_leaves` removed from BOTH indexes above because two
+    /// unrelated enums share a variant name with different (concrete vs. dispatch) payloads. Threaded
+    /// through so the binder sites that consult `enum_variants`/`enum_variant_traits` can tell "this
+    /// payload is genuinely untyped" apart from "this payload's type was thrown away because it collided"
+    /// — only the second case discloses `Unknown`; see collector.rs's `enum_variant_binding`.
+    pub(crate) ambiguous_enum_leaves: &'a HashSet<String>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

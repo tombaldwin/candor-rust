@@ -66,6 +66,12 @@ pub(crate) struct CallCollector<'a> {
     /// `type_path` can't name so `enum_variants` never records it. Consulted by every tuple-variant
     /// binding site (match arm, if-let, while-let, let-else) BEFORE the plain `enum_variants` type route.
     pub(crate) enum_variant_traits: &'a EnumVariantTraitIndex,
+    /// R90 — the leaves dropped from BOTH indexes above by `drop_cross_ambiguous_enum_leaves` (two
+    /// unrelated enums sharing a variant name with different payloads — never guess which one a pattern
+    /// meant). `enum_variant_binding`/`enum_struct_variant_bindings` consult this so a payload that is
+    /// untyped BECAUSE IT COLLIDED discloses `Unknown` instead of silently binding nothing, the same
+    /// disclosure an ambiguous local trait name or an unbounded dispatch fan-out already gets.
+    pub(crate) ambiguous_enum_leaves: &'a HashSet<String>,
     /// local var / param -> ELEMENT type of a COLLECTION it holds (a `Vec<T>`/`&[T]`/… binding), grown
     /// as collection-typed `let`s/params are seen. Lets `for c in xs`, `xs[0]`, `xs.iter().for_each`
     /// resolve the element's type. Scoped bindings (loop var, closure param) live in `vars`, not here.
@@ -608,6 +614,14 @@ impl<'a> CallCollector<'a> {
                     .and_then(|t| ret_dispatch_leaves(t))
                     .unwrap_or_default()
             }
+            // `grid[i]` is itself a collection (a row of trait objects) — its element dispatch leaves are
+            // the indexed base's, mirroring `resolve_elem_type`'s own `Index` arm. R88 SWEEP RESIDUAL:
+            // this arm was ALSO missing (a THIRD accessor with the same gap as `resolve_recv_traits`'s),
+            // so `for d in grid[i] { d.go() }` over a `Vec<Vec<Box<dyn Doer>>>` dropped silent-pure.
+            // `Vec::pop()`/`HashMap::remove()`/similar Option-returning element-yielding methods are a
+            // separate, still-open gap in the `MethodCall` arm above (not fixed by this arm) — left
+            // unexamined this round; see R88's report.
+            syn::Expr::Index(idx) => self.resolve_elem_trait_leaves(&idx.expr),
             _ => Vec::new(),
         }
     }
@@ -1052,8 +1066,66 @@ impl<'a> CallCollector<'a> {
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.trait_fields.get(base_leaf).and_then(|m| m.get(&key).cloned()).unwrap_or_default()
             }
+            // `xs[i].method()` / `self.handlers[0].method()` — the receiver is the indexed BASE's
+            // ELEMENT; mirrors `resolve_recv_type`'s own `Index` arm (its concrete-type counterpart,
+            // just above in this file) via `resolve_elem_trait_leaves`, the element-typed analogue of
+            // THIS function already used by for-loop resolution. R88 compounding gap: this arm was
+            // missing while both siblings had it, so `self.handlers[0].go()` (a `Vec<Box<dyn Doer>>`
+            // field) resolved neither a concrete type nor a dispatch leaf and dropped silent-pure.
+            syn::Expr::Index(idx) => self.resolve_elem_trait_leaves(&idx.expr),
             _ => Vec::new(),
         }
+    }
+
+    /// Bounded-CHA dispatch for a LOCAL trait's method, given the trait's leaf name and the method's
+    /// leaf name — the fan-out logic shared by TWO call sites: a `.method()` call on a dispatch-typed
+    /// RECEIVER (`resolve_recv_traits` above resolves the receiver to its trait leaves, then this decides
+    /// what to do with `(leaf, method)`) and a trait method passed AS A FIRST-CLASS VALUE to an invoking
+    /// adapter (`items.iter().for_each(Doer::go)` where `Doer::go` is an abstract requirement — R89,
+    /// SOUNDNESS). Extracted so the second site asks this ONE authority instead of hand-rolling a second
+    /// copy of the same ambiguity/bound rules (the family rule against re-deriving something already
+    /// defined once — a second implementation is exactly how this class of bug recurs).
+    ///
+    /// Returns `false` when `tr` names no LOCAL trait, or a local trait that doesn't declare/inherit
+    /// `leaf` — the caller's own literal-path / external-trait handling still applies, unchanged. Returns
+    /// `true` when it does: an ambiguous local trait NAME (two unrelated local traits sharing a leaf) or
+    /// an unbounded/absent local impl set (`>12` or none visible) sets `unresolved = true` (honest
+    /// `Unknown`, never a guess); a bounded impl set (`<=12`) pushes a `Type::method` edge to every local
+    /// implementor. Either way the caller must do nothing further for this `(tr, leaf)`.
+    fn dispatch_calls_for_trait_method(&mut self, tr: &str, leaf: &str, str_arg: Option<String>) -> bool {
+        let Some(lt) = self.local_traits.get(tr) else { return false };
+        // The leaf must be a method the trait declares OR INHERITS from a (local) SUPERTRAIT — a `Super`
+        // method is callable on a `Sub`-bound/`dyn Sub` receiver (or passed as `Sub::base_method`), and
+        // the sub's impls (which provide the super method) resolve it via `trait_impls[tr]` below.
+        if !self.trait_declares_method(tr, leaf, 0) {
+            return false; // blanket/unrelated name — not this trait's dispatch
+        }
+        let count = lt.count;
+        // ⟨peek-scope-attribution⟩ Record the reachability fact BEFORE the ambiguity/bound gates below —
+        // those decide whether an EFFECT edge is safe to fabricate, but "this fn dispatches on trait-leaf
+        // `tr`'s method `leaf`" is true regardless of either, and costs nothing extra to record.
+        self.dispatch_sites.insert((tr.to_string(), leaf.to_string()));
+        if count > 1 {
+            self.unresolved = true; // ambiguous local leaf — never guess between traits
+            return true;
+        }
+        match self.trait_impls.get(tr) {
+            Some(impls) if impls.len() <= 12 => {
+                for ty in impls {
+                    self.calls.push(Call {
+                        path: format!("{ty}::{leaf}"),
+                        leaf: leaf.to_string(),
+                        str_arg: str_arg.clone(),
+                        path_lits_partial: false, path_lit2: None,
+                        typed: true,
+                        method: true,
+                        is_macro: false,
+                    });
+                }
+            }
+            _ => self.unresolved = true, // >12, or no impl visible: honest indeterminacy
+        }
+        true
     }
 }
 
@@ -1083,10 +1155,20 @@ impl<'a> CallCollector<'a> {
     /// fallback (unchanged pre-R77 behaviour) for a genuinely concrete payload. `None` overall for any
     /// pattern that isn't a single-field tuple-struct (multi-field/destructuring — an honest under-report,
     /// unchanged) — peels a reference/paren wrapper first, like `some_ok_binding`.
-    fn enum_variant_binding(&self, pat: &syn::Pat) -> Option<(String, Vec<String>, Option<String>)> {
+    fn enum_variant_binding(&mut self, pat: &syn::Pat) -> Option<(String, Vec<String>, Option<String>)> {
         let (name, leaf) = tuple_variant_binding(pat)?;
         let leaves = self.enum_variant_traits.get(&leaf).cloned().unwrap_or_default();
         let ty = self.enum_variants.get(&leaf).cloned();
+        // R90 — SOUNDNESS: `leaf` colliding across two unrelated enums makes
+        // `drop_cross_ambiguous_enum_leaves` remove it from BOTH indexes rather than guess which enum a
+        // pattern meant — so `leaves`/`ty` land empty/`None` here NOT because this payload is genuinely
+        // untyped, but because its type was thrown away. Every caller below treats empty+`None` as
+        // "nothing to bind" and silently visits the arm with no disclosure, which was the FALSE half of
+        // this guard's own doc comment (it claimed an honest `Unknown`; measured, there was none). Set
+        // the SAME flag an ambiguous local trait name or an unbounded dispatch fan-out already uses.
+        if leaves.is_empty() && ty.is_none() && self.ambiguous_enum_leaves.contains(&leaf) {
+            self.unresolved = true;
+        }
         Some((name, leaves, ty))
     }
     /// R77 STRUCT-VARIANT FIELDS — the struct-variant counterpart of `enum_variant_binding`, generalised
@@ -1096,12 +1178,18 @@ impl<'a> CallCollector<'a> {
     /// reads — keyed by the composite `"VariantLeaf::field"` string the Pass-A `decls.rs` enum branch
     /// writes (see that site's comment for why this is deliberate reuse, not a new index). Empty when the
     /// pattern isn't a struct-variant pattern or binds nothing.
-    fn enum_struct_variant_bindings(&self, pat: &syn::Pat) -> Vec<(String, Vec<String>, Option<String>)> {
+    fn enum_struct_variant_bindings(&mut self, pat: &syn::Pat) -> Vec<(String, Vec<String>, Option<String>)> {
         struct_variant_field_bindings(pat)
             .into_iter()
             .map(|(name, key)| {
                 let leaves = self.enum_variant_traits.get(&key).cloned().unwrap_or_default();
                 let ty = self.enum_variants.get(&key).cloned();
+                // R90 — the struct-variant-field counterpart of `enum_variant_binding`'s own R90 fix,
+                // same collision, same composite `"VariantLeaf::field"` key space (see the type's doc
+                // comment on why struct-variant fields share `enum_variants`/`enum_variant_traits`).
+                if leaves.is_empty() && ty.is_none() && self.ambiguous_enum_leaves.contains(&key) {
+                    self.unresolved = true;
+                }
                 (name, leaves, ty)
             })
             .collect()
@@ -1819,7 +1907,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             //  - the dispatch must be narrow (≤12 impls, the cross-engine bound) → edges to
             //    every local implementor; otherwise (or with no impl visible) honest `Unknown`.
             for tr in self.resolve_recv_traits(&node.receiver) {
-                let Some(lt) = self.local_traits.get(&tr) else {
+                if self.local_traits.get(&tr).is_none() {
                     // EXTERNAL trait dispatch (`x.publish()`, `x: &dyn dep::OutboundChannel`). Formerly a
                     // documented miss (dropped → pure). If the trait resolves via `use` to a DEPENDENCY-
                     // qualified path (not std/core/alloc), emit a crate-qualified Call so a CANDOR_DEPS chain
@@ -1934,40 +2022,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }
                     }
                     continue;
-                };
-                // The leaf must be a method the trait declares OR INHERITS from a (local) SUPERTRAIT — a
-                // `Super` method is callable on a `Sub`-bound/`dyn Sub` receiver, and the sub's impls (which
-                // provide the super method) resolve it via the `trait_impls[tr]` CHA below. Without the
-                // supertrait walk `t.base()` (base ∈ Super, `t: T: Sub`) read silent-pure.
-                if !self.trait_declares_method(&tr, &leaf, 0) {
-                    continue; // blanket/unrelated call — not this trait's dispatch
                 }
-                // ⟨peek-scope-attribution⟩ Record the reachability fact BEFORE the ambiguity/bound gates
-                // below — those two gates decide whether an EFFECT edge is safe to fabricate (never guess
-                // between colliding traits; never enumerate a >12-impl fan-out), but "this fn dispatches
-                // on trait-leaf `tr`'s method `leaf`" is true regardless of either, and recording it here
-                // costs nothing extra (a BTreeSet insert) and never influences `calls`/`unresolved`.
-                self.dispatch_sites.insert((tr.clone(), leaf.clone()));
-                if lt.count > 1 {
-                    self.unresolved = true; // ambiguous local leaf — never guess between traits
-                    continue;
-                }
-                match self.trait_impls.get(&tr) {
-                    Some(impls) if impls.len() <= 12 => {
-                        for ty in impls {
-                            self.calls.push(Call {
-                                path: format!("{ty}::{leaf}"),
-                                leaf: leaf.clone(),
-                                str_arg: str_arg.clone(),
-                                path_lits_partial: false, path_lit2: None,
-                                typed: true,
-                                method: true,
-                                is_macro: false,
-                            });
-                        }
-                    }
-                    _ => self.unresolved = true, // >12, or no impl visible: honest indeterminacy
-                }
+                // A LOCAL trait: the declares/inherits check, the ambiguous-local-name guard, and the
+                // bounded-CHA fan-out (edges to <=12 local implementors, else honest `Unknown`) are the
+                // SAME rules `dispatch_calls_for_trait_method` applies for a trait method passed as a
+                // first-class value (R89) — ask that one authority rather than a second copy here.
+                self.dispatch_calls_for_trait_method(&tr, &leaf, str_arg.clone());
             }
         }
         // ITERATOR-ADAPTER CLOSURE: `xs.iter().for_each(|c| c.send())`, `.map(|c| ..)`, `.filter`, …
@@ -2027,10 +2087,32 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.vars.contains_key(&n) || self.closure_vars.contains(&n) || self.fn_typed_vars.contains(&n)
                     });
                     if p.qself.is_none() && !is_local {
-                        let name = path_to_string(&p.path);
-                        let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, self.uses));
-                        let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
-                        self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                        // R89 — SOUNDNESS: this path head can name a CONCRETE type (`Conn::send`, handled
+                        // correctly below — the comment above is only ever true for this shape) OR a
+                        // LOCAL TRAIT's abstract requirement (`Doer::go` where `trait Doer { fn go(&self);
+                        // }` has no body) — a dispatch call exactly like `.go()` on a dispatch-typed
+                        // RECEIVER, which `dispatch_calls_for_trait_method`'s bounded CHA already answers.
+                        // Without this, an abstract trait method is never recorded as a callable unit
+                        // (decls.rs skips a body-less `TraitItem::Fn` on purpose — a provided/default
+                        // method IS recorded), so the literal `Call{path:"Doer::go"}` this arm used to
+                        // push unconditionally matched no declaration downstream and the edge evaporated
+                        // silently: no `Unknown`, no effect. Only a plain 2-segment `Head::method` path is
+                        // checked (the shape both the fixture and `Conn::send` share) — a longer
+                        // module-qualified trait path is a documented, unchanged residual, exactly like
+                        // the receiver-side dispatch's own qualified-path limits.
+                        let two_seg_trait_method = if p.path.segments.len() == 2 {
+                            let head = p.path.segments[0].ident.to_string();
+                            let method = p.path.segments[1].ident.to_string();
+                            self.dispatch_calls_for_trait_method(&head, &method, None)
+                        } else {
+                            false
+                        };
+                        if !two_seg_trait_method {
+                            let name = path_to_string(&p.path);
+                            let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, self.uses));
+                            let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
+                            self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
+                        }
                     }
                 }
             }
@@ -2516,6 +2598,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
     }
     fn visit_local(&mut self, node: &'ast syn::Local) {
+        // R88 SELF-SHADOW GUARD: the bare `let` binder's `trait_vars` mutation (below, in the `Pat::Ident`
+        // arm) must NOT take effect until AFTER this statement's own RHS has been walked — the RHS is
+        // walked a SECOND time, independently, by the trailing `syn::visit::visit_local(self, node)` call
+        // at the bottom of this fn, and a SELF-SHADOWING rebind's RHS refers to the SAME name being bound
+        // (`let mut conn = conn.to_connection()...;`, real shape, mysql_async 0.37.0 `Query::run`). An
+        // EARLY clear of `trait_vars[name]` — correct for every later statement — is ALSO visible to that
+        // second walk of THIS statement's own RHS, which still means the OUTER "conn", and loses ITS
+        // dispatch typing: measured, `Q::run` read `Unknown` (honest — an opaque `run` dispatch through
+        // `ToConnection`) before the R88 patch that added the clear, and fell CONSPICUOUSLY SILENT (zero
+        // calls, zero unresolved, absent from `functions[]` entirely) once it was added — a fabricated
+        // false-clean regression the corpus A/B caught before this commit, not after. Deferred here and
+        // applied once, after the trailing walk, so the RHS resolves against the PRE-rebind state (matching
+        // real Rust scoping) and only LATER statements see the new binding.
+        let mut r88_pending_trait_vars: Option<(String, Vec<String>)> = None;
         // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
         // TRAIT OBJECT is valid for the REST of the fn (let-else binds fn-wide), so type `d` into
         // `trait_vars` (fn-wide, like any top-level let) → `d.go()` dispatches. Only a `Some`/`Ok` pattern
@@ -2787,7 +2883,35 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // Unknown, not a phantom free-fn `g` (the max review found the param-only seeding
                     // missed this). A rebind to a non-fn clears the stale fn-typed marking.
                     self.fn_alias.remove(&id.ident.to_string()); // drop any stale alias on rebind
-                    if self.expr_is_fn_typed(&init.expr) {
+                    // R88 — SOUNDNESS: every sibling dispatch binder (if-let, while-let, match-arm,
+                    // for-loop, let-else, annotated `let`, tuple destructure — R71/R75/R76/R77) resolves
+                    // dispatch-trait leaves for its RHS before falling back to a concrete type. The bare
+                    // unannotated `let` was the one binder that never asked at all: `let h = &self.single;
+                    // h.go();` (`self.single: Box<dyn Doer>`) was ABSENT from `functions[]`, while
+                    // `self.single.go()` (no binder at all) correctly read `["Fs"]` — same field, same
+                    // type; the dispatch machinery is sound, the binder was the hole. `resolve_recv_traits`
+                    // is the SAME authority the call site already uses to resolve a dispatch RECEIVER —
+                    // routed here rather than reimplemented (the family rule against a second hand-rolled
+                    // path answering a question one already owns). Computed against the PRE-rebind state
+                    // (safe — a read, not a mutation); the actual `trait_vars` clear/insert is DEFERRED to
+                    // `r88_pending_trait_vars` (see this fn's opening comment) rather than applied here, so
+                    // a self-shadowing RHS (`let mut conn = conn.to_connection()...;`) still resolves
+                    // against the OUTER binding when the trailing walk revisits it. A non-empty result
+                    // takes the dispatch route and skips the concrete-type routes below — a dispatch RHS is
+                    // a `Field`/`Path`/`MethodCall` receiver shape, never a `ctor_type`/clone-typed concrete
+                    // one, so nothing is lost by skipping them.
+                    let dispatch_leaves = self.resolve_recv_traits(&init.expr);
+                    r88_pending_trait_vars = Some((id.ident.to_string(), dispatch_leaves.clone()));
+                    if !dispatch_leaves.is_empty() {
+                        self.vars.remove(&id.ident.to_string());
+                        self.dep_bound_vars.remove(&id.ident.to_string());
+                        // R71: a Fn/FnMut/FnOnce leaf means `h` is only ever invoked with CALL syntax —
+                        // hedge into `fn_typed_vars` alongside the dispatch binding, exactly like every
+                        // other binder that can yield a callable leaf.
+                        if Self::leaves_are_callable(&dispatch_leaves) {
+                            self.fn_typed_vars.insert(id.ident.to_string());
+                        }
+                    } else if self.expr_is_fn_typed(&init.expr) {
                         self.fn_typed_vars.insert(id.ident.to_string());
                         self.vars.remove(&id.ident.to_string());
                     } else {
@@ -2896,6 +3020,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         }
         syn::visit::visit_local(self, node);
+        // R88 SELF-SHADOW GUARD, continued (see this fn's opening comment): apply the bare `let` dispatch
+        // binding NOW, after the RHS has been walked under the PRE-rebind state — never before.
+        if let Some((name, leaves)) = r88_pending_trait_vars {
+            self.trait_vars.remove(&name);
+            if !leaves.is_empty() {
+                self.trait_vars.insert(name, leaves);
+            }
+        }
     }
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         // The macro PATH itself can carry/hide an effect that a syntactic (pre-expansion) scan can't see.

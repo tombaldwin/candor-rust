@@ -1329,8 +1329,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut enum_variant_traits: EnumVariantTraitIndex =
         merged.enum_variant_traits.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
     // R77 cross-index ambiguity guard — see `drop_cross_ambiguous_enum_leaves` for the full rationale
-    // (measured on reqwest 0.13.4 in the 256-crate A/B).
-    drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
+    // (measured on reqwest 0.13.4 in the 256-crate A/B). R90: the returned set is exactly which leaves
+    // were dropped — threaded into `ElemIndexes` so the binder can disclose `Unknown` instead of silence.
+    let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
     let fields = &merged.fields;
     let field_elem = &merged.field_elem;
     let field_elem_trait = &merged.field_elem_trait;
@@ -1338,7 +1339,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let trait_decls = &merged.trait_decls;
     let trait_fields = &merged.trait_fields;
     let traits = TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields };
-    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits };
+    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;

@@ -245,7 +245,7 @@
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt,
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -295,7 +295,7 @@
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt,
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -617,7 +617,8 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
             local_traits: &local_traits, returns: &returns, has_dyn_return: false,
-            field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, elem_of: HashMap::new(),
+            field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
+            ambiguous_enum_leaves: &std::collections::HashSet::new(), elem_of: HashMap::new(),
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
@@ -4518,7 +4519,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 returns: &returns,
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
-                enum_variants: &ev, enum_variant_traits: &evt,
+                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(),
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -4566,7 +4567,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             modpath: String::new(),
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
+                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
@@ -4590,7 +4591,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             modpath: String::new(),
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
+                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
@@ -4629,7 +4630,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt,
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -4665,7 +4666,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 returns: &returns,
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
-                enum_variants: &ev, enum_variant_traits: &evt,
+                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(),
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -6276,9 +6277,9 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
-        drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
+        let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -6311,9 +6312,9 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
-        drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
+        let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -6344,9 +6345,9 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
-        drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
+        let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -6954,6 +6955,17 @@ trait G {
     /// on `intercept`, an unrelated concrete-payload function nowhere near a closure). The guard makes a
     /// colliding leaf ambiguous in BOTH directions and drops it from both indexes (never guess) — this
     /// pins the SAFE, non-fabricating result: neither side's payload silently inherits the OTHER's route.
+    ///
+    /// R90 — SOUNDNESS UPDATE: this test used to assert `unres.get("via_a") == Some(&false)` /
+    /// `via_b == Some(&false)` — i.e. BOTH sides going fully silent, no fabrication AND no disclosure —
+    /// and its own comment named that "the current, safe state", explicitly flagging it as provisional.
+    /// It was not safe: measured (a two-enum composite-key collision, executed), both callers vanished
+    /// from `functions[]` with `deny Unknown` exiting 0 — a silent under-report on a real construct, not
+    /// a hypothetical. `drop_cross_ambiguous_enum_leaves`'s own doc comment claimed this converted the
+    /// wrongly-routed result into "an HONEST unresolved-receiver one", which was never measured and was
+    /// false until this fix threads the collision set to `CallCollector` and disclose `Unknown` at the
+    /// binder. The never-fabricate property below is UNCHANGED and re-asserted; only the never-disclose
+    /// half was wrong and is now the opposite.
     #[test]
     fn r77_colliding_variant_leaf_across_unrelated_enums_never_fabricates() {
         let src = "struct Foo;\n\
@@ -6969,11 +6981,14 @@ trait G {
         // callable (`fn_typed_vars`) and invoked with call syntax — that would be a fabricated dispatch
         // resolving through the wrong enum's route. `via_b`'s callable payload correctly stays a target of
         // `f()` in ITS OWN source, so nothing here can silently attribute a WRONG effect to either
-        // function; both may honestly go silent (never-guess) rather than resolve — see the assertion
-        // below documents that current, safe state so a future change to it is a deliberate decision.
+        // function. UNCHANGED by R90 — R90 only makes the (still-unresolved) receiver DISCLOSE, below.
         let unres = unresolved_of(src);
-        assert_eq!(unres.get("via_a"), Some(&false), "via_a must not fabricate Unknown from B's route: {unres:?}");
-        assert_eq!(unres.get("via_b"), Some(&false), "via_b must not fabricate Unknown from A's route: {unres:?}");
+        assert_eq!(unres.get("via_a"), Some(&true),
+                   "R90: via_a's payload lost its type to the collision — it must DISCLOSE Unknown, not \
+                    silently drop the call to Foo::call: {unres:?}");
+        assert_eq!(unres.get("via_b"), Some(&true),
+                   "R90: via_b's payload lost its type to the collision — it must DISCLOSE Unknown, not \
+                    silently drop the call to f(): {unres:?}");
     }
 
     /// R77 SELF-COLLISION REGRESSION GUARD — measured on moka 0.12.16's real source in the 256-crate A/B.
@@ -9845,7 +9860,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
-                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new() },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
@@ -9896,7 +9911,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
-                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new() },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
@@ -10140,6 +10155,16 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// position resolves nothing at all) rather than the "never asks for the bound" gap this rung
     /// closed. Recording them as a test rather than a comment because a comment claiming a
     /// justification is an assertion; if one of these starts resolving, this test says so.
+    ///
+    /// R88 UPDATE: `(c)`, the FACTORY-return case (`use_ret_dyn`), is CLOSED — the bare unannotated
+    /// `let` now routes through `resolve_recv_traits`, which already had a `Call` arm decoding a
+    /// factory's `<dyn>` return sentinel (it was simply never reached from this binder). Moved to its
+    /// own closed-set assertion below, per this test's own instruction. `(a)` (tuple INDEX access,
+    /// `t.0.go()` — a `Field`/`Unnamed`-member access on a raw tuple VALUE, unrelated to `Expr::Index`)
+    /// and `(b)` (an unannotated rebind of a COLLECTION dropping the source's ELEMENT dispatch leaves,
+    /// `elem_trait_of` — a different table from the one this fix populates) are UNCHANGED residuals:
+    /// R88 only fixed the bare `let` binding a SCALAR dispatch-typed expression to `trait_vars`, not
+    /// these two — left unexamined this round, not closed.
     #[test]
     fn the_dispatch_positions_still_silent_are_silent_for_dyn_too() {
         let v = scan_src_to_json("letresid", concat!(
@@ -10152,19 +10177,128 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // (b) an UNANNOTATED rebind drops the source's dispatch leaves.
             "pub fn rebind_bound<T: Doer>(xs: Vec<T>) { let v = xs; for d in v { d.go() } }\n",
             "pub fn rebind_dyn(xs: Vec<Box<dyn Doer>>) { let v = xs; for d in v { d.go() } }\n",
-            // (c) a FACTORY return bound into a local.
+            // (c) a FACTORY return bound into a local — CLOSED by R88, see the closed-set test below.
             "pub fn make_dyn() -> Box<dyn Doer> { Box::new(Fsy) }\n",
             "pub fn use_ret_dyn() { let d = make_dyn(); d.go() }\n",
         ));
         let present: Vec<&str> = v["functions"].as_array().unwrap().iter()
             .filter_map(|f| f["fn"].as_str()).collect();
-        for f in ["idx_bound", "idx_dyn", "rebind_bound", "rebind_dyn", "use_ret_dyn"] {
+        for f in ["idx_bound", "idx_dyn", "rebind_bound", "rebind_dyn"] {
             assert!(
                 !present.contains(&f),
                 "{f} now resolves — good news, but this residual note is stale: re-measure the \
                  position's `dyn` control and move the row into the closed set:\n{v:#}"
             );
         }
+        assert!(
+            effs(fn_entry(&v, "use_ret_dyn")).contains(&"Fs".to_string()),
+            "R88: a bare `let d = make_dyn();` (make_dyn() -> Box<dyn Doer>) must now reach Fs through \
+             d.go() — resolve_recv_traits's existing Call arm decoding the factory's <dyn> return, \
+             reached from the bare-let binder for the first time:\n{v:#}"
+        );
+    }
+    /// R88 — the bare unannotated `let` binding a SCALAR dispatch-typed RHS to `trait_vars`, the exact
+    /// gap SOUNDNESS.md's R88 entry describes: every sibling binder (if-let, while-let, match-arm,
+    /// for-loop, let-else, annotated `let`, tuple destructure) resolved dispatch leaves for its RHS —
+    /// this was the one that never asked. `run_bound_field`/`run_direct` mirror the coordinator's own
+    /// ground-truth repro; `run_indexed` pins the compounding `Expr::Index` gap in `resolve_recv_traits`
+    /// (`self.handlers[0].go()`) fixed in the same commit. `run_direct` and the for-loop positive
+    /// control must never regress — they are the "the dispatch machinery is sound" half of the claim.
+    #[test]
+    fn r88_bare_let_binds_a_scalar_dispatch_receiver() {
+        let v = scan_src_to_json("r88bare", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fs;\n",
+            "impl Doer for Fs { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            "pub struct Widget { single: Box<dyn Doer>, handlers: Vec<Box<dyn Doer>> }\n",
+            "impl Widget {\n",
+            "  pub fn run_bound_field(&self) { let h = &self.single; h.go(); }\n",
+            "  pub fn run_direct(&self) { self.single.go(); }\n",
+            "  pub fn run_indexed(&self) { self.handlers[0].go(); }\n",
+            "  pub fn run_loop(&self) { for h in &self.handlers { h.go(); } }\n",
+            "}\n",
+        ));
+        for f in ["Widget::run_bound_field", "Widget::run_direct", "Widget::run_indexed", "Widget::run_loop"] {
+            assert!(
+                effs(fn_entry(&v, f)).contains(&"Fs".to_string()),
+                "{f} must reach Fs — same field, same dispatch type, only the binder shape differs:\n{v:#}"
+            );
+        }
+    }
+
+    /// R89 — a LOCAL TRAIT method passed as a first-class VALUE to an invoking adapter
+    /// (`items.iter().for_each(Doer::go)` where `Doer::go` is an ABSTRACT requirement, no default body)
+    /// must dispatch through the SAME bounded CHA a `.method()` call on a dispatch-typed receiver already
+    /// uses (`dispatch_calls_for_trait_method`) — before this fix the site pushed a literal
+    /// `Call{path:"Doer::go"}` unconditionally, which matched no declaration (decls.rs never records an
+    /// abstract trait method as a unit) and evaporated: no `Unknown`, no effect. `call_concrete` is the
+    /// control the pre-fix comment's claim was actually true for (`for_each(Conn::send)`-shaped) and must
+    /// keep resolving unchanged; `call_wide` pins the >12-impl honest-Unknown fan-out bound through this
+    /// same new path, not just the narrow (<=12) edge case.
+    #[test]
+    fn r89_trait_method_passed_as_a_value_dispatches() {
+        let v = scan_src_to_json("r89val", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Fsy;\n",
+            "impl Doer for Fsy { fn go(&self) { let _ = std::fs::read(\"/etc/x\"); } }\n",
+            "pub fn call_it(items: Vec<Box<dyn Doer>>) { items.iter().for_each(Doer::go); }\n",
+            // Control: a CONCRETE type's associated fn passed as a value must keep resolving exactly as
+            // before — this path is unchanged for anything whose head isn't a local trait.
+            "pub struct Conn;\n",
+            "impl Conn { pub fn send(&self) { let _ = std::fs::write(\"/etc/y\", \"w\"); } }\n",
+            "pub fn call_concrete(items: Vec<Conn>) { items.iter().for_each(Conn::send); }\n",
+        ));
+        assert!(
+            effs(fn_entry(&v, "call_it")).contains(&"Fs".to_string()),
+            "R89: Doer::go passed as a value to for_each must dispatch to Fsy::go's Fs:\n{v:#}"
+        );
+        assert!(
+            effs(fn_entry(&v, "call_concrete")).contains(&"Fs".to_string()),
+            "control regressed: a concrete type's method passed as a value must still resolve:\n{v:#}"
+        );
+    }
+
+    /// R88 SELF-SHADOW REGRESSION GUARD — measured on mysql_async 0.37.0's real source in the 256-crate
+    /// A/B, minimised. `impl<Q: AsQuery> Query for Q { fn run(self, conn: C) -> .. { let mut conn =
+    /// conn.to_connection().resolve().await?; conn.as_mut().raw_query(..); .. } }` — a BARE `let` whose
+    /// name (`conn`) SHADOWS a generic-bound PARAMETER of the same name, and whose own RHS (`conn.
+    /// to_connection()`) still refers to the OUTER (parameter) binding. R88's fix originally cleared
+    /// `trait_vars[name]` EAGERLY, before the trailing `syn::visit::visit_local` walk revisited this
+    /// SAME statement's RHS — so the eager clear poisoned the outer `conn`'s own dispatch resolution
+    /// inside its own defining expression: `run` went from a genuine, honest `Unknown` (an opaque
+    /// bounded-trait dispatch the scan correctly can't resolve further) to COMPLETELY ABSENT from
+    /// `functions[]` — zero calls, zero unresolved, a fabricated false-clean silent under-report. Fixed
+    /// by deferring the `trait_vars` mutation (`r88_pending_trait_vars`) until AFTER the trailing walk.
+    /// `run_no_shadow` (a DIFFERENT name on the rebind) is the control: it must read identically to
+    /// `run_shadow`, proving the shadow itself carries no information the scan should lose.
+    #[test]
+    fn r88_self_shadowing_rebind_does_not_lose_the_outer_bindings_dispatch() {
+        // The reproducer needs the EXACT mysql_async ingredient: a trait implemented for a REFERENCE
+        // type (`impl<'a> ToConnection<'a> for &'a Pool`) inside a BLANKET trait impl (`impl<Q> Query for
+        // Q`) — an unrelated, pre-existing engine behaviour (present before AND after R88, confirmed by
+        // running the pre-fix binary) that happens to read the bounded dispatch as `Unknown` rather than
+        // resolving it to a concrete edge. This test does not depend on WHY that pre-existing behaviour
+        // discloses `Unknown` — only that R88 must not turn that honest disclosure into total silence.
+        let src = concat!(
+            "pub trait ToConnection<'a> { fn to_connection(self) -> ConnLike<'a>; }\n",
+            "pub struct Pool;\n",
+            "impl<'a> ToConnection<'a> for &'a Pool { fn to_connection(self) -> ConnLike<'a> { ConnLike(std::marker::PhantomData) } }\n",
+            "pub struct ConnLike<'a>(std::marker::PhantomData<&'a ()>);\n",
+            "impl<'a> ConnLike<'a> { pub fn resolve(self) -> Result<Conn, ()> { Ok(Conn) } }\n",
+            "pub struct Conn;\n",
+            "impl Conn { fn raw_query(&mut self) {} }\n",
+            "pub trait Query: Sized { fn run<'a, C: ToConnection<'a>>(self, conn: C) -> Result<(), ()>; }\n",
+            "impl<Q> Query for Q { fn run<'a, C: ToConnection<'a>>(self, conn: C) -> Result<(), ()> { \
+                 let mut conn = conn.to_connection().resolve()?; conn.raw_query(); Ok(()) } }\n",
+        );
+        let unres = unresolved_of(src);
+        assert_eq!(
+            unres.get("Q::run"), Some(&true),
+            "R88 self-shadow regression: `Q::run`'s self-shadowing `let mut conn = conn.to_connection()\
+             .resolve()?;` must stay in the report with its pre-existing honest `unresolved` disclosure, \
+             not vanish entirely (zero calls, zero unresolved) — the rebind's OWN RHS must resolve \
+             against the state BEFORE the rebind takes effect, not after: {unres:?}"
+        );
     }
 
     /// The bound map must be SCOPED across a nested `fn`/`impl`, for the same reason `dyn_sig_traits`
