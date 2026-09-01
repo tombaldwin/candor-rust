@@ -10301,6 +10301,128 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         );
     }
 
+    /// R92 SELF-SHADOW REGRESSION GUARD — SOUNDNESS.md R92, the let-else twin of R88's bare-`let` fix
+    /// above. `visit_local`'s let-else branches (tuple-variant, struct-variant, and the `Some`/`Ok` form)
+    /// mutated `self.vars`/`self.trait_vars` for the newly-bound name BEFORE the trailing
+    /// `syn::visit::visit_local` re-walked that same statement's own RHS — so when the binding SHADOWS
+    /// the name it is initialised from, the RHS's own call resolved against the NEW binding's leaves
+    /// instead of the OUTER one, and the outer effect vanished with `unresolved` never set. `produce`
+    /// (`Env`) and `go` (`Fs`) are deliberately DIFFERENT effect classes — an earlier fixture used the
+    /// same class for both and the union hid the loss entirely; a fixture whose instrument can't
+    /// distinguish the sin from correct behaviour answers nothing. Fixed by deferring the mutation into
+    /// `pending_bindings`, reusing R88's mechanism rather than adding a third ordering rule.
+    ///
+    /// Each variant below pairs a self-SHADOWING function with a non-shadowing CONTROL of identical
+    /// shape (distinct binder name) — the control must read identically regardless of the fix, proving
+    /// the shadow itself, not the binder shape, is what the bug turned on.
+    #[test]
+    fn r92_letelse_tuple_variant_self_shadow_keeps_producer_effect() {
+        let v = scan_src_to_json("r92tuple", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct W;\n",
+            "impl Doer for W { fn go(&self) { let _ = std::fs::write(\"/tmp/x\", \"w\"); } }\n",
+            "pub enum Msg { Cb(Box<dyn Doer>) }\n",
+            "pub trait Producer { fn produce(&self) -> Msg; }\n",
+            "pub struct P;\n",
+            "impl Producer for P { fn produce(&self) -> Msg { let _ = std::env::var(\"HOME\"); \
+                 Msg::Cb(Box::new(W)) } }\n",
+            "pub fn shadowed(f: Box<dyn Producer>) { let Msg::Cb(f) = f.produce() else { return }; f.go(); }\n",
+            "pub fn control(p: Box<dyn Producer>) { let Msg::Cb(g) = p.produce() else { return }; g.go(); }\n",
+        ));
+        let shadowed = effs(fn_entry(&v, "shadowed"));
+        assert!(
+            shadowed.contains(&"Env".to_string()) && shadowed.contains(&"Fs".to_string()),
+            "R92 tuple-variant let-else self-shadow: `shadowed` must keep BOTH the producer's Env and \
+             the worker's Fs — pre-fix this read [\"Fs\"] only, Env silently lost:\n{v:#}"
+        );
+        let control = effs(fn_entry(&v, "control"));
+        assert!(
+            control.contains(&"Env".to_string()) && control.contains(&"Fs".to_string()),
+            "control regressed: a non-shadowing let-else binding must be unaffected by the fix:\n{v:#}"
+        );
+    }
+
+    #[test]
+    fn r92_letelse_struct_variant_self_shadow_keeps_producer_effect() {
+        let v = scan_src_to_json("r92struct", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct W;\n",
+            "impl Doer for W { fn go(&self) { let _ = std::fs::write(\"/tmp/x\", \"w\"); } }\n",
+            "pub enum Msg { CbField { f: Box<dyn Doer> } }\n",
+            "pub trait Producer { fn produce(&self) -> Msg; }\n",
+            "pub struct P;\n",
+            "impl Producer for P { fn produce(&self) -> Msg { let _ = std::env::var(\"HOME\"); \
+                 Msg::CbField { f: Box::new(W) } } }\n",
+            "pub fn shadowed(f: Box<dyn Producer>) { \
+                 let Msg::CbField { f } = f.produce() else { return }; f.go(); }\n",
+            "pub fn control(p: Box<dyn Producer>) { \
+                 let Msg::CbField { f: g } = p.produce() else { return }; g.go(); }\n",
+        ));
+        let shadowed = effs(fn_entry(&v, "shadowed"));
+        assert!(
+            shadowed.contains(&"Env".to_string()) && shadowed.contains(&"Fs".to_string()),
+            "R92 struct-variant let-else self-shadow: `shadowed` must keep BOTH the producer's Env and \
+             the worker's Fs — pre-fix this read [\"Fs\"] only, Env silently lost:\n{v:#}"
+        );
+        let control = effs(fn_entry(&v, "control"));
+        assert!(
+            control.contains(&"Env".to_string()) && control.contains(&"Fs".to_string()),
+            "control regressed: a non-shadowing struct-variant let-else binding must be unaffected by \
+             the fix:\n{v:#}"
+        );
+    }
+
+    /// R92 EXTENSION — found while auditing R92's stated boundary (SOUNDNESS.md scoped the confirmed
+    /// bug to the two enum-variant let-else branches): the THIRD let-else branch, `Some`/`Ok` unwrap
+    /// (`some_ok_binding`), mutated `trait_vars` immediately in exactly the same shape and was equally
+    /// wrong for a self-shadowing bind — measured via the pre-fix binary before this test existed.
+    #[test]
+    fn r92_letelse_some_ok_self_shadow_keeps_producer_effect() {
+        let v = scan_src_to_json("r92opt", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct W;\n",
+            "impl Doer for W { fn go(&self) { let _ = std::fs::write(\"/tmp/x\", \"w\"); } }\n",
+            "pub trait Producer { fn maybe_produce(&self) -> Option<Box<dyn Doer>>; }\n",
+            "pub struct P;\n",
+            "impl Producer for P { fn maybe_produce(&self) -> Option<Box<dyn Doer>> { \
+                 let _ = std::env::var(\"HOME\"); Some(Box::new(W)) } }\n",
+            "pub fn shadowed(f: Box<dyn Producer>) { \
+                 let Some(f) = f.maybe_produce() else { return }; f.go(); }\n",
+            "pub fn control(p: Box<dyn Producer>) { \
+                 let Some(g) = p.maybe_produce() else { return }; g.go(); }\n",
+        ));
+        let shadowed = effs(fn_entry(&v, "shadowed"));
+        assert!(
+            shadowed.contains(&"Env".to_string()) && shadowed.contains(&"Fs".to_string()),
+            "R92 (Some/Ok let-else, unflagged in the original SOUNDNESS entry) self-shadow: `shadowed` \
+             must keep BOTH the producer's Env and the worker's Fs — pre-fix this read [\"Fs\"] only, \
+             Env silently lost:\n{v:#}"
+        );
+        let control = effs(fn_entry(&v, "control"));
+        assert!(
+            control.contains(&"Env".to_string()) && control.contains(&"Fs".to_string()),
+            "control regressed: a non-shadowing Some/Ok let-else binding must be unaffected by the fix:\n{v:#}"
+        );
+    }
+
+    /// R92 CONTROL — a let-else binding a CONCRETE (non-dispatch) payload under a NON-shadowing name
+    /// must stay exactly as pure as it was before the fix; this exercises the deferred `concrete_ty`
+    /// half of `pending_bindings` (the `vars.insert` alternative to `trait_vars.insert`) on the ordinary,
+    /// no-shadow path.
+    #[test]
+    fn r92_letelse_concrete_payload_non_shadow_stays_pure() {
+        let v = scan_src_to_json("r92concrete", concat!(
+            "pub enum Data { Num(i32) }\n",
+            "fn make_data() -> Data { Data::Num(3) }\n",
+            "pub fn concrete_control() -> i32 { let Data::Num(n) = make_data() else { return 0 }; n + 1 }\n",
+        ));
+        assert!(
+            v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "concrete_control"),
+            "control regressed: a non-shadowing, non-dispatch let-else binding must stay pure (absent \
+             from functions[], same as before the fix):\n{v:#}"
+        );
+    }
+
     /// The bound map must be SCOPED across a nested `fn`/`impl`, for the same reason `dyn_sig_traits`
     /// is (R4 / value-bag): a nested item's calls are attributed to the ENCLOSING unit, so a nested
     /// `let d: T` would otherwise read the OUTER signature's `T` and charge the outer bound's
