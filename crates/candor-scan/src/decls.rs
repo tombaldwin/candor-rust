@@ -405,19 +405,46 @@ fn resolve_use_base(segs: &[String], modpath: &str, mods: &HashMap<String, Vec<S
         .collect()
 }
 
+/// A name declared at `modpath`, spelled as the path a caller ELSEWHERE writes for it (`facade::Command`;
+/// just `Command` at the crate root). The key shape `seed_mod_aliases` and `expand`'s multi-segment lookup
+/// both agree on.
+pub(crate) fn qualify(modpath: &str, name: &str) -> String {
+    if modpath.is_empty() { name.to_string() } else { format!("{modpath}::{name}") }
+}
+
 /// Collect this file's `pub use` RE-EXPORT edges, recursing into inline `mod` blocks. `modpath` is the
 /// module path the items sit at and `dir` is the DIRECTORY of the source file, relative to the scan root
 /// — `#[path]` targets resolve against it (Rust resolves a `#[path]` on an out-of-line `mod` relative to
 /// the containing file's directory, and inside an inline `mod` block with the inline names as
 /// directories, which is what the recursion below does).
+///
+/// R99 — the SAME walk also collects `aliases`, the MODULE-QUALIFIED name → EXTERNAL path map, from the
+/// three item shapes that give a std/dependency item a second, crate-local spelling:
+///
+///   1. the `from.is_empty()` branch below — a `pub use` whose head names no local `mod`, i.e. a
+///      re-export of a std/external item (`mod facade { pub use std::process::Command; }`). `Reexport`
+///      cannot carry it: its `from` is an INTRA-crate module path feeding the tail2 call-graph index,
+///      and this names nothing in the crate. It was DROPPED, and `facade::Command::new("x").status()`
+///      was absent from `functions[]` under every policy form including a blanket `deny`.
+///   2. a NOMINAL type alias (`pub type Cmd = std::process::Command;`). `Item::Type` was recorded only
+///      when the target is NON-nominal (`prim_aliases`, a resolution SKIP); the nominal case — which is
+///      what `pub type Client = reqwest::Client;` is — recorded nothing at all.
+///   3. a `const`/`static` of CALLABLE type bound to a bare path (`const W: fn(&str) = writer;`).
+///
+/// All three are recorded exactly as the equivalent `use … as NAME` would have been, and consumed through
+/// the SAME `expand`/`uses` authority — no second resolution path (§G). The direction is ADD-only: a name
+/// that resolved to nothing now resolves to its declared origin.
 pub(crate) fn collect_reexports(
     items: &[syn::Item],
     modpath: &str,
     dir: &Path,
     include_tests: bool,
+    uses: &HashMap<String, String>,
     out: &mut Vec<Reexport>,
+    aliases: &mut HashMap<String, String>,
 ) {
     let mods = mod_targets(items, modpath, dir, include_tests);
+    let no_bounds: HashMap<String, Vec<String>> = HashMap::new();
     for it in items {
         match it {
             syn::Item::Use(u) => {
@@ -436,9 +463,67 @@ pub(crate) fn collect_reexports(
                 for (segs, name, alias) in leaves {
                     let from = resolve_use_base(&segs, modpath, &mods);
                     if from.is_empty() {
+                        // R99 (1): the head names no local `mod` and is not `crate`/`self`/`super`, so this
+                        // re-exports an EXTERNAL/std item. A GLOB (`pub use std::process::*`) names no
+                        // single item and is skipped — enumerating an external module's exports needs its
+                        // source, which a syntactic scan does not have (stated residual, not a guess).
+                        if name != "*" && !segs.is_empty() {
+                            let head = segs[0].as_str();
+                            if !matches!(head, "crate" | "self" | "super") {
+                                let target = format!("{}::{name}", segs.join("::"));
+                                aliases.insert(qualify(modpath, &alias), target);
+                            }
+                        }
                         continue;
                     }
                     out.push(Reexport { module: modpath.to_string(), from, name, alias });
+                }
+            }
+            // R99 (2): a NOMINAL type alias is exactly a `use <target> as <ident>` for path resolution,
+            // and is recorded as one. THE EXPOSURE IS THEREFORE THE SAME AS A `use`'S, not smaller —
+            // stated as the assumption it is rather than as a guarantee. A same-module `use Bar;` and
+            // `type Bar = …` cannot coexist (one type namespace, E0255), so no COMPILING input reaches
+            // that collision and no fixture could witness it; but a VALUE-namespace name may share the
+            // spelling (`type Foo = Bar;` beside `fn Foo()`), and there this entry answers for `Foo()`
+            // exactly as `use x::Foo;` already does today. Converging on the `use` route means inheriting
+            // its residual, deliberately, rather than opening a second one.
+            //
+            // Generic aliases (`type R<T> = Result<T, E>`) are skipped: their target carries parameters
+            // this map has no way to substitute.
+            syn::Item::Type(t) if t.generics.params.is_empty() && !is_non_nominal_type(&t.ty) => {
+                if !include_tests && is_cfg_test(&t.attrs) {
+                    continue;
+                }
+                if let syn::Type::Path(p) = &*t.ty {
+                    if p.qself.is_none() {
+                        let written = path_to_string(&p.path);
+                        if written != "Self" {
+                            aliases.insert(qualify(modpath, &t.ident.to_string()), expand(&written, uses));
+                        }
+                    }
+                }
+            }
+            // R99 (3): `const W: fn(&str) -> R = writer;` / the `static` twin. Gated on BOTH a callable
+            // declared type and a bare-path initializer, which is what keeps it narrow: the initializer of
+            // a callable-typed const can only name a function item. Same residual as (2) — a TYPE of the
+            // same spelling could coexist and would now expand through this entry — and the same reason
+            // for accepting it: a `use std::fs::write as W;` is already recorded identically.
+            syn::Item::Const(_) | syn::Item::Static(_) => {
+                let (attrs, ident, ty, expr) = match it {
+                    syn::Item::Const(c) => (&c.attrs, &c.ident, &c.ty, &c.expr),
+                    syn::Item::Static(s) => (&s.attrs, &s.ident, &s.ty, &s.expr),
+                    _ => unreachable!(),
+                };
+                if !include_tests && is_cfg_test(attrs) {
+                    continue;
+                }
+                if is_callable_type(ty, &no_bounds) {
+                    if let syn::Expr::Path(p) = &**expr {
+                        if p.qself.is_none() {
+                            let written = path_to_string(&p.path);
+                            aliases.insert(qualify(modpath, &ident.to_string()), expand(&written, uses));
+                        }
+                    }
                 }
             }
             syn::Item::Mod(m) => {
@@ -449,7 +534,11 @@ pub(crate) fn collect_reexports(
                     let name = m.ident.to_string();
                     let sub =
                         if modpath.is_empty() { name.clone() } else { format!("{modpath}::{name}") };
-                    collect_reexports(inner, &sub, &dir.join(&name), include_tests, out);
+                    // The inline module's OWN `use` map — the same shadowing rule `collect_decls` and
+                    // `scan_items` apply, so a submodule that declares its own `Command` is not typed
+                    // through the enclosing file's import.
+                    let subuses = submodule_uses(uses, inner, include_tests);
+                    collect_reexports(inner, &sub, &dir.join(&name), include_tests, &subuses, out, aliases);
                 }
             }
             _ => {}
@@ -585,6 +674,26 @@ pub(crate) fn bound_idents(sig: &syn::Signature, block: &syn::Block) -> std::col
         }
     }
     v.visit_block(block);
+    v.0
+}
+
+/// R100 — the idents ONE pattern binds. Same `Pat::Ident` funnel as `bound_idents` above, narrowed to a
+/// single pattern: `visit_local` needs the names THIS statement binds so it can walk the statement's own
+/// RHS under the state that was live before the binding took effect.
+pub(crate) fn pat_bound_idents(pat: &syn::Pat) -> Vec<String> {
+    struct V(Vec<String>);
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            let n = node.ident.to_string();
+            if !self.0.contains(&n) {
+                self.0.push(n);
+            }
+            syn::visit::visit_pat_ident(self, node);
+        }
+    }
+    use syn::visit::Visit;
+    let mut v = V(Vec::new());
+    v.visit_pat(pat);
     v.0
 }
 

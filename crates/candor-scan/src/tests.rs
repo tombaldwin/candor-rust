@@ -8248,6 +8248,9 @@ trait G {
             // `pub use self::platform::*` in a SUBMODULE — a call `imp::doit()` in ANOTHER file resolves
             // through it, so a change to the edge set re-resolves that file's calls.
             reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into() }); },
+            // R99: `mod facade { pub use std::process::Command; }` / `pub type Cmd = …` — seeded into
+            // EVERY file's `use` map, so a change re-resolves `facade::Command::new` in other files.
+            mod_aliases => |m| { m.mod_aliases.insert("facade::Command".into(), "std::process::Command".into()); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -9737,13 +9740,17 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 marker set, so a warm cache would replay the binder-keyed reading — a guard
     ///                 released in any of sixteen other positions read PURE — with no test that scans
     ///                 cold able to see it.
+    ///   rev11 -> rev12 `FileDecls.mod_aliases` (R99). An old entry deserializes EMPTY — "this file gives
+    ///                 no std/dependency item a second crate-local spelling" — so a warm cache replays the
+    ///                 blanket-`deny`-defeating silence for `mod facade { pub use std::process::Command; }`
+    ///                 and `pub type Cmd = std::process::Command;`.
     ///
     /// The schema token is the only thing standing between those readings, so it is pinned rather than
     /// trusted. (The `aborted` disclosure is what this fixture MEASURES in every case: it is the visible
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        for stale in ["rev7", "rev8", "rev9"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -9754,7 +9761,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev11/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev12/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -11896,4 +11903,405 @@ pub fn go() {{ imp::doit(); }}
             "an unrelated path must not be swept in just because both are unresolvable"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── R99: A NAME'S SECOND SPELLING (SOUNDNESS.md R99) ──────────────────────────────────────────
+    //
+    // THE ONLY DEFECT OF THE 2026-09-01 ROUND WHERE A BLANKET `deny` FAILS. Every other silent
+    // under-report that day was still caught by `deny <E>` because the CALLEE stayed independently
+    // reported; here NOTHING anywhere in the document carries the effect — no `Unknown`, no
+    // `unresolved`, no `incomplete`, `excluded: []` — so the whole crate reads clean.
+    //
+    // Four spellings that give a std/dependency item a second, crate-local name, all measured ABSENT
+    // from `functions[]` at 9c4d5be against an executed ground truth (each fixture below is a reduction
+    // of a program that was compiled and run, and whose spawn/write was observed):
+    //
+    //   (1) a SUBMODULE `pub use` of an external item — `mod facade { pub use std::process::Command; }`
+    //   (2) a NOMINAL type alias                       — `pub type Cmd = std::process::Command;`
+    //   (3) a callable `const`/`static` bound to a fn   — `const W: fn(&str) = writer;`
+    //   (4) an alias OF an alias                        — `let w = std::fs::write; let v = w; v(..)`
+    //
+    // Each has an INTRINSIC CONTROL one spelling away that already answered correctly — the crate-ROOT
+    // `pub use`, the one-hop `let` alias, `use std::fs as f` — which is why the fix converges on the
+    // existing `expand`/`uses` authority instead of adding a resolution path. The controls are asserted
+    // beside every fixture: they are what makes this precise rather than a guess.
+
+    /// R99 (1) — a submodule `pub use` of a std item, INLINE in the same file, with the crate-ROOT
+    /// spelling of the identical thing as the control. Pre-fix: `via_facade` absent, `ctl_root` present.
+    #[test]
+    fn r99_submodule_pub_use_of_a_std_item_is_not_lost() {
+        let v = scan_src_to_json("r99facade", concat!(
+            "mod facade { pub use std::process::Command; }\n",
+            "pub use std::process::Command as RootCmd;\n",
+            "pub fn via_facade() { let _ = facade::Command::new(\"/bin/sh\").status(); }\n",
+            "pub fn ctl_root() { let _ = RootCmd::new(\"/bin/sh\").status(); }\n",
+        ));
+        assert_eq!(
+            effs_opt(&v, "via_facade"), vec!["Exec".to_string()],
+            "R99: a call through a SUBMODULE `pub use` of `std::process::Command` must charge Exec — \
+             pre-fix `via_facade` was absent from functions[] entirely and a blanket `deny` exited 0:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "ctl_root"), vec!["Exec".to_string()],
+            "INTRINSIC CONTROL: the crate-ROOT spelling already resolved before this fix and must \
+             still resolve — it is the path the fix converges ON, not a new one:\n{v:#}"
+        );
+    }
+
+    /// R99 (1), FILE-PER-MODULE and CROSS-FILE — the shape real facade/prelude modules have. Three
+    /// caller spellings, all measured absent pre-fix: from an ANCESTOR module (`facade::Command`), fully
+    /// `crate::`-rooted, and through a module re-bind (`use crate::facade;`) in a SIBLING module.
+    #[test]
+    fn r99_cross_file_facade_reexport_resolves_from_every_caller_spelling() {
+        let v = scan_crate_to_json("r99xfile", &[
+            ("src/lib.rs", "pub mod facade;\npub mod other;\n\
+                            pub fn from_root() { let _ = facade::Command::new(\"/bin/sh\").status(); }\n"),
+            ("src/facade.rs", "pub use std::process::Command;\n"),
+            ("src/other.rs", "use crate::facade;\n\
+                              pub fn sib() { let _ = facade::Command::new(\"/bin/sh\").status(); }\n\
+                              pub fn rooted() { let _ = crate::facade::Command::new(\"/bin/sh\").status(); }\n"),
+        ]);
+        for f in ["from_root", "other::sib", "other::rooted"] {
+            assert_eq!(
+                effs_opt(&v, f), vec!["Exec".to_string()],
+                "R99: `{f}` reaches std's Command through a cross-file facade re-export and must charge \
+                 Exec — pre-fix every one of these three spellings was absent:\n{v:#}"
+            );
+        }
+    }
+
+    /// R99 (2) — a NOMINAL type alias, used in the declaring module and from another file through
+    /// `crate::`. `decls.rs` recorded an `Item::Type` only when the target is NON-nominal
+    /// (`prim_aliases`, a resolution SKIP); `pub type Client = reqwest::Client` recorded nothing.
+    #[test]
+    fn r99_nominal_type_alias_carries_its_targets_effects() {
+        let v = scan_crate_to_json("r99alias", &[
+            ("src/lib.rs", "pub mod other;\n\
+                            pub type Cmd = std::process::Command;\n\
+                            pub fn via_alias() { let _ = Cmd::new(\"/bin/sh\").status(); }\n"),
+            ("src/other.rs", "pub fn via_rooted_alias() { let _ = crate::Cmd::new(\"/bin/sh\").status(); }\n"),
+        ]);
+        assert_eq!(
+            effs_opt(&v, "via_alias"), vec!["Exec".to_string()],
+            "R99: `pub type Cmd = std::process::Command` must resolve exactly as `use … as Cmd` does \
+             — both live in the TYPE namespace, so no module can declare both spellings:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "other::via_rooted_alias"), vec!["Exec".to_string()],
+            "R99: …and from another file through `crate::Cmd`:\n{v:#}"
+        );
+    }
+
+    /// R99 (2) OVER-CHARGE CONTROL — the direction the fix did NOT intend. A root `pub type Client =
+    /// std::process::Command` must NOT reach a SUBMODULE that declares its own `Client`: a bare name is
+    /// never bound crate-wide (the rule `seed_root_reexports` established), only `crate::<qualified>`
+    /// and the spellings genuinely in scope. Without this the fix would trade a silent under-report for
+    /// the misattribution mirror — R101's direction, which is worse.
+    #[test]
+    fn r99_a_root_type_alias_does_not_reach_a_submodules_own_same_named_type() {
+        let v = scan_crate_to_json("r99shadow", &[
+            ("src/lib.rs", "pub mod local;\npub type Client = std::process::Command;\n"),
+            ("src/local.rs", "pub struct Client;\n\
+                              impl Client { pub fn new() -> Self { Client } pub fn go(&self) {} }\n\
+                              pub fn uses_local_client() { let c = Client::new(); c.go(); }\n"),
+        ]);
+        assert!(
+            effs_opt(&v, "local::uses_local_client").is_empty(),
+            "OVER-CHARGE CONTROL: a submodule's OWN `Client` must stay pure — the root alias binds \
+             `crate::Client`, never a bare crate-wide `Client`:\n{v:#}"
+        );
+    }
+
+    /// R99 (2) CONTROL — a NON-nominal alias must keep going to `prim_aliases` (the resolution SKIP that
+    /// stops `Inner::default()` inheriting a same-named local struct's effects, the sled `IVec`
+    /// fabrication). The nominal arm added here must not swallow it.
+    #[test]
+    fn r99_a_non_nominal_alias_still_takes_the_prim_alias_skip() {
+        let v = scan_src_to_json("r99prim", concat!(
+            "pub struct Inner;\n",
+            "impl Default for Inner { fn default() -> Self { let _ = std::env::var(\"HOME\"); Inner } }\n",
+            "pub type Buf = [u8; 4];\n",
+            "pub fn pure_path() -> Buf { Buf::default() }\n",
+        ));
+        assert!(
+            effs_opt(&v, "pure_path").is_empty(),
+            "CONTROL: `type Buf = [u8; 4]` is NON-nominal — it must still reach `prim_aliases` and skip \
+             the same-named local struct's effectful `Default`, not be recorded as a nominal alias:\n{v:#}"
+        );
+    }
+
+    /// R99 (3) — a `const`/`static` of CALLABLE type bound to a fn item. Gated on both halves (callable
+    /// declared type AND a bare-path initializer), so it can only ever name a function.
+    #[test]
+    fn r99_a_callable_const_bound_to_a_fn_item_is_not_lost() {
+        let v = scan_src_to_json("r99const", concat!(
+            "fn writer(p: &str) { let _ = std::fs::write(p, \"x\"); }\n",
+            "const WRITER: fn(&str) = writer;\n",
+            "static SWRITER: fn(&str) = writer;\n",
+            "pub fn via_const() { WRITER(\"/tmp/x\"); }\n",
+            "pub fn via_static() { SWRITER(\"/tmp/x\"); }\n",
+        ));
+        for f in ["via_const", "via_static"] {
+            assert_eq!(
+                effs_opt(&v, f), vec!["Fs".to_string()],
+                "R99: `{f}` calls a fn item held in a callable-typed const/static and must charge Fs — \
+                 pre-fix it was absent from functions[]:\n{v:#}"
+            );
+        }
+    }
+
+    /// R99 (3) CONTROL — a const that is NOT callable-typed, and a callable-typed const whose
+    /// initializer is not a bare path, must both record nothing. (`const_strings` and the lazy-static
+    /// route own those; a second answer here is what §G forbids.)
+    #[test]
+    fn r99_a_non_callable_const_records_no_alias() {
+        let v = scan_src_to_json("r99constctl", concat!(
+            "fn writer(p: &str) { let _ = std::fs::write(p, \"x\"); }\n",
+            "const NAME: &str = \"writer\";\n",
+            "pub fn uses_name() -> &'static str { NAME }\n",
+            "pub fn real_call() { writer(\"/tmp/x\"); }\n",
+        ));
+        assert!(
+            effs_opt(&v, "uses_name").is_empty(),
+            "CONTROL: a `&str` const named after a fn must NOT alias to it:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "real_call"), vec!["Fs".to_string()],
+            "CONTROL: the direct call must be unaffected:\n{v:#}"
+        );
+    }
+
+    /// R99 (4) — `fn_alias` did not CHAIN. `let w = std::fs::write; let v = w; v(..)` was absent in BOTH
+    /// the shadowing and non-shadowing spellings while the ONE-hop form (the control) has resolved since
+    /// sweep [6]; `let v = w` bound `v` to the dead string `w`, which names no fn.
+    #[test]
+    fn r99_a_fn_alias_of_a_fn_alias_chains() {
+        let v = scan_src_to_json("r99chain", concat!(
+            "pub fn two_hop() { let w = std::fs::write; let v = w; let _ = v(\"/tmp/x\", \"y\"); }\n",
+            "pub fn two_hop_shadow() { let w = std::fs::write; let w = w; let _ = w(\"/tmp/x\", \"y\"); }\n",
+            "pub fn ctl_one_hop() { let w = std::fs::write; let _ = w(\"/tmp/x\", \"y\"); }\n",
+        ));
+        for f in ["two_hop", "two_hop_shadow"] {
+            assert_eq!(
+                effs_opt(&v, f), vec!["Fs".to_string()],
+                "R99: `{f}` writes a file through a two-hop fn alias and must charge Fs:\n{v:#}"
+            );
+        }
+        assert_eq!(
+            effs_opt(&v, "ctl_one_hop"), vec!["Fs".to_string()],
+            "INTRINSIC CONTROL: the one-hop alias already resolved and must still:\n{v:#}"
+        );
+    }
+
+    /// R99 CONTROL — a plain external call must keep its own crate identity. The module-qualified alias
+    /// lookup runs AFTER the single-segment `use` route in the bare-qualifier branch precisely so a file
+    /// that binds the head itself (`use somecrate::facade;`) still means ITS `facade`; and a path with
+    /// no alias entry at all must come back unchanged.
+    #[test]
+    fn r99_a_plain_external_call_keeps_its_own_crate_identity() {
+        let mut uses: HashMap<String, String> = HashMap::new();
+        uses.insert("facade".into(), "somecrate::facade".into());
+        uses.insert("facade::Command".into(), "std::process::Command".into());
+        assert_eq!(
+            expand("facade::Command::new", &uses), "somecrate::facade::Command::new",
+            "a file that BINDS the head must keep that binding — the alias map answers only where the \
+             qualifier names a module of THIS crate"
+        );
+        let bare: HashMap<String, String> = HashMap::new();
+        assert_eq!(
+            expand("serde_json::from_str", &bare), "serde_json::from_str",
+            "an unaliased external path must come back unchanged"
+        );
+    }
+
+    // ── R100: THE SELF-SHADOW WINDOW (SOUNDNESS.md R100) ──────────────────────────────────────────
+    //
+    // R88 deferred the bare `let`'s `trait_vars` write past the trailing walk; R92 deferred the three
+    // let-else binders'. Both enumerated BINDERS, and `visit_local` makes ~46 name-keyed mutations across
+    // a dozen tables — so the class survived both. `elem_of` was the next one (R100), `fn_alias` the one
+    // after (found by R99's own fixture, minutes later). The fix enumerates the STATE instead: one
+    // capture/restore window around the trailing walk, covering every table and every binder shape.
+    //
+    // Every fixture below pairs a SELF-SHADOWING rebind with a NON-shadowing control of identical shape,
+    // and the two effect classes are deliberately DIFFERENT so the union cannot hide a loss.
+
+    /// R100 — `elem_of`. `self.elem_of.remove(name)` ran before `resolve_elem_type(&init.expr)`, whose
+    /// `.clone()` arm recurses into the receiver and reads the entry just deleted. Measured pre-fix:
+    /// `let ys = xs.clone(); for y in &ys { y.go(); }` → `["Fs"]`, and the self-shadowing
+    /// `let xs = xs.clone();` → ABSENT from functions[] with `deny Fs` exiting 0.
+    #[test]
+    fn r100_elem_of_survives_a_self_shadowing_clone_rebind() {
+        let src = concat!(
+            "pub struct W;\n",
+            "impl W { pub fn go(&self) { let _ = std::fs::write(\"/tmp/x\", \"w\"); } }\n",
+            "pub fn shadowed(xs: Vec<W>) { let xs = xs.clone(); for x in &xs { x.go(); } }\n",
+            "pub fn control(xs: Vec<W>) { let ys = xs.clone(); for y in &ys { y.go(); } }\n",
+        );
+        let v = scan_src_to_json("r100elem", src);
+        assert_eq!(
+            effs_opt(&v, "shadowed"), vec!["Fs".to_string()],
+            "R100: a SELF-SHADOWING element-preserving rebind must keep the element type — the RHS's own \
+             `.clone()` receiver still means the OUTER `xs`:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "control"), vec!["Fs".to_string()],
+            "control regressed: the non-shadowing rebind resolved before the fix and must still:\n{v:#}"
+        );
+    }
+
+    /// R100 — `str_locals`, named in the SOUNDNESS row as having the identical ordering
+    /// (`self.str_locals.remove(name)` before the value is resolved from the RHS) but NOT established:
+    /// the previous fixture showed no differential because neither arm resolved the host, so the
+    /// instrument could not separate the two hypotheses. This one can — the control DOES resolve the
+    /// host, so a shadowed arm that loses it is visible as a missing `hosts` entry rather than as two
+    /// identical blanks.
+    #[test]
+    fn r100_str_locals_survive_a_self_shadowing_rebind() {
+        let v = scan_src_to_json("r100str", concat!(
+            "pub fn control() { let u = \"https://ctl.example/x\"; let v = u; \
+                 let _ = reqwest::blocking::get(v); }\n",
+            "pub fn shadowed() { let u = \"https://shadow.example/x\"; let u = u; \
+                 let _ = reqwest::blocking::get(u); }\n",
+        ));
+        let ctl = hosts_of(fn_entry(&v, "control"));
+        assert!(
+            ctl.iter().any(|h| h.contains("ctl.example")),
+            "INSTRUMENT CHECK (§E3): the control arm must actually RESOLVE a host, or this fixture \
+             cannot tell a lost binding from one that was never resolved: {ctl:?}\n{v:#}"
+        );
+        let sh = hosts_of(fn_entry(&v, "shadowed"));
+        assert!(
+            sh.iter().any(|h| h.contains("shadow.example")),
+            "R100: a self-shadowing string rebind must keep the resolved host — the RHS names the OUTER \
+             binding: {sh:?}\n{v:#}"
+        );
+    }
+
+    /// R100 — `fn_alias`, the third instance, found by R99's two-hop fixture rather than predicted.
+    /// `let w = w;` removed the alias for stale-rebind hygiene BEFORE the same statement's RHS read it.
+    /// (The chaining half of that behaviour is `r99_a_fn_alias_of_a_fn_alias_chains`; this pins the
+    /// ORDERING half against the non-shadowing control.)
+    #[test]
+    fn r100_fn_alias_survives_a_self_shadowing_rebind() {
+        let v = scan_src_to_json("r100alias", concat!(
+            "pub fn shadowed() { let w = std::fs::write; let w = w; let _ = w(\"/tmp/x\", \"y\"); }\n",
+            "pub fn control()  { let w = std::fs::write; let v = w; let _ = v(\"/tmp/x\", \"y\"); }\n",
+        ));
+        for f in ["shadowed", "control"] {
+            assert_eq!(
+                effs_opt(&v, f), vec!["Fs".to_string()],
+                "R100/R99: `{f}` must charge Fs — the rebind's RHS means the PRE-rebind alias:\n{v:#}"
+            );
+        }
+    }
+
+    /// R100 — the ENUMERATION pin, the counterpart of
+    /// `every_name_keyed_table_is_scoped_by_the_one_binder`. That test pins the ten resolution tables
+    /// `scoped_binding` clears for a SHADOW BODY; this one pins that the same tables — plus the two
+    /// HEDGING sets, which `scoped_binding` deliberately keeps and this window must NOT — are captured
+    /// and restored around the RHS walk. Exercised directly on `CallCollector` rather than through a
+    /// fixture, for the reason the sibling test gives: a fixture can only witness the tables some shape
+    /// happens to reach, and the whole class is a table no shape reached.
+    #[test]
+    fn every_name_keyed_table_is_restored_for_the_rhs_walk() {
+        let uses = HashMap::new();
+        let fields = FieldIndex::new();
+        let trait_fields = TraitFieldIndex::new();
+        let trait_impls = TraitImplIndex::new();
+        let local_traits = HashMap::new();
+        let returns = ReturnIndex::new();
+        let field_elem = FieldElemIndex::new();
+        let field_elem_trait = FieldElemTraitIndex::new();
+        let enum_variants = EnumVariantIndex::new();
+        let enum_variant_traits = EnumVariantTraitIndex::new();
+        let lazy = std::collections::HashSet::new();
+        let consts = std::collections::HashMap::new();
+        let macros = std::collections::HashMap::new();
+        let mut c = CallCollector {
+            modpath: String::new(), uses: &uses, vars: HashMap::new(), trait_vars: HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
+            trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
+            fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
+            local_traits: &local_traits, returns: &returns, has_dyn_return: false,
+            field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
+            ambiguous_enum_leaves: &std::collections::HashSet::new(), elem_of: HashMap::new(),
+            field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
+            tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
+            closure_vars: Default::default(), fn_typed_vars: Default::default(),
+            dep_bound_vars: HashMap::new(), fn_alias: Default::default(), lazy_statics: &lazy,
+            forced_lazies: Default::default(), unresolved: false, err_ret_leaf: None,
+            const_strings: &consts, local_macros: &macros, macro_expanding: Default::default(),
+            str_locals: Default::default(),
+            local_uses: Default::default(), bound_names: Default::default(), dispatch_sites: Default::default(),
+            drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
+        };
+        let n = "x";
+        c.vars.insert(n.into(), "Outer".into());
+        c.trait_vars.insert(n.into(), vec!["Store".into()]);
+        c.dep_bound_vars.insert(n.into(), "deplib::build".into());
+        c.trait_quals_by_param.insert(n.into(), HashMap::from([("Store".to_string(), "deplib::Store".to_string())]));
+        c.elem_of.insert(n.into(), "Elem".into());
+        c.elem_trait_of.insert(n.into(), vec!["Doer".into()]);
+        c.tuple_of.insert(n.into(), vec![Some("A".into())]);
+        c.tuple_trait_of.insert(n.into(), vec![vec!["Doer".into()]]);
+        c.fn_alias.insert(n.into(), "effectful".into());
+        c.str_locals.insert(n.into(), "https://outer.example".into());
+        c.closure_vars.insert(n.into());
+        c.fn_typed_vars.insert(n.into());
+
+        let pre = c.capture_bindings(&[n.to_string()]);
+        // A statement's binder arms overwrite EVERY table for the name — the state the trailing walk of
+        // this statement's own RHS must not see.
+        c.vars.insert(n.into(), "Inner".into());
+        c.trait_vars.insert(n.into(), vec!["Other".into()]);
+        c.dep_bound_vars.insert(n.into(), "otherlib::build".into());
+        c.trait_quals_by_param.insert(n.into(), HashMap::new());
+        c.elem_of.insert(n.into(), "OtherElem".into());
+        c.elem_trait_of.insert(n.into(), vec!["Other".into()]);
+        c.tuple_of.insert(n.into(), vec![Some("B".into())]);
+        c.tuple_trait_of.insert(n.into(), vec![vec!["Other".into()]]);
+        c.fn_alias.insert(n.into(), "other".into());
+        c.str_locals.insert(n.into(), "https://inner.example".into());
+        c.closure_vars.remove(n);
+        c.fn_typed_vars.remove(n);
+        let post = c.capture_bindings(&[n.to_string()]);
+
+        c.restore_bindings(&pre);
+        let mut wrong: Vec<&str> = Vec::new();
+        if c.vars.get(n).map(String::as_str) != Some("Outer") { wrong.push("vars"); }
+        if c.trait_vars.get(n).cloned() != Some(vec!["Store".to_string()]) { wrong.push("trait_vars"); }
+        if c.dep_bound_vars.get(n).map(String::as_str) != Some("deplib::build") { wrong.push("dep_bound_vars"); }
+        if c.trait_quals_by_param.get(n).map(|m| m.len()) != Some(1) { wrong.push("trait_quals_by_param"); }
+        if c.elem_of.get(n).map(String::as_str) != Some("Elem") { wrong.push("elem_of"); }
+        if c.elem_trait_of.get(n).cloned() != Some(vec!["Doer".to_string()]) { wrong.push("elem_trait_of"); }
+        if c.tuple_of.get(n).cloned() != Some(vec![Some("A".to_string())]) { wrong.push("tuple_of"); }
+        if c.tuple_trait_of.get(n).cloned() != Some(vec![vec!["Doer".to_string()]]) { wrong.push("tuple_trait_of"); }
+        if c.fn_alias.get(n).map(String::as_str) != Some("effectful") { wrong.push("fn_alias"); }
+        if c.str_locals.get(n).map(String::as_str) != Some("https://outer.example") { wrong.push("str_locals"); }
+        // The HEDGING sets are restored too — unlike `scoped_binding`, which keeps them. The questions
+        // differ: there the shadow's BODY is being walked and clearing a hedge would let `x()` resolve to
+        // a free fn; here the pre-statement value is what the RHS meant, so restoring is honest in BOTH
+        // directions and leaving them alone would answer the RHS with the new binding's hedging.
+        if !c.closure_vars.contains(n) { wrong.push("closure_vars"); }
+        if !c.fn_typed_vars.contains(n) { wrong.push("fn_typed_vars"); }
+        assert!(wrong.is_empty(),
+                "these name-keyed tables are NOT restored for the RHS walk: {wrong:?}. A `let` whose RHS \
+                 names the binding it shadows will resolve against the NEW entry and lose the outer \
+                 binding's effect, with nothing disclosed — SOUNDNESS.md R88/R92/R100.");
+
+        // …and the statement's own decision is put back afterwards, or every LATER statement reads the
+        // outer binding instead (the mirror failure: a stale entry answering for a rebound name).
+        c.restore_bindings(&post);
+        assert_eq!(c.vars.get(n).map(String::as_str), Some("Inner"));
+        assert_eq!(c.elem_of.get(n).map(String::as_str), Some("OtherElem"));
+        assert_eq!(c.fn_alias.get(n).map(String::as_str), Some("other"));
+        assert!(!c.closure_vars.contains(n) && !c.fn_typed_vars.contains(n));
+
+        // An entry ABSENT from the snapshot must be REMOVED, never left standing.
+        let empty = c.capture_bindings(&["never_bound".to_string()]);
+        c.vars.insert("never_bound".into(), "Ghost".into());
+        c.restore_bindings(&empty);
+        assert!(!c.vars.contains_key("never_bound"),
+                "restore must DELETE an entry the snapshot did not have — leaving it is the fabrication \
+                 direction this window exists to avoid");
     }

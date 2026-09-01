@@ -864,7 +864,29 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     if !rooted_local {
         if let Some(full) = uses.get(segs[0]) {
             let rest = &segs[1..];
-            return if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
+            let joined =
+                if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
+            // R99 — a crate-LOCAL rebind of the MODULE (`use crate::facade;` then `facade::Command::new`)
+            // rewrites to `crate::facade::Command::new`, which is the alias map's own key shape. Re-apply
+            // the qualified lookup ONCE to the rewritten path: without it the SIBLING-module spelling of a
+            // facade re-export stayed silent while the ancestor-module spelling resolved. Only the
+            // `crate::`-rooted rewrite is re-applied — a rebind onto an EXTERNAL module
+            // (`use somecrate::facade;`) must keep that crate's identity and is left alone.
+            if let Some(stripped) = joined.strip_prefix("crate::") {
+                let s2: Vec<&str> = stripped.split("::").collect();
+                if let Some(q) = qualified_alias(&s2, true, uses) {
+                    return q;
+                }
+            }
+            return joined;
+        }
+        // R99 — a MODULE-QUALIFIED alias (`facade::Command`, seeded by `seed_mod_aliases`) written from a
+        // module where the qualifier IS in scope. AFTER the single-segment `use` lookup, never before: a
+        // file that binds the head itself (`use somecrate::facade;`) means ITS `facade`, and answering
+        // from the alias map there would attribute the call to the wrong origin. The head is unbound here,
+        // so the only thing it can name is a module of this crate.
+        if let Some(full) = qualified_alias(&segs, false, uses) {
+            return full;
         }
         // A BARE qualifier with no `use` binding is NOT glob-rewritten here: it could be a genuine external
         // crate call (`dotenvy::var`) whose crate identity the classifier still needs — rewriting it under a
@@ -884,6 +906,12 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     // module still resolves to its local def downstream (local wins) and stays pure — no fabrication. A
     // `crate::`-rooted path can never be a genuine external-crate call, so this can't hijack one (unlike a
     // bare qualifier). Two-plus globs are ambiguous → honest under-report.
+    // R99 — the MULTI-segment form of exactly that lookup, tried FIRST because it is the more specific
+    // key: `crate::facade::Command` names the re-exported item, `crate::facade` only names its module. A
+    // `crate::`-rooted path can never be an external-crate call, so this cannot hijack one either.
+    if let Some(full) = qualified_alias(&segs, true, uses) {
+        return full;
+    }
     if let Some(full) = uses.get(&format!("crate::{}", segs[0])) {
         let rest = &segs[1..];
         return if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
@@ -895,6 +923,64 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
         return format!("{glob}::{}", segs.join("::"));
     }
     segs.join("::")
+}
+
+/// R99 — resolve a MULTI-SEGMENT prefix of `segs` against the module-qualified alias entries
+/// `seed_mod_aliases` put in the `use` map (`facade::Command -> std::process::Command`). LONGEST prefix
+/// first, so a nested `outer::inner::Command` is preferred over any shorter key that happens to exist.
+/// Two segments minimum: a one-segment lookup is `expand`'s existing `use`-map route and must keep its
+/// own precedence rules.
+fn qualified_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) -> Option<String> {
+    for n in (2..=segs.len()).rev() {
+        let joined = segs[..n].join("::");
+        let key = if rooted { format!("crate::{joined}") } else { joined };
+        if let Some(full) = uses.get(&key) {
+            let rest = &segs[n..];
+            return Some(if rest.is_empty() {
+                full.clone()
+            } else {
+                format!("{full}::{}", rest.join("::"))
+            });
+        }
+    }
+    None
+}
+
+/// R99 — seed the crate's MODULE-QUALIFIED external aliases into ONE file's `use` map, under the keys a
+/// call written in THAT file can actually spell. `modpath` is the file's own module path.
+///
+/// Three keys per entry, and the scoping rule behind each is the one `seed_root_reexports` established:
+/// never bind a BARE name crate-wide, because a submodule that declares its own `Client` would then have
+/// its local type hijacked by a root `pub type Client = reqwest::Client` — the misattribution direction.
+///
+///  * `crate::<qualified>` — always. `crate::facade::Command` / `crate::Cmd` name the item from anywhere,
+///    and a `crate::`-rooted path always names THIS crate, so it cannot hijack an external call — the
+///    same property `expand`'s existing crate-rooted branch already rests on, not a new claim.
+///  * `<qualified>` relative to THIS file's module — the spelling an ANCESTOR module writes
+///    (`facade::Command` from the crate root; `inner::Command` from inside `outer`). Two-plus segments,
+///    so it is only reachable through `qualified_alias`.
+///  * the BARE name, and only when this file IS the declaring module — where the name is genuinely in
+///    scope. (Usually redundant with the file's own `use`/`type` item; not redundant when the declaration
+///    is an inline submodule of the same file, or the item appears after its first use.)
+pub(crate) fn seed_mod_aliases(
+    aliases: &HashMap<String, String>,
+    modpath: &str,
+    uses: &mut HashMap<String, String>,
+) {
+    for (qualified, target) in aliases {
+        uses.insert(format!("crate::{qualified}"), target.clone());
+        let (module, name) = match qualified.rsplit_once("::") {
+            Some((m, n)) => (m, n),
+            None => ("", qualified.as_str()),
+        };
+        if module == modpath {
+            uses.insert(name.to_string(), target.clone());
+        } else if modpath.is_empty() {
+            uses.insert(qualified.clone(), target.clone());
+        } else if let Some(rel) = module.strip_prefix(&format!("{modpath}::")) {
+            uses.insert(format!("{rel}::{name}"), target.clone());
+        }
+    }
 }
 
 /// The single crate-ROOT re-export glob (seeded under `crate::` + `GLOB_KEY`), if unambiguous — see

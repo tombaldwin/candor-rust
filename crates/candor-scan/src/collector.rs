@@ -228,6 +228,47 @@ pub(crate) struct CallCollector<'a> {
 /// dropped as pure. `record_return`'s own doc comment already states over-approximating toward fn-typed
 /// only ever marks the binding `Unknown` — the safe direction — so decoding it here carries the same
 /// soundness argument the `<dyn>`/`<elemdyn>` sentinels already rely on.
+/// R100 — every name-keyed entry for ONE bound name, captured so a `let` statement's own RHS can be
+/// walked under the state that was live BEFORE the statement bound it.
+///
+/// THE CLASS, and why this is a snapshot rather than another deferral. `visit_local` mutates ~46
+/// name-keyed table entries, then walks the statement's `pat`/`init`/`else` with the trailing
+/// `syn::visit::visit_local`. In Rust the RHS is evaluated BEFORE the binding takes effect, so every one
+/// of those mutations is visible to a walk that must not see it — and where the binding SHADOWS the name
+/// it is initialised from, the RHS resolves against the new entry and the outer binding's effect is lost
+/// with nothing disclosed. R88 fixed that for the bare `let`'s `vars`/`trait_vars`, R92 for the three
+/// let-else binders' — both by DEFERRING their own mutation, which is one family of sites out of ~46.
+/// `elem_of` was another (`let xs = xs.clone(); for x in &xs { x.go(); }` → ABSENT, R100), `fn_alias`
+/// another (`let w = w;`, found by R99's own fixture).
+///
+/// Enumerating the BINDERS was necessary and not sufficient. This enumerates the STATE instead: capture
+/// every name-keyed entry for the bound names on entry, restore it around the trailing walk, put the
+/// statement's own result back after. One rule, every site, and it cannot go stale as binder shapes are
+/// added — a NEW binder is covered the day it is written, and a new TABLE is caught by
+/// `every_name_keyed_table_is_restored_for_the_rhs_walk`.
+///
+/// The field list is deliberately the one `scoped_binding` enumerates. It differs in ONE decision, and
+/// the reason is that the two answer different questions: `scoped_binding` KEEPS the hedging sets
+/// (`closure_vars`/`fn_typed_vars`) because clearing them inside a shadow's body would let a shadowed
+/// `name()` resolve to a free fn — a fabrication. Here nothing is cleared: the pre-statement value is
+/// RESTORED, which for the RHS is simply what the name meant there, so both directions stay honest.
+#[derive(Default, Clone)]
+pub(crate) struct BoundNameState {
+    name: String,
+    vars: Option<String>,
+    trait_vars: Option<Vec<String>>,
+    dep_bound_vars: Option<String>,
+    trait_quals_by_param: Option<HashMap<String, String>>,
+    elem_of: Option<String>,
+    elem_trait_of: Option<Vec<String>>,
+    tuple_of: Option<Vec<Option<String>>>,
+    tuple_trait_of: Option<Vec<Vec<String>>>,
+    fn_alias: Option<String>,
+    str_locals: Option<String>,
+    closure_vars: bool,
+    fn_typed_vars: bool,
+}
+
 fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
     if t == RET_FN_TYPED {
         return Some(vec!["Fn".to_string()]);
@@ -1464,6 +1505,81 @@ impl<'a> CallCollector<'a> {
         r
     }
 
+    /// R100 — capture the name-keyed state of `names` (see `BoundNameState`).
+    pub(crate) fn capture_bindings(&self, names: &[String]) -> Vec<BoundNameState> {
+        names
+            .iter()
+            .map(|n| BoundNameState {
+                name: n.clone(),
+                vars: self.vars.get(n).cloned(),
+                trait_vars: self.trait_vars.get(n).cloned(),
+                dep_bound_vars: self.dep_bound_vars.get(n).cloned(),
+                trait_quals_by_param: self.trait_quals_by_param.get(n).cloned(),
+                elem_of: self.elem_of.get(n).cloned(),
+                elem_trait_of: self.elem_trait_of.get(n).cloned(),
+                tuple_of: self.tuple_of.get(n).cloned(),
+                tuple_trait_of: self.tuple_trait_of.get(n).cloned(),
+                fn_alias: self.fn_alias.get(n).cloned(),
+                str_locals: self.str_locals.get(n).cloned(),
+                closure_vars: self.closure_vars.contains(n),
+                fn_typed_vars: self.fn_typed_vars.contains(n),
+            })
+            .collect()
+    }
+
+    /// R100 — put a `capture_bindings` snapshot back, exactly (an entry absent in the snapshot is REMOVED,
+    /// never left standing: a stale entry answering for the name is the fabrication direction).
+    pub(crate) fn restore_bindings(&mut self, saved: &[BoundNameState]) {
+        fn put<V: Clone>(m: &mut HashMap<String, V>, n: &str, v: &Option<V>) {
+            match v {
+                Some(v) => { m.insert(n.to_string(), v.clone()); }
+                None => { m.remove(n); }
+            }
+        }
+        fn put_set(s: &mut std::collections::HashSet<String>, n: &str, present: bool) {
+            if present { s.insert(n.to_string()); } else { s.remove(n); }
+        }
+        for b in saved {
+            let n = b.name.as_str();
+            put(&mut self.vars, n, &b.vars);
+            put(&mut self.trait_vars, n, &b.trait_vars);
+            put(&mut self.dep_bound_vars, n, &b.dep_bound_vars);
+            put(&mut self.trait_quals_by_param, n, &b.trait_quals_by_param);
+            put(&mut self.elem_of, n, &b.elem_of);
+            put(&mut self.elem_trait_of, n, &b.elem_trait_of);
+            put(&mut self.tuple_of, n, &b.tuple_of);
+            put(&mut self.tuple_trait_of, n, &b.tuple_trait_of);
+            put(&mut self.fn_alias, n, &b.fn_alias);
+            put(&mut self.str_locals, n, &b.str_locals);
+            put_set(&mut self.closure_vars, n, b.closure_vars);
+            put_set(&mut self.fn_typed_vars, n, b.fn_typed_vars);
+        }
+    }
+
+    /// R100 — run `f` with the name-keyed state of this statement's bound names put back to `pre`.
+    ///
+    /// EVERY read of a `let`'s own RHS goes through here, not just the ones known to have broken. In Rust
+    /// the RHS is evaluated before the binding exists, so a resolver asked about it must see the
+    /// pre-statement state — and `visit_local` interleaves ~46 writes with those reads, so which pairs
+    /// happen to be ordered wrongly is a question that has to be re-answered every time the function is
+    /// edited. It has been answered wrongly three times (R88, R92, R100), so it is not asked here:
+    /// the reads are wrapped uniformly and the ordering stops being a thing to get right.
+    pub(crate) fn with_pre_bindings<R>(
+        &mut self,
+        pre: &[BoundNameState],
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if pre.is_empty() {
+            return f(self);
+        }
+        let names: Vec<String> = pre.iter().map(|b| b.name.clone()).collect();
+        let now = self.capture_bindings(&names);
+        self.restore_bindings(pre);
+        let r = f(self);
+        self.restore_bindings(&now);
+        r
+    }
+
     /// Bind each single-ident element of a tuple PATTERN to the matching element of a tuple TYPE
     /// (`let (s, _): (Sender, usize)` → `s: Sender`). A `_`/wildcard element is skipped. Each binding
     /// CLEARS any prior `vars`/`elem_of` for the name first, so a stale effectful binding can't survive
@@ -2598,31 +2714,33 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
     }
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        // R88/R92 SELF-SHADOW GUARD: any binder's `vars`/`trait_vars` mutation for the name(s) THIS
-        // statement binds must NOT take effect until AFTER this statement's own RHS has been walked — the
-        // RHS is walked a SECOND time, independently, by the trailing `syn::visit::visit_local(self, node)`
-        // call at the bottom of this fn, and a SELF-SHADOWING rebind's RHS refers to the SAME name being
-        // bound (`let mut conn = conn.to_connection()...;`, real shape, mysql_async 0.37.0 `Query::run`;
-        // `let Msg::Cb(f) = f.produce() else { return }; f.go();`, R92). An EARLY clear of `trait_vars[name]`
-        // — correct for every later statement — is ALSO visible to that second walk of THIS statement's own
-        // RHS, which still means the OUTER binding, and loses ITS dispatch typing: measured, `Q::run` read
-        // `Unknown` (honest — an opaque `run` dispatch through `ToConnection`) before the R88 patch that
-        // first added the clear, and fell CONSPICUOUSLY SILENT (zero calls, zero unresolved, absent from
-        // `functions[]` entirely) once it was added — a fabricated false-clean regression the corpus A/B
-        // caught before that commit shipped, not after. Deferred here and applied once, after the trailing
-        // walk, so the RHS resolves against the PRE-rebind state (matching real Rust scoping) and only
-        // LATER statements see the new binding.
+        // R88/R92/R100 SELF-SHADOW GUARD — ONE RULE, EVERY TABLE, EVERY BINDER. Read `BoundNameState`
+        // for the class; the mechanism is: capture the name-keyed state of the names THIS statement binds
+        // BEFORE any of the binder arms below run, and at the bottom of this fn put that pre-statement
+        // state back for the duration of the trailing `syn::visit::visit_local(self, node)` walk.
         //
-        // R88 introduced this ONLY for the bare unannotated `let` (the `Pat::Ident` arm below, which still
-        // pushes its own entry with `clear_vars: false` — its `vars` mutation is more elaborate than a
-        // single insert/remove and stays immediate, unchanged from R88). R92 found the SAME early-mutation
-        // shape, unfixed, in both let-else binders (tuple-variant and struct-variant) below — reused here
-        // rather than given a third ordering rule, per the family rule against two hand-rolled paths
-        // answering one question. `concrete_ty`/`clear_vars` generalise the tuple so a let-else binder's
-        // "no trait leaves, but a concrete field type" alternative (`vars.insert`, not `trait_vars.insert`)
-        // defers exactly like the trait-leaves case — that alternative can ALSO be fed a self-shadowing
-        // RHS and was equally wrong to apply early.
-        let mut pending_bindings: Vec<(String, Vec<String>, Option<String>, bool)> = Vec::new();
+        // WHY THE WALK MUST NOT SEE THEM. That trailing call re-walks this statement's own `pat`/`init`/
+        // `else`, and a SELF-SHADOWING rebind's RHS names the SAME binding it is initialised from
+        // (`let mut conn = conn.to_connection()...;`, real shape, mysql_async 0.37.0 `Query::run`;
+        // `let Msg::Cb(f) = f.produce() else { return }; f.go();`, R92; `let xs = xs.clone(); for x in &xs
+        // { x.go(); }`, R100; `let w = w;`, found by R99's fixture). In Rust the RHS is evaluated before
+        // the binding takes effect, so there the name still means the OUTER one. An early write — correct
+        // for every LATER statement — is also visible to that walk and silently loses the outer binding's
+        // effect: measured, `Q::run` read `Unknown` (honest — an opaque `run` dispatch through
+        // `ToConnection`) before the R88 patch that first added the clear, and fell CONSPICUOUSLY SILENT
+        // (zero calls, zero unresolved, absent from `functions[]` entirely) once it was added — a
+        // fabricated false-clean regression the corpus A/B caught before that commit shipped, not after.
+        //
+        // WHY IT IS A SNAPSHOT AND NOT A THIRD DEFERRAL. R88 deferred the bare `let`'s `trait_vars` write;
+        // R92 deferred the three let-else binders'. Both were binder-shaped, and this function makes ~46
+        // name-keyed mutations across a dozen tables — so the class outlived both fixes, in `elem_of`
+        // (R100) and in `fn_alias`. Enumerating the STATE covers every site at once and keeps covering
+        // them: a binder added tomorrow is inside the window the day it is written, and a TABLE added
+        // tomorrow is caught by `every_name_keyed_table_is_restored_for_the_rhs_walk`. The per-binder
+        // deferral it replaces is gone rather than left beside it — two mechanisms answering one ordering
+        // question is exactly how this class stayed open through two fixes.
+        let bound_names = crate::decls::pat_bound_idents(&node.pat);
+        let pre_bindings = self.capture_bindings(&bound_names);
         // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
         // TRAIT OBJECT is valid for the REST of the fn (let-else binds fn-wide), so type `d` into
         // `trait_vars` (fn-wide, like any top-level let) → `d.go()` dispatches. Only a `Some`/`Ok` pattern
@@ -2636,17 +2754,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // `self.returns`/`self.trait_vars` for the OLD `f` to decide the NEW `f`'s leaves — a correct read
         // — but the immediate `insert` then overwrote `trait_vars["f"]` before the trailing walk asked what
         // `f.maybe_produce()` itself dispatches to, so the producer's own effect vanished the same way.
-        // Deferred into `pending_bindings` (this fn's opening comment) rather than given its own fix.
+        // Covered by the SELF-SHADOW WINDOW at the top of this fn rather than given its own fix.
         if let Some(binding) = some_ok_binding(&node.pat) {
             if let Some(init) = &node.init {
-                let leaves = self.resolve_elem_trait_leaves(&init.expr);
+                let leaves = self.with_pre_bindings(&pre_bindings, |s| s.resolve_elem_trait_leaves(&init.expr));
                 if !leaves.is_empty() {
                     // R71: `let Some(f) = &self.cb else { return }; f();` — same call-syntax gap as
                     // if-let/while-let/match; hedge a callable-leaved binding into `fn_typed_vars`.
                     if Self::leaves_are_callable(&leaves) {
                         self.fn_typed_vars.insert(binding.clone());
                     }
-                    pending_bindings.push((binding, leaves, None, true));
+                    self.vars.remove(&binding);
+                    self.trait_vars.insert(binding, leaves);
                 }
             }
         } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&node.pat) {
@@ -2665,12 +2784,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // else { return };`) is the same name. Measured: `f.produce()`'s dispatch then looked up the
             // NEW (wrong) leaves and silently failed to match any method, losing the producer's effect with
             // `unresolved` never set — see the fixture this fn's opening comment references. Deferred via
-            // `pending_bindings`, reusing R88's mechanism rather than adding a third ordering rule.
+            // the one self-shadow WINDOW at the top of this fn, not a per-binder ordering rule.
             if node.init.is_some() {
                 if Self::leaves_are_callable(&leaves) {
                     self.fn_typed_vars.insert(name.clone());
                 }
-                pending_bindings.push((name, leaves, ty, true));
+                self.vars.remove(&name);
+                self.trait_vars.remove(&name);
+                if !leaves.is_empty() {
+                    self.trait_vars.insert(name, leaves);
+                } else if let Some(t) = ty {
+                    self.vars.insert(name, t);
+                }
             }
         } else {
             // R77 RESIDUAL: the let-else twin of the struct-variant branches above — `let Msg::CbField
@@ -2688,7 +2813,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if Self::leaves_are_callable(&leaves) {
                         self.fn_typed_vars.insert(name.clone());
                     }
-                    pending_bindings.push((name, leaves, ty, true));
+                    self.vars.remove(&name);
+                    self.trait_vars.remove(&name);
+                    if !leaves.is_empty() {
+                        self.trait_vars.insert(name, leaves);
+                    } else if let Some(t) = ty {
+                        self.vars.insert(name, t);
+                    }
                 }
             }
         }
@@ -2887,7 +3018,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let name = id.ident.to_string();
             self.str_locals.remove(&name); // clear stale binding on any rebind
             if let Some(init) = &node.init {
-                let resolved = const_str_value(&init.expr).or_else(|| self.resolve_str_expr(&init.expr));
+                let resolved = const_str_value(&init.expr)
+                    .or_else(|| self.with_pre_bindings(&pre_bindings, |s| s.resolve_str_expr(&init.expr)));
                 if let Some(v) = resolved {
                     self.str_locals.insert(name, v);
                 }
@@ -2904,7 +3036,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // `cb: fn()`/`impl Fn`): invoking `g()` is the same opaque-callback call as `cb()` →
                     // Unknown, not a phantom free-fn `g` (the max review found the param-only seeding
                     // missed this). A rebind to a non-fn clears the stale fn-typed marking.
-                    self.fn_alias.remove(&id.ident.to_string()); // drop any stale alias on rebind
+                    // R99/R100 — the removal is hygiene for LATER statements, but this statement's own
+                    // RHS still means the PRE-rebind binding (`let w = w;` re-aliases `w` to whatever `w`
+                    // already named). Keep the removed entry so the chaining lookup below can read it:
+                    // dropping it first is the same mutate-before-read ordering R100 names, one read
+                    // earlier than the trailing walk, and it left the SELF-SHADOWING two-hop spelling
+                    // silent while the distinct-name one resolved.
+                    let shadowed_alias = self.fn_alias.remove(&id.ident.to_string());
                     // R88 — SOUNDNESS: every sibling dispatch binder (if-let, while-let, match-arm,
                     // for-loop, let-else, annotated `let`, tuple destructure — R71/R75/R76/R77) resolves
                     // dispatch-trait leaves for its RHS before falling back to a concrete type. The bare
@@ -2915,18 +3053,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // is the SAME authority the call site already uses to resolve a dispatch RECEIVER —
                     // routed here rather than reimplemented (the family rule against a second hand-rolled
                     // path answering a question one already owns). Computed against the PRE-rebind state
-                    // (safe — a read, not a mutation); the actual `trait_vars` clear/insert is DEFERRED to
-                    // `pending_bindings` (see this fn's opening comment) rather than applied here, so
-                    // a self-shadowing RHS (`let mut conn = conn.to_connection()...;`) still resolves
-                    // against the OUTER binding when the trailing walk revisits it. A non-empty result
+                    // (safe — a read, not a mutation); the `trait_vars` clear/insert below is applied
+                    // here and UNDONE for the trailing walk by the self-shadow window at the top of this
+                    // fn, so a self-shadowing RHS (`let mut conn = conn.to_connection()...;`) still
+                    // resolves against the OUTER binding when that walk revisits it. A non-empty result
                     // takes the dispatch route and skips the concrete-type routes below — a dispatch RHS is
                     // a `Field`/`Path`/`MethodCall` receiver shape, never a `ctor_type`/clone-typed concrete
                     // one, so nothing is lost by skipping them. `clear_vars: false` — this arm's own `vars`
                     // mutation (immediately below, and the ctor_type/clone/tuple routes further down) is
-                    // more elaborate than a single insert/remove and is left immediate, unchanged from R88;
-                    // only the `trait_vars` half defers here.
-                    let dispatch_leaves = self.resolve_recv_traits(&init.expr);
-                    pending_bindings.push((id.ident.to_string(), dispatch_leaves.clone(), None, false));
+                    // more elaborate than a single insert/remove — and, like every other mutation in this
+                    // fn, it is now inside the window rather than special-cased.
+                    let dispatch_leaves =
+                        self.with_pre_bindings(&pre_bindings, |s| s.resolve_recv_traits(&init.expr));
+                    self.trait_vars.remove(&id.ident.to_string());
+                    if !dispatch_leaves.is_empty() {
+                        self.trait_vars.insert(id.ident.to_string(), dispatch_leaves.clone());
+                    }
                     if !dispatch_leaves.is_empty() {
                         self.vars.remove(&id.ident.to_string());
                         self.dep_bound_vars.remove(&id.ident.to_string());
@@ -2985,7 +3127,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // CALL itself stays uncharged — the anti-fabrication clone guard is untouched);
                             // scan.rs's `local_types` gate still confines any resulting `Type::method` edge.
                             if m.method == "clone" {
-                                if let Some(t) = self.resolve_recv_type(&m.receiver) {
+                                if let Some(t) =
+                                    self.with_pre_bindings(&pre_bindings, |s| s.resolve_recv_type(&m.receiver))
+                                {
                                     self.vars.insert(id.ident.to_string(), t);
                                 }
                             }
@@ -3000,7 +3144,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     || self.fn_typed_vars.contains(&n)
                             });
                             if p.qself.is_none() && !single_local {
-                                self.fn_alias.insert(id.ident.to_string(), expand(&path_to_string(&p.path), self.uses));
+                                // R99 — an alias OF an alias (`let w = std::fs::write; let v = w; v(..)`).
+                                // `expand("w")` names nothing (`w` is a local, not an import), so `v` was
+                                // bound to the dead string `w` and its call resolved to no fn at all —
+                                // ABSENT from `functions[]` in both the shadowing and non-shadowing
+                                // spellings, while the ONE-hop form has resolved since sweep [6]. Follow
+                                // the existing entry, reading the SAME map the call site reads, so the two
+                                // spellings cannot answer differently.
+                                let target = p
+                                    .path
+                                    .get_ident()
+                                    .and_then(|i| {
+                                        let n = i.to_string();
+                                        if id.ident == n {
+                                            shadowed_alias.clone()
+                                        } else {
+                                            self.fn_alias.get(&n).cloned()
+                                        }
+                                    })
+                                    .unwrap_or_else(|| expand(&path_to_string(&p.path), self.uses));
+                                self.fn_alias.insert(id.ident.to_string(), target);
                             }
                         }
                     }
@@ -3009,7 +3172,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // still resolve. Drop any STALE element binding first — a rebind to a non-collection
                     // must not leave the old element type to mis-type a later subscript/loop.
                     self.elem_of.remove(&id.ident.to_string());
-                    if let Some(e) = self.resolve_elem_type(&init.expr) {
+                    if let Some(e) = self.with_pre_bindings(&pre_bindings, |s| s.resolve_elem_type(&init.expr)) {
                         self.elem_of.insert(id.ident.to_string(), e);
                     }
                     // GAP C / SOUNDNESS: `let pair = (cb, 1);` (an UNANNOTATED plain `let` whose init is
@@ -3031,7 +3194,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // dispatch-typed, position 1 a plain concrete effectful value) needs BOTH: the
                         // consumer (`let (f, c) = pair;`) reads whichever table has that position's
                         // entry, exactly as the ANNOTATED-`let` route above populates both independently.
-                        let leaves = self.tuple_literal_leaves(it);
+                        let leaves = self.with_pre_bindings(&pre_bindings, |s| s.tuple_literal_leaves(it));
                         if leaves.iter().any(|l| !l.is_empty()) {
                             self.tuple_trait_of.insert(id.ident.to_string(), leaves);
                         }
@@ -3044,23 +3207,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
             }
         }
+        // R88/R92/R100 SELF-SHADOW WINDOW, closed (see this fn's opening comment and `BoundNameState`).
+        // Everything above has written this statement's bindings; the trailing walk below re-walks the
+        // statement's OWN `pat`/`init`/`else`, where every one of those names still means what it meant
+        // BEFORE the statement. So: keep what the statement decided, put the pre-statement state back for
+        // the walk, and restore the decision afterwards. One window, every table, every binder shape.
+        let post = self.capture_bindings(&bound_names);
+        self.restore_bindings(&pre_bindings);
         syn::visit::visit_local(self, node);
-        // R88/R92 SELF-SHADOW GUARD, continued (see this fn's opening comment): apply every deferred
-        // binder's `vars`/`trait_vars` mutation NOW, after the RHS has been walked under the PRE-rebind
-        // state — never before. One entry per bound name (a struct-variant let-else can bind several from
-        // one statement); `clear_vars` and `concrete_ty` are both no-ops for the bare-`let` entry (R88),
-        // which pushes `(name, leaves, None, false)` and so only ever exercises the `trait_vars` half below.
-        for (name, leaves, concrete_ty, clear_vars) in pending_bindings {
-            if clear_vars {
-                self.vars.remove(&name);
-            }
-            self.trait_vars.remove(&name);
-            if !leaves.is_empty() {
-                self.trait_vars.insert(name, leaves);
-            } else if let Some(t) = concrete_ty {
-                self.vars.insert(name, t);
-            }
-        }
+        self.restore_bindings(&post);
     }
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         // The macro PATH itself can carry/hide an effect that a syntactic (pre-expansion) scan can't see.

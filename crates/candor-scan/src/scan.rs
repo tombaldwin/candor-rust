@@ -1501,6 +1501,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // otherwise see (each file starts with a fresh `use` map). Crate-rooted only: a bare `net::foo` never
         // looks up a `crate::…` key, so a genuine external-crate call is never hijacked (see `expand`).
         let mut uses = seed_root_reexports(&merged.root_reexports);
+        // …and the MODULE-QUALIFIED external aliases (R99): a submodule `pub use std::process::Command`, a
+        // nominal `pub type Cmd = std::process::Command`, a callable-typed `const`. Same cross-file problem
+        // the root re-exports have — the declaring module is usually a DIFFERENT file — and the same answer.
+        seed_mod_aliases(&merged.mod_aliases, &modpath, &mut uses);
         let mut file_fns: Vec<FnInfo> = Vec::new();
         // A PANIC IN ONE FILE MUST NOT TAKE THE RUN DOWN, and must not vanish either. `syn`/`proc-macro2`
         // can abort on input candor does not control — `getrandom` 0.3.4/0.4.2 hit proc-macro2's
