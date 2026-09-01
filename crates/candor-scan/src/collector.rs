@@ -1089,6 +1089,51 @@ impl<'a> CallCollector<'a> {
         let ty = self.enum_variants.get(&leaf).cloned();
         Some((name, leaves, ty))
     }
+    /// R77 STRUCT-VARIANT FIELDS — the struct-variant counterpart of `enum_variant_binding`, generalised
+    /// to a LIST because a struct-variant pattern can bind several fields at once (`Msg::Both { f, g }`).
+    /// One `(binding name, dispatch trait leaves, plain type)` triple per field `struct_variant_field_bindings`
+    /// found, looked up in the SAME `enum_variants`/`enum_variant_traits` maps `enum_variant_binding`
+    /// reads — keyed by the composite `"VariantLeaf::field"` string the Pass-A `decls.rs` enum branch
+    /// writes (see that site's comment for why this is deliberate reuse, not a new index). Empty when the
+    /// pattern isn't a struct-variant pattern or binds nothing.
+    fn enum_struct_variant_bindings(&self, pat: &syn::Pat) -> Vec<(String, Vec<String>, Option<String>)> {
+        struct_variant_field_bindings(pat)
+            .into_iter()
+            .map(|(name, key)| {
+                let leaves = self.enum_variant_traits.get(&key).cloned().unwrap_or_default();
+                let ty = self.enum_variants.get(&key).cloned();
+                (name, leaves, ty)
+            })
+            .collect()
+    }
+    /// Bind a LIST of struct-variant-field `(name, leaves, ty)` triples for the duration of `body`, one
+    /// name at a time, by NESTING `scoped_binding`/`scoped_var` — so THE ONE BINDER's save/restore
+    /// discipline (see its doc comment) applies independently to every field `Msg::Both { f, g }` binds,
+    /// instead of a bespoke multi-name table that could restore one field's shadow incorrectly. `body` is
+    /// boxed (`dyn FnOnce`, not `impl FnOnce`) deliberately: a GENERIC recursive call here would ask the
+    /// compiler to monomorphize a new closure type at every recursion depth (the depth is RUNTIME data —
+    /// the field count of a real pattern — so that instantiation has no static bound). The box pays one
+    /// allocation per struct-variant binding site to erase that recursion, which is not on any hot path.
+    fn bind_enum_struct_variant_fields(
+        &mut self,
+        bindings: &[(String, Vec<String>, Option<String>)],
+        body: Box<dyn FnOnce(&mut Self) + '_>,
+    ) {
+        let Some(((name, leaves, ty), rest)) = bindings.split_first() else {
+            body(self);
+            return;
+        };
+        if !leaves.is_empty() {
+            if Self::leaves_are_callable(leaves) {
+                self.fn_typed_vars.insert(name.clone());
+            }
+            self.scoped_binding(name, Bound::Traits(leaves.clone()), move |s| {
+                s.bind_enum_struct_variant_fields(rest, body)
+            });
+        } else {
+            self.scoped_var(name, ty.clone(), move |s| s.bind_enum_struct_variant_fields(rest, body));
+        }
+    }
     /// The DISPATCH leaves of a single element inside an inline tuple LITERAL (`(x, 1)`) — a cast
     /// (`x as Box<dyn Doer>`), or a bare local PATH already known dispatch-typed via `fn_typed_vars`
     /// (a callable) or `trait_vars` (a dyn-trait receiver). GAP C / SOUNDNESS, measured 2026-09: before
@@ -2069,6 +2114,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.visit_expr(else_b);
                 }
                 return;
+            } else {
+                // R77 RESIDUAL: a LOCAL enum STRUCT-variant if-let (`if let Msg::CbField { f } = m {
+                // f() }`) — the struct-variant twin of the branch just above (which only matches
+                // `Pat::TupleStruct`). Bind every field the pattern names, nested, then walk the
+                // then-branch once inside all of them; empty when the pattern binds nothing.
+                let bindings = self.enum_struct_variant_bindings(&el.pat);
+                if !bindings.is_empty() {
+                    self.visit_expr(&el.expr);
+                    let then_branch = &node.then_branch;
+                    self.bind_enum_struct_variant_fields(
+                        &bindings,
+                        Box::new(move |s| s.visit_block(then_branch)),
+                    );
+                    if let Some((_, else_b)) = &node.else_branch {
+                        self.visit_expr(else_b);
+                    }
+                    return;
+                }
             }
         }
         syn::visit::visit_expr_if(self, node);
@@ -2103,6 +2166,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.scoped_var(&name, ty, |s| s.visit_block(&node.body));
                 }
                 return;
+            } else {
+                // R77 RESIDUAL: the while-let twin of `visit_expr_if`'s struct-variant branch.
+                let bindings = self.enum_struct_variant_bindings(&el.pat);
+                if !bindings.is_empty() {
+                    self.visit_expr(&el.expr);
+                    let body_block = &node.body;
+                    self.bind_enum_struct_variant_fields(
+                        &bindings,
+                        Box::new(move |s| s.visit_block(body_block)),
+                    );
+                    return;
+                }
             }
         }
         syn::visit::visit_expr_while(self, node);
@@ -2209,6 +2284,23 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     s.visit_expr(&node.body);
                 });
             }
+            return;
+        }
+        // R77 RESIDUAL: the struct-variant twin of the branch just above — `Conn::CbField { f }` is a
+        // `Pat::Struct`, which `enum_variant_binding`/`tuple_variant_binding` never match. Binds EVERY
+        // field the arm pattern names (`Msg::Both { f, g }`), nested, then runs the guard + body once
+        // inside all of them.
+        let bindings = self.enum_struct_variant_bindings(&node.pat);
+        if !bindings.is_empty() {
+            self.bind_enum_struct_variant_fields(
+                &bindings,
+                Box::new(move |s| {
+                    if let Some((_, guard)) = &node.guard {
+                        s.visit_expr(guard);
+                    }
+                    s.visit_expr(&node.body);
+                }),
+            );
         } else {
             syn::visit::visit_arm(self, node);
         }
@@ -2459,6 +2551,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.trait_vars.insert(name, leaves);
                 } else if let Some(t) = ty {
                     self.vars.insert(name, t);
+                }
+            }
+        } else {
+            // R77 RESIDUAL: the let-else twin of the struct-variant branches above — `let Msg::CbField
+            // { f } = m else { return }; f()`. Fn-wide like the tuple-variant let-else form (let-else
+            // binds for the REST of the fn), so each bound field is cleared+set directly rather than
+            // nested via `scoped_binding` (there is no enclosing block to scope TO).
+            let bindings = self.enum_struct_variant_bindings(&node.pat);
+            if !bindings.is_empty() && node.init.is_some() {
+                for (name, leaves, ty) in bindings {
+                    self.vars.remove(&name);
+                    self.trait_vars.remove(&name);
+                    if !leaves.is_empty() {
+                        if Self::leaves_are_callable(&leaves) {
+                            self.fn_typed_vars.insert(name.clone());
+                        }
+                        self.trait_vars.insert(name, leaves);
+                    } else if let Some(t) = ty {
+                        self.vars.insert(name, t);
+                    }
                 }
             }
         }

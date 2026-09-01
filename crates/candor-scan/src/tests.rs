@@ -6803,18 +6803,145 @@ trait G {
         assert_eq!(unres.get("via_iflet"), Some(&false), "a typed concrete call must not also read Unknown");
     }
 
-    /// R77 RESIDUAL — struct-variant fields (`Msg::CbField { f } => f()`) are a DOCUMENTED, still-open
-    /// gap (SOUNDNESS.md R77): no struct-variant-field binder exists yet, for ANY payload type, callable
-    /// or not. This canary pins TODAY's behaviour (still silently pure) so the day someone closes it,
-    /// this test fails loudly instead of the SOUNDNESS row silently going stale.
+    // ── R77 RESIDUAL, CLOSED — struct-variant fields (`Msg::CbField { f } => f()`) had NO binder
+    // mechanism at all before this (not a routing bug like the tuple vein above — a missing capability,
+    // for ANY payload type, callable or not). The canary that pinned this as open
+    // (`r77_enum_struct_variant_field_is_still_a_documented_open_gap`) failed the day this closed it, as
+    // its own comment promised, and is converted below into real positive coverage rather than deleted —
+    // an open gap that goes silently unrecorded is worse than one left open. Same executed pipeline as
+    // the tuple vein (`unresolved_of`/`typed_calls_of` run Pass A + Pass B for real, no mocking), same
+    // four-binder-form + never-called-control + concrete-payload structure, plus the struct-variant-only
+    // shapes: `..` rest, multi-field, `ref`/`@`, and a measured (not assumed) or-pattern gap.
+
+    /// Ground truth: `CbField`'s payload IS called with call syntax, so the function must read `Unknown`
+    /// (an opaque invocation), never silent-pure.
     #[test]
-    fn r77_enum_struct_variant_field_is_still_a_documented_open_gap() {
+    fn r77_enum_struct_variant_field_callable_match_arm_reads_unknown_not_silent_pure() {
         let src = "enum Msg { CbField { f: Box<dyn Fn()> } }\n\
                    fn f(m: Msg) { match m { Msg::CbField { f } => f() } }\n";
         let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "callable struct-variant match-arm field must read Unknown: {unres:?}");
+    }
+
+    /// The if-let twin.
+    #[test]
+    fn r77_enum_struct_variant_field_callable_iflet_reads_unknown() {
+        let src = "enum Msg { CbField { f: Box<dyn Fn()> } }\n\
+                   fn f(m: Msg) { if let Msg::CbField { f } = m { f() } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "callable struct-variant if-let field must read Unknown: {unres:?}");
+    }
+
+    /// The while-let twin.
+    #[test]
+    fn r77_enum_struct_variant_field_callable_whilelet_reads_unknown() {
+        let src = "enum Msg { CbField { f: Box<dyn Fn()> } }\n\
+                   fn next_msg() -> Msg { Msg::CbField { f: Box::new(|| {}) } }\n\
+                   fn f() { while let Msg::CbField { f } = next_msg() { f(); break; } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "callable struct-variant while-let field must read Unknown: {unres:?}");
+    }
+
+    /// The let-else twin.
+    #[test]
+    fn r77_enum_struct_variant_field_callable_letelse_reads_unknown() {
+        let src = "enum Msg { CbField { f: Box<dyn Fn()> } }\n\
+                   fn f(m: Msg) { let Msg::CbField { f } = m else { return }; f() }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "callable struct-variant let-else field must read Unknown: {unres:?}");
+    }
+
+    /// NEVER-CALLED CONTROLS — the over-charge direction. A callable FIELD bound but never invoked with
+    /// call syntax must stay silently pure in every one of the four binder forms.
+    #[test]
+    fn r77_enum_struct_variant_field_callable_never_called_stays_pure_all_four_forms() {
+        let src = "enum Msg { CbField { f: Box<dyn Fn()> } }\n\
+                   fn m1(m: Msg) -> bool { match m { Msg::CbField { f: _f } => true } }\n\
+                   fn m2(m: Msg) -> bool { if let Msg::CbField { f: _f } = m { true } else { false } }\n\
+                   fn next_msg() -> Msg { Msg::CbField { f: Box::new(|| {}) } }\n\
+                   fn m3() -> u32 { let mut n = 0; while let Msg::CbField { f: _f } = next_msg() { n += 1; if n > 3 { break; } } n }\n\
+                   fn m4(m: Msg) -> bool { let Msg::CbField { f: _f } = m else { return false }; true }\n";
+        let unres = unresolved_of(src);
+        for f in ["m1", "m2", "m3", "m4"] {
+            assert_eq!(unres.get(f), Some(&false), "{f}: a bound-but-never-called struct-variant field must stay pure: {unres:?}");
+        }
+    }
+
+    /// REGRESSION GUARD — a genuinely CONCRETE (non-dispatch) struct-variant field must resolve via the
+    /// plain-type route, precisely, and must NOT gain a fabricated Unknown.
+    #[test]
+    fn r77_enum_struct_variant_field_concrete_payload_resolves_typed_not_unknown() {
+        let src = "enum Msg { Data { s: String } }\n\
+                   fn via_match(m: Msg) { match m { Msg::Data { s } => { let _ = s.len(); } } }\n\
+                   fn via_iflet(m: Msg) { if let Msg::Data { s } = m { let _ = s.len(); } }\n";
+        let typed = typed_calls_of(src);
+        assert!(typed.get("via_match").is_some_and(|c| c.iter().any(|p| p == "String::len")),
+                "match-arm concrete struct-variant field must type-resolve s.len(): {typed:?}");
+        assert!(typed.get("via_iflet").is_some_and(|c| c.iter().any(|p| p == "String::len")),
+                "if-let concrete struct-variant field must type-resolve s.len(): {typed:?}");
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("via_match"), Some(&false), "a typed concrete field call must not also read Unknown");
+        assert_eq!(unres.get("via_iflet"), Some(&false), "a typed concrete field call must not also read Unknown");
+    }
+
+    /// `..` REST PATTERN — `Msg::Wide { f, .. }` must bind `f` exactly like the bare `{ f }` form; the
+    /// unlisted fields (`tag`, `other`) must not disturb the one that IS named.
+    #[test]
+    fn r77_enum_struct_variant_field_rest_pattern_still_binds_named_field() {
+        let src = "enum Msg { Wide { f: Box<dyn Fn()>, tag: u32, other: String } }\n\
+                   fn f(m: Msg) { match m { Msg::Wide { f, .. } => f() } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("f"), Some(&true), "`{{ f, .. }}` must still bind and dispatch `f`: {unres:?}");
+    }
+
+    /// MULTI-FIELD BINDING — `Msg::Both { f, g }` binds TWO INDEPENDENT names from TWO DIFFERENT fields
+    /// of the SAME variant declaration in ONE pattern. Each must resolve to its OWN field's type/dispatch
+    /// leaves — a shared/aliased binding here would be the self-collision class R77's bounded-generic fix
+    /// guards against (`r77_bounded_generic_payload_self_collision_still_resolves`), one level down: per
+    /// FIELD instead of per VARIANT.
+    #[test]
+    fn r77_enum_struct_variant_field_multi_field_binds_each_independently() {
+        let src = "enum Msg { Both { f: Box<dyn Fn()>, g: String } }\n\
+                   fn via_match(m: Msg) { match m { Msg::Both { f, g } => { f(); let _ = g.len(); } } }\n\
+                   fn via_iflet(m: Msg) { if let Msg::Both { f, g } = m { f(); let _ = g.len(); } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("via_match"), Some(&true), "the callable field `f` must still read Unknown: {unres:?}");
+        assert_eq!(unres.get("via_iflet"), Some(&true), "the callable field `f` must still read Unknown: {unres:?}");
+        let typed = typed_calls_of(src);
+        assert!(typed.get("via_match").is_some_and(|c| c.iter().any(|p| p == "String::len")),
+                "the concrete field `g` must independently type-resolve g.len(): {typed:?}");
+        assert!(typed.get("via_iflet").is_some_and(|c| c.iter().any(|p| p == "String::len")),
+                "the concrete field `g` must independently type-resolve g.len(): {typed:?}");
+    }
+
+    /// `ref`/`@` BINDINGS — `single_pat_ident` reads only the `Pat::Ident`'s own bound name, so a
+    /// `ref`-qualified or `@`-subpattern field binding must resolve exactly like a bare one.
+    #[test]
+    fn r77_enum_struct_variant_field_ref_and_at_bindings_still_resolve() {
+        let src = "enum Msg { CbField { f: Box<dyn Fn()> } }\n\
+                   fn via_ref(m: Msg) { match m { Msg::CbField { ref f } => f() } }\n\
+                   fn via_at(m: Msg) { match m { Msg::CbField { f: g @ _ } => g() } }\n";
+        let unres = unresolved_of(src);
+        assert_eq!(unres.get("via_ref"), Some(&true), "a `ref f` struct-variant field binding must read Unknown: {unres:?}");
+        assert_eq!(unres.get("via_at"), Some(&true), "an `f: g @ _` struct-variant field binding must read Unknown: {unres:?}");
+    }
+
+    /// INSIDE AN OR-PATTERN — MEASURED, not assumed: `Msg::A { f } | Msg::B { f } => f()`.
+    /// `struct_variant_field_bindings` only matches `Pat::Struct` (after peeling reference/paren
+    /// wrappers, like `tuple_variant_binding`); a top-level `Pat::Or` is neither, so this arm falls
+    /// through to the ordinary `syn::visit::visit_arm` walk and `f` binds nothing — an HONEST
+    /// under-report, the same class `tuple_variant_binding` already accepts for its own or-pattern case
+    /// (this is not a NEW gap; it is the pre-existing one, now measured for the struct-variant route
+    /// too). Pinned so a future change here is a deliberate decision, not silent drift.
+    #[test]
+    fn r77_enum_struct_variant_field_or_pattern_is_a_measured_open_gap() {
+        let src = "enum Msg { A { f: Box<dyn Fn()> }, B { f: Box<dyn Fn()> } }\n\
+                   fn f(m: Msg) { match m { Msg::A { f } | Msg::B { f } => f() } }\n";
+        let unres = unresolved_of(src);
         assert_eq!(unres.get("f"), Some(&false),
-                   "struct-variant field binding is not implemented (SOUNDNESS.md R77, open) — if this \
-                    now reads Unknown, the gap has been closed: update R77 and this canary together: {unres:?}");
+                   "or-pattern struct-variant binding is not implemented — if this now reads Unknown, \
+                    the gap has closed; update this test's assertion (and check whether \
+                    tuple_variant_binding's matching or-pattern gap should close too): {unres:?}");
     }
 
     /// R77 CROSS-INDEX AMBIGUITY REGRESSION GUARD — measured on reqwest 0.13.4's real source in the
@@ -8117,6 +8244,41 @@ trait G {
                  reuse stale FnInfos. Fold `{name}` into decl_index_digest().",
             );
         }
+    }
+
+    /// R77 STRUCT-VARIANT FIELDS made a DELIBERATE design choice the table above does not exercise:
+    /// rather than adding a new `MergedDecls` field, per-field data is written into the SAME `enum_tmp`/
+    /// `enum_variant_traits` maps the tuple-variant route already uses, under a composite
+    /// `"VariantLeaf::field"` key (see `decls.rs`'s `syn::Item::Enum` arm and
+    /// `collector::enum_struct_variant_bindings`) — reuse, not a second index, per the standing family
+    /// rule against two hand-rolled paths answering one question.
+    ///
+    /// Because that reuses an EXISTING field, the generic rows above already prove the map is hashed at
+    /// all; they do not prove the digest is sensitive to the composite key's CONTENT, only that it is
+    /// non-empty. This proves the content-sensitivity specifically: two struct-variant-field entries for
+    /// the SAME variant leaf but DIFFERENT fields (`Msg::Both { f, g }`'s exact shape) must hash
+    /// differently, and adding a second field's key must move the digest again. (Manually confirmed to
+    /// fail during development by hashing only the pre-`::` prefix of each key — i.e. collapsing every
+    /// field of one variant onto its leaf — which made `with_f` and `with_g` collide; that collapsed form
+    /// is deliberately NOT the shape being asserted here.)
+    #[test]
+    fn r77_struct_variant_field_composite_key_moves_the_digest_by_content_not_just_presence() {
+        fn build(extra: &[(&str, &str)]) -> MergedDecls {
+            let mut m = MergedDecls::default();
+            m.enum_tmp.insert("Cb".into(), Some("Real".into())); // an ordinary tuple-variant leaf, unrelated
+            for (k, v) in extra {
+                m.enum_tmp.insert((*k).into(), Some((*v).into()));
+            }
+            m
+        }
+        let base = decl_index_digest(&build(&[]));
+        let with_f = decl_index_digest(&build(&[("Cb::f", "Box")]));
+        let with_g = decl_index_digest(&build(&[("Cb::g", "Box")]));
+        let with_f_and_g = decl_index_digest(&build(&[("Cb::f", "Box"), ("Cb::g", "String")]));
+        assert_ne!(base, with_f, "a struct-variant composite key must move the digest at all");
+        assert_ne!(with_f, with_g, "two DIFFERENT fields of the SAME variant must hash differently — \
+                                     Msg::Both {{ f, g }} depends on this to invalidate correctly");
+        assert_ne!(with_f, with_f_and_g, "adding a SECOND field's composite key must also move the digest");
     }
 
     // ── cfg_eval: the 3-valued nested `cfg(all/any/not)` evaluator ──────────────────────────────────

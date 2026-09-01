@@ -1160,6 +1160,9 @@ pub(crate) fn collect_decls(
             // leaf -> payload type` so a match arm `Conn::Active(s) => s.send()` types `s`. Only the
             // single-field tuple form is recorded; a leaf two enums share with conflicting payloads is
             // marked ambiguous (None) and dropped by the caller — never guess (the return-index rule).
+            // STRUCT variants (`enum Msg { CbField { f: T } }`) are indexed too, per FIELD, under a
+            // composite `"VariantLeaf::field"` key in these SAME two maps — see the `Fields::Named` arm
+            // below (R77 residual).
             syn::Item::Enum(en) => {
                 // R77: the enum's OWN generic bounds (`enum Msg<T: Doer> { Cb(T) }`), mirroring the
                 // struct field route just above — a bounded-generic single-field payload dispatches too.
@@ -1168,47 +1171,95 @@ pub(crate) fn collect_decls(
                     if has_cfg(&v.attrs) {
                         continue;
                     }
-                    let syn::Fields::Unnamed(unnamed) = &v.fields else { continue };
-                    if unnamed.unnamed.len() != 1 {
-                        continue;
-                    }
-                    let payload_ty = &unnamed.unnamed[0].ty;
-                    let leaf = v.ident.to_string();
-                    // R77: DISPATCH-TYPING FIRST — same precedence as the struct-field route just above
-                    // ("Dispatch-typing first: `store: Box<dyn Store>` reads as concrete `Box` to
-                    // `type_path`"). A BOUNDED GENERIC payload (`enum Msg<F: FnOnce() -> V> { Function(F) }`)
-                    // is worse than that struct case: `type_path` doesn't just mis-name it, it SUCCEEDS —
-                    // a bare generic ident IS a `Type::Path`, so `type_path` returns the literal, USELESS
-                    // string `"F"` as if it were a real nominal type. Recording that into `enum_tmp`
-                    // alongside the correct `enum_variant_traits` entry made this ONE variant collide with
-                    // ITSELF crate-wide once R77's cross-index ambiguity guard shipped (moka's
-                    // `ValueOrFunction::Function(F: FnOnce() -> V)`, measured in the 256-crate A/B): both
-                    // maps had "Function", so the guard — designed for two DIFFERENT enums sharing a leaf —
-                    // dropped a single variant's own correct dispatch claim as if it were a foreign
-                    // collision. `else if` (not two independent `if`s) makes them mutually exclusive PER
-                    // OCCURRENCE, exactly like the struct-field route, so a bounded-generic payload only
-                    // ever contributes to `enum_variant_traits`, never also to `enum_tmp`.
-                    let leaves = trait_leaves(payload_ty, &enum_bounds);
-                    if !leaves.is_empty() {
-                        match enum_variant_traits.get(&leaf) {
-                            None => {
-                                enum_variant_traits.insert(leaf, Some(leaves));
+                    match &v.fields {
+                        syn::Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
+                            let payload_ty = &unnamed.unnamed[0].ty;
+                            let leaf = v.ident.to_string();
+                            // R77: DISPATCH-TYPING FIRST — same precedence as the struct-field route just
+                            // above ("Dispatch-typing first: `store: Box<dyn Store>` reads as concrete
+                            // `Box` to `type_path`"). A BOUNDED GENERIC payload (`enum Msg<F: FnOnce() ->
+                            // V> { Function(F) }`) is worse than that struct case: `type_path` doesn't
+                            // just mis-name it, it SUCCEEDS — a bare generic ident IS a `Type::Path`, so
+                            // `type_path` returns the literal, USELESS string `"F"` as if it were a real
+                            // nominal type. Recording that into `enum_tmp` alongside the correct
+                            // `enum_variant_traits` entry made this ONE variant collide with ITSELF
+                            // crate-wide once R77's cross-index ambiguity guard shipped (moka's
+                            // `ValueOrFunction::Function(F: FnOnce() -> V)`, measured in the 256-crate
+                            // A/B): both maps had "Function", so the guard — designed for two DIFFERENT
+                            // enums sharing a leaf — dropped a single variant's own correct dispatch claim
+                            // as if it were a foreign collision. `else if` (not two independent `if`s)
+                            // makes them mutually exclusive PER OCCURRENCE, exactly like the struct-field
+                            // route, so a bounded-generic payload only ever contributes to
+                            // `enum_variant_traits`, never also to `enum_tmp`.
+                            let leaves = trait_leaves(payload_ty, &enum_bounds);
+                            if !leaves.is_empty() {
+                                match enum_variant_traits.get(&leaf) {
+                                    None => {
+                                        enum_variant_traits.insert(leaf, Some(leaves));
+                                    }
+                                    Some(Some(prev)) if *prev != leaves => {
+                                        enum_variant_traits.insert(leaf, None); // conflicting leaf sets — ambiguous, drop
+                                    }
+                                    _ => {}
+                                }
+                            } else if let Some(tp) = type_path(payload_ty, uses) {
+                                match enum_tmp.get(&leaf) {
+                                    None => {
+                                        enum_tmp.insert(leaf.clone(), Some(tp));
+                                    }
+                                    Some(Some(prev)) if *prev != tp => {
+                                        enum_tmp.insert(leaf.clone(), None); // conflicting payloads — ambiguous, drop
+                                    }
+                                    _ => {}
+                                }
                             }
-                            Some(Some(prev)) if *prev != leaves => {
-                                enum_variant_traits.insert(leaf, None); // conflicting leaf sets — ambiguous, drop
-                            }
-                            _ => {}
                         }
-                    } else if let Some(tp) = type_path(payload_ty, uses) {
-                        match enum_tmp.get(&leaf) {
-                            None => {
-                                enum_tmp.insert(leaf.clone(), Some(tp));
+                        // R77 STRUCT-VARIANT FIELDS (the remaining half of the vein — SOUNDNESS.md R77):
+                        // `enum Msg { CbField { f: Box<dyn Fn()> } }`. No binder mechanism existed for
+                        // ANY struct-variant field before this, callable or concrete. Rather than a THIRD
+                        // index, this writes into the SAME `enum_tmp`/`enum_variant_traits` maps the
+                        // tuple-variant route above uses, under the composite key `"VariantLeaf::field"`
+                        // — a Rust identifier can never contain `::`, so this key space is provably
+                        // disjoint from every bare tuple-variant leaf already stored there (no new
+                        // collision surface, and the EXISTING `drop_cross_ambiguous_enum_leaves` guard —
+                        // and the EXISTING digest/merge/cache plumbing — cover it for free; see
+                        // `lang::struct_variant_field_bindings` and `collector::enum_struct_variant_bindings`
+                        // for the read side). Per-field, same dispatch-typing-first / `else if`
+                        // mutual-exclusion precedence as every other route in this function; a `#[cfg]`
+                        // field is skipped, matching the struct-field discipline above.
+                        syn::Fields::Named(named) => {
+                            let leaf = v.ident.to_string();
+                            for f in &named.named {
+                                if has_cfg(&f.attrs) {
+                                    continue;
+                                }
+                                let Some(field_name) = &f.ident else { continue };
+                                let key = format!("{leaf}::{field_name}");
+                                let leaves = trait_leaves(&f.ty, &enum_bounds);
+                                if !leaves.is_empty() {
+                                    match enum_variant_traits.get(&key) {
+                                        None => {
+                                            enum_variant_traits.insert(key, Some(leaves));
+                                        }
+                                        Some(Some(prev)) if *prev != leaves => {
+                                            enum_variant_traits.insert(key, None); // conflicting leaf sets — ambiguous, drop
+                                        }
+                                        _ => {}
+                                    }
+                                } else if let Some(tp) = type_path(&f.ty, uses) {
+                                    match enum_tmp.get(&key) {
+                                        None => {
+                                            enum_tmp.insert(key.clone(), Some(tp));
+                                        }
+                                        Some(Some(prev)) if *prev != tp => {
+                                            enum_tmp.insert(key.clone(), None); // conflicting payloads — ambiguous, drop
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
-                            Some(Some(prev)) if *prev != tp => {
-                                enum_tmp.insert(leaf.clone(), None); // conflicting payloads — ambiguous, drop
-                            }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
             }
