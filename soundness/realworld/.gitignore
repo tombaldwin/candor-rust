@@ -2,3 +2,6 @@
 **/.candor/
 **/trace.log
 Cargo.lock
+# Logs written by recall/disclosure_recall.sh (one per oracle arm per mutant pass). Untracked until
+# now only because the battery had never been run locally.
+recall/.recall-out/

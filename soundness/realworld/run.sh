@@ -38,12 +38,11 @@ retry cargo +stable build -q --manifest-path "$ROOT/Cargo.toml" -p candor-scan |
 SCAN="$ROOT/target/debug/candor-scan"
 
 # KNOWN, TRIAGED under-reports — tracked so the oracle is a clean gate (green on known gaps, red only on
-# NEW findings). Each needs a real fix; listed here with the root cause, not silently ignored. Empty now:
-# both builder-chain under-reports this oracle found (duct cmd!()→run, ureq get()→call) are FIXED by the
-# GENERALIZED scan_builder_entry_effect table in candor-scan (over-approximate the entry for the syntactic
-# engine; the deep engine types the terminal verb and stays precise). New verb-keyed crates that under-report
-# get a table row + leave this empty.
-KNOWN_UNDER=()
+# NEW findings). The list and its mechanism now live in ONE place shared with pf/run_pf.sh, which had no
+# allowlist at all until SOUNDNESS R102; two harnesses answering one question is how this family produced
+# its worst defects. This oracle's list is KNOWN_UNDER_PROGRAM (still empty — see known_under.sh).
+. "$HERE/known_under.sh"
+KNOWN_UNDER=(${KNOWN_UNDER_PROGRAM[@]+"${KNOWN_UNDER_PROGRAM[@]}"})
 
 # member | effect ("" = pure control) | marker (must appear in the strace iff the effect ran)
 CASES=(
@@ -69,21 +68,38 @@ CASES=(
   "ffi_libc|Fs|candor-mk-ffi"
 )
 
-pass=0; under=0; known=0; skip=0; fab=0; blame=0; failed=""
+pass=0; under=0; known=0; skip=0; fab=0; blame=0; broke=0; failed=""; status=""
 for row in "${CASES[@]}"; do
   IFS='|' read -r m eff marker <<<"$row"
   d="$HERE/$m"
+  # Every driver records a status for the stale-entry ratchet — see known_under.sh.
+  note() { status="$status
+$m $1"; }
+  # A driver that will not build, or builds no binary, never reaches the verdict: its coverage is gone
+  # and counting it as a SKIP let the run still say "0 under-reports" and exit 0. MEASURED on the
+  # per-function sibling 2026-09-02 (a canary rejected by cargo, skipped, exit 0). Red, after `retry`
+  # has ruled out a transient crates.io fetch.
   retry cargo +stable build -q --manifest-path "$HERE/Cargo.toml" -p "$m" 2>/dev/null \
-    || { echo "  $m: build failed — SKIP"; skip=$((skip+1)); continue; }
+    || { echo "  $m: BUILD FAILED — the driver did not run at all (instrument failure, not a finding)"; broke=$((broke+1)); note broke; continue; }
   bin="$HERE/target/debug/$m"
-  [ -x "$bin" ] || { echo "  $m: no binary — SKIP"; skip=$((skip+1)); continue; }
+  [ -x "$bin" ] || { echo "  $m: NO BINARY — the driver did not run at all (instrument failure, not a finding)"; broke=$((broke+1)); note broke; continue; }
 
   strace -f -e trace=connect,socket,openat,open,execve -o "$d/trace.log" "$bin" >/dev/null 2>&1 || true
   ran=0; grep -qF "$marker" "$d/trace.log" 2>/dev/null && ran=1
 
   rm -rf "$d/.candor" 2>/dev/null
-  "$SCAN" "$d" >/dev/null 2>&1
+  scanout="$("$SCAN" "$d" 2>&1)"; scanec=$?
   rep=$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)
+  if [ -z "$rep" ]; then
+    # One loud retry, then red. WITHOUT this branch an absent report fell through to the reader below
+    # as `funcs=[]` -> pred="-" -> "NEW UNDER-REPORT": the oracle would MANUFACTURE a cardinal sin out
+    # of its own failure to produce a report. See pf/run_pf.sh's twin for the measurement behind it.
+    echo "  $m: no report on the first read (candor-scan exit=$scanec) — retrying once"
+    [ -z "$scanout" ] || echo "      candor-scan said: $(printf '%s' "$scanout" | head -c 300)"
+    "$SCAN" "$d" >/dev/null 2>&1
+    rep=$(ls "$d"/.candor/report.*.scan.json 2>/dev/null | grep -v callgraph | head -1)
+  fi
+  [ -n "$rep" ] || { echo "  $m: NO CANDOR REPORT — nothing was adjudicated (instrument failure, not a finding)"; broke=$((broke+1)); note broke; continue; }
   # DISCLOSURE-RECALL calibration hook — UNSET in every normal run. When set, candor's signature is
   # falsified here (downstream of the analyzer, upstream of the verdict) so a known cardinal sin is
   # injected and this oracle MUST turn red. That is what makes a green run evidence rather than silence.
@@ -118,10 +134,10 @@ PY
 
   echo "  $m: ran=$ran  effect=${eff:-none}  candor=[$pred] $uncertain"
   if [ -z "$eff" ]; then  # pure control: nothing should run, nothing should be predicted
-    { [ "$ran" = "0" ] && [ "$pred" = "-" ]; } && pass=$((pass+1)) || { echo "    ⚠ control: ran=$ran pred=$pred (expected none/none)"; fab=$((fab+1)); }
+    { [ "$ran" = "0" ] && [ "$pred" = "-" ]; } && { pass=$((pass+1)); note pass; } || { echo "    ⚠ control: ran=$ran pred=$pred (expected none/none)"; fab=$((fab+1)); note fail; }
     continue
   fi
-  if [ "$ran" = "0" ]; then echo "    SKIP ($eff did not execute under strace this run)"; skip=$((skip+1)); continue; fi
+  if [ "$ran" = "0" ]; then echo "    SKIP ($eff did not execute under strace this run)"; skip=$((skip+1)); note skip; continue; fi
   # Three-way honesty verdict (mirrors candor-swift / candor-ts verify-core):
   #  (1) PRECISE   — the effect is in candor's precise (non-Unknown) claim: held tightly.
   #  (2) HELD BY DISCLOSURE — not precise, but Unknown was disclosed → honest, and BLAME-TRACKED: the
@@ -130,21 +146,27 @@ PY
   # Pass/fail is UNCHANGED from the two-way form: precise ⇒ pass, disclosed-Unknown ⇒ pass (now blamed),
   # otherwise KNOWN or NEW under-report exactly as before.
   if echo ",$pred," | grep -q ",$eff,"; then
-    pass=$((pass+1))
+    pass=$((pass+1)); note pass
   elif [ "$uncertain" = "uncertain" ]; then
     echo "    ⓘ $eff held by DISCLOSURE (Unknown), not a precise claim — blame: [$whys]  (resolve this edge → precise $eff)"
-    blame=$((blame+1)); pass=$((pass+1))
-  elif printf '%s\n' "${KNOWN_UNDER[@]}" | grep -qx "$m"; then
-    echo "    ⚠ KNOWN under-report (tracked, awaiting fix): ran $eff but candor predicts [$pred] — see KNOWN_UNDER"
-    known=$((known+1))
+    blame=$((blame+1)); pass=$((pass+1)); note pass
+  elif meta="$(known_under_lookup "$m" ${KNOWN_UNDER[@]+"${KNOWN_UNDER[@]}"})"; then
+    echo "    ⚠ KNOWN under-report (${meta%%|*}, tracked, awaiting fix): ran $eff but candor predicts [$pred] — see KNOWN_UNDER"
+    echo "      SOUNDNESS ${meta%%|*}: ${meta#*|}"
+    known=$((known+1)); note known
   else
     echo "    ✗ NEW UNDER-REPORT: ran $eff (marker '$marker' in trace) but candor predicts [$pred] with no uncertainty"
-    under=$((under+1)); failed="$failed $m"
+    under=$((under+1)); failed="$failed $m"; note fail
   fi
 done
 
 echo
-echo "realworld oracle: $pass honest ($blame held by disclosure+blamed), $known KNOWN under-report(s), $under NEW under-report(s), $fab fabrication(s), $skip skipped"
+echo "realworld oracle: $pass honest ($blame held by disclosure+blamed), $known KNOWN under-report(s), $under NEW under-report(s), $fab fabrication(s), $skip skipped, $broke driver(s) that did not run"
+ratchet=0
+known_under_ratchet "$status" ${KNOWN_UNDER[@]+"${KNOWN_UNDER[@]}"} || ratchet=1
 [ -n "$failed" ] && echo "realworld oracle: NEW under-reporting drivers:$failed"
-# Green on known gaps; red only on a NEW under-report or a fabrication (a regression).
-{ [ "$under" -eq 0 ] && [ "$fab" -eq 0 ]; }
+[ "$broke" -gt 0 ] && echo "realworld oracle: $broke driver(s) never reached the verdict — their coverage is GONE this run, which is why this is red rather than skipped."
+# Green on known gaps; red on a NEW under-report, a fabrication (a regression), a STALE/DEAD allowlist
+# entry (an allowlist consulted only in the failing branch can never go red again), or a driver that
+# never ran (lost coverage is not a clean pass).
+{ [ "$under" -eq 0 ] && [ "$fab" -eq 0 ] && [ "$ratchet" -eq 0 ] && [ "$broke" -eq 0 ]; }

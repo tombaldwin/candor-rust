@@ -15,7 +15,12 @@
 # what is calibrated is the deployed instrument end to end. Per-driver recall + the uncalibrated remainder
 # are both reported -- see disclosure_recall_check.py for why they must travel together.
 #
-#   bash soundness/realworld/recall/disclosure_recall.sh
+#   bash soundness/realworld/recall/disclosure_recall.sh            # both oracles (the CI gate)
+#   bash soundness/realworld/recall/disclosure_recall.sh perfn      # one arm, when iterating on it
+#
+# The optional filter selects ONE arm. It exists so the per-function calibration can be re-run on its
+# own; the CI gate takes no argument and therefore always runs both. A filter that names no arm is an
+# error, not an empty run — zero arms must never aggregate to a green (§H).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORACLE="$HERE/../run.sh"
@@ -27,6 +32,7 @@ command -v strace >/dev/null 2>&1 || { echo "disclosure-recall battery: strace n
 
 mkdir -p "$OUT"
 rc=0
+ONLY="${1:-}"; ran_arms=0
 
 # Both syscall oracles are calibrated: the program-level verdict (run.sh) and the per-function one
 # (pf/run_pf.sh, which attributes each syscall to every frame on the reconstructed stack). Calibrating only
@@ -34,6 +40,8 @@ rc=0
 calibrate() {  # <label> <oracle path> <checker format> <mutant modes...>
   local label="$1" oracle="$2" fmt="$3"; shift 3
   local modes=("$@") mode ec args=()
+  [ -z "$ONLY" ] || [ "$ONLY" = "$label" ] || return 0
+  ran_arms=$((ran_arms+1))
   echo "### oracle: $label"
   for mode in control "${modes[@]}"; do
     echo "=== pass: $mode ==="
@@ -59,4 +67,6 @@ calibrate() {  # <label> <oracle path> <checker format> <mutant modes...>
 calibrate program "$ORACLE" program silent wrong
 [ -f "$HERE/../pf/run_pf.sh" ] && calibrate perfn "$HERE/../pf/run_pf.sh" perfn silent wrong transitive
 
+# §H — zero arms is not zero failures. A filter typo, or a missing run_pf.sh, would otherwise leave rc=0.
+[ "$ran_arms" -gt 0 ] || { echo "disclosure-recall battery: FAIL — no oracle arm ran (filter '$ONLY' matched none of: program perfn)."; exit 1; }
 exit $rc
