@@ -1087,27 +1087,26 @@ pub(crate) fn single_pat_ident(pat: &syn::Pat) -> Option<String> {
     }
 }
 
-/// A single-payload enum-variant match pattern `Variant(x)` / `Enum::Variant(x)` -> the bound name and
-/// its payload type (looked up by the variant leaf in `enum_variants`; `None` type when the variant is
-/// unknown/ambiguous — the caller still SCOPES it, clearing any stale binding so nothing leaks in).
-/// `None` overall when the pattern isn't a single-field tuple-struct with a single-ident binding — a
-/// multi-field or destructuring payload has no single receiver to type, an honest under-report.
-pub(crate) fn arm_payload_binding(pat: &syn::Pat, enum_variants: &EnumVariantIndex) -> Option<(String, Option<String>)> {
-    let ts = match pat {
-        syn::Pat::TupleStruct(ts) => ts,
-        // `Some(Variant(x))`-style nesting is rare; peel a reference/paren wrapper only.
-        syn::Pat::Reference(r) => return arm_payload_binding(&r.pat, enum_variants),
-        syn::Pat::Paren(p) => return arm_payload_binding(&p.pat, enum_variants),
-        _ => return None,
-    };
-    if ts.elems.len() != 1 {
-        return None; // multi-field variant — no single receiver to type
+/// The (bound name, variant leaf) of a single-field tuple-variant pattern `Variant(x)` /
+/// `Enum::Variant(x)` — generalises `some_ok_binding` beyond `Some`/`Ok` to ANY tuple-variant leaf (R77),
+/// so a caller can look the leaf up in EITHER `EnumVariantIndex` (a plain payload type) or
+/// `EnumVariantTraitIndex` (a `dyn`/`impl`/bounded-generic payload's dispatch leaves) without this parser
+/// needing to know which. `None` when the pattern isn't a single-field tuple-struct with a single-ident
+/// binding — a multi-field or destructuring payload has no single receiver to type, an honest
+/// under-report. Peels a reference/paren wrapper first (`Some(Variant(x))`-style nesting is rare).
+pub(crate) fn tuple_variant_binding(pat: &syn::Pat) -> Option<(String, String)> {
+    match pat {
+        syn::Pat::Reference(r) => tuple_variant_binding(&r.pat),
+        syn::Pat::Paren(p) => tuple_variant_binding(&p.pat),
+        syn::Pat::TupleStruct(ts) if ts.elems.len() == 1 => {
+            let name = single_pat_ident(ts.elems.first()?)?;
+            let leaf = ts.path.segments.last()?.ident.to_string();
+            Some((name, leaf))
+        }
+        _ => None,
     }
-    let name = single_pat_ident(ts.elems.first()?)?;
-    let variant_leaf = ts.path.segments.last()?.ident.to_string();
-    let ty = enum_variants.get(&variant_leaf).cloned();
-    Some((name, ty))
 }
+
 
 /// The single-ident binding of a `Some(x)` / `Ok(x)` pattern (the payload of an `if let`/`let-else`
 /// unwrap of an `Option`/`Result`) — so `if let Some(d) = o { d.go() }` over an `Option<Box<dyn T>>`

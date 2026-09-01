@@ -127,6 +127,46 @@ pub(crate) type TupleElemIndex = HashMap<String, Vec<Option<String>>>;
 /// the return-index ambiguity rule.
 pub(crate) type EnumVariantIndex = HashMap<String, String>;
 
+/// `enum-variant-leaf -> the single payload's DISPATCH trait leaves` (R77), the trait-object counterpart
+/// of `EnumVariantIndex` — `Cb -> ["Fn"]` from `enum Msg { Cb(Box<dyn Fn()>) }`. `type_path` returns
+/// `None` for a `dyn`/`impl`/bounded-generic payload (no nominal path), so such a variant was ABSENT from
+/// `EnumVariantIndex` entirely and a match-arm/if-let/while-let/let-else binding of it (`Msg::Cb(f) =>
+/// f()`) typed `f` into NEITHER `vars` nor `trait_vars`/`fn_typed_vars` — a silent drop of the payload,
+/// closures included (SOUNDNESS.md R77). Same ambiguity rule as `EnumVariantIndex`: a leaf two enums
+/// share with different leaf sets is dropped (never guess).
+pub(crate) type EnumVariantTraitIndex = HashMap<String, Vec<String>>;
+
+/// R77 CROSS-INDEX AMBIGUITY GUARD. `EnumVariantIndex` and `EnumVariantTraitIndex` are both keyed by bare
+/// variant LEAF, crate-wide, with no enum qualifier — the exact imprecision `EnumVariantIndex`'s own
+/// same-index ambiguity rule already accepts (two enums, same leaf, different CONCRETE payloads ->
+/// dropped, never guess). That rule never had to consider a leaf that is CONCRETE in one enum and
+/// DISPATCH-typed in another, because a dispatch payload was invisible to any index before R77.
+///
+/// Measured on reqwest 0.13.4's real source in the 256-crate A/B: `enum Matcher_ { Custom(Custom) }` (a
+/// concrete struct payload) and the unrelated `enum PolicyKind { Custom(Box<dyn Fn(..)->..>) }` (a
+/// callable payload) share the leaf `Custom`. Without this guard, `Matcher_::Custom(ref c) =>
+/// c.call(dst)` took the WRONG (dispatch) route from the unrelated enum, typed `c` as a bare `Fn` with no
+/// local impl, and the call SILENTLY DROPPED — `intercept` read pure instead of inheriting the correctly
+/// `Unknown` `Custom::call`, an under-report R77 itself introduced on a function nowhere near a closure.
+///
+/// A leaf present in BOTH indexes can't be told apart by leaf alone: drop it from both (never guess),
+/// same as the existing same-index rule. This does not recover the accidental cross-enum precision the
+/// pre-R77 code had here (dispatch payloads being invisible was never a designed guarantee) — it converts
+/// a WRONGLY-ROUTED result into an HONEST unresolved-receiver one. Called from every place that finalises
+/// these two indexes (the real scan path AND the test helpers that replicate it), so a unit test actually
+/// exercises the same guard the CLI does.
+pub(crate) fn drop_cross_ambiguous_enum_leaves(
+    enum_variants: &mut EnumVariantIndex,
+    enum_variant_traits: &mut EnumVariantTraitIndex,
+) {
+    let colliding: Vec<String> =
+        enum_variants.keys().filter(|k| enum_variant_traits.contains_key(*k)).cloned().collect();
+    for leaf in colliding {
+        enum_variants.remove(&leaf);
+        enum_variant_traits.remove(&leaf);
+    }
+}
+
 /// `fn-leaf -> expanded return-type-path`, e.g. `create_pool -> sqlx::Pool` (Result/Option unwrapped).
 /// Lets type inference flow through a LOCAL factory function: `let p = create_pool()?; p.fetch_one(q)`.
 /// Only UNAMBIGUOUS leaves are kept — a name with two different return types across the crate is dropped
@@ -267,6 +307,7 @@ pub(crate) struct ElemIndexes<'a> {
     pub(crate) field_elem: &'a FieldElemIndex,
     pub(crate) field_elem_trait: &'a FieldElemTraitIndex,
     pub(crate) enum_variants: &'a EnumVariantIndex,
+    pub(crate) enum_variant_traits: &'a EnumVariantTraitIndex,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

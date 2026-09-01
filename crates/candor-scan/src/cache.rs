@@ -88,6 +88,11 @@ pub(crate) struct FileDecls {
     /// `leaf -> Some(ty)` or `None` (this file alone already saw conflicting return types for the leaf).
     pub(crate) rets: HashMap<String, Option<String>>,
     pub(crate) enum_tmp: HashMap<String, Option<String>>,
+    /// `variant leaf -> Some(dispatch trait leaves)` or `None` (ambiguous) for a single-field DISPATCH-typed
+    /// tuple-variant payload (R77) — the `enum_tmp` counterpart for a `dyn`/`impl`/bounded-generic payload,
+    /// which `type_path` can't name so `enum_tmp` never records it at all.
+    #[serde(default)]
+    pub(crate) enum_variant_traits: HashMap<String, Option<Vec<String>>>,
     pub(crate) trait_impls: TraitImplIndex,
     /// `trait leaf -> (decl count in this file, declared method names)` — `LocalTrait` flattened for serde.
     pub(crate) trait_decls: HashMap<String, (usize, Vec<String>, Vec<String>)>,
@@ -147,6 +152,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut field_elem_trait = HashMap::new();
     let mut rets = HashMap::new();
     let mut enum_tmp = HashMap::new();
+    let mut enum_variant_traits = HashMap::new();
     let mut trait_impls = HashMap::new();
     let mut trait_decls: HashMap<String, LocalTrait> = HashMap::new();
     let mut trait_fields = HashMap::new();
@@ -159,7 +165,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut local_macros = HashMap::new();
     let mut blanket_methods = HashMap::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
-                  &mut enum_tmp, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
+                  &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
                   &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut blanket_methods);
     FileDecls {
         fields,
@@ -167,6 +173,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         field_elem_trait,
         rets,
         enum_tmp,
+        enum_variant_traits,
         trait_impls,
         trait_decls: trait_decls
             .into_iter()
@@ -204,6 +211,7 @@ pub(crate) struct MergedDecls {
     pub(crate) field_elem_trait: FieldElemTraitIndex,
     pub(crate) rets: HashMap<String, Option<String>>,
     pub(crate) enum_tmp: HashMap<String, Option<String>>,
+    pub(crate) enum_variant_traits: HashMap<String, Option<Vec<String>>>,
     pub(crate) trait_impls: TraitImplIndex,
     pub(crate) trait_decls: HashMap<String, LocalTrait>,
     pub(crate) trait_fields: TraitFieldIndex,
@@ -273,6 +281,28 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     };
     merge_amb(&mut acc.rets, &fd.rets);
     merge_amb(&mut acc.enum_tmp, &fd.enum_tmp);
+    // R77: the Vec-valued twin of `merge_amb` — same ambiguity rule (a leaf seen with two DIFFERENT leaf
+    // sets, or already `None` in any contributor, collapses to `None`), for `enum_variant_traits`.
+    let merge_amb_vec = |dst: &mut HashMap<String, Option<Vec<String>>>, src: &HashMap<String, Option<Vec<String>>>| {
+        for (leaf, val) in src {
+            match val {
+                None => {
+                    dst.insert(leaf.clone(), None);
+                }
+                Some(leaves) => match dst.get(leaf) {
+                    None => {
+                        dst.insert(leaf.clone(), Some(leaves.clone()));
+                    }
+                    Some(Some(prev)) if prev != leaves => {
+                        dst.insert(leaf.clone(), None); // conflicting leaf sets — drop
+                    }
+                    Some(Some(_)) => {} // same leaves — keep
+                    Some(None) => {}    // already ambiguous — stays
+                },
+            }
+        }
+    };
+    merge_amb_vec(&mut acc.enum_variant_traits, &fd.enum_variant_traits);
     for (tr, tys) in &fd.trait_impls {
         acc.trait_impls.entry(tr.clone()).or_default().extend(tys.iter().cloned());
     }
@@ -403,6 +433,21 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     };
     amb(&mut s, "rets", &m.rets);
     amb(&mut s, "enum", &m.enum_tmp);
+    // enum_variant_traits — the Vec-valued twin of `enum_tmp` (R77): a DISPATCH-typed single-field
+    // tuple-variant payload's trait leaves, joined so the digest moves if the leaf SET changes.
+    s.push_str("enum_variant_traits");
+    let mut evtk: Vec<&String> = m.enum_variant_traits.keys().collect();
+    evtk.sort();
+    for k in evtk {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        match &m.enum_variant_traits[k] {
+            Some(leaves) => s.push_str(&leaves.join(",")),
+            None => s.push_str("\u{0}AMBIG"),
+        }
+    }
+    s.push('\n');
     // trait_impls — Vec order is significant (CHA), hash in stored order, keys sorted.
     s.push_str("trait_impls");
     let mut tik: Vec<&String> = m.trait_impls.keys().collect();

@@ -61,6 +61,11 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) field_elem: &'a FieldElemIndex,
     /// `enum-variant-leaf -> single payload type` for match-arm binding (`Conn::Active(s) => s.send()`).
     pub(crate) enum_variants: &'a EnumVariantIndex,
+    /// `enum-variant-leaf -> single payload's DISPATCH trait leaves` (R77) — the `enum_variants`
+    /// counterpart for a `dyn`/`impl`/bounded-generic payload (`Msg::Cb(Box<dyn Fn()>)`), which
+    /// `type_path` can't name so `enum_variants` never records it. Consulted by every tuple-variant
+    /// binding site (match arm, if-let, while-let, let-else) BEFORE the plain `enum_variants` type route.
+    pub(crate) enum_variant_traits: &'a EnumVariantTraitIndex,
     /// local var / param -> ELEMENT type of a COLLECTION it holds (a `Vec<T>`/`&[T]`/… binding), grown
     /// as collection-typed `let`s/params are seen. Lets `for c in xs`, `xs[0]`, `xs.iter().for_each`
     /// resolve the element's type. Scoped bindings (loop var, closure param) live in `vars`, not here.
@@ -1068,6 +1073,22 @@ impl<'a> CallCollector<'a> {
     fn leaves_are_callable(leaves: &[String]) -> bool {
         leaves.iter().any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce"))
     }
+    /// R77 — the enum-payload counterpart of `resolve_elem_trait_leaves`, shared by every single-field
+    /// TUPLE-VARIANT binding site (match arm, if-let, while-let, let-else): `(binding name, dispatch trait
+    /// leaves, plain type)` for pattern `Variant(x)` / `Enum::Variant(x)`. `leaves` non-empty means the
+    /// variant's declared payload is a `dyn`/`impl`/bounded-generic type (`Msg::Cb(Box<dyn Fn()>)`) — the
+    /// caller must bind it via `Bound::Traits`/hedge `fn_typed_vars` like every other dyn-binding site,
+    /// NEVER the plain-type route, which would type it as the useless literal wrapper name (`"Box"`) and
+    /// mis-resolve `f.method()`/drop `f()` as a phantom free-fn call. `ty` is the `enum_variants` plain-type
+    /// fallback (unchanged pre-R77 behaviour) for a genuinely concrete payload. `None` overall for any
+    /// pattern that isn't a single-field tuple-struct (multi-field/destructuring — an honest under-report,
+    /// unchanged) — peels a reference/paren wrapper first, like `some_ok_binding`.
+    fn enum_variant_binding(&self, pat: &syn::Pat) -> Option<(String, Vec<String>, Option<String>)> {
+        let (name, leaf) = tuple_variant_binding(pat)?;
+        let leaves = self.enum_variant_traits.get(&leaf).cloned().unwrap_or_default();
+        let ty = self.enum_variants.get(&leaf).cloned();
+        Some((name, leaves, ty))
+    }
     /// The DISPATCH leaves of a single element inside an inline tuple LITERAL (`(x, 1)`) — a cast
     /// (`x as Box<dyn Doer>`), or a bare local PATH already known dispatch-typed via `fn_typed_vars`
     /// (a callable) or `trait_vars` (a dyn-trait receiver). GAP C / SOUNDNESS, measured 2026-09: before
@@ -2028,6 +2049,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                     return;
                 }
+            } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&el.pat) {
+                // R77: a LOCAL enum tuple-variant if-let (`if let Msg::Cb(f) = m { f() }`) — NOT
+                // `Some`/`Ok`, so the branch above never fires; type from the VARIANT's own declared
+                // payload (Pass-A enum-variant index) rather than the scrutinee's type. Dispatch-typed
+                // payload wins (mirrors match-arm/while-let/let-else); else the plain-type route, which
+                // is a genuinely NEW capability here — this pattern shape had no if-let handling at all
+                // before R77, dyn or concrete (the commit's "generalise beyond Some/Ok" instruction).
+                self.visit_expr(&el.expr);
+                if !leaves.is_empty() {
+                    if Self::leaves_are_callable(&leaves) {
+                        self.fn_typed_vars.insert(name.clone());
+                    }
+                    self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.then_branch));
+                } else {
+                    self.scoped_var(&name, ty, |s| s.visit_block(&node.then_branch));
+                }
+                if let Some((_, else_b)) = &node.else_branch {
+                    self.visit_expr(else_b);
+                }
+                return;
             }
         }
         syn::visit::visit_expr_if(self, node);
@@ -2049,6 +2090,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.scoped_binding(&binding, Bound::Traits(leaves), |s| s.visit_block(&node.body));
                     return;
                 }
+            } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&el.pat) {
+                // R77: the while-let twin of `visit_expr_if`'s new branch — a LOCAL enum tuple-variant
+                // pattern, NOT `Some`/`Ok`. Scoped to the BODY, like the if-let form.
+                self.visit_expr(&el.expr);
+                if !leaves.is_empty() {
+                    if Self::leaves_are_callable(&leaves) {
+                        self.fn_typed_vars.insert(name.clone());
+                    }
+                    self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.body));
+                } else {
+                    self.scoped_var(&name, ty, |s| s.visit_block(&node.body));
+                }
+                return;
             }
         }
         syn::visit::visit_expr_while(self, node);
@@ -2125,16 +2179,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // ENUM-PAYLOAD MATCH BINDING: `match c { Conn::Active(s) => s.send() }` — the arm pattern
         // `Conn::Active(s)` is a `Pat::TupleStruct` whose single field binds `s` to the variant's
         // payload type. Type `s` from the Pass-A enum-variant index so `s.method()` resolves (else
-        // dropped to pure: a §4 under-report). SCOPED to the arm body + guard via `scoped_var`, so the
-        // binding can't leak into a later arm or a later same-named var (the `vars`-leak fabrication).
-        let binding = arm_payload_binding(&node.pat, self.enum_variants);
-        if let Some((name, ty)) = binding {
-            self.scoped_var(&name, ty, |s| {
-                if let Some((_, guard)) = &node.guard {
-                    s.visit_expr(guard);
+        // dropped to pure: a §4 under-report). SCOPED to the arm body + guard via `scoped_var`/
+        // `scoped_binding`, so the binding can't leak into a later arm or a later same-named var (the
+        // `vars`-leak fabrication).
+        //
+        // R77: a DISPATCH-typed payload (`Msg::Cb(Box<dyn Fn()>) => f()`) previously took this SAME
+        // route into `scoped_var` with a plain type string — but `type_path` can't name a `dyn` type, so
+        // `enum_variants` never had the leaf at all and the binding landed in NEITHER `vars` nor
+        // `trait_vars`/`fn_typed_vars`: a silent drop of the payload, closures included (SOUNDNESS.md
+        // R77). `enum_variant_binding` tries the dispatch-leaves route FIRST (mirroring every other
+        // dyn-binding site — if-let/while-let/match-Some/for-loop/HOF), falling back to the unchanged
+        // plain-type route only when the payload isn't dispatch-typed.
+        if let Some((name, leaves, ty)) = self.enum_variant_binding(&node.pat) {
+            if !leaves.is_empty() {
+                if Self::leaves_are_callable(&leaves) {
+                    self.fn_typed_vars.insert(name.clone());
                 }
-                s.visit_expr(&node.body);
-            });
+                self.scoped_binding(&name, Bound::Traits(leaves), |s| {
+                    if let Some((_, guard)) = &node.guard {
+                        s.visit_expr(guard);
+                    }
+                    s.visit_expr(&node.body);
+                });
+            } else {
+                self.scoped_var(&name, ty, |s| {
+                    if let Some((_, guard)) = &node.guard {
+                        s.visit_expr(guard);
+                    }
+                    s.visit_expr(&node.body);
+                });
+            }
         } else {
             syn::visit::visit_arm(self, node);
         }
@@ -2366,6 +2440,25 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.fn_typed_vars.insert(binding.clone());
                     }
                     self.trait_vars.insert(binding, leaves);
+                }
+            }
+        } else if let Some((name, leaves, ty)) = self.enum_variant_binding(&node.pat) {
+            // R77: the let-else twin — `let Msg::Cb(f) = m else { return }; f()`, NOT `Some`/`Ok`, so the
+            // branch above never fires. Unscoped/fn-wide like the Some/Ok form above (let-else binds for
+            // the REST of the fn, not a block) — `vars`+`trait_vars` are both cleared first so a name that
+            // shadows an outer binding can't have its NEW payload resolve to the STALE outer entry via
+            // precedence (the exact fabrication class `scoped_binding`'s own doc comment describes: "a
+            // shadow that resolves to NOTHING writes nothing... trait_vars still answers").
+            if node.init.is_some() {
+                self.vars.remove(&name);
+                self.trait_vars.remove(&name);
+                if !leaves.is_empty() {
+                    if Self::leaves_are_callable(&leaves) {
+                        self.fn_typed_vars.insert(name.clone());
+                    }
+                    self.trait_vars.insert(name, leaves);
+                } else if let Some(t) = ty {
+                    self.vars.insert(name, t);
                 }
             }
         }
