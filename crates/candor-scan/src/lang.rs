@@ -1107,6 +1107,46 @@ pub(crate) fn tuple_variant_binding(pat: &syn::Pat) -> Option<(String, String)> 
     }
 }
 
+/// The (bound name, `"VariantLeaf::field"` composite key) pairs of a STRUCT-VARIANT pattern
+/// (`Msg::CbField { f }`, `Msg::CbField { f: renamed }`, `Msg::CbField { f, .. }`, `Msg::Both { f, g }`)
+/// — the struct-variant counterpart of `tuple_variant_binding`, generalised to MULTIPLE simultaneous
+/// bindings since a struct-variant pattern can name several fields at once (R77 residual: no
+/// struct-variant binder existed at all before this, for any payload type).
+///
+/// One pair per field the pattern actually binds to a single ident; a `..` rest is simply not iterated
+/// (Rust's own partial-destructure semantics — the omitted fields bind nothing, an honest under-report
+/// unchanged from before). A field bound to a non-single-ident sub-pattern (`Msg::CbField { f: (a, b) }`)
+/// contributes nothing for that field — same discipline as `tuple_variant_binding`'s `None` result for a
+/// multi-field/destructuring payload. `ref`/`@` bindings resolve through `single_pat_ident`, which reads
+/// only the `Pat::Ident`'s own bound name, ignoring `by_ref`/`subpat`.
+///
+/// The composite key is deliberate reuse, not a new index: Rust identifiers never contain `::`, so
+/// `"Leaf::field"` can never collide with a bare tuple-variant leaf already stored in
+/// `EnumVariantIndex`/`EnumVariantTraitIndex` — see `enum_struct_variant_bindings` in `collector.rs` and
+/// the matching Pass-A write site in `decls.rs`'s enum branch. Peels reference/paren wrappers first, like
+/// `tuple_variant_binding`.
+pub(crate) fn struct_variant_field_bindings(pat: &syn::Pat) -> Vec<(String, String)> {
+    match pat {
+        syn::Pat::Reference(r) => struct_variant_field_bindings(&r.pat),
+        syn::Pat::Paren(p) => struct_variant_field_bindings(&p.pat),
+        syn::Pat::Struct(ps) => {
+            let Some(leaf) = ps.path.segments.last().map(|s| s.ident.to_string()) else {
+                return Vec::new();
+            };
+            ps.fields
+                .iter()
+                .filter_map(|fp| {
+                    let field = match &fp.member {
+                        syn::Member::Named(id) => id.to_string(),
+                        syn::Member::Unnamed(idx) => idx.index.to_string(),
+                    };
+                    single_pat_ident(&fp.pat).map(|name| (name, format!("{leaf}::{field}")))
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
 
 /// The single-ident binding of a `Some(x)` / `Ok(x)` pattern (the payload of an `if let`/`let-else`
 /// unwrap of an `Option`/`Result`) — so `if let Some(d) = o { d.go() }` over an `Option<Box<dyn T>>`
