@@ -21,6 +21,13 @@ CASE = re.compile(r"^\s{2}(\S+): ran=(\d)\s+effect=(\S+)")
 PF_OK = re.compile(r"^\s{2}(pf_\S+): OK \((\d+) fns on stack")
 PF_SKIP = re.compile(r"^\s{2}(pf_\S+): SKIP (.*)$")
 PF_FAILED = re.compile(r"per-function under-report on:(.*)$")
+# An allowlisted (KNOWN_UNDER) driver is a gap the engine has NOT closed, so its signature is already
+# wrong and falsifying it further changes nothing the verdict can see. It is therefore neither
+# falsifiable nor a blind spot: counted as falsifiable it would read as a MISSED catch in every mutant
+# pass, and dropped from both counts it would shrink the denominator silently — the exact truncation
+# this checker exists to prevent. It goes in the UNCALIBRATED remainder, by name and by row.
+PF_KNOWN = re.compile(r"^\s{2}(pf_\S+): KNOWN under-report \((\S+?),")
+PROG_KNOWN = re.compile(r"^\s{4}⚠ KNOWN under-report \((\S+?),")
 MULTI = re.compile(r"^\s{2}(\S+): \(multi-effect\)")
 MULTI_EFF = re.compile(r"^\s{4}\[(\w+)\] (?:✓|ⓘ)")
 MULTI_SKIP = re.compile(r"^\s{4}\[(\w+)\] SKIP \((.*)\)")
@@ -41,12 +48,20 @@ def parse_control_pf(text):
             else:
                 skipped[name] = "no function on the stack at the effect"
             continue
+        m = PF_KNOWN.match(ln)
+        if m:
+            skipped[m.group(1)] = (f"KNOWN under-report allowlisted against SOUNDNESS {m.group(2)} "
+                                   "— an open gap cannot be falsified further")
+            continue
         m = PF_SKIP.match(ln)
         if m:
             skipped[m.group(1)] = m.group(2)
             continue
-        if "build failed — SKIP" in ln or "no candor report — SKIP" in ln:
-            skipped[ln.strip().split(":")[0]] = "did not build / no report"
+        # A driver that never reached the verdict is uncalibrated, never a silent omission. (These are
+        # also RED in the oracle itself as of 2026-09-02, so a control pass containing one aborts above
+        # — the branch stays because a mutant pass can contain one too.)
+        if "BUILD FAILED —" in ln or "NO CANDOR REPORT —" in ln:
+            skipped[ln.strip().split(":")[0]] = "did not build / produced no report — never reached the verdict"
     return falsifiable, skipped
 
 
@@ -60,18 +75,28 @@ def parse_flagged_pf(text):
 
 def parse_control(text):
     """-> (falsifiable set of driver keys, dict of skipped driver -> reason)."""
-    falsifiable, skipped, cur_multi = set(), {}, None
+    falsifiable, skipped, cur_multi, cur_case = set(), {}, None, None
     for ln in text.splitlines():
         m = CASE.match(ln)
         if m:
             cur_multi = None
             name, ran, eff = m.group(1), m.group(2), m.group(3)
+            cur_case = name
             if eff == "none":
                 continue                      # the pure control: nothing to hide, calibrates fabrication
             if ran == "1":
                 falsifiable.add(name)
             else:
                 skipped[name] = f"{eff} did not execute under strace"
+            continue
+        m = PROG_KNOWN.match(ln)
+        if m and cur_case:
+            # Same reasoning as PF_KNOWN: an allowlisted gap is uncalibrated, not falsifiable. This
+            # arm is latent while KNOWN_UNDER_PROGRAM is empty; it is here because the per-function
+            # oracle's list is not, and the two share one mechanism.
+            falsifiable.discard(cur_case)
+            skipped[cur_case] = (f"KNOWN under-report allowlisted against SOUNDNESS {m.group(1)} "
+                                 "— an open gap cannot be falsified further")
             continue
         m = MULTI.match(ln)
         if m:
@@ -89,8 +114,11 @@ def parse_control(text):
             if m:
                 skipped[f"{cur_multi}:{m.group(1)}"] = m.group(2)
                 continue
-        if ": no source — SKIP" in ln or "failed — SKIP" in ln or ": no binary — SKIP" in ln:
-            skipped[ln.strip().split(":")[0]] = "did not build"
+        if (": no source — SKIP" in ln or "BUILD FAILED —" in ln or "NO BINARY —" in ln
+                or "NO CANDOR REPORT —" in ln):
+            name = ln.strip().split(":")[0]
+            falsifiable.discard(name)   # the CASE line for it may already have been read
+            skipped[name] = "did not build / produced no report — never reached the verdict"
     return falsifiable, skipped
 
 
@@ -116,6 +144,8 @@ def main(fmt, control_log, *mutant_args):
     control = open(control_log).read()
     if flag_parse(control):
         print("ABORT: the control pass is already red — calibrate against a green oracle, not a broken one.")
+        print("       If the red is a KNOWN, TRIAGED gap, give it a KNOWN_UNDER entry (with its SOUNDNESS")
+        print("       row) in soundness/realworld/known_under.sh — do NOT relax this abort. See R102.")
         return 2
 
     falsifiable, skipped = ctl_parse(control)

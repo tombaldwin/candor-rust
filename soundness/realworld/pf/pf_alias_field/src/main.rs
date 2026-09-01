@@ -1,13 +1,15 @@
 // ---------------------------------------------------------------------------------------------
-// KNOWN-RED. This driver is EXPECTED to fail at HEAD and two things follow that a reader hitting the
-// red needs to know before "fixing" it:
-//   * `run_pf.sh` has no KNOWN_UNDER allowlist. Its sibling `soundness/realworld/run.sh` does (see the
-//     `KNOWN_UNDER=()` block and its comment: "tracked so the oracle is a clean gate — green on known
-//     gaps, red only on NEW findings"). Two oracles, one question, and only one of them answers it.
-//   * because of that, `soundness/realworld/recall/disclosure_recall_check.py:117` sees the control
-//     pass already red and ABORTS the per-function calibration entirely — so the recall numbers for
-//     this oracle stop being produced, not merely reported red. That is an aggregation failure, and
-//     it is the reason this file says so here rather than leaving it to be rediscovered.
+// KNOWN-RED, AND ALLOWLISTED. This driver is EXPECTED to fail at HEAD; it is listed in
+// `soundness/realworld/known_under.sh` (KNOWN_UNDER_PERFN) with its SOUNDNESS row, so `run_pf.sh`
+// reports it as a KNOWN under-report and stays green. Two things follow for a reader hitting it:
+//   * do NOT "fix" the driver. It is a runtime witness for an OPEN row; the red IS the finding.
+//   * when the engine defect is fixed, the driver PASSES and the stale-entry ratchet in
+//     `known_under.sh` turns the oracle RED until the allowlist entry is deleted in the same change.
+//     That is deliberate: an allowlist consulted only in the failing branch is a gate that can never
+//     go red again, and would absorb the next regression here silently and forever (SOUNDNESS R102).
+// Before R102 this driver's red ABORTED the per-function disclosure-recall calibration outright
+// (`recall/disclosure_recall_check.py`), so the recall numbers stopped being produced rather than
+// being reported red — the §H aggregation shape, which is why the allowlist exists at all.
 // ---------------------------------------------------------------------------------------------
 // R99 OPEN SHAPE 2 — EXPECTED TO FAIL AT HEAD. Pass A's decl indexes do not see `mod_aliases`, so a
 // struct FIELD typed through the module alias is unresolved and the method that USES it is omitted.
