@@ -201,6 +201,29 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) in_pattern: bool,
 }
 
+/// Decode a `self.returns` entry — recorded by `decls::record_return` under a fn's leaf name — into the
+/// DISPATCH leaves a call-position resolver over a collection/Option/Result context expects: the
+/// existing `<dyn>`/`<elemdyn>` trait-object-return sentinels, PLUS `RET_FN_TYPED` (`"<fn>"`, a bare or
+/// Option/Result-wrapped `Fn`/`FnMut`/`FnOnce` return — `record_return`'s `is_callable_type` branch,
+/// checked and recorded FIRST, before the `<dyn>`/`<elemdyn>` branch ever runs) decoded to a synthetic
+/// `"Fn"` leaf, the exact leaf `CallCollector::leaves_are_callable` tests for.
+///
+/// GAP A / SOUNDNESS, measured 2026-09: before this, every caller of `resolve_elem_trait_leaves`
+/// (if-let/while-let/match/let-else over `Option<Box<dyn Fn()>>`/`Result<Box<dyn Fn()>, E>`, for ANY
+/// factory shape — free fn, method, associated fn, trait method) decoded `RET_FN_TYPED` as "not a
+/// trait-object return" (neither prefix matches `"<fn>"`), got back an empty leaf list, and every
+/// consumer's `leaves_are_callable` check was false — so the callable-leaved binding was never hedged
+/// into `fn_typed_vars`, and `f()` at the call site resolved as a phantom free-fn call and was silently
+/// dropped as pure. `record_return`'s own doc comment already states over-approximating toward fn-typed
+/// only ever marks the binding `Unknown` — the safe direction — so decoding it here carries the same
+/// soundness argument the `<dyn>`/`<elemdyn>` sentinels already rely on.
+fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
+    if t == RET_FN_TYPED {
+        return Some(vec!["Fn".to_string()]);
+    }
+    ret_elem_dyn_leaves(t).or_else(|| ret_dyn_leaves(t))
+}
+
 impl<'a> CallCollector<'a> {
     /// DROP-GLUE, the single emission point. `leaf` is whatever `lang::ctor_leaf_from_*` returned for
     /// the construction expression in hand; a type with no local `Drop` (and owning none) is not
@@ -557,17 +580,27 @@ impl<'a> CallCollector<'a> {
                     // self.opt()`, `opt() -> Option<Box<dyn>>` → recorded scalar `<dyn>` via
                     // unwrap_result_option). Decode either — this arm is only reached in a collection/option
                     // context, which a plain scalar-`dyn` return can't be, so the `<dyn>` fallback is safe.
+                    // GAP A / SOUNDNESS: `ret_dispatch_leaves` ALSO decodes `RET_FN_TYPED` (a bare/Option/
+                    // Result `Fn`/`FnMut`/`FnOnce` return recorded by `record_return`'s is_callable_type
+                    // branch) into the synthetic `"Fn"` leaf `leaves_are_callable` recognises — without
+                    // this, `if let Some(f) = q.get_cb() { f() }` over `fn get_cb(&mut self) ->
+                    // Option<Box<dyn Fn()>>` decoded to no leaves at all (neither `<dyn>` nor `<elemdyn>`
+                    // matches `<fn>`) and every if-let/while-let/match/let-else consumer below silently
+                    // dropped the call as pure.
                     self.returns.get(&m.method.to_string())
-                        .and_then(|t| ret_elem_dyn_leaves(t).or_else(|| ret_dyn_leaves(t)))
+                        .and_then(|t| ret_dispatch_leaves(t))
                         .unwrap_or_default()
                 }
             }
-            // A FREE/STATIC factory returning a collection (or Option/Result) of trait objects.
+            // A FREE/STATIC factory returning a collection (or Option/Result) of trait objects — or,
+            // per `ret_dispatch_leaves`, a factory recorded `RET_FN_TYPED` (GAP A, same as the
+            // MethodCall arm above: `if let Some(f) = make_cb() { f() }` was silently dropped identically
+            // for a free/associated-fn factory, not only a method one).
             syn::Expr::Call(c) => {
                 let syn::Expr::Path(p) = &*c.func else { return Vec::new() };
                 let leaf = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
                 self.returns.get(&leaf)
-                    .and_then(|t| ret_elem_dyn_leaves(t).or_else(|| ret_dyn_leaves(t)))
+                    .and_then(|t| ret_dispatch_leaves(t))
                     .unwrap_or_default()
             }
             _ => Vec::new(),
@@ -1035,6 +1068,43 @@ impl<'a> CallCollector<'a> {
     fn leaves_are_callable(leaves: &[String]) -> bool {
         leaves.iter().any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce"))
     }
+    /// The DISPATCH leaves of a single element inside an inline tuple LITERAL (`(x, 1)`) — a cast
+    /// (`x as Box<dyn Doer>`), or a bare local PATH already known dispatch-typed via `fn_typed_vars`
+    /// (a callable) or `trait_vars` (a dyn-trait receiver). GAP C / SOUNDNESS, measured 2026-09: before
+    /// this, only the `Cast` shape was recognised here — an already-fn-typed/dispatch-typed PARAMETER or
+    /// binding carried through a tuple literal UNCAST (`fn f(cb: Box<dyn Fn()>) { let pair = (cb, 1); }`)
+    /// found no leaves at either tuple-literal call site (this one, and the two-step `let pair = (cb,
+    /// 1); let (f, _) = pair;` case fed by `tuple_literal_leaves` below), so the destructured `f`/`x`
+    /// bound to NEITHER `trait_vars` nor `fn_typed_vars` and a later `f()`/`x.go()` resolved as a phantom
+    /// free-fn/field call and was silently dropped — for ANY dispatch-worthy element, not only `Fn`.
+    fn tuple_elem_leaves(&self, e: &syn::Expr) -> Vec<String> {
+        match e {
+            syn::Expr::Cast(c) => trait_leaves(&c.ty, &self.generic_bounds),
+            syn::Expr::Path(p) => p
+                .path
+                .get_ident()
+                .map(|id| id.to_string())
+                .map(|n| {
+                    if self.fn_typed_vars.contains(&n) {
+                        vec!["Fn".to_string()]
+                    } else {
+                        self.trait_vars.get(&n).cloned().unwrap_or_default()
+                    }
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+    /// Per-position DISPATCH leaves for every element of an inline tuple LITERAL (`(cb, 1)`), via
+    /// `tuple_elem_leaves` — the `tuple_trait_of` value this literal implies, so `let pair = (cb, 1);`
+    /// (a PLAIN, unannotated `let` whose init is a tuple literal — the `Pat::Ident` binder, which
+    /// previously recorded NO tuple shape for `pair` at all: `tuple_of`/`tuple_trait_of` were populated
+    /// only for an ANNOTATED tuple `let` or a same-statement destructure) can feed a LATER `let (f, _) =
+    /// pair;` exactly like an annotated source would. `None` per position when that element carries no
+    /// leaves (kept as `None`, not dropped, so positions after it don't shift).
+    fn tuple_literal_leaves(&self, it: &syn::ExprTuple) -> Vec<Vec<String>> {
+        it.elems.iter().map(|e| self.tuple_elem_leaves(e)).collect()
+    }
     /// Whether an expression evaluates to a fn-typed (callback) value — a fn-typed binding, through
     /// `&`/paren/group wrappers, or an `if` whose then-branch tail yields one. Lets `let g = cb`
     /// propagate fn-typed-ness so a later `g()` reads the honest `Unknown` instead of a phantom free-fn
@@ -1055,9 +1125,20 @@ impl<'a> CallCollector<'a> {
             // only marks `g()` Unknown — the safe direction for a missed-effect-is-a-hole tool.
             syn::Expr::Call(c) => {
                 if let syn::Expr::Path(p) = &*c.func {
+                    // Matched by LEAF segment, not `get_ident()` (which only succeeds for a
+                    // single-segment path): a cross-module free call (`other::make_cb()`) or a
+                    // UFCS associated-fn call (`Queue::make_assoc()`) is JUST AS MUCH a factory
+                    // call as a bare `make_cb()` — `self.returns` is keyed by leaf name only
+                    // (`record_return` never qualifies it), so the leaf lookup is already correct
+                    // for either; only the PATH-MATCHING here was too narrow. GAP A / SOUNDNESS:
+                    // `get_ident()` silently returned `None` for any multi-segment callee and this
+                    // whole check was skipped, so `let f = Queue::make_assoc(); f()` and
+                    // `let f = other::make_cb(); f()` were BOTH silently dropped identically to the
+                    // single-segment case this comment used to claim was the only one that worked.
                     if p.path
-                        .get_ident()
-                        .and_then(|id| self.returns.get(&id.to_string()))
+                        .segments
+                        .last()
+                        .and_then(|s| self.returns.get(&s.ident.to_string()))
                         .is_some_and(|t| t == RET_FN_TYPED)
                     {
                         return true;
@@ -1101,6 +1182,18 @@ impl<'a> CallCollector<'a> {
             syn::Expr::MethodCall(m) => {
                 if matches!(m.method.to_string().as_str(), "unwrap" | "expect") {
                     return self.expr_is_fn_typed(&m.receiver);
+                }
+                // A METHOD factory recorded `RET_FN_TYPED` (`fn make(&self) -> Box<dyn Fn()>` / a
+                // trait method `fn make(&self) -> Box<dyn Fn()>` dispatched through `dyn Factory` —
+                // `self.returns` is keyed by leaf method name regardless of receiver, same as the
+                // `Call` arm's associated-fn case). GAP A / SOUNDNESS: this arm previously handled
+                // ONLY `.unwrap()`/`.expect()` pass-through and turbofish — a plain
+                // `let f = q.make_method(); f()` never consulted `self.returns` at all, so the
+                // "let g = make_cb(); g()" claim this fn's own comment makes held for a FREE
+                // factory only; the identical shape through method-call syntax was silently
+                // dropped as pure.
+                if self.returns.get(&m.method.to_string()).is_some_and(|t| t == RET_FN_TYPED) {
+                    return true;
                 }
                 m.turbofish.as_ref().is_some_and(|tf| {
                     tf.args.iter().any(|a| {
@@ -2427,17 +2520,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         _ => None,
                     });
                 // Bind a DISPATCH position into `trait_vars`: from the source var's `tuple_trait_of`, or an
-                // inline tuple literal's cast element (`(x as Box<dyn Doer>, 1)` → position 0's leaves).
+                // inline tuple literal's element — a cast (`x as Box<dyn Doer>`), or a bare local PATH
+                // already `fn_typed_vars`/`trait_vars`-typed (`(cb, 1)` where `cb: Box<dyn Fn()>` is a
+                // PARAMETER — GAP C / SOUNDNESS: only the cast shape was recognised here before; an
+                // uncast already-dispatch-typed element found no leaves and `f()`/`x.go()` on the
+                // destructured binding dropped silently, for ANY dispatch-worthy element, not only `Fn`).
                 let leaves = src_trait_tuple
                     .as_ref()
                     .and_then(|t| t.get(i).cloned())
                     .filter(|l| !l.is_empty())
                     .or_else(|| match init {
                         Some(syn::Expr::Tuple(it)) => it.elems.iter().nth(i).and_then(|e| {
-                            let inner = match e {
-                                syn::Expr::Cast(c) => trait_leaves(&c.ty, &std::collections::HashMap::new()),
-                                _ => Vec::new(),
-                            };
+                            let inner = self.tuple_elem_leaves(e);
                             (!inner.is_empty()).then_some(inner)
                         }),
                         _ => None,
@@ -2563,6 +2657,35 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     self.elem_of.remove(&id.ident.to_string());
                     if let Some(e) = self.resolve_elem_type(&init.expr) {
                         self.elem_of.insert(id.ident.to_string(), e);
+                    }
+                    // GAP C / SOUNDNESS: `let pair = (cb, 1);` (an UNANNOTATED plain `let` whose init is
+                    // an inline tuple LITERAL) previously recorded NO tuple shape for `pair` at all —
+                    // `tuple_of`/`tuple_trait_of` were populated only for an ANNOTATED tuple `let` (the
+                    // `Pat::Type`/`Pat::Tuple` arm above) or a SAME-STATEMENT destructure (`let (f, _) =
+                    // (cb, 1);`, handled inline). So a later TWO-STEP `let (f, _) = pair;` found neither
+                    // table populated and `f`/`x` bound to nothing — `f()`/`x.go()` dropped silently, for
+                    // an already fn-typed/dispatch-typed source (a PARAMETER, most commonly), same as the
+                    // one-step case just above. Per-position dispatch leaves via `tuple_literal_leaves`
+                    // (which also, unlike the old one-step-only Cast check, recognises a bare fn-typed/
+                    // trait-typed PATH element); per-position concrete type via `ctor_type`, mirroring the
+                    // one-step destructure's own type route. Cleared first, matching every other tuple-
+                    // shape binder's stale-rebind hygiene.
+                    self.tuple_of.remove(&id.ident.to_string());
+                    self.tuple_trait_of.remove(&id.ident.to_string());
+                    if let syn::Expr::Tuple(it) = &*init.expr {
+                        // Independent per-position tables — a MIXED tuple (`(cb, conn)`, position 0
+                        // dispatch-typed, position 1 a plain concrete effectful value) needs BOTH: the
+                        // consumer (`let (f, c) = pair;`) reads whichever table has that position's
+                        // entry, exactly as the ANNOTATED-`let` route above populates both independently.
+                        let leaves = self.tuple_literal_leaves(it);
+                        if leaves.iter().any(|l| !l.is_empty()) {
+                            self.tuple_trait_of.insert(id.ident.to_string(), leaves);
+                        }
+                        let types: Vec<Option<String>> =
+                            it.elems.iter().map(|e| ctor_type(e, self.uses, self.returns)).collect();
+                        if types.iter().any(|t| t.is_some()) {
+                            self.tuple_of.insert(id.ident.to_string(), types);
+                        }
                     }
                 }
             }
