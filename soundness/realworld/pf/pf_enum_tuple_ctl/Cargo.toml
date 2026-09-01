@@ -1,0 +1,9 @@
+[package]
+name = "pf_enum_tuple_ctl"
+version = "0.0.0"
+edition = "2021"
+[[bin]]
+name = "pf_enum_tuple_ctl"
+path = "src/main.rs"
+
+[workspace]
