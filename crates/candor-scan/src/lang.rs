@@ -947,6 +947,41 @@ fn qualified_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) 
             return Some(alias_join(full, &segs[n..]));
         }
     }
+    module_glob_alias(segs, rooted, uses)
+}
+
+/// R99 (SHAPE 1) — resolve `glb::write` through a SUBMODULE's external GLOB re-export
+/// (`mod glb { pub use std::fs::*; }`, recorded by `decls::collect_module_glob` under `glb::*glob`).
+///
+/// Tried only AFTER every exact alias key has missed, because a NAMED re-export of the same leaf is the
+/// more specific answer and is also rustc's precedence (an explicit import shadows a glob). Longest module
+/// prefix first, for the same reason `qualified_alias` searches that way.
+///
+/// The entry is `<target>` + `\u{2}`-separated names the module DECLARES ITSELF. A leaf among them is
+/// shadowed and MUST NOT be rewritten — see `decls::GLOB_SHADOW_SEP`, where the fabrication this prevents
+/// is measured. A `#[cfg]`-duplicated glob carries several arms (R105) and has no single answer, so it is
+/// refused rather than picked; unlike a named alias it cannot be distributed over the arms, because the
+/// shadow list is a property of one arm's module and joining them would apply one arm's shadows to the
+/// other's target.
+fn module_glob_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) -> Option<String> {
+    for n in (1..segs.len()).rev() {
+        let joined = segs[..n].join("::");
+        let key = if rooted {
+            format!("crate::{joined}::{}", crate::decls::MOD_GLOB_KEY)
+        } else {
+            format!("{joined}::{}", crate::decls::MOD_GLOB_KEY)
+        };
+        let Some(entry) = uses.get(&key) else { continue };
+        if entry.contains(crate::decls::ALIAS_ALT_SEP) {
+            continue;
+        }
+        let mut parts = entry.split(crate::decls::GLOB_SHADOW_SEP);
+        let Some(target) = parts.next().filter(|t| !t.is_empty()) else { continue };
+        if parts.any(|s| s == segs[n]) {
+            continue; // the module declares this name — the glob is shadowed, and rewriting would fabricate
+        }
+        return Some(format!("{target}::{}", segs[n..].join("::")));
+    }
     None
 }
 

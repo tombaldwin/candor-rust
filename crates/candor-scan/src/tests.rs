@@ -9744,13 +9744,19 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 no std/dependency item a second crate-local spelling" — so a warm cache replays the
     ///                 blanket-`deny`-defeating silence for `mod facade { pub use std::process::Command; }`
     ///                 and `pub type Cmd = std::process::Command;`.
+    ///   rev12 -> rev13 `mod_aliases` gained a NEW KIND of entry — a submodule's external GLOB re-export,
+    ///                 keyed `<module>::*glob` (R99 shape 1). The FIELD is unchanged, so a rev12 entry
+    ///                 deserializes without complaint into a map that simply has no glob in it, and the
+    ///                 warm cache replays `functions: []` over a module that globs `std::fs`. A field
+    ///                 ADDITION is not the only thing that needs a bump: a change in what an EXISTING
+    ///                 field records does too, and that is the reading this rev is here to stop.
     ///
     /// The schema token is the only thing standing between those readings, so it is pinned rather than
     /// trusted. (The `aborted` disclosure is what this fixture MEASURES in every case: it is the visible
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        for stale in ["rev7", "rev8", "rev9", "rev11"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -9761,7 +9767,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev12/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev13/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -12403,6 +12409,329 @@ pub fn go() {{ imp::doit(); }}
             expand("serde_json::from_str", &bare), "serde_json::from_str",
             "an unaliased external path must come back unchanged"
         );
+    }
+
+    // ── R99's TWO STATED-OPEN SHAPES, NOW CLOSED (SOUNDNESS.md R99) ───────────────────────────────
+    //
+    // b00956b closed four alias mechanisms and STATED two residuals rather than guessing at them: a
+    // SUBMODULE GLOB re-export of an external item, and Pass A's decl indexes not seeing `mod_aliases`.
+    // Both were given syscall-oracle drivers at `1aeeaba` (`pf_alias_glob`, `pf_alias_field`) with paired
+    // one-variable controls that PASS, so the failure is the engine and not the harness. Both drivers were
+    // RED — `pf_alias_glob` reporting `functions: []` over a program strace watched write a file.
+
+    /// R99 (SHAPE 1) — a SUBMODULE GLOB re-export of a std module. `collect_reexports`' external branch
+    /// skipped `name == "*"`; the whole crate then read clean (`functions: []`, `excluded: []`, no
+    /// disclosure channel set anywhere) while the program wrote a file. The paired control — the same
+    /// module re-exporting the SAME item BY NAME — resolved before this fix and must still resolve.
+    #[test]
+    fn r99_submodule_glob_reexport_of_an_external_module_resolves() {
+        let v = scan_crate_to_json("r99glob", &[
+            ("src/lib.rs", "pub mod glb;\npub mod named;\npub mod other;\n\
+                            pub fn put() { let _ = glb::write(\"/tmp/r99glob\", \"x\"); }\n\
+                            pub fn ctl_named() { let _ = named::write(\"/tmp/r99glob\", \"x\"); }\n"),
+            ("src/glb.rs", "pub use std::fs::*;\n"),
+            ("src/named.rs", "pub use std::fs::write;\n"),
+            ("src/other.rs", "use crate::glb;\n\
+                              pub fn sib() { let _ = glb::write(\"/tmp/r99glob\", \"x\"); }\n\
+                              pub fn rooted() { let _ = crate::glb::write(\"/tmp/r99glob\", \"x\"); }\n"),
+        ]);
+        for f in ["put", "other::sib", "other::rooted"] {
+            assert_eq!(
+                effs_opt(&v, f), vec!["Fs".to_string()],
+                "R99 SHAPE 1: `{f}` reaches `std::fs::write` through a submodule GLOB re-export and must \
+                 charge Fs — pre-fix the report was EMPTY for all three spellings:\n{v:#}"
+            );
+        }
+        assert_eq!(
+            effs_opt(&v, "ctl_named"), vec!["Fs".to_string()],
+            "INTRINSIC CONTROL: the NAMED re-export of the identical item already resolved before this \
+             fix (R99 mechanism 1, closed at b00956b) and must still resolve:\n{v:#}"
+        );
+    }
+
+    /// R99 (SHAPE 1) OVER-CHARGE CONTROL, and the reason this is not a one-line `name != "*"` deletion.
+    /// A glob import is SHADOWED by an explicit item of the same name, so `glb::write` here is the module's
+    /// own pure `write` — and rewriting it to `std::fs::write` would FABRICATE an Fs on a path that
+    /// performs none, unrecoverably, because scan.rs never attempts a local link for a std-rooted path.
+    ///
+    /// ONE VARIABLE against `r99_submodule_glob_reexport_of_an_external_module_resolves`: the module
+    /// declares the name. The local `write` performs a DISTINCT effect class (Env) rather than nothing, so
+    /// this asserts a POSITIVE claim — an `Fs` here means the glob reached a name it does not bind, and an
+    /// absence would mean the fixture never resolved at all (brief §E3).
+    #[test]
+    fn r99_a_module_glob_does_not_reach_a_name_the_module_declares() {
+        let v = scan_crate_to_json("r99globshadow", &[
+            ("src/lib.rs", "pub mod glb;\n\
+                            pub fn put() { glb::write(\"/tmp/r99globshadow\", \"x\"); }\n"),
+            ("src/glb.rs", "pub use std::fs::*;\n\
+                            pub fn write(k: &str, v: &str) { std::env::set_var(k, v); }\n"),
+        ]);
+        assert_eq!(
+            effs_opt(&v, "put"), vec!["Env".to_string()],
+            "OVER-CHARGE CONTROL: `glb::write` names the module's OWN `write`, which sets an environment \
+             variable and touches no file. `Fs` (or `Env`+`Fs`) means the glob rewrote a shadowed name — a \
+             fabrication on a provably-Fs-free path:\n{v:#}"
+        );
+    }
+
+    /// R99 (SHAPE 1) × R105 — THE `#[cfg]` INTERACTION, BUILT DELIBERATELY. Two exported globs in one
+    /// module have no single answer, and unlike a named alias the arms cannot be distributed over: the
+    /// shadow list belongs to ONE arm's module, so joining them would apply one arm's shadows to the
+    /// other's target. Both spellings of the collision are refused — the honest under-report, which is the
+    /// direction `unique_glob` already takes for the same question one level out.
+    #[test]
+    fn r99_a_cfg_duplicated_module_glob_is_refused_not_picked() {
+        let inline = scan_src_to_json("r99globcfg", concat!(
+            "mod glb {\n",
+            "  #[cfg(unix)] pub use std::fs::*;\n",
+            "  #[cfg(not(unix))] pub use std::env::*;\n",
+            "}\n",
+            "pub fn put() { let _ = glb::write(\"/tmp/r99globcfg\", \"x\"); }\n",
+        ));
+        assert!(
+            effs_opt(&inline, "put").is_empty(),
+            "TWO exported globs in one module: neither arm may be picked. Charging `Fs` here would be \
+             deciding by source order, which is exactly the R105 defect:\n{inline:#}"
+        );
+        // The DUPLICATED-MODULE half: two `#[cfg]` arms of the SAME module, each with one glob. The count
+        // above cannot see this — each arm is walked separately and each records exactly one — so
+        // `record_alias` joins them and `module_glob_alias`'s multi-arm check is the refusal.
+        let dup = scan_src_to_json("r99globdup", concat!(
+            "#[cfg(unix)] mod glb { pub use std::fs::*; }\n",
+            "#[cfg(not(unix))] mod glb { pub use std::env::*; }\n",
+            "pub fn put() { glb::set_var(\"A\", \"B\"); }\n",
+            "pub fn put2() { let _ = glb::write(\"/tmp/r99globdup\", \"x\"); }\n",
+        ));
+        for f in ["put", "put2"] {
+            assert!(
+                effs_opt(&dup, f).is_empty(),
+                "a module declared under two `#[cfg]` arms has two glob targets and no single answer; \
+                 `{f}` must charge neither:\n{dup:#}"
+            );
+        }
+        // …AND THAT SCAN CANNOT TELL WHICH GUARD DID IT, WHICH IS WHY THIS ASSERTION IS HERE. Measured by
+        // deleting the multi-arm check (§C): the scan above stays green, because without it `expand`
+        // returns a path with a `\u{1}` still in it, which the classifier reads as no effect rather than as
+        // an arm. That is a LATENT misclassification, not a refusal — one classifier rule keyed on a tail
+        // rather than a whole path would turn it into a picked arm — so the refusal is asserted directly,
+        // where the difference is visible.
+        let mut uses: HashMap<String, String> = HashMap::new();
+        uses.insert(
+            format!("glb::{}", crate::decls::MOD_GLOB_KEY),
+            format!("std::env{}std::fs", crate::decls::ALIAS_ALT_SEP),
+        );
+        assert_eq!(
+            expand("glb::write", &uses), "glb::write",
+            "a multi-arm module glob must come back UNCHANGED — never one arm, and never a joined path \
+             with the arm separator still embedded in it"
+        );
+        uses.insert(format!("glb::{}", crate::decls::MOD_GLOB_KEY), "std::fs".into());
+        assert_eq!(
+            expand("glb::write", &uses), "std::fs::write",
+            "…and the SINGLE-arm entry in the identical position resolves, so the assertion above is not \
+             holding because the lookup is inert"
+        );
+    }
+
+    /// R99 (SHAPE 1) — the three further refusals, each asserted against the ONE variable that makes the
+    /// positive case resolve. A PRIVATE glob exports nothing nameable from outside; two exported globs are
+    /// ambiguous; and a NAMED re-export must WIN over the glob, which is rustc's precedence.
+    ///
+    /// The named-beats-glob arm asserts a POSITIVE, DISTINCT class (`Env` from `set_var`, against the
+    /// glob's `Fs`) rather than an absence, so it cannot pass by the fixture failing to resolve at all.
+    #[test]
+    fn r99_a_module_glob_is_refused_when_it_cannot_be_the_only_answer() {
+        let private = scan_crate_to_json("r99globpriv", &[
+            ("src/lib.rs", "pub mod glb;\npub fn put() { let _ = glb::write(\"/tmp/x\", \"y\"); }\n"),
+            ("src/glb.rs", "use std::fs::*;\npub fn noop() {}\n"),
+        ]);
+        assert!(
+            effs_opt(&private, "put").is_empty(),
+            "a PRIVATE glob binds names in the module's own body and exports none of them, so it cannot \
+             answer a qualified `glb::write` written outside it:\n{private:#}"
+        );
+        let two = scan_crate_to_json("r99globtwo", &[
+            ("src/lib.rs", "pub mod glb;\npub fn put() { let _ = glb::write(\"/tmp/x\", \"y\"); }\n"),
+            ("src/glb.rs", "pub use std::fs::*;\npub use std::env::*;\n"),
+        ]);
+        assert!(
+            effs_opt(&two, "put").is_empty(),
+            "TWO exported globs: never guess which one a name arrived through:\n{two:#}"
+        );
+        let named = scan_crate_to_json("r99globnamed", &[
+            ("src/lib.rs", "pub mod glb;\npub fn put() { glb::write(\"A\", \"B\"); }\n"),
+            ("src/glb.rs", "pub use std::fs::*;\npub use std::env::set_var as write;\n"),
+        ]);
+        assert_eq!(
+            effs_opt(&named, "put"), vec!["Env".to_string()],
+            "an explicit import SHADOWS a glob (rustc's rule), so `glb::write` is `std::env::set_var` and \
+             charges Env. `Fs` means the glob beat the named re-export:\n{named:#}"
+        );
+    }
+
+    /// R99 (SHAPE 2) — Pass A's decl indexes could not see `mod_aliases`, so a struct FIELD typed through
+    /// a module alias was recorded as the literal written path and the method USING it was absent. The
+    /// paired controls are the SAME alias in positions that already worked: the field typed directly, and
+    /// the identical alias on a LOCAL binding (decoded in Pass B, where the seed is present).
+    #[test]
+    fn r99_a_field_typed_through_a_module_alias_resolves() {
+        let v = scan_crate_to_json("r99field", &[
+            ("src/lib.rs", "pub mod facade;\n\
+                            pub struct Holder { pub c: facade::Command }\n\
+                            pub struct Rooted { pub c: crate::facade::Command }\n\
+                            pub struct Plain  { pub c: std::process::Command }\n\
+                            impl Holder { pub fn run_aliased(&mut self) { let _ = self.c.status(); } }\n\
+                            impl Rooted { pub fn run_rooted(&mut self) { let _ = self.c.status(); } }\n\
+                            impl Plain  { pub fn run_plain(&mut self)  { let _ = self.c.status(); } }\n\
+                            pub fn run_local() { let mut c: facade::Command = \
+                              std::process::Command::new(\"/bin/sh\"); let _ = c.status(); }\n"),
+            ("src/facade.rs", "pub use std::process::Command;\n"),
+        ]);
+        for f in ["Holder::run_aliased", "Rooted::run_rooted"] {
+            assert_eq!(
+                effs_opt(&v, f), vec!["Exec".to_string()],
+                "R99 SHAPE 2: a field typed through a module alias must resolve to std's Command — \
+                 pre-fix `{f}` was absent from functions[] while the control below reported Exec:\n{v:#}"
+            );
+        }
+        for f in ["Plain::run_plain", "run_local"] {
+            assert_eq!(
+                effs_opt(&v, f), vec!["Exec".to_string()],
+                "PAIRED CONTROL `{f}`: the same call in a position that already resolved before this \
+                 fix — one variable, the module alias:\n{v:#}"
+            );
+        }
+    }
+
+    /// R99 (SHAPE 2) OVER-CHARGE CONTROL — the re-expansion runs against the DECLARING file's module path
+    /// and an ALIAS-ONLY `use` map, which is the whole reason it lives at the merge rather than at the
+    /// decode site. A bare local type must not be rewritten by another file's alias of the same name.
+    ///
+    /// Positive on BOTH arms and on DISTINCT classes, so neither can pass by resolving to nothing: the
+    /// local `Widget::go` writes a file (Fs), the aliased one spawns (Exec).
+    #[test]
+    fn r99_the_field_re_expansion_does_not_rewrite_a_local_types_name() {
+        let v = scan_crate_to_json("r99fieldshadow", &[
+            ("src/lib.rs", "pub mod facade;\npub mod local;\n"),
+            ("src/facade.rs", "pub use std::process::Command as Widget;\n"),
+            ("src/local.rs", "pub struct Widget;\n\
+                              impl Widget { pub fn go(&self) { let _ = std::fs::write(\"/tmp/w\", \"x\"); } }\n\
+                              pub struct Holder { pub w: Widget }\n\
+                              impl Holder { pub fn run(&self) { self.w.go(); } }\n\
+                              pub struct Aliased { pub c: crate::facade::Widget }\n\
+                              impl Aliased { pub fn run(&mut self) { let _ = self.c.status(); } }\n"),
+        ]);
+        assert_eq!(
+            effs_opt(&v, "local::Holder::run"), vec!["Fs".to_string()],
+            "OVER-CHARGE CONTROL: `w: Widget` is the file's OWN `Widget`, whose `go` writes a file. An \
+             `Exec` means the re-expansion bound a bare name to another module's alias:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "local::Aliased::run"), vec!["Exec".to_string()],
+            "…and the QUALIFIED spelling in the same file still resolves through the alias, so the \
+             control above is not passing because the mechanism is inert:\n{v:#}"
+        );
+    }
+
+    /// R99 (SHAPE 2) × R105 — A `#[cfg]`-DUPLICATED ALIAS MUST NOT REACH A DECL INDEX.
+    ///
+    /// R105 keeps every arm in one `\u{1}`-joined value and adjudicates at the CALL SITE, where the leaf
+    /// is in hand. A decl index has no such site: a joined string lands in `fields` and every consumer
+    /// (`tail2`, `local_types`, the receiver-type chain) reads it as ONE path.
+    ///
+    /// THIS GUARD WAS ADDED BECAUSE THE 256-CRATE A/B FOUND THE DEFECT IN THE FIRST CUT, not because it
+    /// was foreseen. async-lock's `state: AtomicUsize` — through `mod sync { #[cfg(not(loom))] pub use
+    /// core::sync::atomic; #[cfg(loom)] pub use loom::sync::atomic; }` — and bytes' `Bytes::data_mut` went
+    /// `inferred: ["Unknown"], unresolved: true` -> `inferred: [], invisible: ["loom"]` on 5 rows. The
+    /// effect is genuinely absent on either arm, but `deny Unknown` flips 1 -> 0, and a disclosure loss
+    /// is a loss whatever the underlying truth is.
+    ///
+    /// ASSERTED AT `alias_expand_decls`' OWN CONTRACT rather than through a scan, deliberately: the
+    /// downstream consequence needs a local trait whose method exists on only one arm (async-lock's real
+    /// shape), and a fixture that merely approximated it would pass for the wrong reason — measured, on
+    /// two attempts that both came back empty. Both directions are asserted, so neither can hold by the
+    /// mechanism being inert.
+    #[test]
+    fn r99_a_cfg_duplicated_alias_is_not_written_into_a_decl_index() {
+        use crate::cache::{alias_expand_decls, FileDecls};
+        let mut fd = FileDecls::default();
+        let holder = fd.fields.entry("Holder".into()).or_default();
+        holder.insert("c".into(), "facade::Cmd".into());
+        holder.insert("d".into(), "single::Cmd".into());
+
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        crate::decls::record_alias(&mut aliases, "facade::Cmd".into(), "std::process::Command".into());
+        crate::decls::record_alias(&mut aliases, "facade::Cmd".into(), "std::fs::File".into());
+        crate::decls::record_alias(&mut aliases, "single::Cmd".into(), "std::process::Command".into());
+
+        let out = alias_expand_decls(&fd, "", &aliases).expect(
+            "the SINGLE-arm field must move — without this the assertion below could hold because \
+             nothing expands at all",
+        );
+        assert_eq!(
+            out.fields["Holder"]["d"], "std::process::Command",
+            "the single-arm alias is exactly what this fix exists to resolve"
+        );
+        assert_eq!(
+            out.fields["Holder"]["c"], "facade::Cmd",
+            "a `#[cfg]`-DUPLICATED alias must be left as written: the decl index has no call site to \
+             adjudicate the arms at, and a `\\u{{1}}`-joined string in `fields` is read as one path by \
+             every consumer of it"
+        );
+    }
+
+    /// R99 (SHAPE 2) — THE WARM CACHE MUST NOT SERVE AN EXPANSION THE ALIAS NO LONGER SUPPORTS.
+    ///
+    /// `alias_expand_decls` runs at the MERGE, over a crate-wide map, and its result is deliberately
+    /// never written back into `decls_per_file` — because a `FileDecls` entry is keyed by ONE file's
+    /// content hash, so a crate-wide fact baked into it would survive an edit to the file that supplied
+    /// the fact. `main.rs`'s bytes do not change here; only `facade.rs`'s do. If the expansion were
+    /// cached, the warm run would reuse `main.rs`'s decls and keep reporting `Exec` for a field that now
+    /// aliases `std::fs::File`.
+    ///
+    /// THE CODE COMMENT ASSERTING THIS IS WHAT `assert-audit.sh` FLAGGED IN THIS DIFF, so it is measured
+    /// rather than believed. Both arms are positive and on DISTINCT effect classes, so neither can hold
+    /// by the fixture resolving to nothing.
+    #[test]
+    fn r99_a_warm_cache_re_derives_a_field_alias_after_the_declaring_file_changes() {
+        // `incremental_scan` REMOVES `CANDOR_PANIC_ON_FILE`, and an env var is process-global: without
+        // this lock the removal races the abort tests' `set_var`, and THEIR fault silently fails to
+        // inject — `an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed` went red with
+        // `left: 1, right: 2` under a different thread interleaving while passing on the run before. Any
+        // test that calls `incremental_scan` must take this lock, injection or not.
+        let _lock = abort_injection_lock();
+        let d = std::env::temp_dir().join(format!("r99warm{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname=\"r99warm\"\nversion=\"0.1.0\"\nedition=\"2021\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"),
+            "pub mod facade;\n\
+             pub struct Holder { pub c: facade::Thing }\n\
+             impl Holder { pub fn run(&mut self) { let _ = self.c.status(); } }\n").unwrap();
+        std::fs::write(d.join("src/facade.rs"), "pub use std::process::Command as Thing;\n").unwrap();
+        let policy = d.join("candor.policy");
+        std::fs::write(&policy, "deny Exec\n").unwrap();
+        let out = d.join("r").to_string_lossy().into_owned();
+        let pol = policy.to_string_lossy().into_owned();
+
+        let (_, cold) = incremental_scan(&d, &out, &pol, None);
+        assert_eq!(
+            effs_opt(&cold, "Holder::run"), vec!["Exec".to_string()],
+            "the COLD run must resolve the field through the alias — without this the warm assertion \
+             below would hold because nothing ever resolved:\n{cold:#}"
+        );
+
+        // Only the DECLARING file changes. `src/lib.rs`'s bytes — and so its cached `FileDecls` — are
+        // byte-identical, which is exactly the entry a baked-in expansion would be served from.
+        std::fs::write(d.join("src/facade.rs"), "pub use std::fs::File as Thing;\n").unwrap();
+        let (_, warm) = incremental_scan(&d, &out, &pol, None);
+        assert_eq!(
+            effs_opt(&warm, "Holder::run"), vec!["Fs".to_string()],
+            "the WARM run must re-derive the expansion from the CURRENT crate-wide alias map. `Exec` \
+             here means a crate-wide fact was cached inside a per-file entry and outlived the file that \
+             supplied it:\n{warm:#}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     // ── R100: THE SELF-SHADOW WINDOW (SOUNDNESS.md R100) ──────────────────────────────────────────

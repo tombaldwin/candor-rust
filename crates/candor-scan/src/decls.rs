@@ -497,6 +497,21 @@ pub(crate) fn qualify(modpath: &str, name: &str) -> String {
 /// "this key has more than one answer", not a second one.
 pub(crate) const ALIAS_ALT_SEP: char = '\u{1}';
 
+/// R99 (SHAPE 1) — the alias key under which a SUBMODULE's single external GLOB re-export is recorded
+/// (`mod glb { pub use std::fs::*; }` -> key `glb::*glob`). Deliberately NOT `lang::GLOB_KEY`: that key
+/// means "a glob in THIS file's own `use` map" and is read by `unique_glob`/`root_glob`, and
+/// `seed_mod_aliases` would otherwise drop a submodule's glob into a file's map under the very name those
+/// two read. A leading `*` means no Rust path can spell it, so no call site can collide with it either.
+pub(crate) const MOD_GLOB_KEY: &str = "*glob";
+
+/// R99 (SHAPE 1) — separates a module glob's TARGET from the sorted list of names the module DECLARES
+/// ITSELF. A glob import is shadowed by an explicit item of the same name (rustc's rule), so
+/// `mod glb { pub use std::fs::*; pub fn write(..) {..} }` means `glb::write` is the LOCAL fn — rewriting
+/// it to `std::fs::write` would FABRICATE an `Fs` on a path that performs none. The shadow list rides in
+/// the same entry rather than in a second index, so there is one thing to seed, one thing to hash, and no
+/// way for the two halves to drift apart.
+pub(crate) const GLOB_SHADOW_SEP: char = '\u{2}';
+
 /// R106 — the prefix a FUNCTION-BODY-LOCAL item's name is rebound to in that body's `use` map. A single
 /// segment containing characters no Rust path can carry, so the resulting `tail2` matches no definition
 /// in the crate, the classifier's head lookup finds nothing, and the κ ledger cannot read it as a
@@ -566,6 +581,99 @@ pub(crate) fn record_alias(aliases: &mut HashMap<String, String>, key: String, t
 /// All three are recorded exactly as the equivalent `use … as NAME` would have been, and consumed through
 /// the SAME `expand`/`uses` authority — no second resolution path (§G). The direction is ADD-only: a name
 /// that resolved to nothing now resolves to its declared origin.
+/// R99 (SHAPE 1) — record ONE module's external GLOB re-export, with the names that shadow it.
+///
+/// THE DEFECT THIS CLOSES. `collect_reexports`'s external branch skipped `name == "*"`, stating the skip
+/// as a residual: enumerating an external module's exports needs its source. But the glob does not have to
+/// be enumerated to be USED — a caller writes the leaf, so the leaf is in hand at resolution time and only
+/// the PREFIX is missing. Measured, EXECUTED, by the syscall oracle driver `pf_alias_glob`:
+///
+///     src/glb.rs    pub use std::fs::*;
+///     src/main.rs   mod glb;  fn put() { let _ = glb::write("/tmp/…", b"x"); }
+///
+/// `functions: []` — the whole report EMPTY, `excluded: []`, no `Unknown`, no `unresolved`, nothing —
+/// while strace watched the write and three functions sat on the stack. The paired control (the same
+/// module re-exporting `write` BY NAME) reported `Fs` on all three.
+///
+/// THE SHADOW LIST IS THE WHOLE DIFFICULTY, and it is why this is not a one-line `name != "*"` deletion.
+/// A glob import is shadowed by an explicit item of the same name, so a module that globs `std::fs` AND
+/// declares its own `write` means the LOCAL one — and unlike every other alias route, rewriting is
+/// FABRICATION here rather than a missed resolution, because the rewritten path leaves the crate
+/// (`std::fs::write`) and `scan.rs` never tries a local link for a std-rooted path. So the module's own
+/// declared names ride in the entry and `lang::qualified_alias` refuses any leaf among them.
+///
+/// TWO MORE REFUSALS, both in the under-report direction and both pinned by DELETING them (§C):
+///  * a PRIVATE glob exports nothing, so it cannot answer a qualified `glb::write` from outside.
+///  * TWO OR MORE exported globs in one module — external or crate-local — is ambiguous, and the local
+///    kind is already answered by `Reexport`/`reexport_target` through the tail2 index. Never guess which
+///    glob a name arrived through; that is `unique_glob`'s own rule, one level out.
+///
+/// AND A THIRD THAT IS NOT BEHAVIOUR-BEARING, SAID AS SUCH RATHER THAN LISTED AS A GUARD. The
+/// `modpath.is_empty()` return skips the crate ROOT, and deleting it turns no test red and moves no
+/// corpus row: a root entry's key is a bare `*glob`, and `module_glob_alias` only ever looks up
+/// `<module-prefix>::*glob`, so the entry would be unreachable dead weight in the merged index and in its
+/// digest. It stays because `collect_root_reexports` already answers the root question under `GLOB_KEY`,
+/// and two indexes answering one question is how this family produced its worst defects (§G).
+fn collect_module_glob(
+    items: &[syn::Item],
+    modpath: &str,
+    mods: &HashMap<String, Vec<String>>,
+    include_tests: bool,
+    aliases: &mut HashMap<String, String>,
+) {
+    if modpath.is_empty() {
+        return;
+    }
+    let mut exported_globs = 0usize;
+    let mut external: Option<String> = None;
+    let mut shadow: Vec<String> = Vec::new();
+    for it in items {
+        let syn::Item::Use(u) = it else {
+            if let Some(n) = declared_item_name(it, include_tests) {
+                shadow.push(n);
+            }
+            continue;
+        };
+        if !include_tests && is_cfg_test(&u.attrs) {
+            continue;
+        }
+        let exported = !matches!(&u.vis, syn::Visibility::Inherited)
+            && !matches!(&u.vis, syn::Visibility::Restricted(r) if r.path.is_ident("self"));
+        let mut leaves = Vec::new();
+        use_leaves(&u.tree, Vec::new(), &mut leaves);
+        for (segs, name, alias) in leaves {
+            if name != "*" {
+                // A NAMED import binds the name in this module whether or not it is re-exported, and a
+                // binding shadows the glob either way.
+                shadow.push(alias);
+                continue;
+            }
+            if !exported {
+                continue;
+            }
+            exported_globs += 1;
+            let head = segs.first().map(String::as_str).unwrap_or("");
+            if !segs.is_empty()
+                && !matches!(head, "crate" | "self" | "super")
+                && resolve_use_base(&segs, modpath, mods).is_empty()
+            {
+                external = Some(segs.join("::"));
+            }
+        }
+    }
+    if exported_globs != 1 {
+        return;
+    }
+    let Some(mut target) = external else { return };
+    shadow.sort();
+    shadow.dedup();
+    for s in &shadow {
+        target.push(GLOB_SHADOW_SEP);
+        target.push_str(s);
+    }
+    record_alias(aliases, qualify(modpath, MOD_GLOB_KEY), target);
+}
+
 pub(crate) fn collect_reexports(
     items: &[syn::Item],
     modpath: &str,
@@ -577,6 +685,7 @@ pub(crate) fn collect_reexports(
 ) {
     let mods = mod_targets(items, modpath, dir, include_tests);
     let no_bounds: HashMap<String, Vec<String>> = HashMap::new();
+    collect_module_glob(items, modpath, &mods, include_tests, aliases);
     for it in items {
         match it {
             syn::Item::Use(u) => {

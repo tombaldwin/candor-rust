@@ -1319,6 +1319,31 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     for (_, _, fd) in &decls_per_file {
         merge_decls(&mut merged, fd);
     }
+    // R99 (SHAPE 2) — SECOND MERGE, over decls whose type paths have been re-expanded against the
+    // crate-wide alias map that only exists once the first merge is done. Pass A walks each file in
+    // isolation, so a field/return/variant type spelled through a module alias (`c: facade::Command`)
+    // was recorded as the literal written path and never resolved; the method using it was ABSENT from
+    // `functions[]` under every policy form. See `alias_expand_decls` for the measurement and for why
+    // the DECLARING file's `modpath` — known only here — is the only sound context to re-expand in.
+    //
+    // Guarded twice so the ordinary crate pays nothing: no aliases at all, or no file whose decls
+    // actually move, and the first merge stands. `decls_per_file` is NEVER mutated — it is what the
+    // cache persists, and an entry is keyed by ONE file's content hash, so baking a crate-wide fact
+    // into it would survive an edit to the file that supplied the fact.
+    if !merged.mod_aliases.is_empty() {
+        let expanded: Vec<Option<FileDecls>> = decls_per_file
+            .iter()
+            .map(|(rel, _, fd)| {
+                alias_expand_decls(fd, &module_path(Path::new(rel)), &merged.mod_aliases)
+            })
+            .collect();
+        if expanded.iter().any(Option::is_some) {
+            merged = MergedDecls::default();
+            for ((_, _, fd), ex) in decls_per_file.iter().zip(&expanded) {
+                merge_decls(&mut merged, ex.as_ref().unwrap_or(fd));
+            }
+        }
+    }
     let decl_index_hash = decl_index_digest(&merged);
     // Keep only unambiguous fn-leaf -> return-type / enum-variant-payload mappings (the `None`s drop).
     let returns: ReturnIndex =
