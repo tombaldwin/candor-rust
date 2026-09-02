@@ -44,6 +44,14 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev13: `mod_aliases` gained a NEW KIND OF ENTRY — a submodule's external GLOB re-export, keyed
+    // `<module>::*glob` (R99 shape 1). The FIELD is unchanged, so serde reads a rev12 entry without
+    // complaint and simply yields a map with no glob in it: "this module re-exports nothing by glob",
+    // for a module that does. That is the same warm-cache-served silent under-report rev12 was bumped
+    // for, and a field addition is not the only thing that causes it — a change in what an EXISTING
+    // field records does too. (The Pass A re-expansion added in the same change needs no bump: the
+    // cached `FileDecls` are the PRE-expansion ones by construction, and the expansion is redone from
+    // the merged index on every run.)
     // rev12: FileDecls gained `mod_aliases` (R99 — the module-qualified external alias map). A rev11
     // entry has none, so it deserializes EMPTY: "this file gives no std/dependency item a second
     // spelling", which is exactly the silent under-report the field closes, served warm and invisible.
@@ -61,7 +69,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev12/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev13/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -250,6 +258,120 @@ pub(crate) struct MergedDecls {
     /// carries its module path, so two files collide only where they declare the SAME name in the SAME
     /// module, which no crate that compiles does.
     pub(crate) mod_aliases: HashMap<String, String>,
+}
+
+/// R99 (SHAPE 2) — re-expand ONE file's recorded TYPE PATHS against the crate-wide module-alias map.
+///
+/// THE DEFECT THIS CLOSES. Pass A runs per file, in isolation, so `type_path`/`record_return` expand a
+/// written type against THAT FILE'S OWN `use` map and nothing else. `mod_aliases` is a crate-wide fact —
+/// it does not exist until every file has been walked — so a type spelled through a module alias was
+/// recorded UNRESOLVED and stayed that way for the whole run:
+///
+///     src/facade.rs   pub use std::process::Command;
+///     src/main.rs     struct Holder { c: facade::Command }
+///                     impl Holder { fn run_aliased(&mut self) { let _ = self.c.status(); } }
+///
+/// `fields["Holder"]["c"]` held the literal string `facade::Command`, `self.c` typed to a name with no
+/// impl anywhere, and `run_aliased` was ABSENT from `functions[]` — while the paired control
+/// (`c: std::process::Command`) reported `Exec`, and so did the same alias written as a LOCAL
+/// (`let c: facade::Command`), because a local's type is decoded in Pass B where the seed is present.
+/// Measured, EXECUTED, by the syscall oracle driver `pf_alias_field`.
+///
+/// WHY HERE AND NOT AT THE DECODE SITE. The obvious cheaper repair — re-expand the recorded string where
+/// `CallCollector` reads it — resolves a path written in the DECLARING file against the CALLING file's
+/// `use` map, so a bare local type `Widget` in `a.rs` would be rewritten by an unrelated
+/// `use somecrate::Widget;` in `b.rs`. The declaring file's module path is the only context in which the
+/// recorded path means anything, and this is the last place that still knows it.
+///
+/// It is the SAME authority, not a second one: `seed_mod_aliases` + `expand`, seeded with the DECLARING
+/// file's `modpath`, exactly as Pass B seeds it for the file it is walking. Only the four index families
+/// whose values are type PATHS are rewritten — `fields`, `field_elem`, `rets`, `enum_tmp`. The trait
+/// indexes, `deref_target` and `prim_aliases` hold bare LEAVES rather than paths, so an alias map keyed
+/// by qualified name cannot say anything about them.
+///
+/// Returns `None` when nothing moved, which is the case for every file in a crate with no module alias —
+/// the caller then keeps the original and does not re-merge at all.
+pub(crate) fn alias_expand_decls(
+    fd: &FileDecls,
+    modpath: &str,
+    aliases: &HashMap<String, String>,
+) -> Option<FileDecls> {
+    let mut uses: HashMap<String, String> = HashMap::new();
+    crate::lang::seed_mod_aliases(aliases, modpath, &mut uses);
+    if uses.is_empty() {
+        return None;
+    }
+    // A rewritten path, or None when `expand` leaves it alone. An ALIAS-ONLY `uses` map is deliberate:
+    // a general `use` map here would re-apply an unrelated file's imports to this file's paths.
+    //
+    // THE SECOND ATTEMPT IS NOT BELT-AND-BRACES. Pass A already ran `expand` on the written type, and
+    // `expand` STRIPS a `crate::`/`self::`/`super::` prefix — so a field written `crate::facade::Widget`
+    // in a SIBLING module is recorded as `facade::Widget`, and the alias for it is seeded under
+    // `crate::facade::Widget` (a sibling's relative spelling is not, and must not be, bound). Without the
+    // retry the whole sibling-module spelling stays unresolved, which the over-charge control's second arm
+    // caught: it asserts the qualified spelling still RESOLVES, precisely so the control cannot pass by
+    // the mechanism being inert (brief §E3).
+    //
+    // THE BOUND, STATED RATHER THAN CLAIMED AWAY: the retry asserts the recorded path is crate-local, and
+    // after Pass A's strip nothing distinguishes `crate::facade::Widget` from a bare `facade::Widget`
+    // naming an EXTERN CRATE `facade`. Hijacking one would need a crate that has a root module `facade`
+    // declaring `Widget`, an extern crate `facade` also exporting `Widget`, and a submodule writing the
+    // bare spelling — and `qualified_alias`'s rooted lookup answers only for keys this crate declared, so
+    // the wrong answer would be this crate's own `facade::Widget`. Nothing in the 256-crate corpus reaches
+    // it, and it is an ATTRIBUTION between two same-named items rather than an invented effect.
+    //
+    // A MULTI-ARM RESULT IS REFUSED, AND THE A/B IS WHY. R105 keeps every `#[cfg]` arm of a duplicated
+    // alias in one `\u{1}`-joined value and adjudicates at the CALL SITE, where the leaf is in hand. A
+    // decl INDEX has no such site: a joined string lands in `fields` and every consumer — `tail2`,
+    // `local_types`, the receiver-type chain — reads it as one path. Measured on the 256-crate corpus:
+    // async-lock's `state: AtomicUsize` (through `mod sync { #[cfg(not(loom))] pub use core::sync::atomic;
+    // #[cfg(loom)] pub use loom::sync::atomic; }`) and bytes' `Bytes::data_mut` went
+    // `inferred: ["Unknown"], unresolved: true` -> `inferred: [], invisible: ["loom"]` on 5 rows — the
+    // effect is genuinely absent either way (`with_mut` is a pure local trait method on the arm that
+    // actually compiles), but `deny Unknown` flips 1 -> 0, which is a DISCLOSURE LOSS whatever the
+    // underlying truth is. Refusing leaves those rows exactly as they were.
+    let re = |p: &str| {
+        let try_one = |q: &str| {
+            let e = crate::lang::expand(q, &uses);
+            (e != q && !e.contains(crate::decls::ALIAS_ALT_SEP)).then_some(e)
+        };
+        if let Some(e) = try_one(p) {
+            return Some(e);
+        }
+        if p.contains("::") {
+            if let Some(e) = try_one(&format!("crate::{p}")).filter(|e| e != p) {
+                return Some(e);
+            }
+        }
+        None
+    };
+    let moves_nested = |src: &HashMap<String, HashMap<String, String>>| {
+        src.values().any(|m| m.values().any(|v| re(v).is_some()))
+    };
+    let moves_amb = |src: &HashMap<String, Option<String>>| {
+        src.values().any(|v| v.as_deref().is_some_and(|t| re(t).is_some()))
+    };
+    if !moves_nested(&fd.fields)
+        && !moves_nested(&fd.field_elem)
+        && !moves_amb(&fd.rets)
+        && !moves_amb(&fd.enum_tmp)
+    {
+        return None;
+    }
+    let mut out = fd.clone();
+    for m in out.fields.values_mut().chain(out.field_elem.values_mut()) {
+        for v in m.values_mut() {
+            if let Some(e) = re(v) {
+                *v = e;
+            }
+        }
+    }
+    for v in out.rets.values_mut().chain(out.enum_tmp.values_mut()) {
+        if let Some(t) = v.as_deref().and_then(re) {
+            *v = Some(t);
+        }
+    }
+    Some(out)
 }
 
 /// Merge one file's `FileDecls` into the crate accumulator, replaying EXACTLY the accumulation semantics

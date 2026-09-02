@@ -36,9 +36,12 @@ KNOWN_UNDER_PROGRAM=()
 # Per-function oracle (soundness/realworld/pf/run_pf.sh). Three drivers were added at candor-rust
 # `1aeeaba` as RUNTIME WITNESSES for rows that are open and stay open: they exist to be red, so that
 # the day the engine is fixed the ratchet below forces the entry out with the fix.
+#
+# THE RATCHET HAS NOW DONE THAT ONCE, WHICH IS THE ONLY EVIDENCE THAT IT WORKS ON A REAL FIX rather
+# than on the six seeded cases it was proven against. R99's two stated-open shapes were closed; both
+# drivers went green; this file printed `✗ STALE ALLOWLIST ENTRY` for each and exited 1; and the two
+# entries left in the same commit as the fix. `pf_oncelock_cb` stays — R101 is still open.
 KNOWN_UNDER_PERFN=(
-  "pf_alias_glob|R99|submodule GLOB re-export of an external item (pub use std::process::*) is dropped before an edge is built; the crate-ROOT spelling resolves. Paired control pf_alias_glob_ctl (named re-export) passes."
-  "pf_alias_field|R99|Pass A's decl indexes do not see mod_aliases, so a struct FIELD typed through a module alias is unresolved and run_aliased is omitted. Paired control pf_alias_field_ctl (field typed std::process::Command) passes."
   "pf_oncelock_cb|R101|a callback installed through OnceLock interior mutability: the get() if-let binder never marks the binding fn-typed, so fire's call resolves as a phantom free-fn. Paired control pf_oncelock_cb_ctl (fn-typed parameter) passes BY DISCLOSURE."
 )
 
