@@ -121,6 +121,13 @@ pub(crate) struct CompletenessFields {
     /// route's; an advisory document is under no such constraint, and its reader has no stderr.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) unread: Vec<String>,
+    /// ⟨R152⟩ SPEC §3.3.1 ⟨0.32⟩'s refusal-marker reason(s) — see [`ReportCompleteness::refused`]. A
+    /// rust-only key today, on the same terms `unread` already ships on: `incomplete: true` alone would
+    /// tell a `--json` consumer the answer is partial and say nothing about why, and this is the one
+    /// cause in this struct whose reason is not recoverable from the report bytes at all (the whole
+    /// point of a marker — see `refusal_marker_for`'s doc).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) refused: Vec<String>,
 }
 
 /// ⟨R54⟩ [`CompletenessFields`]'s SAME key set, `baseline`-prefixed — for a two-locator verb whose
@@ -148,6 +155,9 @@ pub(crate) struct BaselineCompletenessFields {
     /// policy-carrying two-locator verb inherits the wire key rather than needing a second rung to add it.
     #[serde(rename = "baselineUnread", skip_serializing_if = "Vec::is_empty")]
     pub(crate) unread: Vec<String>,
+    /// See [`CompletenessFields::refused`] — carried here on the same terms.
+    #[serde(rename = "baselineRefused", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) refused: Vec<String>,
 }
 
 /// The manifest as far as it could be READ, unioned across the reports under a locator.
@@ -249,6 +259,18 @@ pub(crate) struct ReportCompleteness {
     /// omission is real: it COULD have recorded covering this run's rules and did not. See
     /// [`arm_unasked_rules`] for the per-report accounting this is built from.
     pub(crate) unasked_rules_predates_033: bool,
+    /// ⟨R152⟩ SPEC §3.3.1 ⟨0.32⟩: *"A consumer resolving a `--report` locator MUST consult the marker
+    /// and refuse (exit 2) when one is present for the reports it is about to read."* `gate --report`
+    /// has honoured this since ⟨0.32⟩ ([`crate::gate`]'s own `load_gate_report`); every OTHER reader of
+    /// this locator did not, because `refusal_marker_for` had exactly one caller in the whole repo. A
+    /// refused prefix is bytes the gate has disowned — certifying them here would be MORE confident
+    /// than the gate over the SAME locator, which is the over-claim ⟨0.24⟩'s "an advisory verb may be
+    /// LESS certain than the gate, never more" already forbids for every other cause in this struct.
+    ///
+    /// One entry per locator that carried a marker (0 or 1 for a one-locator verb, up to 2 for
+    /// `containment`/`diff`'s current+baseline pair via [`Self::absorb`]) — a `Vec`, not an `Option`,
+    /// for the same reason `unread`/`unanalyzed` are: the shape [`Self::absorb`] already `.extend()`s.
+    pub(crate) refused: Vec<candor_report::RefusalMarker>,
 }
 
 /// ⟨0.32⟩ **ARM THE UNREAD-CLASS CAUSE FOR THIS RUN'S POLICY** — the one place the condition is applied
@@ -369,6 +391,11 @@ impl ReportCompleteness {
             // does: `arm_unasked_rules` already leaves this structurally empty whenever the policy in
             // force asks nothing (see that function).
             || !self.unasked_rules.is_empty()
+            // ⟨R152⟩ SPEC §3.3.1 ⟨0.32⟩ — see the field doc on `refused`. `gate --report` refuses
+            // UNCONDITIONALLY over a marked prefix; joining this arm here, rather than adding a second
+            // exit-code check beside the five above, is what makes a `--strict` advisory verb's "2" mean
+            // the SAME thing `gate --report`'s "2" means for every cause, this one included.
+            || !self.refused.is_empty()
     }
 
     /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where
@@ -518,6 +545,10 @@ impl ReportCompleteness {
             (true, true) => self.unasked_rules_predates_033 && other.unasked_rules_predates_033,
         };
         self.unasked_rules.extend(other.unasked_rules);
+        // ⟨R152⟩ …and any refusal marker either locator carried — plain `.extend()`, like `unread` and
+        // `unanalyzed` above: a baseline that is refused is exactly as disqualifying as a current tree
+        // that is, and `containment`'s answer is a DIFFERENCE, unsound if either side is disowned.
+        self.refused.extend(other.refused);
     }
 
     /// The stderr disclosure for a `unanalyzed` key that is present and unreadable. Named per file and
@@ -602,6 +633,10 @@ impl ReportCompleteness {
             // the rule this module already applies to `unreadable`, and the one ts and swift state for
             // themselves. Closing the rust-only ADVISORY key four-way is a separate rung.
             unread: if self.unread_armed { self.unread.clone() } else { Vec::new() },
+            // ⟨R152⟩ Unconditional, unlike `unread` above: this cause needs no policy-scoped arming —
+            // `refused` is a raw fact about the LOCATOR (SPEC §3.3.1 ⟨0.32⟩), not a question whose
+            // relevance depends on what the run's policy asks. See [`Self::refused`]'s field doc.
+            refused: self.refused.iter().map(|m| m.reason.clone()).collect(),
         })
     }
 
@@ -618,6 +653,7 @@ impl ReportCompleteness {
             judged_nothing: self.judged_nothing.clone(),
             no_manifest: self.no_manifest.clone(),
             unread: if self.unread_armed { self.unread.clone() } else { Vec::new() },
+            refused: self.refused.iter().map(|m| m.reason.clone()).collect(),
         })
     }
 
@@ -701,6 +737,19 @@ impl ReportCompleteness {
                 head.push_str(&joined);
             }
         }
+        // ⟨R152⟩ SPEC §3.3.1 ⟨0.32⟩ — placed FIRST among the appended clauses, ahead of every cause a
+        // producing scan merely DECLARED, because this one says the producing RUN itself never
+        // completed: nothing else in `head` is trustworthy context for it, so it leads.
+        if let n @ 1.. = self.refused.len() {
+            append(
+                &mut head,
+                format!(
+                    "{n} report(s) under this locator are marked REFUSED (SPEC §3.3.1 ⟨0.32⟩) — the \
+                     most recent producing scan over them refused and never completed,"
+                ),
+                format!(", and {n} report(s) under this locator marked REFUSED,"),
+            );
+        }
         if let n @ 1.. = self.no_manifest.len() {
             append(
                 &mut head,
@@ -779,6 +828,14 @@ impl ReportCompleteness {
         }
         writeln!(w, "  ⚠ INCOMPLETE — {head}")?;
         writeln!(w, "      so {so_what}:")?;
+        for m in &self.refused {
+            writeln!(
+                w,
+                "      {} — REFUSED: {}. `candor-query gate --report` refuses (exit 2) over these bytes \
+                 unconditionally (SPEC §3.3.1 ⟨0.32⟩); re-scan to clear the marker",
+                m.prefix, m.reason
+            )?;
+        }
         for u in &self.unanalyzed {
             writeln!(w, "      {} — {}", u.path, u.reason)?;
         }
@@ -875,7 +932,15 @@ pub(crate) fn report_completeness(prefix: &str) -> ReportCompleteness {
         scanned_under_facts: Vec::new(),
         unasked_rules: Vec::new(),
         unasked_rules_predates_033: false,
+        refused: Vec::new(),
     };
+    // ⟨R152⟩ SPEC §3.3.1 ⟨0.32⟩ — see the field doc on `refused`. Checked ONCE, against the LOCATOR,
+    // exactly as `gate --report`'s own `load_gate_report` checks it — never per glob'd report file,
+    // because the marker is a fact about the PREFIX's most recent producing run, not about any one file
+    // under it (a `.refused.json` sits BESIDE the reports, never inside their glob).
+    if let Some(m) = candor_report::refusal_marker_for(prefix) {
+        out.refused.push(m);
+    }
     for path in glob_reports(prefix) {
         let p = path.display().to_string();
         let Ok(text) = std::fs::read_to_string(&path) else {
