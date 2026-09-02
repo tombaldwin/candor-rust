@@ -9,6 +9,61 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R122 (cardinal sin, PRE-EXISTING and PUBLISHED — reproduces on `origin/main` `3cf055d`):
+  a production function under `#[cfg(any(test, feature = "x"))]` is no longer erased from the report.**
+  `is_cfg_test` recursed into `any` and `all` alike, and `cfg_meta_requires_test`'s own doc claimed the
+  item "POSITIVELY requires test" — correct for `all(test, X)`, exactly backwards for `any(test, X)`,
+  which compiles into an ORDINARY build whenever X holds. Ground truth EXECUTED: a crate with
+  `default = ["extra"]` and `#[cfg(any(test, feature = "extra"))] pub fn prod_under_any(p) {
+  Command::new(p).status() }` really spawns the process, and candor reported `functions: []`,
+  `analyzed.count: 0`, `excluded: []` — `deny Exec`, `deny Exec Unknown`, `pure prod_under_any` and
+  `deny Exec prod_under_any` ALL exited 0 (now 1; `deny Unknown` correctly stays 0). Real victims found
+  by the corpus A/B include **`ed25519-dalek 2.2.0`'s public `SigningKey::generate`, absent from the
+  report entirely and now `["Rand"]`**, `curve25519-dalek`'s inherent `Scalar::random`, `ring`'s
+  `Elem::into_unencoded` (`any(test, not(target_arch = "x86_64"))` — production on this machine),
+  `bstr`'s `first_non_ascii_byte_fallback` and `tower-http`'s `is_reserved_dos_name`
+  (`any(windows, test)`).
+  The rule is now "can this `#[cfg]` hold with `test` FALSE": one Kleene fold (`cfg_fold`) shared with
+  `cfg_eval`, differing only in the leaf, because two hand-written copies of one question are what
+  drifted. Non-`test` predicates stay UNKNOWN and are therefore SCANNED — `any(test, miri)` and
+  `any(test, doc)` are kept deliberately, since guessing them test-only is the silent direction.
+  A second, order-dependence half: an unconsumed `= "…"` tail aborted syn's sibling iteration, so
+  `all(feature = "std", test)` was read as production while `all(test, feature = "std")` was not.
+  `--include-tests` is unaffected (byte-identical over the 20 crates the default mode moves).
+
+  **A/B, all 1489 crates in the local registry cache, HEAD vs HEAD+fix, keyed on the FULL row**
+  (`inferred`, `direct`, `unresolved`, `unknownWhy`, `invisible`, `incomplete`, `netClass`, `declared`,
+  `calls`, `ambiguous`, `entryPoint`, `contributes`, plus `analyzed`/`excluded`/`resolves`/`coverage`):
+  **ADDED 42  REMOVED 29  CHANGED 29** with `loc` in the key; **ADDED-names 40, REMOVED-names 27**
+  keyed `(package, fn)`, in 30 crates. `inferred` moved on 1 row (the narrow key sees almost none of
+  this). §E1 REACH, measured with a counter in the changed branch, not inferred from the diff:
+  **864 divergent `is_cfg_test` verdicts across 77 of the 1489 crates** — this is a recall
+  measurement, not a safety-only zero-diff. The instrumented binary's reports are byte-identical to
+  the committed build's.
+
+  **All 27 removed names audited in full from SOURCE (not from candor's own report): every one is
+  inside a `#[cfg(all(feature = "…", test))]` module** — `combine`'s `std_tests`, `redis`'s
+  `entra_id_mock_tests`, `proptest`'s `timeout_tests`, `utf8parse`'s `benches`, `x509-cert`'s `tests`.
+  One mechanism, the order-dependence half, and every removal is test code that should never have been
+  in a production report. **No effect is lost anywhere in the A/B**: the only values dropped on a
+  surviving row are 6 `calls` edges in `bstr`'s `inv_memchr`/`inv_memrchr`, and each is replaced by
+  `direct: ["Unknown"]` + `unknownWhy: ["ambiguous:same-name local defs"]` — a resolved edge becoming a
+  DISCLOSED ambiguity, fail-closed. `curve25519-dalek`'s `Scalar::random` keeps `["Rand"]`; it only
+  changes `loc`, and a previous LOC-keyed reading of that row as a loss was a false alarm.
+  Over-charge control: no added row carries a fabricated concrete effect — the additions are `Rand`
+  (real: both fns take an RNG and call `fill_bytes`), `Unknown`, `invisible`, or empty. The honest cost
+  is items under a cfg flag nobody can resolve — `aws-lc-rs`'s `generate_for_test`
+  (`any(test, dev_tests_only)`) and `sharded-slab`'s `Track` (`all(loom, any(test, feature = "loom"))`)
+  are now scanned; that is the stated direction of the trade, not an oversight.
+
+  **Prevalence, over the same 1489 crates, definition stated:** an `#[cfg]` is affected when its
+  predicate contains an `any(...)` with `test` as a DIRECT member alongside at least one sibling.
+  **140 crates (9.4%), 719 attribute sites**; of those, **138 crates / 709 sites** have at least one
+  sibling that is not harness-only (`miri`/`doc`/`doctest`/`kani`/`fuzzing`), where "not harness-only"
+  means a dependent CAN turn it on, not that it is on by default. Only 2 crates are harness-only.
+  Commonest shapes: `any(test, feature="alloc")` 127, `any(test, feature="std")` 126,
+  `any(test, feature="derive")` 87, `any(test, miri, not(target_arch="x86_64"))` 24.
+
 - **⚠ SOUNDNESS R101 (cardinal sin): a callback installed through a static CELL is no longer silently
   pure.** `static CB: OnceLock<Box<dyn Fn()>>` + `pub fn install(f) { CB.set(f) }` + `fn fire() { if let
   Some(f) = CB.get() { f() } }` left `fire` ABSENT from `functions[]` entirely while the program

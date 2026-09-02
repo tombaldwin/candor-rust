@@ -1379,37 +1379,93 @@ pub(crate) fn is_build_script(rel: &std::path::Path) -> bool {
     rel == std::path::Path::new("build.rs")
 }
 
-/// True if `test` is POSITIVELY required by this cfg predicate node (recursing through `any`/`all` to
-/// any depth, but NOT through `not` — a `test` under `not()` means "compile when NOT testing", i.e.
-/// production code that must NOT be skipped).
-pub(crate) fn cfg_meta_requires_test(m: &syn::meta::ParseNestedMeta) -> bool {
-    if m.path.is_ident("test") {
-        return true;
-    }
-    if m.path.is_ident("any") || m.path.is_ident("all") {
-        let mut inner_test = false;
-        // (the parse may error on a non-meta tail like a bare `not(unix)` group; `test` is recorded
-        // before that, and the error is swallowed — we only care whether a positive `test` was seen.)
-        let _ = m.parse_nested_meta(|inner| {
-            if cfg_meta_requires_test(&inner) {
-                inner_test = true;
+/// `test` is FALSE and every other predicate is UNKNOWN — the leaf rule that decides whether a cfg
+/// predicate can hold in the non-test build the default scan describes. Fed to [`cfg_fold`].
+///
+/// Non-`test` leaves stay UNKNOWN on purpose, including `miri`, `doc` and `doctest`: they are not
+/// decidable here, and the failure direction of guessing them false is a SILENT UNDER-REPORT, which is
+/// the sin this rule exists to prevent (R122). `any(test, miri)` is therefore SCANNED — over-reporting
+/// a genuinely test-only item is the affordable half of the trade. Feature predicates are likewise
+/// unknown to this rule; `is_cfg_inactive` resolves those separately, against the same attrs.
+fn cfg_leaf_test_off(m: &syn::meta::ParseNestedMeta) -> Option<bool> {
+    // CONSUME a `= …` tail before returning. `parse_nested_meta` raises its error AFTER this callback
+    // returns, and an unconsumed tail aborts the whole sibling iteration — so a leaf that ignores the
+    // value silently truncates the predicate at the first name-value child, and `all(feature = "x",
+    // test)` was read as NOT test-only purely because `test` was typed second. The `feature` leaf in
+    // `cfg_eval` consumes it for the same reason; this one does not care what the value IS.
+    //
+    // Stepped over as raw token trees rather than `parse::<syn::Lit>()`: syn's negative-literal path
+    // BUILDS a new literal token, and this AST may have been parsed on another thread — the fixture
+    // `a_cfg_attribute_reparse_survives_the_ast_crossing_a_thread_boundary` (`feature = -1`) panics on
+    // that, and it panicked here first. Moving the cursor touches no source map.
+    if m.input.peek(syn::Token![=]) {
+        let _ = m.input.parse::<syn::Token![=]>();
+        while !m.input.is_empty() && !m.input.peek(syn::Token![,]) {
+            if m.input.parse::<proc_macro2::TokenTree>().is_err() {
+                break;
             }
-            Ok(())
-        });
-        return inner_test;
+        }
+        return None;
     }
-    false // `not(...)`, `feature = "..."`, target predicates, etc.
+    if m.path.is_ident("test") { Some(false) } else { None }
 }
 
-/// True if an item carries a `#[cfg(...)]` that POSITIVELY requires `test` — a test-only module the
-/// default scan skips, since its effects describe the crate's TESTS, not the crate. `#[cfg(not(test))]`
-/// (production code) and `#[cfg(all(unix, not(test)))]` are correctly NOT treated as test.
+/// The 3-valued (Kleene) fold over a `#[cfg(...)]` predicate tree: `not`/`all`/`any` to any depth, with
+/// `leaf` deciding everything else. `Some(true)`/`Some(false)` are DEFINITE; `None` is "unresolvable",
+/// and every caller must read `None` as *keep the item*.
+///
+/// ONE fold, two leaf rules ([`cfg_leaf_test_off`] and the feature rule in [`cfg_eval`]), because the
+/// two used to be written out separately and DRIFTED: the `test` copy treated `any` and `all` alike,
+/// so `#[cfg(any(test, feature = "x"))]` — production code whenever `x` is on — was classified test-only
+/// and erased from the report (SOUNDNESS R122, a published cardinal sin). `any` and `all` differ, and
+/// the only way they cannot drift apart again is for there to be one of them.
+///
+/// (a `parse_nested_meta` on a child may error on a non-meta tail; the error is swallowed exactly as
+/// before, so a partially-parsed group folds over the children it did see.)
+fn cfg_fold(m: &syn::meta::ParseNestedMeta,
+            leaf: &dyn Fn(&syn::meta::ParseNestedMeta) -> Option<bool>) -> Option<bool> {
+    if m.path.is_ident("not") {
+        let mut inner: Option<bool> = None;
+        let _ = m.parse_nested_meta(|n| { inner = cfg_fold(&n, leaf); Ok(()) });
+        return inner.map(|b| !b);
+    }
+    if m.path.is_ident("all") {
+        // false if ANY child false; true only if ALL true; else None.
+        let (mut any_false, mut all_true, mut saw) = (false, true, false);
+        let _ = m.parse_nested_meta(|n| { saw = true; match cfg_fold(&n, leaf) { Some(false) => any_false = true, Some(true) => {}, None => all_true = false }; Ok(()) });
+        if any_false { return Some(false); }
+        if saw && all_true { return Some(true); }
+        return None;
+    }
+    if m.path.is_ident("any") {
+        // true if ANY child true; false only if ALL false; else None.
+        let (mut any_true, mut all_false, mut saw) = (false, true, false);
+        let _ = m.parse_nested_meta(|n| { saw = true; match cfg_fold(&n, leaf) { Some(true) => any_true = true, Some(false) => {}, None => all_false = false }; Ok(()) });
+        if any_true { return Some(true); }
+        if saw && all_false { return Some(false); }
+        return None;
+    }
+    leaf(m)
+}
+
+/// TEST-ONLY: `Some(false)` from folding the predicate with `test = false` — i.e. this `#[cfg(...)]`
+/// CANNOT be satisfied in a non-test build, whatever the features and target are.
+pub(crate) fn cfg_meta_is_test_only(m: &syn::meta::ParseNestedMeta) -> bool {
+    cfg_fold(m, &cfg_leaf_test_off) == Some(false)
+}
+
+/// True if an item carries a `#[cfg(...)]` under which the item cannot exist in a NON-TEST build — a
+/// test-only item the default scan skips, since its effects describe the crate's TESTS, not the crate.
+///
+/// `#[cfg(test)]` and `#[cfg(all(test, unix))]` are test-only. `#[cfg(not(test))]`,
+/// `#[cfg(all(unix, not(test)))]` and — R122 — `#[cfg(any(test, feature = "x"))]` are NOT: the last one
+/// compiles into an ordinary build whenever `x` is on, and `std`/`alloc`/`derive` usually are.
 pub(crate) fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("cfg") && {
             let mut found = false;
             let _ = a.parse_nested_meta(|m| {
-                if cfg_meta_requires_test(&m) {
+                if cfg_meta_is_test_only(&m) {
                     found = true;
                 }
                 Ok(())
@@ -1529,42 +1585,24 @@ pub(crate) fn parse_features(cargo_toml: &str) -> (std::collections::HashSet<Str
 /// undeclared⇒None. `not/all/any` fold with Kleene logic.
 pub(crate) fn cfg_eval(m: &syn::meta::ParseNestedMeta, active: &std::collections::HashSet<String>,
             declared: &std::collections::HashSet<String>) -> Option<bool> {
-    if m.path.is_ident("feature") {
-        // `feature = "X"` → active⇒Some(true), declared-but-inactive⇒Some(false), undeclared⇒None.
-        let v = m.value().ok().and_then(|v| v.parse::<syn::LitStr>().ok());
-        return v.and_then(|lit| {
-            let name = lit.value();
-            if active.contains(&name) {
-                Some(true)
-            } else if declared.contains(&name) {
-                Some(false)
-            } else {
-                None
-            }
-        });
-    }
-    if m.path.is_ident("not") {
-        let mut inner: Option<bool> = None;
-        let _ = m.parse_nested_meta(|n| { inner = cfg_eval(&n, active, declared); Ok(()) });
-        return inner.map(|b| !b);
-    }
-    if m.path.is_ident("all") {
-        // false if ANY child false; true only if ALL true; else None.
-        let (mut any_false, mut all_true, mut saw) = (false, true, false);
-        let _ = m.parse_nested_meta(|n| { saw = true; match cfg_eval(&n, active, declared) { Some(false) => any_false = true, Some(true) => {}, None => all_true = false }; Ok(()) });
-        if any_false { return Some(false); }
-        if saw && all_true { return Some(true); }
-        return None;
-    }
-    if m.path.is_ident("any") {
-        // true if ANY child true; false only if ALL false; else None.
-        let (mut any_true, mut all_false, mut saw) = (false, true, false);
-        let _ = m.parse_nested_meta(|n| { saw = true; match cfg_eval(&n, active, declared) { Some(true) => any_true = true, Some(false) => {}, None => all_false = false }; Ok(()) });
-        if any_true { return Some(true); }
-        if saw && all_false { return Some(false); }
-        return None;
-    }
-    None // target_os/unix/windows/test/… — unknown to a default-feature scan; keep the item.
+    // Same `not`/`all`/`any` Kleene fold as the test-only rule (see `cfg_fold`); only the LEAF differs.
+    cfg_fold(m, &|n| {
+        if n.path.is_ident("feature") {
+            // `feature = "X"` → active⇒Some(true), declared-but-inactive⇒Some(false), undeclared⇒None.
+            let v = n.value().ok().and_then(|v| v.parse::<syn::LitStr>().ok());
+            return v.and_then(|lit| {
+                let name = lit.value();
+                if active.contains(&name) {
+                    Some(true)
+                } else if declared.contains(&name) {
+                    Some(false)
+                } else {
+                    None
+                }
+            });
+        }
+        None // target_os/unix/windows/test/… — unknown to a default-feature scan; keep the item.
+    })
 }
 
 /// True if an item/stmt's `#[cfg(...)]` is KNOWN-FALSE under the active feature set (compiled out, so its
