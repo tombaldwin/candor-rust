@@ -4073,6 +4073,66 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         v
     }
 
+    /// SOUNDNESS R122, END TO END — the fixture the unit test above abstracts, through the real
+    /// `scan_one`, with a real `[features] default = ["extra"]` so the `any` arm is genuinely on.
+    ///
+    /// GROUND TRUTH IS EXECUTED, not assumed: this exact crate was built and `cargo run` printed
+    /// `any=true` — `prod_under_any` really spawns a process in an ordinary (non-test) build. Before
+    /// the fix it was ABSENT from `functions[]` with `analyzed.count` short by one, and `deny Exec`
+    /// exited 0 over it.
+    ///
+    /// The two controls are compiled-out-of-a-production-build items, so their ABSENCE is the correct
+    /// answer rather than an artefact of an unbuildable fixture (§E3).
+    #[test]
+    fn r122_a_production_fn_under_any_test_feature_is_reported() {
+        let d = std::env::temp_dir().join(format!("candor-r122-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"),
+            "[package]\nname = \"r122\"\n\n[features]\ndefault = [\"extra\"]\nextra = []\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), r#"
+            use std::process::Command;
+            #[cfg(any(test, feature = "extra"))]
+            pub fn prod_under_any(p: &str) -> bool { Command::new(p).status().is_ok() }
+            #[cfg(any(test, unix))]
+            pub fn prod_under_any_platform(p: &str) -> bool { Command::new(p).status().is_ok() }
+            pub fn control_plain(p: &str) -> bool { Command::new(p).status().is_ok() }
+            #[cfg(test)]
+            pub fn only_in_tests(p: &str) -> bool { Command::new(p).status().is_ok() }
+            #[cfg(all(test, feature = "extra"))]
+            pub fn only_in_tests_all(p: &str) -> bool { Command::new(p).status().is_ok() }
+        "#).unwrap();
+        let idx = load_dep_reports(None);
+        let run = |include_tests: bool| {
+            let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
+                prefix: d.join("out/r").to_string_lossy().into_owned(), want_json: true,
+                include_tests, policy: None, baseline: None, ws_member: false, quiet: true,
+                deps_idx: &idx, peek_excluded: false,
+            }, &crate::gate::begin_run());
+            assert_eq!(rc, 0);
+            serde_json::from_str::<serde_json::Value>(&body.unwrap()).unwrap()
+        };
+        let v = run(false);
+        for f in ["prod_under_any", "prod_under_any_platform", "control_plain"] {
+            assert_eq!(fixture_effects(&v, f), vec!["Exec".to_string()],
+                       "R122: `{f}` is compiled into an ordinary build and must carry Exec");
+        }
+        // CONTROLS — `#[cfg(test)]` and `all(test, …)` cannot exist in a non-test build, so they stay
+        // out. Without these the fix would read as "scan everything", which is a different change.
+        for f in ["only_in_tests", "only_in_tests_all"] {
+            assert!(fixture_effects(&v, f).is_empty(),
+                    "`{f}` cannot compile with test off — the default scan must not report it");
+        }
+        // DIRECTION CONTROL — `--include-tests` is unaffected: it reported all five before and after.
+        let vt = run(true);
+        for f in ["prod_under_any", "prod_under_any_platform", "control_plain",
+                  "only_in_tests", "only_in_tests_all"] {
+            assert_eq!(fixture_effects(&vt, f), vec!["Exec".to_string()],
+                       "--include-tests must still report `{f}`");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[cfg(test)]
     fn fixture_effects(v: &serde_json::Value, name: &str) -> Vec<String> {
         v["functions"].as_array().into_iter().flatten()
@@ -5290,13 +5350,14 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     #[test]
     fn cfg_test_modules_are_recognised() {
         let yes1: syn::ItemMod = syn::parse_str("#[cfg(test)] mod tests {}").unwrap();
-        let yes2: syn::ItemMod =
-            syn::parse_str("#[cfg(any(test, feature = \"x\"))] mod tests {}").unwrap();
         let no1: syn::ItemMod = syn::parse_str("#[cfg(feature = \"std\")] mod imp {}").unwrap();
         let no2: syn::ItemMod = syn::parse_str("mod real {}").unwrap();
-        // deeper nesting positively requiring test → still skipped
+        // `all(test, …)` CANNOT hold with test off, whatever the sibling is → still test-only.
+        let yes2: syn::ItemMod =
+            syn::parse_str("#[cfg(all(test, unix))] mod t {}").unwrap();
+        // nested, but every branch still needs test → test-only
         let yes3: syn::ItemMod =
-            syn::parse_str("#[cfg(any(all(test, unix), windows))] mod t {}").unwrap();
+            syn::parse_str("#[cfg(any(all(test, unix), all(test, windows)))] mod t {}").unwrap();
         // `not(test)` is PRODUCTION code — must NOT be treated as a test module (the regression fix)
         let prod1: syn::ItemMod = syn::parse_str("#[cfg(not(test))] mod prod {}").unwrap();
         let prod2: syn::ItemMod = syn::parse_str("#[cfg(all(unix, not(test)))] mod prod {}").unwrap();
@@ -5307,6 +5368,46 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         assert!(!is_cfg_test(&no2.attrs));
         assert!(!is_cfg_test(&prod1.attrs), "cfg(not(test)) is production, not a test module");
         assert!(!is_cfg_test(&prod2.attrs), "cfg(all(unix, not(test))) is production");
+    }
+
+    /// SOUNDNESS R122 — a published cardinal sin. `#[cfg(any(test, X))]` compiles into an ORDINARY
+    /// build whenever X holds, so it does not require test at all; the old rule recursed into `any`
+    /// and `all` alike and erased those items from the report. `all(test, X)` keeps its (correct)
+    /// test-only verdict — the two quantifiers are not the same question.
+    ///
+    /// Fails against the pre-fix binary on the first four assertions (all returned `true`).
+    #[test]
+    fn cfg_any_test_with_a_production_sibling_is_not_test_only() {
+        let m = |s: &str| syn::parse_str::<syn::ItemMod>(s).unwrap();
+        // ── the sin: an `any` arm that a non-test build can satisfy ────────────────────────────────
+        let feat = m("#[cfg(any(test, feature = \"extra\"))] mod x {}");
+        let feat_rev = m("#[cfg(any(feature = \"alloc\", test))] mod x {}");
+        let plat = m("#[cfg(any(test, unix))] mod x {}");
+        // `miri`/`doc` are NOT decidable here and are deliberately KEPT: guessing them test-only is a
+        // silent under-report, which is the direction this rule exists to refuse. Stated, not silent.
+        let miri = m("#[cfg(any(test, miri))] mod x {}");
+        // nested one level down — an `any` under an `all` still has a production-satisfiable arm.
+        let nested = m("#[cfg(all(unix, any(test, feature = \"std\")))] mod x {}");
+        for (name, item) in [("any(test,feature)", &feat), ("any(feature,test)", &feat_rev),
+                             ("any(test,unix)", &plat), ("any(test,miri)", &miri),
+                             ("all(unix,any(test,feature))", &nested)] {
+            assert!(!is_cfg_test(&item.attrs), "`{name}` is production-reachable — must be scanned");
+        }
+        // ── the control: `all` stays test-only, in both nestings and BOTH CHILD ORDERS ─────────────
+        // (the second spelling was NOT test-only before this fix, for an unrelated reason: an
+        // unconsumed `= "extra"` aborted syn's sibling iteration before `test` was ever visited.)
+        for s in ["#[cfg(all(test, feature = \"extra\"))] mod x {}",
+                  "#[cfg(all(feature = \"extra\", test))] mod x {}",
+                  "#[cfg(all(target_os = \"linux\", test))] mod x {}",
+                  "#[cfg(any(all(test, unix), all(test, windows)))] mod x {}",
+                  "#[cfg(test)] mod x {}"] {
+            assert!(is_cfg_test(&m(s).attrs), "`{s}` cannot compile with test off — still test-only");
+        }
+        // ── a SECOND cfg attribute is AND-ed: one test-only attr is enough to skip ─────────────────
+        let two = m("#[cfg(unix)] #[cfg(test)] mod x {}");
+        assert!(is_cfg_test(&two.attrs));
+        let two_ok = m("#[cfg(unix)] #[cfg(any(test, feature = \"std\"))] mod x {}");
+        assert!(!is_cfg_test(&two_ok.attrs));
     }
 
     #[test]
