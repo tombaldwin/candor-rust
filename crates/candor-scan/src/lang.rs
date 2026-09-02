@@ -824,7 +824,6 @@ pub(crate) fn recorded_return_type(leaf: &str, returns: &ReturnIndex) -> Option<
 /// around the one spelling the row was filed for, and a `use m::from_handle` import already expands to
 /// a multi-segment path before it gets here.
 pub(crate) fn ctor_leaf_from_call_returns(full: &str, returns: &ReturnIndex) -> Option<String> {
-    if true { let _ = (full, returns); return None; }
     let last = full.rsplit("::").next().unwrap_or(full);
     if last == "drop" {
         return None;
