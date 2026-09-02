@@ -334,7 +334,7 @@ impl<'a> CallCollector<'a> {
     /// charges, never withdraw one, and the direction it fails in is over-charging a consuming method
     /// that moves `self` into a callee through a method call syntax cannot distinguish from a borrow.
     pub(crate) fn note_owned_param_drop(&mut self, leaf: Option<String>) {
-        self.note_release(leaf, true)
+        self.note_release(leaf, false)
     }
 
     fn note_release(&mut self, leaf: Option<String>, gate_on_escape: bool) {
