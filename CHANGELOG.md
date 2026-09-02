@@ -9,6 +9,41 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R160 (cardinal sin, PUBLISHED in every release to date) — CLOSED: a sibling call
+  qualified with `Self::` now resolves exactly as `<Type>::` does.** `Self` is bound in the ordinary
+  import map for the length of each `impl` block, so the one path-expansion routine answers every
+  position; no second matching arm. `rusqlite::Connection::open` and `open_in_memory` were ABSENT from
+  `functions[]` and now read `['Db','Unknown']`; `pure <forwarder>` goes from binding nothing to a
+  violation. 1,489-crate A/B: 2,621 functions gained an entry, 2 lost one (both audited correct),
+  no `inferred` set shrank (`bb4851b`).
+- **⚠ SOUNDNESS R161 (cardinal sin, published) — CLOSED: a callback typed through a TYPE ALIAS, or a
+  bare `fn` pointer unwrapped out of an `Option` by `if let`/`match`/`.map`, is now disclosed as
+  `Unknown`.** `is_callable_type` consults a crate-wide `callable_aliases` index and unwraps
+  `Option`/`Result` before asking; a bare fn-pointer payload counts as callable. `rusqlite::
+  init_auto_extension` read `[]` and now reads `['Unknown']`. Stated residuals: a double alias and an
+  alias-typed RETURN. Cache revision 17 (`ba203cf`).
+- **⚠ SOUNDNESS R165 (cardinal sin) — CLOSED: a `Drop` value obtained from a FREE-FUNCTION
+  constructor (`fn from_handle(p) -> H { H { .. } }`) is now charged for its drop like one from
+  `Type::assoc()`.** The marker reads the crate's own return index — a declared fact, not a name
+  guess. The escape side learns the same fact through the same function, so forwarding and
+  `mem::forget` controls stay uncharged (`8603f3a`).
+- **⚠ SOUNDNESS R166 (cardinal sin) — CLOSED: nine `sqlite3_*` leaves added to the `Db` set after an
+  audit of the whole 185-symbol surface**, not the one name that triggered it: the process-global
+  auto-extension registry (`auto_extension`, `cancel_`/`reset_auto_extension`,
+  `enable_load_extension`) and database-content I/O (`serialize`, `deserialize`, `db_cacheflush`,
+  `file_control`, `wal_autocheckpoint`). Per-connection callback installers are deliberately still
+  absent and named in the file. Gains in rusqlite, diesel and sqlx-sqlite (`dfc14c9`).
+- **⚠ SOUNDNESS R168 (cardinal sin) — CLOSED: a by-value `Drop` parameter's drop is no longer
+  suppressed because the function returns a fresh value of the same type leaf.** The parameter route
+  has its own emission point that skips the construction-leaf gate only; its value-keyed escape gate
+  is untouched. Measured over-charge, stated: 4 x11rb `replace_connection` rows where `mem::forget`
+  sits one call away (`fe15158`).
+- **⚠ SOUNDNESS R169 (cardinal sin, published) — CLOSED: two `#[cfg]`-gated re-exports of the same
+  name are a UNION, not an ambiguity to drop.** `crossterm::terminal::size`, `window_size`,
+  `enable_raw_mode`, `disable_raw_mode` and `is_raw_mode_enabled` were ABSENT and now carry their
+  platform module's effects. Explicit import beats glob, as in Rust. The union exposed R170 (a module
+  whose `pub use` is inside `cfg_if!` cannot contest a key it owns), guarded for the keys the union
+  newly admits; the universal guard is open (`c3e1660`).
 - **⚠ SOUNDNESS R139 (cardinal sin, introduced by R119's own fix) — CLOSED: a crate-local
   `macro_rules!` TEMPLATE now counts toward the body-item shadow, so a nested block's item can no
   longer rebind a name the macro expansion uses.** R119 promotes a nested block's item to a
