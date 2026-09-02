@@ -37,13 +37,17 @@ KNOWN_UNDER_PROGRAM=()
 # `1aeeaba` as RUNTIME WITNESSES for rows that are open and stay open: they exist to be red, so that
 # the day the engine is fixed the ratchet below forces the entry out with the fix.
 #
-# THE RATCHET HAS NOW DONE THAT ONCE, WHICH IS THE ONLY EVIDENCE THAT IT WORKS ON A REAL FIX rather
-# than on the six seeded cases it was proven against. R99's two stated-open shapes were closed; both
-# drivers went green; this file printed `✗ STALE ALLOWLIST ENTRY` for each and exited 1; and the two
-# entries left in the same commit as the fix. `pf_oncelock_cb` stays — R101 is still open.
-KNOWN_UNDER_PERFN=(
-  "pf_oncelock_cb|R101|a callback installed through OnceLock interior mutability: the get() if-let binder never marks the binding fn-typed, so fire's call resolves as a phantom free-fn. Paired control pf_oncelock_cb_ctl (fn-typed parameter) passes BY DISCLOSURE."
-)
+# THE RATCHET HAS NOW DONE THAT THREE TIMES ON REAL FIXES, which is the only evidence it works on one
+# rather than on the six seeded cases it was proven against. R99's two stated-open shapes were closed;
+# both drivers went green; this file printed `✗ STALE ALLOWLIST ENTRY` for each and exited 1; the two
+# entries left in the same commit as the fix. `pf_oncelock_cb` (R101) went the same way one commit later.
+#
+# NOW EMPTY, AND THE EMPTINESS IS THE POINT. It is the completion criterion this list was built with:
+# every driver the per-function oracle runs is now falsifiable, so the recall denominator is the whole
+# driver set (28/28) and NOTHING is suppressed. A red from here on is a NEW finding by construction —
+# there is no entry left that could absorb one. Keep it that way: an entry added here is a DEBT with a
+# row number, not a way to quiet a driver, and the ratchet will demand it back the day the row closes.
+KNOWN_UNDER_PERFN=()
 
 # ---------------------------------------------------------------------------------------------
 # The mechanism. Both oracles use these and only these.

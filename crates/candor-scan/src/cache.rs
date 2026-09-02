@@ -44,6 +44,11 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev14: FileDecls gained `callable_statics` (R101 — the `static`/`const` items holding an invokable
+    // callback). A rev13 entry has none, so it deserializes EMPTY: "this file declares no externally
+    // installable callback slot", for a file that does — and the consequence is precisely the silent
+    // under-report the field closes, served warm and invisible. Same shape as rev12 and rev9, and the
+    // reason a `#[serde(default)]` field addition is never cache-neutral in this scanner.
     // rev13: `mod_aliases` gained a NEW KIND OF ENTRY — a submodule's external GLOB re-export, keyed
     // `<module>::*glob` (R99 shape 1). The FIELD is unchanged, so serde reads a rev12 entry without
     // complaint and simply yields a map with no glob in it: "this module re-exports nothing by glob",
@@ -69,7 +74,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev13/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev14/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -122,6 +127,11 @@ pub(crate) struct FileDecls {
     /// `thread_local!`) — a fn naming one of these FORCES its deferred init unit (`<lazy>::NAME`).
     #[serde(default)]
     pub(crate) lazy_statics: Vec<String>,
+    /// R101 — `static`/`const` NAMES in this file whose declared type holds an INVOKABLE callback inside a
+    /// container/cell (`static CB: OnceLock<Box<dyn Fn()>>`). Unwrapping one binds a name whose `f()` calls
+    /// a body this scan cannot see, so the binder must hedge `Unknown` instead of dropping it silently.
+    #[serde(default)]
+    pub(crate) callable_statics: Vec<String>,
     /// CONST/STATIC string NAMES → their LITERAL value in this file (`const API_BASE: &str = "…"`) — a
     /// call building its host from one (`post(format!("{}/x", API_BASE))`) resolves the host here (SPEC §1
     /// static-host propagation). Literal-valued only.
@@ -184,9 +194,10 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut const_strings = HashMap::new();
     let mut local_macros = HashMap::new();
     let mut blanket_methods = HashMap::new();
+    let mut callable_statics = std::collections::HashSet::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut blanket_methods);
+                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut blanket_methods, &mut callable_statics);
     // ONE walk produces both re-export channels — the intra-crate edges (`reexports`) and the
     // external/alias map (`mod_aliases`, R99), which is collected at the very branch that used to DROP
     // an external `pub use`. `uses` is this file's top-level `use` map, as `collect_decls` left it, so a
@@ -212,6 +223,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         drop_types: drop_types.into_iter().collect(),
         deref_target,
         lazy_statics: lazy_statics.into_iter().collect(),
+        callable_statics: callable_statics.into_iter().collect(),
         const_strings,
         local_macros,
         blanket_methods,
@@ -244,6 +256,7 @@ pub(crate) struct MergedDecls {
     pub(crate) drop_types: std::collections::HashSet<String>,
     pub(crate) deref_target: HashMap<String, String>,
     pub(crate) lazy_statics: std::collections::HashSet<String>,
+    pub(crate) callable_statics: std::collections::HashSet<String>,
     pub(crate) const_strings: HashMap<String, String>,
     pub(crate) local_macros: HashMap<String, String>,
     pub(crate) blanket_methods: HashMap<String, String>,
@@ -481,6 +494,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.lazy_statics {
         acc.lazy_statics.insert(n.clone()); // set union — order-independent
     }
+    for n in &fd.callable_statics {
+        acc.callable_statics.insert(n.clone()); // set union — order-independent
+    }
     for (k, v) in &fd.const_strings {
         acc.const_strings.insert(k.clone(), v.clone()); // leaf → literal; last-writer-wins on a rare collision
     }
@@ -684,6 +700,16 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     let mut lsk: Vec<&String> = m.lazy_statics.iter().collect();
     lsk.sort();
     for a in lsk {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
+    // callable_statics — sorted set of static/const names holding a callable. A change here changes which
+    // unwrap binders hedge `Unknown`, so it must invalidate cached FnInfos exactly like `lazy_statics`.
+    s.push_str("callable_statics");
+    let mut cak: Vec<&String> = m.callable_statics.iter().collect();
+    cak.sort();
+    for a in cak {
         s.push('|');
         s.push_str(a);
     }

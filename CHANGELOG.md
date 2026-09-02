@@ -9,6 +9,24 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R101 (cardinal sin): a callback installed through a static CELL is no longer silently
+  pure.** `static CB: OnceLock<Box<dyn Fn()>>` + `pub fn install(f) { CB.set(f) }` + `fn fire() { if let
+  Some(f) = CB.get() { f() } }` left `fire` ABSENT from `functions[]` entirely while the program
+  demonstrably wrote a file — silent on `deny Fs`, `deny Unknown`, `deny Fs Unknown` and scoped
+  `deny Fs fire`. The sibling path answering the same question, a fn-typed PARAMETER, was already
+  correct; `fire` now converges on its exact answer, `["Unknown"]` with `unknownWhy:
+  ["callback:unresolved call"]`. A `static`'s declared type was recorded in no index at all, so nothing
+  typed the unwrapped binding; the deferred-init cells (`OnceLock`/`OnceCell`/`LazyLock`/`LazyCell`/
+  `Lazy`) were also missing from the element-dispatch peel that already covered `Mutex`/`RefCell`/`Cell`,
+  `get`/`get_mut`/`get_or_init` were missing from the element-preserving accessor list, and an
+  `unsafe { .. }` scrutinee — which reading a `static mut` REQUIRES — was not peeled. Covered spellings:
+  if-let, let-else, match, while-let, module-qualified, `Mutex<Option<Box<dyn Fn>>>`, and `static mut`
+  through `unsafe`. The index yields only a synthetic `Fn` leaf, so it can hedge a binding to `Unknown`
+  and can never contribute or withdraw a concrete effect. Measured: byte-identical over the 256-crate
+  a–c registry slice; over all 1489 registry crates it ADDS 2 rows and removes none — proptest 1.9.0 and
+  1.11.0's `scoped_hook_dispatcher`, which invokes an externally-installed panic hook through
+  `static mut DEFAULT_HOOK` and was reported pure.
+
 - **⚠ SOUNDNESS R105: a `#[cfg]`-duplicated alias is no longer resolved by SOURCE ORDER.** Two `#[cfg]`
   arms declaring the same qualified name — the ordinary platform/feature shim — used to leave whichever
   arm was written LAST in the alias map. Measured on two crates identical but for arm order: one

@@ -522,12 +522,59 @@ pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String,
                     type_args().nth(1).map(dispatch).unwrap_or_default(),
                 // Smart-pointer / interior-mutability wrappers around a COLLECTION: peel one layer and
                 // recurse so a `Arc<Mutex<Vec<Box<dyn>>>>` / `Rc<RefCell<Vec<Box<dyn>>>>` surfaces the element.
-                "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell" | "Cell" => dispatch(first_ty),
+                //
+                // R101 — the DEFERRED-INIT cells belong in this list and were missing: `OnceLock<T>` /
+                // `OnceCell<T>` / `LazyLock<T>` / `LazyCell<T>` / `once_cell::Lazy<T>` are interior-mutability
+                // wrappers exactly like `Mutex`/`RefCell`, and their contents are reached the same way (an
+                // accessor yielding `Option<&T>`/`&T`). Without them `static CB: OnceLock<Box<dyn Fn()>>`
+                // surfaced NO element leaves, so `if let Some(f) = CB.get() { f() }` never hedged `f` into
+                // `fn_typed_vars` and the call resolved as a phantom free-fn and vanished (SOUNDNESS R101,
+                // driver `pf_oncelock_cb` — a kernel-witnessed silent under-report). Only `elem_trait_leaves`
+                // gains them, NOT `trait_leaves`: a `OnceLock<Box<dyn Doer>>` is not itself a `Doer` (it does
+                // not `Deref`), so peeling it in the direct-dispatch resolver would fabricate a receiver type.
+                "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell" | "Cell"
+                | "OnceLock" | "OnceCell" | "LazyLock" | "LazyCell" | "Lazy" => dispatch(first_ty),
                 _ => Vec::new(),
             }
         }
         _ => Vec::new(),
     }
+}
+
+/// Whether a set of dispatch leaves names an INVOKABLE callback rather than a user trait — the ONE
+/// definition of that question, shared by `CallCollector::leaves_are_callable` (every binder site) and
+/// by the Pass-A `callable_statics` index. Rust exposes no stable method on `Fn`/`FnMut`/`FnOnce`, so
+/// such a binding is only ever reached with CALL syntax, which the `trait_vars` dispatch machinery
+/// cannot see — every site that types these leaves must also hedge into `fn_typed_vars` (R71).
+pub(crate) fn leaves_are_callable(leaves: &[String]) -> bool {
+    leaves.iter().any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce"))
+}
+
+/// R101 — whether a `static`/`const` ITEM's declared type holds an INVOKABLE callback inside a
+/// container/cell, so that unwrapping it (`if let Some(f) = CB.get()`, `let Some(f) = CB.get() else`,
+/// `match CB.get()`, `while let`) binds a name whose `f()` calls a body this scan cannot see.
+///
+/// DELIBERATELY the ELEMENT question (`elem_trait_leaves`), not `is_callable_type`. The only consumer is
+/// `resolve_elem_trait_leaves`, the unwrap/element resolver, so the index answers exactly what that
+/// resolver asks. It therefore does NOT capture a DIRECTLY callable static (`static W: fn(&str) = writer;`
+/// — `Type::BareFn` yields no element leaves): that shape is not unwrapped, it is CALLED, and R99(3)
+/// already resolves `W(..)` to the concrete `writer` through the alias index. Widening this to
+/// `is_callable_type` would put such a static in both, and the honest concrete resolution is the better
+/// answer — so the narrower question is the deliberate one, not an oversight.
+///
+/// SOUNDNESS DIRECTION, AND THE CONDITION IT RESTS ON — worded as the assumption it is, because the
+/// unconditional reading is FALSE. The index only ever produces the synthetic `"Fn"` leaf, the same one
+/// `ret_dispatch_leaves` decodes `RET_FN_TYPED` into, and that leaf matches no local trait — so it cannot
+/// contribute a CONCRETE effect. It CAN WITHDRAW one: the consuming arm in `resolve_elem_trait_leaves`
+/// runs BEFORE the local `elem_trait_of`/`trait_vars` lookup, so a name that is a callable static
+/// crate-wide AND a dispatch-typed local HERE would have its real leaves replaced by `["Fn"]` and lose
+/// its dispatch. The `locally_bound` gate on that arm is the only thing preventing that, and it is
+/// load-bearing rather than defensive: delete it and the cross-module shadow control in
+/// `callback_installed_through_a_static_cell_reads_unknown_not_silent_pure` goes `["Env","Fs"]` ->
+/// `["Env"]`, losing `D::go` outright. Measured, not argued. Read the property as ADDITIVE GIVEN THAT
+/// GATE.
+pub(crate) fn static_holds_callable(ty: &syn::Type) -> bool {
+    leaves_are_callable(&elem_trait_leaves(ty, &HashMap::new()))
 }
 
 /// The per-position type paths of a TUPLE `syn::Type` (`(Sender, usize)` -> `[Some("Sender"),
