@@ -181,31 +181,110 @@ pub(crate) fn submodule_uses(
 ) -> HashMap<String, String> {
     let mut subuses = uses.clone();
     for it in inner {
-        let (attrs, name): (&[syn::Attribute], String) = match it {
-            syn::Item::Fn(f) => (&f.attrs, f.sig.ident.to_string()),
-            syn::Item::Struct(s) => (&s.attrs, s.ident.to_string()),
-            syn::Item::Enum(e) => (&e.attrs, e.ident.to_string()),
-            syn::Item::Union(u) => (&u.attrs, u.ident.to_string()),
-            syn::Item::Type(t) => (&t.attrs, t.ident.to_string()),
-            syn::Item::Trait(t) => (&t.attrs, t.ident.to_string()),
-            syn::Item::TraitAlias(t) => (&t.attrs, t.ident.to_string()),
-            syn::Item::Mod(m) => (&m.attrs, m.ident.to_string()),
-            syn::Item::Const(c) => (&c.attrs, c.ident.to_string()),
-            syn::Item::Static(s) => (&s.attrs, s.ident.to_string()),
-            syn::Item::ExternCrate(e) => (&e.attrs, e.ident.to_string()),
-            // a `macro_rules! NAME` DEFINITION carries an ident; an item-position INVOCATION does not.
-            syn::Item::Macro(m) => match &m.ident {
-                Some(id) => (&m.attrs, id.to_string()),
-                None => continue,
-            },
-            _ => continue,
-        };
-        if !include_tests && is_cfg_test(attrs) {
-            continue;
+        if let Some(name) = declared_item_name(it, include_tests) {
+            subuses.remove(&name);
         }
-        subuses.remove(&name);
     }
     subuses
+}
+
+/// The NAME an item declares in its enclosing scope — `None` for an item that declares none (an
+/// item-position macro INVOCATION, a `use`, an `impl`) and for one a production scan skips
+/// (`#[cfg(test)]`).
+///
+/// ONE ANSWER, TWO CONSUMERS, and the second one is why this was extracted. `submodule_uses` shadows an
+/// inherited import with an INLINE MODULE's own declarations; `body_shadowed_uses` does the same for a
+/// FUNCTION BODY's. Only the module half existed, which is R106: a body-local `struct Cmd` did not shadow
+/// a file-level `Cmd` binding, so `Cmd::new("true").spawn()` inside the body was charged `Exec` with
+/// `cmds: ["true"]` for a body that only ever wrote a file. The item-kind list lives here once so the two
+/// halves cannot answer the same question differently.
+pub(crate) fn declared_item_name(it: &syn::Item, include_tests: bool) -> Option<String> {
+    let (attrs, name): (&[syn::Attribute], String) = match it {
+        syn::Item::Fn(f) => (&f.attrs, f.sig.ident.to_string()),
+        syn::Item::Struct(s) => (&s.attrs, s.ident.to_string()),
+        syn::Item::Enum(e) => (&e.attrs, e.ident.to_string()),
+        syn::Item::Union(u) => (&u.attrs, u.ident.to_string()),
+        syn::Item::Type(t) => (&t.attrs, t.ident.to_string()),
+        syn::Item::Trait(t) => (&t.attrs, t.ident.to_string()),
+        syn::Item::TraitAlias(t) => (&t.attrs, t.ident.to_string()),
+        syn::Item::Mod(m) => (&m.attrs, m.ident.to_string()),
+        syn::Item::Const(c) => (&c.attrs, c.ident.to_string()),
+        syn::Item::Static(s) => (&s.attrs, s.ident.to_string()),
+        syn::Item::ExternCrate(e) => (&e.attrs, e.ident.to_string()),
+        // a `macro_rules! NAME` DEFINITION carries an ident; an item-position INVOCATION does not.
+        syn::Item::Macro(m) => (&m.attrs, m.ident.as_ref()?.to_string()),
+        _ => return None,
+    };
+    (include_tests || !is_cfg_test(attrs)).then_some(name)
+}
+
+/// R106 — the `use` map a FUNCTION BODY sees: the file's map MINUS every name the body itself declares
+/// as an item.
+///
+/// THE DEFECT. A body-local item is a declaration in the body's own scope and it SHADOWS anything the
+/// file imported under that name — rustc's rule, and the rule `submodule_uses` has always applied to an
+/// inline module. Nothing applied it to a function body, so:
+///
+///     pub type Cmd = std::process::Command;               // or: use std::process::Command;
+///     pub fn f() { struct Cmd; impl Cmd { fn new(_: &str) -> Self { fs::write(..); Cmd } … }
+///                  Cmd::new("true").spawn(); }
+///
+/// resolved the body's OWN `Cmd::new` through the file-level binding: EXECUTED ground truth is one file
+/// write and no process, the report said `["Exec","Fs"]` with `cmds: ["true"]`, and `deny Exec` exited 1.
+/// A fabricated effect AND a fabricated command surface on a provably-pure-of-Exec path.
+///
+/// NOT ONLY THE R99 SEED. The `pub type` spelling reaches this through the alias seed b00956b added, but
+/// the plain `use std::process::Command;` spelling is the same hole and PREDATES it — measured identically
+/// at HEAD. So the fix is at the BODY, where the shadow belongs, not at the seed: fixing the seed alone
+/// would have left the commoner spelling silent, which is §9's audit-boundary trap exactly.
+///
+/// REBOUND TO A SENTINEL, **NOT REMOVED**, AND THAT DISTINCTION IS MEASURED. The first cut of this fix
+/// simply removed the name, on `submodule_uses`' own stated argument that "removing an inherited binding
+/// can never invent an effect". **For a function body that argument is FALSE**, and the fixture is small:
+///
+///     pub mod other { pub struct W; impl W { pub fn make() -> Self { fs::write(..); W } } }
+///     use std::process::Command as W;
+///     pub fn body_pure() { struct W; impl W { fn make() -> Self { W } } let _ = W::make(); }
+///
+/// `body_pure` calls a body-local, provably pure `W::make`. With the import in scope it fabricated `Exec`
+/// (that is R106). With the import merely REMOVED it fabricated `Fs`, because `W::make` fell back to
+/// module-relative resolution and the tail2 index linked it to `other::W::make`. One fabrication traded
+/// for another. So the name is rebound to `ITEM_SENTINEL + name` — a single segment that can appear in no
+/// Rust path, so `expand` yields a tail2 (`<body-item>W::make`) that matches no definition, the classifier
+/// returns `None` for its head, and the κ ledger cannot mistake it for a dependency. The BODY's own item
+/// is not lost by this: the collector walks a body's nested `fn`/`impl` into the SAME unit, so an
+/// effectful body-local `make` still charges its caller.
+///
+/// What this DOES cost is precision, in the under-report direction: a body that declares `struct write`
+/// and elsewhere calls a genuinely-imported `write` loses the import. Bounded deliberately — the walk
+/// stops at a nested `fn`/`impl`/`mod`, exactly where `LocalUseCollector`'s does, because those are
+/// separate scopes whose declarations do not shadow anything out here.
+fn body_declared_items(block: &syn::Block) -> std::collections::HashSet<String> {
+    struct C {
+        out: std::collections::HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for C {
+        fn visit_item(&mut self, it: &'ast syn::Item) {
+            // `include_tests: false` — a `#[cfg(test)]` item inside a body is not compiled into the
+            // build this report describes, so it shadows nothing in it. Under `--include-tests` that
+            // makes this UNDER-shadow, i.e. exactly the pre-R106 behaviour for that one case, which is
+            // the safe way to be wrong here (stated, not assumed away).
+            if let Some(n) = crate::decls::declared_item_name(it, false) {
+                self.out.insert(n);
+            }
+            syn::visit::visit_item(self, it);
+        }
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            self.out.insert(f.sig.ident.to_string()); // the nested fn's own NAME shadows out here…
+        }
+        fn visit_item_impl(&mut self, _: &'ast syn::ItemImpl) {}
+        fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+            self.out.insert(m.ident.to_string());
+        }
+    }
+    let mut c = C { out: std::collections::HashSet::new() };
+    c.visit_block(block);
+    c.out
 }
 
 // ── SUBMODULE-LEVEL RE-EXPORTS ────────────────────────────────────────────────────────────────────
@@ -412,6 +491,59 @@ pub(crate) fn qualify(modpath: &str, name: &str) -> String {
     if modpath.is_empty() { name.to_string() } else { format!("{modpath}::{name}") }
 }
 
+/// R105 — the separator joining the SEVERAL targets one alias name can have when its declaration is
+/// duplicated across `#[cfg]` arms. `\u{1}` cannot appear in a Rust path, and it is the SAME convention
+/// `collect_root_reexports` already uses for the multi-glob list under `GLOB_KEY` — one spelling for
+/// "this key has more than one answer", not a second one.
+pub(crate) const ALIAS_ALT_SEP: char = '\u{1}';
+
+/// R106 — the prefix a FUNCTION-BODY-LOCAL item's name is rebound to in that body's `use` map. A single
+/// segment containing characters no Rust path can carry, so the resulting `tail2` matches no definition
+/// in the crate, the classifier's head lookup finds nothing, and the κ ledger cannot read it as a
+/// dependency. See `body_shadowed_uses` for why REBINDING and not removing.
+pub(crate) const ITEM_SENTINEL: &str = "<body-item>";
+
+/// R105 — record ONE crate-local alias for an external item, resolving a DUPLICATE declaration instead
+/// of letting source order decide it.
+///
+/// THE DEFECT THIS CLOSES. All three alias-collection branches below used to end in a bare
+/// `aliases.insert(..)`, so two `#[cfg]` arms declaring the same qualified name — the ordinary
+/// platform/feature shim, `#[cfg(unix)] pub use std::fs::write as put;` beside `#[cfg(not(unix))] pub use
+/// std::env::set_var as put;` — resolved to WHICHEVER ARM WAS WRITTEN LAST. Measured on two crates
+/// identical but for arm order: one reported `go: ["Fs"]` and failed `deny Fs` (exit 1), the other
+/// reported `go: ["Env"]` and PASSED it (exit 0) — a fabricated effect class and, behind it, the real
+/// `Fs` unreported anywhere in the document. candor analyses every `cfg` branch everywhere else (see
+/// `Reexport::from`, which is a `Vec` for exactly this reason); this map was the one place that collapsed
+/// them, and it collapsed them by position.
+///
+/// WHY THE ARMS ARE KEPT RATHER THAN ADJUDICATED HERE. The alias target is a PREFIX — a caller appends
+/// its own leaf (`Cmd::new`, `put(..)`) — so whether two arms answer the same question is a property of
+/// the CALL, not of the target alone, and it is `candor_classify` that decides it. Deciding it here would
+/// mean re-implementing the classifier against a leaf nobody has yet written (§G). So both arms are kept,
+/// SORTED (the result no longer depends on walk order or `HashMap` iteration order, which is what the
+/// decl-index digest requires), and the choice is made in scan.rs's call loop where the leaf is in hand:
+/// identical classifications → charge that one effect; different → `Unknown`, the same honest signal
+/// `drop_cross_ambiguous_enum_leaves`'s R90 collision already earns. Never a pick by position.
+pub(crate) fn record_alias(aliases: &mut HashMap<String, String>, key: String, target: String) {
+    match aliases.get_mut(&key) {
+        None => {
+            aliases.insert(key, target);
+        }
+        Some(prev) => {
+            // The SAME target declared twice (the common `cfg_if` shape where both arms re-export the
+            // identical item) is not an ambiguity at all — it is one answer, recorded twice.
+            if prev.split(ALIAS_ALT_SEP).any(|t| t == target) {
+                return;
+            }
+            let mut alts: Vec<&str> =
+                prev.split(ALIAS_ALT_SEP).chain(std::iter::once(target.as_str())).collect();
+            alts.sort_unstable();
+            alts.dedup();
+            *prev = alts.join(&ALIAS_ALT_SEP.to_string());
+        }
+    }
+}
+
 /// Collect this file's `pub use` RE-EXPORT edges, recursing into inline `mod` blocks. `modpath` is the
 /// module path the items sit at and `dir` is the DIRECTORY of the source file, relative to the scan root
 /// — `#[path]` targets resolve against it (Rust resolves a `#[path]` on an out-of-line `mod` relative to
@@ -471,7 +603,7 @@ pub(crate) fn collect_reexports(
                             let head = segs[0].as_str();
                             if !matches!(head, "crate" | "self" | "super") {
                                 let target = format!("{}::{name}", segs.join("::"));
-                                aliases.insert(qualify(modpath, &alias), target);
+                                record_alias(aliases, qualify(modpath, &alias), target);
                             }
                         }
                         continue;
@@ -498,7 +630,7 @@ pub(crate) fn collect_reexports(
                     if p.qself.is_none() {
                         let written = path_to_string(&p.path);
                         if written != "Self" {
-                            aliases.insert(qualify(modpath, &t.ident.to_string()), expand(&written, uses));
+                            record_alias(aliases, qualify(modpath, &t.ident.to_string()), expand(&written, uses));
                         }
                     }
                 }
@@ -521,7 +653,7 @@ pub(crate) fn collect_reexports(
                     if let syn::Expr::Path(p) = &**expr {
                         if p.qself.is_none() {
                             let written = path_to_string(&p.path);
-                            aliases.insert(qualify(modpath, &ident.to_string()), expand(&written, uses));
+                            record_alias(aliases, qualify(modpath, &ident.to_string()), expand(&written, uses));
                         }
                     }
                 }
@@ -837,11 +969,28 @@ pub(crate) fn fninfo(
         let mut c = LocalUseCollector { out: &mut local_uses };
         c.visit_block(block);
     }
+    // R106 — …and the mirror-image adjustment, which was missing entirely: a name the body DECLARES as
+    // an item shadows whatever the file imported under it (`body_shadowed_uses`' doc has the measured
+    // fabrication). Applied in the same place and the same way as the additive half, so a body's `use`
+    // and a body's `struct` are answered by one map rather than by one map and an omission.
+    let shadowed = body_declared_items(block);
     let merged: HashMap<String, String>;
-    let uses: &HashMap<String, String> = if local_uses.is_empty() {
+    let uses: &HashMap<String, String> = if local_uses.is_empty() && shadowed.is_empty() {
         uses
     } else {
         let mut m = uses.clone();
+        for n in &shadowed {
+            // Instrument the PRECONDITION, not just the output (the standing bar): a REMOVAL that hits no
+            // key changes nothing, so only a removal that actually took a binding away counts as this
+            // branch having fired. `CANDOR_ALIAS_DEBUG` is the same switch scan.rs's R105 counter uses.
+            if m.insert(n.clone(), format!("{ITEM_SENTINEL}{n}")).is_some()
+                && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+            {
+                eprintln!("BODYSHADOW {qual} :: {n}");
+            }
+        }
+        // A body-level `use` is itself a body declaration, so it wins over the removal above — that is
+        // what `use` means, and it is the ADD direction, which cannot lose an effect.
         m.extend(local_uses);
         merged = m;
         &merged

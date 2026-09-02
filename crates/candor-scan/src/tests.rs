@@ -11997,20 +11997,311 @@ pub fn go() {{ imp::doit(); }}
     /// never bound crate-wide (the rule `seed_root_reexports` established), only `crate::<qualified>`
     /// and the spellings genuinely in scope. Without this the fix would trade a silent under-report for
     /// the misattribution mirror — R101's direction, which is worse.
+    ///
+    /// R107 — THIS CONTROL COULD NOT FAIL, AND THAT IS WHY THE HOLE BESIDE IT SHIPPED. As written it
+    /// asserted `is_empty()` over bodies that were empty (`fn new() -> Self { Client }`, `fn go(&self) {}`),
+    /// so it held whether or not the alias hijacked the name — an absence assertion over a program with
+    /// nothing to be absent (brief §E3). And its rival sat in a FILE submodule, a position the bare seed
+    /// STRUCTURALLY cannot reach: `seed_mod_aliases` binds the bare name only where `module == modpath`,
+    /// and the root alias's module is `""` while this file's is `local`. Two independent reasons to pass,
+    /// neither of them the one it claimed. Now: the local `Client` performs a DISTINCT effect class (Fs)
+    /// from the alias target (Exec), so the assertion is `["Fs"]` — a claim that discriminates — and the
+    /// position the seed actually lands in has its own test, `r106_a_body_local_item_wins_over_a_seeded_alias`.
     #[test]
     fn r99_a_root_type_alias_does_not_reach_a_submodules_own_same_named_type() {
         let v = scan_crate_to_json("r99shadow", &[
             ("src/lib.rs", "pub mod local;\npub type Client = std::process::Command;\n"),
             ("src/local.rs", "pub struct Client;\n\
-                              impl Client { pub fn new() -> Self { Client } pub fn go(&self) {} }\n\
-                              pub fn uses_local_client() { let c = Client::new(); c.go(); }\n"),
+                              impl Client {\n\
+                                pub fn new(_p: &str) -> Self { let _ = std::fs::write(\"/tmp/r99shadow\", \"x\"); Client }\n\
+                                pub fn status(&self) -> u32 { 0 }\n\
+                              }\n\
+                              pub fn uses_local_client() { let c = Client::new(\"/bin/sh\"); let _ = c.status(); }\n"),
         ]);
-        assert!(
-            effs_opt(&v, "local::uses_local_client").is_empty(),
-            "OVER-CHARGE CONTROL: a submodule's OWN `Client` must stay pure — the root alias binds \
-             `crate::Client`, never a bare crate-wide `Client`:\n{v:#}"
+        assert_eq!(
+            effs_opt(&v, "local::uses_local_client"), vec!["Fs".to_string()],
+            "OVER-CHARGE CONTROL: a submodule's OWN `Client` must resolve to the LOCAL type — its `new` \
+             writes a file (Fs) and nothing here spawns anything. An `Exec` (or an `Exec`+`Fs`) means the \
+             root alias reached a name it does not bind:\n{v:#}"
         );
     }
+
+    /// R105 — a `#[cfg]`-DUPLICATED ALIAS MUST NOT BE RESOLVED BY SOURCE ORDER.
+    ///
+    /// Two crates identical but for the ORDER of the two `#[cfg]` arms. On unix both programs call
+    /// `std::fs::write`; EXECUTED ground truth for both is one file written and no environment variable
+    /// set. Pre-fix the last arm in the file won: arm order A reported `["Fs"]` and failed `deny Fs`
+    /// (exit 1), arm order B reported `["Env"]` and PASSED it (exit 0) — a fabricated effect class, and
+    /// behind it the real `Fs` present nowhere in the document (no `Unknown`, no `unresolved`, no
+    /// `incomplete`, `excluded: []`), which is the cardinal sin.
+    ///
+    /// The assertion is ORDER-INVARIANCE plus honesty: both orders must give the SAME answer, and that
+    /// answer must be a disclosure, because the two arms classify differently (Fs vs Env) and candor
+    /// cannot know which platform the build selects. Charging one would be the guess; charging both would
+    /// fabricate the arm that is not compiled.
+    #[test]
+    fn r105_a_cfg_duplicated_alias_is_not_decided_by_arm_order() {
+        let src = |first: &str, second: &str| {
+            format!(
+                "mod sys {{\n  #[cfg({first})] pub use std::{}::{} as put;\n  \
+                 #[cfg({second})] pub use std::{}::{} as put;\n}}\n\
+                 pub fn go() {{ let _ = sys::put(\"/tmp/r105\", \"x\"); }}\n",
+                if first == "unix" { "fs" } else { "env" },
+                if first == "unix" { "write" } else { "set_var" },
+                if first == "unix" { "env" } else { "fs" },
+                if first == "unix" { "set_var" } else { "write" },
+            )
+        };
+        let a = scan_src_to_json("r105a", &src("unix", "not(unix)"));
+        let b = scan_src_to_json("r105b", &src("not(unix)", "unix"));
+        assert_eq!(
+            effs_opt(&a, "go"), effs_opt(&b, "go"),
+            "R105: two crates differing ONLY in `#[cfg]` arm ORDER answered differently — the alias map \
+             resolved by source position:\nA:\n{a:#}\nB:\n{b:#}"
+        );
+        for (tag, v) in [("A", &a), ("B", &b)] {
+            assert_eq!(
+                effs_opt(v, "go"), vec!["Unknown".to_string()],
+                "R105 ({tag}): the arms classify differently (Fs vs Env), so the honest answer is \
+                 `Unknown` — never one arm picked, never both charged:\n{v:#}"
+            );
+            let why: Vec<String> = v["functions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|f| f["fn"] == "go")
+                .and_then(|f| f["unknownWhy"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|r| r.as_str().map(str::to_string))
+                .collect();
+            assert!(
+                why.iter().any(|r| r.starts_with("ambiguous:")),
+                "R105 ({tag}): the disclosure must carry a reason, and the SPEC §4 kind for \
+                 `two candidates, cannot say which runs` is `ambiguous:`:\n{v:#}"
+            );
+        }
+    }
+
+    /// R105 UNION CONTROL — the cost side, and the reason this fix does not make 6.6% of a real corpus
+    /// noisier. When the duplicated arms ANSWER THE SAME, nothing is disclosed:
+    ///
+    ///   * `same_target`  — both arms name the identical item (the ordinary `cfg_if` re-export). Not an
+    ///     ambiguity at all; the full surface survives, `fs: ["write"]` included.
+    ///   * `both_fs`      — two DIFFERENT paths that classify identically. The agreed effect is charged
+    ///     (this is the union), the literal surface is withheld because the two arms' literals are
+    ///     different claims, and the effect is marked `incomplete` so an empty surface cannot read as a
+    ///     complete one.
+    ///   * `inert`        — the portability shim that dominates the real corpus (`std::boxed::Box` vs
+    ///     `alloc::boxed::Box`). Neither arm classifies, so the collision costs nothing at all.
+    #[test]
+    fn r105_arms_that_classify_alike_are_unioned_not_disclosed() {
+        let v = scan_src_to_json("r105union", concat!(
+            "mod s1 { #[cfg(unix)] pub use std::fs::write as put;\n",
+            "         #[cfg(not(unix))] pub use std::fs::write as put; }\n",
+            "pub fn same_target() { let _ = s1::put(\"/tmp/a\", \"x\"); }\n",
+            "mod s2 { #[cfg(unix)] pub use std::fs::write as put;\n",
+            "         #[cfg(not(unix))] pub use std::fs::remove_file as put; }\n",
+            "pub fn both_fs() { let _ = s2::put(\"/tmp/a\"); }\n",
+            "mod s3 { #[cfg(feature = \"std\")] pub use std::boxed::Box as B;\n",
+            "         #[cfg(not(feature = \"std\"))] pub use alloc::boxed::Box as B; }\n",
+            "pub fn inert() { let _b = s3::B::new(1u8); }\n",
+        ));
+        assert_eq!(
+            effs_opt(&v, "same_target"), vec!["Fs".to_string()],
+            "R105 CONTROL: two arms naming the IDENTICAL item are one answer recorded twice — not an \
+             ambiguity, and not a reason to lose the surface:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "both_fs"), vec!["Fs".to_string()],
+            "R105 UNION: arms that classify alike charge that effect — `Unknown` here would be the \
+             over-charge this fix is measured against:\n{v:#}"
+        );
+        assert!(
+            effs_opt(&v, "inert").is_empty(),
+            "R105 CONTROL: a `std`/`alloc` portability shim classifies to nothing on BOTH arms, so the \
+             collision must cost nothing — this is the shape 17 of 256 real crates carry:\n{v:#}"
+        );
+    }
+
+    /// R105 CONTROL — a SINGLE-arm alias (no duplication) is untouched. This is the whole of R99's own
+    /// behaviour, and the branch this fix adds must be unreachable for it.
+    #[test]
+    fn r105_a_single_arm_alias_is_unchanged() {
+        let v = scan_src_to_json("r105single", concat!(
+            "mod facade { pub use std::process::Command; }\n",
+            "pub fn go() { let _ = facade::Command::new(\"/bin/sh\").status(); }\n",
+        ));
+        assert_eq!(
+            effs_opt(&v, "go"), vec!["Exec".to_string()],
+            "R105 CONTROL: an alias with ONE declaration resolves exactly as before:\n{v:#}"
+        );
+    }
+
+    /// R106 — A BODY-LOCAL ITEM SHADOWS A FILE-LEVEL BINDING OF THE SAME NAME.
+    ///
+    /// EXECUTED ground truth (the fixture was compiled and run): `body_local_item` writes one file and
+    /// spawns nothing. Pre-fix it reported `["Exec","Fs"]` with `cmds: ["true"]` and failed `deny Exec` at
+    /// exit 1 — a fabricated effect AND a fabricated command surface, because the body's own `struct Cmd`
+    /// did not shadow the file's `Cmd` binding and `Cmd::new("true").spawn()` resolved to
+    /// `std::process::Command`.
+    ///
+    /// BOTH SPELLINGS OF THE BINDING ARE TESTED, and that is the point. The `pub type` half arrives
+    /// through the alias seed `b00956b` added; the plain `use std::process::Command;` half is the SAME
+    /// hole and PREDATES it — measured identically at HEAD. Fixing only the seeded route would have left
+    /// the commoner spelling silent, which is the audit boundary drawn around its own trigger.
+    #[test]
+    fn r106_a_body_local_item_wins_over_a_seeded_alias() {
+        for (tag, binding) in [
+            ("type-alias", "pub type Cmd = std::process::Command;"),
+            ("plain-use", "use std::process::Command as Cmd;"),
+        ] {
+            let v = scan_src_to_json("r106body", &format!(
+                "{binding}\n\
+                 pub fn body_local_item() {{\n\
+                   struct Cmd;\n\
+                   impl Cmd {{\n\
+                     fn new(_: &str) -> Self {{ let _ = std::fs::write(\"/tmp/r106\", \"x\"); Cmd }}\n\
+                     fn spawn(&self) -> u32 {{ 0 }}\n\
+                   }}\n\
+                   let _ = Cmd::new(\"true\").spawn();\n\
+                 }}\n"
+            ));
+            assert_eq!(
+                effs_opt(&v, "body_local_item"), vec!["Fs".to_string()],
+                "R106 ({tag}): the body declares its OWN `Cmd`, so `Cmd::new(..).spawn()` is the local \
+                 one — which writes a file and spawns nothing. `Exec` here is a fabricated effect on a \
+                 path that provably performs none:\n{v:#}"
+            );
+            assert!(
+                v.to_string().find("\"true\"").is_none(),
+                "R106 ({tag}): `cmds: [\"true\"]` is a fabricated EXEC SURFACE — an `allow Exec true` \
+                 would then certify a program that runs nothing:\n{v:#}"
+            );
+        }
+    }
+
+    /// R106 CONTROL — the shadow must not go the other way. A body that does NOT declare the name keeps
+    /// resolving it through the file-level binding (that is R99, and it must survive), and an INLINE
+    /// SUBMODULE's own item keeps winning (that is `submodule_uses`, which already worked). Distinct
+    /// effect classes on the two sides — Exec for the alias target, Fs for the local type — so neither
+    /// assertion can hold for the wrong reason.
+    #[test]
+    fn r106_the_body_shadow_does_not_reach_past_the_body() {
+        let v = scan_src_to_json("r106ctl", concat!(
+            "pub type Cmd = std::process::Command;\n",
+            "pub fn no_local_decl() { let _ = Cmd::new(\"/bin/sh\").status(); }\n",
+            "pub mod inner {\n",
+            "  pub struct Cmd;\n",
+            "  impl Cmd {\n",
+            "    pub fn new(_: &str) -> Self { let _ = std::fs::write(\"/tmp/r106c\", \"x\"); Cmd }\n",
+            "    pub fn status(&self) -> u32 { 0 }\n",
+            "  }\n",
+            "  pub fn go() { let _ = Cmd::new(\"true\").status(); }\n",
+            "}\n",
+        ));
+        assert_eq!(
+            effs_opt(&v, "no_local_decl"), vec!["Exec".to_string()],
+            "R106 CONTROL: a body that declares nothing must still resolve `Cmd` through the file's \
+             alias — the body shadow must not cost R99 its fix:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "inner::go"), vec!["Fs".to_string()],
+            "R106 CONTROL: an INLINE submodule's own `Cmd` already won (`submodule_uses`) and must \
+             keep winning:\n{v:#}"
+        );
+    }
+
+    /// R106 — SHADOWING MUST NOT HAND THE NAME TO A DIFFERENT CRATE-LEVEL DEFINITION. This is the
+    /// fixture that falsified the first cut of the fix, which merely REMOVED the shadowed binding on
+    /// `submodule_uses`' stated argument that "removing an inherited binding can never invent an effect".
+    /// For a function body it can: `W::make()` then resolved MODULE-RELATIVE and the tail2 index linked it
+    /// to the unrelated `other::W::make`, so `body_pure` went from a fabricated `Exec` (the R106 defect)
+    /// to a fabricated `Fs` (the fix's own). Both are wrong; `body_pure` performs nothing.
+    ///
+    /// Three arms, one variable each: the shadowing body must be PURE, the body-local item's OWN effect
+    /// must still reach its caller (the shadow must not silence the code that actually runs), and a
+    /// function in the same file that does NOT shadow must keep the import.
+    #[test]
+    fn r106_a_body_local_shadow_does_not_reroute_to_another_definition() {
+        let v = scan_src_to_json("r106reroute", concat!(
+            "pub mod other {\n",
+            "  pub struct W;\n",
+            "  impl W { pub fn make() -> Self { let _ = std::fs::write(\"/tmp/r106r\", \"x\"); W } }\n",
+            "}\n",
+            "use std::process::Command as W;\n",
+            "pub fn body_pure() { struct W; impl W { fn make() -> Self { W } } let _ = W::make(); }\n",
+            "pub fn body_effectful() {\n",
+            "  struct W;\n",
+            "  impl W { fn make() -> Self { let _ = std::fs::write(\"/tmp/r106e\", \"y\"); W } }\n",
+            "  let _ = W::make();\n",
+            "}\n",
+            "pub fn keeps_alias() { let _ = W::new(\"/bin/sh\").status(); }\n",
+        ));
+        assert!(
+            effs_opt(&v, "body_pure").is_empty(),
+            "R106: the body's OWN `W::make` does nothing. `Exec` means the import hijacked the name; \
+             `Fs` means shadowing rerouted it to `other::W::make`, an unrelated definition that does \
+             not run here:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "body_effectful"), vec!["Fs".to_string()],
+            "R106 CONTROL: the shadow must not SILENCE the item it shadows in favour of — the body's \
+             own effectful `make` is what runs, and its caller must carry it:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "keeps_alias"), vec!["Exec".to_string()],
+            "R106 CONTROL: the shadow is scoped to the body that declares it — a sibling function in \
+             the same file still resolves `W` through the import:\n{v:#}"
+        );
+    }
+
+    /// R107 — the SELF-SHADOWING TUPLE DESTRUCTURE, the read that escaped the R100 window.
+    ///
+    /// `tuple_elem_leaves` reads the source element's dispatch typing, and the binding loop above it has
+    /// already cleared `trait_vars` for the name it is binding. So `let (d, n) = (d, n);` asked about a
+    /// `d` this statement had just deleted, found nothing, and `d.go()` dropped SILENT — absent from
+    /// `functions[]`, which is the cardinal sin's signature. The two arms differ in exactly one thing:
+    /// whether the destructured names shadow the source names.
+    #[test]
+    fn r107_a_self_shadowing_tuple_destructure_keeps_its_dispatch_typing() {
+        let v = scan_src_to_json("r107tuple", concat!(
+            "pub trait Doer { fn go(&self); }\n",
+            "pub struct Real;\n",
+            "impl Doer for Real { fn go(&self) { let _ = std::fs::write(\"/tmp/r107\", \"x\"); } }\n",
+            "pub fn shadowed(d: Box<dyn Doer>, n: u32) { let (d, n) = (d, n); d.go(); let _ = n; }\n",
+            "pub fn control(d: Box<dyn Doer>, n: u32) { let (e, m) = (d, n); e.go(); let _ = m; }\n",
+        ));
+        for f in ["shadowed", "control"] {
+            assert_eq!(
+                effs_opt(&v, f), vec!["Fs".to_string()],
+                "R107: `{f}` dispatches to the one visible `Doer` impl, which writes a file. The \
+                 SHADOWING arm went silent pre-fix while the renamed one resolved — the RHS of a `let` \
+                 means the PRE-statement binding:\n{v:#}"
+            );
+        }
+    }
+
+    /// R107 — a REBIND FROM A CLOSURE BINDING keeps the closure marking. PRE-EXISTING (identical at
+    /// `9c4d5be`), found by the same audit: `let eff = || {}; let eff = eff;` dropped the marking, so
+    /// `eff()` stopped being a visible closure call and resolved by bare leaf to the free `fn eff` beside
+    /// it — a positive `Fs` claim about a body whose only call is to an empty closure.
+    #[test]
+    fn r107_a_rebind_from_a_closure_binding_stays_a_closure() {
+        let v = scan_src_to_json("r107closure", concat!(
+            "pub fn eff() { let _ = std::fs::write(\"/tmp/r107c\", \"x\"); }\n",
+            "pub fn shadowed() { let eff = || {}; let eff = eff; eff(); }\n",
+            "pub fn renamed() { let c = || {}; let d = c; d(); }\n",
+        ));
+        for f in ["shadowed", "renamed"] {
+            assert!(
+                effs_opt(&v, f).is_empty(),
+                "R107: `{f}` calls an EMPTY closure and nothing else — charging the free `fn eff`'s Fs \
+                 is a fabrication on a provably-pure body:\n{v:#}"
+            );
+        }
+    }
+
 
     /// R99 (2) CONTROL — a NON-nominal alias must keep going to `prim_aliases` (the resolution SKIP that
     /// stops `Inner::default()` inheriting a same-named local struct's effects, the sled `IVec`
@@ -12195,15 +12486,23 @@ pub fn go() {{ imp::doit(); }}
         }
     }
 
-    /// R100 — the ENUMERATION pin, the counterpart of
-    /// `every_name_keyed_table_is_scoped_by_the_one_binder`. That test pins the ten resolution tables
-    /// `scoped_binding` clears for a SHADOW BODY; this one pins that the same tables — plus the two
-    /// HEDGING sets, which `scoped_binding` deliberately keeps and this window must NOT — are captured
-    /// and restored around the RHS walk. Exercised directly on `CallCollector` rather than through a
-    /// fixture, for the reason the sibling test gives: a fixture can only witness the tables some shape
-    /// happens to reach, and the whole class is a table no shape reached.
+    /// R100 — the REGRESSION pin for the twelve name-keyed tables `BoundNameState` REGISTERS today: each
+    /// is captured and restored around the RHS walk. Ten are the resolution tables `scoped_binding` clears
+    /// for a SHADOW BODY (its own pin is `every_name_keyed_table_is_scoped_by_the_one_binder`); two are
+    /// the HEDGING sets `scoped_binding` deliberately KEEPS and this window must not. Exercised directly
+    /// on `CallCollector` rather than through a fixture, for the reason the sibling test gives: a fixture
+    /// can only witness the tables some shape happens to reach.
+    ///
+    /// R107 — THIS WAS NAMED `every_name_keyed_table_…` AND IT DOES NOT ANSWER FOR EVERY TABLE. Proven
+    /// mechanically: a thirteenth name-keyed table was added to `CallCollector` and poisoned inside the
+    /// window's scope, and this test passed, as did all 306. The compiler forces a new field into ten
+    /// exhaustive struct literals — including the one below, which is why this LOOKS like a completeness
+    /// gate — but nothing forces it into `BoundNameState`, `capture_bindings` or `restore_bindings`, and
+    /// those three are what would actually cover it. Renamed to what it pins, with the residual written
+    /// down instead of implied: **a table added to `CallCollector` and not registered in `BoundNameState`
+    /// is outside the window, and no test in this repo will say so.**
     #[test]
-    fn every_name_keyed_table_is_restored_for_the_rhs_walk() {
+    fn the_twelve_registered_name_keyed_tables_are_restored_for_the_rhs_walk() {
         let uses = HashMap::new();
         let fields = FieldIndex::new();
         let trait_fields = TraitFieldIndex::new();
