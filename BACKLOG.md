@@ -2,6 +2,87 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+## 2026-09-02 — TWO PRE-EXISTING, PUBLISHED CARDINAL SINS in candor-scan's `#[cfg(test)]` handling —
+## MEASURED here, filed not fixed, and the obvious fix for the first is PROVEN UNSOUND
+
+Both are at `origin/main` (3cf055d) as well as at HEAD, so neither belongs to the R105/R106/R107/R119
+work. Both were found while checking a reviewer's hypothesis rather than by a sweep, so **the boundary
+below is what I measured, not a claim that the class is exhausted.**
+
+### [P0] SIN 1 — a module-level `use` map is built with NO `#[cfg(test)]` filter, so a production scan
+### can resolve a call through a TEST MOCK, decided by SOURCE ORDER
+
+`scan_items` (decls.rs, the `for it in items { if let syn::Item::Use(u) = it { collect_use(..) } }`
+preamble) and `collect_decls` (same shape, further down) both collect EVERY `Item::Use` unconditionally.
+`collect_use` inserts into a `HashMap`, so the LAST spelling of a name wins. The idiomatic mocking pair
+is two mutually-exclusive `cfg`s, and which one candor believes is decided by which was typed second.
+
+TWO ARMS, BYTE-IDENTICAL EXCEPT FOR THE ORDER OF TWO `use` LINES. Ground truth EXECUTED — each was
+compiled with `cargo run` in a normal (non-test) build and printed `ran=true`, i.e. really spawned
+`/usr/bin/true`:
+
+    #[cfg(not(test))] use std::process::Command as Runner;     //  ARM "first": mock import FIRST
+    #[cfg(test)]      use crate::mockproc::Runner;             //  ARM "last" : mock import LAST
+    pub fn run(p: &str) -> bool { let mut c = Runner::new(p); c.status().map(|s| s.success()).unwrap_or(false) }
+
+    arm "first"  ->  run: ["Exec"]
+    arm "last"   ->  run: ABSENT from functions[]        <- silent under-report
+
+Measured identically on `origin/main` and on HEAD. The `crate::mockproc::Runner` mock is pure by
+construction, which is what makes this the worst shape of the class: the answer is confidently pure.
+
+**THE ONE-LINE FIX IS UNSOUND — PROTOTYPED, BUILT AND A/B'D, THEN REJECTED.** Adding
+`if !include_tests && is_cfg_test(&u.attrs) { continue; }` to both loops does close the fixture (both
+arms report `["Exec"]`, order-independent) and 326+77 tests stay green. But over all 1489 registry
+crates against HEAD it is **ADDED 0, REMOVED 11, CHANGED 39 (wide, 15 fields) in 7 crates**, and the
+removals audited in full contain a real loss: `curve25519-dalek` 4.1.3's `scalar::Scalar::random` loses
+`["Rand"]` and the row disappears. Cause is SIN 2 below — `is_cfg_test` fires on
+`#[cfg(any(test, feature = "rand_core"))]`, which is a PRODUCTION import whenever that feature is on.
+So **SIN 2 must be fixed first**, or fixing SIN 1 trades one silent under-report for another. The rest
+of that A/B: `tokio` 1.53.1 loses a fabricated `Log`+`Unknown` across its whole `fs` module (35 rows,
+`Fs` correctly retained — this looks like the intended gain), `hickory-resolver` GAINS `Clock` on five
+rows, and `cap-primitives`/`ordered-float`/`similar` move on test-only functions.
+
+**THE SAME QUESTION IS ANSWERED FIVE TIMES AND TWO OF THEM DRIFTED** (brief §F1 q3). Sites that DO apply
+the filter: `collect_module_glob` and `collect_reexports` (both decls.rs). Sites that do NOT:
+`scan_items`, `collect_decls`, and `lang.rs`'s `collect_root_reexports` — which has no `include_tests`
+parameter at all, so fixing it needs a signature change. `LocalUseCollector` (a `use` inside a fn body)
+is unfiltered too and was not measured.
+
+### [P0] SIN 2 — `is_cfg_test` treats `#[cfg(any(test, …))]` as test-only, so production items under a
+### default-on feature vanish from the report entirely
+
+`cfg_meta_requires_test` returns true for a `test` found anywhere inside `any(...)` as well as
+`all(...)`. Its own doc says the item "POSITIVELY requires test". For `all(test, X)` that is right; for
+`any(test, X)` it is exactly backwards — the item compiles when EITHER holds, so it does not require
+test at all. A comment asserting the property the code lacks.
+
+Ground truth EXECUTED (`cargo run` on a default build printed `maybe=true` — a real spawned process):
+
+    [features] default = ["extra"] ; extra = []
+
+    #[cfg(any(test, feature = "extra"))]
+    pub fn maybe_spawn(p: &str) -> bool { std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) }
+
+    pub fn always_spawn(p: &str) -> bool { /* identical body, no cfg */ }        <- the control
+
+    maybe_spawn  -> ABSENT      always_spawn -> ["Exec"]      (origin/main AND HEAD, identical)
+
+On an ISOLATED crate whose only function is `maybe_spawn`, `functions[]` is `[]`, `analyzed.count` is 0,
+and every policy form passes:
+
+    deny Exec  ·  deny Unknown  ·  deny Exec Unknown  ·  deny Exec maybe_spawn  ·  pure maybe_spawn
+    -> exit 0, exit 0, exit 0, exit 0, exit 0
+
+`is_cfg_test` gates every item-kind in `scan_items` (free fn, impl, impl method, mod, trait) plus
+`declared_item_name`, `lazy_unit_emitted`, `collect_module_glob` and `collect_reexports`, so this is not
+a `use`-map issue — the whole item disappears. **102 of the 1489 crate sources in the local registry
+contain `#[cfg(any(test, …))]`** (`aho-corasick`, `arrow`, `aws-config`, `axum`, `bstr`,
+`curve25519-dalek`, … and candor-scan's own older published versions).
+
+Repro fixtures for both live under this session's scratchpad; each is three files and rebuildable from
+the snippets above in under a minute. `include_tests: true` is unaffected by either.
+
 ## 2026-08-30 — CARDINAL SIN: a closure/coroutine capturing an effectful Drop by move, boxed as
 ## `dyn Fn*` and dropped without ever being called, is silently pure — filed, not fixed here
 
