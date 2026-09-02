@@ -912,6 +912,12 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
         if let Some(full) = uses.get(segs[0]) {
             // R105 — `alias_join`, not `format!`: `full` may carry several `#[cfg]`-duplicated arms.
             let joined = alias_join(full, &segs[1..]);
+            // SOUNDNESS R160's §E1 HIT COUNTER — an unchanged row is not evidence the new code ran, so the
+            // A/B has to be able to prove the corpus REACHES the `Self` binding. Gated on the cheap `Self`
+            // compare first, so the env lookup happens only on paths this change can possibly affect.
+            if segs[0] == SELF_KEY && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                eprintln!("SELFALIAS {path} -> {joined}");
+            }
             // R99 — a crate-LOCAL rebind of the MODULE (`use crate::facade;` then `facade::Command::new`)
             // rewrites to `crate::facade::Command::new`, which is the alias map's own key shape. Re-apply
             // the qualified lookup ONCE to the rewritten path: without it the SIBLING-module spelling of a
@@ -1684,6 +1690,16 @@ pub(crate) fn is_non_nominal_type(ty: &syn::Type) -> bool {
         _ => false,
     }
 }
+
+/// SOUNDNESS R160 — the key under which `scan_items` binds `Self` to the ENCLOSING impl's type (or, in a
+/// trait's default body, to the trait) for the length of that block. It is the literal token `Self`, which
+/// is a Rust KEYWORD and therefore can never be introduced by a `use`, a `type` alias or a declaration, so
+/// it cannot collide with a real imported name and needs no sentinel escape the way `GLOB_KEY` does. It
+/// lives in the ordinary `use` map on purpose: `expand` is the single place a written path becomes a
+/// resolved one, so every position — assoc-fn call, assoc const, enum variant, struct literal, a
+/// `Self::f` passed as a value — is answered by that one authority rather than by a second arm per
+/// position.
+pub(crate) const SELF_KEY: &str = "Self";
 
 /// Reserved key under which `collect_use` records GLOB re-export PATHs (`use x::y::*`) in the `use` map.
 /// `*` can never be a Rust identifier, so it never collides with a real imported name. The value is a

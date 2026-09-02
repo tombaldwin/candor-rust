@@ -77,6 +77,27 @@ pub(crate) fn scan_items(
                     continue; // a `#[cfg(test)] impl` block — test-only
                 }
                 let tyname = impl_type_name(&im.self_ty);
+                // SOUNDNESS R160 — `Self` IS the enclosing impl's type, and nothing told the resolver so.
+                // Every path in a body reaches `lang::expand` through this one `uses` map, so binding
+                // `Self` HERE makes `Self::assoc()`, `Self::CONST`, `Self::Variant(..)`, `Self { .. }` and
+                // `map(Self::f)` resolve byte-identically to the same code written `<Type>::…` — one
+                // authority, no second resolution arm. Without it `resolve_target` looked up the tail2
+                // `Self::open_with_flags`, which matches no declaration, so a public forwarder written
+                // `pub fn open(p) { Self::open_with_flags(p, 0) }` reached NOTHING and the
+                // mint-no-unit-unless-it-carries-or-reaches-an-effect filter dropped it from `functions[]`
+                // entirely: `rusqlite::Connection::open` — the function every rusqlite user calls — absent
+                // while `Connection::open_with_flags` read ['Db','Unknown'].
+                //
+                // The VALUE is `expand(type, uses)`, not the bare leaf, so parity holds for an
+                // `impl Trait for <imported type>` too: `use inner::Far; impl Reach for Far { fn reach() {
+                // Self::touch() } }` must produce `inner::Far::touch`, which is exactly what writing
+                // `Far::touch()` produces. `Self` is a reserved word, so this binding can never shadow a
+                // real import (asserted below rather than assumed).
+                let self_alias = tyname.as_deref().map(|t| crate::lang::expand(t, uses));
+                if let Some(alias) = &self_alias {
+                    let prev = uses.insert(SELF_KEY.to_string(), alias.clone());
+                    debug_assert!(prev.is_none(), "`Self` is a reserved word: nothing else can bind it");
+                }
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
                         if !include_tests && is_cfg_test(&m.attrs) {
@@ -91,6 +112,10 @@ pub(crate) fn scan_items(
                         out.push(fninfo(&n, &q, modpath, &loc, &m.sig, &m.block, tyname.as_deref(), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
+                // Scoped to THIS impl block: a sibling free fn, or a later impl of a DIFFERENT type, must
+                // not inherit it. (`impl_type_name` yields None for a non-nominal self type — `impl Trait
+                // for &[u8]` — and then nothing was inserted and nothing is removed: an honest miss.)
+                uses.remove(SELF_KEY);
             }
             syn::Item::Mod(m) => {
                 if !include_tests && is_cfg_test(&m.attrs) {
@@ -114,6 +139,18 @@ pub(crate) fn scan_items(
                     continue;
                 }
                 let tname = tr.ident.to_string();
+                // SOUNDNESS R160, the trait-default half. Inside a default body `Self` is the (unknown)
+                // IMPLEMENTOR, not a concrete type, so there is no type to alias it to. The sound answer
+                // is the one this arm ALREADY gives `self` two lines below — bind it to the TRAIT, so
+                // `Self::helper()` resolves exactly as the explicitly-written `<Self as Trait>::helper()`
+                // and `Trait::helper()` spellings already do: to the trait's own DEFAULT body, which is a
+                // body that really runs for every implementor that does not override it. An overriding
+                // impl is an honest under-report, the same residual the R53 revert deliberately left for
+                // the UFCS `Trait::method` edge; widening it to every implementor would be the CHA
+                // fan-out that route was reverted for. A `Self::required()` whose target has NO body
+                // matches no unit and evaporates — unchanged by this line, and noted as a residual.
+                let prev_self = uses.insert(SELF_KEY.to_string(), tname.clone());
+                debug_assert!(prev_self.is_none(), "`Self` is a reserved word: nothing else can bind it");
                 for ti in &tr.items {
                     if let syn::TraitItem::Fn(m) = ti {
                         let Some(block) = &m.default else { continue }; // no body ⇒ abstract, skip
@@ -128,6 +165,7 @@ pub(crate) fn scan_items(
                             Some(&tname), uses, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
+                uses.remove(SELF_KEY); // scoped to THIS trait, exactly as in the impl arm
             }
             _ => {}
         }
