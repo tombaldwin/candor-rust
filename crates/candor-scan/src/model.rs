@@ -340,6 +340,13 @@ pub(crate) struct ElemIndexes<'a> {
     /// one if its consuming arm is reached for a name that is a dispatch-typed LOCAL here — see
     /// `lang::static_holds_callable`, which states that condition and the guard-deletion measurement.
     pub(crate) callable_statics: &'a HashSet<String>,
+    /// SOUNDNESS R161 — the LEAF names of crate-wide `type NAME = <callable>` aliases (`pub type
+    /// AutoExtension = fn(Connection) -> Result<()>`, `type Cb = Box<dyn Fn()>`). A nominal alias is a
+    /// `Type::Path` like any other, so `is_callable_type` answered FALSE for it in every position at
+    /// once — parameter, `let` annotation, closure param — and a fn whose only call was through such a
+    /// parameter vanished from `functions[]`. Carries names only; like `callable_statics` it can name no
+    /// concrete effect, only turn a silent drop into `Unknown`.
+    pub(crate) callable_aliases: &'a HashSet<String>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

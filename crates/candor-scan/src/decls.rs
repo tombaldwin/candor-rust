@@ -1085,7 +1085,7 @@ pub(crate) fn collect_reexports(
                 if !include_tests && is_cfg_test(attrs) {
                     continue;
                 }
-                if is_callable_type(ty, &no_bounds) {
+                if is_callable_type(ty, &no_bounds, &std::collections::HashSet::new()) {
                     if let syn::Expr::Path(p) = &**expr {
                         if p.qself.is_none() {
                             let written = path_to_string(&p.path);
@@ -1463,7 +1463,7 @@ pub(crate) fn fninfo(
     // concrete type `X` to `type_path` (and `Box<dyn Store>` looks like `Box`), which would shadow
     // the CHA route with a meaningless receiver type.
     let trait_vars = seed_trait_vars(sig);
-    let fn_typed_vars = seed_fn_typed_vars(sig);
+    let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
     for k in trait_vars.keys() {
         vars.remove(k);
@@ -1477,7 +1477,7 @@ pub(crate) fn fninfo(
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
     let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses);
-    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields);
+    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
         uses,
@@ -1506,6 +1506,7 @@ pub(crate) fn fninfo(
         enum_variant_traits: elems.enum_variant_traits,
         ambiguous_enum_leaves: elems.ambiguous_enum_leaves,
         callable_statics: elems.callable_statics,
+        callable_aliases: elems.callable_aliases,
         elem_of,
         elem_trait_of,
         tuple_of,
@@ -1541,8 +1542,11 @@ pub(crate) fn fninfo(
     // in THIS scope, and no construction expression in this body says so. Same marker, same consumer —
     // the marker's meaning is "a value of this type is RELEASED here", of which construction is the
     // dominant but not the only cause.
+    // SOUNDNESS R168 — through `note_owned_param_drop`, NOT `note_construction`: the leaf-keyed escape
+    // gate answers a question about a CONSTRUCTION, and a by-value parameter is not constructed here.
+    // Its own escape gate is the `&escapes.names` argument two lines up, which is value-keyed.
     for leaf in crate::lang::owned_drop_params(sig, self_ty, uses, &escapes.names) {
-        c.note_construction(Some(leaf));
+        c.note_owned_param_drop(Some(leaf));
     }
     for stmt in &block.stmts {
         c.visit_stmt(stmt);
@@ -1628,7 +1632,10 @@ pub(crate) fn record_return(
     // The sentinel rides the SAME ambiguity rule as a type (a leaf seen callable AND non-callable, or two
     // shapes, collapses to None → no claim) and is filtered out of var-typing in `ctor_type`. Over-
     // approximating toward fn-typed only ever marks the binding Unknown — the safe direction.
-    if is_callable_type(unwrap_result_option(ty), &generic_bounds_of(sig)) {
+    // R161: Pass A has no completed alias index (this walk is what builds it), so an alias-typed
+    // RETURN (`fn make() -> Alias`) still records no `RET_FN_TYPED` sentinel. Named as a residual; the
+    // PARAMETER positions, which is where R161 was measured, are answered from the merged index.
+    if is_callable_type(unwrap_result_option(ty), &generic_bounds_of(sig), &std::collections::HashSet::new()) {
         let leaf = sig.ident.to_string();
         match rets.get(&leaf) {
             None => { rets.insert(leaf, Some(RET_FN_TYPED.to_string())); }
@@ -1748,6 +1755,10 @@ pub(crate) fn collect_decls(
     local_macros: &mut HashMap<String, String>,
     blanket_methods: &mut HashMap<String, String>,
     callable_statics: &mut std::collections::HashSet<String>,
+    // R161 — `type NAME = <callable>` alias leaves. Collected in the SAME walk and the SAME arm as
+    // `prim_aliases` (a `BareFn` RHS is non-nominal, so it already passes through there) so the two
+    // questions about a `type` item cannot drift apart.
+    callable_aliases: &mut std::collections::HashSet<String>,
 ) {
     // R123: same one authority as `scan_items` — see `use_item_applies`.
     crate::lang::collect_item_uses(items, include_tests, uses);
@@ -2014,6 +2025,20 @@ pub(crate) fn collect_decls(
                 if is_non_nominal_type(&it.ty) {
                     prim_aliases.insert(it.ident.to_string());
                 }
+                // SOUNDNESS R161 — and, independently, whether the alias names a CALLABLE. The two
+                // questions overlap but neither implies the other: `type Inner = [u8; N]` is
+                // non-nominal and not callable; `type Cb = Box<dyn Fn()>` is NOMINAL and callable, so
+                // the `prim_aliases` arm above never sees it. Generic aliases are kept (unlike the
+                // `mod_aliases` recorder, which skips them because it must substitute a PATH): whether
+                // a `type Cb<T> = fn(T)` is invokable does not depend on the substitution.
+                //
+                // The empty `callable_aliases` argument is not an oversight: this is Pass A, the walk
+                // that BUILDS the set, and an alias whose RHS is itself another alias would need a
+                // completed index to resolve. Stated as the residual it is — a double alias
+                // (`type A = fn(); type B = A;`) still reads pure through `B`.
+                if crate::lang::is_callable_type(&it.ty, &HashMap::new(), &std::collections::HashSet::new()) {
+                    callable_aliases.insert(it.ident.to_string());
+                }
             }
             syn::Item::Trait(t) => {
                 let e = local_traits.entry(t.ident.to_string()).or_default();
@@ -2136,7 +2161,7 @@ pub(crate) fn collect_decls(
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods, callable_statics);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods, callable_statics, callable_aliases);
                 }
             }
             _ => {}

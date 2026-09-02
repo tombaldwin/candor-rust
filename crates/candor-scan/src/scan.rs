@@ -1364,7 +1364,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let trait_decls = &merged.trait_decls;
     let trait_fields = &merged.trait_fields;
     let traits = TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields };
-    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics };
+    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics, callable_aliases: &merged.callable_aliases };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;
@@ -1695,7 +1695,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // re-exported it (`pub use self::platform::*` makes `imp::platform::doit` nameable as `imp::doit`).
     // A FALLBACK, never a competitor: `reexport_target` consults it only where `by_tail2` holds nothing at
     // all for the call's tail, so no resolution that worked before can be displaced or made ambiguous.
-    let by_reexport = reexport_aliases(&merged.reexports, &fns);
+    let by_reexport = reexport_aliases(&merged.reexports, &fns, &merged.macro_modules);
 
     // Inverse of trait_impls (impl-TYPE leaf → the trait leaves it impls), for the trait-DEFAULT-method
     // caller fallback below: a call `t.m()` on a concrete type T that does NOT declare `m` but impls a
