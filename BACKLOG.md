@@ -2,6 +2,91 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+## 2026-09-02 (later) — R122 IS FIXED AND SHIPPED HERE. **R123's fix is WRITTEN, TESTED AND
+## MEASURED — AND IS HELD, because it trades one cardinal sin for another. Do not re-ship it blind.**
+
+### R122 — CLOSED. See the commit `scan: \`any(test, feature)\` is production code…` for the full A/B.
+
+R122 was fixed first exactly as planned, and the plan's premise held: the `curve25519-dalek`
+`Scalar::random` loss that sank the previous R123 prototype **was** caused by R122 and is gone. Same
+prototype, re-measured over the same 1489 crates on top of the R122 fix: **ADDED 0, REMOVED 10,
+CHANGED 39 in 6 crates**, against **ADDED 0, REMOVED 11, CHANGED 39 in 7 crates** before. One removal
+and one crate — curve25519-dalek — and that was the one the audit had flagged.
+
+### [P0] R123 — STILL OPEN, AND THE ONE-LINE FIX IS STILL UNSOUND, FOR A NEW AND FULLY IDENTIFIED REASON
+
+The sin is unchanged and reproduces on HEAD: two `use` lines differing only in ORDER decide whether a
+production call resolves through a TEST MOCK. Both arms compile and RUN (`ran=true`, a real spawned
+process). Now PINNED as executable tests —
+`r123_a_module_level_cfg_test_import_still_decides_by_source_order` and
+`r123_body_local_cfg_test_import_is_unfiltered_too` **assert the defect**, so it cannot go unmeasured
+and an accidental fix cannot go unnoticed. Both carry the standing instruction to delete them and
+re-run the A/B if they start failing.
+
+**THE BODY-LOCAL SITE IS NOW MEASURED (it never had been).** `LocalUseCollector` (decls.rs) and
+`CallCollector::visit_item_use` (collector.rs) both collect a `use` written inside a fn body, neither
+has an `include_tests` to filter on, and the same swap one scope lower is decided by order too —
+confirmed by fixture, with the opposite-order control proving the collector is reached. Prevalence:
+**20 sites in 12 of the 1489 registry crates** carry an indented `#[cfg(test)]`-gated `use`
+(aws-smithy-http-client, aws-config, bigdecimal, hashbrown ×2, ordered-float ×2, log ×4, scrypt).
+Fixing those two needs `include_tests` threaded through `fninfo` (5 call sites) and onto `CallCollector`,
+which has no such field at all.
+
+**WHY THE FIX IS HELD.** The full fix — one `use_item_applies` / `collect_item_uses` authority in
+lang.rs, applied at all five sites (`scan_items`, `collect_decls` and `collect_root_reexports` were the
+three unfiltered ones; `collect_root_reexports` needed an `include_tests` parameter it did not have),
+plus a cache rev14→rev15 bump because the cached `uses`/`root_reexports` would otherwise serve the
+removed resolution warm — closes the fixture ORDER-INDEPENDENTLY and passes 330 + 77 tests. It was
+revert-tested: with the filter disabled the module-scope test fails `left: [] right: ["Exec"]`.
+§E1 reach, counted in the changed branch: **310 `use` items dropped across 59 of the 1489 crates.**
+
+And then it loses `["Log","Unknown"]` on **35 rows of tokio 1.53.1's public async `fs` API**, and the
+scoped policy forms are the ones that show it:
+
+    deny Unknown fs::read::read          exit 1 -> 0
+    deny Unknown fs::symlink::symlink    exit 1 -> 0
+    pure fs::symlink::symlink            exit 1 -> 0     <- candor CERTIFIES tokio::fs::symlink pure
+    deny Unknown fs::asyncify            exit 1 -> 0
+    deny Fs fs::read::read               exit 1 -> 1     <- `Fs` is correctly retained throughout
+
+Whole-crate blanket `deny Unknown` / `deny Fs` stay exit 1 on all six moved crates, which is why this
+is invisible unless you ask the scoped form. `fs::asyncify`, `fs::symlink`, `fs::symlink_dir`,
+`fs::symlink_file`, `DirEntry::file_type` and `DirEntry::metadata` disappear from `functions[]`
+entirely.
+
+**THE RESIDUAL CAUSE IS ONE THING, AND IT IS PRE-EXISTING AND SEPARATE FROM R123.** tokio's
+`src/fs/mod.rs` has the textbook pair, mock last:
+
+    #[cfg(not(test))] use crate::blocking::spawn_blocking;
+    #[cfg(test)]      use mocks::spawn_blocking;
+
+Drop the mock and the production import wins — and `crate::blocking::spawn_blocking` is
+`pub(crate) use crate::runtime::spawn_blocking;` **inside a `cfg_rt!` MACRO BODY** in `src/blocking.rs`.
+The scanner does not expand crate-defined macros, so the name resolves to no unit, and **a `use` bound
+to a crate-local path that names nothing reads as PURE rather than as a disclosure.** That is its own
+cardinal sin, R123 merely unmasks it, and it has a four-line repro that needs no `cfg` at all:
+
+    mod hidden { macro_rules! reexp { () => { pub(crate) use crate::real::runner; } } reexp!(); }
+    pub mod real { pub fn runner<F: FnOnce() -> bool>(f: F) -> bool { f() } }
+    use crate::hidden::runner;
+    pub fn go<F: FnOnce() -> bool + Send + 'static>(f: F) -> bool { runner(f) }
+
+`real::runner` is reported `["Unknown"]` with `unknownWhy: ["callback:unresolved call"]`. **`go` is
+ABSENT** — it hands a caller-supplied closure to a target candor cannot see and says nothing. Measured
+on HEAD; nothing about `#[cfg]` is involved.
+
+**SO THE ORDER IS: fix the absent-`use`-target sin FIRST, then re-run the R123 A/B, then ship R123.**
+That is the same shape as "fix R122 before R123", and it was found the same way. Fixing it needs a
+measurement this entry does NOT have: how many rows gain `Unknown` when a call through a `use`-bound
+crate-local path that matches no unit is disclosed instead of dropped. That is the flood question, and
+it decides whether the fix is a rule or a narrow one.
+
+**Audited in full, the other 4 crates the R123 patch moves are clean:** `ordered-float` ×2 lose two
+`impl_rkyv::test_*` names (test fns, correct), `cap-primitives` loses `invisible: ["ambient_authority"]`
+on four `net::pool::test_*` (test fns), `similar` loses one `calls` edge on a `test_*`, and
+`hickory-resolver` GAINS `Clock` on five rows. Only tokio is the problem, and only through the one
+mechanism above.
+
 ## 2026-09-02 — TWO PRE-EXISTING, PUBLISHED CARDINAL SINS in candor-scan's `#[cfg(test)]` handling —
 ## MEASURED here, filed not fixed, and the obvious fix for the first is PROVEN UNSOUND
 
