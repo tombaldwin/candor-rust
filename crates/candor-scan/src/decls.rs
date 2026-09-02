@@ -256,35 +256,210 @@ pub(crate) fn declared_item_name(it: &syn::Item, include_tests: bool) -> Option<
 /// effectful body-local `make` still charges its caller.
 ///
 /// What this DOES cost is precision, in the under-report direction: a body that declares `struct write`
-/// and elsewhere calls a genuinely-imported `write` loses the import. Bounded deliberately — the walk
-/// stops at a nested `fn`/`impl`/`mod`, exactly where `LocalUseCollector`'s does, because those are
-/// separate scopes whose declarations do not shadow anything out here.
-fn body_declared_items(block: &syn::Block) -> std::collections::HashSet<String> {
-    struct C {
-        out: std::collections::HashSet<String>,
+/// and elsewhere calls a genuinely-imported `write` loses the import.
+///
+/// R119 — **THE SHADOW IS PER BLOCK, NOT PER FUNCTION, AND THE FIRST CUT FLATTENED IT.** The original
+/// collector walked the whole body with `visit_block`, so an item declared in a NESTED block rebound its
+/// name for the ENTIRE function. Measured on a fixture whose two arms differ only in the nested item's
+/// NAME, ground truth EXECUTED (both spawn `/usr/bin/true`):
+///
+///     use std::process::Command as Cmd;
+///     pub fn spawn_it(p: &str) -> bool {
+///         let ok = Cmd::new(p).status().map(|s| s.success()).unwrap_or(false);
+///         let _n = { struct Cmd { n: u32 } Cmd { n: 1 }.n };   // a SEPARATE scope
+///         ok
+///     }
+///
+///     spawn_it  -> ABSENT from functions[]      spawn_ctl (nested item named `Helper`) -> ["Exec"]
+///
+/// A silent under-report on a path that provably runs a process — the cardinal sin, in the direction the
+/// sentinel was chosen to avoid. **FIFTEEN block-introducing constructs reach it**, all measured against a
+/// pre-fix binary on one crate: a plain `{ }`, an `if` block, an `else` block, a `match` arm, `if let`,
+/// `while let`, `loop`, `for`, `while`, a closure body, an `async` block, an `unsafe` block, a `const`
+/// item's initializer, a `static` item's initializer, and a labelled `'a: { }`. The three positions that
+/// were already safe — a nested `fn` body, an `impl` block, an inline `mod` — stayed safe.
+///
+/// THE RULE NOW. A name declared DIRECTLY in the body's own statement list shadows the whole body (Rust's
+/// rule: an item is visible throughout its enclosing block, before its own declaration included). A name
+/// declared in a nested block shadows only that block — and this map is FUNCTION-WIDE, so it cannot
+/// express that. Rather than approximate in the sin's direction, the nested name is promoted to the
+/// function-wide set only when doing so is INDISTINGUISHABLE from block scoping: when every occurrence of
+/// that identifier anywhere in the body already lies inside the one block that declares it. Otherwise the
+/// shadow is dropped, which restores the pre-R106 answer for that name — a possible FABRICATION inside the
+/// nested block, never a lost effect. That is the deliberate direction: over-report, not silence.
+///
+/// INSTRUMENTED, because an unchanged row is not evidence the new code ran. Under `CANDOR_ALIAS_DEBUG`
+/// (scan.rs's R105 switch) every name whose treatment DIFFERS from the flattened collector is printed:
+/// `BODYSCOPE-DROP` for a nested name no longer promoted (the sin this closes) and `BODYSCOPE-ADD` for one
+/// now reached inside a nested `fn`/`impl`/`mod`, which the old walk stopped at. Both are the A/B's
+/// hit counter; `BODYSHADOW` above still counts shadows that actually took a binding away.
+fn body_declared_items(qual: &str, block: &syn::Block) -> std::collections::HashSet<String> {
+    let dbg = std::env::var("CANDOR_ALIAS_DEBUG").is_ok();
+    // `include_tests: false` throughout — a `#[cfg(test)]` item inside a body is not compiled into the
+    // build this report describes, so it shadows nothing in it. Under `--include-tests` that makes this
+    // UNDER-shadow, i.e. exactly the pre-R106 behaviour for that one case, which is the safe way to be
+    // wrong here (stated, not assumed away).
+    fn direct(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
+        stmts
+            .iter()
+            .filter_map(|s| match s {
+                syn::Stmt::Item(it) => crate::decls::declared_item_name(it, false),
+                _ => None,
+            })
+            .collect()
     }
-    impl<'ast> Visit<'ast> for C {
-        fn visit_item(&mut self, it: &'ast syn::Item) {
-            // `include_tests: false` — a `#[cfg(test)]` item inside a body is not compiled into the
-            // build this report describes, so it shadows nothing in it. Under `--include-tests` that
-            // makes this UNDER-shadow, i.e. exactly the pre-R106 behaviour for that one case, which is
-            // the safe way to be wrong here (stated, not assumed away).
-            if let Some(n) = crate::decls::declared_item_name(it, false) {
-                self.out.insert(n);
+    // The body's OWN statement list — an unconditional shadow (`impl` yields no name; a nested
+    // `fn`/`mod` yields its own name and nothing from inside it, which is what `declared_item_name` does).
+    let mut out = direct(&block.stmts);
+
+    // Every STRICTLY-nested block that declares an item of its own, paired with what it declares and with
+    // whether it sits under a nested `fn`/`impl`/`mod` (a scope the FLATTENED collector stopped at — kept
+    // only so the A/B can label its hits). The root is not pushed because the walk starts at
+    // `syn::visit::visit_block` (the free fn), which descends into the root's statements without
+    // re-entering the override for the root itself.
+    struct Nested<'ast> {
+        out: Vec<(&'ast syn::Block, std::collections::HashSet<String>, bool)>,
+        under_item: bool,
+    }
+    impl<'ast> Nested<'ast> {
+        fn in_item(&mut self, f: impl FnOnce(&mut Self)) {
+            let prev = std::mem::replace(&mut self.under_item, true);
+            f(self);
+            self.under_item = prev;
+        }
+    }
+    impl<'ast> Visit<'ast> for Nested<'ast> {
+        fn visit_block(&mut self, b: &'ast syn::Block) {
+            let d = direct(&b.stmts);
+            if !d.is_empty() {
+                self.out.push((b, d, self.under_item));
             }
-            syn::visit::visit_item(self, it);
+            syn::visit::visit_block(self, b);
         }
         fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-            self.out.insert(f.sig.ident.to_string()); // the nested fn's own NAME shadows out here…
+            self.in_item(|s| syn::visit::visit_item_fn(s, f));
         }
-        fn visit_item_impl(&mut self, _: &'ast syn::ItemImpl) {}
+        fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+            self.in_item(|s| syn::visit::visit_item_impl(s, i));
+        }
         fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
-            self.out.insert(m.ident.to_string());
+            self.in_item(|s| syn::visit::visit_item_mod(s, m));
         }
     }
-    let mut c = C { out: std::collections::HashSet::new() };
+    let mut n = Nested { out: Vec::new(), under_item: false };
+    syn::visit::visit_block(&mut n, block);
+    if n.out.is_empty() {
+        return out;
+    }
+    let direct_only = out.clone();
+
+    // A name declared by TWO nested scopes gets no promotion. NOT because that is unsound to check — if
+    // one declaring block CONTAINS the other, every occurrence really can lie inside the outer one, and
+    // this drops a shadow it could have kept. It is a deliberate simplification, and it is the cheap
+    // direction to be wrong in: no promotion means the file's binding stays in scope, which is the
+    // pre-R106 answer — an over-report inside those blocks, never a lost effect. `time` 0.3.55's
+    // `macro_rules! item` in both arms of one if/else is the real-world instance (see the A/B in the
+    // commit message); it costs one `invisible` disclosure and no effect.
+    let mut cand: HashMap<String, Option<usize>> = HashMap::new();
+    for (i, (_, names, _)) in n.out.iter().enumerate() {
+        for name in names {
+            if out.contains(name) {
+                continue; // already shadowed body-wide by the body's own statement list
+            }
+            cand.entry(name.clone()).and_modify(|v| *v = None).or_insert(Some(i));
+        }
+    }
+    for (name, who) in cand {
+        let Some(i) = who else { continue };
+        if count_ident(block, &name) == count_ident(n.out[i].0, &name) {
+            out.insert(name);
+        }
+    }
+
+    if dbg {
+        // What the FLATTENED collector would have produced: the body's own items plus everything declared
+        // in a nested block it did not stop at. Printing the symmetric difference makes both directions of
+        // this change countable per crate, which is what the A/B's hits column needs.
+        let mut old = direct_only;
+        for (_, names, under_item) in &n.out {
+            if !under_item {
+                old.extend(names.iter().cloned());
+            }
+        }
+        for name in old.difference(&out) {
+            eprintln!("BODYSCOPE-DROP {qual} :: {name}");
+        }
+        for name in out.difference(&old) {
+            eprintln!("BODYSCOPE-ADD {qual} :: {name}");
+        }
+    }
+    out
+}
+
+/// Does the signature's PARAMETER LIST, RETURN TYPE or GENERICS mention `name`? The function's own ident
+/// is deliberately not looked at — it is not a type position. Debug instrumentation only (`BODYSIG`).
+fn sig_mentions(sig: &syn::Signature, name: &str) -> bool {
+    struct C<'a> {
+        name: &'a str,
+        hit: bool,
+    }
+    impl<'ast, 'a> Visit<'ast> for C<'a> {
+        fn visit_ident(&mut self, i: &'ast proc_macro2::Ident) {
+            self.hit |= i == self.name;
+        }
+    }
+    let mut c = C { name, hit: false };
+    c.visit_generics(&sig.generics);
+    for a in &sig.inputs {
+        c.visit_fn_arg(a);
+    }
+    c.visit_return_type(&sig.output);
+    c.hit
+}
+
+/// How many times the identifier `name` occurs anywhere in `block`, INCLUDING inside macro token streams
+/// and attribute token lists, which syn's `Visit` does not otherwise descend into.
+///
+/// UNDERCOUNTING IS THE DANGEROUS DIRECTION and that is why the token streams are counted. This is used
+/// only to answer "does this name occur outside the block that declares it"; an undercount of the outer
+/// total is what would wrongly license a function-wide shadow, so every position an identifier can occupy
+/// has to be reached. An OVERCOUNT merely drops a shadow, which costs precision, never soundness.
+fn count_ident(block: &syn::Block, name: &str) -> usize {
+    fn in_tokens(ts: &proc_macro2::TokenStream, name: &str, n: &mut usize) {
+        for t in ts.clone() {
+            match t {
+                proc_macro2::TokenTree::Ident(i) => {
+                    if i == name {
+                        *n += 1;
+                    }
+                }
+                proc_macro2::TokenTree::Group(g) => in_tokens(&g.stream(), name, n),
+                _ => {}
+            }
+        }
+    }
+    struct C<'a> {
+        name: &'a str,
+        n: usize,
+    }
+    impl<'ast, 'a> Visit<'ast> for C<'a> {
+        fn visit_ident(&mut self, i: &'ast proc_macro2::Ident) {
+            if i == self.name {
+                self.n += 1;
+            }
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            syn::visit::visit_macro(self, m);
+            in_tokens(&m.tokens, self.name, &mut self.n);
+        }
+        fn visit_meta_list(&mut self, m: &'ast syn::MetaList) {
+            syn::visit::visit_meta_list(self, m);
+            in_tokens(&m.tokens, self.name, &mut self.n);
+        }
+    }
+    let mut c = C { name, n: 0 };
     c.visit_block(block);
-    c.out
+    c.n
 }
 
 // ── SUBMODULE-LEVEL RE-EXPORTS ────────────────────────────────────────────────────────────────────
@@ -1082,7 +1257,35 @@ pub(crate) fn fninfo(
     // an item shadows whatever the file imported under it (`body_shadowed_uses`' doc has the measured
     // fabrication). Applied in the same place and the same way as the additive half, so a body's `use`
     // and a body's `struct` are answered by one map rather than by one map and an omission.
-    let shadowed = body_declared_items(block);
+    let shadowed = body_declared_items(qual, block);
+    // R119 — THE SIGNATURE IS NOT IN THE BODY'S SCOPE, and the first cut of R106 shadowed it too. A
+    // parameter's type resolves where the function is DECLARED, so a body-local item cannot rebind it:
+    //
+    //     pub fn f(c: &mut Cmd) -> bool { struct Cmd { n: u32 } … c.status()… }   // legal Rust
+    //
+    // is a genuine `Cmd = std::process::Command` receiver. With one map for both, `seed_vars` typed `c`
+    // as the sentinel and the row vanished — EXECUTED ground truth is a spawned process, and the control
+    // that differs only in the body item's NAME reported `["Exec"]`. So the sig keeps the OUTER map.
+    // Body-level `use`s stay merged into it: that is the pre-existing additive over-approximation, which
+    // can attribute a name to its origin but never take one away.
+    if !shadowed.is_empty() && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+        // The A/B's hit counter for THIS half: a shadowed name that the signature also mentions is
+        // exactly where the two maps now answer differently.
+        for n in &shadowed {
+            if sig_mentions(sig, n) {
+                eprintln!("BODYSIG {qual} :: {n}");
+            }
+        }
+    }
+    let sig_merged: HashMap<String, String>;
+    let sig_uses: &HashMap<String, String> = if local_uses.is_empty() {
+        uses
+    } else {
+        let mut m = uses.clone();
+        m.extend(local_uses.clone());
+        sig_merged = m;
+        &sig_merged
+    };
     let merged: HashMap<String, String>;
     let uses: &HashMap<String, String> = if local_uses.is_empty() && shadowed.is_empty() {
         uses
@@ -1109,7 +1312,7 @@ pub(crate) fn fninfo(
     // the CHA route with a meaningless receiver type.
     let trait_vars = seed_trait_vars(sig);
     let fn_typed_vars = seed_fn_typed_vars(sig);
-    let mut vars = seed_vars(sig, self_ty, uses);
+    let mut vars = seed_vars(sig, self_ty, sig_uses);
     for k in trait_vars.keys() {
         vars.remove(k);
     }
@@ -1121,7 +1324,7 @@ pub(crate) fn fninfo(
     }
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
-    let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, uses);
+    let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses);
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields);
     let mut c = CallCollector {
         modpath: modpath.to_string(),

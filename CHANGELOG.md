@@ -38,6 +38,25 @@ after upgrading; review policies and regenerate baselines with the new build.
   cross-FILE half is fixed too — `#[cfg]`-conditional `#[path]` puts two files at one module path, which
   the merge previously called impossible. Measured cost on 256 crates: 89 collision call-sites in 5
   crates, **zero** became `Unknown` and zero gained an effect.
+- **⚠ SOUNDNESS R119 (cardinal sin, introduced by R106 and never released): a body-local item's shadow is
+  now scoped to the BLOCK that declares it, and does not reach the SIGNATURE.** R106's collector walked
+  the whole function body, so an item declared in a nested block rebound that name for the entire
+  function. On a fixture whose two arms differ only in the nested item's NAME — executed ground truth,
+  both spawn `/usr/bin/true` — the `struct Cmd` arm went ABSENT from `functions[]` while the `struct
+  Helper` control reported `["Exec"]`. On an isolated single-function crate that silence passed `deny
+  Exec`, `deny Exec Unknown`, scoped `deny Exec spawn_it` and `pure spawn_it`, all at exit 0. FIFTEEN
+  block-introducing constructs reached it, each measured against a pre-fix binary: a plain `{ }`, `if`,
+  `else`, a `match` arm, `if let`, `while let`, `loop`, `for`, `while`, a closure body, an `async` block,
+  an `unsafe` block, a `const` initializer, a `static` initializer and a labelled `'a: { }`. A SIXTEENTH
+  position is not a nested block at all: a parameter's type resolves where the function is DECLARED, so
+  `fn f(c: &mut Cmd) { struct Cmd { .. } .. c.status() .. }` lost its receiver typing and vanished too —
+  the signature now keeps the outer map. A nested name is promoted to the function-wide shadow only when
+  every occurrence of it in the body already lies inside the one block that declares it; otherwise the
+  shadow is dropped, restoring the pre-R106 answer for that name — a possible over-report inside that
+  block, never a lost effect. Measured over all 1489 registry crates, 252,396 common rows, 15 fields:
+  ADDED 0, REMOVED 0, CHANGED 1 (`time` 0.3.55 regains an `invisible: ["serde_core"]` disclosure that
+  `origin/main` also reports). Hits on the changed branch: 89 dropped shadows in 46 crates, 99 names
+  newly reached in 44, 11 signature-position names in 6.
 - **SOUNDNESS R106: a body-local item now shadows a file-level binding of the same name.** `pub type Cmd
   = std::process::Command;` beside a function body declaring its own `struct Cmd` charged that body
   `Exec` with `cmds: ["true"]` — executed ground truth is one file write and no process — and `deny Exec`

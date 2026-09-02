@@ -12422,6 +12422,148 @@ pub fn go() {{ imp::doit(); }}
         );
     }
 
+    /// R119 (CARDINAL SIN, introduced by R106's own fix) — A NESTED BLOCK'S ITEM MUST NOT SHADOW THE
+    /// WHOLE FUNCTION.
+    ///
+    /// `body_declared_items` walked the entire body with `visit_block`, so an item declared in a nested
+    /// block rebound its name to the sentinel for every statement of the function, not just that block's.
+    /// EXECUTED ground truth (compiled and run, prints `spawned=true`): each arm below spawns
+    /// `/usr/bin/true`, and each went ABSENT from `functions[]` — a silent under-report, with `deny Exec`
+    /// dropping from exit 1 to exit 0 on a single-function crate.
+    ///
+    /// THE ARMS ARE THE AUDIT, NOT THE TRIGGER. The reported instance was a plain `{ }`; every construct
+    /// below introduces a block scope by a different syntactic route and all fifteen were measured silent
+    /// against a pre-fix binary. The three positions that were ALREADY correct — a nested `fn` body, an
+    /// `impl` block, an inline `mod` — are the last three arms, so this test also pins the boundary rather
+    /// than assuming it.
+    #[test]
+    fn r109_a_nested_block_item_does_not_shadow_the_whole_body() {
+        // Each snippet declares `struct Cmd` inside a scope of its own. The `Cmd::new(p).status()` that
+        // decides the row sits OUTSIDE that scope, so the only correct answer is `Exec`.
+        for (tag, snippet) in [
+            ("plain-block", "let _n = { struct Cmd { n: u32 } Cmd { n: 1 }.n };"),
+            ("if", "if ok { struct Cmd { n: u32 } let _ = Cmd { n: 1 }.n; }"),
+            ("else", "if !ok { let _ = 0; } else { struct Cmd { n: u32 } let _ = Cmd { n: 1 }.n; }"),
+            ("match-arm", "match ok { true => { struct Cmd { n: u32 } let _ = Cmd { n: 1 }.n; }, false => {} }"),
+            ("if-let", "if let Some(_x) = Some(1u32) { struct Cmd { n: u32 } let _ = Cmd { n: 1 }.n; }"),
+            ("while-let", "let mut it = vec![1u32].into_iter();\n\
+                           while let Some(_x) = it.next() { struct Cmd { n: u32 } let _ = Cmd { n: 1 }.n; }"),
+            ("loop", "loop { struct Cmd { n: u32 } let _ = Cmd { n: 1 }.n; break; }"),
+            ("for", "for _i in 0..1u32 { struct Cmd { n: u32 } let _ = Cmd { n: 1 }.n; }"),
+            ("while", "let mut k = 0u32;\n\
+                       while k < 1 { struct Cmd { n: u32 } let _ = Cmd { n: 1 }.n; k += 1; }"),
+            ("closure", "let f = || { struct Cmd { n: u32 } Cmd { n: 1 }.n }; let _ = f();"),
+            ("async-block", "let _fut = async { struct Cmd { n: u32 } Cmd { n: 1 }.n };"),
+            ("unsafe-block", "let _n = unsafe { struct Cmd { n: u32 } Cmd { n: 1 }.n };"),
+            ("const-init", "const K: u32 = { struct Cmd { n: u32 } Cmd { n: 1 }.n }; let _ = K;"),
+            ("static-init", "static S: u32 = { struct Cmd { n: u32 } Cmd { n: 1 }.n }; let _ = S;"),
+            ("labelled-block", "let _n = 'lbl: { struct Cmd { n: u32 } break 'lbl Cmd { n: 1 }.n; };"),
+            // The three that were already right — kept here so the boundary is pinned, not assumed.
+            ("nested-fn", "fn inner() -> u32 { struct Cmd { n: u32 } Cmd { n: 1 }.n } let _ = inner();"),
+            ("impl-block", "struct Q; impl Q { fn m() -> u32 { struct Cmd { n: u32 } Cmd { n: 1 }.n } } let _ = Q::m();"),
+            ("inline-mod", "mod m { pub fn g() -> u32 { struct Cmd { n: u32 } Cmd { n: 1 }.n } } let _ = m::g();"),
+        ] {
+            let v = scan_src_to_json("r109nested", &format!(
+                "use std::process::Command as Cmd;\n\
+                 pub fn spawn_it(p: &str) -> bool {{\n\
+                   let ok = Cmd::new(p).status().map(|s| s.success()).unwrap_or(false);\n\
+                   {snippet}\n\
+                   ok\n\
+                 }}\n"
+            ));
+            assert_eq!(
+                effs_opt(&v, "spawn_it"), vec!["Exec".to_string()],
+                "R119 ({tag}): the `struct Cmd` is declared in a SEPARATE scope, so the body's own \
+                 `Cmd::new(p).status()` is `std::process::Command` and provably runs a process. An empty \
+                 answer here is a silent under-report, not a pure function:\n{v:#}"
+            );
+        }
+    }
+
+    /// R119 — THE SIGNATURE IS NOT IN THE BODY'S SCOPE. A second position the flattened shadow reached,
+    /// and it is not a nested-block instance: a body-level item legitimately shadows for the whole body,
+    /// but a PARAMETER's type resolves where the function is declared. R106 applied the sentinel to one
+    /// map used for both, so `seed_vars` typed the receiver as `<body-item>Cmd` and the row vanished.
+    ///
+    /// EXECUTED ground truth: `sig_param` spawns `/usr/bin/true`. The control differs in exactly one
+    /// thing — the body item's NAME — and reported `["Exec"]` throughout.
+    #[test]
+    fn r109_a_body_item_does_not_shadow_the_signature() {
+        let v = scan_src_to_json("r109sig", concat!(
+            "use std::process::Command as Cmd;\n",
+            "pub fn sig_param(c: &mut Cmd) -> bool {\n",
+            "  struct Cmd { n: u32 }\n",
+            "  let _ = Cmd { n: 1 }.n;\n",
+            "  c.status().map(|s| s.success()).unwrap_or(false)\n",
+            "}\n",
+            "pub fn sig_ctl(c: &mut Cmd) -> bool {\n",
+            "  struct Helper { n: u32 }\n",
+            "  let _ = Helper { n: 1 }.n;\n",
+            "  c.status().map(|s| s.success()).unwrap_or(false)\n",
+            "}\n",
+        ));
+        assert_eq!(
+            effs_opt(&v, "sig_param"), vec!["Exec".to_string()],
+            "R119: `c: &mut Cmd` names the file's import — a body-local `struct Cmd` cannot rebind a \
+             parameter's type, and `c.status()` provably runs a process:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "sig_ctl"), vec!["Exec".to_string()],
+            "R119 CONTROL: the same function with the body item RENAMED — the two arms differ in nothing \
+             else, so a difference between them is the shadow and nothing else:\n{v:#}"
+        );
+    }
+
+    /// R119 CONTROL — THE R106 PRECISION GAIN MUST SURVIVE THE SCOPING. Where a nested block declares a
+    /// name and is the ONLY place in the function that mentions it, function-wide shadowing and true block
+    /// scoping are indistinguishable, so the shadow is still applied. EXECUTED ground truth: `nested_only`
+    /// returns 7 and runs no process — pre-R106 this fabricated `Exec`.
+    ///
+    /// SECOND ARM: THE STATED RESIDUAL, PINNED. With the SAME name declared by two SIBLING blocks, no
+    /// single block contains every occurrence, so no promotion happens and the import stays in scope —
+    /// `two_blocks` keeps the pre-R106 FABRICATION. (The rule declines to promote for ANY two declaring
+    /// blocks, including a nested pair where promotion would in fact have been exact; that is a
+    /// deliberate simplification, and it errs by over-reporting.) Asserted here so that "improving" it
+    /// into an empty answer fails loudly rather than quietly.
+    #[test]
+    fn r109_a_nested_item_used_only_in_its_own_block_still_shadows() {
+        let v = scan_src_to_json("r109prec", concat!(
+            "use std::process::Command as Cmd;\n",
+            "pub fn nested_only() -> u32 {\n",
+            "  let n = {\n",
+            "    struct Cmd { n: u32 }\n",
+            "    impl Cmd { fn new(_: &str) -> Self { Cmd { n: 7 } } fn status(&self) -> u32 { self.n } }\n",
+            "    Cmd::new(\"/usr/bin/true\").status()\n",
+            "  };\n",
+            "  n\n",
+            "}\n",
+            "pub fn two_blocks() -> u32 {\n",
+            "  let a = {\n",
+            "    struct Cmd { n: u32 }\n",
+            "    impl Cmd { fn new(_: &str) -> Self { Cmd { n: 1 } } fn status(&self) -> u32 { self.n } }\n",
+            "    Cmd::new(\"/usr/bin/true\").status()\n",
+            "  };\n",
+            "  let b = {\n",
+            "    struct Cmd { n: u32 }\n",
+            "    impl Cmd { fn new(_: &str) -> Self { Cmd { n: 2 } } fn status(&self) -> u32 { self.n } }\n",
+            "    Cmd::new(\"/usr/bin/true\").status()\n",
+            "  };\n",
+            "  a + b\n",
+            "}\n",
+        ));
+        assert!(
+            effs_opt(&v, "nested_only").is_empty(),
+            "R119 CONTROL: every mention of `Cmd` in this body is inside the block that declares it, so \
+             the shadow is exact — `Exec` here is R106's fabrication on a path that runs nothing:\n{v:#}"
+        );
+        assert_eq!(
+            effs_opt(&v, "two_blocks"), vec!["Exec".to_string()],
+            "R119 RESIDUAL: two sibling blocks declare the name, so no function-wide promotion is sound \
+             and the import is left in scope. This is a known OVER-report on a pure path — pinned so the \
+             cheap 'fix' of shadowing anyway, which is the cardinal-sin direction, cannot land quietly:\n{v:#}"
+        );
+    }
+
     /// R107 — the SELF-SHADOWING TUPLE DESTRUCTURE, the read that escaped the R100 window.
     ///
     /// `tuple_elem_leaves` reads the source element's dispatch typing, and the binding loop above it has
