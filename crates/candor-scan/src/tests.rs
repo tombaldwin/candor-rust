@@ -14066,3 +14066,48 @@ pub fn go() {{ imp::doit(); }}
         }
     }
 
+    /// R168, the trigger. A by-value `Drop` parameter whose LEAF also escapes through a freshly built
+    /// return value. `escaping_ctor_leaves` is keyed on the type leaf, so the RETURN's escape suppressed
+    /// the PARAMETER's drop — two different values, one key. UNDER-REPORT direction; executed ground
+    /// truth counts one `G::drop` inside each of these frames.
+    #[test]
+    fn a_by_value_drop_parameter_is_charged_even_when_its_leaf_escapes_through_the_return() {
+        let v = scan_src_to_json("r168own", "\
+            pub struct G { pub n: u32 }\n\
+            impl Drop for G { fn drop(&mut self) { let _ = std::fs::read_to_string(\"/etc/hosts\"); } }\n\
+            impl G {\n\
+                pub fn mk() -> G { G { n: 0 } }\n\
+                pub fn via_self(self) -> G { let _k = self.n; Self::mk() }\n\
+                pub fn via_type(self) -> G { let _k = self.n; G::mk() }\n\
+                pub fn consume_only(self) -> u32 { let k = self.n; k + 1 }\n\
+            }\n");
+        let plain = effs(fn_entry(&v, "G::consume_only"));
+        assert_eq!(plain, vec!["Fs".to_string()],
+                   "the no-escape control has always been charged — it is what proves the \
+                    parameter-owned route itself works");
+        for n in ["G::via_self", "G::via_type"] {
+            assert_eq!(effs(fn_entry(&v, n)), plain,
+                       "`{n}` consumes `self` and really drops it; a DIFFERENT `G` escaping through the \
+                        return must not answer for it");
+        }
+    }
+
+    /// R168 CONTROL — the OVER-CHARGE direction. The parameter route's own escape gate is value-keyed
+    /// and is the one that must still refuse: `self` returned, and `self` forgotten. Passes in BOTH arms.
+    #[test]
+    fn a_by_value_drop_parameter_that_escapes_or_is_forgotten_stays_uncharged() {
+        let v = scan_src_to_json("r168ctl", "\
+            pub struct G { pub n: u32 }\n\
+            impl Drop for G { fn drop(&mut self) { let _ = std::fs::read_to_string(\"/etc/hosts\"); } }\n\
+            impl G {\n\
+                pub fn mk() -> G { G { n: 0 } }\n\
+                pub fn forgets(self) -> G { std::mem::forget(self); G::mk() }\n\
+                pub fn returns_self(self) -> G { self }\n\
+            }\n");
+        for n in ["G::forgets", "G::returns_self"] {
+            assert!(row_absent(&v, n),
+                    "`{n}` does not run `G::drop` in its own frame (executed: 0 drops) — charging it \
+                     fabricates:\n{v:#}");
+        }
+    }
+
