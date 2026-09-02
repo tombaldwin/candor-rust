@@ -9,6 +9,31 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R128 (cardinal sin, PRE-EXISTING and PUBLISHED): a call into a module whose items are
+  hidden behind an unexpanded MACRO no longer reads PURE.** `collect_decls` skips item-position macro
+  invocations, so a `pub fn` or a `pub(crate) use` declared by `cfg_rt! { .. }` / `foo!();` /
+  `include!("gen.rs")` contributes no unit and no re-export edge — and the caller matched nothing
+  anywhere and fell out of the resolver silently. Three shapes, each COMPILED AND RUN spawning a real
+  process, each leaving the caller ABSENT from `functions[]` before this: a macro body holding a
+  `pub(crate) use` re-export (tokio's `cfg_rt! { pub(crate) use crate::runtime::spawn_blocking; }`,
+  async-std's `cfg_default! { pub use spawn_blocking::spawn_blocking; }`), a macro body declaring the
+  `pub fn` itself, and an item-position `include!`. The second is the worst: the TARGET has no report
+  row either, so even blanket `deny Exec` exited 0. Such a call now discloses `Unknown` with
+  `unknownWhy: ["ambiguous:module items hidden by an unexpanded macro"]` (§4's existing fifth kind —
+  the analyser's own name resolution failed; no new kind is invented here, which would need a SPEC
+  clause and a conformance PART first). Real recall gained, ground-truthed from source: nix's
+  `fcntl::open` (inside `feature! { .. }`), find-msvc-tools' whole `windows_sys` FFI surface
+  (`windows_link::link!` — `RegOpenKeyExW`, `LoadLibraryA`, `CoCreateInstance`), reqwest's
+  `into_url::try_uri` (inside `if_hyper! { .. }`), tiff's `bytecast` and moxcms' SIMD conversions.
+  **The hedge is charged on EVIDENCE, never on a name heuristic**: the owning module must be one whose
+  item list demonstrably could not be read. Measured over a 1489-crate registry corpus, the general
+  "any unresolved crate-rooted call → Unknown" rule hits **66,196 sites in 741 of 1489 crates**; this
+  one reaches **325 sites in 44 crates**. A/B keyed on EVERY field: **ADDED 193, REMOVED 0, and no
+  surviving row lost a value in any field** — purely additive. Blanket `deny Unknown` over all 44
+  affected crates: **0 verdicts flipped**. Residual over-charge, measured and stated rather than
+  claimed away: ~34 of the 325 hits construct a macro-declared TYPE, which is pure. Cache schema
+  rev14 → rev15.
+
 - **⚠ SOUNDNESS R122 (cardinal sin, PRE-EXISTING and PUBLISHED — reproduces on `origin/main` `3cf055d`):
   a production function under `#[cfg(any(test, feature = "x"))]` is no longer erased from the report.**
   `is_cfg_test` recursed into `any` and `all` alike, and `cfg_meta_requires_test`'s own doc claimed the

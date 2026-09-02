@@ -3586,6 +3586,43 @@ pub(crate) fn resolve_target<'a>(
     }
 }
 
+/// SOUNDNESS R128 — is this call path's OWNING MODULE one whose items candor could not read in full?
+///
+/// `path` is the RESOLVED callee path as `expand` left it, and a surviving `crate::` head means one
+/// specific thing: the path came from a `use` MAP VALUE (`use crate::blocking::spawn_blocking;` stores
+/// `spawn_blocking -> crate::blocking::spawn_blocking`). That is exactly R128's shape, and it is tokio's.
+///
+/// WHICH SPELLINGS THIS THEREFORE DOES NOT ANSWER — measured, not assumed. `expand` STRIPS a written
+/// `crate::`/`self::`/`super::` prefix and returns the remainder (`lang.rs`, the crate-rooted branch's
+/// `segs.join("::")`), so an explicitly-written `crate::m::f()` arrives here as `m::f` — BYTE-IDENTICAL
+/// to a bare external-crate call `m::f()`. Hedging on that shape would charge every call into a
+/// dependency whose name collides with a local macro-bearing module, which is a fabrication and worse
+/// than the miss. Restoring the distinction needs the collector to FLAG crate-locality where the written
+/// path is still in hand; that is a separate change with its own A/B, so the explicitly-rooted spelling
+/// (and the genuinely relative `self::`/`super::` one, which is not crate-absolute at all) is a STATED
+/// UNDER-REPORT here rather than a gap nobody wrote down.
+///
+/// `drop` says how many trailing segments name the ITEM rather than the module: 1 for a free fn
+/// (`crate::blocking::spawn_blocking` → module `blocking`), 2 for an associated fn (`crate::a::T::new`
+/// → module `a`). Only `drop = 1` is used by the resolver — see the boundary note at its call site.
+pub(crate) fn macro_hidden_owner(
+    path: &str,
+    drop: usize,
+    macro_modules: &std::collections::HashSet<String>,
+) -> bool {
+    let mut segs: Vec<&str> = path.split("::").collect();
+    if segs.first() != Some(&"crate") {
+        return false;
+    }
+    segs.remove(0);
+    if segs.len() < drop {
+        return false;
+    }
+    segs.truncate(segs.len() - drop);
+    // An EMPTY remainder is the crate ROOT (`crate::helper` with drop=1), whose module qual is "".
+    macro_modules.contains(&segs.join("::"))
+}
+
 /// Above how many definitions one re-exported NAME may stand for before the alias is dropped. A name
 /// with several targets is normal and correct — a `#[cfg]`-redirected platform module contributes one
 /// definition per target — but only up to a point: past it the edge is not a platform split, it is

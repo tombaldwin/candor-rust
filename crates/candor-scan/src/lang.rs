@@ -1796,6 +1796,55 @@ pub(crate) fn collect_root_reexports(items: &[syn::Item]) -> HashMap<String, Str
     m
 }
 
+/// SOUNDNESS R128 — the MODULES whose item list this scan could not read in full, because an
+/// item-position MACRO INVOCATION sits in it and `syn` leaves a macro body opaque.
+///
+/// A macro at item position can declare anything: a `pub fn`, a `pub(crate) use` re-export, a whole
+/// `impl`. `collect_decls` deliberately skips those (see its `Item::Macro` arm — only a `macro_rules!`
+/// DEFINITION, which carries an `ident`, is recorded), so the module's `by_tail2`/re-export entries are
+/// INCOMPLETE and candor cannot tell "this module has no such name" from "the macro declared it".
+/// Recording which modules are in that state is what lets the call resolver DISCLOSE the difference
+/// instead of reading the absence as purity — see the R128 hedge in `scan.rs`.
+///
+/// The three shapes measured, each compiled and RUN spawning a real process, each of which left the
+/// CALLER absent from `functions[]` before this existed:
+///   * `mod m { macro_rules! r { () => { pub(crate) use crate::real::f; } } r!(); }` — tokio's own
+///     `cfg_rt! { pub(crate) use crate::runtime::spawn_blocking; }` in `src/blocking.rs`.
+///   * `mod m { defit!(); }` where the macro declares the `pub fn` itself — the worst of the three: the
+///     TARGET has no report row either, so blanket `deny Exec` also exits 0.
+///   * `mod m { include!("gen.rs"); }` — the `include!`/`OUT_DIR` build-script convention. An
+///     `Item::Macro` like any other, so it needs no separate rule.
+///
+/// A `macro_rules!` DEFINITION is not an invocation and declares nothing by itself, so it does not mark
+/// the module — only `ident: None` items, which is exactly `collect_decls`'s own skip condition. Reading
+/// the same syn shape from the same predicate is deliberate: the index must mark precisely the modules
+/// whose items were skipped, so a future arm that starts EXPANDING one of these shapes narrows both.
+pub(crate) fn collect_macro_modules(
+    items: &[syn::Item],
+    modpath: &str,
+    include_tests: bool,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Macro(m) if m.ident.is_none() && (include_tests || !is_cfg_test(&m.attrs)) => {
+                out.insert(modpath.to_string());
+            }
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    let sub = if modpath.is_empty() {
+                        m.ident.to_string()
+                    } else {
+                        format!("{modpath}::{}", m.ident)
+                    };
+                    collect_macro_modules(inner, &sub, include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Build a per-file `use` map seeded with the crate-ROOT re-exports under `crate::<name>` keys (the root
 /// glob under `crate::` + `GLOB_KEY`). A `use crate::net` / `crate::net::foo` in the file then resolves
 /// through the root re-export via `expand`, while a bare `net::foo` — which never keys on `crate::…` —
