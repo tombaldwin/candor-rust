@@ -1786,14 +1786,48 @@ pub(crate) fn collect_use(tree: &syn::UseTree, prefix: String, out: &mut HashMap
 /// re-export) pick them up. The single glob is stored under `crate::` + `GLOB_KEY`. Real-world seam:
 /// sqlx-postgres re-exports the whole `sqlx_core::driver_prelude::*` at its root; every driver file then
 /// does `use crate::net; net::connect_tcp(..)` — the TCP dial that read SILENT-PURE before this.
-pub(crate) fn collect_root_reexports(items: &[syn::Item]) -> HashMap<String, String> {
+pub(crate) fn collect_root_reexports(items: &[syn::Item], include_tests: bool) -> HashMap<String, String> {
     let mut m = HashMap::new();
+    collect_item_uses(items, include_tests, &mut m);
+    m
+}
+
+/// SOUNDNESS R123 — THE ONE RULE for "does this `use` item bind a name in the build we are describing".
+///
+/// `collect_use` inserts into a `HashMap`, so the LAST spelling of a name wins, and the idiomatic
+/// mocking pair is two MUTUALLY EXCLUSIVE `cfg`s:
+///
+///     #[cfg(not(test))] use std::process::Command as Runner;
+///     #[cfg(test)]      use crate::mockproc::Runner;      // <- typed second, so the MOCK won
+///
+/// With the test arm collected, a PRODUCTION scan resolved `Runner::new(p).status()` through a mock that
+/// is pure by construction: `run` vanished from `functions[]` entirely, and which answer you got was
+/// decided by SOURCE ORDER. Measured on the published binary, over two crates identical in every byte
+/// but the order of those two lines, BOTH compiled and RUN in a normal (non-test) build — each printed
+/// `ran=true`, i.e. each really spawned `/usr/bin/true`.
+///
+/// FIVE SITES ANSWERED THIS QUESTION AND ONLY TWO APPLIED THE FILTER (`collect_module_glob`,
+/// `collect_reexports`). `scan_items`, `collect_decls` and `collect_root_reexports` did not, and the
+/// last had no `include_tests` PARAMETER to apply — the one site of the five that could not even express
+/// the question. They all call this now, so there is one authority rather than five hand-rolled loops
+/// free to drift apart again.
+pub(crate) fn use_item_applies(u: &syn::ItemUse, include_tests: bool) -> bool {
+    include_tests || !is_cfg_test(&u.attrs)
+}
+
+/// Collect every module-level `use` that [`use_item_applies`] admits into `out`.
+pub(crate) fn collect_item_uses(
+    items: &[syn::Item],
+    include_tests: bool,
+    out: &mut HashMap<String, String>,
+) {
     for it in items {
         if let syn::Item::Use(u) = it {
-            collect_use(&u.tree, String::new(), &mut m);
+            if use_item_applies(u, include_tests) {
+                collect_use(&u.tree, String::new(), out);
+            }
         }
     }
-    m
 }
 
 /// SOUNDNESS R128 — the MODULES whose item list this scan could not read in full, because an

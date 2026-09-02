@@ -9,6 +9,26 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R123 (cardinal sin, PRE-EXISTING and PUBLISHED) — CLOSED: two `cfg`'d `use` lines no
+  longer resolve by SOURCE ORDER, so a production scan can no longer resolve through a TEST MOCK.**
+  `collect_use` inserts into a `HashMap`, so the last spelling of a name won, and the idiomatic mocking
+  pair is two mutually-exclusive `cfg`s — with the mock's import written second, a production scan
+  resolved `Runner::new(p).status()` through a mock that is pure by construction and `run` vanished from
+  `functions[]`. Ground truth EXECUTED: two crates identical in every byte but the order of those two
+  lines, both `cargo run` in a normal build printing `ran=true`. One `use_item_applies`/`collect_item_uses`
+  authority now answers at all five sites — `scan_items`, `collect_decls` and `collect_root_reexports`
+  were the three unfiltered ones, and the last had no `include_tests` parameter to apply. The fixture is
+  closed ORDER-INDEPENDENTLY, which is the assertion the inverted test now pins.
+  A/B over 1489 registry crates keyed on every field: **ADDED 0, REMOVED 7, 5 crates moved**; §E1 reach
+  310 `use` items filtered across 59 crates. hickory-resolver GAINS a real `Clock` on 6 rows. **The
+  tokio `fs` losses this fix was held for are gone**: every `tokio::fs` verb keeps its `Fs`,
+  `pure fs::symlink::symlink` stays exit 1, and the `["Log","Unknown"]` that disappears is exactly what
+  candor was reading out of `#[cfg(test)] mod mocks` — the removed `fs::asyncify` row records
+  `calls: ["fs::mocks::spawn_blocking"]` in its own pre-image. **STILL OPEN, deliberately, and pinned by
+  a test that asserts the defect:** a `use` written inside a function BODY is still unfiltered and still
+  order-decided (`LocalUseCollector`, `CallCollector::visit_item_use`) — 20 sites in 12 of the 1489
+  crates. Cache schema rev15 → rev16.
+
 - **⚠ NEW CARDINAL SIN, FOUND AND FIXED HERE (no row number — the coordinator assigns those):
   `std::os::{unix,windows,wasi}::fs` had NO filesystem rule at all, so `symlink`, `chown`, `lchown`,
   `chroot` and the platform `FileExt` positional I/O all read PURE.** `std::fs::` was the whole

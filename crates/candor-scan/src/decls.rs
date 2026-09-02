@@ -54,11 +54,10 @@ pub(crate) fn scan_items(
     uses: &mut HashMap<String, String>,
     out: &mut Vec<FnInfo>,
 ) {
-    for it in items {
-        if let syn::Item::Use(u) = it {
-            collect_use(&u.tree, String::new(), uses);
-        }
-    }
+    // R123: `#[cfg(test)]`-gated imports are the TEST build's, not this one's — one authority, applied
+    // at all five sites (see `use_item_applies`). Unfiltered, an idiomatic mocking pair resolved a
+    // production call through the mock whenever the mock's `use` was typed second.
+    crate::lang::collect_item_uses(items, include_tests, uses);
     let qual = |name: &str| if modpath.is_empty() { name.to_string() } else { format!("{modpath}::{name}") };
     for it in items {
         match it {
@@ -1597,11 +1596,8 @@ pub(crate) fn collect_decls(
     blanket_methods: &mut HashMap<String, String>,
     callable_statics: &mut std::collections::HashSet<String>,
 ) {
-    for it in items {
-        if let syn::Item::Use(u) = it {
-            collect_use(&u.tree, String::new(), uses);
-        }
-    }
+    // R123: same one authority as `scan_items` — see `use_item_applies`.
+    crate::lang::collect_item_uses(items, include_tests, uses);
     for it in items {
         // LAZY/deferred static NAME collection (crate-wide) — a forcing site (any fn naming the static)
         // edges to its synthetic init unit, and the forcing site lives anywhere, so the name set must be

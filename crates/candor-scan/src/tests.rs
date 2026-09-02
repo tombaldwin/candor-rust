@@ -103,7 +103,7 @@
         // A `crate::net::foo` in ANY file resolves through the crate-ROOT re-exports seeded under
         // `crate::<name>` (a DIRECT `pub use x::net`) or `crate::` + GLOB_KEY (a `pub use x::…::*` glob).
         let mut direct = seed_root_reexports(&collect_root_reexports(&syn::parse_file(
-            "pub use mycore::net;").unwrap().items));
+            "pub use mycore::net;").unwrap().items, false));
         assert_eq!(expand("crate::net::connect_tcp", &direct), "mycore::net::connect_tcp");
         // a `use super::core::foo` re-bind is RELATIVE (not crate-root) and must keep its literal so the
         // local `core::foo` def still resolves by tail2 — seeding a root re-export must not hijack it.
@@ -111,7 +111,7 @@
         assert_eq!(direct.get("display_width").map(String::as_str), Some("super::core::display_width"));
 
         let glob = seed_root_reexports(&collect_root_reexports(&syn::parse_file(
-            "pub use mycore::driver_prelude::*;").unwrap().items));
+            "pub use mycore::driver_prelude::*;").unwrap().items, false));
         assert_eq!(expand("crate::net::connect_tcp", &glob), "mycore::driver_prelude::net::connect_tcp");
     }
 
@@ -4143,36 +4143,44 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// SOUNDNESS R123 — a PUBLISHED cardinal sin, PINNED HERE RATHER THAN FIXED. **These two tests
-    /// assert the DEFECT.** They are here because a sin recorded only in prose stops being measured,
-    /// and because the fix for it is written, revert-tested and A/B'd and was REJECTED on evidence —
-    /// see BACKLOG.md's 2026-09-02 R123 entry for the numbers and the one residual cause.
+    /// SOUNDNESS R123 — a PUBLISHED cardinal sin, NOW CLOSED. **This test asserted the DEFECT until
+    /// 2026-09-02 and is now INVERTED**, per the standing instruction it carried. What it pins is the
+    /// property that matters: the answer must be the SAME whichever order the two `use` lines are
+    /// written in, and it must be the PRODUCTION one.
     ///
-    /// `collect_use` inserts into a `HashMap`, so the LAST spelling of a name wins, and the idiomatic
-    /// mocking pair is two mutually-exclusive `cfg`s. With the test arm collected, a production scan
-    /// resolves through a mock that is pure by construction and `run` vanishes from `functions[]`.
+    /// `collect_use` inserts into a `HashMap`, so the LAST spelling of a name won, and the idiomatic
+    /// mocking pair is two mutually-exclusive `cfg`s — with the test arm collected, a production scan
+    /// resolved through a mock that is pure by construction and `run` vanished from `functions[]`.
     /// GROUND TRUTH EXECUTED: both arms were built as crates and `cargo run` printed `ran=true` in a
     /// normal build — a real spawned process — differing in nothing but the ORDER of two `use` lines.
     ///
-    /// **If either assertion below starts failing, the gap was closed: delete these tests, say so in
-    /// the changelog, and re-run the 1489-crate A/B in the backlog entry before believing it.**
+    /// ORDER-INDEPENDENCE IS THE ASSERTION, not "the mock-last arm now works". A fix that swapped which
+    /// spelling wins would satisfy the second and not the first, and this crate's whole complaint was
+    /// that source order decided the answer at all.
     #[test]
-    fn r123_a_module_level_cfg_test_import_still_decides_by_source_order() {
+    fn r123_a_module_level_cfg_test_import_no_longer_decides_by_source_order() {
         let first = fixture_effects(&scan_fixture("r123first", &r123_src(false, false)), "run");
         let last = fixture_effects(&scan_fixture("r123last", &r123_src(true, false)), "run");
         assert_eq!(first, vec!["Exec".to_string()],
-                   "control: with the production import typed second the answer is right, which is what \
-                    makes the silence below a question about ORDER and not about the fixture");
-        assert_eq!(last, Vec::<String>::new(),
-                   "MEASURED SIN, not a desired behaviour: the `#[cfg(test)]` import typed second wins \
-                    and `run` reads pure over a call that really spawns a process (SOUNDNESS R123)");
+                   "the production import typed second: `run` really spawns a process and must say so");
+        assert_eq!(last, vec!["Exec".to_string()],
+                   "the `#[cfg(test)]` import typed second must no longer win — the mock belongs to the \
+                    TEST build, and a production scan that resolves through it certifies a real spawn \
+                    as pure (SOUNDNESS R123)");
+        assert_eq!(first, last, "and the two must agree: ORDER must not decide the answer");
     }
 
     /// SOUNDNESS R123, THE SITE THAT HAD NEVER BEEN MEASURED: a `use` written INSIDE a function body.
     /// `LocalUseCollector` (decls.rs) and `CallCollector::visit_item_use` (collector.rs) collect those,
     /// and neither has an `include_tests` to filter on — so the same swap one scope lower is decided by
     /// order too. Measured, and it is: 20 sites in 12 of the 1489 registry crates carry an indented
-    /// `#[cfg(test)]`-gated `use`. Same standing instruction as above if this starts failing.
+    /// `#[cfg(test)]`-gated `use`.
+    ///
+    /// **STILL OPEN AFTER R123'S MODULE-SCOPE FIX, DELIBERATELY.** `use_item_applies` is applied at the
+    /// five MODULE-level sites; threading `include_tests` into `LocalUseCollector` and `CallCollector`
+    /// needs it on `fninfo` (5 call sites) and on a `CallCollector` that has no such field at all. This
+    /// test asserts the DEFECT so the remaining half cannot go unmeasured. **If it starts failing, the
+    /// gap was closed: invert it, say so in the changelog, and re-run the 1489-crate A/B first.**
     #[test]
     fn r123_body_local_cfg_test_import_is_unfiltered_too() {
         let first = fixture_effects(&scan_fixture("r123blfirst", &r123_src(false, true)), "run");
@@ -10268,13 +10276,17 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev15 -> rev16 `uses`/`root_reexports` stopped RECORDING `#[cfg(test)]`-gated imports (R123).
+    ///                 The field is unchanged, so serde reads a rev15 entry happily and simply hands
+    ///                 back a map built by a binary that DID resolve production calls through a test
+    ///                 mock — the exact silent under-report the fix closes, served warm.
     ///
     /// The schema token is the only thing standing between those readings, so it is pinned rather than
     /// trusted. (The `aborted` disclosure is what this fixture MEASURES in every case: it is the visible
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -10285,7 +10297,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev15/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev16/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

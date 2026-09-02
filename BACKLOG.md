@@ -2,6 +2,53 @@
 
 Honest priority order within each section. Sources: `CRITIQUE.md`, `EVAL.md`, hands-on findings.
 
+## 2026-09-02 (later still) — R128 AND R123 ARE BOTH FIXED, AND THE ENTRY BELOW THAT ORDERED THEM
+## WAS WRONG ABOUT WHY. A third, unrelated cardinal sin was found tracing the difference.
+
+### THE CORRECTION, and it is worth more than either fix
+
+The entry below says tokio's residual "falls through" R128's silent path — that a `use` bound to
+`crate::blocking::spawn_blocking` names nothing. **MEASURED FALSE.** With R128 fixed, tokio's `fs` rows
+still vanished under R123, and instrumenting the resolver showed why: `crate::blocking::spawn_blocking`
+resolves fine, `resolved_local=true`, to `runtime::blocking::pool::spawn_blocking` via the re-export
+alias index. R128's branch never fires there.
+
+**What was actually happening is visible in the A/B's own pre-image.** The removed `fs::asyncify` row
+carries `calls: ["fs::mocks::spawn_blocking"]`. Every one of those 35 tokio rows got its
+`["Log","Unknown"]` from `#[cfg(test)] mod mocks` — i.e. **the disclosure R123 was held for was
+MANUFACTURED BY THE SIN R123 FIXES.** Holding R123 to preserve it meant keeping a published cardinal
+sin in order to keep an answer that was right for the wrong reason.
+
+`tokio::fs::symlink` carried no `Fs` of its own because its whole body is
+`asyncify(move || std::os::unix::fs::symlink(..))` — and **`std::os::unix::fs::symlink` classified as
+PURE**, along with `chown`, `lchown` and `chroot`: `std::fs::` was the entire filesystem prefix rule and
+the platform half of std's filesystem API was not under it. That is its own cardinal sin (no row number
+— assign one), ground-truthed by a `cargo run` that created a real symlink and stat'd it back, and it
+is fixed in `classify: std::os::{unix,windows,wasi}::fs is filesystem I/O`. With it fixed,
+`tokio::fs::symlink` reads `["Fs"]` and `pure fs::symlink::symlink` stays exit 1 across R123.
+
+**The lesson is the family's own: a BACKLOG entry is a snapshot, and a diagnosis inside one is the part
+that goes stale worst.** The entry below stated a mechanism it had not instrumented, and the fix order
+it derived was right by accident — R128 needed doing, just not for the reason given.
+
+### WHAT IS STILL OPEN
+
+* **The body-local `use` half of R123.** `LocalUseCollector` (decls.rs) and
+  `CallCollector::visit_item_use` (collector.rs) still collect a `use` inside a fn body unfiltered and
+  order-decided. 20 sites in 12 of the 1489 crates. Pinned by
+  `r123_body_local_cfg_test_import_is_unfiltered_too`, which ASSERTS the defect.
+* **R128's stated under-reports**, each pinned by a test: the associated-fn spelling
+  (`crate::<mod>::<T>::<assoc>`), and an explicitly-written `crate::m::f()` (`expand` strips the prefix,
+  making it byte-identical to a bare external call).
+* **R128's residual over-charge**: ~34 of its 325 corpus hits construct a macro-declared TYPE, which is
+  pure. Needs an index of ALL local type names, not only those carrying an impl.
+* **An AMBIGUOUS local call target silently loses its edge** when the path is qualified. The existing
+  `ambiguous:same-name local defs` disclosure covers only the BARE-leaf spelling. Found while guarding
+  R128 (redis's `crate::types::from_redis_value`, 67 call sites); not fixed, not a claim about size.
+* **tokio's `fs` reach into the runtime is still lost**, independently of all three fixes:
+  `pool::spawn_blocking` -> `Handle::spawn_blocking` resolves, and that body's own chain reads pure.
+  `fs::asyncify` is now ABSENT for that reason rather than because of a mock. Not measured further.
+
 ## 2026-09-02 (later) — R122 IS FIXED AND SHIPPED HERE. **R123's fix is WRITTEN, TESTED AND
 ## MEASURED — AND IS HELD, because it trades one cardinal sin for another. Do not re-ship it blind.**
 
