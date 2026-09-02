@@ -595,6 +595,16 @@ fn attach_manifest(v: &mut serde_json::Value, cur_pre: &str, base_pre: &str) {
         if !cur.no_manifest.is_empty() {
             v["noManifest"] = serde_json::json!(cur.no_manifest);
         }
+        // ⟨R152⟩ SPEC §3.3.1 ⟨0.32⟩'s refusal marker — unlike `unread`/`unasked_rules` (both omitted
+        // here on purpose: `gains` takes no `--policy`, so `arm_unread`/`arm_unasked_rules` are never
+        // called and those two causes are STRUCTURALLY unreachable on this verb, never merely unwired),
+        // a refusal marker is a fact about the LOCATOR, not about a policy this verb does not carry —
+        // it CAN fire here, so omitting the key would flip `incomplete: true` on with no reason any
+        // channel of this verb names, the exact "flag with no cause" shape this module's header warns
+        // against for `unanalyzed`/`judgedNothing`/`noManifest`.
+        if !cur.refused.is_empty() {
+            v["refused"] = serde_json::json!(cur.refused.iter().map(|m| m.reason.clone()).collect::<Vec<_>>());
+        }
     }
     if base.must_hedge() {
         v["baselineIncomplete"] = serde_json::json!(true);
@@ -606,6 +616,11 @@ fn attach_manifest(v: &mut serde_json::Value, cur_pre: &str, base_pre: &str) {
         }
         if !base.no_manifest.is_empty() {
             v["baselineNoManifest"] = serde_json::json!(base.no_manifest);
+        }
+        // ⟨R152⟩ see the `cur` side's comment above.
+        if !base.refused.is_empty() {
+            v["baselineRefused"] =
+                serde_json::json!(base.refused.iter().map(|m| m.reason.clone()).collect::<Vec<_>>());
         }
     }
 }

@@ -591,6 +591,174 @@
         assert!(!candor_report::report_has_no_manifest("{not json"));
     }
 
+    // ── ⟨R152⟩ SPEC §3.3.1 ⟨0.32⟩'s refusal marker, read by EVERY reader of `report_completeness` ────
+    //
+    // `gate --report` has checked `refusal_marker_for` since ⟨0.32⟩ (`load_gate_report`, gate.rs); it
+    // was `refusal_marker_for`'s ONLY caller in the whole repo before this rung. `unverified --strict`
+    // and `fix-gate --strict` — the two verbs that turn `ReportCompleteness::incomplete()` into an
+    // exit code the way `--strict` mirrors the gate for every OTHER cause — answered 0 (a "PROVABLY
+    // clean ✓"/"no … crossings ✓" all-clear) over reports a REFUSED run had left behind. MEASURED
+    // against a pre-fix binary before this test was written (see the R152 commit message for the
+    // exact transcript): `gate --report` refused (exit 2) the same bytes throughout.
+
+    /// Write a `<dir>/rep.refused.json` marker covering `<dir>/rep.*` — the same prefix
+    /// `unv_fixture`/`comp_fixture` write their one report under, so a caller need only say WHY.
+    fn refuse_beside(rep_path: &str, reason: &str) {
+        let rep = std::path::Path::new(rep_path);
+        // CANONICALIZED, because `refusal_marker_for`'s direct-file branch compares against
+        // `canonicalize(p)` (`me`) — on macOS `std::env::temp_dir()` sits under `/var`, itself a
+        // symlink to `/private/var`, so an un-canonicalized prefix silently fails BOTH of that
+        // function's match arms (the `canonicalize(prefix)` one AND the string-prefix fallback) while
+        // looking like a correct absolute path. Measured writing this test.
+        let dir = std::fs::canonicalize(rep.parent().unwrap()).unwrap();
+        let prefix = dir.join("rep");
+        std::fs::write(
+            dir.join("rep.refused.json"),
+            serde_json::json!({
+                "refused": true,
+                "prefix": prefix.to_str().unwrap(),
+                "target": ".",
+                "reason": reason,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The MECHANISM, on `report_completeness` directly — a refused prefix reaches BOTH predicates,
+    /// unlike `unread`/`judged_nothing` which reach only `must_hedge()`. `gate --report` refuses
+    /// UNCONDITIONALLY over these bytes (no policy needed to make it certain), so this is the one
+    /// cause that must move `incomplete()`, not just the disclosure — see the field doc on `refused`.
+    #[test]
+    fn a_refused_prefix_reaches_incomplete_and_must_hedge_and_both_channels() {
+        let rep = comp_fixture(
+            "refused",
+            serde_json::json!({
+                "candor": "0.34",
+                "analyzed": { "count": 1 },
+                "functions": [{ "fn": "f", "inferred": ["Fs"], "direct": ["Fs"] }],
+            }),
+        );
+        // CONTROL: before the marker exists, this report is complete — proves the fixture itself, not
+        // just the marker, reaches `report_completeness` (SPEC §E3 of the corpus brief).
+        let clean = crate::completeness::report_completeness(&rep);
+        assert!(!clean.incomplete() && !clean.must_hedge(), "no marker yet — must read as complete");
+
+        refuse_beside(&rep, "R152 unit test: simulated refusal");
+        let comp = crate::completeness::report_completeness(&rep);
+        assert!(comp.incomplete(), "a refused prefix must reach the EXIT-CODE predicate — `gate \
+                                     --report` refuses over it unconditionally, so `--strict` must too");
+        assert!(comp.must_hedge());
+        assert_eq!(comp.gate_line(), "`gate --report` exits 2 over these bytes.");
+
+        // The MACHINE channel: `incomplete: true` alone would be a flag with no cause on the one arm
+        // whose reason cannot be recovered from the report bytes at all (unlike `unanalyzed`, which the
+        // report itself names).
+        let mut doc = serde_json::json!({ "reaches": [] });
+        comp.write_json(&mut doc);
+        assert_eq!(doc["incomplete"], serde_json::json!(true));
+        assert_eq!(doc["refused"], serde_json::json!(["R152 unit test: simulated refusal"]), "{doc}");
+
+        // The HUMAN channel — the mutant this module's own header warns about is exactly "the JSON
+        // fix shipped, the printed line did not".
+        let mut note = Vec::new();
+        comp.write_note_for_test(&mut note, "so-what", "tail");
+        let note = String::from_utf8(note).unwrap();
+        assert!(note.contains("REFUSED"), "{note}");
+        assert!(note.contains("R152 unit test: simulated refusal"), "{note}");
+    }
+
+    /// `absorb` (the two-locator verbs, `containment`/`diff`) unions a refusal on EITHER side — a
+    /// refused BASELINE is exactly as disqualifying as a refused CURRENT tree.
+    #[test]
+    fn absorb_unions_a_refusal_from_either_locator() {
+        let cur = comp_fixture("refused-absorb-cur", serde_json::json!({ "candor": "0.34", "analyzed": { "count": 1 }, "functions": [] }));
+        let base = comp_fixture("refused-absorb-base", serde_json::json!({ "candor": "0.34", "analyzed": { "count": 1 }, "functions": [] }));
+        refuse_beside(&base, "baseline refused");
+        let mut c = crate::completeness::report_completeness(&cur);
+        assert!(!c.incomplete(), "the current side alone carries no marker");
+        c.absorb(crate::completeness::report_completeness(&base));
+        assert!(c.incomplete(), "a refused BASELINE must disqualify the union — `containment`'s answer \
+                                  is a DIFFERENCE, unsound if either side is disowned");
+        assert_eq!(c.refused.len(), 1);
+    }
+
+    /// The end-to-end regression: `unverified --strict` over a REFUSED report, run through the shipped
+    /// verb rather than the predicate alone — the exact shape the reviewer measured (`--strict` prints
+    /// "every function in a pure/deny layer is PROVABLY clean … ✓" at exit 0 pre-fix).
+    #[test]
+    fn unverified_strict_refuses_over_a_refused_report() {
+        let (rep, pol) = unv_fixture(
+            "refused",
+            serde_json::json!([{ "fn": "f", "inferred": [], "direct": [] }]),
+            "deny Net\n",
+        );
+        assert_eq!(unv(&rep, &pol, None), 0, "CONTROL: no marker, no Unknown holes — clean");
+        refuse_beside(&rep, "R152: unverified must refuse over a refused report");
+        assert_eq!(unv(&rep, &pol, None), 2, "`gate --report` refuses (exit 2) over these bytes \
+                                               unconditionally; `--strict` must match it, not answer \
+                                               the pre-⟨R152⟩ 0 (\"PROVABLY clean ✓\")");
+    }
+
+    /// `fix-gate --strict`'s twin of the test above — the reviewer's second measured verb.
+    #[test]
+    fn fix_gate_strict_refuses_over_a_refused_report() {
+        let dir = std::env::temp_dir().join("candor-query-fixgate-refused");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rep = dir.join("rep.fixture.scan.json");
+        let pol = dir.join("candor.policy");
+        std::fs::write(
+            &rep,
+            serde_json::json!({
+                "candor": "0.34",
+                "analyzed": { "count": 1 },
+                "functions": [{ "fn": "f", "inferred": [], "direct": [] }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(&pol, "deny Net\n").unwrap();
+        let rep = rep.to_str().unwrap().to_string();
+        let pol = pol.to_str().unwrap().to_string();
+        let args = |rep: &str, pol: &str| -> Vec<String> {
+            vec!["--report".into(), rep.into(), "--policy".into(), pol.into(), "--strict".into()]
+        };
+        assert_eq!(
+            crate::fix::cmd_fix_gate(&args(&rep, &pol)), 0,
+            "CONTROL: no marker, no crossings — clean"
+        );
+        refuse_beside(&rep, "R152: fix-gate must refuse over a refused report");
+        assert_eq!(
+            crate::fix::cmd_fix_gate(&args(&rep, &pol)), 2,
+            "`gate --report` refuses (exit 2) over these bytes unconditionally; `--strict` must match \
+             it, not answer the pre-⟨R152⟩ 0 (\"no deny/pure boundary crossings in this report ✓\")"
+        );
+    }
+
+    /// **THE OVER-CHARGE CONTROL — descriptive verbs disclose, they do NOT refuse.** ⟨0.24⟩'s ruling
+    /// ("an advisory verb may be LESS certain than the gate, never more") only reaches the two verbs
+    /// that answer `ok` under `--strict`; every OTHER reader of `report_completeness` (`tour`,
+    /// `callers`, `path`, `fix`, `gains`, `containment`, `show`, `where`, `map`, `blindspots`,
+    /// `reachable`, `impact`, `whatif`) is DESIGNED to stay exit 0 regardless of completeness — see
+    /// `cmd_fix`'s own comment on why its exit "stays 0" — so this refusal cause must not be the one
+    /// that changes that design. Asserted on the shared predicate: `must_hedge()` (what every
+    /// descriptive verb's exit ignores) is true, same as `incomplete()`, so a verb reading only the
+    /// former still sees the cause — the DIFFERENCE lives in the exit builder, not in this struct.
+    #[test]
+    fn a_refused_prefix_does_not_invent_a_new_exit_family_for_descriptive_verbs() {
+        let rep = comp_fixture(
+            "refused-descriptive",
+            serde_json::json!({ "candor": "0.34", "analyzed": { "count": 1 }, "functions": [] }),
+        );
+        refuse_beside(&rep, "R152: descriptive verbs disclose, they do not refuse");
+        let comp = crate::completeness::report_completeness(&rep);
+        assert!(comp.incomplete() && comp.must_hedge(), "the cause is present");
+        // The struct exposes ONE more true/false fact; whether a caller's own exit builder reads
+        // `incomplete()` at all is `unverified_exit`/`fix_gate_exit`'s decision (2 of ~13 verbs), never
+        // this module's — asserted by construction, not by re-running every verb's CLI here.
+    }
+
     // ── `unverified --class` (SPEC §6.2 ⟨0.24⟩) ───────────────────────────────────────────────────
     // Written as EXIT-CODE assertions through `cmd_unverified --strict` (1 = holes remain, 0 = none),
     // so they exercise the shipped verb end to end — report load, `--class` parse, the transitive
