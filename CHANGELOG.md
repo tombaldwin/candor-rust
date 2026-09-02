@@ -9,6 +9,22 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ NEW CARDINAL SIN, FOUND AND FIXED HERE (no row number — the coordinator assigns those):
+  `std::os::{unix,windows,wasi}::fs` had NO filesystem rule at all, so `symlink`, `chown`, `lchown`,
+  `chroot` and the platform `FileExt` positional I/O all read PURE.** `std::fs::` was the whole
+  filesystem prefix rule and the platform-specific half of std's filesystem API simply was not under
+  it. Ground truth EXECUTED: a crate whose `pub fn a(o,l) { std::os::unix::fs::symlink(o,l) }` really
+  creates a symlink on disk (`cargo run` printed `symlink=true exists_as_symlink=true`) reported
+  `functions: []` for it, so `deny Fs` exited 0 over a real filesystem write; `std::fs::hard_link` and
+  `std::fs::read_to_string` beside it were correctly `["Fs"]`, which is what makes this a gap and not a
+  design choice. Found while tracing why `tokio::fs::symlink` carries no `Fs` of its own. A DENYLIST
+  keyed on the TRAIT, like the existing `OpenOptions`/`DirBuilder` carve-outs: `MetadataExt`,
+  `DirEntryExt`, `FileTypeExt`, `PermissionsExt`, `OpenOptionsExt` and `DirBuilderExt` stay pure (they
+  read or configure data already in hand — charging them would fabricate `Fs` on every `m.uid()`), and
+  `FileExt` deliberately does not. A/B over 1489 registry crates keyed on every field: **ADDED 34,
+  REMOVED 0, no surviving row lost a value in any field**, and every added row is an fs syscall wrapper
+  in cap-std, fs-err, async-fs, async-std, jiff, snapbox and tokio. Revert-tested by neutering the rule.
+
 - **⚠ SOUNDNESS R128 (cardinal sin, PRE-EXISTING and PUBLISHED): a call into a module whose items are
   hidden behind an unexpanded MACRO no longer reads PURE.** `collect_decls` skips item-position macro
   invocations, so a `pub fn` or a `pub(crate) use` declared by `cfg_rt! { .. }` / `foo!();` /

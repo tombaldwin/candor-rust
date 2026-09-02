@@ -1699,6 +1699,36 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         const PURE: &[&str] = &["new", "recursive", "mode", "clone", "default", "fmt"];
         return (!PURE.contains(&m)).then_some("Fs");
     }
+    // THE PLATFORM `fs` MODULES — `std::os::{unix,windows,wasi}::fs`. Measured 2026-09-02, ground truth
+    // EXECUTED (a `cargo run` that really created a symlink on disk and then stat'd it back):
+    // `std::os::unix::fs::symlink`, `chown`, `lchown` and `chroot` all read PURE, so `deny Fs` over a
+    // crate whose only filesystem write is a symlink exited 0. The `std::fs::` prefix below is the whole
+    // filesystem rule and these modules are simply not under it — the platform-specific half of std's
+    // filesystem API had no rule at all. (Found tracing why `tokio::fs::symlink` carries no `Fs` of its
+    // own; its body is `asyncify(move || std::os::unix::fs::symlink(..))`.)
+    //
+    // A DENYLIST keyed on the TRAIT, exactly like `OpenOptions`/`DirBuilder` above and for the same
+    // reason: subtract only the provably-pure surfaces, so a std addition nobody here has read about
+    // fails in the SAFE direction. What is subtracted, and why each is pure:
+    //   * `MetadataExt` / `DirEntryExt` / `FileTypeExt` — accessors over data ALREADY fetched by the
+    //     `metadata()`/`read_dir()` call that is charged at its own site. `m.uid()` issues no syscall.
+    //   * `PermissionsExt` — reads/sets bits on an in-memory `Permissions`; the syscall is
+    //     `set_permissions`, charged under `std::fs::`.
+    //   * `OpenOptionsExt` / `DirBuilderExt` — SPEC §1 ⟨0.32⟩ option-builders: the resource arrives at
+    //     the terminal verb (`open`/`create`), which is charged at its own call site.
+    // `FileExt` is deliberately NOT subtracted — `read_at`/`write_at`/`seek_read`/`seek_write` are the
+    // positional-I/O syscalls and are exactly what this rule must keep.
+    if let Some(rest) = path
+        .strip_prefix("std::os::unix::fs::")
+        .or_else(|| path.strip_prefix("std::os::windows::fs::"))
+        .or_else(|| path.strip_prefix("std::os::wasi::fs::"))
+    {
+        const PURE_TRAITS: &[&str] = &[
+            "MetadataExt::", "DirEntryExt::", "DirEntryExt2::", "FileTypeExt::",
+            "PermissionsExt::", "OpenOptionsExt::", "DirBuilderExt::",
+        ];
+        return (!PURE_TRAITS.iter().any(|t| rest.starts_with(t))).then_some("Fs");
+    }
     // Filesystem. `tokio::fs`/`async_std::fs` are the async mirrors of `std::fs`; `async_fs` is
     // smol's fs crate; `fs_err` is a drop-in `std::fs` wrapper (its whole surface is fs I/O).
     if path.starts_with("std::fs::")
@@ -4131,6 +4161,41 @@ mod tests {
         assert_eq!(classify("std", "std::fs::read"), Some("Fs"));
         assert_eq!(classify("std", "std::os::unix::net::UnixStream::connect"), Some("Ipc"));
         assert_eq!(classify("tokio", "tokio::net::TcpStream::connect"), Some("Net"));
+    }
+
+    /// THE PLATFORM `fs` MODULES. `std::fs::` was the whole filesystem rule, so every function in
+    /// `std::os::{unix,windows,wasi}::fs` read PURE — measured with EXECUTED ground truth (a `cargo run`
+    /// that created a real symlink and stat'd it back), `deny Fs` over a crate whose only filesystem
+    /// write was `std::os::unix::fs::symlink` exited 0.
+    ///
+    /// The controls are the point: the `*Ext` DATA/BUILDER traits must stay pure, or the fix trades a
+    /// silent under-report for a fabrication on every `m.uid()` — and `FileExt` must NOT, because
+    /// `read_at`/`write_at` are the positional-I/O syscalls this rule exists to catch.
+    #[test]
+    fn the_platform_fs_modules_are_filesystem_io_and_their_data_traits_are_not() {
+        for p in [
+            "std::os::unix::fs::symlink", "std::os::unix::fs::chown", "std::os::unix::fs::lchown",
+            "std::os::unix::fs::fchown", "std::os::unix::fs::chroot",
+            "std::os::windows::fs::symlink_dir", "std::os::windows::fs::symlink_file",
+            "std::os::windows::fs::junction_point",
+            "std::os::unix::fs::FileExt::read_at", "std::os::unix::fs::FileExt::write_at",
+            "std::os::windows::fs::FileExt::seek_read", "std::os::windows::fs::FileExt::seek_write",
+        ] {
+            assert_eq!(classify("std", p), Some("Fs"), "{p} performs filesystem I/O");
+        }
+        for p in [
+            "std::os::unix::fs::MetadataExt::uid", "std::os::unix::fs::MetadataExt::mode",
+            "std::os::unix::fs::PermissionsExt::mode", "std::os::unix::fs::PermissionsExt::set_mode",
+            "std::os::unix::fs::OpenOptionsExt::custom_flags",
+            "std::os::unix::fs::DirBuilderExt::mode",
+            "std::os::unix::fs::DirEntryExt::ino", "std::os::unix::fs::FileTypeExt::is_fifo",
+            "std::os::windows::fs::MetadataExt::file_attributes",
+        ] {
+            assert_eq!(classify("std", p), None,
+                       "{p} reads or configures data already in hand — charging it would FABRICATE Fs");
+        }
+        // `std::os::unix::net` is Ipc and must be untouched by a rule keyed one segment along.
+        assert_eq!(classify("std", "std::os::unix::net::UnixStream::connect"), Some("Ipc"));
     }
 
     #[test]
