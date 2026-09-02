@@ -2,7 +2,7 @@
 # Using candor (instructions for an AI coding agent)
 
 You are working in a Rust project. **candor** tells you, for every function, which side effects it
-performs — network, filesystem, database, subprocess, env, clock, IPC, logging, randomness,
+performs — network, calls to LLM/model providers, filesystem, database, subprocess, env, clock, IPC, logging, randomness,
 clipboard — *including effects inherited transitively from functions it calls*. Use it instead of
 tracing call chains by hand or guessing what code does. The language-agnostic consumption contract is
 [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md); this file is
@@ -143,7 +143,7 @@ Each entry:
   "unresolved": true }                        // true => some calls could not be traced
 ```
 
-Effects: `Net`, `Fs`, `Db`, `Exec` (subprocess), `Env`, `Clock`, `Ipc`, `Log`, `Rand`, `Clipboard`.
+Effects: `Net`, `Llm` (a call to a model provider — refines `Net`), `Fs`, `Db`, `Exec` (subprocess), `Env`, `Clock`, `Ipc`, `Log`, `Rand`, `Clipboard`.
 `fs` refines `Fs` (read vs write) when statically knowable; `cargo candor show` renders it as
 `Fs(write)` / `Fs(read,write)`. Absent when unknown or no `Fs` — it never changes the `Fs` effect.
 
