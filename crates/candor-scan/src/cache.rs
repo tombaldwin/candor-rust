@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev17: FileDecls gained `callable_aliases` (R161 — the `type NAME = <callable>` alias leaves). A
+    // rev16 entry has none, so it deserializes EMPTY: "this file declares no callable type alias", for a
+    // file that does — and the consequence is exactly the silent under-report the field closes, served
+    // warm and invisible. Same shape as rev15, rev14, rev13, rev12 and rev9.
     // rev16: R123 changed what an EXISTING field RECORDS — `uses` and `root_reexports` no longer collect
     // a `#[cfg(test)]`-gated `use`. A rev15 entry was written by a binary that DID collect them, so a warm
     // cache serves the mock-resolved answer for the very file the fix is about: `run` ABSENT over a call
@@ -142,6 +146,11 @@ pub(crate) struct FileDecls {
     /// a body this scan cannot see, so the binder must hedge `Unknown` instead of dropping it silently.
     #[serde(default)]
     pub(crate) callable_statics: Vec<String>,
+    /// R161 — type-alias NAMES in this file whose RHS is an INVOKABLE callback (`type AutoExtension =
+    /// fn(Connection) -> Result<()>`, `type Cb = Box<dyn Fn()>`). A parameter/annotation of such a name
+    /// is a callback boundary, and nothing resolved the alias, so it read silently pure.
+    #[serde(default)]
+    pub(crate) callable_aliases: Vec<String>,
     /// CONST/STATIC string NAMES → their LITERAL value in this file (`const API_BASE: &str = "…"`) — a
     /// call building its host from one (`post(format!("{}/x", API_BASE))`) resolves the host here (SPEC §1
     /// static-host propagation). Literal-valued only.
@@ -213,9 +222,10 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut local_macros = HashMap::new();
     let mut blanket_methods = HashMap::new();
     let mut callable_statics = std::collections::HashSet::new();
+    let mut callable_aliases = std::collections::HashSet::new();
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
-                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut blanket_methods, &mut callable_statics);
+                  &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut blanket_methods, &mut callable_statics, &mut callable_aliases);
     // ONE walk produces both re-export channels — the intra-crate edges (`reexports`) and the
     // external/alias map (`mod_aliases`, R99), which is collected at the very branch that used to DROP
     // an external `pub use`. `uses` is this file's top-level `use` map, as `collect_decls` left it, so a
@@ -242,6 +252,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         deref_target,
         lazy_statics: lazy_statics.into_iter().collect(),
         callable_statics: callable_statics.into_iter().collect(),
+        callable_aliases: callable_aliases.into_iter().collect(),
         const_strings,
         local_macros,
         blanket_methods,
@@ -285,6 +296,7 @@ pub(crate) struct MergedDecls {
     pub(crate) deref_target: HashMap<String, String>,
     pub(crate) lazy_statics: std::collections::HashSet<String>,
     pub(crate) callable_statics: std::collections::HashSet<String>,
+    pub(crate) callable_aliases: std::collections::HashSet<String>,
     pub(crate) const_strings: HashMap<String, String>,
     pub(crate) local_macros: HashMap<String, String>,
     pub(crate) blanket_methods: HashMap<String, String>,
@@ -532,6 +544,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.callable_statics {
         acc.callable_statics.insert(n.clone()); // set union — order-independent
     }
+    for n in &fd.callable_aliases {
+        acc.callable_aliases.insert(n.clone()); // set union — order-independent
+    }
     for (k, v) in &fd.const_strings {
         acc.const_strings.insert(k.clone(), v.clone()); // leaf → literal; last-writer-wins on a rare collision
     }
@@ -757,6 +772,17 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     let mut cak: Vec<&String> = m.callable_statics.iter().collect();
     cak.sort();
     for a in cak {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
+    // callable_aliases — sorted set of `type NAME = <callable>` alias names (R161). A change here changes
+    // which PARAMETERS/annotations are callback boundaries, so it must invalidate cached FnInfos exactly
+    // like `callable_statics`.
+    s.push_str("callable_aliases");
+    let mut cak2: Vec<&String> = m.callable_aliases.iter().collect();
+    cak2.sort();
+    for a in cak2 {
         s.push('|');
         s.push_str(a);
     }

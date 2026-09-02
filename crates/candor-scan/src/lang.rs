@@ -308,14 +308,51 @@ pub(crate) fn trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<
 /// syntactic scan cannot see, so the enclosing fn can't be certified pure — it MUST read `Unknown`, never
 /// silently pure (SPEC §4). The non-bare forms are exactly where `trait_leaves` finds an
 /// `Fn`/`FnMut`/`FnOnce` leaf; `Type::BareFn` carries no trait so it's matched explicitly.
-pub(crate) fn is_callable_type(ty: &syn::Type, generic_bounds: &HashMap<String, Vec<String>>) -> bool {
+///
+/// SOUNDNESS R161 — `callable_aliases` is the crate-wide set of `type NAME = <callable>` LEAF names.
+/// Without it a NOMINAL ALIAS was a hole in every position at once: `pub type AutoExtension =
+/// fn(Connection) -> Result<()>` made `fn init(.., ax: AutoExtension)` read a bare `[]` with no
+/// `unknownWhy` — an affirmative purity claim over an opaque caller-supplied body — on published
+/// rusqlite 0.40.2, and the same alias in a `let` annotation or a closure param was equally silent.
+/// A leaf-NAME match, like every other index in this file: this scanner is syntactic and cannot ask
+/// rustc whether some other crate's same-named type is the one in scope. A collision can only ever turn
+/// a call into an honest `Unknown` (it names no effect), which is the direction that cannot fabricate.
+pub(crate) fn is_callable_type(
+    ty: &syn::Type,
+    generic_bounds: &HashMap<String, Vec<String>>,
+    callable_aliases: &std::collections::HashSet<String>,
+) -> bool {
     match ty {
         syn::Type::BareFn(_) => true,
-        syn::Type::Reference(r) => is_callable_type(&r.elem, generic_bounds),
-        syn::Type::Paren(p) => is_callable_type(&p.elem, generic_bounds),
-        syn::Type::Group(g) => is_callable_type(&g.elem, generic_bounds),
+        syn::Type::Reference(r) => is_callable_type(&r.elem, generic_bounds, callable_aliases),
+        syn::Type::Paren(p) => is_callable_type(&p.elem, generic_bounds, callable_aliases),
+        syn::Type::Group(g) => is_callable_type(&g.elem, generic_bounds, callable_aliases),
         syn::Type::Path(p) => {
             if trait_leaves(ty, generic_bounds).iter().any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce")) {
+                return true;
+            }
+            // R161, the ALIAS arm. Checked before the wrapper peel so `Alias` and `Option<Alias>` and
+            // `Box<Alias>` all answer the same way (the peel below recurses back into here).
+            if p.path.segments.last().is_some_and(|s| callable_aliases.contains(&s.ident.to_string())) {
+                // §E1 HIT COUNTER — an unchanged row is not evidence the new code ran. Same switch, same
+                // shape as R160's `SELFALIAS` line; gated on the cheap set hit so the env lookup is off
+                // the hot path.
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R161ALIAS {}", path_to_string(&p.path));
+                }
+                return true;
+            }
+            // R161, the `Option`/`Result` arm. A PARAMETER position never peeled these — only
+            // `record_return` did, for a fn's own RETURN type — so `f: Option<fn(&str)>` was not callable
+            // here and the `if let Some(g) = f { g(p) }` / `match` / `.map(|g| g(p))` binders never hedged
+            // `g` into `fn_typed_vars`: the fn vanished from `functions[]` entirely. `Option<Box<dyn Fn>>`
+            // was never affected, which is why this was invisible — `trait_leaves` peels `Box`, and the
+            // BARE fn pointer is the one payload that carries no trait to peel to.
+            let inner = unwrap_result_option(ty);
+            if !std::ptr::eq(inner, ty) && is_callable_type(inner, generic_bounds, callable_aliases) {
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R161OPT {}", path_to_string(&p.path));
+                }
                 return true;
             }
             // An OPAQUE RUNTIME-RESOLVED-SYMBOL wrapper. `libloading::Symbol<T>` (and its
@@ -341,7 +378,7 @@ pub(crate) fn is_callable_type(ty: &syn::Type, generic_bounds: &HashMap<String, 
             let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return false };
             args.args
                 .iter()
-                .any(|a| matches!(a, syn::GenericArgument::Type(inner) if is_callable_type(inner, generic_bounds)))
+                .any(|a| matches!(a, syn::GenericArgument::Type(inner) if is_callable_type(inner, generic_bounds, callable_aliases)))
         }
         _ => trait_leaves(ty, generic_bounds)
             .iter()
@@ -359,13 +396,16 @@ pub(crate) fn block_tail_expr(b: &syn::Block) -> Option<&syn::Expr> {
 
 /// The params of a signature that are invokable callbacks (`is_callable_type`) — so `cb()` on one reads
 /// the honest `Unknown` instead of being silently dropped as a phantom call to a free fn `cb`.
-pub(crate) fn seed_fn_typed_vars(sig: &syn::Signature) -> std::collections::HashSet<String> {
+pub(crate) fn seed_fn_typed_vars(
+    sig: &syn::Signature,
+    callable_aliases: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
     let gb = generic_bounds_of(sig);
     let mut s = std::collections::HashSet::new();
     for arg in &sig.inputs {
         if let syn::FnArg::Typed(pt) = arg {
             if let syn::Pat::Ident(id) = &*pt.pat {
-                if is_callable_type(&pt.ty, &gb) {
+                if is_callable_type(&pt.ty, &gb, callable_aliases) {
                     s.insert(id.ident.to_string());
                 }
             }
@@ -507,7 +547,35 @@ pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String,
             // `Option<Vec<Box<dyn>>>`, `HashMap<K, Option<Box<dyn>>>` all surface the element's trait (R46).
             let dispatch = |t: &syn::Type| {
                 let d = trait_leaves(t, generic_bounds);
-                if d.is_empty() { elem_trait_leaves(t, generic_bounds) } else { d }
+                if !d.is_empty() {
+                    return d;
+                }
+                let e = elem_trait_leaves(t, generic_bounds);
+                if !e.is_empty() {
+                    return e;
+                }
+                // SOUNDNESS R161 — a BARE FN POINTER payload. Both questions above are TRAIT questions,
+                // and `fn(&str)` carries no trait to answer with, so `Option<fn(&str)>` surfaced NO
+                // element leaves while `Option<Box<dyn Fn(&str)>>` (one `Box` away) surfaced `["Fn"]`.
+                // The consequence was not a precision loss but silence: `if let Some(g) = f { g(p) }`,
+                // `match f { Some(g) => g(p), .. }` and `f.map(|g| g(p))` all bind `g` through
+                // `resolve_elem_trait_leaves`, so with no leaves `g` was never hedged into
+                // `fn_typed_vars`, `g(p)` resolved as a phantom free fn, and a function whose ONLY call
+                // was that callback disappeared from `functions[]` entirely — an affirmative purity
+                // claim (SPEC §2 rule 3) over an opaque caller-supplied body. Executed ground truth:
+                // the fixture's callback really writes a file in that frame.
+                //
+                // The synthetic `"Fn"` leaf is the SAME one `static_holds_callable` and
+                // `ret_dispatch_leaves` already produce, and it matches no local trait, so it can name
+                // no concrete effect — it can only turn silence into `Unknown`.
+                if is_bare_fn(t) {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R161ELEMFN {name}");
+                    }
+                    vec!["Fn".to_string()]
+                } else {
+                    Vec::new()
+                }
             };
             match name.as_str() {
                 "Vec" | "VecDeque" | "HashSet" | "BTreeSet" | "ContiguousArray" | "BinaryHeap"
@@ -538,6 +606,20 @@ pub(crate) fn elem_trait_leaves(ty: &syn::Type, generic_bounds: &HashMap<String,
             }
         }
         _ => Vec::new(),
+    }
+}
+
+/// SOUNDNESS R161 — a BARE FN POINTER under the reference/paren/group wrappers `trait_leaves` peels.
+/// Split out rather than inlined because it answers the one shape a TRAIT question cannot: `fn(&str)`
+/// implements `Fn` but names no trait bound anywhere in its syntax, so every leaf-based test returns
+/// empty for it and cannot tell it apart from an ordinary concrete payload.
+fn is_bare_fn(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::BareFn(_) => true,
+        syn::Type::Reference(r) => is_bare_fn(&r.elem),
+        syn::Type::Paren(p) => is_bare_fn(&p.elem),
+        syn::Type::Group(g) => is_bare_fn(&g.elem),
+        _ => false,
     }
 }
 
@@ -688,11 +770,7 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
             // Neither sentinel is a NOMINAL type: `RET_FN_TYPED` types no var (a callback), and the
             // `RET_DYN_PREFIX` dispatch-object return is resolved by TRAIT (via `resolve_recv_traits`'s
             // Call arm), never as a concrete `Type::method`. Filter both out of concrete var-typing.
-            returns
-                .get(leaf)
-                .filter(|t| *t != RET_FN_TYPED && ret_dyn_leaves(t).is_none()
-                    && ret_elem_dyn_leaves(t).is_none() && ret_tuple_dyn_leaves(t).is_none())
-                .cloned()
+            recorded_return_type(leaf, returns)
         }
         // `let s = S {..};` — a struct literal names its type directly.
         syn::Expr::Struct(s) => type_from_value_path(&path_to_string(&s.path), uses),
@@ -702,6 +780,56 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
         syn::Expr::Path(p) => type_from_value_path(&path_to_string(&p.path), uses),
         _ => None,
     }
+}
+
+/// The recorded return type of a fn LEAF, as a NOMINAL type path — the one authority for "what concrete
+/// type does calling this local factory produce". Filters out both of `record_return`'s sentinels: the
+/// fn-typed one (a callback types no var — `expr_is_fn_typed` owns it) and the three `<dyn>` dispatch
+/// shapes (resolved by TRAIT, never as a concrete `Type::method`).
+///
+/// Extracted so `ctor_type` (the `let`-binding type inference) and `ctor_leaf_from_call_returns` (the
+/// R165 drop-glue route) cannot answer it differently. They HAD to, before: the drop marker's binder-keyed
+/// predecessor consulted this index and the position-independent rewrite that replaced it did not, so a
+/// free-function constructor stopped being a construction at all.
+pub(crate) fn recorded_return_type(leaf: &str, returns: &ReturnIndex) -> Option<String> {
+    returns
+        .get(leaf)
+        .filter(|t| *t != RET_FN_TYPED && ret_dyn_leaves(t).is_none()
+            && ret_elem_dyn_leaves(t).is_none() && ret_tuple_dyn_leaves(t).is_none())
+        .cloned()
+}
+
+/// SOUNDNESS R165 — the type LEAF a call RELEASES into this scope when the CALLEE PATH does not name it.
+///
+///     pub fn from_handle(p: &str) -> H { H { p: p.into() } }   // constructs and returns — no charge
+///     pub fn holds(p: &str) -> usize { let h = from_handle(p); h.p.len() }   // H dies HERE
+///
+/// `ctor_leaf_from_call_path` recognises a tuple-struct/variant literal and a `Type::assoc()` call — both
+/// spellings in which the callee path IS or CONTAINS the type. A bare `from_handle(p)` is neither: its
+/// `rsplit_once("::")` returns `None` and the whole route declines, so `holds` was ABSENT while the
+/// destructor really ran in its frame (executed: the file really is removed). The intermediate cannot
+/// supply the answer either — `from_handle`'s OWN report is correctly empty, and it leaves no residual
+/// edge for a caller to inherit.
+///
+/// The answer comes from the crate's own `ReturnIndex`, a DECLARED fact, not from a name heuristic. That
+/// is what keeps this clear of R160's deliberate refusal to fall back to a bare LEAF: R160 refused to
+/// let `Self::NAME` MATCH a same-named free fn, a resolution guess; this reads what the callee's
+/// signature says it returns. `ReturnIndex` already drops any leaf recorded with two different return
+/// types, and `note_construction`'s `drop_relevant` gate means only a type with a local `impl Drop`
+/// survives — so a cross-crate leaf collision has to hit a local `Drop` type of the same name to matter,
+/// and when it does the direction is an over-charge, never silence.
+///
+/// STATED LIMIT: leaf-keyed like the index itself, so `serde_json::from_str` and a local `from_str` are
+/// one name to this route. Deliberate — the alternative (single-segment paths only) draws the boundary
+/// around the one spelling the row was filed for, and a `use m::from_handle` import already expands to
+/// a multi-segment path before it gets here.
+pub(crate) fn ctor_leaf_from_call_returns(full: &str, returns: &ReturnIndex) -> Option<String> {
+    if true { let _ = (full, returns); return None; }
+    let last = full.rsplit("::").next().unwrap_or(full);
+    if last == "drop" {
+        return None;
+    }
+    local_type_leaf(&recorded_return_type(last, returns)?)
 }
 
 /// The type a VALUE path denotes, for `let` inference: `S` → `S`; `m::S` → `m::S`; `Color::Red`
@@ -2067,6 +2195,13 @@ pub(crate) fn ctor_leaf_of_expr(
     expr: &syn::Expr,
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
+    // SOUNDNESS R165 — the crate-wide fn-leaf -> return-type index, so a FREE-FUNCTION constructor is
+    // the same construction to this authority as `Type::assoc()`. Threaded here rather than added at
+    // the marker's call site alone: this fn is read by BOTH the marker and the ESCAPE GATE
+    // (`mark_escape`), and widening only the marker made `fn forwards(p) -> H { from_handle(p) }`
+    // fabricate a Drop the caller runs — measured on the fixture's own over-charge control, which is
+    // why that control exists. Two paths computing one fact are free to disagree; this is the one path.
+    returns: &ReturnIndex,
 ) -> Option<String> {
     match expr {
         // A struct LITERAL names its type directly, so the fieldless test above does not apply to it
@@ -2080,7 +2215,9 @@ pub(crate) fn ctor_leaf_of_expr(
         }
         syn::Expr::Call(c) => {
             let syn::Expr::Path(p) = &*c.func else { return None };
-            ctor_leaf_from_call_path(&path_to_string(&p.path), uses)
+            let written = path_to_string(&p.path);
+            ctor_leaf_from_call_path(&written, uses)
+                .or_else(|| ctor_leaf_from_call_returns(&expand(&written, uses), returns))
         }
         _ => None,
     }
@@ -2213,6 +2350,7 @@ pub(crate) fn escaping_ctor_leaves(
     block: &syn::Block,
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
+    returns: &ReturnIndex,
 ) -> Escapes {
     // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
     // this table (running its own copy of the fixpoint), never re-walks the tree.
@@ -2224,16 +2362,16 @@ pub(crate) fn escaping_ctor_leaves(
     // single call seeded from `None` runs exactly that unconditional half and nothing root-dependent,
     // which is the correct answer when there is no root to be dependent ON.
     if sites.roots.is_empty() {
-        return escape_from_root(None, &sites, uses, fields);
+        return escape_from_root(None, &sites, uses, fields, returns);
     }
     let mut roots = sites.roots.iter();
     let first = roots.next().expect("checked non-empty above");
-    let mut acc = escape_from_root(*first, &sites, uses, fields);
+    let mut acc = escape_from_root(*first, &sites, uses, fields, returns);
     for r in roots {
         if acc.names.is_empty() && acc.leaves.is_empty() {
             break; // the intersection can only shrink further; every remaining root would too.
         }
-        let next = escape_from_root(*r, &sites, uses, fields);
+        let next = escape_from_root(*r, &sites, uses, fields, returns);
         acc.names.retain(|n| next.names.contains(n));
         acc.leaves.retain(|l| next.leaves.contains(l));
     }
@@ -2250,23 +2388,24 @@ fn escape_from_root(
     sites: &EscapeSites<'_>,
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
+    returns: &ReturnIndex,
 ) -> Escapes {
     let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut leaves: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(e) = root {
-        mark_escape(e, uses, fields, &mut names, &mut leaves);
+        mark_escape(e, uses, fields, returns, &mut names, &mut leaves);
     }
     // Unconditional escape ROUTES (a closure body, a `mem::forget`/`ManuallyDrop::new` operand) — not
     // gated on `root` at all, and identical on every `escape_from_root` call, which is what lets them
     // survive `escaping_ctor_leaves`'s intersection across roots undiminished.
     for e in &sites.escapes {
-        mark_escape(e, uses, fields, &mut names, &mut leaves);
+        mark_escape(e, uses, fields, returns, &mut names, &mut leaves);
     }
     for _ in 0..8 {
         let before = (names.len(), leaves.len());
         for (name, init) in &sites.lets {
             if names.contains(name) {
-                mark_escape(init, uses, fields, &mut names, &mut leaves);
+                mark_escape(init, uses, fields, returns, &mut names, &mut leaves);
             }
         }
         for (lhs, rhs) in &sites.assigns {
@@ -2274,19 +2413,19 @@ fn escape_from_root(
                 // `x = Guard::new()` — only an escape if `x` itself escapes (in THIS root).
                 Some(n) => {
                     if names.contains(n) {
-                        mark_escape(rhs, uses, fields, &mut names, &mut leaves);
+                        mark_escape(rhs, uses, fields, returns, &mut names, &mut leaves);
                     }
                 }
                 // `self.g = …` / `xs[i] = …` / `*p = …` — stored somewhere this scope does not own,
                 // unconditionally (not gated on this root, same as before this fix: a store is a store
                 // regardless of which exit the function eventually takes).
-                None => mark_escape(rhs, uses, fields, &mut names, &mut leaves),
+                None => mark_escape(rhs, uses, fields, returns, &mut names, &mut leaves),
             }
         }
         for (recv, args) in &sites.method_args {
             if names.contains(recv) {
                 for a in args {
-                    mark_escape(a, uses, fields, &mut names, &mut leaves);
+                    mark_escape(a, uses, fields, returns, &mut names, &mut leaves);
                 }
             }
         }
@@ -2526,10 +2665,11 @@ fn mark_escape(
     e: &syn::Expr,
     uses: &HashMap<String, String>,
     fields: &FieldIndex,
+    returns: &ReturnIndex,
     names: &mut std::collections::HashSet<String>,
     leaves: &mut std::collections::HashSet<String>,
 ) {
-    if let Some(l) = ctor_leaf_of_expr(e, uses, fields) {
+    if let Some(l) = ctor_leaf_of_expr(e, uses, fields, returns) {
         leaves.insert(l);
     }
     if let syn::Expr::Path(p) = e {
@@ -2555,7 +2695,7 @@ fn mark_escape(
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
         if let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) {
             for sub in &exprs {
-                mark_escape(sub, uses, fields, names, leaves);
+                mark_escape(sub, uses, fields, returns, names, leaves);
             }
         }
         return;
@@ -2585,7 +2725,7 @@ fn mark_escape(
             let mut then_names = std::collections::HashSet::new();
             let mut then_leaves = std::collections::HashSet::new();
             if let Some(t) = tail_expr_of(&iff.then_branch) {
-                mark_escape(t, uses, fields, &mut then_names, &mut then_leaves);
+                mark_escape(t, uses, fields, returns, &mut then_names, &mut then_leaves);
             }
             // No `else` means the implicit value is `()`, which can carry no NAME — an empty set, which
             // (correctly) vetoes any name the `then` arm alone found. A `()`-typed branch cannot carry a
@@ -2595,7 +2735,7 @@ fn mark_escape(
                 Some((_, eb)) => {
                     let mut n = std::collections::HashSet::new();
                     let mut l = std::collections::HashSet::new();
-                    mark_escape(eb, uses, fields, &mut n, &mut l);
+                    mark_escape(eb, uses, fields, returns, &mut n, &mut l);
                     (n, l)
                 }
                 None => (std::collections::HashSet::new(), std::collections::HashSet::new()),
@@ -2608,7 +2748,7 @@ fn mark_escape(
             let mut arms = m.arms.iter().map(|a| {
                 let mut n = std::collections::HashSet::new();
                 let mut l = std::collections::HashSet::new();
-                mark_escape(&a.body, uses, fields, &mut n, &mut l);
+                mark_escape(&a.body, uses, fields, returns, &mut n, &mut l);
                 (n, l)
             });
             if let Some((first_n, first_l)) = arms.next() {
@@ -2625,7 +2765,7 @@ fn mark_escape(
         }
         _ => {}
     }
-    for_each_value_child(e, &mut |c| mark_escape(c, uses, fields, names, leaves));
+    for_each_value_child(e, &mut |c| mark_escape(c, uses, fields, returns, names, leaves));
 }
 
 /// Value-position children of an expression — the positions through which a constructed value can

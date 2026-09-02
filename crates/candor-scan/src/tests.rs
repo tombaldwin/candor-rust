@@ -245,7 +245,7 @@
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(),
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -295,7 +295,7 @@
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(),
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -618,7 +618,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
             local_traits: &local_traits, returns: &returns, has_dyn_return: false,
             field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
-            ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), elem_of: HashMap::new(),
+            ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(),
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
@@ -4991,7 +4991,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 returns: &returns,
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
-                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(),
+                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -5039,7 +5039,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             modpath: String::new(),
                 uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
+                returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
             };
@@ -5063,7 +5063,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             modpath: String::new(),
                     uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
-                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
+                    returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
                     closure_vars: std::collections::HashSet::new(), fn_typed_vars: std::collections::HashSet::new(), dep_bound_vars: std::collections::HashMap::new(), fn_alias: std::collections::HashMap::new(), lazy_statics: empty_lazy(), forced_lazies: std::collections::HashSet::new(), unresolved: false, err_ret_leaf: None, const_strings: empty_consts(), local_macros: empty_consts(), macro_expanding: std::collections::HashSet::new(), str_locals: std::collections::HashMap::new(), local_uses: std::collections::HashMap::new(), bound_names: std::collections::HashSet::new(), dispatch_sites: Default::default(), drop_relevant: &std::collections::HashSet::new(), escaping_ctors: Default::default(), marked_ctors: Default::default(), marked_cross_ctors: Default::default(), in_pattern: false,
                 };
@@ -5102,7 +5102,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             returns: &returns,
             has_dyn_return: false,
             field_elem: &fe, field_elem_trait: &fet,
-            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(),
+            enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
             elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
             calls: Vec::new(),
             closure_vars: std::collections::HashSet::new(),
@@ -5138,7 +5138,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 returns: &returns,
                 has_dyn_return: false,
                 field_elem: &fe, field_elem_trait: &fet,
-                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(),
+                enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(),
                 elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
                 closure_vars: std::collections::HashSet::new(),
@@ -5727,7 +5727,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         assert_eq!(rets.get("new_with_defaults"), Some(&Some("Agent".to_string())),
                    "Self must resolve to the impl type, not the literal");
     }
@@ -6761,7 +6761,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         let (mut fe, mut ev) = (FieldElemIndex::new(), HashMap::new());
         let mut fet = FieldElemTraitIndex::new();
-        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+        collect_decls(&file.items, false, &mut uses, &mut fields, &mut fe, &mut fet, &mut rets, &mut ev, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         assert_eq!(fields["Outer"]["0"], "Inner");
         assert_eq!(fields["Stack"]["0"], "Outer");
     }
@@ -6784,7 +6784,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -6792,7 +6792,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new() };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -6819,7 +6819,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -6827,7 +6827,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new() };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -6852,7 +6852,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let mut tf = TraitFieldIndex::new();
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let returns: ReturnIndex = rets.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let mut enum_variants: EnumVariantIndex =
             enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
@@ -6860,7 +6860,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
         let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf };
-        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new() };
+        let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new() };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
         let mut locs = Vec::new();
@@ -7199,7 +7199,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut std::collections::HashMap::new(), &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let ev: EnumVariantIndex = enum_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(ev.get("One").map(String::as_str), Some("i32")); // single-payload: kept
         assert_eq!(ev.get("Pair"), None);                           // multi-field: not indexed
@@ -7226,7 +7226,7 @@ trait G {
         let (mut ti, mut td, mut tf) = (TraitImplIndex::new(), HashMap::new(), TraitFieldIndex::new());
         collect_decls(&file.items, false, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                       &mut enum_tmp, &mut enum_variant_traits_tmp, &mut ti, &mut td, &mut tf, &mut std::collections::HashSet::new(),
-                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new());
+                      &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new(), &mut std::collections::HashSet::new(), &mut std::collections::HashSet::new());
         let evt: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         assert_eq!(evt.get("Cb"), Some(&vec!["Fn".to_string()]), "dyn Fn() payload must record the Fn leaf");
@@ -8755,6 +8755,10 @@ trait G {
             deref_target => |m| { m.deref_target.insert("W".into(), "Inner".into()); },
             lazy_statics => |m| { m.lazy_statics.insert("CONFIG".into()); },
             callable_statics => |m| { m.callable_statics.insert("CB".into()); },
+            // SOUNDNESS R161: `pub type AutoExtension = fn(Connection) -> Result<()>` — read at every
+            // PARAMETER/annotation position, so a file gaining or losing one changes whether another
+            // file's `fn init(ax: AutoExtension)` discloses the callback boundary at all.
+            callable_aliases => |m| { m.callable_aliases.insert("AutoExtension".into()); },
             const_strings => |m| { m.const_strings.insert("API_BASE".into(), "https://api.openai.com".into()); },
             local_macros => |m| { m.local_macros.insert("do_io".into(), "() => { fs::write(\"/x\", b\"y\"); }".into()); },
             blanket_methods => |m| { m.blanket_methods.insert("ext".into(), "T".into()); },
@@ -10403,7 +10407,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
-                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new() },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new() },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
@@ -10454,7 +10458,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
                 TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields },
-                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new() },
+                ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new() },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), &mut uses, &mut out,
             );
             out
@@ -13738,7 +13742,7 @@ pub fn go() {{ imp::doit(); }}
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
             local_traits: &local_traits, returns: &returns, has_dyn_return: false,
             field_elem: &field_elem, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits,
-            ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), elem_of: HashMap::new(),
+            ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(),
             field_elem_trait: &field_elem_trait, elem_trait_of: HashMap::new(),
             tuple_of: HashMap::new(), tuple_trait_of: HashMap::new(), calls: Vec::new(),
             closure_vars: Default::default(), fn_typed_vars: Default::default(),
@@ -13952,3 +13956,75 @@ pub fn go() {{ imp::doit(); }}
                     "`{absent}` performs nothing — an associated const and an enum ctor are not calls:\n{v:#}");
         }
     }
+
+    // ======================= SOUNDNESS R161 / R165 / R168 / R169 =======================
+    // Four published silent under-reports, each measured against the 0.34.0 binary on real crates
+    // (rusqlite 0.40.2, crossterm 0.29.0) and each with an EXECUTED ground truth beside it — the
+    // callback really writes a file, the destructor really removes one, the forwarder really reads
+    // one. Every test below states which direction it guards; the ones that assert an ABSENCE are
+    // labelled CONTROL and are recorded as passing in BOTH arms, not as coverage.
+
+    /// Report row for `name`, or an empty effect list when the row is absent — absence is what a
+    /// silently-dropped function looks like, so these tests must be able to say it without panicking.
+    #[cfg(test)]
+    fn row_absent(v: &serde_json::Value, name: &str) -> bool {
+        v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != name)
+    }
+
+    /// R161, the trigger. A callback parameter typed through a NOMINAL ALIAS. UNDER-REPORT direction:
+    /// `rusqlite::auto_extension::init_auto_extension(.., ax: AutoExtension)` read a bare `[]` with no
+    /// `unknownWhy` on the published 0.34.0 binary — an affirmative purity claim over a caller-supplied
+    /// body. FAILS pre-fix: `via_alias` is absent from the report entirely.
+    #[test]
+    fn a_callback_parameter_typed_through_an_alias_discloses_unknown_like_the_bare_spelling() {
+        let v = scan_src_to_json("r161alias", "\
+            pub type Alias = fn(&str);\n\
+            pub type BoxAlias = Box<dyn Fn(&str)>;\n\
+            pub fn ctl_bare(f: fn(&str), p: &str) { f(p) }\n\
+            pub fn via_alias(f: Alias, p: &str) { f(p) }\n\
+            pub fn via_box_alias(f: BoxAlias, p: &str) { f(p) }\n\
+            pub fn via_ref_alias(f: &Alias, p: &str) { f(p) }\n");
+        let bare = effs(fn_entry(&v, "ctl_bare"));
+        assert_eq!(bare, vec!["Unknown".to_string()], "the bare `fn(&str)` control must disclose Unknown");
+        for n in ["via_alias", "via_box_alias", "via_ref_alias"] {
+            assert_eq!(effs(fn_entry(&v, n)), bare,
+                       "`{n}` differs from the bare spelling by an alias and nothing else; the report \
+                        must not differ at all");
+        }
+    }
+
+    /// R161, the `Option<fn>` arm — the one a `Box<dyn Fn>` payload hid. `Option<Box<dyn Fn(..)>>`
+    /// always worked (`trait_leaves` peels the `Box`); a BARE fn pointer carries no trait to peel to,
+    /// so every unwrap binder silently dropped it. UNDER-REPORT direction, three binder shapes.
+    #[test]
+    fn an_optional_bare_fn_pointer_parameter_discloses_unknown_at_every_unwrap_binder() {
+        let v = scan_src_to_json("r161opt", "\
+            pub fn ctl_boxed(f: Option<Box<dyn Fn(&str)>>, p: &str) { if let Some(g) = f { g(p) } }\n\
+            pub fn iflet(f: Option<fn(&str)>, p: &str) { if let Some(g) = f { g(p) } }\n\
+            pub fn matched(f: Option<fn(&str)>, p: &str) { match f { Some(g) => g(p), None => () } }\n\
+            pub fn mapped(f: Option<fn(&str)>, p: &str) { f.map(|g| g(p)); }\n");
+        let boxed = effs(fn_entry(&v, "ctl_boxed"));
+        assert_eq!(boxed, vec!["Unknown".to_string()], "the `Box<dyn Fn>` control must disclose Unknown");
+        for n in ["iflet", "matched", "mapped"] {
+            assert_eq!(effs(fn_entry(&v, n)), boxed,
+                       "`{n}` binds an opaque caller-supplied callable and calls it — it must read \
+                        exactly what the `Box<dyn Fn>` spelling reads");
+        }
+    }
+
+    /// R161 CONTROL — the OVER-CHARGE direction. An alias to a non-callable type must not make its
+    /// parameter a callback boundary, and a genuinely pure function must stay out of `functions[]`.
+    /// Passes in BOTH arms; recorded as a boundary, not as coverage.
+    #[test]
+    fn a_non_callable_alias_does_not_make_its_parameter_a_callback() {
+        let v = scan_src_to_json("r161ctl", "\
+            pub type NumAlias = usize;\n\
+            pub fn pure_alias(a: NumAlias) -> NumAlias { a + 1 }\n\
+            pub fn pure_opt(a: Option<usize>) -> usize { a.unwrap_or(0) }\n");
+        for n in ["pure_alias", "pure_opt"] {
+            assert!(row_absent(&v, n),
+                    "`{n}` calls nothing opaque — widening `is_callable_type` must not mint a unit for \
+                     it:\n{v:#}");
+        }
+    }
+

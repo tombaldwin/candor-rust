@@ -126,6 +126,8 @@ pub(crate) struct CallCollector<'a> {
     /// it (`if let Some(f) = CB.get()`, the let-else/while-let/match twins) hedged nothing — `f()` then
     /// resolved as a phantom free-fn and the enclosing fn vanished from the report entirely.
     pub(crate) callable_statics: &'a std::collections::HashSet<String>,
+    /// R161 — the crate-wide `type NAME = <callable>` alias leaves; see `ElemIndexes::callable_aliases`.
+    pub(crate) callable_aliases: &'a std::collections::HashSet<String>,
     /// Lazy statics already FORCED (edged) in this body — emit at most one forcing edge per static, so a
     /// hot static read in a loop doesn't bloat the call list.
     pub(crate) forced_lazies: std::collections::HashSet<String>,
@@ -308,9 +310,43 @@ impl<'a> CallCollector<'a> {
     /// `Pat::Ident`, so `let _ = Guard{..}`, a bare statement, a call argument, an array element, a
     /// `match` scrutinee, a tuple destructuring, `v.push(..)` and ten more read silent-pure.
     pub(crate) fn note_construction(&mut self, leaf: Option<String>) {
+        self.note_release(leaf, true)
+    }
+
+    /// SOUNDNESS R168 — the PARAMETER-OWNED entry point, which must NOT consult the leaf-keyed escape
+    /// gate. `escaping_ctors` answers "does a CONSTRUCTION of this leaf leave the body", and that is the
+    /// right question for the three construction spellings; it is the WRONG question for a by-value
+    /// parameter, whose value was built in someone else's frame and cannot be the thing that escapes.
+    ///
+    ///     impl G { fn via_self(self) -> G { let _k = self.n; Self::mk() } }
+    ///
+    /// `self` really drops here (executed: `G::drop` runs once inside that frame) and the RETURNED `G` is
+    /// a different value — but both are leaf `G`, so the return's escape suppressed the parameter's drop
+    /// and the function vanished from `functions[]` entirely. `crossbeam_epoch::Owned::with_tag` is the
+    /// real instance R160's A/B audited: right answer, wrong reason, and it stops being right the moment
+    /// the body has no `mem::forget`.
+    ///
+    /// The parameter route already HAS its escape gate, and it is keyed on the VALUE rather than the type:
+    /// `owned_drop_params` refuses any param whose NAME reaches an exit (`escapes.names`), which is what
+    /// keeps `fn returns_self(self) -> G { self }` and `fn forgets(self) { mem::forget(self) }` uncharged
+    /// — both measured, both still absent after this change. So this is not a gate removal; it is the
+    /// removal of a SECOND gate that was answering about a different value. Direction: it can only ADD
+    /// charges, never withdraw one, and the direction it fails in is over-charging a consuming method
+    /// that moves `self` into a callee through a method call syntax cannot distinguish from a borrow.
+    pub(crate) fn note_owned_param_drop(&mut self, leaf: Option<String>) {
+        self.note_release(leaf, true)
+    }
+
+    fn note_release(&mut self, leaf: Option<String>, gate_on_escape: bool) {
         let Some(leaf) = leaf else { return };
-        if !self.drop_relevant.contains(&leaf) || self.escaping_ctors.contains(&leaf) {
+        if !self.drop_relevant.contains(&leaf) || (gate_on_escape && self.escaping_ctors.contains(&leaf)) {
             return;
+        }
+        if !gate_on_escape && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && self.escaping_ctors.contains(&leaf) {
+            // §E1 HIT COUNTER — the branch this change adds is exactly "the leaf gate WOULD have
+            // suppressed this parameter's drop". Printed only when it really fires, so a zero count in an
+            // A/B means the corpus never reached the change rather than that the change was quiet.
+            eprintln!("R168OWNED {} in {}", leaf, self.modpath);
         }
         if !self.marked_ctors.insert(leaf.clone()) {
             return;
@@ -1457,7 +1493,7 @@ impl<'a> CallCollector<'a> {
                                     syn::GenericArgument::Type(t) => Some(t),
                                     _ => None,
                                 })
-                                .is_some_and(|t| is_callable_type(t, &self.generic_bounds));
+                                .is_some_and(|t| is_callable_type(t, &self.generic_bounds, self.callable_aliases));
                         }
                     }
                 }
@@ -1488,7 +1524,7 @@ impl<'a> CallCollector<'a> {
                 }
                 m.turbofish.as_ref().is_some_and(|tf| {
                     tf.args.iter().any(|a| {
-                        matches!(a, syn::GenericArgument::Type(t) if is_callable_type(t, &self.generic_bounds))
+                        matches!(a, syn::GenericArgument::Type(t) if is_callable_type(t, &self.generic_bounds, self.callable_aliases))
                     })
                 })
             }
@@ -1707,7 +1743,7 @@ impl<'a> CallCollector<'a> {
                 // `dyn` position), so without this the name was left in NO side-table at all and
                 // `f()` resolved as a phantom free-fn call. Mirrors the single-ident annotated `let`
                 // route (`is_callable_type` check ahead of `trait_leaves`/`type_path`, line ~2216).
-                if is_callable_type(ty_el, &self.generic_bounds) {
+                if is_callable_type(ty_el, &self.generic_bounds, self.callable_aliases) {
                     self.fn_typed_vars.insert(name.clone());
                 } else {
                     self.fn_typed_vars.remove(&name);
@@ -1932,7 +1968,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // `Expr::Call`, so it failed the old `contains("::")` test, and the qualified
                         // spelling's `tail2` head is the MODULE). Read off the RESOLVED path, after
                         // fn-alias and qself restoration, so `<Daemon>::new()` still keys on Daemon.
-                        let ctor = crate::lang::ctor_leaf_from_call_path(&path, self.uses);
+                        let ctor = crate::lang::ctor_leaf_from_call_path(&path, self.uses)
+                            // SOUNDNESS R165 — …and, when the callee path names no type at all, what the
+                            // callee's own recorded RETURN type says it produces. A free-function
+                            // constructor (`let c = from_handle(p);`) had no route in ANY position after
+                            // the marker was made position-independent: the binder-keyed predecessor
+                            // consulted `ctor_type`/`returns` and this one did not.
+                            .or_else(|| {
+                                let leaf = crate::lang::ctor_leaf_from_call_returns(&path, self.returns);
+                                if leaf.is_some() && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    eprintln!("R165RET {path} -> {leaf:?}"); // §E1 HIT COUNTER
+                                }
+                                leaf
+                            });
                         self.note_construction(ctor);
                         // CROSS-CRATE sibling — R68(1). `path` is already the resolved (use-expanded)
                         // callee path, exactly what `cross_ctor_leaf_from_call_path` needs to recover the
@@ -2765,7 +2813,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
         if node.qself.is_none() {
             let ctor = crate::lang::ctor_leaf_of_expr(
-                &syn::Expr::Struct(node.clone()), self.uses, self.fields);
+                &syn::Expr::Struct(node.clone()), self.uses, self.fields, self.returns);
             self.note_construction(ctor);
             // CROSS-CRATE sibling — R68(1). This spelling had NO route to a cross-crate marker at all
             // before this fix; `deplib::Guard { n: 1 }` read silent-pure regardless of what deplib's own
@@ -2798,7 +2846,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if let syn::Pat::Type(pt) = input {
                 if let Some(name) = single_pat_ident(&pt.pat) {
                     let was = self.fn_typed_vars.contains(&name);
-                    if is_callable_type(&pt.ty, &self.generic_bounds) {
+                    if is_callable_type(&pt.ty, &self.generic_bounds, self.callable_aliases) {
                         self.fn_typed_vars.insert(name.clone());
                         saved_fn_typed.push((name, was));
                         continue;
@@ -2977,7 +3025,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // `self.generic_bounds` for the same reason as the `trait_leaves` call below: an
                 // annotation can name a generic (`let g: F = f;` under `<F: Fn()>`). The PARAMETER
                 // position already discloses `Unknown` for that callable; the annotation read pure.
-                if is_callable_type(&pt.ty, &self.generic_bounds) {
+                if is_callable_type(&pt.ty, &self.generic_bounds, self.callable_aliases) {
                     self.fn_typed_vars.insert(id.ident.to_string());
                     self.vars.remove(&id.ident.to_string());
                 } else {
@@ -3661,16 +3709,30 @@ const DECLARED_HERE: usize = usize::MAX;
 ///
 /// Fixpoint, because re-exports chain: `a` re-exports `a::b`, which re-exports `a::b::c`, and `a::doit()`
 /// has to travel both edges. Bounded, so a cyclic `pub use` pair cannot spin.
-pub(crate) fn reexport_aliases(edges: &[Reexport], fns: &[FnInfo]) -> HashMap<String, Vec<String>> {
+pub(crate) fn reexport_aliases(
+    edges: &[Reexport],
+    fns: &[FnInfo],
+    // R169 — the module quals whose item list carries an UNEXPANDED item-position macro (R128's index).
+    // A module that hides a `cfg_if! { pub use self::unix::*; }` contributes NO `Reexport` edge, so it is
+    // invisible to the claimants test below and cannot contest a tail2 key it really does own. Measured
+    // on tempfile 3.10.0: `file/imp/mod.rs` is exactly that shape, so `imp::create` looked like `dir::imp`'s
+    // alone and `file::tempfile_in`'s `imp::create(dir)` resolved into the DIRECTORY module — a wrong
+    // attribution that also lost `file::imp::unix::create`'s `Env`.
+    macro_modules: &std::collections::HashSet<String>,
+) -> HashMap<String, Vec<String>> {
     use std::collections::BTreeMap;
     // module key -> name -> (which edges put it there, which definitions it stands for). The module key
     // is the fn qual minus its last segment, so a FREE fn keys on its module (`imp::platform`) and a
     // METHOD keys one level deeper (`imp::platform::Type`) — which is what makes a glob from a module
     // pick up that module's free functions and nothing else.
-    /// Which `pub use` edges put a name in a module, and which definitions it stands for. Named because
-    /// clippy's `type_complexity` refuses the inline spelling and CI denies warnings — the alias is the
-    /// documentation the nested generics were not.
-    type ExportClaims = (BTreeSet<usize>, BTreeSet<String>);
+    /// Which `pub use` edges put a name in a module, which definitions it stands for, and which of
+    /// those came through an EXPLICIT (non-glob) edge. Named because clippy's `type_complexity` refuses
+    /// the inline spelling and CI denies warnings — the alias is the documentation the nested generics
+    /// were not. The third set exists for SOUNDNESS R169: `pub use a::*; pub use b::create;` is legal
+    /// Rust in which the explicit import SHADOWS the glob, so when both kinds bring one name into one
+    /// module the explicit definitions are the answer and the glob's are not. That is the same
+    /// precedence `module_glob_alias` already applies one index over.
+    type ExportClaims = (BTreeSet<usize>, BTreeSet<String>, BTreeSet<String>);
     let mut exported: BTreeMap<String, BTreeMap<String, ExportClaims>> = BTreeMap::new();
     for f in fns {
         // A synthetic lazy-init unit is reachable only through the forcing edge its own qual spells out.
@@ -3685,21 +3747,25 @@ pub(crate) fn reexport_aliases(edges: &[Reexport], fns: &[FnInfo]) -> HashMap<St
     for _ in 0..REEXPORT_CHAIN_MAX {
         let mut changed = false;
         for (i, ed) in edges.iter().enumerate() {
+            let explicit = ed.name != "*";
             let mut adds: Vec<(String, String)> = Vec::new();
             for src in &ed.from {
                 let Some(names) = exported.get(src) else { continue };
                 if ed.name == "*" {
-                    for (n, (_, quals)) in names {
+                    for (n, (_, quals, _)) in names {
                         adds.extend(quals.iter().map(|q| (n.clone(), q.clone())));
                     }
-                } else if let Some((_, quals)) = names.get(&ed.name) {
+                } else if let Some((_, quals, _)) = names.get(&ed.name) {
                     adds.extend(quals.iter().map(|q| (ed.alias.clone(), q.clone())));
                 }
             }
             for (n, q) in adds {
                 let e = exported.entry(ed.module.clone()).or_default().entry(n).or_default();
                 changed |= e.0.insert(i);
-                changed |= e.1.insert(q);
+                changed |= e.1.insert(q.clone());
+                if explicit {
+                    changed |= e.2.insert(q);
+                }
             }
         }
         if !changed {
@@ -3723,7 +3789,7 @@ pub(crate) fn reexport_aliases(edges: &[Reexport], fns: &[FnInfo]) -> HashMap<St
             continue;
         }
         let mlast = module.rsplit("::").next().unwrap_or(module);
-        for (name, (from_edges, _)) in names {
+        for (name, (from_edges, _, _)) in names {
             // A name the module only DECLARES is not a claim on the alias index: the primary tail2 index
             // holds it, and `reexport_target` steps aside whenever that index has the key at all.
             if from_edges.iter().all(|e| *e == DECLARED_HERE) {
@@ -3732,24 +3798,79 @@ pub(crate) fn reexport_aliases(edges: &[Reexport], fns: &[FnInfo]) -> HashMap<St
             claimants.entry(format!("{mlast}::{name}")).or_default().insert(module);
         }
     }
+    // A module whose items are partly hidden behind a macro can export ANY name, so it contests every
+    // tail2 key spelled with its own last segment. Indexed by that segment, which is all the key carries.
+    let mut macro_last: BTreeMap<&str, BTreeSet<&String>> = BTreeMap::new();
+    for m in macro_modules {
+        if m.is_empty() {
+            continue;
+        }
+        macro_last.entry(m.rsplit("::").next().unwrap_or(m)).or_default().insert(m);
+    }
     let mut keyed: HashMap<String, Vec<String>> = HashMap::new();
     for (module, names) in &exported {
         if module.is_empty() {
             continue;
         }
         let mlast = module.rsplit("::").next().unwrap_or(module);
-        for (name, (from_edges, quals)) in names {
+        for (name, (from_edges, quals, explicit_quals)) in names {
             if from_edges.contains(&DECLARED_HERE) || from_edges.len() != 1 {
                 continue;
             }
-            if quals.is_empty() || quals.len() > REEXPORT_FANOUT_MAX {
+            // SOUNDNESS R169 — SEVERAL EDGES ARE A UNION, NOT AN AMBIGUITY. This read
+            // `from_edges.len() != 1`, and dropped the name outright the moment two `pub use` statements
+            // brought it into one module. That is the `#[cfg]` PLATFORM SPLIT written as a pair of
+            // gated `use`s rather than as one `#[cfg_attr(path)] mod` — the identical fact this
+            // function's own doc comment says it KEEPS ("ONE edge standing for several definitions is
+            // KEPT and charged as a union — that is the cfg platform split"), refused because of how it
+            // was spelled. Two implementations of one question, drifted (brief §F1-3); R105 had already
+            // settled the same question for the `#[cfg]`-duplicated ALIAS map by keeping every arm.
+            //
+            // MEASURED, published: crossterm 0.29.0's `terminal::sys` re-exports `size` under
+            // `#[cfg(unix)]` from `unix` and under `#[cfg(windows)]` from `windows`. Two edges, so the
+            // alias was dropped and `crossterm::terminal::size` — the public API — got NO unit at all,
+            // while `terminal::sys::unix::size` read ['Exec','Unknown']. Absence is the sin's signature.
+            // The `self::`- and `crate::`-rooted spellings of the same call fail identically, which is
+            // how this was told apart from the module-relative-path hypothesis it was filed under: with
+            // ONE re-export edge and both platform modules present, every spelling already resolved.
+            //
+            // A union cannot withdraw an effect (it only adds targets), and the two rules that DO refuse
+            // are untouched: a name the module declares itself still wins outright, and a tail2 key two
+            // different modules could claim is still dropped. The remaining direction is an over-charge
+            // when the two edges are a glob and an explicit import rather than `#[cfg]` twins — Rust
+            // gives the explicit one precedence, and `explicit_quals` applies exactly that, so the glob's
+            // definitions are used only when nothing explicit brought the name in.
+            let effective = if explicit_quals.is_empty() { quals } else { explicit_quals };
+            if effective.is_empty() || effective.len() > REEXPORT_FANOUT_MAX {
                 continue;
             }
             let key = format!("{mlast}::{name}");
             if claimants.get(&key).is_none_or(|c| c.len() != 1) {
                 continue;
             }
-            keyed.insert(key, quals.iter().cloned().collect());
+            // …and the claimant this index CANNOT SEE — applied ONLY to the keys the multi-edge union
+            // above newly admits, which is a boundary drawn on MEASUREMENT, not on convenience. Applied
+            // to every key, this guard removes 27 rows across four crates in a 1489-crate A/B, and eight
+            // of them are async-std's `Path::is_dir`/`exists`/`metadata`/`read_dir`/`canonicalize`/
+            // `read_link`/`symlink_metadata`/`is_file` losing ['Fs','Unknown'] — real filesystem calls on
+            // a public API, i.e. this family's cardinal sin, traded for a fabrication fix. The claimants
+            // index being blind to macro-hidden modules is a PRE-EXISTING gap that the old
+            // `from_edges.len() != 1` test happened to mask for these keys; closing it universally is a
+            // separate change with its own A/B and is NOT attempted here. What this line guarantees is
+            // narrower and is the only thing it claims: the union does not import that gap.
+            if from_edges.len() > 1
+                && macro_last.get(mlast).is_some_and(|ms| ms.iter().any(|m| *m != module))
+            {
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("R169MACROCONTEST {key} (module {module})");
+                }
+                continue;
+            }
+            if from_edges.len() > 1 && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                // §E1 HIT COUNTER — this is precisely the branch the old `!= 1` test dropped.
+                eprintln!("R169MULTI {key} -> {effective:?}");
+            }
+            keyed.insert(key, effective.iter().cloned().collect());
         }
     }
     keyed
