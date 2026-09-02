@@ -14028,3 +14028,41 @@ pub fn go() {{ imp::doit(); }}
         }
     }
 
+    /// R165, the trigger. A `Drop`-carrying value obtained through a FREE FUNCTION dies in the caller's
+    /// scope, and the caller was ABSENT — the intermediate's own report is (correctly) empty and carries
+    /// no residual edge, so nothing downstream could recover it. UNDER-REPORT direction; the assoc-fn
+    /// spelling one token away is the control, and it was charged all along.
+    #[test]
+    fn a_drop_value_from_a_free_function_constructor_is_charged_like_one_from_an_assoc_fn() {
+        let v = scan_src_to_json("r165free", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H { pub fn make(p: &str) -> H { H { p: p.to_string() } } }\n\
+            pub fn from_handle(p: &str) -> H { H { p: p.to_string() } }\n\
+            pub fn holds_free(p: &str) -> usize { let h = from_handle(p); h.p.len() }\n\
+            pub fn holds_assoc(p: &str) -> usize { let h = H::make(p); h.p.len() }\n");
+        let assoc = effs(fn_entry(&v, "holds_assoc"));
+        assert_eq!(assoc, vec!["Fs".to_string()], "the assoc-fn control must carry the destructor's Fs");
+        assert_eq!(effs(fn_entry(&v, "holds_free")), assoc,
+                   "the two callers differ only in how the constructor is spelled; the destructor runs \
+                    in both frames (executed ground truth: the file really is removed)");
+    }
+
+    /// R165 CONTROL — the OVER-CHARGE direction, and the reason the escape gate had to learn the same
+    /// fact as the marker. Widening only the marker made both of these fabricate a `Drop` that runs in
+    /// someone else's frame. Passes in BOTH arms.
+    #[test]
+    fn a_free_function_constructed_value_that_escapes_is_not_charged() {
+        let v = scan_src_to_json("r165esc", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            pub fn from_handle(p: &str) -> H { H { p: p.to_string() } }\n\
+            pub fn forwards(p: &str) -> H { from_handle(p) }\n\
+            pub fn forgets(p: &str) { std::mem::forget(from_handle(p)); }\n");
+        for n in ["forwards", "forgets"] {
+            assert!(row_absent(&v, n),
+                    "`{n}` does NOT run the destructor in its own frame (executed: the file survives) — \
+                     charging it fabricates an effect in the caller's frame:\n{v:#}");
+        }
+    }
+
