@@ -566,6 +566,26 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         if let Some(rest) = leaf.strip_prefix("sqlite3_") {
             let _ = rest;
             // SQLite C API operations that touch the database (open/exec/step/prepare/backup/blob/wal).
+            //
+            // SOUNDNESS R166 — MEMBERSHIP CRITERION, stated because the list was extended and the next
+            // reader needs to know what "already audited" covers. A leaf belongs here when it either
+            // (a) reads or writes DATABASE CONTENT (disk or the in-memory image), or (b) mutates the
+            // registry of code the engine will later RUN — the extension/auto-extension registry, whose
+            // effect is not local to the calling frame. The audit boundary was the WHOLE `sqlite3_*`
+            // surface rusqlite 0.40.2 mentions (185 distinct symbols diffed against this list), not the
+            // one name the row was filed for: `sqlite3_auto_extension` arrived with its `_cancel_`/
+            // `_reset_` siblings and with four content-I/O leaves nobody had looked at.
+            //
+            // DELIBERATELY STILL ABSENT, so this is not read as "the surface is covered": the
+            // CALLBACK-INSTALLING entry points (`sqlite3_create_function[_v2]`,
+            // `sqlite3_create_window_function`, `sqlite3_create_collation_v2`, `sqlite3_create_module_v2`,
+            // `sqlite3_*_hook`, `sqlite3_set_authorizer`, `sqlite3_progress_handler`, `sqlite3_trace_v2`).
+            // Those register a UDF/hook on ONE connection for the life of that connection; they perform no
+            // database I/O themselves, and the opaque-callback boundary is already disclosed by the
+            // scanner's own `Unknown` at the call site that hands the function pointer across. The
+            // auto-extension registry is the case that differs: it is PROCESS-GLOBAL and outlives every
+            // connection, so its consequence cannot be attributed to a caller's own frame at all.
+            // Unexamined and named as such: the libgit2 (`git_*`) table below got no equivalent sweep.
             const DB: &[&str] = &[
                 "sqlite3_open", "sqlite3_open_v2", "sqlite3_open16", "sqlite3_close", "sqlite3_close_v2",
                 "sqlite3_exec", "sqlite3_step", "sqlite3_prepare", "sqlite3_prepare_v2",
@@ -573,6 +593,16 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 "sqlite3_get_table", "sqlite3_backup_init", "sqlite3_backup_step", "sqlite3_backup_finish",
                 "sqlite3_blob_open", "sqlite3_blob_read", "sqlite3_blob_write", "sqlite3_blob_reopen",
                 "sqlite3_load_extension", "sqlite3_wal_checkpoint", "sqlite3_wal_checkpoint_v2",
+                // (b) the PROCESS-GLOBAL extension registry — every one of these changes what a LATER
+                // `sqlite3_open` on any connection will execute, and `sqlite3_load_extension` (already
+                // above) is the same capability one call along.
+                "sqlite3_auto_extension", "sqlite3_cancel_auto_extension", "sqlite3_reset_auto_extension",
+                "sqlite3_enable_load_extension",
+                // (a) further DATABASE-CONTENT I/O the original list missed: whole-image load/save,
+                // a forced page-cache flush to disk, a direct VFS file operation, and arming the
+                // automatic WAL checkpoint writes whose manual twin is already listed.
+                "sqlite3_deserialize", "sqlite3_serialize", "sqlite3_db_cacheflush",
+                "sqlite3_file_control", "sqlite3_wal_autocheckpoint",
             ];
             return DB.contains(&leaf).then_some("Db");
         }
@@ -3901,6 +3931,24 @@ mod tests {
         assert_eq!(classify("libc", "libc::connect"), Some("Net"));
         assert_eq!(classify("libc", "libc::read"), None); // generic fd op — deliberately unclassified
         assert_eq!(classify("ffi", "ffi::sqlite3_step"), Some("Db"));
+        // SOUNDNESS R166 — the PROCESS-GLOBAL extension registry. `rusqlite::register_auto_extension`
+        // calls `ffi::sqlite3_auto_extension` directly and read `[]` on the 0.34.0 binary: an explicit
+        // empty effect set over a call that changes what every LATER `sqlite3_open` executes.
+        assert_eq!(classify("ffi", "ffi::sqlite3_auto_extension"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_cancel_auto_extension"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_reset_auto_extension"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_enable_load_extension"), Some("Db"));
+        // …and the database-CONTENT I/O the same sweep found unlisted beside it.
+        assert_eq!(classify("ffi", "ffi::sqlite3_deserialize"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_serialize"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_db_cacheflush"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_file_control"), Some("Db"));
+        assert_eq!(classify("ffi", "ffi::sqlite3_wal_autocheckpoint"), Some("Db"));
+        // CONTROLS for the boundary this list deliberately stops at — an in-memory accessor and a
+        // per-connection callback INSTALLER stay unclassified, so the additions above are not read as
+        // "every `sqlite3_*` is Db". Both pass before and after R166; recorded as boundary, not coverage.
+        assert_eq!(classify("ffi", "ffi::sqlite3_column_int64"), None);
+        assert_eq!(classify("ffi", "ffi::sqlite3_create_function_v2"), None);
         assert_eq!(classify("raw", "raw::git_remote_fetch"), Some("Net"));
         // libgit2 clone + submodule clone/update fetch over the network (an A/B on git2 0.20 caught
         // `Submodule::update`/`clone` and `Repository::clone` reporting no Net — the latter because the
