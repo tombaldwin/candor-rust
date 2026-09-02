@@ -1774,6 +1774,114 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .iter()
             .any(|r| fields.contains_key(r) || merged.drop_types.contains(r));
         for c in &f.calls {
+            // ── R105 — A `#[cfg]`-DUPLICATED ALIAS, ADJUDICATED WHERE THE LEAF IS KNOWN ────────────────
+            // `decls::record_alias` keeps EVERY arm of an alias whose declaration is duplicated across
+            // `#[cfg]` branches (the ordinary platform/feature shim) instead of letting the last one in
+            // the file win, and `lang::alias_join` distributed this call's own trailing segments over
+            // them. So the path in hand is the complete set of callees this one call site could name, and
+            // the question "do the arms answer the same?" can be put to the AUTHORITY that owns it — the
+            // classifier, with the real leaf attached — instead of being guessed at collection time from
+            // a prefix nobody had yet appended a leaf to (§G).
+            //
+            //   * every arm classifies the SAME → charge that effect. This is the union, and it is the
+            //     case that decides the cost: essentially every real collision in a 256-crate corpus is a
+            //     portability shim (`alloc::boxed::Box` / `std::boxed::Box`, `core::sync::atomic` /
+            //     `loom::sync::atomic`, `LittleEndian` / `BigEndian`) whose arms are indistinguishable to
+            //     the classifier, so this arm stays silent and costs nothing.
+            //   * the arms DISAGREE → `Unknown`. candor cannot know which platform or feature set the
+            //     build selects, and the two things it must not do are pick one (measured: `deny Fs` went
+            //     exit 1 → exit 0 on two crates differing ONLY in arm order, with the real `Fs` nowhere in
+            //     the document) and charge both (a fabricated effect from the arm that is not compiled).
+            //     The kind is `ambiguous:` — SPEC §4's fifth kind, already meaning "two definitions, no
+            //     way to say which runs"; this is that state one resolution step earlier, so it reuses the
+            //     token rather than minting one.
+            //
+            // NO SURFACE IS CAPTURED for either outcome, deliberately: the arms are DIFFERENT paths, so
+            // their `fs`/`cmds`/`hosts` literals are different claims and publishing one arm's would be
+            // the pick-by-position this fix removes. The agreed-effect arm marks itself `incomplete` so an
+            // empty surface cannot read as a complete one and let `allow <E> <lit>` certify a claim the
+            // engine never made.
+            if c.path.contains(crate::decls::ALIAS_ALT_SEP) {
+                let arms = || {
+                    c.path.split(crate::decls::ALIAS_ALT_SEP).map(|alt| {
+                        let written = alt.split("::").next().unwrap_or("");
+                        let acr: &str = dep_renames.get(written).map(String::as_str).unwrap_or(written);
+                        candor_classify::classify(acr, alt)
+                            .or_else(|| scan_builder_entry_effect(acr, alt))
+                    })
+                };
+                let first = arms().next().flatten();
+                let agree = arms().all(|e| e == first);
+                // Instrument the PRECONDITION, not just the output (the standing bar, and the sibling of
+                // `CANDOR_TYPESURFACE_DEBUG` above): a report diff cannot show that this branch never
+                // fired, and a byte-identical A/B over a corpus that never reaches it is the most
+                // flattering number available.
+                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!(
+                        "ALIASCOLLIDE {} :: {} -> {}",
+                        f.qual,
+                        c.path.replace(crate::decls::ALIAS_ALT_SEP, " | "),
+                        if agree { format!("AGREE {first:?}") } else { "DISAGREE".to_string() }
+                    );
+                }
+                match (agree, first) {
+                    (true, Some(eff)) => {
+                        direct.entry(f.qual.clone()).or_default().insert(eff);
+                        incomplete.entry(f.qual.clone()).or_default().insert(eff);
+                    }
+                    (true, None) => {}
+                    (false, _) => {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert("ambiguous:cfg-duplicated alias".to_string());
+                    }
+                }
+                // …AND THE κ LEDGER STILL RUNS, once per arm. This branch `continue`s, so without it an
+                // UNCLASSIFIED call through a duplicated alias would leave the blind-spot ledger silent —
+                // and MEASURED, that is not hypothetical: the first cut of this fix dropped 32 rows and
+                // changed 20 more across `bytes-1.12.1`, every one of them an `invisible:
+                // ["extra_platforms"]` that vanished, because `loom.rs` declares
+                // `core::sync::atomic::{…}` and `extra_platforms::{…}` under opposing `#[cfg]`s and the
+                // whole ledger contribution went out with the `continue`. Losing a disclosure is the
+                // direction that matters here, so every arm that names a declared dependency is charged,
+                // which is the SAME union this file already applies to `#[cfg]` branches elsewhere (see
+                // the `blind_direct` note below: a union over cfg arms is over-report noise, never the
+                // cardinal sin). With this, the fix's whole-corpus diff is byte-identical.
+                for alt in c.path.split(crate::decls::ALIAS_ALT_SEP) {
+                    let acr = alt.split("::").next().unwrap_or("");
+                    let acr_real: &str = dep_renames.get(acr).map(String::as_str).unwrap_or(acr);
+                    let alt_real: std::borrow::Cow<str> = if acr_real == acr {
+                        std::borrow::Cow::Borrowed(alt)
+                    } else {
+                        std::borrow::Cow::Owned(format!("{acr_real}{}", &alt[acr.len()..]))
+                    };
+                    if alt.contains("::")
+                        && deps.contains(acr)
+                        && candor_classify::classify(acr_real, &alt_real).is_none()
+                        && scan_builder_entry_effect(acr_real, &alt_real).is_none()
+                    {
+                        *dep_seen.entry(acr.to_string()).or_insert(0) += 1;
+                        blind_direct.entry(f.qual.clone()).or_default().insert(acr.to_string());
+                    }
+                    // An arm carrying the UNTYPED-RECEIVER marker would, on the ordinary path below, earn
+                    // a `dispatch:` disclosure for a CHAINED dependency. It is doubly conditional (an
+                    // ambiguous alias AND an untyped receiver) and fired on nothing in the corpus, but a
+                    // disclosure that exists on the single-arm path and not here is exactly the kind of
+                    // asymmetry that turns into a finding later, so it is mirrored rather than left out.
+                    if let Some(_rest) = alt.strip_prefix(&format!("{acr}::{UNTYPED_RECV_MARKER}::")) {
+                        if deps_idx.crates.contains(acr_real) {
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why
+                                .entry(f.qual.clone())
+                                .or_default()
+                                .insert("dispatch:untyped cross-package receiver".to_string());
+                        }
+                    }
+                }
+                continue;
+            }
             let cr = c.path.split("::").next().unwrap_or("");
             // The dependency's REAL package identity (post `package = "…"` manifest rename), hoisted
             // once per call and reused by every crate-identity-keyed lookup below (the cross-crate joins,

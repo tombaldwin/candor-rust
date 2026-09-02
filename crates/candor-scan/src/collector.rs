@@ -243,9 +243,22 @@ pub(crate) struct CallCollector<'a> {
 ///
 /// Enumerating the BINDERS was necessary and not sufficient. This enumerates the STATE instead: capture
 /// every name-keyed entry for the bound names on entry, restore it around the trailing walk, put the
-/// statement's own result back after. One rule, every site, and it cannot go stale as binder shapes are
-/// added — a NEW binder is covered the day it is written, and a new TABLE is caught by
-/// `every_name_keyed_table_is_restored_for_the_rhs_walk`.
+/// statement's own result back after. One rule, every site, so a NEW BINDER is covered the day it is
+/// written.
+///
+/// WHAT THIS DOES **NOT** GUARANTEE, stated as the assumption it is (R107). This comment used to end "and
+/// a new TABLE is caught by `every_name_keyed_table_is_restored_for_the_rhs_walk`". **That is false, and
+/// it was proven false mechanically**: a thirteenth name-keyed table was added to `CallCollector` and
+/// poisoned inside the window's scope, and that test — and all 306 others — PASSED. The compiler forces a
+/// new field into ten exhaustive struct literals, one of which is that test's; NOTHING forces it into the
+/// three places that would actually cover it (`BoundNameState`'s field list, `capture_bindings`,
+/// `restore_bindings`), because those three are hand-written maps with no link back to the collector's
+/// field set. So the sibling test is a REGRESSION PIN over the twelve tables that exist today, not a
+/// completeness pin, and it is named and worded for that now. The residual it leaves is exact and worth
+/// stating rather than papering over: **a table added to `CallCollector` and not registered in
+/// `BoundNameState` is outside this window and nothing in this repo will say so.** Registering it is a
+/// manual step; this paragraph is the reminder, and it is not a substitute for the guard nobody has
+/// written.
 ///
 /// The field list is deliberately the one `scoped_binding` enumerates. It differs in ONE decision, and
 /// the reason is that the two answer different questions: `scoped_binding` KEEPS the hedging sets
@@ -1574,6 +1587,19 @@ impl<'a> CallCollector<'a> {
         }
         let names: Vec<String> = pre.iter().map(|b| b.name.clone()).collect();
         let now = self.capture_bindings(&names);
+        // R107 — instrument the PRECONDITION. The window is a NO-OP wherever the statement has not yet
+        // mutated a bound name's state, so a corpus A/B that shows no movement proves nothing unless the
+        // window was actually LIVE somewhere in it. Print the call sites where `pre` and `now` genuinely
+        // differ: those are the reads that would have seen this statement's own writes.
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            for (p, n) in pre.iter().zip(now.iter()) {
+                if (&p.vars, &p.trait_vars, &p.fn_alias, &p.elem_of, &p.tuple_trait_of, p.closure_vars, p.fn_typed_vars)
+                    != (&n.vars, &n.trait_vars, &n.fn_alias, &n.elem_of, &n.tuple_trait_of, n.closure_vars, n.fn_typed_vars)
+                {
+                    eprintln!("WINDOW-LIVE {}", p.name);
+                }
+            }
+        }
         self.restore_bindings(pre);
         let r = f(self);
         self.restore_bindings(&now);
@@ -2001,10 +2027,26 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // `arc.clone()` would form `T::clone` and FABRICATE — but `arc.clone()` calls the pointer's
             // own `Arc::clone` (a pure refcount bump), NEVER `T::clone`. An effectful `T::clone` is a rare
             // anti-pattern, so skipping the typed clone resolution is the safe choice (no fabrication).
-            if (!matches!(cr, "std" | "core" | "alloc") || std_path_recv || std_handle_recv)
-                && leaf != "clone"
-            {
-                let path = format!("{ty}::{leaf}");
+            // R105 — a `#[cfg]`-DUPLICATED alias can type a receiver, and then `ty` carries SEVERAL arms.
+            // The three gates above read only the FIRST segment, so a two-arm type sorted `core::…` first
+            // failed all three and the call was never recorded at all — no classification, no κ ledger,
+            // no disclosure. MEASURED on `bytes-1.12.1`, whose `loom.rs` declares
+            // `core::sync::atomic::{AtomicPtr,…}` beside `extra_platforms::{…}`: three functions lost the
+            // `invisible: ["extra_platforms"]` they had carried, i.e. this fix's own first cut silently
+            // dropped a disclosure. Judge the arms INDEPENDENTLY and record the call if ANY of them would
+            // have been recorded — scan.rs's collision branch then adjudicates them against the
+            // classifier, and runs the ledger for each. For a SINGLE-arm type (everything that is not a
+            // duplicated alias) `any_arm_recordable` is the identical three-way test, evaluated once.
+            let any_arm_recordable = ty.split(crate::decls::ALIAS_ALT_SEP).any(|a| {
+                let acr = a.split("::").next().unwrap_or("");
+                !matches!(acr, "std" | "core" | "alloc")
+                    || a == "std::path::Path"
+                    || a == "std::path::PathBuf"
+                    || candor_classify::is_std_effect_handle(a)
+            });
+            let _ = (cr, std_path_recv, std_handle_recv);
+            if any_arm_recordable && leaf != "clone" {
+                let path = crate::lang::alias_join(&ty, &[leaf.as_str()]);
                 self.calls.push(Call { path, leaf: leaf.clone(), str_arg, typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None });
             }
         } else {
@@ -2734,11 +2776,19 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // WHY IT IS A SNAPSHOT AND NOT A THIRD DEFERRAL. R88 deferred the bare `let`'s `trait_vars` write;
         // R92 deferred the three let-else binders'. Both were binder-shaped, and this function makes ~46
         // name-keyed mutations across a dozen tables — so the class outlived both fixes, in `elem_of`
-        // (R100) and in `fn_alias`. Enumerating the STATE covers every site at once and keeps covering
-        // them: a binder added tomorrow is inside the window the day it is written, and a TABLE added
-        // tomorrow is caught by `every_name_keyed_table_is_restored_for_the_rhs_walk`. The per-binder
-        // deferral it replaces is gone rather than left beside it — two mechanisms answering one ordering
-        // question is exactly how this class stayed open through two fixes.
+        // (R100) and in `fn_alias`. Enumerating the STATE covers every BINDER at once and keeps covering
+        // them: a binder added tomorrow is inside the window the day it is written. It does NOT cover a
+        // TABLE added tomorrow — see `BoundNameState`'s doc for the measurement that disproved the claim
+        // this comment used to make here (R107). The per-binder deferral it replaces is gone rather than
+        // left beside it — two mechanisms answering one ordering question is exactly how this class stayed
+        // open through two fixes, and R107 found one such second mechanism still standing (`shadowed_alias`,
+        // below) and removed it.
+        //
+        // R107 — THE WINDOW IS NOT SELF-ENFORCING EITHER: a read added inside this fn is only covered if
+        // whoever wrote it wrapped it. Three were not, and one was a cardinal sin (the self-shadowing
+        // tuple destructure, `tuple_elem_leaves`). Every read of this statement's own RHS below now goes
+        // through `with_pre_bindings`; the ones that could NOT be shown to matter were wrapped anyway
+        // rather than argued about, because the argument is the thing that has been wrong three times.
         let bound_names = crate::decls::pat_bound_idents(&node.pat);
         let pre_bindings = self.capture_bindings(&bound_names);
         // `let Some(d) = <opt> else { .. };` (let-else) — the unwrapped payload of an Option/Result OF A
@@ -2928,35 +2978,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // `tuple_of`), or (b) a tuple LITERAL initializer's per-element exprs. A non-tuple, untyped
             // source carries no per-element type — honest under-report. Each binding clears stale state.
             let init = node.init.as_ref().map(|i| &*i.expr);
-            let src_tuple = match init {
-                Some(syn::Expr::Path(p)) => p
-                    .path
-                    .get_ident()
-                    .and_then(|id| self.tuple_of.get(&id.to_string()))
-                    .cloned(),
+            // R107 — inside the window like every other read of this statement's own RHS. No differential
+            // could be built for THIS read (no arm above it writes `tuple_of`, so pre-state and current
+            // state coincide today); it is wrapped because "which reads happen to be ordered correctly
+            // right now" is the question this window exists to stop anyone having to answer.
+            let src_tuple = self.with_pre_bindings(&pre_bindings, |s| match init {
+                Some(syn::Expr::Path(p)) => {
+                    p.path.get_ident().and_then(|id| s.tuple_of.get(&id.to_string())).cloned()
+                }
                 _ => None,
-            };
+            });
             // A TUPLE-OF-DYN source's per-position dispatch leaves — from a source VAR's `tuple_trait_of`
             // (`let (d, _) = pair` where `pair: (Box<dyn Doer>, u32)`), or a FACTORY CALL's `<tupledyn>`
             // return sentinel (`let (d, _) = make()` where `make() -> (Box<dyn Doer>, u32)`) — so `d.go()`
             // dispatches (R46 tuple).
-            let src_trait_tuple = match init {
-                Some(syn::Expr::Path(p)) => p
-                    .path
-                    .get_ident()
-                    .and_then(|id| self.tuple_trait_of.get(&id.to_string()))
-                    .cloned(),
+            // R107 — same window, same reason as `src_tuple` above.
+            let src_trait_tuple = self.with_pre_bindings(&pre_bindings, |s| match init {
+                Some(syn::Expr::Path(p)) => {
+                    p.path.get_ident().and_then(|id| s.tuple_trait_of.get(&id.to_string())).cloned()
+                }
                 Some(syn::Expr::Call(c)) => {
                     if let syn::Expr::Path(p) = &*c.func {
                         let full = path_to_string(&p.path);
                         let leaf = full.rsplit("::").next().unwrap_or(&full);
-                        self.returns.get(leaf).and_then(|t| ret_tuple_dyn_leaves(t))
+                        s.returns.get(leaf).and_then(|t| ret_tuple_dyn_leaves(t))
                     } else {
                         None
                     }
                 }
                 _ => None,
-            };
+            });
             for (i, pat_el) in tup.elems.iter().enumerate() {
                 let Some(name) = single_pat_ident(pat_el) else { continue };
                 self.vars.remove(&name);
@@ -2979,13 +3030,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // PARAMETER — GAP C / SOUNDNESS: only the cast shape was recognised here before; an
                 // uncast already-dispatch-typed element found no leaves and `f()`/`x.go()` on the
                 // destructured binding dropped silently, for ANY dispatch-worthy element, not only `Fn`).
+                // R107 — `tuple_elem_leaves` reads the SOURCE element's own dispatch typing, and this loop
+                // has already cleared `trait_vars` for the name it is binding. A SELF-SHADOWING destructure
+                // (`let (d, n) = (d, n);`) therefore asked about a `d` whose typing this statement had
+                // just deleted, and the arm went silent: MEASURED, `let (d, n) = (d, n); d.go()` was ABSENT
+                // from `functions[]` while the byte-identical `let (e, m) = (d, n); e.go()` reported `Fs` —
+                // the same one-variable comparison, the same cardinal sin, one binder shape further out
+                // than R100 reached. Inside the window, like every other read of a `let`'s own RHS.
                 let leaves = src_trait_tuple
                     .as_ref()
                     .and_then(|t| t.get(i).cloned())
                     .filter(|l| !l.is_empty())
                     .or_else(|| match init {
                         Some(syn::Expr::Tuple(it)) => it.elems.iter().nth(i).and_then(|e| {
-                            let inner = self.tuple_elem_leaves(e);
+                            let inner =
+                                self.with_pre_bindings(&pre_bindings, |s| s.tuple_elem_leaves(e));
                             (!inner.is_empty()).then_some(inner)
                         }),
                         _ => None,
@@ -3025,7 +3084,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
             }
             if let Some(init) = &node.init {
-                if matches!(&*init.expr, syn::Expr::Closure(_)) {
+                // R107 — a REBIND FROM A CLOSURE BINDING (`let f = |..| ..; let f = f;` / `let g = f;`) is
+                // still the same closure value, so it keeps the marking. Only a rebind to something that
+                // is NOT a known closure clears it.
+                //
+                // This is the SIBLING of the fn-typed propagation three lines below, which has existed
+                // since the max review and which this position never got — the drift shape of §F1.3, one
+                // `else` arm apart. MEASURED FABRICATION with it missing: beside a free `fn eff()` that
+                // writes a file, `let eff = || {}; let eff = eff; eff();` reported `Fs`. The marking was
+                // dropped, so `eff()` stopped being a visible closure call and resolved to the free fn by
+                // bare leaf — a positive effect claim about a body whose only call is to an empty closure.
+                // Keeping the marking can only ever REMOVE a phantom edge: a closure's body is walked
+                // lexically by this same visitor, so a call through the marking contributes nothing.
+                let init_is_closure_var = match peel_recv(&init.expr) {
+                    syn::Expr::Path(p) => p
+                        .path
+                        .get_ident()
+                        .is_some_and(|i| self.closure_vars.contains(&i.to_string())),
+                    _ => false,
+                };
+                if init_is_closure_var && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    eprintln!("CLOSURE-REBIND {}", id.ident);
+                }
+                if matches!(&*init.expr, syn::Expr::Closure(_)) || init_is_closure_var {
                     // `let f = |..| ..` — remember `f` so a later `f()` is seen as a closure call.
                     self.closure_vars.insert(id.ident.to_string());
                 } else {
@@ -3036,13 +3117,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // `cb: fn()`/`impl Fn`): invoking `g()` is the same opaque-callback call as `cb()` →
                     // Unknown, not a phantom free-fn `g` (the max review found the param-only seeding
                     // missed this). A rebind to a non-fn clears the stale fn-typed marking.
-                    // R99/R100 — the removal is hygiene for LATER statements, but this statement's own
-                    // RHS still means the PRE-rebind binding (`let w = w;` re-aliases `w` to whatever `w`
-                    // already named). Keep the removed entry so the chaining lookup below can read it:
-                    // dropping it first is the same mutate-before-read ordering R100 names, one read
-                    // earlier than the trailing walk, and it left the SELF-SHADOWING two-hop spelling
-                    // silent while the distinct-name one resolved.
-                    let shadowed_alias = self.fn_alias.remove(&id.ident.to_string());
+                    // R99/R100 — the removal is hygiene for LATER statements; this statement's own RHS
+                    // still means the PRE-rebind binding (`let w = w;` re-aliases `w` to whatever `w`
+                    // already named), and dropping it first is the mutate-before-read ordering R100 names.
+                    // R107 — that was answered here by an explicit `shadowed_alias` local carrying the
+                    // removed entry to the read below: a SECOND mechanism answering the ordering question
+                    // the self-shadow window exists to own, which is the shape (§F1.3) that let this class
+                    // survive R88 and R92. The local is gone; the read below is inside the window.
+                    self.fn_alias.remove(&id.ident.to_string());
                     // R88 — SOUNDNESS: every sibling dispatch binder (if-let, while-let, match-arm,
                     // for-loop, let-else, annotated `let`, tuple destructure — R71/R75/R76/R77) resolves
                     // dispatch-trait leaves for its RHS before falling back to a concrete type. The bare
@@ -3078,7 +3160,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         if Self::leaves_are_callable(&dispatch_leaves) {
                             self.fn_typed_vars.insert(id.ident.to_string());
                         }
-                    } else if self.expr_is_fn_typed(&init.expr) {
+                    // R107 — in the window. No differential: `expr_is_fn_typed` reads `fn_typed_vars` and
+                    // `returns`, and no arm above it has written `fn_typed_vars` for this name, so
+                    // pre-state and current state coincide today. Wrapped for the same reason as
+                    // `src_tuple` — the arm above it DOES write `trait_vars`, and the next person to
+                    // widen this predicate should not have to re-derive which tables were safe.
+                    } else if self.with_pre_bindings(&pre_bindings, |s| s.expr_is_fn_typed(&init.expr)) {
                         self.fn_typed_vars.insert(id.ident.to_string());
                         self.vars.remove(&id.ident.to_string());
                     } else {
@@ -3138,12 +3225,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // so a later `g()` resolves to it (sweep [6]). `g()` only compiles if the path is
                         // callable, so aliasing any bare path is sound (an unused alias is never resolved).
                         if let syn::Expr::Path(p) = &*init.expr {
-                            let single_local = p.path.get_ident().is_some_and(|i| {
-                                let n = i.to_string();
-                                self.vars.contains_key(&n) || self.closure_vars.contains(&n)
-                                    || self.fn_typed_vars.contains(&n)
-                            });
-                            if p.qself.is_none() && !single_local {
+                            // R107 — BOTH reads here are of this statement's own RHS, and BOTH ran after
+                            // writes to the very tables they consult:
+                            //   * `single_local` asks whether the init names a LOCAL binding, reading
+                            //     `vars`/`closure_vars`/`fn_typed_vars` — all three of which the arms above
+                            //     have already rewritten for this name. MEASURED FABRICATION on the closure
+                            //     shape: `let eff = || {}; let eff = eff; eff();` beside a free `fn eff()`
+                            //     that writes a file reported `Fs` on a body that calls only the closure,
+                            //     because `closure_vars.remove` had already run and the rebind aliased the
+                            //     free fn. (PRE-EXISTING — identical at `9c4d5be`, not this round's.)
+                            //   * the `fn_alias` chain lookup, which R99 answered with an explicit
+                            //     `shadowed_alias` local — a second mechanism for the ordering question the
+                            //     window owns. Reading pre-state gives the same answer, so the local goes.
+                            // Only the READS are inside the window; the `fn_alias.insert` below is this
+                            // statement's DECISION and must survive it.
+                            let target = self.with_pre_bindings(&pre_bindings, |s| {
+                                let single_local = p.path.get_ident().is_some_and(|i| {
+                                    let n = i.to_string();
+                                    s.vars.contains_key(&n) || s.closure_vars.contains(&n)
+                                        || s.fn_typed_vars.contains(&n)
+                                });
+                                if p.qself.is_some() || single_local {
+                                    return None;
+                                }
                                 // R99 — an alias OF an alias (`let w = std::fs::write; let v = w; v(..)`).
                                 // `expand("w")` names nothing (`w` is a local, not an import), so `v` was
                                 // bound to the dead string `w` and its call resolved to no fn at all —
@@ -3151,18 +3255,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 // spellings, while the ONE-hop form has resolved since sweep [6]. Follow
                                 // the existing entry, reading the SAME map the call site reads, so the two
                                 // spellings cannot answer differently.
-                                let target = p
-                                    .path
-                                    .get_ident()
-                                    .and_then(|i| {
-                                        let n = i.to_string();
-                                        if id.ident == n {
-                                            shadowed_alias.clone()
-                                        } else {
-                                            self.fn_alias.get(&n).cloned()
-                                        }
-                                    })
-                                    .unwrap_or_else(|| expand(&path_to_string(&p.path), self.uses));
+                                Some(
+                                    p.path
+                                        .get_ident()
+                                        .and_then(|i| s.fn_alias.get(&i.to_string()).cloned())
+                                        .unwrap_or_else(|| {
+                                            expand(&path_to_string(&p.path), s.uses)
+                                        }),
+                                )
+                            });
+                            if let Some(target) = target {
                                 self.fn_alias.insert(id.ident.to_string(), target);
                             }
                         }

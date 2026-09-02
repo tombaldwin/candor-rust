@@ -863,19 +863,29 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
     }
     if !rooted_local {
         if let Some(full) = uses.get(segs[0]) {
-            let rest = &segs[1..];
-            let joined =
-                if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
+            // R105 — `alias_join`, not `format!`: `full` may carry several `#[cfg]`-duplicated arms.
+            let joined = alias_join(full, &segs[1..]);
             // R99 — a crate-LOCAL rebind of the MODULE (`use crate::facade;` then `facade::Command::new`)
             // rewrites to `crate::facade::Command::new`, which is the alias map's own key shape. Re-apply
             // the qualified lookup ONCE to the rewritten path: without it the SIBLING-module spelling of a
             // facade re-export stayed silent while the ancestor-module spelling resolved. Only the
             // `crate::`-rooted rewrite is re-applied — a rebind onto an EXTERNAL module
             // (`use somecrate::facade;`) must keep that crate's identity and is left alone.
-            if let Some(stripped) = joined.strip_prefix("crate::") {
-                let s2: Vec<&str> = stripped.split("::").collect();
-                if let Some(q) = qualified_alias(&s2, true, uses) {
-                    return q;
+            // R105 — skipped when `joined` carries several `#[cfg]`-duplicated arms, because
+            // `strip_prefix("crate::")` is a question about ONE path and a joined form has no single
+            // answer to it. STATED AS THE LIMIT IT IS RATHER THAN AS A GUARANTEE, because the obvious
+            // justification ("a multi-arm value is by construction external") is FALSE: only the `pub use`
+            // route checks its head against `crate`/`self`/`super`; the `type` and `const` routes expand
+            // through the file's own `use` map and can yield a crate-local target. So a duplicated alias
+            // with a crate-local arm does not get the sibling-module re-resolution a single-arm one would.
+            // That is an under-resolution — the direction this file prefers — and nothing in the suite or
+            // the 256-crate corpus reaches it.
+            if !joined.contains(crate::decls::ALIAS_ALT_SEP) {
+                if let Some(stripped) = joined.strip_prefix("crate::") {
+                    let s2: Vec<&str> = stripped.split("::").collect();
+                    if let Some(q) = qualified_alias(&s2, true, uses) {
+                        return q;
+                    }
                 }
             }
             return joined;
@@ -913,8 +923,7 @@ pub(crate) fn expand(path: &str, uses: &HashMap<String, String>) -> String {
         return full;
     }
     if let Some(full) = uses.get(&format!("crate::{}", segs[0])) {
-        let rest = &segs[1..];
-        return if rest.is_empty() { full.clone() } else { format!("{full}::{}", rest.join("::")) };
+        return alias_join(full, &segs[1..]); // R105 — may carry several `#[cfg]`-duplicated arms
     }
     // The crate's UNIQUE re-export glob: the seeded root glob (`crate::` + GLOB_KEY, the cross-file case) or,
     // failing that, a glob in THIS file's own `use` map (`GLOB_KEY` — the single-file/collect-time case,
@@ -935,15 +944,30 @@ fn qualified_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) 
         let joined = segs[..n].join("::");
         let key = if rooted { format!("crate::{joined}") } else { joined };
         if let Some(full) = uses.get(&key) {
-            let rest = &segs[n..];
-            return Some(if rest.is_empty() {
-                full.clone()
-            } else {
-                format!("{full}::{}", rest.join("::"))
-            });
+            return Some(alias_join(full, &segs[n..]));
         }
     }
     None
+}
+
+/// R105 — append a caller's trailing segments to an alias target that may carry SEVERAL `#[cfg]`-duplicated
+/// alternatives (`decls::record_alias`). The suffix DISTRIBUTES over the arms, so `sys::put` with arms
+/// `{std::env::set_var, std::fs::write}` becomes both full callee paths, still joined by `ALIAS_ALT_SEP` —
+/// scan.rs's call loop then classifies each and either charges their agreed effect or discloses `Unknown`.
+/// A single-arm target — every alias that is not duplicated, which is all but 31 sites in a 256-crate
+/// corpus — takes the identical `format!` this replaced, so nothing changes for it.
+pub(crate) fn alias_join(full: &str, rest: &[&str]) -> String {
+    if rest.is_empty() {
+        return full.to_string();
+    }
+    let tail = rest.join("::");
+    if !full.contains(crate::decls::ALIAS_ALT_SEP) {
+        return format!("{full}::{tail}");
+    }
+    full.split(crate::decls::ALIAS_ALT_SEP)
+        .map(|a| format!("{a}::{tail}"))
+        .collect::<Vec<_>>()
+        .join(&crate::decls::ALIAS_ALT_SEP.to_string())
 }
 
 /// R99 — seed the crate's MODULE-QUALIFIED external aliases into ONE file's `use` map, under the keys a

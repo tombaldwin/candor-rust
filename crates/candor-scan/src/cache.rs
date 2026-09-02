@@ -382,9 +382,15 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     // resulting index does not depend on this order.
     acc.reexports.extend(fd.reexports.iter().cloned());
     for (k, v) in &fd.mod_aliases {
-        // MODULE-QUALIFIED keys, so a cross-file collision means two declarations of one name in one
-        // module — not a program that compiles. Plain insert, same as `root_reexports`.
-        acc.mod_aliases.insert(k.clone(), v.clone());
+        // R105 — this used to be a plain insert, carrying the assertion that "a cross-file collision means
+        // two declarations of one name in one module — not a program that compiles". MEASURED FALSE, by
+        // the same construct the intra-file half of R105 is about: `#[cfg(unix)] #[path = "unix.rs"] mod
+        // imp;` beside `#[cfg(windows)] #[path = "windows.rs"] mod imp;` puts TWO files at ONE modpath,
+        // this scanner walks both branches by design, and a `pub type Handle = …` in each collides here.
+        // The winner was then whichever file the walk reached last. One rule for both halves: record every
+        // arm, let the call site adjudicate. `record_alias` sorts, so the merged value does not depend on
+        // walk order — which the decl-index digest below requires.
+        record_alias(&mut acc.mod_aliases, k.clone(), v.clone());
     }
 }
 

@@ -9,6 +9,29 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R105: a `#[cfg]`-duplicated alias is no longer resolved by SOURCE ORDER.** Two `#[cfg]`
+  arms declaring the same qualified name — the ordinary platform/feature shim — used to leave whichever
+  arm was written LAST in the alias map. Measured on two crates identical but for arm order: one
+  reported `["Fs"]` and failed `deny Fs` at exit 1, the other reported `["Env"]` and PASSED at exit 0,
+  with the real `Fs` present nowhere in the document. Every arm is now kept and adjudicated at the CALL
+  SITE by the classifier, with the leaf in hand: arms that classify alike charge that one effect (with
+  the literal surface withheld and the effect marked `incomplete`, since the arms' literals are
+  different claims); arms that classify differently disclose `Unknown` with an `ambiguous:` reason. The
+  cross-FILE half is fixed too — `#[cfg]`-conditional `#[path]` puts two files at one module path, which
+  the merge previously called impossible. Measured cost on 256 crates: 89 collision call-sites in 5
+  crates, **zero** became `Unknown` and zero gained an effect.
+- **SOUNDNESS R106: a body-local item now shadows a file-level binding of the same name.** `pub type Cmd
+  = std::process::Command;` beside a function body declaring its own `struct Cmd` charged that body
+  `Exec` with `cmds: ["true"]` — executed ground truth is one file write and no process — and `deny Exec`
+  exited 1. The same hole exists for the plain `use std::process::Command;` spelling and PREDATES the
+  alias work; both are closed, at the body, where the shadow belongs.
+- **SOUNDNESS R107: three reads inside `visit_local` escaped the R100 self-shadow window.** One was a
+  silent under-report: `let (d, n) = (d, n); d.go()` was ABSENT from `functions[]` while the identical
+  `let (e, m) = (d, n); e.go()` reported its effect. Two were fabrications on the closure-rebind shape,
+  both pre-existing. The second mechanism answering the same ordering question (`shadowed_alias`) is
+  gone. The window's "a table added tomorrow is caught" claim was disproved mechanically and is now
+  worded as the regression pin it is.
+
 - **⚠ SOUNDNESS R68(1): cross-crate drop-glue now uses the same construction authority as the
   in-crate case (candor-spec ⟨0.34⟩'s R66/R69 fixes), for a CALL, a STRUCT LITERAL and a bare VALUE
   PATH.** Before this, a dependency's effectful `Drop` reached the caller only through a bare
