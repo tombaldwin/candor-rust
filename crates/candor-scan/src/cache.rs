@@ -44,6 +44,11 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev15: FileDecls gained `macro_modules` (R128 — the module quals whose item list carries an
+    // unexpanded item-position macro invocation). A rev14 entry has none, so it deserializes EMPTY:
+    // "every module in this file was read in full", for files where a `cfg_rt!`/`include!`/`foo!()`
+    // hid a `pub fn` or a `pub(crate) use`. That is exactly the silent under-report the field closes,
+    // served warm and invisible — the same shape as rev14, rev13, rev12 and rev9.
     // rev14: FileDecls gained `callable_statics` (R101 — the `static`/`const` items holding an invokable
     // callback). A rev13 entry has none, so it deserializes EMPTY: "this file declares no externally
     // installable callback slot", for a file that does — and the consequence is precisely the silent
@@ -74,7 +79,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev14/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev15/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -166,6 +171,14 @@ pub(crate) struct FileDecls {
     /// silent under-report this field closes — hence the rev bump in `cache_schema`.
     #[serde(default)]
     pub(crate) mod_aliases: HashMap<String, String>,
+    /// R128 — MODULE QUALS in this file whose item list carries an unexpanded item-position MACRO
+    /// INVOCATION (`foo!();`, `cfg_rt! { .. }`, `include!("gen.rs")`). Those items are skipped by
+    /// `collect_decls`, so the module's decl/re-export entries are INCOMPLETE and a call naming a name
+    /// in one must HEDGE rather than read the absence as purity. See `collect_macro_modules`. A cache
+    /// entry written before this field deserializes EMPTY — which is precisely the silent under-report
+    /// the field closes, hence the rev bump in `cache_schema`.
+    #[serde(default)]
+    pub(crate) macro_modules: Vec<String>,
 }
 
 /// Collect ONE file's Pass A decls in isolation (the per-file input to `merge_decls`). `modpath` is the
@@ -234,6 +247,16 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         // the two answer different questions — see `Reexport`).
         reexports,
         mod_aliases,
+        // R128 — which of this file's modules had items hidden behind an unexpanded macro invocation.
+        // Keyed on the module QUAL (the file's own `modpath` for its top level), which is the same key
+        // space a call's resolved `crate::…` path reduces to at the resolver.
+        macro_modules: {
+            let mut s = std::collections::HashSet::new();
+            crate::lang::collect_macro_modules(items, modpath, include_tests, &mut s);
+            let mut v: Vec<String> = s.into_iter().collect();
+            v.sort(); // deterministic on the wire — the cache entry is content-hashed
+            v
+        },
     }
 }
 
@@ -271,6 +294,10 @@ pub(crate) struct MergedDecls {
     /// carries its module path, so two files collide only where they declare the SAME name in the SAME
     /// module, which no crate that compiles does.
     pub(crate) mod_aliases: HashMap<String, String>,
+    /// R128 — every file's MACRO-HIDDEN module quals, unioned. A module in this set had item-position
+    /// macro invocations its decl walk could not read, so "this module declares no such name" is a
+    /// statement candor is NOT entitled to make about it. See `collect_macro_modules`.
+    pub(crate) macro_modules: std::collections::HashSet<String>,
 }
 
 /// R99 (SHAPE 2) — re-expand ONE file's recorded TYPE PATHS against the crate-wide module-alias map.
@@ -485,6 +512,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.extern_fns {
         acc.extern_fns.insert(n.clone()); // set union — order-independent
     }
+    for n in &fd.macro_modules {
+        acc.macro_modules.insert(n.clone()); // set union — order-independent (R128)
+    }
     for n in &fd.drop_types {
         acc.drop_types.insert(n.clone()); // set union — order-independent
     }
@@ -669,6 +699,18 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     let mut efk: Vec<&String> = m.extern_fns.iter().collect();
     efk.sort();
     for a in efk {
+        s.push('|');
+        s.push_str(a);
+    }
+    s.push('\n');
+    // macro_modules — R128, sorted set of module quals whose items were hidden behind an unexpanded
+    // macro invocation. It is read at the CALL RESOLVER (a crate-local call into one hedges Unknown
+    // instead of vanishing), so a file gaining or losing an item-position macro must re-run Pass B for
+    // every OTHER file too — exactly the property this digest exists to enforce.
+    s.push_str("macro_modules");
+    let mut mmk: Vec<&String> = m.macro_modules.iter().collect();
+    mmk.sort();
+    for a in mmk {
         s.push('|');
         s.push_str(a);
     }

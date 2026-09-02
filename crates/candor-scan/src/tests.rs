@@ -4057,11 +4057,21 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
     /// all-pure control).
     #[cfg(test)]
     fn scan_fixture(name: &str, src: &str) -> serde_json::Value {
+        scan_fixture_files(name, src, &[])
+    }
+
+    /// `scan_fixture` plus extra files under `src/` — needed by any fixture whose lib.rs `include!`s a
+    /// second file, because a fixture that cannot compile is not weak evidence, it is NO evidence (§E3).
+    #[cfg(test)]
+    fn scan_fixture_files(name: &str, src: &str, extra: &[(&str, &str)]) -> serde_json::Value {
         let d = std::env::temp_dir().join(format!("candor-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n")).unwrap();
         std::fs::write(d.join("src/lib.rs"), src).unwrap();
+        for (rel, body) in extra {
+            std::fs::write(d.join("src").join(rel), body).unwrap();
+        }
         let prefix = d.join("out/r").to_string_lossy().into_owned();
         let idx = load_dep_reports(None);
         let (rc, body) = scan_one(&d.to_string_lossy(), ScanOpts {
@@ -4194,6 +4204,182 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
              pub fn run(p: &str) -> bool {{ {in_body} let mut c = Runner::new(p); \
                c.status().map(|s| s.success()).unwrap_or(false) }}\n"
         )
+    }
+
+    /// SOUNDNESS R128 — A `use` BOUND TO A CRATE-LOCAL PATH THAT NAMES NOTHING MUST HEDGE, NOT READ PURE.
+    ///
+    /// The three shapes below are one mechanism: an item-position MACRO the scanner does not expand, so
+    /// the module's `pub fn` / `pub(crate) use` contributes no unit and no re-export edge, and the caller
+    /// matched nothing anywhere and fell out of the resolver silent. Real-world instance: tokio's
+    /// `src/blocking.rs` declares `pub(crate) use crate::runtime::spawn_blocking;` inside `cfg_rt! { .. }`.
+    ///
+    /// GROUND TRUTH IS EXECUTED, NOT ASSERTED (§E3): each of the three was built as its own crate with a
+    /// `main` and `cargo run --release` printed `ran=true` — i.e. `/usr/bin/true` really was spawned
+    /// through the macro-hidden target. An absence assertion over a program that does not run is no
+    /// evidence, because absence is also what a broken engine produces.
+    ///
+    /// PRE-FIX BEHAVIOUR, MEASURED BY REVERT (not by reasoning): with `macro_hidden_owner` forced to
+    /// `false`, all three go `["Unknown"] -> ABSENT` and this test fails on the first assertion of each
+    /// pair. The worst is `macro_declares_the_fn`: pre-fix even a blanket `deny Exec` exits 0 over it,
+    /// because the TARGET has no report row either.
+    #[test]
+    fn r128_a_call_through_a_macro_hidden_module_item_hedges_instead_of_vanishing() {
+        // (1) the macro body holds a `pub(crate) use` re-export — tokio's `cfg_rt!` shape.
+        let reexport = "mod hidden { macro_rules! reexp { () => { pub(crate) use crate::real::spawn; } } reexp!(); }\n\
+                        pub mod real { pub fn spawn(p: &str) -> bool { \
+                          std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } }\n\
+                        use crate::hidden::spawn;\n\
+                        pub fn go(p: &str) -> bool { spawn(p) }\n";
+        // (2) the macro body declares the `pub fn` ITSELF — no target row anywhere in the report.
+        let declares = "macro_rules! defit { () => { pub fn spawn(p: &str) -> bool { \
+                          std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } }\n\
+                        mod hidden { defit!(); }\n\
+                        use crate::hidden::spawn;\n\
+                        pub fn go(p: &str) -> bool { spawn(p) }\n";
+        // (3) `include!` at item position — the build-script / `OUT_DIR` convention, same `Item::Macro`.
+        let included = "mod hidden { include!(\"gen.rs\"); }\n\
+                        use crate::hidden::spawn;\n\
+                        pub fn go(p: &str) -> bool { spawn(p) }\n";
+        // `gen.rs` is REAL, so the `include!` fixture compiles and the shape is the one that was built
+        // and run — and candor also scans it as its own module `gen`, which is exactly what makes this
+        // case instructive: the target's effects ARE in the report, under a qual the caller cannot name.
+        let gen = ("gen.rs", "pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) }\n");
+        // COLLECT, don't assert-in-loop: an `assert!` inside the loop stops at the FIRST shape, so a
+        // revert would only ever prove ONE of the three protected and the other two would read as covered
+        // (attack A — a test that cannot discriminate is worse than no test). With the hedge disabled all
+        // three lines appear in the failure.
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, src, extra) in [("r128reexp", reexport, &[][..]), ("r128decl", declares, &[]),
+                                   ("r128incl", included, &[gen][..])] {
+            let v = scan_fixture_files(name, src, extra);
+            let eff = fixture_effects(&v, "go");
+            let whys: Vec<String> = v["functions"].as_array().into_iter().flatten()
+                .filter(|f| f["fn"].as_str() == Some("go"))
+                .flat_map(|f| f["unknownWhy"].as_array().into_iter().flatten()
+                    .filter_map(|w| w.as_str().map(String::from)).collect::<Vec<_>>())
+                .collect();
+            if eff != vec!["Unknown".to_string()]
+                || whys != vec!["ambiguous:module items hidden by an unexpanded macro".to_string()]
+            {
+                wrong.push(format!("{name}: go = {eff:?} / unknownWhy = {whys:?}"));
+            }
+        }
+        assert!(wrong.is_empty(),
+                "a caller handing work to a target hidden behind an unexpanded item macro must DISCLOSE \
+                 Unknown WITH a §4 reason, never read pure (SOUNDNESS R128) — wrong: {wrong:#?}");
+    }
+
+    /// THE CONTROLS FOR R128, EACH VARYING EXACTLY ONE THING — the module keeps its `pub(crate) use`
+    /// re-export but loses the macro wrapper, and the call is written out in full with no `use` at all.
+    /// Both already resolved correctly BEFORE the fix and must be UNCHANGED by it: the hedge is charged
+    /// on the EVIDENCE that a module's items were unreadable, so a module with nothing hidden in it must
+    /// not gain an Unknown. Without these, "the fix made everything Unknown" reads identically to "the fix
+    /// worked".
+    #[test]
+    fn r128_a_module_with_nothing_hidden_gains_no_unknown() {
+        let plain = "mod hidden { pub(crate) use crate::real::spawn; }\n\
+                     pub mod real { pub fn spawn(p: &str) -> bool { \
+                       std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } }\n\
+                     use crate::hidden::spawn;\n\
+                     pub fn go(p: &str) -> bool { spawn(p) }\n";
+        let direct = "pub mod real { pub fn spawn(p: &str) -> bool { \
+                        std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } }\n\
+                      pub fn go(p: &str) -> bool { crate::real::spawn(p) }\n";
+        for (name, src) in [("r128ctlplain", plain), ("r128ctldirect", direct)] {
+            let v = scan_fixture(name, src);
+            assert_eq!(fixture_effects(&v, "go"), vec!["Exec".to_string()],
+                       "{name}: the target IS visible, so the caller must inherit the REAL effect — a hedge \
+                        here would be the fix over-charging, and `Exec` is distinguishable from `Unknown`");
+        }
+    }
+
+    /// R128's TWO OVER-CHARGE GUARDS, each written from a defect the first cut's own corpus A/B showed —
+    /// so each fixture is a REAL crate's shape rather than one invented after the fact. Without them the
+    /// hedge charged 794 of its 1330 registry hits on targets candor can see perfectly well, purely
+    /// because the module they live in also contains one unexpandable item macro.
+    ///
+    /// (1) A VISIBLE TUPLE-STRUCT CONSTRUCTOR. `by_tail2` indexes FUNCTIONS, so `Wrap(1)` is absent from
+    ///     it by construction and not because anything was hidden — diesel's
+    ///     `pub struct Grouped<T>(pub(crate) T)` beside `impl_selectable_expression!(Grouped<T>)`, 85 hits;
+    ///     nom's `pub enum Err`, 165; syn's `token::Paren`/`Brace`/`Bracket`.
+    /// (2) AN AMBIGUOUS-BUT-PRESENT TARGET. Two units sharing a 2-segment tail make `resolve_target`
+    ///     decline to CHOOSE, which is a different state from naming nothing — redis's
+    ///     `crate::types::from_redis_value` is a plain `pub fn` present in `by_tail2`, 67 hits.
+    ///
+    /// Both halves assert an ABSENCE of Unknown, which is also what a build with no R128 rule at all
+    /// produces — so each carries a `discriminator` in the SAME module, behind the SAME macro, that MUST
+    /// still hedge. Without it these two tests would pass against the fix's own removal.
+    #[test]
+    fn r128_does_not_hedge_a_target_it_can_actually_see() {
+        // (1) `Wrap` is a visible tuple struct in a module that also carries an unexpandable item macro.
+        // diesel's exact shape: a visible tuple struct WITH an impl (which is what puts its leaf in
+        // `local_types`), in a module that also carries an unexpandable item macro.
+        let ctor = "pub mod m { macro_rules! noise { () => { pub fn hidden_one() {} } } noise!();\n\
+                      pub struct Wrap(pub u8);\n\
+                      impl Wrap { pub fn get(&self) -> u8 { self.0 } } }\n\
+                    use crate::m::{Wrap, hidden_one};\n\
+                    pub fn go() -> Wrap { Wrap(1) }\n\
+                    pub fn discriminator() { hidden_one() }\n";
+        let v = scan_fixture("r128ctor", ctor);
+        assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
+                   "constructing a VISIBLE tuple struct is pure — a macro elsewhere in its module is not \
+                    evidence that `Wrap` was hidden");
+        assert_eq!(fixture_effects(&v, "discriminator"), vec!["Unknown".to_string()],
+                   "…and the guard must not have disabled the rule: the genuinely macro-declared \
+                    `hidden_one` in the SAME module still hedges");
+
+        // (1b) A CRATE-ROOT free fn has a ONE-segment qual, so it has NO `tail2` key at all — its absence
+        // from `by_tail2` is a fact about the INDEX, never about the source. `log`'s `pub fn logger()`
+        // (lib.rs:1607) was hedged by the first guarded cut purely because lib.rs also carries a
+        // `compile_error!` at item position; 160 of that cut's 472 corpus hits, across 27 crates, were
+        // this one misreading — criterion's `black_box`, rusqlite's `str_to_cstring`, zstd-safe's
+        // `parse_code`, palette's `clamp`, chacha20's `quarter_round`, all plainly visible in source.
+        let rootfn = "macro_rules! noise { () => { pub fn hidden_three() {} } }\n\
+                      noise!();\n\
+                      pub fn visible_root() {}\n\
+                      use crate::{visible_root, hidden_three};\n\
+                      pub fn go() { visible_root() }\n\
+                      pub fn discriminator() { hidden_three() }\n";
+        let v = scan_fixture("r128rootfn", rootfn);
+        assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
+                   "a crate-ROOT free fn is VISIBLE — it merely has no 2-segment tail to be indexed \
+                    under, and the shape of an index is not evidence about the source");
+        assert_eq!(fixture_effects(&v, "discriminator"), vec!["Unknown".to_string()],
+                   "…discriminator: the macro-declared root fn still hedges");
+
+        // (2) `dup::pick` exists twice, so the 2-segment tail `dup::pick` is AMBIGUOUS, not absent.
+        let ambiguous = "pub mod dup { macro_rules! noise { () => { pub fn hidden_two() {} } } noise!();\n\
+                           pub fn pick() {} }\n\
+                         pub mod outer { pub mod dup { pub fn pick() {} } }\n\
+                         use crate::dup::{pick, hidden_two};\n\
+                         pub fn go() { pick() }\n\
+                         pub fn discriminator() { hidden_two() }\n";
+        let v = scan_fixture("r128ambig", ambiguous);
+        assert_eq!(fixture_effects(&v, "go"), Vec::<String>::new(),
+                   "an AMBIGUOUS tail names definitions candor SAW and declined to choose between — a \
+                    different state from naming nothing, and not R128's");
+        assert_eq!(fixture_effects(&v, "discriminator"), vec!["Unknown".to_string()],
+                   "…same discriminator: the macro-declared name in that module still hedges");
+    }
+
+    /// R128's boundary, PINNED AS THE UNDER-REPORT IT IS rather than left to a comment. The
+    /// ASSOCIATED-fn spelling (`crate::<module>::<Type>::<assoc>`) is NOT covered: dropping two segments
+    /// to reach a module is evidence too weak to charge on — measured over the 1489-crate registry it
+    /// would add 17,533 sites in 278 crates, dominated by enum-variant construction and by std
+    /// combinators mis-keyed onto a local type, neither of which is macro-hidden at all.
+    ///
+    /// So this asserts a MISS, deliberately. If it starts failing because the associated-fn form was
+    /// covered, that is an improvement — delete this test, and re-run the corpus A/B before believing the
+    /// flood number stayed acceptable.
+    #[test]
+    fn r128_the_associated_fn_spelling_is_a_stated_under_report() {
+        let src = "mod hidden { macro_rules! defit { () => { pub struct T; impl T { pub fn spawn(p: &str) -> bool { \
+                     std::process::Command::new(p).status().map(|s| s.success()).unwrap_or(false) } } } } defit!(); }\n\
+                   use crate::hidden::T;\n\
+                   pub fn go(p: &str) -> bool { T::spawn(p) }\n";
+        assert_eq!(fixture_effects(&scan_fixture("r128assoc", src), "go"), Vec::<String>::new(),
+                   "STATED LIMIT, not a desired behaviour: a macro-declared `impl` is still silent");
     }
 
     #[cfg(test)]
@@ -8571,6 +8757,10 @@ trait G {
             // R99: `mod facade { pub use std::process::Command; }` / `pub type Cmd = …` — seeded into
             // EVERY file's `use` map, so a change re-resolves `facade::Command::new` in other files.
             mod_aliases => |m| { m.mod_aliases.insert("facade::Command".into(), "std::process::Command".into()); },
+            // R128: `mod blocking { cfg_rt! { pub(crate) use crate::runtime::spawn_blocking; } }` — read
+            // at the CALL RESOLVER, so a file gaining or losing an item-position macro changes how EVERY
+            // other file's crate-local calls into that module resolve.
+            macro_modules => |m| { m.macro_modules.insert("blocking".into()); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -10074,13 +10264,17 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "this file declares no externally-installable callback slot"
     ///                 — and the warm cache replays `fire` ABSENT for a `static CB: OnceLock<Box<dyn
     ///                 Fn()>>` whose installed callback demonstrably writes a file.
+    ///   rev14 -> rev15 `FileDecls` gained `macro_modules` (R128). A rev14 entry has none, so it
+    ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
+    ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
+    ///                 demonstrably spawns a process.
     ///
     /// The schema token is the only thing standing between those readings, so it is pinned rather than
     /// trusted. (The `aborted` disclosure is what this fixture MEASURES in every case: it is the visible
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -10091,7 +10285,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev14/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev15/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

@@ -2603,6 +2603,112 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local defs".to_string());
             }
+            // §4 HONESTY — SOUNDNESS R128, A MACRO-HIDDEN TARGET: a crate-local FREE call
+            // (`crate::<module>::<name>`) that resolved to nothing, whose owning MODULE is one whose item
+            // list candor could not read in full because an unexpanded item-position macro sits in it.
+            //
+            // THE DEFECT. `collect_decls` skips item-position macro invocations (its `Item::Macro` arm
+            // takes only a `macro_rules!` DEFINITION), so a `pub fn` or a `pub(crate) use` declared by
+            // `cfg_rt! { .. }` / `foo!();` / `include!("gen.rs")` contributes NO unit and NO re-export
+            // edge. The call then matched no `by_tail2` key, no alias, no classifier rule and no dep
+            // report — and fell out of the loop with the caller reading PURE. Three shapes, each compiled
+            // and RUN spawning a real process, each leaving the caller ABSENT from `functions[]`:
+            //   * `mod m { macro_rules! r { () => { pub(crate) use crate::real::f; } } r!(); }`
+            //     — tokio's `cfg_rt! { pub(crate) use crate::runtime::spawn_blocking; }`, src/blocking.rs.
+            //   * `mod m { defit!(); }`, the macro declaring the `pub fn` itself. The WORST of the three:
+            //     the target has no report row either, so even blanket `deny Exec` exited 0.
+            //   * `mod m { include!("gen.rs"); }` — the build-script/`OUT_DIR` convention.
+            //
+            // THE HEDGE IS EVIDENCE-BASED, NOT A NAME HEURISTIC, and that is what keeps it off the flood
+            // the general rule causes. Measured over the 1489-crate registry corpus: "any unresolved
+            // crate-rooted call → Unknown" hits **66,196 call sites in 741 of 1489 crates** — half the
+            // corpus, which is not a disclosure, it is noise. Requiring the owning module to be one whose
+            // items were DEMONSTRABLY unreadable narrows that to **1,691 sites in 122 crates**, and those
+            // are real: `crate::runtime::context::with_current`, `crate::task::coop::cooperative`,
+            // `crate::util::trace::async_op` are all tokio functions declared inside `cfg_*!` bodies that
+            // candor genuinely cannot see.
+            //
+            // THE BOUNDARY, STATED RATHER THAN IMPLIED — three things this deliberately does NOT cover:
+            //   1. The ASSOCIATED-fn form (`crate::a::T::assoc`, module = path minus TWO segments). Also
+            //      measured: **17,533 further sites in 278 crates**, and the sample is dominated by enum
+            //      VARIANT construction (`crate::sync::mpsc::error::TrySendError::Closed`) and by std
+            //      combinators mis-keyed onto a local type (`crate::fs::OpenOptions::map`/`expect`/`into`)
+            //      — neither of which is macro-hidden at all. `a` having a macro says nothing about
+            //      whether `T::assoc` was hidden, so that evidence is too weak to charge on. A macro that
+            //      declares a whole `impl` is therefore still an under-report here.
+            //   2. `self::`/`super::`-rooted paths — RELATIVE, and this loop has no current-module to
+            //      resolve them against (see `macro_hidden_owner`).
+            //   3. A macro-hidden target reached through a BARE leaf rather than a `crate::` path: with no
+            //      module in the written path there is no module to check, and `by_leaf` cannot see the
+            //      hidden def either.
+            // Each is an under-report, which is the direction this engine prefers to guessing — but none
+            // of them is "considered and safe", so none is written as one.
+            //
+            // TWO FURTHER GUARDS, AND BOTH CAME FROM AUDITING THE FIRST CUT'S OWN A/B RATHER THAN FROM
+            // DESIGN. "The module has a macro in it" is NECESSARY evidence and it is not SUFFICIENT: it
+            // condemns a whole module for one unexpandable item, and the first cut charged 794 of its
+            // 1330 corpus hits on targets candor could see perfectly well. Ground-truthed from SOURCE,
+            // never from candor's own report:
+            //   * `tail2` MUST NAME NOTHING. `resolve_target` also returns None for an AMBIGUOUS key —
+            //     two units sharing a 2-segment tail — and that is a DIFFERENT state: candor saw the
+            //     definitions and declined to choose. redis's `crate::types::from_redis_value` is a plain
+            //     `pub fn` at `types.rs:2437` and IS in `by_tail2`; the first cut hedged 67 calls to it
+            //     because `types.rs` also carries `itoa_based_to_redis_impl!(..)`. R128 is a target that
+            //     names NOTHING, so the key's ABSENCE is the trigger, not the resolution's failure. (An
+            //     ambiguous local target silently losing its edge is a real, SEPARATE gap — the existing
+            //     `ambiguous:same-name local defs` disclosure covers only its BARE-leaf spelling. Not
+            //     fixed here, and not claimed to be.)
+            //   * A LEAF NAMING A LOCAL TYPE IS A CONSTRUCTOR, AND CONSTRUCTION IS PURE. `by_tail2`
+            //     indexes FUNCTIONS, so a tuple-struct call `Grouped(expr)` is absent from it by
+            //     construction, never because a macro hid something. diesel's
+            //     `pub struct Grouped<T>(pub(crate) T)` is at `grouped.rs:9`; the first cut hedged 85
+            //     calls to it because the module also carries `impl_selectable_expression!(Grouped<T>)`.
+            //     Same for nom's `pub enum Err` (165) and syn's `token::Paren`/`Brace`/`Bracket`. Implicit
+            //     DROP GLUE is not lost by this guard — it travels the separate `drop_types` route, keyed
+            //     on the constructed type rather than on this call.
+            // Each guard NARROWS a sound over-approximation, so each is a DENYLIST — refuse the hedge on a
+            // named, evidenced condition — never an allowlist of shapes permitted to hedge. The directions
+            // they fail in: a macro-declared free `fn` whose name collides with a local type, and a
+            // macro-hidden target whose 2-segment tail collides with a same-named module's visible unit.
+            // Both are misses, both are rare, and neither is asserted to be impossible.
+            //   * AND THE FULL QUAL MUST NAME NOTHING EITHER, not just the 2-segment tail. A CRATE-ROOT
+            //     free fn has a ONE-segment qual (`logger`), so it has no `tail2` key at all — its
+            //     absence from `by_tail2` is a fact about the INDEX, never about the source. The first
+            //     guarded cut charged 160 of its 472 hits (34%, 27 crates) on exactly that reading, and
+            //     every one checked was a plainly-visible root fn: `log`'s `pub fn logger()`
+            //     (lib.rs:1607), criterion's `black_box` (:157), rusqlite's `str_to_cstring` (:304),
+            //     zstd-safe's `parse_code` (:95), palette's `clamp` (:450), chacha20's `quarter_round`
+            //     (:321) — all hedged because their lib.rs also carries a `compile_error!`/`doctest!` at
+            //     item position. Ask `by_leaf` whether ANY unit's qual IS the module-relative target, and
+            //     the root case answers itself.
+            let rel = c.path.strip_prefix("crate::").unwrap_or(&c.path);
+            if !c.is_macro
+                && !c.method
+                && !already_handled
+                && !tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
+                && !by_leaf.get(&c.leaf).is_some_and(|v| v.iter().any(|q| q == rel))
+                && !local_types.contains(&c.leaf)
+                && macro_hidden_owner(&c.path, 1, &merged.macro_modules)
+            {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                // KIND: `ambiguous:` — §4's fifth kind, "the analyser's own NAME RESOLUTION" failed, with
+                // a best-effort (non-conformance-compared) detail. It is the only member of §4's CLOSED
+                // vocabulary this state fits: there is no owner type so it is not `dispatch:`, no function
+                // VALUE so it is not `callback:`, and a macro body is Rust the engine declined to expand,
+                // not a foreign boundary, so it is not `native:`/`reflect:`. §4's own text describes
+                // `ambiguous:` around the two-same-named-defs case rather than the zero-readable-defs one,
+                // so this REUSES a kind rather than fitting it exactly. A dedicated kind is a SPEC clause
+                // plus a conformance PART before any engine emits it (this family's write-the-row-before-
+                // the-port rule) and candor-rust does not own that file — filed, not invented here.
+                unknown_why.entry(f.qual.clone()).or_default()
+                    .insert("ambiguous:module items hidden by an unexpanded macro".to_string());
+                if std::env::var_os("CANDOR_R128_INSTR").is_some() {
+                    eprintln!("R128HIT\t{}\t{}\tt2present={}\tleafty={}\tleaffn={}", f.qual, c.path,
+                        tail2(&c.path).is_some_and(|t| by_tail2.contains_key(&t)),
+                        local_types.contains(&c.leaf),
+                        by_leaf.contains_key(&c.leaf));
+                }
+            }
         }
         // DROP-GLUE EDGE (#3): for each LOCAL drop type this fn constructed, add the implicit scope-exit
         // edge to its `T::drop` body — but ONLY when that body is a UNIQUE local def (in `by_tail2` with
