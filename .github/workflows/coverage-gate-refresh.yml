@@ -33,8 +33,18 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
+      # SOUNDNESS R157. This step ran NIGHTLY, not stable, and had never once succeeded: the repo's
+      # `rust-toolchain` file overrides `dtolnay/rust-toolchain@stable` for any bare `cargo`, and
+      # `.cargo/config.toml` then forces `linker=dylint-link`, which this job never installs — so every
+      # dependency's build script died at link ("linker `dylint-link` not found"), before any fetch or
+      # diff. The runner's own log said which toolchain it used; the step's name said otherwise.
+      #
+      # `ci.yml`'s stable lane documents and escapes both traps with exactly this spelling: `+stable`
+      # beats the toolchain file, and set-but-empty RUSTFLAGS overrides the workspace linker. One question
+      # ("how do we build on stable in CI") answered twice; the second copy was never checked against
+      # the first. It is now the same line.
       - name: Build the stable scanner (the self-scan oracle)
-        run: cargo build --release -p candor-scan
+        run: RUSTFLAGS= cargo +stable build --release -p candor-scan
 
       - name: Fetch fresh crates.io source for every in-scope calibrated crate
         run: |
