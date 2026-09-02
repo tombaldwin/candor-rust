@@ -55,16 +55,36 @@ require_candor_lib() {
 # matters: dylint's own unindented `Checking with toolchain …` preamble prints even on the runs that go on
 # to load nothing, so matching it would re-open the hole. Either signal missing means the run did not
 # happen, and a "not flagged" verdict below would be measuring nothing.
+# BOTH checks below are ANCHORED, so BOTH are broken by ANSI colour — and they break in opposite
+# directions, which is why the strip happens once, here, before either runs.
+#
+# Measured 2026-09-02, on the push that shipped this helper: CI went RED with "cargo never reported
+# checking a crate" while the very next lines of its own output read
+# `\e[1m\e[92m    Checking\e[0m httpkit v0.1.0`. GitHub's runner makes cargo colourise, so the escape
+# precedes the indentation and `^ +` cannot match. Locally cargo emits plain text and it passed — the
+# instrument behaved differently in the two environments, which is the property an instrument must not
+# have.
+#
+# The false FAIL is the SAFE direction and is merely how it was noticed. The dangerous one is the
+# `^(Error|error):` arm above it: a COLOURISED dylint refusal would not match, `assert_live` would
+# return 0, and every absence assertion below it would be credited over a run that loaded nothing —
+# reopening R108 exactly, in CI only, where nobody reads the log of a green job.
+strip_ansi() { sed $'s/\033\[[0-9;]*[a-zA-Z]//g'; }
+
 assert_live() {
   local what="$1" out="$2"
-  if printf '%s\n' "$out" | grep -qE '^(Error|error):'; then
+  # Strip once; both greps below keep their anchors, so the indentation discrimination the comment
+  # above depends on (cargo's indented progress vs dylint's unindented preamble) is unchanged.
+  local clean
+  clean="$(printf '%s\n' "$out" | strip_ansi)"
+  if printf '%s\n' "$clean" | grep -qE '^(Error|error):'; then
     echo "FAIL: $what — candor did not run (dylint refused the lint library); every absence check below would be vacuous" >&2
-    printf '%s\n' "$out" | grep -E '^(Error|error):' | head -3 >&2
+    printf '%s\n' "$clean" | grep -E '^(Error|error):' | head -3 >&2
     return 1
   fi
-  if ! printf '%s\n' "$out" | grep -qE '^ +(Checking|Finished) '; then
+  if ! printf '%s\n' "$clean" | grep -qE '^ +(Checking|Finished) '; then
     echo "FAIL: $what — cargo never reported checking a crate; the instrument did not run" >&2
-    printf '%s\n' "$out" | head -5 >&2
+    printf '%s\n' "$clean" | head -5 >&2
     return 1
   fi
   return 0
