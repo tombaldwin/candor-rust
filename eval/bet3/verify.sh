@@ -14,8 +14,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$ROOT/host-allowlist"
 cd "$WS"
 
-LIB="$(cd "$ROOT/../../target/debug" && pwd)/$(basename "$(find "$ROOT/../../target/debug" -maxdepth 1 -name 'libcandor@*.dylib' -o -name 'libcandor@*.so' | head -1)")"
-[ -e "$LIB" ] || { echo "FAIL: no candor dylib (run cargo build first)"; exit 1; }
+# shellcheck source=./_lib.sh
+. "$ROOT/_lib.sh"
+LIB="$(require_candor_lib "$ROOT/../../target/debug")" || exit 1
 
 rm -rf target/dylint r.*.json
 cargo build -q 2>/dev/null || { echo "FAIL: workspace does not compile"; exit 1; }
@@ -23,11 +24,19 @@ cargo build -q 2>/dev/null || { echo "FAIL: workspace does not compile"; exit 1;
 # 1) Snapshot every workspace crate's report (writes r.httpkit.Rlib.json, r.app.Executable.json — with
 #    per-fn `hosts`). CANDOR_JSON writes reports and suppresses enforcement.
 CANDOR_JSON="$WS/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1
+# The snapshot is the PRECONDITION for step 2's cross-crate resolution, and its output is discarded, so
+# check the artefact rather than the stream: no httpkit report means step 2 has nothing to resolve into
+# and its "not flagged" verdicts would be measuring a missing sidecar, not a policy decision.
+[ -f "$WS/r.httpkit.Rlib.json" ] || {
+  echo "FAIL: the CANDOR_JSON snapshot wrote no httpkit report — cross-crate resolution cannot run"; exit 1; }
 
 # 2) Enforce the policy WITH the siblings loaded read-only (CANDOR_REPORTS). No CANDOR_JSON here, so
 #    enforcement runs; CANDOR_REPORTS resolves app's calls into httpkit, inheriting its hosts.
 rm -rf target/dylint
 out="$(CANDOR_POLICY="$WS/.candor/policy" CANDOR_REPORTS="$WS/r" cargo dylint --lib-path "$LIB" 2>&1)"
+# Before either verdict below: prove candor RAN. `charge_customer` is asserted ABSENT from this stream,
+# and a stream candor never wrote satisfies that assertion perfectly.
+assert_live "AS-EFF-008 enforcement pass" "$out" || exit 1
 
 echo "$out" | grep -E '\[AS-EFF-008\]' || true
 echo "---"

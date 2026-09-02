@@ -176,6 +176,15 @@ jobs:
       - name: Laundered (third-crate) layering enforcement
         run: bash eval/bet3/verify-laundered.sh
 
+      # The teeth ON the teeth. Each Bet 3 script pairs a positive assertion with an ABSENCE control,
+      # and absence is also what a dead instrument produces — so a locator that handed dylint a library
+      # it could not load once made both scripts read "detection broken, controls fine" when in fact
+      # candor had not run at all. This drives the three ways the instrument can be dead and asserts
+      # the scripts refuse to adjudicate (crediting no PASS), plus a green control so a check that
+      # simply rejected everything could not survive it either.
+      - name: Bet 3 instrument liveness (the absence controls must not pass vacuously)
+        run: bash eval/bet3/verify-instrument.sh
+
       # The Claude Code receipt is plain bash (no Rust test reaches it) and has shipped real
       # bugs (the sidecar/report glob collision). Guard its coverage/freshness/count logic.
       - name: Receipt logic tests (Claude Code integration)
