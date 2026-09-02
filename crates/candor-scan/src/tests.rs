@@ -4133,6 +4133,69 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// SOUNDNESS R123 — a PUBLISHED cardinal sin, PINNED HERE RATHER THAN FIXED. **These two tests
+    /// assert the DEFECT.** They are here because a sin recorded only in prose stops being measured,
+    /// and because the fix for it is written, revert-tested and A/B'd and was REJECTED on evidence —
+    /// see BACKLOG.md's 2026-09-02 R123 entry for the numbers and the one residual cause.
+    ///
+    /// `collect_use` inserts into a `HashMap`, so the LAST spelling of a name wins, and the idiomatic
+    /// mocking pair is two mutually-exclusive `cfg`s. With the test arm collected, a production scan
+    /// resolves through a mock that is pure by construction and `run` vanishes from `functions[]`.
+    /// GROUND TRUTH EXECUTED: both arms were built as crates and `cargo run` printed `ran=true` in a
+    /// normal build — a real spawned process — differing in nothing but the ORDER of two `use` lines.
+    ///
+    /// **If either assertion below starts failing, the gap was closed: delete these tests, say so in
+    /// the changelog, and re-run the 1489-crate A/B in the backlog entry before believing it.**
+    #[test]
+    fn r123_a_module_level_cfg_test_import_still_decides_by_source_order() {
+        let first = fixture_effects(&scan_fixture("r123first", &r123_src(false, false)), "run");
+        let last = fixture_effects(&scan_fixture("r123last", &r123_src(true, false)), "run");
+        assert_eq!(first, vec!["Exec".to_string()],
+                   "control: with the production import typed second the answer is right, which is what \
+                    makes the silence below a question about ORDER and not about the fixture");
+        assert_eq!(last, Vec::<String>::new(),
+                   "MEASURED SIN, not a desired behaviour: the `#[cfg(test)]` import typed second wins \
+                    and `run` reads pure over a call that really spawns a process (SOUNDNESS R123)");
+    }
+
+    /// SOUNDNESS R123, THE SITE THAT HAD NEVER BEEN MEASURED: a `use` written INSIDE a function body.
+    /// `LocalUseCollector` (decls.rs) and `CallCollector::visit_item_use` (collector.rs) collect those,
+    /// and neither has an `include_tests` to filter on — so the same swap one scope lower is decided by
+    /// order too. Measured, and it is: 20 sites in 12 of the 1489 registry crates carry an indented
+    /// `#[cfg(test)]`-gated `use`. Same standing instruction as above if this starts failing.
+    #[test]
+    fn r123_body_local_cfg_test_import_is_unfiltered_too() {
+        let first = fixture_effects(&scan_fixture("r123blfirst", &r123_src(false, true)), "run");
+        let last = fixture_effects(&scan_fixture("r123bllast", &r123_src(true, true)), "run");
+        assert_eq!(first, vec!["Exec".to_string()],
+                   "control: the body-local map IS reached and IS right when the order favours it");
+        assert_eq!(last, Vec::<String>::new(),
+                   "MEASURED SIN: a body-local `#[cfg(test)] use` typed second wins and `run` reads pure");
+    }
+
+    /// The R123 mocking pair, at module scope or inside the body, mock import first or last. The mock is
+    /// pure by construction, which is what makes resolving through it read as a confident clean answer.
+    #[cfg(test)]
+    fn r123_src(mock_last: bool, body_local: bool) -> String {
+        let prod = "#[cfg(not(test))] use std::process::Command as Runner;";
+        let mock = "#[cfg(test)] use crate::mockproc::Runner;";
+        let (a, b) = if mock_last { (prod, mock) } else { (mock, prod) };
+        let (mod_scope, in_body) = if body_local { (String::new(), format!("{a} {b}")) }
+                                   else { (format!("{a}\n{b}"), String::new()) };
+        format!(
+            "pub mod mockproc {{\n\
+             pub struct Runner;\n\
+             impl Runner {{ pub fn new(_p: &str) -> Runner {{ Runner }}\n\
+               pub fn status(&mut self) -> std::io::Result<Status> {{ Ok(Status) }} }}\n\
+             pub struct Status;\n\
+             impl Status {{ pub fn success(&self) -> bool {{ true }} }}\n\
+             }}\n\
+             {mod_scope}\n\
+             pub fn run(p: &str) -> bool {{ {in_body} let mut c = Runner::new(p); \
+               c.status().map(|s| s.success()).unwrap_or(false) }}\n"
+        )
+    }
+
     #[cfg(test)]
     fn fixture_effects(v: &serde_json::Value, name: &str) -> Vec<String> {
         v["functions"].as_array().into_iter().flatten()
