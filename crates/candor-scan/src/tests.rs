@@ -13819,3 +13819,136 @@ pub fn go() {{ imp::doit(); }}
                 "restore must DELETE an entry the snapshot did not have — leaving it is the fabrication \
                  direction this window exists to avoid");
     }
+
+    // ================================ SOUNDNESS R160 ================================
+    // `Self::sibling(..)` in a static-call position resolved to nothing, so a public forwarder
+    // reached nothing and the mint-no-unit-unless-it-carries-or-reaches-an-effect filter dropped it
+    // from `functions[]` ENTIRELY — a silent under-report on `rusqlite::Connection::open`, the
+    // function every rusqlite user calls, on the 08-28, published-0.34.0 and HEAD scanners alike.
+    // Every test below states which direction it guards.
+
+    /// R160, the trigger. UNDER-REPORT direction: the `Self::`-spelled forwarder must be present and
+    /// must carry EXACTLY what the `Type::`-spelled control carries — one variable between the arms.
+    /// FAILS against the pre-fix binary: `Conn::open` is absent from the report, so `fn_entry` panics.
+    #[test]
+    fn self_qualified_sibling_call_resolves_exactly_like_the_type_qualified_one() {
+        let v = scan_src_to_json("r160fwd", "\
+            pub struct Conn { p: String }\n\
+            impl Conn {\n\
+                pub fn open(path: &str) -> Conn { Self::open_with_flags(path, 0) }\n\
+                pub fn open2(path: &str) -> Conn { Conn::open_with_flags(path, 0) }\n\
+                pub fn open_with_flags(path: &str, _f: u32) -> Conn {\n\
+                    Conn { p: std::fs::read_to_string(path).unwrap_or_default() }\n\
+                }\n\
+            }\n");
+        let via_self = fn_entry(&v, "Conn::open");
+        let via_type = fn_entry(&v, "Conn::open2");
+        assert_eq!(effs(via_self), vec!["Fs".to_string()],
+                   "the `Self::`-qualified forwarder must inherit its callee's Fs");
+        assert_eq!(effs(via_self), effs(via_type),
+                   "`Self::open_with_flags` and `Conn::open_with_flags` differ in exactly one token; \
+                    the report must not differ at all");
+    }
+
+    /// R160, the chain. Three levels of `Self::` forwarding — rusqlite's `open_in_memory` →
+    /// `open_in_memory_with_flags` → `open_with_flags` shape. UNDER-REPORT direction; the middle link
+    /// is the one a single-hop fix would leave silent.
+    #[test]
+    fn a_chain_of_self_qualified_forwarders_propagates_the_whole_way() {
+        let v = scan_src_to_json("r160chain", "\
+            pub struct C;\n\
+            impl C {\n\
+                pub fn front() -> u8 { Self::middle() }\n\
+                pub fn middle() -> u8 { Self::sink() }\n\
+                pub fn sink() -> u8 { let _ = std::fs::read_to_string(\"/x\"); 1 }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "C::front")), vec!["Fs".to_string()]);
+        assert_eq!(effs(fn_entry(&v, "C::middle")), vec!["Fs".to_string()]);
+    }
+
+    /// R160, the other positions the sweep found live: `Self::f` passed as a VALUE, and `Self::` inside
+    /// a nested closure. Both are UNDER-REPORT direction, and both were silent pre-fix.
+    #[test]
+    fn self_qualified_paths_resolve_as_a_value_and_inside_a_closure() {
+        let v = scan_src_to_json("r160pos", "\
+            pub struct C;\n\
+            impl C {\n\
+                pub fn as_value(v: Vec<String>) -> Vec<String> { v.into_iter().map(Self::mapper).collect() }\n\
+                pub fn mapper(s: String) -> String { let _ = std::env::var(\"HOME\"); s }\n\
+                pub fn in_closure() { let f = || Self::sink(); f(); }\n\
+                pub fn sink() { let _ = std::fs::read_to_string(\"/x\"); }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "C::as_value")), vec!["Env".to_string()],
+                   "`map(Self::mapper)` must reach the mapper, exactly as `map(C::mapper)` does");
+        assert_eq!(effs(fn_entry(&v, "C::in_closure")), vec!["Fs".to_string()],
+                   "a closure body is walked lexically under the same impl — `Self` is still bound there");
+    }
+
+    /// R160, the trait-default half. Inside a default body `Self` is the unknown IMPLEMENTOR, so the
+    /// only sound target is the trait's own default body — which is what the explicitly-written
+    /// `<Self as Trait>::helper()` and `Trait::helper()` spellings already resolve to. UNDER-REPORT
+    /// direction, and the ctrl arm is what pins the parity claim.
+    #[test]
+    fn self_in_a_trait_default_body_resolves_to_the_traits_own_default() {
+        let v = scan_src_to_json("r160trait", "\
+            pub trait R {\n\
+                fn helper() -> String { std::env::var(\"HOME\").unwrap_or_default() }\n\
+                fn via_self() -> String { Self::helper() }\n\
+                fn via_trait() -> String { <Self as R>::helper() }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "R::via_self")), vec!["Env".to_string()]);
+        assert_eq!(effs(fn_entry(&v, "R::via_self")), effs(fn_entry(&v, "R::via_trait")),
+                   "the two spellings of the same call must agree");
+    }
+
+    /// R160 — the binding is `expand(<type>, uses)`, not the bare type LEAF, so an `impl Trait for
+    /// <imported type>` resolves through the file's `use` map exactly as the written type name would.
+    /// UNDER-REPORT direction. With a bare-leaf binding this would resolve to nothing (`Far::touch`
+    /// matches no declaration; the unit is keyed `inner::Far::touch`).
+    #[test]
+    fn self_in_an_impl_for_an_imported_type_resolves_through_the_use_map() {
+        let v = scan_src_to_json("r160imported", "\
+            pub mod inner { pub struct Far; impl Far { pub fn touch() { let _ = std::env::var(\"F\"); } } }\n\
+            use inner::Far;\n\
+            pub trait Reach { fn reach(); }\n\
+            impl Reach for Far { fn reach() { Self::touch() } }\n");
+        assert_eq!(effs(fn_entry(&v, "Far::reach")), vec!["Env".to_string()]);
+    }
+
+    /// R160 — SCOPING, the FABRICATION direction. `Self` is bound for the length of ONE impl block and
+    /// removed after it; a later impl of a different type must not inherit the earlier binding. If it
+    /// leaked, `B::hop` would resolve to `A::target` and be charged an `Fs` it cannot perform.
+    #[test]
+    fn the_self_binding_does_not_leak_out_of_its_impl_block() {
+        let v = scan_src_to_json("r160scope", "\
+            pub struct A;\n\
+            impl A { pub fn hop() -> u8 { Self::target() } pub fn target() -> u8 { let _ = std::fs::read_to_string(\"/a\"); 1 } }\n\
+            pub struct B;\n\
+            impl B { pub fn hop() -> u8 { Self::target() } pub fn target() -> u8 { 2 } }\n");
+        assert_eq!(effs(fn_entry(&v, "A::hop")), vec!["Fs".to_string()]);
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "B::hop"),
+                "`B::hop` reaches only the pure `B::target`; charging it A's Fs would be a fabrication:\n{v:#}");
+    }
+
+    /// R160 — the FABRICATION direction for the two non-call positions, and the reason the fix binds
+    /// `Self` in the `use` map rather than stripping the `Self::` prefix and falling back to the bare
+    /// LEAF. `Self::NAME` is an associated CONST and `Self::V` an enum ctor: neither is a call, and a
+    /// leaf fallback would have linked `Self::NAME` to the effectful free fn `NAME` beside it.
+    ///
+    /// CONTROL, not a regression test: it passes with AND without the fix, and it is recorded as a
+    /// control for that reason. It is REACHABLE — `CANDOR_ALIAS_DEBUG=1` prints
+    /// `SELFALIAS Self::NAME -> K::NAME` for this source, so the new branch does run over it.
+    #[test]
+    fn ctrl_self_qualified_const_and_enum_variant_are_never_charged_as_calls() {
+        let v = scan_src_to_json("r160nocall", "\
+            #[allow(non_snake_case)]\n\
+            pub fn NAME() { let _ = std::fs::read_to_string(\"/etc/hosts\"); }\n\
+            pub struct K;\n\
+            impl K { pub const NAME: u8 = 1; pub fn read_const() -> u8 { Self::NAME } }\n\
+            pub enum S { Open(u32) }\n\
+            impl S { pub fn mk(n: u32) -> S { Self::Open(n) } }\n");
+        for absent in ["K::read_const", "S::mk"] {
+            assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != absent),
+                    "`{absent}` performs nothing — an associated const and an enum ctor are not calls:\n{v:#}");
+        }
+    }
