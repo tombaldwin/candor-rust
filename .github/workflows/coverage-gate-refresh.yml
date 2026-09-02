@@ -28,6 +28,21 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    # SOUNDNESS R157, second half. The job's first-ever green build step (the first fix) moved the failure
+    # one layer down: `generate.py` shells out to a BARE `cargo run` for `classify_check`, and that
+    # subprocess inherited the repo's `rust-toolchain` (nightly) and `.cargo/config.toml`
+    # (`linker=dylint-link`) exactly as the step's own cargo had — "linker `dylint-link` not found" again,
+    # after 74 crates fetched and 21,999 entries collected. A per-step `+stable` cannot reach a cargo that
+    # Python spawns, so the decision lives here, once, for every step:
+    #   RUSTUP_TOOLCHAIN beats the toolchain file (measured: bare `cargo --version` in this repo prints
+    #   1.98.0-nightly; with the var, 1.98.0 stable), and a SET-BUT-EMPTY RUSTFLAGS overrides the
+    #   workspace linker (the same fact `ci.yml`'s stable lane documents and relies on).
+    # Forcing stable is the RIGHT mechanism, not a workaround: `classify_check` depends only on
+    # `candor-classify` and serde — no nightly feature, no rustc_private, no dylint. Installing
+    # `dylint-link` here would have made it build on a toolchain it never needed.
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      RUSTFLAGS: ""
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -44,7 +59,7 @@ jobs:
       # ("how do we build on stable in CI") answered twice; the second copy was never checked against
       # the first. It is now the same line.
       - name: Build the stable scanner (the self-scan oracle)
-        run: RUSTFLAGS= cargo +stable build --release -p candor-scan
+        run: cargo build --release -p candor-scan
 
       - name: Fetch fresh crates.io source for every in-scope calibrated crate
         run: |
