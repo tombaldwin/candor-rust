@@ -12934,6 +12934,220 @@ pub fn go() {{ imp::doit(); }}
         );
     }
 
+    /// R139 (CARDINAL SIN, and the property R119's own doc asserted was the one it lacked) — A
+    /// CRATE-LOCAL `macro_rules!` TEMPLATE IS PART OF THE BODY FOR SHADOWING PURPOSES.
+    ///
+    /// R119 promotes a nested block's item to a function-wide shadow only when EVERY occurrence of the
+    /// name lies inside that block, and `count_ident` answered that question by walking the body.
+    /// `CallCollector::visit_macro` inline-expands a bare `NAME!(..)` from `local_macros` (R48), whose
+    /// tokens live at FILE level — in this crate's other file for the `cross-file` arm — so no walk of the
+    /// body could reach them. Both counts came out equal, `Cmd` was rebound to the sentinel function-wide,
+    /// and the `Cmd::new` the expansion injects resolved to `<body-item>Cmd`.
+    ///
+    /// EXECUTED ground truth, every arm compiled and run: `f` is handed a generated shell script that
+    /// touches a marker file, and the marker EXISTS afterwards — a process really runs. Against a pre-fix
+    /// binary every arm below was ABSENT from `functions[]`, and on the reported fixture `deny Exec`,
+    /// `deny Exec f` and `pure f` all fell from exit 1 to exit 0 (`deny Unknown` correctly 0 either way).
+    ///
+    /// THE ARMS ARE THE AUDIT, NOT THE TRIGGER. The reported instance was `file-macro`; the others are the
+    /// routes by which the same template reaches the body — a macro in another file (`local_macros` is
+    /// merged crate-wide), a template that invokes a second macro, an invocation nested inside another
+    /// macro's opaque argument tokens (one `syn::Macro` node, so the inner call is tokens only), a name
+    /// with two definitions (`local_macros` is last-writer-wins, and the count must read the entry the
+    /// collector will inject), and a template that mentions its own name (the recursion guard).
+    #[test]
+    fn r139_a_local_macro_template_counts_toward_the_body_shadow() {
+        for (tag, prelude, call) in [
+            (
+                "file-macro",
+                "macro_rules! spawn_it { ($q:expr) => { Cmd::new($q).status().is_ok() } }",
+                "spawn_it!(p)",
+            ),
+            (
+                "nested-macro",
+                "macro_rules! inner { ($q:expr) => { Cmd::new($q).status().is_ok() } }\n\
+                 macro_rules! outer { ($q:expr) => { inner!($q) } }",
+                "outer!(p)",
+            ),
+            (
+                "macro-in-macro-args",
+                "macro_rules! spawn_it { ($q:expr) => { Cmd::new($q).status().is_ok() } }",
+                "{ let ok = spawn_it!(p); println!(\"{}\", spawn_it!(p)); ok }",
+            ),
+            (
+                "redefined-macro",
+                "macro_rules! go { ($q:expr) => { false } }\n\
+                 macro_rules! go { ($q:expr) => { Cmd::new($q).status().is_ok() } }",
+                "go!(p)",
+            ),
+            (
+                "self-mentioning-macro",
+                "macro_rules! rec { ($q:expr) => { { let _s = stringify!(rec); Cmd::new($q).status().is_ok() } } }",
+                "rec!(p)",
+            ),
+        ] {
+            let v = scan_src_to_json(
+                "r139macro",
+                &format!(
+                    "use std::process::Command as Cmd;\n\
+                     {prelude}\n\
+                     pub fn f(p: &str) -> bool {{\n\
+                       let _n = {{ struct Cmd {{ n: u32 }} Cmd {{ n: 1 }}.n }};   // a SEPARATE scope\n\
+                       {call}\n\
+                     }}\n"
+                ),
+            );
+            assert_eq!(
+                effs_opt(&v, "f"), vec!["Exec".to_string()],
+                "R139 ({tag}): the `struct Cmd` is declared in a SEPARATE scope and the macro expands \
+                 OUTSIDE it, so the template's `Cmd::new($q).status()` is `std::process::Command` and \
+                 provably runs a process. An empty answer here is a silent under-report:\n{v:#}"
+            );
+        }
+
+        // The same shape with the macro defined in ANOTHER FILE of the crate — `local_macros` is merged
+        // across every file (cache.rs), so the template the body expands need not be in the body's file
+        // at all. `#[macro_use]` makes it visible; the fixture compiles and spawns.
+        let v = scan_fixture_files(
+            "r139xfile",
+            "use std::process::Command as Cmd;\n\
+             #[macro_use]\n\
+             mod m;\n\
+             pub fn f(p: &str) -> bool {\n\
+               let _n = { struct Cmd { n: u32 } Cmd { n: 1 }.n };\n\
+               spawn_it!(p)\n\
+             }\n",
+            &[("m.rs", "macro_rules! spawn_it { ($q:expr) => { Cmd::new($q).status().is_ok() } }\n")],
+        );
+        assert_eq!(
+            effs_opt(&v, "f"), vec!["Exec".to_string()],
+            "R139 (cross-file): the template lives in `src/m.rs` and expands into `f`'s body in \
+             `src/lib.rs`. A count that walks only the body can never reach it:\n{v:#}"
+        );
+
+        // ONE MACRO, INVOKED BOTH INSIDE AND OUTSIDE THE DECLARING BLOCK — the arm that pins the
+        // recursion guard's SHAPE. `expanding` inserts before and removes after, so each invocation
+        // counts the template again; a once-per-count "seen" set would count it ONCE on each side, the
+        // two totals would cancel and come out equal, and the shadow would be promoted anyway. Verified
+        // by degrading the guard to a seen set: every other R139 arm still passed and only this one went
+        // red. Both expansions are real Rust — the inner one binds to the block's own `Cmd`, which is why
+        // the fixture compiles — and the OUTER one spawns (marker file created).
+        let v = scan_src_to_json("r139twice", concat!(
+            "use std::process::Command as Cmd;\n",
+            "macro_rules! spawn_it { ($q:expr) => { Cmd::new($q).status().is_ok() } }\n",
+            "pub fn f(p: &str) -> bool {\n",
+            "  let _n = {\n",
+            "    struct Cmd { n: u32 }\n",
+            "    impl Cmd {\n",
+            "      fn new(_: &str) -> Cmd { Cmd { n: 1 } }\n",
+            "      fn status(&self) -> Result<u32, ()> { Ok(self.n) }\n",
+            "    }\n",
+            "    spawn_it!(p)\n",
+            "  };\n",
+            "  spawn_it!(p)\n",
+            "}\n",
+        ));
+        assert_eq!(
+            effs_opt(&v, "f"), vec!["Exec".to_string()],
+            "R139 (invoked twice): the SECOND `spawn_it!(p)` expands outside the declaring block and \
+             really runs a process. The template must be counted once per INVOCATION, or the inner and \
+             outer totals cancel:\n{v:#}"
+        );
+    }
+
+    /// R139 CONTROL — THE SHADOW MUST SURVIVE WHERE THE EXPANSION IS GENUINELY INSIDE THE BLOCK.
+    ///
+    /// `macro_rules!` is UNHYGIENIC for items and types: a template's `Cmd` resolves at the INVOCATION
+    /// site, not the definition site. So when the invocation sits inside the block that declares
+    /// `struct Cmd`, the expansion really does bind to the block's own item and the function-wide
+    /// promotion is still exact. The counting is symmetric — the template is counted on BOTH sides of the
+    /// comparison — which is what preserves this; a fix that simply refused to promote whenever any local
+    /// macro was invoked would fail here and reintroduce R106's fabrication.
+    ///
+    /// EXECUTED ground truth: compiled and run, the marker file is NOT created — no process runs. The
+    /// fixture compiling at all is itself the proof that `Cmd::new` binds to the block's item, since
+    /// `std::process::Command::new(..).n` is not a field access that exists.
+    #[test]
+    fn r139_a_macro_invoked_inside_the_declaring_block_still_shadows() {
+        let v = scan_src_to_json("r139inner", concat!(
+            "use std::process::Command as Cmd;\n",
+            "macro_rules! mk { ($q:expr) => { Cmd::new($q).n } }\n",
+            "pub fn f(p: &str) -> bool {\n",
+            "  let n = {\n",
+            "    struct Cmd { n: u32 }\n",
+            "    impl Cmd { fn new(_: &str) -> Cmd { Cmd { n: 7 } } }\n",
+            "    mk!(p)\n",
+            "  };\n",
+            "  n == 7\n",
+            "}\n",
+        ));
+        assert!(
+            effs_opt(&v, "f").is_empty(),
+            "R139 CONTROL: `mk!` expands INSIDE the block that declares `struct Cmd`, so every \
+             occurrence — the template's included — lies in that block and the shadow is exact. `Exec` \
+             here is R106's fabrication on a path that runs nothing:\n{v:#}"
+        );
+    }
+
+    /// R139 — THE ASSERTION THE FIX RESTS ON, PINNED (§E2). `count_ident`'s doc claims the counting
+    /// function is MONOTONE: a nested block's count can never exceed the enclosing block's. That is the
+    /// whole licence for over-counting an opaque macro template — an over-count on both sides of the
+    /// promotion comparison is harmless only if it can never make the OUTER total smaller than the inner
+    /// one, which would promote a shadow that should have been dropped. It is not self-evident once
+    /// counting leaves the AST: `expand_local` walks tokens from OUTSIDE the block, and a recursion guard
+    /// that suppressed an expansion on the outer walk but not the inner one would break it exactly.
+    ///
+    /// So: parse each body, enumerate EVERY block inside it, and check the inequality for every
+    /// (block, name) pair — the bodies chosen to include self-mentioning macros, a macro invoked twice,
+    /// and a macro invoked once inside a nested block and once outside it (the shape that a once-per-pass
+    /// "seen" set, rather than a push/pop recursion guard, would silently cancel out).
+    #[test]
+    fn r139_the_ident_count_is_monotone_over_nested_blocks() {
+        use syn::visit::Visit;
+        struct Blocks<'ast>(Vec<&'ast syn::Block>);
+        impl<'ast> Visit<'ast> for Blocks<'ast> {
+            fn visit_block(&mut self, b: &'ast syn::Block) {
+                self.0.push(b);
+                syn::visit::visit_block(self, b);
+            }
+        }
+        let macros: HashMap<String, String> = [
+            ("spawn_it", "($q:expr) => { Cmd::new($q).status().is_ok() }"),
+            ("outer", "($q:expr) => { spawn_it!($q) }"),
+            ("rec", "($q:expr) => { { let _s = stringify!(rec); Cmd::new($q).n } }"),
+            ("multi", "(a $q:expr) => { Cmd::new($q) }; (b $q:expr) => { Cmd::new($q) }"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+        for src in [
+            "fn f(p: &str) -> bool { let _n = { struct Cmd { n: u32 } Cmd { n: 1 }.n }; spawn_it!(p) }",
+            "fn f(p: &str) -> bool { let _n = { struct Cmd { n: u32 } spawn_it!(p) }; spawn_it!(p) }",
+            "fn f(p: &str) -> bool { { spawn_it!(p) } && { outer!(p) } }",
+            "fn f(p: &str) -> u32 { let a = { struct Cmd { n: u32 } rec!(p) }; a }",
+            "fn f(p: &str) { let _ = multi!(a p); { let _ = multi!(b p); } }",
+            "fn f(p: &str) { println!(\"{}\", spawn_it!(p)); { println!(\"{}\", spawn_it!(p)); } }",
+        ] {
+            let item: syn::ItemFn = syn::parse_str(src).expect("fixture must parse");
+            let mut bs = Blocks(Vec::new());
+            bs.visit_block(&item.block);
+            for name in ["Cmd", "spawn_it", "outer", "rec", "multi", "p", "n"] {
+                let outer = crate::decls::count_ident(&item.block, name, &macros);
+                for b in &bs.0 {
+                    let inner = crate::decls::count_ident(b, name, &macros);
+                    assert!(
+                        inner <= outer,
+                        "R139: the count must be MONOTONE — a nested block counted {inner} of `{name}` \
+                         where the whole body counted {outer}. The promotion test compares these two \
+                         for EQUALITY, so an inner count that can exceed the outer one promotes a \
+                         shadow that should have been dropped. Body:\n{src}"
+                    );
+                }
+            }
+        }
+    }
+
     /// R107 — the SELF-SHADOWING TUPLE DESTRUCTURE, the read that escaped the R100 window.
     ///
     /// `tuple_elem_leaves` reads the source element's dispatch typing, and the binding loop above it has

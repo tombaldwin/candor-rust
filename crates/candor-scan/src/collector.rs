@@ -3797,7 +3797,12 @@ pub(crate) fn reexport_target<'a>(
 /// exactly ONE arm and a syntactic scan can't tell which, so walking all arms would fabricate a non-matching
 /// arm's effect. `total_arm_count` counts EVERY `(..) => {..}` arm — including one whose template fails to
 /// parse (so a 2-arm macro with one `$(..)*`-repetition arm is correctly seen as multi-arm, not single).
-fn macro_template_blocks(body: &str) -> (usize, Vec<syn::Block>) {
+///
+/// SHARED WITH `decls::count_ident` (R139, §G — ask the authority, do not write a second one). That
+/// function has to know which tokens this expansion will inject into a body, because a body-item shadow
+/// computed without them silently rebinds a name the template uses. Two implementations of "what does
+/// `NAME!(..)` expand to" would be exactly the drift §F1 item 3 describes, so there is one.
+pub(crate) fn macro_template_blocks(body: &str) -> (usize, Vec<syn::Block>) {
     use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
     let ts: TokenStream = match body.parse() {
         Ok(t) => t,

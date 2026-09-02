@@ -287,12 +287,28 @@ pub(crate) fn declared_item_name(it: &syn::Item, include_tests: bool) -> Option<
 /// shadow is dropped, which restores the pre-R106 answer for that name — a possible FABRICATION inside the
 /// nested block, never a lost effect. That is the deliberate direction: over-report, not silence.
 ///
+/// **"EVERY OCCURRENCE ANYWHERE IN THE BODY" IS A CLAIM ABOUT `count_ident`, AND R119 SHIPPED IT
+/// UNTESTED.** The promotion test is only as sound as that count, and the count could not see the one
+/// place the collector injects tokens from OUTSIDE the body: a crate-local `macro_rules!` template
+/// (`local_macros`, R48). That is R139 — a cardinal sin, EXECUTED, and `count_ident`'s own doc asserted
+/// the property it lacked, written by this commit because this commit needed it true. The property is now
+/// stated in the form that can be checked — *every ident the `CallCollector` resolves through the `uses`
+/// map while walking this body* — with the enumeration of what is and is not injected, and a test per
+/// position. See `count_ident`.
+///
 /// INSTRUMENTED, because an unchanged row is not evidence the new code ran. Under `CANDOR_ALIAS_DEBUG`
 /// (scan.rs's R105 switch) every name whose treatment DIFFERS from the flattened collector is printed:
-/// `BODYSCOPE-DROP` for a nested name no longer promoted (the sin this closes) and `BODYSCOPE-ADD` for one
-/// now reached inside a nested `fn`/`impl`/`mod`, which the old walk stopped at. Both are the A/B's
-/// hit counter; `BODYSHADOW` above still counts shadows that actually took a binding away.
-fn body_declared_items(qual: &str, block: &syn::Block) -> std::collections::HashSet<String> {
+/// `BODYSCOPE-DROP` for a nested name no longer promoted (the sin R119 closes) and `BODYSCOPE-ADD` for one
+/// now reached inside a nested `fn`/`impl`/`mod`, which the old walk stopped at. `BODYSHADOW` above still
+/// counts shadows that actually took a binding away. **`BODYMACRO` is R139's own counter, and it exists
+/// because neither of the R119 pair could have fired on the R139 shape** — the flattened collector and the
+/// promoted one give that shape the same answer, so its cardinal sin lived inside a `CHANGED 0` A/B that
+/// read as quiet.
+fn body_declared_items(
+    qual: &str,
+    block: &syn::Block,
+    local_macros: &HashMap<String, String>,
+) -> std::collections::HashSet<String> {
     let dbg = std::env::var("CANDOR_ALIAS_DEBUG").is_ok();
     // `include_tests: false` throughout — a `#[cfg(test)]` item inside a body is not compiled into the
     // build this report describes, so it shadows nothing in it. Under `--include-tests` that makes this
@@ -368,9 +384,31 @@ fn body_declared_items(qual: &str, block: &syn::Block) -> std::collections::Hash
             cand.entry(name.clone()).and_modify(|v| *v = None).or_insert(Some(i));
         }
     }
+    // R139's HIT COUNTERS, and the reason they had to be NEW ones. The R119 counters below print the
+    // symmetric difference against the FLATTENED collector — and on the R139 shape the flattened and the
+    // promoted answers are IDENTICAL (both shadow `Cmd` function-wide), so that A/B emitted nothing and
+    // the defect sat inside a `CHANGED 0` read as quiet. **A zero-diff over a shape your counters cannot
+    // distinguish is not evidence.** Two counters, because "reached" and "changed the answer" are
+    // different questions and only the first one licenses reading a byte-identical A/B as coverage:
+    //   `BODYMACRO-REACH` — the templates contributed occurrences the old count could not see, whether or
+    //                       not that moved the decision. This is the CHANGED-BRANCH hit count.
+    //   `BODYMACRO`       — the promotion itself flips. This is the R139 shape.
+    let empty_macros: HashMap<String, String> = HashMap::new();
     for (name, who) in cand {
         let Some(i) = who else { continue };
-        if count_ident(block, &name) == count_ident(n.out[i].0, &name) {
+        let (outer, inner) = (count_ident(block, &name, local_macros), count_ident(n.out[i].0, &name, local_macros));
+        let promote = outer == inner;
+        if dbg && !local_macros.is_empty() {
+            let (was_o, was_i) =
+                (count_ident(block, &name, &empty_macros), count_ident(n.out[i].0, &name, &empty_macros));
+            if (outer, inner) != (was_o, was_i) {
+                eprintln!("BODYMACRO-REACH {qual} :: {name} :: {was_o}/{was_i} -> {outer}/{inner}");
+            }
+            if (was_o == was_i) != promote {
+                eprintln!("BODYMACRO {qual} :: {name} :: {}", if promote { "PROMOTE" } else { "DROP" });
+            }
+        }
+        if promote {
             out.insert(name);
         }
     }
@@ -416,30 +454,101 @@ fn sig_mentions(sig: &syn::Signature, name: &str) -> bool {
     c.hit
 }
 
-/// How many times the identifier `name` occurs anywhere in `block`, INCLUDING inside macro token streams
-/// and attribute token lists, which syn's `Visit` does not otherwise descend into.
+/// How many times the identifier `name` occurs anywhere in `block`, INCLUDING inside macro token streams,
+/// attribute token lists, and the TEMPLATE of any local `macro_rules!` the block invokes — none of which
+/// syn's `Visit` descends into, and the last of which is not in `block` at all.
 ///
-/// UNDERCOUNTING IS THE DANGEROUS DIRECTION and that is why the token streams are counted. This is used
-/// only to answer "does this name occur outside the block that declares it"; an undercount of the outer
-/// total is what would wrongly license a function-wide shadow, so every position an identifier can occupy
-/// has to be reached. An OVERCOUNT merely drops a shadow, which costs precision, never soundness.
-fn count_ident(block: &syn::Block, name: &str) -> usize {
-    fn in_tokens(ts: &proc_macro2::TokenStream, name: &str, n: &mut usize) {
-        for t in ts.clone() {
-            match t {
-                proc_macro2::TokenTree::Ident(i) => {
-                    if i == name {
-                        *n += 1;
-                    }
-                }
-                proc_macro2::TokenTree::Group(g) => in_tokens(&g.stream(), name, n),
-                _ => {}
-            }
-        }
-    }
+/// **THE COUNT MUST REACH EVERY IDENT THE `CallCollector` WILL RESOLVE THROUGH THE `uses` MAP WHILE
+/// WALKING THIS BODY.** That, not "every position an identifier can occupy", is the property, and it is
+/// the one the caller depends on: an ident the collector resolves but this function cannot see makes the
+/// outer and inner counts equal, promotes a nested shadow function-wide, and rebinds that ident to the
+/// sentinel — a LOST EFFECT. Undercounting is the dangerous direction; an OVERCOUNT merely drops a shadow,
+/// which costs precision, never soundness.
+///
+/// R139 — THE PROPERTY WAS ASSERTED AND FALSE, and the assertion was written by the commit (R119) that
+/// needed it to be true. `CallCollector::visit_macro` inline-expands a bare `NAME!(..)` whose `NAME` is a
+/// crate-local `macro_rules!` (R48, `local_macros`), and that template's tokens live at FILE level — often
+/// in a different file — so no walk of `block` could ever have reached them:
+///
+///     use std::process::Command as Cmd;
+///     macro_rules! spawn_it { ($p:expr) => { Cmd::new($p).status().is_ok() } }
+///     pub fn f(p: &str) -> bool {
+///         let _n = { struct Cmd { n: u32 } Cmd { n: 1 }.n };   // a SEPARATE scope
+///         spawn_it!(p)
+///     }
+///
+/// Both counts came out 2, `Cmd` was promoted function-wide, and the `Cmd::new` the expansion injects
+/// resolved to `<body-item>Cmd`. EXECUTED ground truth is a spawned `/usr/bin/true`; `f` went ABSENT from
+/// `functions[]` and `deny Exec` dropped exit 1 → exit 0. The cardinal sin.
+///
+/// WHAT REACHES THE TEMPLATE NOW, and why it is counted the way it is:
+///   * A SINGLE-ARM template is walked through `collector::macro_template_blocks` — the same helper the
+///     collector expands with, so the two cannot disagree about what `NAME!` injects (§G).
+///   * Anything that helper leaves opaque (multi-arm, `$(..)*` repetition, an unparseable template) has
+///     its RAW arm tokens counted instead. The collector injects nothing for those today, so this is a
+///     pure over-count — deliberately, because the alternative couples the soundness of this count to a
+///     precision decision made in another file, and a later widening there would silently turn it into an
+///     undercount.
+///   * An ident that merely NAMES a local macro inside an opaque token stream counts as an invocation of
+///     it. `outer!(inner!(x))` is one `syn::Macro` node, so the nested invocation is only ever tokens; the
+///     collector re-parses those args as expressions and does expand `inner!`, so not descending here
+///     would be an undercount. A bare mention that is not an invocation over-counts. Same direction.
+///
+/// SYMMETRY IS WHAT KEEPS THE PRECISION. The caller compares this count over the whole body against the
+/// same count over one nested block, so the template of a macro invoked INSIDE the declaring block is
+/// counted on both sides and the shadow is still promoted — which is correct, because `macro_rules!` is
+/// unhygienic for items and types, so the expansion really does resolve at the invocation site. The
+/// counting function is monotone (a sub-block's count can never exceed the enclosing block's), so no
+/// over-count can make the outer total smaller than the inner one.
+///
+/// THE BOUNDARY, stated rather than assumed. Positions this still does not reach are positions nothing
+/// injects into the body walk: `include!`d files (an item-position `include!` contributes no unit — see
+/// `scan.rs`'s item-macro handling — so its idents are never resolved against this body's `uses`), doc
+/// comments and string literals (`const_strings`/`str_locals` carry literal VALUES, never code), and
+/// proc-macro/derive expansions (opaque to syn and to the collector alike). `cfg_if!` arms and
+/// `#[cfg]`-gated code ARE reached: both are tokens of `block` itself. `local_macros` is the only field of
+/// `CallCollector` that carries token-level syntax from outside the body, which is what bounds this list.
+pub(crate) fn count_ident(block: &syn::Block, name: &str, local_macros: &HashMap<String, String>) -> usize {
     struct C<'a> {
         name: &'a str,
         n: usize,
+        local_macros: &'a HashMap<String, String>,
+        /// Macros currently being expanded ON THIS PATH — inserted before and removed after, exactly like
+        /// `CallCollector::macro_expanding`. NOT a once-per-count "seen" set: a macro invoked twice must be
+        /// counted twice, or an invocation inside the declaring block and one outside it would cancel out
+        /// and re-open the very hole this closes.
+        expanding: std::collections::HashSet<String>,
+    }
+    impl<'a> C<'a> {
+        fn in_tokens(&mut self, ts: &proc_macro2::TokenStream) {
+            for t in ts.clone() {
+                match t {
+                    proc_macro2::TokenTree::Ident(i) => {
+                        if i == self.name {
+                            self.n += 1;
+                        }
+                        self.expand_local(&i.to_string());
+                    }
+                    proc_macro2::TokenTree::Group(g) => self.in_tokens(&g.stream()),
+                    _ => {}
+                }
+            }
+        }
+        fn expand_local(&mut self, leaf: &str) {
+            let Some(body) = self.local_macros.get(leaf).cloned() else { return };
+            if !self.expanding.insert(leaf.to_string()) {
+                return; // recursive / mutually-recursive macro
+            }
+            let (arms, blocks) = crate::collector::macro_template_blocks(&body);
+            if arms == 1 && blocks.len() == 1 {
+                // The tokens the collector really injects. `visit_block` recurses, so a template that
+                // invokes another local macro reaches it through `visit_macro` below.
+                Visit::visit_block(self, &blocks[0]);
+            } else if let Ok(ts) = body.parse::<proc_macro2::TokenStream>() {
+                self.in_tokens(&ts);
+            }
+            self.expanding.remove(leaf);
+        }
     }
     impl<'ast, 'a> Visit<'ast> for C<'a> {
         fn visit_ident(&mut self, i: &'ast proc_macro2::Ident) {
@@ -449,14 +558,20 @@ fn count_ident(block: &syn::Block, name: &str) -> usize {
         }
         fn visit_macro(&mut self, m: &'ast syn::Macro) {
             syn::visit::visit_macro(self, m);
-            in_tokens(&m.tokens, self.name, &mut self.n);
+            self.in_tokens(&m.tokens);
+            // The macro's own name, by LEAF — a deliberately wider test than the collector's
+            // `!mpath.contains("::")`, since this has no `uses` map to expand the path with. Wider means
+            // it may count a template the collector would not inject; that is the over-count direction.
+            if let Some(seg) = m.path.segments.last() {
+                self.expand_local(&seg.ident.to_string());
+            }
         }
         fn visit_meta_list(&mut self, m: &'ast syn::MetaList) {
             syn::visit::visit_meta_list(self, m);
-            in_tokens(&m.tokens, self.name, &mut self.n);
+            self.in_tokens(&m.tokens);
         }
     }
-    let mut c = C { name, n: 0 };
+    let mut c = C { name, n: 0, local_macros, expanding: Default::default() };
     c.visit_block(block);
     c.n
 }
@@ -1256,7 +1371,7 @@ pub(crate) fn fninfo(
     // an item shadows whatever the file imported under it (`body_shadowed_uses`' doc has the measured
     // fabrication). Applied in the same place and the same way as the additive half, so a body's `use`
     // and a body's `struct` are answered by one map rather than by one map and an omission.
-    let shadowed = body_declared_items(qual, block);
+    let shadowed = body_declared_items(qual, block, local_macros);
     // R119 — THE SIGNATURE IS NOT IN THE BODY'S SCOPE, and the first cut of R106 shadowed it too. A
     // parameter's type resolves where the function is DECLARED, so a body-local item cannot rebind it:
     //

@@ -9,6 +9,43 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R139 (cardinal sin, introduced by R119's own fix) — CLOSED: a crate-local
+  `macro_rules!` TEMPLATE now counts toward the body-item shadow, so a nested block's item can no
+  longer rebind a name the macro expansion uses.** R119 promotes a nested block's item to a
+  function-wide shadow only when every occurrence of the name lies inside that block, and answered
+  that with `count_ident`, which walks the body. `CallCollector::visit_macro` inline-expands a bare
+  `NAME!(..)` from `local_macros` (R48) whose tokens live at FILE level — often in another file — so no
+  walk of the body could reach them: the counts came out equal, the shadow was promoted, and the
+  `Cmd::new` the expansion injects resolved to the `<body-item>` sentinel. Ground truth EXECUTED (a
+  generated script that touches a marker file; the marker exists, so a process really ran):
+  `f -> ["Exec"]` on published `3cf055d`, **ABSENT at HEAD `5af1a27`**, and `deny Exec`, `deny Exec f`,
+  `pure f` and `deny Exec Unknown` all fell exit 1 → exit 0 (`deny Unknown` correctly 0 either way).
+  `count_ident` now expands through `collector::macro_template_blocks` — the same helper the collector
+  injects with, so the two cannot disagree about what `NAME!` expands to — and falls back to counting a
+  template's RAW tokens where that helper is opaque (multi-arm, `$(..)*`), which over-counts and can
+  only drop a shadow. The count stays SYMMETRIC, so a macro invoked INSIDE the declaring block is still
+  promoted (`macro_rules!` is unhygienic for items and types, so the expansion really does bind there)
+  — pinned by a control that goes red under the naive "never promote when a local macro exists" fix.
+  Six routes measured against a pre-fix binary, all ABSENT before and `["Exec"]` after: file-level
+  macro, a macro in ANOTHER FILE, a template invoking a second macro, an invocation nested in another
+  macro's opaque argument tokens, a redefined macro name, and a self-mentioning template.
+  A/B over 1490 registry crates, wide key (every field of every row, plus the report-level keys):
+  **ADDED 0, REMOVED 0, CHANGED 0 over 252,772 common rows** — and the changed branch was REACHED:
+  new `BODYMACRO-REACH` / `BODYMACRO` counters fire on **6 promotions in portable-atomic 1.13.1 and
+  1.15.0**, all flipping to DROP, none of which moves a row because `cmpxchg16b` is not a key in that
+  file's `use` map (the pre-fix shadow was already a no-op there — no `BODYSHADOW` in either arm).
+  **So this A/B is an over-charge control only; the recall evidence is the executed fixture, not the
+  corpus** — the corpus contains no instance where the flip could have changed a row.
+  `BODYMACRO` had to be a NEW counter: R119's `BODYSCOPE-ADD`/`DROP` compare against the FLATTENED
+  collector, which gives the R139 shape the SAME answer, so R119's own corpus A/B could not have seen
+  this and its `CHANGED 0` read as quiet.
+  **STILL OPEN, measured and NOT fixed here** (separate mechanisms, all pre-existing, all silent, each
+  demonstrated by a compiled-and-run fixture that really spawns): a `macro_rules!` defined INSIDE a
+  function body is never recorded in `local_macros` at all; a MULTI-ARM macro's template is
+  deliberately not expanded (the anti-fabrication trade) and carries no disclosure when it hides an
+  effect; a `$(..)*`-repetition template is unparseable and likewise silent; and `include!` text is
+  never read.
+
 - **⚠ SOUNDNESS R123 (cardinal sin, PRE-EXISTING and PUBLISHED) — CLOSED: two `cfg`'d `use` lines no
   longer resolve by SOURCE ORDER, so a production scan can no longer resolve through a TEST MOCK.**
   `collect_use` inserts into a `HashMap`, so the last spelling of a name won, and the idiomatic mocking
