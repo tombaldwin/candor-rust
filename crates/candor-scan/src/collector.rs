@@ -120,6 +120,12 @@ pub(crate) struct CallCollector<'a> {
     /// init does run on first use), never a fabrication. Keyed per static NAME (not module-scoped), so a
     /// pure-init lazy contributes nothing. Set once per forcing site (de-duped via `forced_lazies`).
     pub(crate) lazy_statics: &'a std::collections::HashSet<String>,
+    /// R101 — crate-wide names of `static`/`const` items holding an INVOKABLE callback inside a
+    /// container/cell. The MODULE-LEVEL peer of `field_elem_trait`/`elem_trait_of`: a static is typed by
+    /// no binding site, so `resolve_elem_trait_leaves` had no answer for one and every unwrap binder over
+    /// it (`if let Some(f) = CB.get()`, the let-else/while-let/match twins) hedged nothing — `f()` then
+    /// resolved as a phantom free-fn and the enclosing fn vanished from the report entirely.
+    pub(crate) callable_statics: &'a std::collections::HashSet<String>,
     /// Lazy statics already FORCED (edged) in this body — emit at most one forcing edge per static, so a
     /// hot static read in a loop doesn't bloat the call list.
     pub(crate) forced_lazies: std::collections::HashSet<String>,
@@ -597,6 +603,33 @@ impl<'a> CallCollector<'a> {
             syn::Expr::Reference(r) => self.resolve_elem_trait_leaves(&r.expr),
             syn::Expr::Paren(p) => self.resolve_elem_trait_leaves(&p.expr),
             syn::Expr::Group(g) => self.resolve_elem_trait_leaves(&g.expr),
+            // R101 — an `unsafe { .. }` block, whose value is its trailing expression. NOT optional for
+            // this shape: reading a `static mut` REQUIRES `unsafe`, so the pre-2024 spelling of an
+            // externally-installable callback slot is always wrapped. Measured — this is why the fix was
+            // SAFETY-ONLY on its first pass: the single real instance in a 1489-crate registry is
+            // proptest's `static mut DEFAULT_HOOK: Option<Box<dyn Fn(&PanicInfo) + Send + Sync>>`, invoked
+            // as `if let Some(hook) = unsafe { DEFAULT_HOOK.as_ref() } { (hook)(info) }`, and the scrutinee
+            // never got past this match. Only a block whose value IS one expression (no statements) is
+            // peeled — a block that computes is not the thing it ends with.
+            syn::Expr::Unsafe(u) => match (u.block.stmts.len(), u.block.stmts.first()) {
+                (1, Some(syn::Stmt::Expr(e, None))) => self.resolve_elem_trait_leaves(e),
+                _ => Vec::new(),
+            },
+            // R101 — a module-level `static`/`const` holding a callable, named here as the thing being
+            // unwrapped. Checked BEFORE the local tables so the qualified spelling (`cfg::CB`) is reachable
+            // at all (`get_ident` is None for it), and gated on `locally_bound` so a same-named local wins
+            // — the same shadow rule the lazy-static forcing edge uses, from the same authority. The leaf
+            // is the synthetic `"Fn"` that `ret_dispatch_leaves` already produces for `RET_FN_TYPED`, so
+            // every downstream consumer (`leaves_are_callable` → `fn_typed_vars`) is the existing one and
+            // the outcome can only ever be `Unknown`, never a concrete effect.
+            syn::Expr::Path(p) if p.qself.is_none()
+                && p.path.segments.last().is_some_and(|s| {
+                    let n = s.ident.to_string();
+                    self.callable_statics.contains(&n) && !self.locally_bound(&n)
+                }) =>
+            {
+                vec!["Fn".to_string()]
+            }
             syn::Expr::Path(p) => p
                 .path
                 .get_ident()
@@ -636,9 +669,42 @@ impl<'a> CallCollector<'a> {
                     // wrapped collection: `reg.lock().unwrap().iter()` / `cell.borrow().iter()` /
                     // `rw.read().unwrap().iter()` over an `Arc<Mutex<Vec<Box<dyn>>>>` etc.
                     | "lock" | "unwrap" | "expect" | "borrow" | "borrow_mut" | "read" | "write" | "as_ref" | "as_mut"
+                    // R101 — the DEFERRED-INIT CELL accessors. `OnceLock`/`OnceCell::get`/`get_mut`/
+                    // `get_or_init` yield the cell's contents exactly as `lock`/`borrow`/`read` yield a
+                    // `Mutex`/`RefCell`'s, so they preserve the receiver's element leaves. Without them
+                    // `if let Some(f) = CB.get() { f() }` over `static CB: OnceLock<Box<dyn Fn()>>` resolved
+                    // to nothing and `f()` dropped silent-pure (SOUNDNESS R101). `get`/`get_mut` are also
+                    // `Vec`/`HashMap`'s element accessors, which this arm was already missing — R88's
+                    // stated-open "Option-returning element-yielding methods" gap, one shape of it.
+                    | "get" | "get_mut" | "get_or_init"
                 );
+                // …and of THOSE, the ones whose NAME a crate is likely to define itself. `returns` is keyed
+                // by bare method LEAF crate-wide, so one local `fn get(&self) -> Option<Box<dyn Doer>>`
+                // answers for EVERY `.get()` in the crate. The ordering between the two routes is therefore
+                // load-bearing, and BOTH directions were measured rather than argued:
+                //   * returns-FIRST (my first cut) made the whole R101 fix INERT the moment a crate had any
+                //     local `fn get` — `CB.get()` resolved to `["Doer"]`, `leaves_are_callable` was false,
+                //     and nothing hedged. The over-charge control `use_reg` is what caught it.
+                //   * receiver-first with the fallback extended to EVERY adapter cost 4 real rows their
+                //     `invisible` κ disclosure across 78 registry crates (sea-query-derive `iden::find_attr`,
+                //     wit-bindgen-rust `declare_import`, x509-parser 0.17/0.18 `find_attribute` — each an
+                //     `xs.iter().find(..)` whose closure param stopped resolving through the field route once
+                //     a local `fn iter` answered for `.iter()`). Losing a disclosure is the wrong direction
+                //     and R101 does not need it, so the fallback is confined to the names that need it.
+                // Receiver-first, fallback for the cell accessors only ⇒ ZERO removals by construction for
+                // every adapter that existed before this change.
+                let cell_accessor = matches!(m.method.to_string().as_str(), "get" | "get_mut" | "get_or_init");
                 if adapter {
-                    self.resolve_elem_trait_leaves(&m.receiver)
+                    let by_recv = self.resolve_elem_trait_leaves(&m.receiver);
+                    if !by_recv.is_empty() {
+                        return by_recv;
+                    }
+                    if !cell_accessor {
+                        return Vec::new();
+                    }
+                    self.returns.get(&m.method.to_string())
+                        .and_then(|t| ret_dispatch_leaves(t))
+                        .unwrap_or_default()
                 } else {
                     // A METHOD factory returning a COLLECTION of trait objects (`for d in r.all()`,
                     // `all() -> Vec<Box<dyn>>` → `<elemdyn>`) OR an Option/Result of one (`if let Some(d) =
@@ -1197,7 +1263,24 @@ impl<'a> CallCollector<'a> {
     /// hold), `trait_vars["f"]` DOES get set, and `f()` was STILL silently dropped — the binding was
     /// live and simply never consulted by the invoking form.
     fn leaves_are_callable(leaves: &[String]) -> bool {
-        leaves.iter().any(|l| matches!(l.as_str(), "Fn" | "FnMut" | "FnOnce"))
+        crate::lang::leaves_are_callable(leaves)
+    }
+    /// Whether a bare NAME in this body refers to a LOCAL binding rather than to a module-level
+    /// `static`/`const` of the same name. The ONE definition of that question: a same-named param, `let`,
+    /// loop var or closure param shadows the static, and a consumer that skips this test charges the
+    /// static's meaning to the local (measured on the lazy-static forcing edge — a `let C = "aa";` whose
+    /// initializer typed to nothing left `C` looking like the imported static). `bound_names` is every
+    /// ident in a binding POSITION anywhere in this body, so the test does not depend on type inference
+    /// having succeeded for the shadow; the typed side-tables above it are kept because they also hold
+    /// SIGNATURE bindings, which `bound_names` covers too but redundantly rather than instead.
+    fn locally_bound(&self, name: &str) -> bool {
+        self.vars.contains_key(name)
+            || self.closure_vars.contains(name)
+            || self.fn_typed_vars.contains(name)
+            || self.fn_alias.contains_key(name)
+            || self.elem_of.contains_key(name)
+            || self.trait_vars.contains_key(name)
+            || self.bound_names.contains(name)
     }
     /// R77 — the enum-payload counterpart of `resolve_elem_trait_leaves`, shared by every single-field
     /// TUPLE-VARIANT binding site (match arm, if-let, while-let, let-else): `(binding name, dispatch trait
@@ -2554,20 +2637,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if node.qself.is_none() {
             if let Some(last) = node.path.segments.last() {
                 let name = last.ident.to_string();
-                let locally_bound = self.vars.contains_key(&name)
-                    || self.closure_vars.contains(&name)
-                    || self.fn_typed_vars.contains(&name)
-                    || self.fn_alias.contains_key(&name)
-                    || self.elem_of.contains_key(&name)
-                    || self.trait_vars.contains_key(&name)
-                    // …and every OTHER binding form. The five side-tables above only hold a binding whose
-                    // TYPE was recoverable, so `let C = "aa";` — a `let` whose initializer types to nothing
-                    // — left `C` looking like the imported static and the forcing edge fired on a local
-                    // string. That was harmless while only a QUALIFIED path could force (a shadow is
-                    // spelled bare); adding the bare `use` spelling made it live, and the control caught it.
-                    // `bound_names` is every ident in a binding POSITION anywhere in this body, so the
-                    // shadow test no longer depends on type inference having succeeded.
-                    || self.bound_names.contains(&name);
+                // …and every OTHER binding form: see `locally_bound`, which owns this test and is shared
+                // with the R101 callable-static lookup in `resolve_elem_trait_leaves`. Two paths asking
+                // "is this name the static or a local?" and drifting is exactly §F1 item 3.
+                let locally_bound = self.locally_bound(&name);
                 // A DEPENDENCY's lazy static, mentioned qualified (`deplib::CFG`). Forcing it runs the
                 // dep's initializer, which a chained report records as `<lazy>::…NAME` — but only LOCAL
                 // statics are in `lazy_statics`, so nothing was emitted and the consumer read pure even

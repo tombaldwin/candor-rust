@@ -331,6 +331,15 @@ pub(crate) struct ElemIndexes<'a> {
     /// payload is genuinely untyped" apart from "this payload's type was thrown away because it collided"
     /// — only the second case discloses `Unknown`; see collector.rs's `enum_variant_binding`.
     pub(crate) ambiguous_enum_leaves: &'a HashSet<String>,
+    /// R101 — the names of `static`/`const` items whose declared type holds an INVOKABLE callback inside
+    /// a container/cell (`static CB: OnceLock<Box<dyn Fn()>>`, `static H: Mutex<Option<Box<dyn Fn()>>>`).
+    /// The module-level counterpart of `field_elem_trait`: a static has no binding site to type it at, so
+    /// before this index `resolve_elem_trait_leaves` returned NOTHING for a static receiver and every
+    /// unwrap binder over one silently dropped the call as pure (SOUNDNESS R101, kernel-witnessed).
+    /// Carries only the synthetic `"Fn"` leaf, so it cannot CONTRIBUTE a concrete effect. It can WITHDRAW
+    /// one if its consuming arm is reached for a name that is a dispatch-typed LOCAL here — see
+    /// `lang::static_holds_callable`, which states that condition and the guard-deletion measurement.
+    pub(crate) callable_statics: &'a HashSet<String>,
 }
 
 /// A freshly-parsed `syn::File` made movable across one thread boundary. `syn::File` is `!Send` solely

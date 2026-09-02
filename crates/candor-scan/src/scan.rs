@@ -1364,7 +1364,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let trait_decls = &merged.trait_decls;
     let trait_fields = &merged.trait_fields;
     let traits = TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields };
-    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves };
+    let elems = ElemIndexes { field_elem, field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &merged.callable_statics };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;

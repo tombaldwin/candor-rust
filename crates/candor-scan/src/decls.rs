@@ -1150,6 +1150,7 @@ pub(crate) fn fninfo(
         enum_variants: elems.enum_variants,
         enum_variant_traits: elems.enum_variant_traits,
         ambiguous_enum_leaves: elems.ambiguous_enum_leaves,
+        callable_statics: elems.callable_statics,
         elem_of,
         elem_trait_of,
         tuple_of,
@@ -1391,6 +1392,7 @@ pub(crate) fn collect_decls(
     const_strings: &mut HashMap<String, String>,
     local_macros: &mut HashMap<String, String>,
     blanket_methods: &mut HashMap<String, String>,
+    callable_statics: &mut std::collections::HashSet<String>,
 ) {
     for it in items {
         if let syn::Item::Use(u) = it {
@@ -1417,14 +1419,32 @@ pub(crate) fn collect_decls(
         // its call stays bare Net with the host masked (no fabrication). `#[cfg(test)]`-gated consts are
         // excluded from a production scan, matching the lazy-static / field discipline above.
         match it {
+            // R101 — CALLABLE-STATIC index (crate-wide, Pass A), collected in the same walk and under the
+            // same `#[cfg(test)]` discipline as the const-string index above. A `static`/`const` whose
+            // declared type holds an `Fn`/`FnMut`/`FnOnce` inside a container or cell is an EXTERNALLY
+            // INSTALLABLE callback: `static CB: OnceLock<Box<dyn Fn()>>` + `pub fn install(f) { CB.set(f) }`
+            // is the canonical shape. The static itself has no binding site, so nothing typed it and
+            // `if let Some(f) = CB.get() { f() }` bound `f` to no leaves at all — `leaves_are_callable` was
+            // false, `f` was never hedged into `fn_typed_vars`, and `f()` resolved as a phantom free-fn and
+            // disappeared: `fire` was ABSENT from `functions[]` while the program wrote a file (SOUNDNESS
+            // R101, driver `pf_oncelock_cb`, strace ground truth). The paired control — the SAME callable
+            // reached through a fn-typed PARAMETER — has always answered `Unknown`/`callback:unresolved
+            // call` correctly; this converges the static path onto that answer rather than writing a
+            // second one (§F1 item 3).
             syn::Item::Const(c) if include_tests || !is_cfg_test(&c.attrs) => {
                 if let Some(v) = const_str_value(&c.expr) {
                     const_strings.insert(c.ident.to_string(), v);
+                }
+                if static_holds_callable(&c.ty) {
+                    callable_statics.insert(c.ident.to_string());
                 }
             }
             syn::Item::Static(s) if include_tests || !is_cfg_test(&s.attrs) => {
                 if let Some(v) = const_str_value(&s.expr) {
                     const_strings.insert(s.ident.to_string(), v);
+                }
+                if static_holds_callable(&s.ty) {
+                    callable_statics.insert(s.ident.to_string());
                 }
             }
             // LOCAL `macro_rules! NAME { (..) => { TEMPLATE }; .. }` — record NAME → the arm TOKENS (as a
@@ -1764,7 +1784,7 @@ pub(crate) fn collect_decls(
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.
                     let mut subuses = submodule_uses(uses, inner, include_tests);
-                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods);
+                    collect_decls(inner, include_tests, &mut subuses, fields, field_elem, field_elem_trait, rets, enum_tmp, enum_variant_traits, trait_impls, local_traits, trait_fields, prim_aliases, extern_fns, drop_types, deref_target, lazy_statics, const_strings, local_macros, blanket_methods, callable_statics);
                 }
             }
             _ => {}
