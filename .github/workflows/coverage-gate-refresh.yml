@@ -140,5 +140,15 @@ jobs:
           gh issue create \
             --title "coverage-gate: crates.io drift changed the CALIBRATED_CRATES differential" \
             --label automated,coverage-gate \
-            --body-file /tmp/issue-body.md \
-            || echo "issue may already exist; skipping"
+            --body-file /tmp/issue-body.md 2>/tmp/issue.err \
+            || {
+              # SOUNDNESS R159. This was `|| echo "issue may already exist; skipping"` — every failure
+              # reason became a green step and a guessed sentence. On the job's first-ever real drift
+              # finding (2026-09-02: 39 regressed, 158 newly-uncovered) `gh issue create` failed because
+              # neither label existed, the step passed, and the repo had ZERO issues: a finding the job
+              # exists to report reached nobody. Only a genuine duplicate is a skip; anything else is the
+              # reporting channel being broken, which is a job failure by this family's own ruling
+              # (R104, R148: an errored step must not reach the verdict as a pass).
+              if grep -qiE "already exists" /tmp/issue.err; then echo "issue already exists; skipping"; else
+                echo "::error::gh issue create FAILED — the drift finding above reached nobody:"; cat /tmp/issue.err; exit 1; fi
+            }
