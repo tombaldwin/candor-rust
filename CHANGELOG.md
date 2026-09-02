@@ -9,6 +9,8 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## Unreleased
 
+## [0.35.0] — 2026-09-03
+
 - **⚠ SOUNDNESS R160 (cardinal sin, PUBLISHED in every release to date) — CLOSED: a sibling call
   qualified with `Self::` now resolves exactly as `<Type>::` does.** `Self` is bound in the ordinary
   import map for the length of each `impl` block, so the one path-expansion routine answers every
