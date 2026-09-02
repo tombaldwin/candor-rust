@@ -3814,7 +3814,7 @@ pub(crate) fn reexport_aliases(
         }
         let mlast = module.rsplit("::").next().unwrap_or(module);
         for (name, (from_edges, quals, explicit_quals)) in names {
-            if from_edges.contains(&DECLARED_HERE) || from_edges.len() != 1 {
+            if from_edges.contains(&DECLARED_HERE) {
                 continue;
             }
             // SOUNDNESS R169 — SEVERAL EDGES ARE A UNION, NOT AN AMBIGUITY. This read

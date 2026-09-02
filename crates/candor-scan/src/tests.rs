@@ -14111,3 +14111,98 @@ pub fn go() {{ imp::doit(); }}
         }
     }
 
+    /// R169, the trigger. Two `#[cfg]`-gated `pub use` edges bringing ONE name into one module were
+    /// read as an ambiguity and dropped, so every caller of the re-exported name resolved to nothing.
+    /// That is the `#[cfg]` platform split this index already keeps when it is spelled as ONE edge with
+    /// several definitions. UNDER-REPORT direction. Real instance: `crossterm::terminal::size` (and
+    /// `window_size`, `enable_raw_mode`, `disable_raw_mode`) absent on the published 0.34.0 binary while
+    /// `terminal::sys::unix::size` read ['Exec','Unknown'].
+    #[test]
+    fn a_name_reexported_by_two_cfg_gated_edges_still_resolves_as_their_union() {
+        let v = scan_crate_to_json("r169cfg", &[
+            ("src/lib.rs", "pub mod terminal;\n"),
+            ("src/terminal.rs", "\
+                pub(crate) mod sys;\n\
+                pub fn size() -> usize { sys::size() }\n\
+                pub fn size_self() -> usize { self::sys::size() }\n\
+                pub fn size_crate() -> usize { crate::terminal::sys::size() }\n"),
+            ("src/terminal/sys.rs", "\
+                #[cfg(unix)] pub(crate) use self::unix::size;\n\
+                #[cfg(windows)] pub(crate) use self::windows::size;\n\
+                #[cfg(unix)] mod unix;\n\
+                #[cfg(windows)] mod windows;\n"),
+            ("src/terminal/sys/unix.rs",
+                "pub fn size() -> usize { std::fs::read_to_string(\"/etc/hosts\").map(|s| s.len()).unwrap_or(0) }\n"),
+            ("src/terminal/sys/windows.rs", "pub fn size() -> usize { 0 }\n"),
+        ]);
+        for n in ["terminal::size", "terminal::size_self", "terminal::size_crate"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Fs".to_string()],
+                       "`{n}` forwards into a `#[cfg]`-split platform module; with ONE re-export edge \
+                        every one of these spellings already resolved, so the second edge is the only \
+                        variable:\n{v:#}");
+        }
+    }
+
+    /// R169 CONTROL — the OVER-CHARGE direction the union opens. A GLOB and an EXPLICIT import can
+    /// legally bring one name into one module, and Rust gives the explicit import precedence, so the
+    /// glob's definition must NOT be unioned in. Executed ground truth: the call returns the explicit
+    /// one's value. Passes in BOTH arms in the sense that pre-fix the row is absent — asserted here as
+    /// the precise effect set, which a naive union would widen to ['Exec','Fs'].
+    #[test]
+    fn an_explicit_reexport_shadows_a_glob_rather_than_unioning_with_it() {
+        let v = scan_crate_to_json("r169glob", &[
+            ("src/lib.rs", "pub mod globmod;\npub mod caller;\n"),
+            ("src/globmod.rs", "\
+                pub use self::globbed::*;\n\
+                pub use self::explicitm::pick;\n\
+                mod globbed;\n\
+                mod explicitm;\n"),
+            ("src/globmod/globbed.rs",
+                "pub fn pick() -> usize { std::fs::read_to_string(\"/etc/hosts\").map(|s| s.len()).unwrap_or(0) }\n"),
+            ("src/globmod/explicitm.rs",
+                "pub fn pick() -> usize { std::process::Command::new(\"true\").status().map(|_| 2).unwrap_or(2) }\n"),
+            ("src/caller.rs", "pub fn go() -> usize { crate::globmod::pick() }\n"),
+        ]);
+        assert_eq!(effs(fn_entry(&v, "caller::go")), vec!["Exec".to_string()],
+                   "`globmod::pick` IS `explicitm::pick` — an explicit import shadows a glob, so the \
+                    glob's `Fs` must not be unioned in:\n{v:#}");
+    }
+
+    /// R169 CONTROL — a MIS-ATTRIBUTION the multi-edge union would otherwise import. `imp::create` is
+    /// spelled the same from `dir` and from `file`; the claimants test drops such a key, but it cannot see
+    /// a module whose `pub use` is hidden inside a `cfg_if!` — that module contributes no `Reexport` edge
+    /// at all. Measured on tempfile 3.10.0, where the union made `file::tempfile_in`'s `imp::create(dir)`
+    /// resolve into the DIRECTORY module (and lose `file::imp::unix::create`'s `Env` with it). The caller
+    /// here must reach NOTHING rather than the wrong module's definition.
+    #[test]
+    fn a_tail2_key_a_macro_hidden_module_could_also_own_is_not_resolved_by_the_union() {
+        let v = scan_crate_to_json("r169mac", &[
+            ("src/lib.rs", "pub mod dir;\npub mod file;\n"),
+            // `dir::imp` — the `#[cfg]` PAIR the union newly admits.
+            ("src/dir.rs", "pub mod imp;\npub fn make() -> usize { imp::create() }\n"),
+            ("src/dir/imp.rs", "\
+                #[cfg(unix)] mod unix;\n\
+                #[cfg(unix)] pub use unix::*;\n\
+                #[cfg(not(unix))] mod any;\n\
+                #[cfg(not(unix))] pub use any::*;\n"),
+            ("src/dir/imp/unix.rs", "pub fn create() -> usize { std::fs::create_dir(\"/tmp/x\").is_ok() as usize }\n"),
+            ("src/dir/imp/any.rs", "pub fn create() -> usize { 0 }\n"),
+            // `file::imp` — the SAME last segment, with its own `create`, behind an unexpanded macro.
+            ("src/file.rs", "pub mod imp;\npub fn make() -> usize { imp::create() }\n"),
+            ("src/file/imp.rs", "\
+                cfg_if::cfg_if! { if #[cfg(unix)] { mod unix; pub use self::unix::*; } }\n"),
+            ("src/file/imp/unix.rs", "pub fn create() -> usize { let _ = std::env::var(\"TMPDIR\"); 1 }\n"),
+        ]);
+        for n in ["dir::make", "file::make"] {
+            let calls: Vec<String> = v["functions"].as_array().unwrap().iter()
+                .find(|f| f["fn"] == n)
+                .and_then(|f| f.get("calls"))
+                .and_then(|c| c.as_array())
+                .map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+                .unwrap_or_default();
+            assert!(calls.iter().all(|c| c.starts_with(n.split("::").next().unwrap())),
+                    "`{n}` must not resolve `imp::create` into the OTHER module's `imp` — the 2-segment \
+                     key names neither, and one of the two claimants is invisible to this index. \
+                     calls = {calls:?}\n{v:#}");
+        }
+    }
