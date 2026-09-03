@@ -185,6 +185,15 @@ jobs:
       - name: Bet 3 instrument liveness (the absence controls must not pass vacuously)
         run: bash eval/bet3/verify-instrument.sh
 
+      # The coverage-gate GENERATOR's own tests. `crates/candor-classify/tests/coverage_gate.rs`
+      # asserts classify() against the checked-in manifest; nothing asserted the code that PRODUCES
+      # that manifest, and three candidate-extraction defects lived in it until 2026-09-02 (a
+      # lexicographic version pick, a `pub fn` inside an inline `mod` never becoming a candidate, an
+      # `impl` inside an inline `mod` correlated under the wrong key). Pure Python — no cargo, no
+      # registry, no network — so it belongs on every push rather than in the weekly refresh job.
+      - name: Coverage-gate generator selftest
+        run: python3 eval/coverage-gate/generate.py --selftest
+
       # The Claude Code receipt is plain bash (no Rust test reaches it) and has shipped real
       # bugs (the sidecar/report glob collision). Guard its coverage/freshness/count logic.
       - name: Receipt logic tests (Claude Code integration)
