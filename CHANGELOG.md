@@ -50,6 +50,52 @@ after upgrading; review policies and regenerate baselines with the new build.
   `Image::put_impl`, whose `while` loop pushes `put_image(..)?` cookies into a `Vec` that really
   drops on the error path, gains that `VoidCookie::drop` edge. The branch fires 13,481 times across
   665 of the 1,504 crates, so the zero-diff is measured over a corpus that reaches it.
+- **⚠ SOUNDNESS R194 (cardinal sin, a REGRESSION against published 0.34.0 introduced by R173 above and
+  NOT reached by R187, caught by a third fix-lens pass before release) — CLOSED: a `?` is live for
+  what its OWN OPERAND built.** R173 numbers each `?` at its PRE-ORDER position, i.e. before its own
+  operand is walked, so every construction inside that operand got a HIGHER number than the `?` and
+  read as "not built yet" — while evaluating the operand is exactly what built it. Nine shapes read
+  `['Fs']` on published 0.34.0 and were ABSENT (or lost their `Fs`) on the candidate:
+  `{ out.push(H::new()); gen(n) }?`, the `match`/`if` operands with the construction in an ARM's
+  statement, `run_cb(|| { out.push(H::new()); .. })?`,
+  `items.into_iter().try_for_each(|it| { it?; out.push(H::new()); Ok(()) })?`,
+  `use_h_ref(&H::try_new(n)?)?` (a borrowed temporary that dies on this frame's exit),
+  `gen({ out.push(H::new()); n })?`, `poll_once(async { out.push(H::new()); .. })?`, and a `?`
+  operand nested inside another `?` operand. (`H::try_new(n)?.check()?` and its `.await?` twin drop in
+  this frame too, but published 0.34.0 missed both and the 0.35.0 line already charges them — a gain,
+  not part of this regression.) `deny Fs` and `pure` both 1 → 0 on them. Executed ground
+  truth: one `H::drop` runs in each frame on the error path (two for the loop-shaped one). Each `?`
+  now also vetoes the leaves its operand constructs OFF THE OPERAND'S VALUE SPINE, whatever their
+  pre-order number says. THE VALUE-SPINE EXEMPTION IS THE LOAD-BEARING HALF, and it is enumerated
+  rather than inferred. A lump post-order number would charge `Ok(Repr::new(s)?)` — on the exit where that `?` fires,
+  `Repr::new` returned `Err` and no `Repr` was ever built — which is published's fabrication back
+  again over ~280 registry rows. The spine descends only the operand itself, `Paren`/`Group`/`Try`/
+  `Await`, a block's TAIL, an `if`/`match` arm's tail, and by-value `Call`/`MethodCall` arguments,
+  tuple/array elements and struct fields; everything else stays charged. It deliberately stops at a
+  `&` (`use_h_ref(&H::try_new(n)?)?` borrows a temporary that dies here, and differs from its exempt
+  by-value twin `use_h_val(H::try_new(n)?)?` by that one character), at a method RECEIVER
+  (`H::try_new(n)?.check()?`), and at a closure/`async` BODY and a block's non-tail statements. A
+  closure's TAIL needs no exemption: it is already an unconditional escape route re-united after the
+  positional filter, which is what keeps async-std's `spawn_blocking(|| File::create(&p)).await?`
+  quiet. Fourteen executed spine controls (0 drops in-frame each, including one that drops 1 in the
+  CALLEE's frame and two `.await?` chains) pin the direction, and the R173 controls
+  `operand_ctrl_value`/`operand_ctrl_straight` are unmoved. Both halves were measured by degrading the
+  code, not reasoned about: reverting the veto clause returns all nine shapes to ABSENT, and dropping
+  the spine exemption charges twelve of the fourteen controls — one of them (`Ok(mk_h(n)?)`, a
+  free-function constructor) beyond even published, which had no such route before R165. The one
+  exclusion with NO teeth is stated as such in the test: a method RECEIVER cannot reach the veto at
+  all, because `for_each_value_child` never descends one and R172's site gate could not accept it as
+  an escaping site, so `H::try_new(n)?.check()?` stays charged with the receiver on the spine or off it. 1,504-crate A/B vs the candidate `70fd624`, wide key (17 fields, not just `inferred`):
+  ADDED 0, REMOVED 0, CHANGED 0, effects lost 0, call edges lost 0 — byte-identical over 257,243
+  common rows. The branch fires 2,824 times across 427 of the 1,504 crates, so that zero is measured
+  over a corpus that reaches it; only 5 of those 2,824 veto a leaf whose `Drop` the crate defines, and
+  all 5 were traced (3 absorbed by the unconditional escape route — jobserver `Acquired`, jni
+  `TLSAttachGuard`, diesel `CopyToBuffer`; dylint `inject_dummy_dependencies`, the real-world instance
+  of the `try_for_each` shape, was already charged identically by all three arms). Published → this
+  build reproduces the published → candidate ledger line for line (common 252,097, ADDED 5,146,
+  REMOVED 699, LOST 620), so nothing in it is unattributed to the earlier rows, and the set of rows
+  that lost a published `X::drop` edge is IDENTICAL to the candidate's (symmetric difference 0), which
+  is the control that the 279 construction-after-the-last-`?` removals stay removed.
 - **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
   refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
   (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same

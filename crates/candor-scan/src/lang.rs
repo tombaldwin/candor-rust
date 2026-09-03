@@ -2520,7 +2520,28 @@ pub(crate) fn escaping_ctor_leaves<'a>(
                 }
             }
         }
-        acc.leaves.retain(|l| sites.first_ctor_seq.get(l).is_some_and(|s| s > p));
+        // SOUNDNESS R194 — POSITION IS NOT ENOUGH FOR THE `?`'S OWN OPERAND. `Expr::Try` is numbered at
+        // its PRE-order position, i.e. before its operand is walked, so every construction inside the
+        // operand gets a HIGHER number than the `?` and reads as "not built yet" — while evaluating
+        // that operand is precisely what built it. `{ out.push(H::new()); gen(n) }?` therefore kept `H`
+        // in the escaping set and lost the drop that really runs when `gen` fails (executed: one
+        // `H::drop` in that frame), a REGRESSION against published 0.34.0, which vetoed blanket.
+        // `t.interior` carries the leaves the operand builds OFF ITS VALUE SPINE; they are vetoed
+        // regardless of position. See `value_spine_addrs` for what the spine is and why the leaves ON
+        // it must NOT be vetoed — that exemption is the whole of R173's gain here (`Ok(Repr::new(s)?)`,
+        // `Async::new(stream)?`), and a lump post-order without it re-fabricates published's blanket
+        // charges over the corpus.
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            for l in &acc.leaves {
+                // §E1 HIT COUNTER — R194's branch is "position would have KEPT this leaf and the
+                // operand-interior rule removes it". Printed only when it really fires.
+                if sites.first_ctor_seq.get(l).is_some_and(|s| s > p) && t.interior.contains(l) {
+                    eprintln!("R194OPERAND {l}");
+                }
+            }
+        }
+        acc.leaves
+            .retain(|l| sites.first_ctor_seq.get(l).is_some_and(|s| s > p) && !t.interior.contains(l));
         acc.names.retain(|n| sites.first_bind_seq.get(n).is_some_and(|s| s > p));
     }
     // The unconditional routes are re-united after the positional filter, per `uncond`'s comment.
@@ -2730,10 +2751,15 @@ pub(crate) fn owned_drop_params(
 
 /// SOUNDNESS R187 — one `?` early exit: its position in the body walk, and whether it sits inside a
 /// CLOSURE (in which case it exits the closure, not this function, and the loop rewrite leaves it alone).
-#[derive(Clone, Copy)]
+/// SOUNDNESS R194 — plus the leaves this `?`'s OWN OPERAND constructs off its value spine, which a
+/// position alone cannot express: they are built BEFORE the `?` runs and numbered AFTER it.
 struct TryExit {
     seq: usize,
     in_closure: bool,
+    /// R194 — type leaves constructed inside this `?`'s operand at a position that is NOT on the
+    /// operand's value spine. Evaluating the operand ran them, so they are live when this `?` takes
+    /// its error exit, whatever their pre-order number says.
+    interior: std::collections::HashSet<String>,
 }
 
 struct EscapeSites<'a> {
@@ -2764,6 +2790,10 @@ struct EscapeSites<'a> {
     /// R187 — a `?` inside a LOOP is rewritten to the loop's own last position when the loop closes,
     /// so the pre-order number stops standing in for evaluation order where the two disagree.
     try_exits: Vec<TryExit>,
+    /// SOUNDNESS R194 — the `?`s whose OPERAND the walk is currently inside: the index of each one in
+    /// `try_exits`, paired with the ADDRESSES of its operand's value spine. A construction reached
+    /// while this is non-empty and not on the spine is recorded in that `?`'s `interior`.
+    open_tries: Vec<(usize, std::collections::HashSet<usize>)>,
     /// R187 — how many CLOSURE bodies enclose the expression being walked. A `?` inside a closure is an
     /// exit of the CLOSURE, not of this function, so the loop rewrite must not move it: leaving it where
     /// R173 put it keeps that (pre-existing, over-charging) treatment exactly as shipped.
@@ -2807,6 +2837,7 @@ impl<'a> EscapeSites<'a> {
             skip_sites: std::collections::HashSet::new(),
             seq: 0,
             try_exits: Vec::new(),
+            open_tries: Vec::new(),
             closure_depth: 0,
             first_ctor_seq: HashMap::new(),
             first_bind_seq: HashMap::new(),
@@ -2828,6 +2859,16 @@ impl<'a> EscapeSites<'a> {
         }
         if let Some(l) = ctor_leaf_of_expr(e, self.uses, self.fields, self.returns) {
             let seq = self.seq;
+            // R194 — every `?` whose operand encloses this construction OFF ITS VALUE SPINE has run it
+            // by the time it takes its error exit, so it must veto this leaf whatever the pre-order
+            // numbers say. Disjoint field borrows: the spine sets are read, the exits are written.
+            let addr = e as *const syn::Expr as usize;
+            let (open, exits) = (&self.open_tries, &mut self.try_exits);
+            for (idx, spine) in open {
+                if !spine.contains(&addr) {
+                    exits[*idx].interior.insert(l.clone());
+                }
+            }
             self.first_ctor_seq.entry(l.clone()).or_insert(seq); // R173
             self.ctor_sites.entry(l).or_default().push((e as *const syn::Expr as usize, 0));
         }
@@ -2942,9 +2983,17 @@ impl<'a> EscapeSites<'a> {
             // R173 — recorded WITH ITS POSITION rather than as a blanket empty root. Pre-order puts a
             // `?` BEFORE its own operand, which is what makes `let c = make()?;` read as "the value
             // does not exist yet at this exit" while `let g = G::new(); f()?;` reads as "it does".
-            syn::Expr::Try(_) => {
-                let e = TryExit { seq: self.seq, in_closure: self.closure_depth > 0 };
+            syn::Expr::Try(t) => {
+                let e = TryExit {
+                    seq: self.seq,
+                    in_closure: self.closure_depth > 0,
+                    interior: std::collections::HashSet::new(),
+                };
                 self.try_exits.push(e);
+                // R194 — open this `?`'s operand scope for the child walk below.
+                let mut spine = std::collections::HashSet::new();
+                value_spine_addrs(&t.expr, &mut spine);
+                self.open_tries.push((self.try_exits.len() - 1, spine));
             }
             syn::Expr::Assign(a) => match &*a.left {
                 // `x = Guard::new()` — an escape only if `x` itself escapes. A MULTI-segment path is a
@@ -3041,6 +3090,9 @@ impl<'a> EscapeSites<'a> {
         for_each_child_block(e, &mut |b| self.walk_block(b, false));
         if in_closure {
             self.closure_depth -= 1;
+        }
+        if matches!(e, syn::Expr::Try(_)) {
+            self.open_tries.pop(); // R194 — the operand scope closes with the `?`
         }
         if let Some(mark) = loop_mark {
             let end = self.seq; // every position inside this loop is <= this one
@@ -3224,6 +3276,68 @@ fn for_each_value_child<'a>(e: &'a syn::Expr, f: &mut dyn FnMut(&'a syn::Expr)) 
         syn::Expr::Tuple(t) => t.elems.iter().for_each(&mut *f),
         syn::Expr::Array(a) => a.elems.iter().for_each(&mut *f),
         syn::Expr::Repeat(r) => f(&r.expr),
+        _ => {}
+    }
+}
+
+/// SOUNDNESS R194 — THE VALUE SPINE of a `?`'s operand: every position from which the operand's own
+/// RESULT can come. A construction here does not exist when that `?` takes its ERROR exit — the operand
+/// returned `Err`/`None`, so it never produced the value — and charging its `Drop` fabricates an effect.
+/// A construction ANYWHERE ELSE in the operand has already run by then and is live in this frame, which
+/// is what `TryExit::interior` records.
+///
+/// SAY WHICH DIRECTION IT FAILS IN: this set is the EXEMPTION, so it is enumerated explicitly and every
+/// shape not listed stays charged. Three exclusions are the load-bearing ones, each pinned by an
+/// executed fixture whose `Drop` really runs in the caller's frame:
+///   · `Reference` — `foo(&H::try_new(n)?)?` borrows a TEMPORARY that lives to the end of the
+///     statement, so it dies on this `?`'s error exit (`attack_ref_arg`, 1 drop). Its by-value twin
+///     `foo(H::try_new(n)?)?` is exempt through the `Call` args below, because a by-value argument is
+///     MOVED into the callee and dies there (`spine_call_arg_byval`, 0 drops here, 1 in the callee —
+///     which the caller inherits through the call edge, not through a local charge). Those two differ
+///     by one `&` and by nothing else, which is why the descent has to stop at it.
+///   · a `MethodCall`'s RECEIVER — `H::try_new(n)?.check()?` leaves the receiver a live temporary when
+///     the second `?` fires (`attack_recv_chain`, 1 drop). `for_each_value_child` already refuses a
+///     receiver for the neighbouring reason, so the two halves agree.
+///   · a `Closure`/`Async` BODY and a block's non-tail STATEMENTS — `run_cb(|| { out.push(H::new());
+///     .. })?` and `{ out.push(H::new()); gen(n) }?` store into a binding this frame owns
+///     (`call_closure_operand_q`, `block_operand_q`, `attack_async_inline`, 1 drop each). A closure's
+///     TAIL is a different matter and needs no exemption at all: it is already an unconditional escape
+///     route, re-united after the positional filter, so no `?` can strip it (async-std's
+///     `spawn_blocking(|| File::create(&p)).await?`).
+/// The listed shapes are exactly the ones the audited corpus removals rely on: `Ok(Repr::new(s)?)`
+/// (compact_str), `Ok(Self { inner: RsaPrivateKey::new(..)? })` (rsa, rusqlite), `Ok((Async::new(
+/// stream)?, addr))` (async-io), `let raw = RawBatchCursor::generic_new(..)?` (mongodb, rdkafka).
+fn value_spine_addrs(e: &syn::Expr, out: &mut std::collections::HashSet<usize>) {
+    if !out.insert(e as *const syn::Expr as usize) {
+        return; // already seen — a shared address cannot recur, but this keeps the walk total
+    }
+    match e {
+        syn::Expr::Paren(p) => value_spine_addrs(&p.expr, out),
+        syn::Expr::Group(g) => value_spine_addrs(&g.expr, out),
+        // `(x?)?` / `X::new(..).await?` — the inner value is the outer operand's value.
+        syn::Expr::Try(t) => value_spine_addrs(&t.expr, out),
+        syn::Expr::Await(a) => value_spine_addrs(&a.base, out),
+        // A block's value is its TAIL; its statements are not on the spine (see above).
+        syn::Expr::Block(b) => tail_expr_of(&b.block).into_iter().for_each(|t| value_spine_addrs(t, out)),
+        syn::Expr::Unsafe(u) => tail_expr_of(&u.block).into_iter().for_each(|t| value_spine_addrs(t, out)),
+        // A FORK: exactly one arm produced the operand's value, and whichever it was, an `Err` from it
+        // constructed nothing. Every arm is therefore exempt, unlike `for_each_value_child`, which
+        // refuses forks because it is asking the opposite question ("does this escape on EVERY path").
+        syn::Expr::If(i) => {
+            tail_expr_of(&i.then_branch).into_iter().for_each(|t| value_spine_addrs(t, out));
+            if let Some((_, e)) = &i.else_branch {
+                value_spine_addrs(e, out);
+            }
+        }
+        syn::Expr::Match(m) => m.arms.iter().for_each(|a| value_spine_addrs(&a.body, out)),
+        // A by-value ARGUMENT is moved into the callee and dies in ITS frame. The callee PATH is not a
+        // construction site at all (`skip_sites`), so it is not listed.
+        syn::Expr::Call(c) => c.args.iter().for_each(|a| value_spine_addrs(a, out)),
+        syn::Expr::MethodCall(m) => m.args.iter().for_each(|a| value_spine_addrs(a, out)),
+        // Pure value composition: the parts move into the whole, which is the operand's value.
+        syn::Expr::Tuple(t) => t.elems.iter().for_each(|x| value_spine_addrs(x, out)),
+        syn::Expr::Array(a) => a.elems.iter().for_each(|x| value_spine_addrs(x, out)),
+        syn::Expr::Struct(st) => st.fields.iter().for_each(|f| value_spine_addrs(&f.expr, out)),
         _ => {}
     }
 }
