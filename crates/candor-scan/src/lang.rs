@@ -2417,8 +2417,13 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // root, by design — see `escape_from_root`), so `*slot = Some(G::new());` must still be seen. A
     // single call seeded from `None` runs exactly that unconditional half and nothing root-dependent,
     // which is the correct answer when there is no root to be dependent ON.
+    // The UNCONDITIONAL half on its own (a closure's return, a `mem::forget`/`ManuallyDrop::new`
+    // operand, a field/index/deref store). Every root's set already contains it, so intersecting the
+    // roots preserves it; it is computed separately here only so R173's positional `?` filter below
+    // cannot strip it — a forgotten value's destructor does not run whichever exit the function takes.
+    let uncond = escape_from_root(None, &sites);
     let mut acc = if sites.roots.is_empty() {
-        escape_from_root(None, &sites)
+        uncond.clone()
     } else {
         let mut roots = sites.roots.iter();
         let first = roots.next().expect("checked non-empty above");
@@ -2437,12 +2442,46 @@ pub(crate) fn escaping_ctor_leaves<'a>(
             // DIFFERENT one of the two sites and neither is in both. The conditional-escape regression
             // this file exists to prevent is still caught, by the leaf INTERSECTION one line up: a name
             // bound before a branch whose fate the branch decides drops its leaf from `acc.leaves` at
-            // the exit that does not carry it, and the site gate below only ever narrows that set
-            // further. So the suppression set can never exceed the shipped leaf-keyed one.
+            // the exit that does not carry it. The site gate below then only ever REMOVES leaves from
+            // whatever set it is handed — it can never add one. (It was true at R172 that the result
+            // could not exceed the shipped leaf-keyed set; R173, one commit later, deliberately widens
+            // the set the gate is handed, so state the narrowing property, which is the one this code
+            // actually has.)
             acc.sites.extend(next.sites);
         }
         acc
     };
+    // SOUNDNESS R173 — THE `?` VETO IS POSITIONAL. A `?` is a genuine early exit that carries nothing
+    // out, so anything live when it is evaluated may die there and must be charged — that is why it
+    // vetoes at all, and `order_after` (`let w = Self::for_region(n); gen(n)?; Ok(w)`) is the fixture
+    // that proves it still does. But it was applied as a BLANKET empty root, so it also vetoed values
+    // the function has not built yet: `gen(n)?; Ok(Self::for_region(n))` charged `Wr::drop` to a body
+    // where nothing is dropped at all. Pre-existing, and R160 made it fire on the dominant spelling —
+    // 302 rows gained a `::drop` edge across the registry corpus, 106 of them NEW positive claims.
+    //
+    // So each `?` removes only what its own position can reach: a leaf whose FIRST construction, or a
+    // name whose binding, precedes it. Anything with no recorded position (a parameter; a leaf the
+    // site pass never placed) counts as live from the start — the charging direction, and the shipped
+    // answer.
+    for p in &sites.try_exits {
+        if acc.names.is_empty() && acc.leaves.is_empty() {
+            break;
+        }
+        // §E1 HIT COUNTER — R173's branch is "this `?` no longer vetoes something built after it".
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            for l in &acc.leaves {
+                if sites.first_ctor_seq.get(l).is_some_and(|s| s > p) {
+                    eprintln!("R173ORDER {l}");
+                }
+            }
+        }
+        acc.leaves.retain(|l| sites.first_ctor_seq.get(l).is_some_and(|s| s > p));
+        acc.names.retain(|n| sites.first_bind_seq.get(n).is_some_and(|s| s > p));
+    }
+    // The unconditional routes are re-united after the positional filter, per `uncond`'s comment.
+    acc.names.extend(uncond.names);
+    acc.leaves.extend(uncond.leaves);
+    acc.sites.extend(uncond.sites);
     // R172, the site gate. `acc.leaves` is the shipped leaf-keyed answer; a leaf survives it only if
     // every construction of that leaf recorded by the body walk is one of the escaping sites. A leaf
     // with NO recorded site (only reachable through a macro, or through a walk position the site pass
@@ -2525,7 +2564,7 @@ fn escape_from_root(root: Option<&syn::Expr>, sites: &EscapeSites<'_>) -> Marks 
 /// One escape walk's findings. `leaves` is the shipped leaf-keyed answer, kept because it is what the
 /// macro fallback still needs; `sites` is the R172 refinement — the ADDRESS of each construction
 /// expression that escapes, so two constructions of one type in one body stop being one fact.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Marks {
     names: std::collections::HashSet<String>,
     leaves: std::collections::HashSet<String>,
@@ -2664,6 +2703,16 @@ struct EscapeSites<'a> {
     /// measured as three fabrications on the first corpus A/B (openssl `MemBio::from_ptr`,
     /// tokio-postgres `Socket::new_tcp`/`SqlState::from_code`), all of them ABSENT on published 0.34.0.
     skip_sites: std::collections::HashSet<usize>,
+    /// SOUNDNESS R173 — a pre-order counter over the body, standing in for evaluation order. Only the
+    /// ORDER of these numbers is ever read, never their values.
+    seq: usize,
+    /// R173 — the position of every `?`. Each one is a real early exit, but it can only drop what is
+    /// ALREADY LIVE when it is evaluated, so it is a veto with a position rather than a blanket one.
+    try_exits: Vec<usize>,
+    /// R173 — the FIRST position at which each type leaf is constructed, and at which each `let` name
+    /// is bound. First, not last: a leaf built both before and after a `?` is live at it.
+    first_ctor_seq: HashMap<String, usize>,
+    first_bind_seq: HashMap<String, usize>,
     /// `return e` operands and the body's tail expression — each one an independent terminal exit of
     /// the function. `None` marks an exit that provably carries nothing out of this scope (a bare
     /// `return;`, or the implicit early-return a `?` can take): a real, present counterexample, not an
@@ -2697,6 +2746,10 @@ impl<'a> EscapeSites<'a> {
             ctor_sites: HashMap::new(),
             macro_ctor_leaves: std::collections::HashSet::new(),
             skip_sites: std::collections::HashSet::new(),
+            seq: 0,
+            try_exits: Vec::new(),
+            first_ctor_seq: HashMap::new(),
+            first_bind_seq: HashMap::new(),
             roots: Vec::new(),
             escapes: Vec::new(),
             lets: Vec::new(),
@@ -2714,6 +2767,8 @@ impl<'a> EscapeSites<'a> {
             return; // a callee path — see `skip_sites`
         }
         if let Some(l) = ctor_leaf_of_expr(e, self.uses, self.fields, self.returns) {
+            let seq = self.seq;
+            self.first_ctor_seq.entry(l.clone()).or_insert(seq); // R173
             self.ctor_sites.entry(l).or_default().push((e as *const syn::Expr as usize, 0));
         }
     }
@@ -2750,6 +2805,8 @@ impl<'a> EscapeSites<'a> {
             return;
         }
         if let Some(l) = ctor_leaf_of_expr(e, self.uses, self.fields, self.returns) {
+            let seq = self.seq; // R173 — the macro's own position; its contents evaluate there
+            self.first_ctor_seq.entry(l.clone()).or_insert(seq);
             self.ctor_sites.entry(l).or_default().push((base, ord));
         }
         for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, n));
@@ -2779,12 +2836,17 @@ impl<'a> EscapeSites<'a> {
             match st {
                 syn::Stmt::Local(l) => {
                     if let Some(init) = &l.init {
-                        if let Some(n) = single_pat_ident(&l.pat) {
-                            self.lets.push((n, &init.expr));
-                        }
                         self.walk_expr(&init.expr);
                         if let Some((_, d)) = &init.diverge {
                             self.walk_expr(d);
+                        }
+                        // R173 — the binder's position is AFTER its initialiser: in
+                        // `let h = try_handle(p)?;` the `?` can take its early exit before `h` exists,
+                        // so `h` is not live at that exit. Recorded after the walk for exactly that.
+                        if let Some(n) = single_pat_ident(&l.pat) {
+                            let seq = self.seq;
+                            self.first_bind_seq.entry(n.clone()).or_insert(seq);
+                            self.lets.push((n, &init.expr));
                         }
                     }
                 }
@@ -2799,6 +2861,7 @@ impl<'a> EscapeSites<'a> {
         }
     }
     fn walk_expr(&mut self, e: &'a syn::Expr) {
+        self.seq += 1; // R173 — pre-order position, read only for its ORDER
         self.note_ctor_site(e); // R172
         if let syn::Expr::Macro(m) = e {
             self.note_macro_ctor_leaves(m); // R172 — address-keying cannot reach inside a macro
@@ -2816,7 +2879,10 @@ impl<'a> EscapeSites<'a> {
             // the only root the old flat-union walk saw was the success-path tail. Recorded regardless of
             // this Try's own position (tail or not): every `?` is a possible early exit the moment it is
             // evaluated.
-            syn::Expr::Try(_) => self.roots.push(None),
+            // R173 — recorded WITH ITS POSITION rather than as a blanket empty root. Pre-order puts a
+            // `?` BEFORE its own operand, which is what makes `let c = make()?;` read as "the value
+            // does not exist yet at this exit" while `let g = G::new(); f()?;` reads as "it does".
+            syn::Expr::Try(_) => self.try_exits.push(self.seq),
             syn::Expr::Assign(a) => match &*a.left {
                 // `x = Guard::new()` — an escape only if `x` itself escapes. A MULTI-segment path is a
                 // static/const (`GLOBAL = …`), which is storage this scope does not own.
