@@ -15474,6 +15474,113 @@ pub fn go() {{ imp::doit(); }}
                  0.34.0's blanket veto back again:\n{v:#}");
     }
 
+    /// SOUNDNESS R206 — A BODY-LOCAL DEFINITION IS A DEFINITION. `macro_rules! lm { .. }` written
+    /// inside a function body is a `Stmt::Item`. `decls.rs` builds R48's `macro_rules!` index from
+    /// ITEM-level definitions only, and `walk_block` threw every `Stmt::Item` away, so a body-local
+    /// template was in no index the `?`-interior veto could consult: it could not see what the macro
+    /// builds, and the leaf built again after the `?` took that later site's position and escaped.
+    /// `body_local_hole` is published `['Fs']`, ABSENT on `5cefa62`/`c22a31d`, executed 1 in-frame drop
+    /// on the error exit.
+    ///
+    /// BOTH TEMPLATES ARE WALKED, NEVER ONE INSTEAD OF THE OTHER — and `stale_overlay_hole` is the
+    /// reason, which is the whole point of writing the fixture for the SIBLING nobody handed you.
+    /// Rust's own rule is that a body-local `macro_rules!` SHADOWS a crate-level one of the same name
+    /// for the rest of that body, so "consult the overlay first, fall back to the index" reads like the
+    /// correct model and is the shape the prototype for this row had. It is a NEW cardinal sin: the
+    /// overlay is filled per BODY, not per block, so a `macro_rules! same` inside an `if` that has
+    /// already closed still answers for the crate-level `same!` used later — the pure template
+    /// displaces the constructing one and the drop disappears. Measured on that prototype: published
+    /// `['Fs']`, `c22a31d` `['Fs']`, prototype ABSENT. Walking both is a strict superset of what
+    /// `c22a31d` does: every leaf it put in `interior` is still put there, and a genuinely shadowing
+    /// pair adds the other template's leaves as an over-charge. This term only ever REFUSES to certify
+    /// an escape, so a superset is the direction it is allowed to be wrong in — and the 1,504-crate
+    /// A/B measures what the superset costs at 0 rows.
+    ///
+    /// `body_shadows_crate_hole` is the real shadowing case, where the body-local template constructs
+    /// and the crate-level one of that name does not; it is charged because the overlay is read.
+    /// `body_local_spine` is the over-charge control (executed: 0 drops in the frame, 1 inside
+    /// `use_h_val`): the same body-local construction as a by-value argument ON the `?` operand's
+    /// value spine has to stay exempt when it is reached through the overlay, exactly as it does
+    /// through the crate index.
+    #[test]
+    fn a_macro_rules_defined_inside_a_fn_body_is_read_by_the_try_interior_veto() {
+        let v = scan_src_to_json("r206body", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+            }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn use_h_val(h: H, n: u32) -> Result<u32, ()> { drop(h); gen(n) }
+            #[macro_export]
+            macro_rules! same { ($p:expr) => { $crate::H::new($p) } }
+            #[macro_export]
+            macro_rules! same2 { ($p:expr) => { { let _ = $p; 1u32 } } }
+
+            pub fn body_local_hole(n: u32, m: u32) -> Result<H, ()> {
+                macro_rules! lm { ($p:expr) => { H::new($p) } }
+                let mut out = Vec::new();
+                { out.push(lm!("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn stale_overlay_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                if n == 7 {
+                    macro_rules! same { ($p:expr) => { { let _ = $p; 0u32 } } }
+                    let _z = same!("x");
+                }
+                { out.push(same!("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn body_shadows_crate_hole(n: u32, m: u32) -> Result<H, ()> {
+                macro_rules! same2 { ($p:expr) => { H::new($p) } }
+                let mut out = Vec::new();
+                { out.push(same2!("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn body_local_spine(n: u32, m: u32) -> Result<H, ()> {
+                macro_rules! lm { ($p:expr) => { H::new($p) } }
+                let _v = use_h_val(lm!("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+"#);
+        assert!(effs(fn_entry(&v, "body_local_hole")).contains(&"Fs".to_string()),
+                "`body_local_hole` builds an `H` inside its `?`'s operand through a `macro_rules!` \
+                 defined in its OWN BODY, and builds the same leaf again after the `?`. A body-local \
+                 definition is a `Stmt::Item`: R48's index is item-level and `walk_block` discarded \
+                 `Stmt::Item`, so no reader could say what the template constructs and the later site \
+                 carried the leaf past R173's position filter. Published 0.34.0 charged it; \
+                 `5cefa62`/`c22a31d` left it ABSENT (executed: the drop really runs on the error \
+                 exit):\n{v:#}");
+        assert!(effs(fn_entry(&v, "stale_overlay_hole")).contains(&"Fs".to_string()),
+                "THE SIBLING FIXTURE, and the one that discriminates this fix from the obvious version \
+                 of it. The `?` operand uses the CRATE-LEVEL `same!`, which constructs; an unrelated \
+                 body-local `same!` sits in an `if` block that has already closed. An overlay consulted \
+                 INSTEAD of the crate index answers with the pure template, the construction vanishes, \
+                 and this is silent — a new cardinal sin, measured on exactly that prototype. Both \
+                 templates must be walked:\n{v:#}");
+        assert!(effs(fn_entry(&v, "body_shadows_crate_hole")).contains(&"Fs".to_string()),
+                "the real shadowing case, and the proof the overlay is READ rather than merely built: \
+                 the body-local `same2!` constructs an `H` and the crate-level `same2!` of that name \
+                 does not, so only a walk that reads the overlay can put the leaf in `interior` \
+                 (executed: 1 in-frame drop on the error exit):\n{v:#}");
+        assert!(!fn_entry(&v, "body_local_spine")["calls"].to_string().contains("H::drop"),
+                "THE OVER-CHARGE CONTROL. The same body-local construction as a by-value ARGUMENT on \
+                 the `?` operand's value spine is moved into the callee and dies in ITS frame \
+                 (executed: 0 drops here, 1 inside `use_h_val`). R199's two-step spine exemption has to \
+                 survive being reached through the body overlay exactly as it does through the crate \
+                 index; charging here is published 0.34.0's blanket veto back again:\n{v:#}");
+    }
+
+
     /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
     /// fn's own LEAF, which withdrew that leaf from every reader of the return index — including `let`
     /// typing, where `()` has no INHERENT methods, so a body resolving `c.send(b)` through the index
