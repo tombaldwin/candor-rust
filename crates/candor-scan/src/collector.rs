@@ -4069,6 +4069,30 @@ pub(crate) fn reexport_target<'a>(
 /// computed without them silently rebinds a name the template uses. Two implementations of "what does
 /// `NAME!(..)` expand to" would be exactly the drift §F1 item 3 describes, so there is one.
 pub(crate) fn macro_template_blocks(body: &str) -> (usize, Vec<syn::Block>) {
+    template_blocks(body, false)
+}
+
+/// SOUNDNESS R207 — the same arm splitting, with REPETITIONS FLATTENED: `$( X ) sep? *` reads as `X`,
+/// so `{{ $( $o.push($crate::H::new($p)); )* }}` parses as a block and what it constructs is visible.
+///
+/// ONE AUTHORITY FOR "WHAT ARE THIS MACRO'S ARMS", TWO TRANSFORMS FOR "WHAT IS IN ONE". The arm walk
+/// below is shared, so the two callers cannot drift about arm COUNT — which is the fact R48's
+/// single-arm rule turns on. They differ only in the token transform, deliberately, because they ask
+/// opposite questions. R48 expands a template to RESOLVE a call edge, i.e. to ADD an effect, and a
+/// flattened repetition is not what any single expansion produces — it would claim a body that ran
+/// zero times ran once. The `?`-interior veto only ever adds to `TryExit::interior`, a REFUSAL to
+/// certify that a leaf escaped, so reading a repetition as its body executed once can over-charge and
+/// cannot silence. VETO SIDE ONLY: `macro_template_blocks` is untouched and stays R48's authority.
+///
+/// WHAT IT DOES NOT CLOSE, said plainly: an arm whose tokens fail BOTH parses stays R203's residual
+/// even when this flattening makes the template readable, because there is nothing to read it FROM —
+/// `kv!("a" => H::new("a"))` and `pick!(n, 0 => H::new("a"), _ => ..)` are silent against published
+/// 0.34.0 and ship that way in 0.35.0 by the owner's ruling (SOUNDNESS R207).
+pub(crate) fn macro_template_blocks_flat(body: &str) -> (usize, Vec<syn::Block>) {
+    template_blocks(body, true)
+}
+
+fn template_blocks(body: &str, flat: bool) -> (usize, Vec<syn::Block>) {
     use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
     let ts: TokenStream = match body.parse() {
         Ok(t) => t,
@@ -4097,8 +4121,22 @@ pub(crate) fn macro_template_blocks(body: &str) -> (usize, Vec<syn::Block>) {
             _ => continue,
         };
         arm_count += 1; // a well-formed arm, whether or not its template parses below
-        let braced = TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, strip_dollars(tmpl))));
+        let tf = if flat { flatten_repetitions } else { strip_dollars };
+        let braced =
+            TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, tf(tmpl.clone()))));
         if let Ok(block) = syn::parse2::<syn::Block>(braced) {
+            // §E1 counter, and it counts the arms this flattening is the ONLY reader of — an arm the
+            // plain transform could already parse is not evidence the branch did anything. The extra
+            // parse happens only under the debug flag, so the hot path is unchanged.
+            if flat && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                let plain = TokenStream::from(TokenTree::Group(Group::new(
+                    Delimiter::Brace,
+                    strip_dollars(tmpl.clone()),
+                )));
+                if syn::parse2::<syn::Block>(plain).is_err() {
+                    eprintln!("R207FLATARM");
+                }
+            }
             out.push(block);
         }
         // optional `;` separator between arms
@@ -4113,7 +4151,9 @@ pub(crate) fn macro_template_blocks(body: &str) -> (usize, Vec<syn::Block>) {
 
 /// Drop `$` punct tokens (recursing into groups) so a `macro_rules!` template's metavars (`$msg`, `$crate`)
 /// become plain idents/paths and the template parses as ordinary Rust. `$(..)*` repetition survives as
-/// `(..)*` which won't parse as a statement — the caller's parse-or-skip drops that arm.
+/// `(..)*` which won't parse as a statement — the caller's parse-or-skip drops that arm. R207's
+/// `flatten_repetitions` is the veto-side transform that does read those arms; this one is R48's and
+/// stays as it is.
 fn strip_dollars(ts: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     use proc_macro2::{Group, TokenTree};
     ts.into_iter()
@@ -4125,6 +4165,52 @@ fn strip_dollars(ts: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
             other => Some(other),
         })
         .collect()
+}
+
+/// SOUNDNESS R207 — `strip_dollars` plus: a repetition `$( X ) sep? op` is replaced by `X` alone, so
+/// `$( $o.push($crate::H::new($p)); )*` reads as `o.push(crate::H::new(p));` and the construction is
+/// visible to the `?`-interior veto. `op` is `*`, `+` or `?`; the optional separator is the single
+/// token between the group and the operator.
+///
+/// THE ONE-ITERATION READING IS THE OVER-APPROXIMATION, AND THAT IS THE POINT. `$(..)* ` can run zero
+/// times, so "the body ran once" is not a fact about any expansion — it is the answer that refuses to
+/// certify an escape, which is all this transform's caller does with it. Do not reuse it on the
+/// RESOLUTION side (R48), where the same reading would ADD an effect a zero-iteration expansion never
+/// has; `macro_template_blocks` is that side's transform and is unchanged.
+///
+/// A `?` inside a flattened body cannot invent an exit: `note_opaque_block` walks the result for
+/// CONSTRUCTIONS only and never records a `TryExit`, so the worst case is more leaves in `interior`.
+fn flatten_repetitions(ts: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    use proc_macro2::{Delimiter, Group, TokenTree};
+    let mut out: Vec<TokenTree> = Vec::new();
+    let mut it = ts.into_iter().peekable();
+    while let Some(tt) = it.next() {
+        match tt {
+            TokenTree::Punct(p) if p.as_char() == '$' => {
+                // `$(` opens a repetition; any other `$` is a metavar's sigil and is simply dropped,
+                // exactly as `strip_dollars` drops it.
+                let is_rep = matches!(it.peek(), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis);
+                if !is_rep {
+                    continue;
+                }
+                let Some(TokenTree::Group(g)) = it.next() else { unreachable!() };
+                out.extend(flatten_repetitions(g.stream()));
+                // The separator, if any, is whatever single token sits between `)` and the operator.
+                if matches!(it.peek(), Some(TokenTree::Punct(q)) if !matches!(q.as_char(), '*' | '+' | '?'))
+                {
+                    it.next();
+                }
+                if matches!(it.peek(), Some(TokenTree::Punct(q)) if matches!(q.as_char(), '*' | '+' | '?'))
+                {
+                    it.next();
+                }
+            }
+            TokenTree::Group(g) => out
+                .push(TokenTree::Group(Group::new(g.delimiter(), flatten_repetitions(g.stream())))),
+            other => out.push(other),
+        }
+    }
+    out.into_iter().collect()
 }
 
 struct CfgIfArms(Vec<syn::Block>);

@@ -3318,11 +3318,21 @@ impl<'a> EscapeSites<'a> {
         if bodies.is_empty() {
             return;
         }
-        // `macro_template_blocks` returns (total arms, the arms that PARSED). An arm that does not
+        // `macro_template_blocks_flat` returns (total arms, the arms that PARSED). An arm that does not
         // parse contributes nothing here, exactly as it contributes nothing to R48 — an unreadable
         // template is a residual either way, never a fabrication.
+        //
+        // SOUNDNESS R207 — THE FLATTENED TRANSFORM, VETO SIDE ONLY. `strip_dollars` leaves a repetition
+        // as `( X ) *`, which parses as no statement, so the whole arm was dropped and
+        // `{{ $( $o.push($crate::H::new($p)); )* }}` — the ordinary way to write a template that pushes
+        // — was as invisible as an unreadable one. `macro_template_blocks_flat` reads `$( X ) sep? *`
+        // as `X`. That is not what any single expansion produces (a repetition can run zero times), and
+        // it is the direction this term is allowed to be wrong in: everything here lands in
+        // `TryExit::interior`, a REFUSAL to certify an escape. R48's resolution keeps the unflattened
+        // `macro_template_blocks`, where the same reading would ADD an effect instead of withholding
+        // one. The arm-splitting walk is shared, so the two cannot disagree about arm COUNT.
         let blocks: Vec<syn::Block> =
-            bodies.iter().flat_map(|b| crate::collector::macro_template_blocks(b).1).collect();
+            bodies.iter().flat_map(|b| crate::collector::macro_template_blocks_flat(b).1).collect();
         self.macro_expanding.insert(name.clone());
         for b in &blocks {
             // Each arm's VALUE is its tail expression, so when the invocation sits on a `?`'s spine that

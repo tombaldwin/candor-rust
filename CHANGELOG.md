@@ -285,6 +285,49 @@ after upgrading; review policies and regenerate baselines with the new build.
   macros are now reached inside those bodies. No leaf any of them constructs has a `Drop` impl, which
   is why no row moves. A 43-fixture regression battery (the ledger's 40, round 5's `r5`/`r5b`, and the
   new body-local fixture) moves only the R204/R205/R206 cells on a full-report wide diff.
+- **⚠ SOUNDNESS R207, repetition half (cardinal sin, a REGRESSION against published 0.34.0 in the same
+  family, caught by the fifth fix-lens pass) — CLOSED: a `macro_rules!` template whose body is a
+  REPETITION is now read by the `?`-interior veto. The remaining half SHIPS OPEN and is stated below.**
+  `$( X ) sep? *` survived `$`-stripping as `( X ) *`, which parses as no statement, so the arm was
+  dropped whole and `{{ $( $o.push($crate::H::new($p)); )* }}` — the ordinary way to write a template
+  that pushes — was as invisible as an unreadable one. Three shapes read `['Fs']` on published 0.34.0
+  (tag `736fa64`) and were ABSENT on `5cefa62`/`c22a31d`, `deny Fs` 1 → 0: a `;`-terminated repetition
+  of pushes, a repetition in VALUE position, and a repetition whose body itself contains a `?`.
+  Executed ground truth: 2, 1 and 2 in-frame drops on the error exit.
+  ONE ITERATION IS AN OVER-APPROXIMATION, WHICH IS WHY IT IS VETO-SIDE ONLY. A `$(..)*` can run zero
+  times, so "the body ran once" is a fact about no expansion — acceptable here because everything this
+  path produces lands in the `?`-interior set, a REFUSAL to certify that a leaf escaped. R48's
+  resolution expands templates to ADD call edges and keeps the unflattened reader; the arm-splitting
+  walk is shared, so the two cannot drift about arm COUNT, which is what R48's single-arm rule turns
+  on. The boundary is measured, not asserted: routing R48 through the flattened reader as well ADDS
+  178 rows and 12 `Unknown` effects over the 1,504-crate corpus (jni-0.22.4 59 and all 12 effects,
+  `memchr` 21 per version, `windows-result`, `lexical-write-float`) — the fabrications the boundary
+  exists to prevent. A unit test drives both readers over one repetition body so a future leak goes
+  red rather than quiet. Over-charge control that stays ABSENT (executed: 0 drops in the frame, 1
+  inside the callee): a repetition template's value as a by-value argument ON the `?` operand's value
+  spine.
+  **STILL OPEN AND SHIPPING OPEN, by the owner's ruling: a macro whose INVOCATION TOKENS parse neither
+  as an expression list nor as statements AND whose template is a repetition over those tokens.**
+  `kv!("a" => H::new("a"))` (maplit-style) and `pick!(n, 0 => H::new("a"), _ => ..)` are SILENT where
+  published 0.34.0 charged them, because it vetoed blanket over any macro it could not read. Measured
+  corpus incidence: 0 rows of 1,504 crates. Exposure: 387 functions in 51 crates have a
+  both-forms-unreadable macro inside a `?` operand (`rustix` ~45 per version, `jni` 27, `mio` 22,
+  `polling` 12, `mongodb` 10, `syn`, `socket2`, `duct`). The blanket alternative — an unreadable macro
+  vetoes everything in that `?` — closes them and changes 7 corpus rows, all in jni-0.22.4, all
+  fabrications, 6 of them beyond published parity, so it is not the fix. A regression test pins the
+  silence so that closing it later cannot happen silently. Same for R208's same-name `macro_rules!`
+  twins, where which module's template is read depends on FILE ORDER: 324 of the 1,504 crates define a
+  `macro_rules!` name more than once (cfg twins), measured corpus rows 0, and the fix is an index that
+  records duplicates and REFUSES rather than picking — a separate mechanism.
+  1,504-crate A/B vs `c22a31d`, wide key (16 fields, cold, same dir list, same host): ADDED 0,
+  REMOVED 0, CHANGED 0 over 257,243 common rows — and published → this build reproduces published →
+  `c22a31d` line for line across all six diff lists, identical member sets and identical per-row
+  content. The zero is measured over a corpus that REACHES the branch: `R207FLATARM` counts arms only
+  the flattened reader can parse and fires 236 times in 10 of the 1,504 crates (`rustix` 62/57/57,
+  `jni` 44, `ring` 5, `xattr`, `trybuild`, `time-macros`, `color-print-proc-macro`, `time`); R203's
+  and R206's counters rise 46 → 48 and 59 → 60 on the templates that became readable. No leaf any of
+  them constructs has a `Drop` impl, which is why no row moves. The 43-fixture wide battery moves only
+  the R204/R205/R206/R207 cells.
 - **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
   refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
   (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same
