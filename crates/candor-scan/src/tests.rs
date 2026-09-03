@@ -14268,6 +14268,43 @@ pub fn go() {{ imp::doit(); }}
                     refusal has bought a fabrication fix with a silent under-report:\n{v:#}");
     }
 
+    /// R173, the trigger. A `?` is a real early exit that carries nothing out, so a value live when it
+    /// is evaluated may die there — that is why it vetoes an escape at all. It was applied as a BLANKET
+    /// veto, so it also vetoed values the function has not built yet, and `gen(n)?; Ok(Self::for_region(n))`
+    /// charged `Wr::drop` to a body that drops nothing on either path. OVER-CHARGE direction, at corpus
+    /// scale: pre-existing, but R160 made it fire on the dominant `x?; Ok(Self::new())` spelling — 302
+    /// rows gained a `::drop` edge across the registry corpus and 106 were new positive claims.
+    ///
+    /// Executed ground truth for all four, on BOTH the Ok and the Err path (a drop counter, with the
+    /// returned value forgotten so it cannot be counted): `order` 0/0, `order_type` 0/0,
+    /// `order_after` 0/1, `order_between` 0/1.
+    #[test]
+    fn a_question_mark_before_a_construction_does_not_charge_its_drop() {
+        let v = scan_src_to_json("r173ord", "\
+            pub struct Wr;\n\
+            impl Drop for Wr { fn drop(&mut self) { let _ = std::fs::remove_file(\"w\"); } }\n\
+            pub fn gen(n: usize) -> Result<usize, ()> { if n == 0 { Err(()) } else { Ok(n) } }\n\
+            pub fn gen2(n: usize) -> Result<usize, ()> { if n == 1 { Err(()) } else { Ok(n) } }\n\
+            impl Wr {\n\
+                pub fn for_region(_n: usize) -> Wr { Wr }\n\
+                pub fn order(n: usize) -> Result<Wr, ()> { gen(n)?; Ok(Self::for_region(n)) }\n\
+                pub fn order_type(n: usize) -> Result<Wr, ()> { gen(n)?; Ok(Wr::for_region(n)) }\n\
+                pub fn order_after(n: usize) -> Result<Wr, ()> { let w = Self::for_region(n); gen(n)?; Ok(w) }\n\
+                pub fn order_between(n: usize) -> Result<Wr, ()> { gen(n)?; let w = Self::for_region(n); gen2(n)?; Ok(w) }\n\
+            }\n");
+        for n in ["Wr::order", "Wr::order_type"] {
+            assert!(row_absent(&v, n),
+                    "the `?` precedes the construction — on its early exit the `Wr` does not exist yet \
+                     (executed: 0 drops on both paths):\n{v:#}");
+        }
+        for n in ["Wr::order_after", "Wr::order_between"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Fs".to_string()],
+                       "`{n}` builds the `Wr` BEFORE a `?` that can still early-exit, and it really \
+                        drops there (executed: 1 drop on the Err path) — the positional veto must keep \
+                        charging it:\n{v:#}");
+        }
+    }
+
     /// R169, the trigger. Two `#[cfg]`-gated `pub use` edges bringing ONE name into one module were
     /// read as an ambiguity and dropped, so every caller of the re-exported name resolved to nothing.
     /// That is the `#[cfg]` platform split this index already keeps when it is spelled as ONE edge with
