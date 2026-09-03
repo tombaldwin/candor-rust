@@ -2494,10 +2494,11 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     // name whose binding, precedes it. Anything with no recorded position (a parameter; a leaf the
     // site pass never placed) counts as live from the start — the charging direction, and the shipped
     // answer.
-    for p in &sites.try_exits {
+    for t in &sites.try_exits {
         if acc.names.is_empty() && acc.leaves.is_empty() {
             break;
         }
+        let p = &t.seq;
         // §E1 HIT COUNTER — R173's branch is "this `?` no longer vetoes something built after it".
         if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
             for l in &acc.leaves {
@@ -2714,6 +2715,14 @@ pub(crate) fn owned_drop_params(
     out
 }
 
+/// SOUNDNESS R187 — one `?` early exit: its position in the body walk, and whether it sits inside a
+/// CLOSURE (in which case it exits the closure, not this function, and the loop rewrite leaves it alone).
+#[derive(Clone, Copy)]
+struct TryExit {
+    seq: usize,
+    in_closure: bool,
+}
+
 struct EscapeSites<'a> {
     uses: &'a HashMap<String, String>,
     fields: &'a FieldIndex,
@@ -2739,7 +2748,13 @@ struct EscapeSites<'a> {
     seq: usize,
     /// R173 — the position of every `?`. Each one is a real early exit, but it can only drop what is
     /// ALREADY LIVE when it is evaluated, so it is a veto with a position rather than a blanket one.
-    try_exits: Vec<usize>,
+    /// R187 — a `?` inside a LOOP is rewritten to the loop's own last position when the loop closes,
+    /// so the pre-order number stops standing in for evaluation order where the two disagree.
+    try_exits: Vec<TryExit>,
+    /// R187 — how many CLOSURE bodies enclose the expression being walked. A `?` inside a closure is an
+    /// exit of the CLOSURE, not of this function, so the loop rewrite must not move it: leaving it where
+    /// R173 put it keeps that (pre-existing, over-charging) treatment exactly as shipped.
+    closure_depth: usize,
     /// R173 — the FIRST position at which each type leaf is constructed, and at which each `let` name
     /// is bound. First, not last: a leaf built both before and after a `?` is live at it.
     first_ctor_seq: HashMap<String, usize>,
@@ -2779,6 +2794,7 @@ impl<'a> EscapeSites<'a> {
             skip_sites: std::collections::HashSet::new(),
             seq: 0,
             try_exits: Vec::new(),
+            closure_depth: 0,
             first_ctor_seq: HashMap::new(),
             first_bind_seq: HashMap::new(),
             roots: Vec::new(),
@@ -2913,7 +2929,10 @@ impl<'a> EscapeSites<'a> {
             // R173 — recorded WITH ITS POSITION rather than as a blanket empty root. Pre-order puts a
             // `?` BEFORE its own operand, which is what makes `let c = make()?;` read as "the value
             // does not exist yet at this exit" while `let g = G::new(); f()?;` reads as "it does".
-            syn::Expr::Try(_) => self.try_exits.push(self.seq),
+            syn::Expr::Try(_) => {
+                let e = TryExit { seq: self.seq, in_closure: self.closure_depth > 0 };
+                self.try_exits.push(e);
+            }
             syn::Expr::Assign(a) => match &*a.left {
                 // `x = Guard::new()` — an escape only if `x` itself escapes. A MULTI-segment path is a
                 // static/const (`GLOBAL = …`), which is storage this scope does not own.
@@ -2979,6 +2998,26 @@ impl<'a> EscapeSites<'a> {
             syn::Expr::Closure(c) => self.escapes.push(&c.body),
             _ => {}
         }
+        // SOUNDNESS R187 — A `?` INSIDE A LOOP IS LIVE FOR EVERYTHING THAT LOOP BODY BUILDS. R173 gave
+        // each `?` a PRE-ORDER number and read it as evaluation order; in a loop the two disagree, because
+        // the body runs again. `for it in items { let v = it?; out.push(H::new(v)); } Ok(out)` numbers the
+        // `?` BEFORE the `H::new` it precedes in the source, so the positional filter kept `H` in the
+        // escaping set and the drop that really runs on iteration 2 (executed: one `H::drop` in that frame)
+        // was never charged — silent, and a REGRESSION against published 0.34.0, which vetoed blanket.
+        // So when the loop closes, every `?` recorded inside it (condition INCLUDED — `while step(&mut n)?`
+        // is re-evaluated after the body has built its value) moves to the loop's LAST position. That is
+        // the smallest change that models re-entry: it can only ever move a `?` LATER, i.e. veto MORE, the
+        // over-charging direction, and a construction AFTER the loop still outranks it, which is what keeps
+        // R173's straight-line gains (`order`, `order_type`, `order_between`) and its loop-shaped sibling
+        // (`for x in v { g(x)?; } let h = H::new(); Ok(h)`) intact.
+        // A `?` in a CLOSURE inside the loop is NOT this function's exit and is left where it was — see
+        // `closure_depth`. Nested loops rewrite twice, outermost last, which is correct and monotone.
+        let loop_mark = matches!(e, syn::Expr::ForLoop(_) | syn::Expr::While(_) | syn::Expr::Loop(_))
+            .then(|| self.try_exits.len());
+        let in_closure = matches!(e, syn::Expr::Closure(_));
+        if in_closure {
+            self.closure_depth += 1;
+        }
         for_each_child_expr(e, &mut |c| self.walk_expr(c));
         // A nested block is walked ONLY to find further escape SITES (`return`, an assignment, a method
         // call on an escaping name). Its trailing expression is NOT a root: `let x = if c { Guard::new()
@@ -2987,6 +3026,21 @@ impl<'a> EscapeSites<'a> {
         // construction spellings. Tail position propagates through `mark_escape`'s value-child walk
         // instead, which only ever descends from a genuine root.
         for_each_child_block(e, &mut |b| self.walk_block(b, false));
+        if in_closure {
+            self.closure_depth -= 1;
+        }
+        if let Some(mark) = loop_mark {
+            let end = self.seq; // every position inside this loop is <= this one
+            for t in &mut self.try_exits[mark..] {
+                if !t.in_closure && t.seq < end {
+                    // §E1 HIT COUNTER — R187's branch is "a `?` inside a loop moved to the loop's end".
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R187LOOPQ {} -> {end}", t.seq);
+                    }
+                    t.seq = end;
+                }
+            }
+        }
     }
 }
 

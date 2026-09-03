@@ -10280,6 +10280,10 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev18 -> rev19 an ANALYSIS change that feeds `fninfos`, not a field (R187). A `?` inside a
+    ///                 loop now vetoes what that loop body builds, so a rev18 entry replays, warm, the
+    ///                 silent under-report that row is: a loop body whose guard really drops, read as
+    ///                 pure.
     ///   rev15 -> rev16 `uses`/`root_reexports` stopped RECORDING `#[cfg(test)]`-gated imports (R123).
     ///                 The field is unchanged, so serde reads a rev15 entry happily and simply hands
     ///                 back a map built by a binary that DID resolve production calls through a test
@@ -10290,11 +10294,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R176 bumped the token to rev18 (and recorded that the R161 bump to rev17 never reached the
-        // string). `rev16` and `rev17` join the stale list rather than replacing an entry: an entry
-        // written by a 0.35.0-dev binary from before the `Reexport::cfg_gated` field must be discarded,
-        // not read as "every re-export in this file is unconditional".
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17"] {
+        // R187 bumped the token to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // to rev17 never reached the string). Each older token JOINS the stale list rather than
+        // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
+        // must be discarded, not read as an analysed file.
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -10305,7 +10309,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev18/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev19/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -14627,6 +14631,110 @@ pub fn go() {{ imp::doit(); }}
                         drops there (executed: 1 drop on the Err path) — the positional veto must keep \
                         charging it:\n{v:#}");
         }
+    }
+
+    /// R187, the trigger, and the sibling R173's own fixtures could not reach. The positional `?` filter
+    /// numbers each `?` in PRE-ORDER and reads that as evaluation order; inside a LOOP the two disagree,
+    /// because the body runs again. `for it in items { let v = it?; out.push(H::new(v)); } Ok(out)`
+    /// numbers the `?` BEFORE the construction that follows it, so `H` stayed in the escaping set, the
+    /// R172 site gate then found every `H` site escaping through the returned `out`, and the row VANISHED
+    /// — silent, against a published 0.34.0 that vetoed blanket and charged it. UNDER-REPORT direction, a
+    /// REGRESSION introduced by the R173 commit: `deny Net collect_loop` and `pure collect_loop` both went
+    /// 1 → 0 on the four plain loop shapes.
+    ///
+    /// Executed ground truth (a drop counter, the result forgotten so the caller cannot count it), on the
+    /// error path: `collect_loop` 1, `while_cond` 1, `loop_top` 1, `nested` 1, `labelled` 1, `while_let` 1,
+    /// `before_loop` 1 — and `after_loop` 0, `no_q` 0, `loop_in_closure` 0, which are the controls for the
+    /// direction this fix could overshoot in.
+    #[test]
+    fn a_question_mark_inside_a_loop_still_charges_what_that_loop_body_builds() {
+        let v = scan_src_to_json("r187loop", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H { pub fn new(p: &str) -> H { H { p: p.to_string() } } }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn step(n: &mut u32) -> Result<bool, ()> { if *n == 0 { return Err(()); } *n -= 1; Ok(true) }
+            pub fn collect_loop(items: Vec<Result<u32, ()>>) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                for it in items { let _v = it?; out.push(H::new("a")); }
+                Ok(out)
+            }
+            pub fn while_cond(mut n: u32) -> Result<Option<H>, ()> {
+                let mut g = None;
+                while step(&mut n)? { g = Some(H::new("a")); }
+                Ok(g)
+            }
+            pub fn loop_top(items: &mut Vec<Result<u32, ()>>) -> Result<Option<H>, ()> {
+                let mut g = None;
+                loop {
+                    let Some(it) = items.pop() else { break };
+                    let _v = it?;
+                    g = Some(H::new("a"));
+                }
+                Ok(g)
+            }
+            pub fn nested(rows: Vec<Vec<Result<u32, ()>>>) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                for row in rows { for it in row { let _v = it?; out.push(H::new("a")); } }
+                Ok(out)
+            }
+            pub fn labelled(rows: Vec<Vec<Result<u32, ()>>>) -> Result<Option<H>, ()> {
+                let mut g = None;
+                'outer: for row in rows {
+                    for it in row {
+                        let v = it?;
+                        g = Some(H::new("a"));
+                        if v == 9 { break 'outer; }
+                    }
+                }
+                Ok(g)
+            }
+            pub fn while_let(mut items: Vec<Result<u32, ()>>) -> Result<Option<H>, ()> {
+                let mut g = None;
+                while let Some(it) = items.pop() { let _v = it?; g = Some(H::new("a")); }
+                Ok(g)
+            }
+            pub fn before_loop(items: Vec<u32>) -> Result<H, ()> {
+                let w = H::new("a");
+                for x in items { gen(x)?; }
+                Ok(w)
+            }
+            pub fn after_loop(items: Vec<u32>) -> Result<H, ()> {
+                for x in items { gen(x)?; }
+                Ok(H::new("a"))
+            }
+            pub fn no_q(items: Vec<u32>) -> Vec<H> {
+                let mut out = Vec::new();
+                for _x in items { out.push(H::new("a")); }
+                out
+            }
+            pub fn loop_in_closure(items: Vec<Result<u32, ()>>) -> Vec<H> {
+                let mut out = Vec::new();
+                let r: Result<(), ()> = (|| {
+                    for it in items { let _v = it?; out.push(H::new("a")); }
+                    Ok(())
+                })();
+                let _ = r;
+                out
+            }
+"#);
+        for n in ["collect_loop", "while_cond", "loop_top", "nested", "labelled", "while_let"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Fs".to_string()],
+                       "`{n}`'s `?` is re-reached AFTER the body has built an `H`, and that `H` really \
+                        dies there (executed: 1 drop on the error path) — published 0.34.0 charges it:\n{v:#}");
+        }
+        assert_eq!(effs(fn_entry(&v, "before_loop")), vec!["Fs".to_string()],
+                   "the construction PRECEDES the loop, so it is live at the `?` on the very first \
+                    iteration and its drop is charged on that exit (executed: 1 drop):\n{v:#}");
+        assert!(row_absent(&v, "after_loop"),
+                "R173's gain, in a loop-shaped body: the `H` is built AFTER the loop, so no `?` inside \
+                 the loop can reach it (executed: 0 drops on both paths). A rewrite that moved the `?` \
+                 past the loop's own end would charge this:\n{v:#}");
+        assert!(row_absent(&v, "no_q"),
+                "a loop with no `?` at all drops nothing in-frame (executed: 0):\n{v:#}");
+        assert!(!effs(fn_entry(&v, "loop_in_closure")).contains(&"Fs".to_string()),
+                "the `?` here exits the CLOSURE, not this function, so the loop rewrite must leave it \
+                 where it was — nothing in this frame dies (executed: 0 drops):\n{v:#}");
     }
 
     /// R169, the trigger. Two `#[cfg]`-gated `pub use` edges bringing ONE name into one module were
