@@ -81,6 +81,20 @@ after upgrading; review policies and regenerate baselines with the new build.
   fan-out cap, so widening an answer can never DROP one — measured, on a 14-definition fixture where it
   did. 1,504-crate A/B: 10 unions across 1 crate (`cap-primitives`' `rustix` platform arms), 0 rows
   removed, 0 effects lost.
+- **⚠ SOUNDNESS R177 (cardinal sin, PUBLISHED and still open on the 0.35.0 candidate) — CLOSED: a
+  callback stored as `Option<Alias>` where `Alias` is a `type NAME = <callable>` is now disclosed at
+  every unwrap binder.** `pub type Cb = Box<dyn Fn()>; cb: Option<Cb>` with `if let Some(c) = &self.cb
+  { c() }` was ABSENT from `functions[]` — an affirmative purity claim over a caller-installed
+  callback, executed ground truth — while the `.unwrap()()` spelling one token away disclosed
+  `Unknown`. R161 closed the bare-fn-pointer payload and listed this one as not established.
+  `elem_trait_leaves` now asks `is_callable_type`, the one authority for "is this value invokable",
+  instead of being a second implementation that had not been told about aliases; and a per-file
+  pre-pass collects a file's `type NAME = <callable>` names to a fixpoint BEFORE the walk that consumes
+  them, so declaration order and a same-file alias CHAIN no longer decide the answer (R181's double
+  alias and alias-typed return, for a same-file alias). `if let`/`match`/`.map`/`.as_ref()`/`while
+  let`/`for`, an `Option<Alias>` parameter and a `let` annotation all disclose; `deny Unknown <fn>`
+  goes 0 → 1. Stated residual: a CROSS-FILE alias is invisible to the per-file field index, because
+  `FileDecls` is keyed on one file's content. 1,504-crate A/B: 0 effects lost.
 - **⚠ SOUNDNESS R139 (cardinal sin, introduced by R119's own fix) — CLOSED: a crate-local
   `macro_rules!` TEMPLATE now counts toward the body-item shadow, so a nested block's item can no
   longer rebind a name the macro expansion uses.** R119 promotes a nested block's item to a
