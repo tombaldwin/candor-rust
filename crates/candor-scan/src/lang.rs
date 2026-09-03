@@ -3191,6 +3191,29 @@ impl<'a> EscapeSites<'a> {
                         syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
                     self.note_opaque_macro(&host, &none);
                 }
+                // SOUNDNESS R206, SECOND INSTANCE — THE AUDIT BOUNDARY, DRAWN PAST ITS OWN TRIGGER.
+                // R206 taught `walk_block` that a body-local `macro_rules!` is a `Stmt::Item` nobody
+                // records. This is the SAME walk one level in — over a template body, block tokens or
+                // statement tokens the veto had to re-parse — and it discarded `Stmt::Item` for the
+                // same reason, so `idm!({ macro_rules! lm { .. } out.push(lm!("a")); gen(n) })?`
+                // stayed silent while the body-level spelling beside it was closed. That is exactly
+                // the R203 -> R204 relationship, one row over. Executed: 1 in-frame drop on the error
+                // exit; published 0.34.0 charges it, `c22a31d` and R206 alone do not.
+                //
+                // Same map, same direction as `walk_block`'s arm: an item-position macro INVOCATION
+                // carries no `ident` and is skipped, and a definition seen here can outlive the token
+                // block it was written in, which over-charges. This walk writes `TryExit::interior`
+                // only, so over-reach cannot silence.
+                syn::Stmt::Item(syn::Item::Macro(im))
+                    if im.ident.is_some() && im.mac.path.is_ident("macro_rules") =>
+                {
+                    if let Some(id) = &im.ident {
+                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            eprintln!("R206BODYMACRO2 {id}");
+                        }
+                        self.body_macros.insert(id.to_string(), im.mac.tokens.to_string());
+                    }
+                }
                 syn::Stmt::Item(_) => {}
             }
         }
