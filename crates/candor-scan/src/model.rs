@@ -225,6 +225,15 @@ pub(crate) struct Reexport {
 /// The angle brackets cannot collide with a real Rust type path.
 pub(crate) const RET_FN_TYPED: &str = "<fn>";
 
+/// SOUNDNESS R174(b) — sentinel return-"type" for a fn that returns NOTHING. It exists only to make a
+/// unit-returning twin a CONFLICT: `record_return` used to bail on `ReturnType::Default` before
+/// recording anything, so `fn init()` beside `fn init() -> Repository` left the leaf `init`
+/// unambiguously typed `Repository` and every `crate::init()` call read as constructing one (git2: 76
+/// functions per version given a phantom `Repository::drop` edge). Never a nominal type —
+/// `recorded_return_type` filters it out exactly as it filters `RET_FN_TYPED`, so a leaf that reaches
+/// it makes no claim at all rather than the wrong one.
+pub(crate) const RET_UNIT: &str = "<unit>";
+
 /// Sentinel prefix for a fn whose return is a DISPATCH trait object (`-> Box<dyn Trait>` / `-> impl
 /// Trait` / `-> &dyn Trait`). The trait bound leaves are joined after it (`"<dyn>Task"` /
 /// `"<dyn>Read+Seek"`), so `get().run()` on such a factory resolves the receiver's TRAIT bounds and

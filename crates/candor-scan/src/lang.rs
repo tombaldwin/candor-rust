@@ -787,6 +787,9 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
 /// fn-typed one (a callback types no var — `expr_is_fn_typed` owns it) and the three `<dyn>` dispatch
 /// shapes (resolved by TRAIT, never as a concrete `Type::method`).
 ///
+/// R174(b): `RET_UNIT` is filtered here too — a leaf that is BOTH a factory and a `()`-returning fn
+/// names no type at the call site, which is the same "no claim" answer the ambiguity rule gives.
+///
 /// Extracted so `ctor_type` (the `let`-binding type inference) and `ctor_leaf_from_call_returns` (the
 /// R165 drop-glue route) cannot answer it differently. They HAD to, before: the drop marker's binder-keyed
 /// predecessor consulted this index and the position-independent rewrite that replaced it did not, so a
@@ -794,7 +797,7 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
 pub(crate) fn recorded_return_type(leaf: &str, returns: &ReturnIndex) -> Option<String> {
     returns
         .get(leaf)
-        .filter(|t| *t != RET_FN_TYPED && ret_dyn_leaves(t).is_none()
+        .filter(|t| *t != RET_FN_TYPED && *t != RET_UNIT && ret_dyn_leaves(t).is_none()
             && ret_elem_dyn_leaves(t).is_none() && ret_tuple_dyn_leaves(t).is_none())
         .cloned()
 }
@@ -814,16 +817,46 @@ pub(crate) fn recorded_return_type(leaf: &str, returns: &ReturnIndex) -> Option<
 /// The answer comes from the crate's own `ReturnIndex`, a DECLARED fact, not from a name heuristic. That
 /// is what keeps this clear of R160's deliberate refusal to fall back to a bare LEAF: R160 refused to
 /// let `Self::NAME` MATCH a same-named free fn, a resolution guess; this reads what the callee's
-/// signature says it returns. `ReturnIndex` already drops any leaf recorded with two different return
-/// types, and `note_construction`'s `drop_relevant` gate means only a type with a local `impl Drop`
-/// survives — so a cross-crate leaf collision has to hit a local `Drop` type of the same name to matter,
-/// and when it does the direction is an over-charge, never silence.
+/// signature says it returns. `ReturnIndex` drops any leaf recorded with two CONFLICTING returns, and
+/// `note_construction`'s `drop_relevant` gate means only a type with a local `impl Drop` survives — so a
+/// cross-crate leaf collision has to hit a local `Drop` type of the same name to matter, and when it
+/// does the direction is an over-charge, never silence.
+///
+/// SOUNDNESS R174(b) — "any leaf recorded with two different return types" is what that sentence said
+/// before, and it was FALSE for the commonest conflict of all: `record_return` used to return early on
+/// a UNIT return, so a `fn init()` twin left a `fn init() -> Repository` unambiguous. Measured on git2
+/// (free `crate::init()` beside `Repository::init`): 76 functions per version gained a phantom
+/// `Repository::drop` edge, invisible in `inferred` only because `git_repository_free` is unclassified,
+/// while `path`/`callers`/`gains` were already wrong. A unit return is now recorded as a conflicting
+/// shape like every other.
 ///
 /// STATED LIMIT: leaf-keyed like the index itself, so `serde_json::from_str` and a local `from_str` are
 /// one name to this route. Deliberate — the alternative (single-segment paths only) draws the boundary
 /// around the one spelling the row was filed for, and a `use m::from_handle` import already expands to
 /// a multi-segment path before it gets here.
+///
+/// SOUNDNESS R174(a) — IT HONOURS THE PATH ROUTE'S STD REFUSAL, and the paragraph above is why it has
+/// to be repeated here rather than inherited. `ctor_leaf_from_call_path` declines a `std`/`core`/
+/// `alloc`-rooted callee ON PURPOSE (`local_type_leaf`'s comment has the measured tokio `Acquire`
+/// story); this route then keyed the SAME call on its bare leaf and undid the refusal. Measured: a
+/// crate with a local `fn open(..) -> Conn` (Drop = Net) charged `Conn::drop` to every `File::open(p)?`
+/// caller — `read_it` `['Fs']` -> `['Fs','Net']`, `count` (`HashMap::new()`) absent -> `['Net']`,
+/// `is_dir` (`Path::new(p).is_dir()`) `['Fs']` -> `['Fs','Net']`; 3,896 std-rooted hits across 480
+/// registry crates. `std::mem::size_of`, `Vec::with_capacity` and `ManuallyDrop::new` are all one
+/// leaf collision away from a local factory of the same name, and none of them constructs anything a
+/// local `impl Drop` describes.
 pub(crate) fn ctor_leaf_from_call_returns(full: &str, returns: &ReturnIndex) -> Option<String> {
+    if matches!(full.split("::").next(), Some("std") | Some("core") | Some("alloc")) {
+        // §E1 HIT COUNTER — printed only when the refusal actually withdraws an answer this route
+        // would otherwise have given, not on every std-rooted call.
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            let last = full.rsplit("::").next().unwrap_or(full);
+            if last != "drop" && recorded_return_type(last, returns).is_some() {
+                eprintln!("R174STD {full}");
+            }
+        }
+        return None;
+    }
     let last = full.rsplit("::").next().unwrap_or(full);
     if last == "drop" {
         return None;

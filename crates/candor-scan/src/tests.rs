@@ -14209,6 +14209,65 @@ pub fn go() {{ imp::doit(); }}
                 "every `H` here leaves in the returned Vec — the macro route must still suppress:\n{v:#}");
     }
 
+    /// R174(a), the trigger. `ctor_leaf_from_call_path` declines a `std`/`core`/`alloc`-rooted callee
+    /// deliberately (a std path names no local type, and `drop_types` is leaf-keyed so a collision is
+    /// invisible one layer down); R165's return-index `or_else` then keyed the same call on its bare
+    /// LEAF and undid the refusal. With a local `fn open(..) -> Conn` in the crate, every `File::open`
+    /// caller inherited `Conn::drop`. OVER-CHARGE direction — a FABRICATION, not a conservative widening:
+    /// it makes a positive claim about an effect that runs in no frame at all. Measured across 480
+    /// registry crates (3,896 std-rooted hits).
+    #[test]
+    fn a_std_rooted_call_does_not_resolve_through_a_same_named_local_factory() {
+        let v = scan_src_to_json("r174std", "\
+            use std::fs::File;\n\
+            use std::collections::HashMap;\n\
+            use std::path::Path;\n\
+            pub struct Conn { pub p: String }\n\
+            impl Drop for Conn { fn drop(&mut self) { let _ = std::net::TcpStream::connect(&*self.p); } }\n\
+            pub fn open(p: &str) -> Conn { Conn { p: p.to_string() } }\n\
+            pub fn new() -> Conn { Conn { p: String::new() } }\n\
+            pub fn read_it(p: &str) -> std::io::Result<u64> { let f = File::open(p)?; Ok(f.metadata()?.len()) }\n\
+            pub fn count() -> usize { let m: HashMap<u8, u8> = HashMap::new(); m.len() }\n\
+            pub fn is_dir(p: &str) -> bool { Path::new(p).is_dir() }\n\
+            pub fn holds(p: &str) -> usize { let c = open(p); c.p.len() }\n");
+        assert_eq!(effs(fn_entry(&v, "holds")), vec!["Net".to_string()],
+                   "the LOCAL factory is what this route exists to resolve — it must still be charged");
+        assert_eq!(effs(fn_entry(&v, "read_it")), vec!["Fs".to_string()],
+                   "`File::open` builds a std `File`, not this crate's `Conn`:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "is_dir")), vec!["Fs".to_string()],
+                   "`Path::new` builds a std `Path`:\n{v:#}");
+        assert!(row_absent(&v, "count"),
+                "`HashMap::new()` constructs nothing this crate drops — `count` is pure:\n{v:#}");
+    }
+
+    /// R174(b), the trigger, and a correction to a SAFETY ASSERTION rather than to a symptom: R165's
+    /// doc comment said "`ReturnIndex` already drops any leaf recorded with two different return
+    /// types". `record_return` returned early on a UNIT return, so the commonest collision of all —
+    /// git2's free `pub fn init()` beside `Repository::init() -> Repository` — never reached the
+    /// ambiguity rule and every `crate::init()` call read as constructing a `Repository`. 76 functions
+    /// per git2 version carried the phantom `Repository::drop` edge. The INSTRUMENT is `calls`, not
+    /// `inferred`: git2's own effect sets did not move, because `git_repository_free` is unclassified.
+    #[test]
+    fn a_leaf_with_a_unit_returning_twin_resolves_to_no_type() {
+        let v = scan_src_to_json("r174unit", "\
+            pub struct Repository { pub p: String }\n\
+            impl Drop for Repository { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl Repository { pub fn init(p: &str) -> Repository { Repository { p: p.to_string() } } }\n\
+            pub fn init() { let _ = 1; }\n\
+            pub fn calls_free_init() -> usize { init(); 7 }\n\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            pub fn from_handle(p: &str) -> H { H { p: p.to_string() } }\n\
+            pub fn holds_free(p: &str) -> usize { let h = from_handle(p); h.p.len() }\n");
+        let calls = fn_entry(&v, "calls_free_init")["calls"].to_string();
+        assert!(!calls.contains("Repository::drop"),
+                "`init()` returns `()`; the typed twin one impl over must not answer for it — \
+                 calls = {calls}:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "holds_free")), vec!["Fs".to_string()],
+                   "R165's own control: a UNIQUE free-function constructor must still resolve, or this \
+                    refusal has bought a fabrication fix with a silent under-report:\n{v:#}");
+    }
+
     /// R169, the trigger. Two `#[cfg]`-gated `pub use` edges bringing ONE name into one module were
     /// read as an ambiguity and dropped, so every caller of the re-exported name resolved to nothing.
     /// That is the `#[cfg]` platform split this index already keeps when it is spelled as ONE edge with
