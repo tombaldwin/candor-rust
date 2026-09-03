@@ -14742,6 +14742,166 @@ pub fn go() {{ imp::doit(); }}
                  where it was — nothing in this frame dies (executed: 0 drops):\n{v:#}");
     }
 
+    /// R194, the trigger, and the one R187 could not reach because it is not about loops at all. R173
+    /// numbers each `?` at its PRE-ORDER position — i.e. BEFORE its own operand is walked — so every
+    /// construction inside the operand gets a HIGHER number than the `?` and reads as "not built yet",
+    /// while evaluating that operand is exactly what built it. `{ out.push(H::new()); gen(n) }?` therefore
+    /// kept `H` escaping and lost the drop that really runs when `gen` fails. CARDINAL SIN, and a
+    /// REGRESSION against published 0.34.0, which vetoed blanket and charged all nine shapes below:
+    /// `deny Fs` and `pure` went 1 -> 0 on them.
+    ///
+    /// The fix is NOT a lump post-order number. The leaves ON THE OPERAND'S VALUE SPINE must stay exempt
+    /// — `Ok(H::try_new(n)?)` cannot have built an `H` on the exit where `try_new` returned `Err` — and
+    /// that exemption is the whole of R173's gain over the corpus (279 registry rows). So the veto keeps
+    /// its position AND gains the operand's OFF-SPINE leaves; see `lang::value_spine_addrs` for the
+    /// enumeration and for the three exclusions it turns on.
+    ///
+    /// EXECUTED ground truth (a drop counter, plus a second counter for drops that happen inside a CALLEE
+    /// frame, since a by-value argument really is dropped — just not here). Error path, drops in THIS
+    /// frame: `block_operand_q` 1, `match_operand_q` 1, `if_operand_q` 1, `cb_operand_q` 1,
+    /// `try_for_each_q` 1, `ref_arg_q` 1, `recv_chain_q` 1, `nested_operand_q` 1, `block_arg_q` 1,
+    /// `async_operand_q` 1, `await_recv_q` 1 (the two async ones driven through a one-shot no-op
+    /// executor) — and
+    /// 0 for every `spine_*` control, `operand_ctrl_value` and `spine_call_arg_byval` (whose single drop
+    /// is counted in `use_h_val`'s frame, which the caller reaches through the call edge, not through a
+    /// local charge). `operand_ctrl_straight` 1.
+    #[test]
+    fn a_question_mark_charges_what_its_own_operand_already_built() {
+        let v = scan_src_to_json("r194operand", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+                pub fn check(&self) -> Result<u32, ()> { Err(()) }
+            }
+            pub struct W { pub h: H }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn use_h_ref(_h: &H) -> Result<u32, ()> { Err(()) }
+            pub fn use_h_val(_h: H) -> Result<u32, ()> { Err(()) }
+            pub fn run_cb<F: FnOnce() -> Result<(), ()>>(f: F) -> Result<(), ()> { f() }
+            pub fn run_cb_h<F: FnOnce() -> Result<H, ()>>(f: F) -> Result<H, ()> { f() }
+
+            pub fn block_operand_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { out.push(H::new("a")); gen(n) }?;
+                Ok(out)
+            }
+            pub fn match_operand_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                match n { 0 => { out.push(H::new("a")); Err(()) } _ => Ok(()) }?;
+                Ok(out)
+            }
+            pub fn if_operand_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                if n == 0 { out.push(H::new("a")); Err(()) } else { Ok(()) }?;
+                Ok(out)
+            }
+            pub fn cb_operand_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                run_cb(|| { out.push(H::new("a")); gen(n).map(|_| ()) })?;
+                Ok(out)
+            }
+            pub fn try_for_each_q(items: Vec<Result<u32, ()>>) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                items.into_iter().try_for_each(|it| { let _v = it?; out.push(H::new("a")); Ok::<(), ()>(()) })?;
+                Ok(out)
+            }
+            pub fn ref_arg_q(n: u32) -> Result<u32, ()> { let v = use_h_ref(&H::try_new(n, "a")?)?; Ok(v) }
+            pub fn recv_chain_q(n: u32) -> Result<u32, ()> { let v = H::try_new(n, "a")?.check()?; Ok(v) }
+            pub async fn mk_h_async(n: u32) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new("a")) } }
+            pub async fn await_recv_q(n: u32) -> Result<u32, ()> { let v = mk_h_async(n).await?.check()?; Ok(v) }
+            pub fn nested_operand_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { { out.push(H::new("a")); gen(n) }?; gen(n) }?;
+                Ok(out)
+            }
+            pub fn block_arg_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                gen({ out.push(H::new("a")); n })?;
+                Ok(out)
+            }
+            pub fn poll_once<F: std::future::Future>(f: F) -> F::Output {
+                use std::sync::Arc;
+                use std::task::{Context, Poll, Wake, Waker};
+                struct N;
+                impl Wake for N { fn wake(self: Arc<Self>) {} }
+                let w: Waker = Arc::new(N).into();
+                let mut cx = Context::from_waker(&w);
+                let mut f = Box::pin(f);
+                loop { if let Poll::Ready(v) = f.as_mut().poll(&mut cx) { return v; } }
+            }
+            pub fn async_operand_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                poll_once(async { out.push(H::new("a")); gen(n).map(|_| ()) })?;
+                Ok(out)
+            }
+
+            pub fn spine_direct(n: u32) -> Result<H, ()> { let h = H::try_new(n, "a")?; Ok(h) }
+            pub fn spine_ok_wrap(n: u32) -> Result<H, ()> { Ok(H::try_new(n, "a")?) }
+            pub fn spine_struct_field(n: u32) -> Result<W, ()> { Ok(W { h: H::try_new(n, "a")? }) }
+            pub fn spine_tuple(n: u32) -> Result<(H, u32), ()> { Ok((H::try_new(n, "a")?, 1)) }
+            pub fn spine_paren(n: u32) -> Result<H, ()> { let h = (H::try_new(n, "a"))?; Ok(h) }
+            pub fn spine_block_tail(n: u32) -> Result<H, ()> { let h = { let _x = n; H::try_new(n, "a") }?; Ok(h) }
+            pub fn spine_match_arms(n: u32) -> Result<H, ()> { let h = match n { 0 => H::try_new(0, "a"), _ => H::try_new(n, "b") }?; Ok(h) }
+            pub fn spine_if_arms(n: u32, c: bool) -> Result<H, ()> { let h = if c { H::try_new(n, "a") } else { H::try_new(n, "b") }?; Ok(h) }
+            pub fn spine_call_arg_byval(n: u32) -> Result<u32, ()> { let v = use_h_val(H::try_new(n, "a")?)?; Ok(v) }
+            pub fn spine_cb_tail(n: u32) -> Result<H, ()> { let h = run_cb_h(|| H::try_new(n, "a"))?; Ok(h) }
+            pub async fn spine_await_chain(n: u32) -> Result<H, ()> { let h = mk_h_async(n).await?; Ok(h) }
+            pub async fn spine_await_ok(n: u32) -> Result<H, ()> { Ok(mk_h_async(n).await?) }
+            pub fn operand_ctrl_value(n: u32) -> Result<H, ()> { let h = { gen(n)?; H::new("a") }; Ok(h) }
+            pub fn operand_ctrl_straight(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                out.push(H::new("a")); gen(n)?;
+                Ok(out)
+            }
+"#);
+        // The nine REGRESSIONS: published 0.34.0 charged every one, the candidate lost every one.
+        for n in ["block_operand_q", "match_operand_q", "if_operand_q", "cb_operand_q", "try_for_each_q",
+                  "ref_arg_q", "nested_operand_q", "block_arg_q", "async_operand_q"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
+                    "`{n}`'s `?` operand BUILT the `H` before that `?` could take its error exit, and this \
+                     frame still owns it there (executed: 1 drop) — published 0.34.0 charges it:\n{v:#}");
+        }
+        // ANALYSIS-ONLY, AND IT CANNOT DISCRIMINATE — say so rather than let it read as coverage.
+        // `H::try_new(n)?.check()?` and its `.await?` twin are the shape a receiver-descending spine
+        // would silence (the fix sketch this row came with proposed exactly that), and they really do
+        // drop in this frame (executed: 1 drop each). But MEASURED: putting `MethodCall`'s receiver
+        // back on the spine leaves both rows GREEN, so these two assertions pass with and without that
+        // mistake. Two independent refusals upstream make a receiver-position construction unreachable
+        // for the veto at all: `for_each_value_child` gives a `MethodCall` its ARGS and never its
+        // receiver, so the leaf is never marked escaping; and even if some other site marked the leaf,
+        // R172's site gate requires EVERY site of it to be an escaping site, which a receiver can
+        // never be. The receiver is left off the spine because the reasoning holds if either refusal
+        // is ever relaxed — not because a test is watching it.
+        for n in ["recv_chain_q", "await_recv_q"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
+                    "the receiver of the second `?` is a live temporary in THIS frame when that `?` \
+                     fires (executed: 1 drop) — a receiver must not be read as the operand's value \
+                     spine. `{n}`:\n{v:#}");
+        }
+        assert_eq!(effs(fn_entry(&v, "operand_ctrl_straight")), vec!["Fs".to_string()],
+                   "R173's positional veto, unchanged: the construction precedes the `?` in the SOURCE \
+                    too, so it never depended on the operand rule (executed: 1 drop):\n{v:#}");
+        for n in ["spine_direct", "spine_ok_wrap", "spine_struct_field", "spine_tuple", "spine_paren",
+                  "spine_block_tail", "spine_match_arms", "spine_if_arms", "spine_await_chain",
+                  "spine_await_ok", "operand_ctrl_value"] {
+            assert!(row_absent(&v, n),
+                    "`{n}`'s construction is ON the operand's VALUE SPINE — the exit where that `?` fires \
+                     is the exit where it returned `Err`, so no `H` was ever built (executed: 0 drops). \
+                     A lump post-order number would charge this, which is published's fabrication back \
+                     again over ~280 registry rows:\n{v:#}");
+        }
+        assert!(!fn_entry(&v, "spine_call_arg_byval")["calls"].to_string().contains("H::drop"),
+                "a by-value ARGUMENT is moved into the callee and dropped in ITS frame (executed: 0 drops \
+                 here, 1 inside `use_h_val`), which the caller inherits through the call edge — charging \
+                 it locally would fabricate. Its twin `ref_arg_q` differs by one `&` and must charge:\n{v:#}");
+        assert!(!effs(fn_entry(&v, "spine_cb_tail")).contains(&"Fs".to_string()),
+                "the construction is the CLOSURE'S TAIL, an unconditional escape route re-united after \
+                 the positional filter — no `?` may strip it (async-std's \
+                 `spawn_blocking(|| File::create(&p)).await?`, executed: 0 drops):\n{v:#}");
+    }
+
     /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
     /// fn's own LEAF, which withdrew that leaf from every reader of the return index — including `let`
     /// typing, where `()` has no INHERENT methods, so a body resolving `c.send(b)` through the index
