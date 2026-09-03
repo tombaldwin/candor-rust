@@ -31,6 +31,25 @@ after upgrading; review policies and regenerate baselines with the new build.
   every removal read from source; 39 of the 136 new positive claims R160 introduced disappear,
   including the whole 36-row x11rb wrapper family. Controls that stay charged: a construction BEFORE
   the `?`, and one between two `?`s (executed: 1 drop each on the early-exit path).
+- **⚠ SOUNDNESS R187 (cardinal sin, a REGRESSION against published 0.34.0 introduced by R173 above,
+  caught by a second fix-lens pass before release) — CLOSED: a `?` inside a LOOP is live for
+  everything that loop body builds.** R173 numbers each `?` in PRE-ORDER and reads that as evaluation
+  order; inside a loop the two disagree, because the body runs again. `for it in items { let v = it?;
+  out.push(H::new(v)); } Ok(out)` — with `while step(&mut n)?`, `loop { let v = it?; .. }` and the
+  single-slot variant beside it — read `['Net']` on published 0.34.0 and were ABSENT on the candidate:
+  `deny Net collect_loop` and `pure collect_loop` both 1 → 0, with no `Unknown` anywhere. Executed
+  ground truth: one `H::drop` runs inside each frame when the error fires on iteration 2. Every `?`
+  recorded inside a `for`/`while`/`loop` — the CONDITION included, since it is re-evaluated after the
+  body has built its value — now moves to that loop's last position when the loop closes, which can
+  only ever veto MORE. Six further silent shapes went with the four: nested loops with the `?` in
+  either one, a labelled break, `while let`, `break`/`continue` around the `?`, and a `?` whose
+  closure sits in the loop body. Controls: a construction AFTER the loop stays ABSENT (R173's gain,
+  executed 0 drops), one BEFORE it stays charged (executed 1), and a `?` inside a CLOSURE is left
+  where R173 put it — it exits the closure, not this function. 1,504-crate A/B vs the candidate,
+  wide key: ADDED 0, REMOVED 0, effects lost 0, call edges lost 0, one row CHANGED — x11rb
+  `Image::put_impl`, whose `while` loop pushes `put_image(..)?` cookies into a `Vec` that really
+  drops on the error path, gains that `VoidCookie::drop` edge. The branch fires 13,481 times across
+  665 of the 1,504 crates, so the zero-diff is measured over a corpus that reaches it.
 - **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
   refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
   (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same
