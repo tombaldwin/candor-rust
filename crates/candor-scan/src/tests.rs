@@ -14902,6 +14902,141 @@ pub fn go() {{ imp::doit(); }}
                  `spawn_blocking(|| File::create(&p)).await?`, executed: 0 drops):\n{v:#}");
     }
 
+    /// R199, a SIBLING of R194 that R194 could not reach BY CONSTRUCTION. A macro's contents are not in
+    /// the body's AST — `note_macro_ctor_leaves` re-parses the token stream — so the site machinery has
+    /// a second, separate recorder for them, `note_macro_site`, and that one records `first_ctor_seq` at
+    /// the MACRO's own position (inside the operand, hence GREATER than the pre-order `?`) and never
+    /// consulted `open_tries` at all. R173's positional filter therefore read a macro-borne construction
+    /// as "not built yet" and R194's `interior` term never saw it: `{ out.extend(vec![H::new("a")]); gen(n) }?`
+    /// lost the `H::drop` that really runs when `gen` fails. CARDINAL SIN, and a REGRESSION against
+    /// published 0.34.0, which vetoed blanket and charged every shape below: `deny Fs` and `pure` went
+    /// 1 -> 0 on all six.
+    ///
+    /// THE SPINE TEST HAS TO BE TWO STEPS, and the second one is not decoration. A macro node CAN sit on
+    /// the operand's value spine (`Ok::<Vec<H>, ()>(vec![H::new("a")])?` puts it there as a by-value
+    /// argument), and then its value positions are on the spine too. But `idm!(use_h_ref(&H::new("a"), n))?`
+    /// is also a macro node on the spine, and the `&` inside its tokens borrows a TEMPORARY that lives to
+    /// the end of the statement and dies on that `?`'s error exit. `mark_escape`'s own macro parse
+    /// descends `Reference`, so that leaf IS in the escaping set: exempting the macro WHOLE leaves it
+    /// there and the drop stays lost. So the spine is re-run over the parsed tokens and only the value
+    /// positions inside them are exempt — the same enumeration, one level down. MEASURED, not reasoned:
+    /// a build that exempts the macro whole leaves `macro_spine_ref` ABSENT.
+    ///
+    /// EXECUTED ground truth (a drop counter; error path, drops in THIS frame): `macro_block_q` 1,
+    /// `macro_assign_q` 1, `macro_let_q` 1, `macro_append_q` 1, `macro_match_q` 1, `macro_tfe_q` 1,
+    /// `macro_loop_q` 2 (two iterations), `macro_inner_q` 1, `macro_leaf_both` 1, `macro_spine_ref` 1
+    /// (on BOTH paths — a statement temporary), and 0 for `macro_spine_ok`, `macro_spine_arm`,
+    /// `macro_is_operand`, `macro_ctrl_noq` and `macro_spine_byval` (whose single drop is counted in
+    /// `use_h_val`'s frame, reached through the call edge). `macro_ctrl` 1.
+    #[test]
+    fn a_question_mark_charges_what_a_macro_in_its_operand_already_built() {
+        let v = scan_src_to_json("r199macro", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+            }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn use_h_ref(_h: &H, n: u32) -> Result<u32, ()> { gen(n) }
+            pub fn use_h_val(h: H, n: u32) -> Result<u32, ()> { let _h = h; gen(n) }
+            #[macro_export]
+            macro_rules! idm { ($e:expr) => { $e } }
+
+            pub fn macro_block_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { out.extend(vec![H::new("a")]); gen(n) }?;
+                Ok(out)
+            }
+            pub fn macro_assign_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { out = vec![H::new("a")]; gen(n) }?;
+                Ok(out)
+            }
+            pub fn macro_let_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { let v = vec![H::new("a")]; out.extend(v); gen(n) }?;
+                Ok(out)
+            }
+            pub fn macro_append_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { out.append(&mut vec![H::new("a")]); gen(n) }?;
+                Ok(out)
+            }
+            pub fn macro_match_q(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                match n { 0 => { out.extend(vec![H::new("a")]); Err(()) } _ => Ok(()) }?;
+                Ok(out)
+            }
+            pub fn macro_tfe_q(items: Vec<Result<u32, ()>>) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                items.into_iter().try_for_each(|it| { let _v = it?; out.extend(vec![H::new("a")]); Ok::<(), ()>(()) })?;
+                Ok(out)
+            }
+            pub fn macro_loop_q(items: Vec<u32>, n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { for _ in items { out.extend(vec![H::new("a")]); } gen(n) }?;
+                Ok(out)
+            }
+            pub fn macro_inner_q(n: u32, m: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { out.extend(vec![H::try_new(n, "a")?]); gen(m) }?;
+                Ok(out)
+            }
+            pub fn macro_leaf_both(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                { out.extend(vec![H::new("a")]); gen(n) }?;
+                out.push(H::new("b"));
+                Ok(out)
+            }
+            pub fn macro_spine_ref(n: u32) -> Result<u32, ()> { let v = idm!(use_h_ref(&H::new("a"), n))?; Ok(v) }
+
+            pub fn macro_spine_ok(n: u32) -> Result<Vec<H>, ()> { gen(n)?; let out = Ok::<Vec<H>, ()>(vec![H::new("a")])?; Ok(out) }
+            pub fn macro_spine_arm(n: u32) -> Result<Vec<H>, ()> { let out = match n { 0 => Ok(vec![H::new("a")]), _ => Ok(vec![H::new("b")]) }?; Ok(out) }
+            pub fn macro_is_operand(n: u32) -> Result<H, ()> { let h = idm!(H::try_new(n, "a"))?; Ok(h) }
+            pub fn macro_spine_byval(n: u32) -> Result<u32, ()> { let v = idm!(use_h_val(H::new("a"), n))?; Ok(v) }
+            pub fn macro_ctrl(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                out.extend(vec![H::new("a")]); gen(n)?;
+                Ok(out)
+            }
+            pub fn macro_ctrl_noq(n: u32) -> Result<Vec<H>, ()> {
+                let mut out = Vec::new();
+                let _ = { out.extend(vec![H::new("a")]); gen(n) };
+                Ok(out)
+            }
+"#);
+        // THE REGRESSIONS: published 0.34.0 charged every one of these, the 7d9a970 candidate lost them.
+        for n in ["macro_block_q", "macro_assign_q", "macro_let_q", "macro_append_q", "macro_match_q",
+                  "macro_tfe_q", "macro_loop_q", "macro_inner_q", "macro_leaf_both"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
+                    "the `vec![..]` in `{n}`'s `?` operand ran BEFORE that `?` could take its error exit, \
+                     and this frame still owns what it built there (executed: 1 drop, 2 in the loop) — \
+                     published 0.34.0 charges it:\n{v:#}");
+        }
+        // The two-step spine, measured: this row is ABSENT if the macro is exempted WHOLE.
+        assert!(effs(fn_entry(&v, "macro_spine_ref")).contains(&"Fs".to_string()),
+                "`macro_spine_ref`'s macro node IS the `?` operand, so it is on the spine — but the `&` \
+                 inside its tokens borrows a TEMPORARY that lives to the end of the statement and dies on \
+                 that `?`'s error exit (executed: 1 drop on BOTH paths). Only the value positions INSIDE \
+                 the parsed tokens are exempt, never the macro whole:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "macro_ctrl")), vec!["Fs".to_string()],
+                   "the control: the same macro, straight-line BEFORE the `?`, charged by position alone \
+                    and never dependent on this rule (executed: 1 drop):\n{v:#}");
+        // THE OVER-CHARGE CONTROLS. Charging any of these is published's blanket fabrication back again.
+        for n in ["macro_spine_ok", "macro_spine_arm", "macro_is_operand", "macro_ctrl_noq"] {
+            assert!(row_absent(&v, n),
+                    "`{n}`'s macro sits on the operand's VALUE SPINE (or has no `?` at all), so the exit \
+                     where that `?` fires is the exit where nothing was built (executed: 0 drops). \
+                     Vetoing a macro's leaves regardless of the spine re-fabricates published's blanket \
+                     charge:\n{v:#}");
+        }
+        assert!(!fn_entry(&v, "macro_spine_byval")["calls"].to_string().contains("H::drop"),
+                "a by-value ARGUMENT written through a macro is moved into the callee and dropped in ITS \
+                 frame (executed: 0 drops here, 1 inside `use_h_val`), which the caller inherits through \
+                 the call edge. Its twin `macro_spine_ref` differs by one `&` and must charge:\n{v:#}");
+    }
+
     /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
     /// fn's own LEAF, which withdrew that leaf from every reader of the return index — including `let`
     /// typing, where `()` has no INHERENT methods, so a body resolving `c.send(b)` through the index
