@@ -285,6 +285,18 @@ after upgrading; review policies and regenerate baselines with the new build.
   macros are now reached inside those bodies. No leaf any of them constructs has a `Drop` impl, which
   is why no row moves. A 43-fixture regression battery (the ledger's 40, round 5's `r5`/`r5b`, and the
   new body-local fixture) moves only the R204/R205/R206 cells on a full-report wide diff.
+  AND THE SAME DEFECT ONE WALK IN, found by widening the audit boundary past its own trigger rather
+  than by a second report. `note_opaque_block` — the walk the veto uses over a template body, block
+  tokens or statement tokens — discarded `Stmt::Item` for the identical reason, so a `macro_rules!`
+  written INSIDE those tokens was still in no index:
+  `idm!({ macro_rules! lm { .. } out.push(lm!("a")); gen(n) })?` is published `['Fs']` and ABSENT on
+  `c22a31d` and on the body-level fix alone, executed 1 in-frame drop. The same recording arm now runs
+  in both walks. It is R203 → R204's relationship one row over, and the row ID for it is the
+  coordinator's to assign — this entry deliberately does not invent one. SAY IT AT THE TIME: its
+  counter fires **0 times in the 1,504-crate corpus**, so its A/B (ADDED 0, REMOVED 0, CHANGED 0) is
+  SAFETY-ONLY evidence, not reach evidence; the reach evidence is the executed fixture and the
+  discriminator beside it (the same use site with a body-level definition, which the first half
+  closes).
 - **⚠ SOUNDNESS R207, repetition half (cardinal sin, a REGRESSION against published 0.34.0 in the same
   family, caught by the fifth fix-lens pass) — CLOSED: a `macro_rules!` template whose body is a
   REPETITION is now read by the `?`-interior veto. The remaining half SHIPS OPEN and is stated below.**

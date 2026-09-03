@@ -15580,6 +15580,79 @@ pub fn go() {{ imp::doit(); }}
                  index; charging here is published 0.34.0's blanket veto back again:\n{v:#}");
     }
 
+    /// SOUNDNESS R206, SECOND INSTANCE — THE AUDIT BOUNDARY DRAWN PAST ITS OWN TRIGGER. R206 closed
+    /// `walk_block`'s discard of a body-local `macro_rules!`. `note_opaque_block` is the SAME walk one
+    /// level in — over a template body, block tokens or statement tokens the veto had to re-parse —
+    /// and it discarded `Stmt::Item` for the identical reason, so a `macro_rules!` written INSIDE
+    /// those tokens was still in no index. That is the R203 → R204 relationship exactly, one row over,
+    /// and it was found by asking what else has this shape rather than by a new report.
+    ///
+    /// `defined_in_block_tokens` is published 0.34.0 `['Fs']`, ABSENT on `c22a31d` AND on R206 alone,
+    /// executed 1 in-frame drop on the error exit. `defined_in_body_used_in_tokens` is the
+    /// discriminator: the same use site with the DEFINITION at body level, which R206 already closed —
+    /// so a green here with a red above is the fixture reaching the code rather than the code working.
+    /// `spine_ctrl` is the over-charge control (executed: 0 drops in the frame).
+    #[test]
+    fn a_macro_rules_defined_inside_reparsed_macro_tokens_is_read_by_the_veto() {
+        let v = scan_src_to_json("r206tok", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+            }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn use_h_val(h: H, n: u32) -> Result<u32, ()> { drop(h); gen(n) }
+            #[macro_export]
+            macro_rules! idm { ($($t:tt)*) => { $($t)* } }
+
+            pub fn defined_in_block_tokens(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                idm!({
+                    macro_rules! lm2 { ($q:expr) => { H::new($q) } }
+                    out.push(lm2!("a"));
+                    gen(n)
+                })?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn defined_in_body_used_in_tokens(n: u32, m: u32) -> Result<H, ()> {
+                macro_rules! lm3 { ($q:expr) => { H::new($q) } }
+                let mut out = Vec::new();
+                idm!({
+                    out.push(lm3!("a"));
+                    gen(n)
+                })?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn spine_ctrl(n: u32, m: u32) -> Result<H, ()> {
+                macro_rules! lm4 { ($q:expr) => { H::new($q) } }
+                let _v = use_h_val(lm4!("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+"#);
+        assert!(effs(fn_entry(&v, "defined_in_block_tokens")).contains(&"Fs".to_string()),
+                "`defined_in_block_tokens` declares its `macro_rules!` INSIDE the tokens the veto \
+                 re-parses, and builds the same leaf again after the `?`. `note_opaque_block` \
+                 discarded every `Stmt::Item` exactly as `walk_block` did before R206, so the template \
+                 was in no index one level in. Published 0.34.0 charged it; `c22a31d` and R206 alone \
+                 leave it ABSENT (executed: 1 in-frame drop on the error exit):\n{v:#}");
+        assert!(effs(fn_entry(&v, "defined_in_body_used_in_tokens")).contains(&"Fs".to_string()),
+                "the discriminator — the same USE site with the definition at BODY level, which R206 \
+                 already closed. If this ever goes quiet, the row above stops being evidence about the \
+                 second walk and becomes evidence about the use site:\n{v:#}");
+        assert!(!fn_entry(&v, "spine_ctrl")["calls"].to_string().contains("H::drop"),
+                "THE OVER-CHARGE CONTROL: a body-local construction as a by-value argument ON the `?` \
+                 operand's value spine is moved into the callee and dies in ITS frame (executed 0 \
+                 drops here). Recording definitions from a second walk must not cost R199's spine \
+                 exemption:\n{v:#}");
+    }
+
+
     /// SOUNDNESS R207 (repetition half) — A REPETITION IS THE ORDINARY WAY TO WRITE A TEMPLATE THAT
     /// PUSHES, and it was as invisible to the `?`-interior veto as an unreadable one. `strip_dollars`
     /// leaves `$( X ) sep? *` as `( X ) *`, which parses as no statement, so `macro_template_blocks`
