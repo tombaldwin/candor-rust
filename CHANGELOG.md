@@ -63,6 +63,26 @@ after upgrading; review policies and regenerate baselines with the new build.
   shape like any other. 1,504-crate A/B: REMOVED 18 rows, 7 effect losses, all audited; 8 of the 18
   (syn, windows) are a precision COST — pure functions losing an `invisible` disclosure and two call
   edges to the new ambiguity, recorded as a loss rather than a gain.
+- **⚠ SOUNDNESS R188 (cardinal sin, a REGRESSION against published 0.34.0 introduced by R174(b)
+  above, caught by the same second pass) — CLOSED: a unit-returning twin withdraws the DROP route's
+  answer, not the binding's type.** R174(b) filed its sentinel under the fn's own LEAF, so the twin
+  ambiguated that leaf for every reader of the return index — including `let` typing, where `()` has
+  no INHERENT methods, so a body that resolves `c.send(b)` through the index could not have called
+  the unit twin. With `net::connect(addr) -> Conn` beside
+  an unrelated unit `ui::Ui::connect(&mut self)`, the module-qualified — unambiguous — `let c =
+  net::connect(addr); c.send(b)` lost `c`'s type and went `['Net']` → ABSENT with no `Unknown` at
+  all: `deny Net go` and `pure go` 1 → 0, and the same through a `use crate::net::connect` import.
+  The conflict is still recorded, under its own `<unit><leaf>` key, and read by
+  `ctor_leaf_from_call_returns` alone — where git2's phantom `Repository::drop` edge actually came
+  from, and that fixture stays fixed (each half of this change has its own red test). 1,504-crate
+  A/B vs the candidate, wide key: ADDED 8, REMOVED 0, effects lost 0, call edges lost 0 — the 8 are
+  rows published 0.34.0 also has, restored byte-identical (syn ×7 `item::parsing::peek_signature`,
+  whose leaf `keyword` has a unit twin one module over; windows-0.56.0 `ID3DInclude_Vtbl::new`, the
+  direction R174's own counter could not see) — plus 7 rows that GAIN back a real call edge audited
+  from source: diesel's four `AnsiTransactionManager` transaction methods recovering all four
+  `Instrumentation::on_connection_event` implementors, itertools `diff_with`, ring
+  `KeyPair::from_components_`, tokio `oneshot::Inner::close`. The refusal fires 1,726 times across
+  86 crates, so the zero-loss is measured over a corpus that reaches it.
 - **⚠ SOUNDNESS R71 (cardinal sin, PUBLISHED in 0.34.0) — CLOSED: a callback stored in a field and
   invoked through an unwrap BINDER is disclosed.** `if let Some(f) = &self.cb { f() }` — the idiomatic
   optional-callback-field shape — reported the invoking function ABSENT from `functions[]`, with no

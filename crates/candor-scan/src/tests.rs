@@ -10280,6 +10280,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     ///                 deserializes EMPTY — "every module in this file was read in full" — and the warm
     ///                 cache replays a caller ABSENT over a `cfg_rt!`/`include!`-hidden target that
     ///                 demonstrably spawns a process.
+    ///   rev19 -> rev20 a change to what an EXISTING field RECORDS (R188): the unit-return sentinel
+    ///                 moved out of the `rets` LEAF key into `<unit><leaf>`. A rev19 entry
+    ///                 deserializes into a map whose typed leaf was withdrawn by an unrelated unit
+    ///                 twin, so the warm cache replays `let c = net::connect(a); c.send(b)` with no
+    ///                 receiver type — the silent under-report that row is.
     ///   rev18 -> rev19 an ANALYSIS change that feeds `fninfos`, not a field (R187). A `?` inside a
     ///                 loop now vetoes what that loop body builds, so a rev18 entry replays, warm, the
     ///                 silent under-report that row is: a loop body whose guard really drops, read as
@@ -10294,11 +10299,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        // R187 bumped the token to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
+        // R188 bumped the token to rev20 and R187 to rev19; R176 had bumped it to rev18 (and recorded that the R161 bump
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -10309,7 +10314,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev19/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev20/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -14735,6 +14740,44 @@ pub fn go() {{ imp::doit(); }}
         assert!(!effs(fn_entry(&v, "loop_in_closure")).contains(&"Fs".to_string()),
                 "the `?` here exits the CLOSURE, not this function, so the loop rewrite must leave it \
                  where it was — nothing in this frame dies (executed: 0 drops):\n{v:#}");
+    }
+
+    /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
+    /// fn's own LEAF, which withdrew that leaf from every reader of the return index — including `let`
+    /// typing, where `()` has no INHERENT methods, so a body resolving `c.send(b)` through the index
+    /// could not have called the unit twin. With `net::connect(addr)
+    /// -> Conn` beside an unrelated unit `ui::Ui::connect(&mut self)`, the MODULE-QUALIFIED (unambiguous)
+    /// `let c = net::connect(addr); c.send(b)` lost `c`'s type and the row went `['Net']` → ABSENT with no
+    /// `Unknown` at all. CARDINAL SIN, and a REGRESSION against published 0.34.0: `deny Net go` 1 → 0.
+    /// 181 `R174UNIT` hits across the 1,504-crate registry corpus, and 7 rows lost a call edge.
+    ///
+    /// The conflict itself is still recorded — under `unit_twin_key`, read by the DROP route alone, which
+    /// is where the git2 phantom `Repository::drop` edge came from. Its own control is
+    /// `a_leaf_with_a_unit_returning_twin_resolves_to_no_type`, which must stay green.
+    #[test]
+    fn a_unit_returning_twin_does_not_withdraw_the_binding_type_of_a_typed_call() {
+        let v = scan_src_to_json("r188twin", r#"
+            pub mod net {
+                pub struct Conn { pub addr: String }
+                impl Conn { pub fn send(&self) -> usize { std::fs::remove_file(&self.addr).is_ok() as usize } }
+                pub fn connect(a: &str) -> Conn { Conn { addr: a.to_string() } }
+            }
+            pub mod ui {
+                pub struct Ui { pub n: u32 }
+                impl Ui { pub fn connect(&mut self) { self.n += 1; } }
+            }
+            pub fn go(a: &str) -> usize { let c = net::connect(a); c.send() }
+            pub fn typed_go(a: &str) -> usize { let c: net::Conn = net::connect(a); c.send() }
+            pub fn use_go(a: &str) -> usize { use crate::net::connect; let c = connect(a); c.send() }
+"#);
+        for n in ["go", "use_go"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Fs".to_string()],
+                       "`{n}` calls the TYPED `net::connect`; the unrelated unit `Ui::connect` one module \
+                        over cannot be what `c` binds, and published 0.34.0 resolves `Conn::send` here:\n{v:#}");
+        }
+        assert_eq!(effs(fn_entry(&v, "typed_go")), vec!["Fs".to_string()],
+                   "the explicitly annotated control never went through the return index at all — it is \
+                    what proves the two arms differ only in the inferred binding:\n{v:#}");
     }
 
     /// R169, the trigger. Two `#[cfg]`-gated `pub use` edges bringing ONE name into one module were

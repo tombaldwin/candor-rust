@@ -241,7 +241,30 @@ pub(crate) const RET_FN_TYPED: &str = "<fn>";
 /// functions per version given a phantom `Repository::drop` edge). Never a nominal type —
 /// `recorded_return_type` filters it out exactly as it filters `RET_FN_TYPED`, so a leaf that reaches
 /// it makes no claim at all rather than the wrong one.
+///
+/// SOUNDNESS R188 — IT IS ALSO THE KEY PREFIX, because the conflict belongs to ONE consumer. R174(b)
+/// wrote the sentinel under the fn's own leaf, so the twin collapsed that leaf to "ambiguous" for
+/// EVERY reader of the index — including `let`-typing, which is not a resolution guess at all: with
+/// `net::connect(addr) -> Conn` beside an unrelated unit `ui::Ui::connect(&mut self)`, `let c =
+/// net::connect(addr); c.send(b)` lost `c`'s type and went `['Net']` → ABSENT, silently, against a
+/// module-qualified (unambiguous) call. `()` has no INHERENT methods, so a body that resolves
+/// `c.send(b)` through this index could not have called the unit twin — which is why the conflict is
+/// now recorded under `<unit><leaf>` and read by the DROP route alone (`ctor_leaf_from_call_returns`),
+/// where the phantom `Repository::drop` edge actually came from. The angle brackets keep the key out of
+/// the identifier space the index is otherwise keyed on.
+///
+/// STATED LIMIT, not a guarantee: a blanket TRAIT method IS callable on `()` (`let c = ui::mk();
+/// c.clone()`), and there this index still answers with the typed twin's type. That is published
+/// 0.34.0's answer and it is the over-charging direction — an edge too many, never a silence — so it
+/// is left where it was rather than narrowed on the strength of this paragraph.
 pub(crate) const RET_UNIT: &str = "<unit>";
+
+/// R188 — the `rets` key under which `record_return` files "some fn with this leaf returns `()`".
+/// One place, so the writer (`record_return`) and the reader (`ctor_leaf_from_call_returns`) cannot
+/// spell it differently — the corpus brief's "a key two paths can spell differently" shape (§F1.7).
+pub(crate) fn unit_twin_key(leaf: &str) -> String {
+    format!("{RET_UNIT}{leaf}")
+}
 
 /// Sentinel prefix for a fn whose return is a DISPATCH trait object (`-> Box<dyn Trait>` / `-> impl
 /// Trait` / `-> &dyn Trait`). The trait bound leaves are joined after it (`"<dyn>Task"` /
