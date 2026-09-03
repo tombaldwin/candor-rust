@@ -15177,11 +15177,18 @@ pub fn go() {{ imp::doit(); }}
                 let b = H::try_new(m, "b")?;
                 Ok(b)
             }
+            pub fn multiarm_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(two!(a "a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
 "#);
         // THE REGRESSIONS: published 0.34.0 charged every one of these (it vetoed blanket); R173 through
         // R199 all leave them ABSENT, and `deny Fs <fn>` goes 1 -> 0 on each.
         for n in ["tmpl_hole", "tmpl_block_hole", "tmpl_loop_hole", "unparsed_hole", "nested_hole",
-                  "nested2_hole", "blocktok_hole", "tmpl_spine_stmt_hole"] {
+                  "nested2_hole", "blocktok_hole", "tmpl_spine_stmt_hole", "multiarm_hole"] {
             assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
                     "`{n}` builds an `H` inside its `?`'s operand through a macro this file's own walk \
                      cannot read (a `macro_rules!` template, statement-only tokens, a nested macro, a \
@@ -15222,11 +15229,23 @@ pub fn go() {{ imp::doit(); }}
                  since. If this ever goes quiet, the two controls above stop being evidence that the \
                  spine exemption survived the macro — they would just be agreeing with a body that \
                  charges nothing:\n{v:#}");
-        assert!(row_absent(&v, "multiarm_pure"),
-                "R203 keeps R48's SINGLE-ARM rule, so `two!(b ..)` — whose matching arm constructs \
-                 nothing — contributes nothing (executed: 0 drops). Walking every arm would charge `H` \
-                 from the NON-matching arm `a`, which is the fabrication that rule exists to refuse; the \
-                 price is that a multi-arm template stays this row's stated residual:\n{v:#}");
+        // THE MULTI-ARM TRADE, RECORDED RATHER THAN HIDDEN. `interior` walks EVERY parseable arm, which
+        // is where this path diverges from R48 — and only here: R48 expands a template to RESOLVE CALL
+        // EDGES (adding an effect, so a non-matching arm fabricates one) and still refuses multi-arm.
+        // This term only REFUSES to certify an escape, so "some arm builds it" is the over-approximating
+        // answer and the one published 0.34.0 gave. `multiarm_hole` above is the silence it closes
+        // (executed 1 in-frame drop, charged by published, ABSENT from R173 through `5cefa62`).
+        // `multiarm_pure` is what it costs: its invocation matches the arm that constructs NOTHING, so
+        // this is an OVER-CHARGE — executed 0 in-frame drops — and it is a fabrication against `5cefa62`
+        // while being exactly what published 0.34.0 already said. The ruling that picked this side is
+        // that a SILENCE against published outranks an over-charge AT published parity; the assertion is
+        // written so that whoever revisits it has both cells in front of them.
+        assert!(fn_entry(&v, "multiarm_pure")["calls"].to_string().contains("H::drop"),
+                "`multiarm_pure` is the MEASURED COST of walking every arm of a multi-arm template: the \
+                 arm its invocation actually matches builds nothing (executed: 0 in-frame drops), so \
+                 charging `H` here is an over-charge — published 0.34.0's own, since it vetoed blanket. \
+                 If this row ever goes quiet, `multiarm_hole` will have gone quiet with it, and that one \
+                 is a cardinal sin:\n{v:#}");
     }
 
     /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
