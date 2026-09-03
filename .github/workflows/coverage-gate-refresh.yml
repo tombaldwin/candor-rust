@@ -61,6 +61,16 @@ jobs:
       - name: Build the stable scanner (the self-scan oracle)
         run: cargo build --release -p candor-scan
 
+      # Both halves of the generator's own test surface, BEFORE the 30-minute fetch-and-scan: the
+      # Python extraction tests and classify_check's rendering tests (no row may be lost, every row
+      # carries its identity). A generator that fails these produces a manifest whose diff below means
+      # nothing, so failing here is strictly cheaper than failing on the diff.
+      - name: Coverage-gate generator selftest
+        run: python3 eval/coverage-gate/generate.py --selftest
+
+      - name: classify_check unit tests
+        run: cargo test --manifest-path eval/coverage-gate/classify_check/Cargo.toml
+
       - name: Fetch fresh crates.io source for every in-scope calibrated crate
         run: |
           mkdir -p /tmp/coverage-gate-fixture/src
@@ -89,17 +99,37 @@ jobs:
           grep -v '^#' eval/coverage-gate/open.tsv | sort > /tmp/open.checked-in.tsv
           grep -v '^#' /tmp/fresh/open.tsv | sort > /tmp/open.fresh.tsv
 
-          # REGRESSION: a row classify() covered before, that the fresh run no longer sees covered at all
-          # (dropped from covered.tsv without reappearing — as a MATCHING crate+path — in open.tsv, which
+          # THE DIFF KEY IS COLUMN 5 (`entry`), NOT COLUMN 2 (`consumer_path`). SOUNDNESS, 2026-09-02:
+          # consumer_path is a GUESSED consumer-facing spelling, and it is chosen by DIFFERENT rules in
+          # the two files — covered.tsv prints the first guess classify() resolves (it has to be a
+          # resolving spelling, coverage_gate.rs asserts classify() on it), open.tsv prints the shortest.
+          # So one candidate has two possible spellings and moving between the lists rewrites the string,
+          # while the checks below compare a covered key to a covered key AND a fresh OPEN key to a
+          # checked-in COVERED key. Keyed on column 2, a rule REMOVED (covered -> open, path rewritten)
+          # therefore reads as a regression AND as growth, double-counting one event, and a rule added
+          # can rewrite a covered path with no coverage change at all. `entry` is the candidate's
+          # identity — the module-qualified key candor-scan itself reports — is the SAME string in both
+          # files, and does not move unless the entry point itself does.
+          for f in /tmp/covered.checked-in.tsv /tmp/open.checked-in.tsv; do
+            if [ -s "$f" ] && [ "$(head -1 "$f" | awk -F'\t' '{print NF}')" -lt 5 ]; then
+              echo "::error::$f has no \`entry\` column — the checked-in manifest predates the identity" \
+                   "column and cannot be diffed. Regenerate it (python3 eval/coverage-gate/generate.py)" \
+                   "and commit, then re-run this job."
+              exit 1
+            fi
+          done
+
+          # REGRESSION: an entry classify() covered before, that the fresh run no longer sees covered at
+          # all (dropped from covered.tsv without reappearing — as a MATCHING entry — in open.tsv, which
           # would mean self-scan itself stopped finding the effect, e.g. the crate rewrote that function).
-          cut -f1,2 /tmp/covered.checked-in.tsv | sort -u > /tmp/covered.checked-in.keys
-          cut -f1,2 /tmp/covered.fresh.tsv       | sort -u > /tmp/covered.fresh.keys
+          cut -f1,5 /tmp/covered.checked-in.tsv | sort -u > /tmp/covered.checked-in.keys
+          cut -f1,5 /tmp/covered.fresh.tsv       | sort -u > /tmp/covered.fresh.keys
           comm -23 /tmp/covered.checked-in.keys /tmp/covered.fresh.keys > /tmp/regressed.keys || true
 
-          # GROWTH: a fresh-run open.tsv row (crate+path) absent from the checked-in open.tsv AND absent
-          # from the checked-in covered.tsv — i.e. genuinely new, not just a row that got fixed elsewhere.
-          cut -f1,2 /tmp/open.checked-in.tsv | sort -u > /tmp/open.checked-in.keys
-          cut -f1,2 /tmp/open.fresh.tsv      | sort -u > /tmp/open.fresh.keys
+          # GROWTH: a fresh-run open.tsv entry absent from the checked-in open.tsv AND absent from the
+          # checked-in covered.tsv — i.e. genuinely new, not just a row that got fixed elsewhere.
+          cut -f1,5 /tmp/open.checked-in.tsv | sort -u > /tmp/open.checked-in.keys
+          cut -f1,5 /tmp/open.fresh.tsv      | sort -u > /tmp/open.fresh.keys
           comm -23 /tmp/open.fresh.keys /tmp/open.checked-in.keys > /tmp/new-open.raw.keys || true
           comm -23 /tmp/new-open.raw.keys /tmp/covered.checked-in.keys > /tmp/new-open.keys || true
 
