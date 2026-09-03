@@ -14111,6 +14111,104 @@ pub fn go() {{ imp::doit(); }}
         }
     }
 
+    /// R172, the trigger — and a REGRESSION against published 0.34.0, so this one is measured in both
+    /// arms rather than only pre/post. A body that constructs the SAME type twice, once locally and
+    /// once into the return, was keyed by type LEAF: the returned construction's escape suppressed the
+    /// local one's destructor and the function left `functions[]` entirely. R160 and R165 taught
+    /// `ctor_leaf_of_expr` to answer `H` for `Self::mk(q)` and `from_handle(q)`, so two tail spellings
+    /// that used to answer nothing began triggering it — `swap_free` and `H::swap_self` read `['Net']`
+    /// on the published binary and were ABSENT on the candidate. UNDER-REPORT direction. Executed
+    /// ground truth: exactly one `H::drop` runs inside each of these frames while the returned value is
+    /// still alive. `H::swap_type` is the third spelling — a victim of the same leaf key before either
+    /// fix, so it is charged here for the first time.
+    #[test]
+    fn a_local_drop_beside_a_returned_construction_of_the_same_type_is_still_charged() {
+        let v = scan_src_to_json("r172swap", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H {\n\
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }\n\
+                pub fn mk(p: &str) -> H { H { p: p.to_string() } }\n\
+                pub fn swap_self(p: &str, q: &str) -> H { let _g = H::new(p); Self::mk(q) }\n\
+                pub fn swap_type(p: &str, q: &str) -> H { let _g = H::new(p); H::mk(q) }\n\
+            }\n\
+            pub fn from_handle(p: &str) -> H { H { p: p.to_string() } }\n\
+            pub fn swap_free(p: &str, q: &str) -> H { let _g = H::new(p); from_handle(q) }\n\
+            pub fn swap_free2(p: &str, q: &str) -> H { let _g = from_handle(p); from_handle(q) }\n\
+            pub fn drops_local(p: &str) { let _g = H::new(p); }\n");
+        let plain = effs(fn_entry(&v, "drops_local"));
+        assert_eq!(plain, vec!["Fs".to_string()],
+                   "the single-construction control is what proves the marker itself fires");
+        for n in ["swap_free", "swap_free2", "H::swap_self", "H::swap_type"] {
+            assert_eq!(effs(fn_entry(&v, n)), plain,
+                       "`{n}` drops one `H` in its own frame (executed: 1 drop, returned value still \
+                        alive) — a DIFFERENT `H` leaving through the tail must not answer for it");
+        }
+    }
+
+    /// R172 CONTROL — the OVER-CHARGE direction, which is the only direction this fix can fail in: it
+    /// removes a suppression, so every escape route the gate models has to keep working when the leaf
+    /// is now judged site by site. Each of these bodies constructs `H` and runs NO destructor in its
+    /// own frame (executed: 0 drops). Passes in BOTH arms; recorded as a boundary, not as coverage.
+    #[test]
+    fn every_construction_of_a_leaf_escaping_still_suppresses_the_whole_leaf() {
+        let v = scan_src_to_json("r172ctl", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H { pub fn new(p: &str) -> H { H { p: p.to_string() } } }\n\
+            pub fn from_handle(p: &str) -> H { H { p: p.to_string() } }\n\
+            pub fn forwards(p: &str) -> H { from_handle(p) }\n\
+            pub fn forgets(p: &str) { let g = H::new(p); std::mem::forget(g); }\n\
+            pub fn two_out(p: &str, q: &str) -> (H, H) { (H::new(p), from_handle(q)) }\n\
+            pub fn two_in_vec(p: &str, q: &str) -> Vec<H> { vec![H::new(p), from_handle(q)] }\n\
+            pub fn builder(p: &str) -> Vec<H> { let mut v = Vec::new(); v.push(H::new(p)); v }\n\
+            pub struct T(String);\n\
+            impl Drop for T { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }\n\
+            pub fn tuple_ctor(p: &str) -> T { T(p.to_string()) }\n\
+            pub enum E { V(String) }\n\
+            impl Drop for E { fn drop(&mut self) { let _ = std::fs::remove_file(\"e\"); } }\n\
+            pub struct W(E);\n\
+            pub fn nested_ctor(p: &str) -> W { W(E::V(p.to_string())) }\n\
+            pub fn two_exits(c: bool, p: &str) -> H { if c { return H::new(p); } from_handle(p) }\n");
+        // A CALLEE PATH is not a construction site of its own. `T(H::new(p))` writes `T` as the callee
+        // of a call whose ARGUMENT is the construction, and `mark_escape` descends only value children
+        // — so a site recorded for the callee could never be marked escaping, and the leaf would be
+        // charged for a value handed straight back. Measured as three fabrications on the corpus A/B
+        // (openssl `MemBio::from_ptr`, tokio-postgres `Socket::new_tcp` and `SqlState::from_code`),
+        // none of them present on published 0.34.0. `nested_ctor` is the two-deep spelling.
+        // `two_exits` is why sites are UNIONED across exits while leaves are intersected: each exit
+        // escapes a DIFFERENT construction of `H`, and neither site is in both. Intersecting them
+        // charged anyhow's `ensure::render` (`.. return Error::msg(string); .. Error::msg(msg)`) for a
+        // destructor that runs in its caller — measured on the corpus A/B, absent on published 0.34.0.
+        for n in ["forwards", "forgets", "two_out", "two_in_vec", "builder", "tuple_ctor",
+                  "nested_ctor", "two_exits"] {
+            assert!(row_absent(&v, n),
+                    "`{n}` hands every `H` it builds to someone else — charging it fabricates a \
+                     destructor that runs in another frame:\n{v:#}");
+        }
+    }
+
+    /// R172, the MACRO half. Construction sites are identified by the address of their `syn::Expr`,
+    /// and the escape walk parses a macro's tokens into its OWN temporaries — so `vec![from_handle(q)]`
+    /// beside a local `H::new(p)` could not be told apart from it by address. Both walks therefore
+    /// number a macro's parsed expressions with one canonical pre-order and key on `(macro, ordinal)`.
+    /// Without that the first control below keeps the candidate's ABSENT — a silent under-report the
+    /// published binary did not have. The second is the over-charge control for the same code path.
+    #[test]
+    fn a_construction_escaping_through_a_macro_does_not_suppress_a_local_one_beside_it() {
+        let v = scan_src_to_json("r172mac", "\
+            pub struct H { pub p: String }\n\
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }\n\
+            impl H { pub fn new(p: &str) -> H { H { p: p.to_string() } } }\n\
+            pub fn from_handle(p: &str) -> H { H { p: p.to_string() } }\n\
+            pub fn mixed_macro(p: &str, q: &str) -> Vec<H> { let _g = H::new(p); vec![from_handle(q)] }\n\
+            pub fn all_macro(p: &str, q: &str) -> Vec<H> { vec![H::new(p), from_handle(q)] }\n");
+        assert_eq!(effs(fn_entry(&v, "mixed_macro")), vec!["Fs".to_string()],
+                   "`_g` dies in this frame; the `H` inside the `vec![]` is a different value:\n{v:#}");
+        assert!(row_absent(&v, "all_macro"),
+                "every `H` here leaves in the returned Vec — the macro route must still suppress:\n{v:#}");
+    }
+
     /// R169, the trigger. Two `#[cfg]`-gated `pub use` edges bringing ONE name into one module were
     /// read as an ambiguity and dropped, so every caller of the re-exported name resolved to nothing.
     /// That is the `#[cfg]` platform split this index already keeps when it is spelled as ONE edge with
