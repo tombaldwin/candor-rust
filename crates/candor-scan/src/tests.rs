@@ -15370,6 +15370,110 @@ pub fn go() {{ imp::doit(); }}
                  charge here and re-fabricate published's blanket veto:\n{v:#}");
     }
 
+    /// SOUNDNESS R205 — A PATH IS STILL A NAME, and the path spelling is the CANONICAL one. R203 looks a
+    /// `macro_rules!` invocation up in R48's crate-wide index to find out what its TEMPLATE constructs,
+    /// and bailed out on any name containing `::`. But `$crate::helper!(..)` is how an exported macro
+    /// calls a helper in the same crate — it is the spelling the hygiene rules push authors towards —
+    /// and `strip_dollars` renders it `crate::helper`. So the lookup refused exactly the shape it most
+    /// needed to read, and the `?`-interior veto went blind to what those templates build.
+    ///
+    /// THREE SHAPES, all published `['Fs']` and all ABSENT from `5cefa62`/`c22a31d` (`deny Fs` 1 -> 0,
+    /// executed 1 in-frame drop each on the error exit):
+    ///   `dollar_chain_stmt`  `push_via!` -> `$o.push($crate::mk_h!($p))`, statement position.
+    ///   `dollar_chain_expr`  `via!` -> `$crate::mk_h!($p)`, expression position.
+    ///   `crate_path_direct`  the user writing `crate::mk_h!("a")` in the body.
+    /// `bare_chain_ctrl` is the same two-template chain with the inner name spelled BARE. It is charged
+    /// in every build including `c22a31d`, so what these rows test is the `::`, not the chain.
+    ///
+    /// SAY WHICH DIRECTION IT FAILS IN. Resolving by LEAF is not proof the macro is local: a
+    /// `dep::mk_h!` from another crate whose leaf collides with a local `macro_rules! mk_h` resolves
+    /// here too and walks the wrong template. That is the safe direction and it is why the leaf rule is
+    /// acceptable — this path only adds to `TryExit::interior`, a REFUSAL to certify that a leaf
+    /// escaped, and the branch it replaces added nothing at all, so every outcome of a wrong resolution
+    /// is an over-charge. The 1,504-crate A/B measures what that costs: nothing, 0 rows.
+    ///
+    /// THE OVER-CHARGE CONTROL, and it is the discriminating one: `dollar_chain_spine` puts the same
+    /// `$crate::`-chained construction ON the `?` operand's value spine as a by-value argument, where it
+    /// is moved into the callee and dies in ITS frame (executed: 0 drops here, 1 inside `use_h_val`).
+    /// The two-step spine test therefore has to survive being reached through a PATH-spelled template as
+    /// well as a bare one; charging here is published 0.34.0's blanket fabrication back again.
+    #[test]
+    fn a_crate_pathed_local_macro_template_is_looked_up_by_its_leaf() {
+        let v = scan_src_to_json("r205path", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+            }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn use_h_val(h: H, n: u32) -> Result<u32, ()> { let _h = h; gen(n) }
+            #[macro_export]
+            macro_rules! mk_h { ($p:expr) => { $crate::H::new($p) } }
+            #[macro_export]
+            macro_rules! via { ($p:expr) => { $crate::mk_h!($p) } }
+            #[macro_export]
+            macro_rules! push_via { ($o:expr, $p:expr) => { $o.push($crate::mk_h!($p)) } }
+            #[macro_export]
+            macro_rules! via_bare { ($p:expr) => { mk_h!($p) } }
+
+            pub fn dollar_chain_stmt(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { push_via!(out, "a"); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn dollar_chain_expr(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(via!("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn crate_path_direct(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(crate::mk_h!("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn bare_chain_ctrl(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(via_bare!("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn dollar_chain_spine(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(via!("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+"#);
+        for n in ["dollar_chain_stmt", "dollar_chain_expr", "crate_path_direct"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
+                    "`{n}` builds an `H` inside its `?`'s operand through a crate-local `macro_rules!` \
+                     template named by a PATH (`$crate::mk_h!`, which `strip_dollars` renders \
+                     `crate::mk_h`), and builds the same leaf again after the `?`. The template lookup \
+                     refused every name containing `::`, so nothing put the leaf in `interior` while the \
+                     later site's position carried it past R173's filter. Published 0.34.0 charged all \
+                     three; `5cefa62`/`c22a31d` left them ABSENT (executed: the drop really runs on the \
+                     error exit):\n{v:#}");
+        }
+        assert!(effs(fn_entry(&v, "bare_chain_ctrl")).contains(&"Fs".to_string()),
+                "the discriminator: the SAME two-template chain with the inner macro named bare, charged \
+                 in every build since `5cefa62`. If this ever goes quiet the three rows above stop being \
+                 evidence about the `::` spelling and become evidence about chaining:\n{v:#}");
+        assert!(!fn_entry(&v, "dollar_chain_spine")["calls"].to_string().contains("H::drop"),
+                "THE OVER-CHARGE CONTROL. The same `$crate::`-chained construction as a by-value ARGUMENT \
+                 on the `?` operand's value spine is moved into the callee and dropped in ITS frame \
+                 (executed: 0 drops here, 1 inside `use_h_val`), which the caller inherits through the \
+                 call edge. R199's two-step spine exemption has to survive being reached through a \
+                 PATH-spelled template exactly as it does through a bare one; charging here is published \
+                 0.34.0's blanket veto back again:\n{v:#}");
+    }
+
     /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
     /// fn's own LEAF, which withdrew that leaf from every reader of the return index — including `let`
     /// typing, where `()` has no INHERENT methods, so a body resolving `c.send(b)` through the index

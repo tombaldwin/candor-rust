@@ -3245,9 +3245,40 @@ impl<'a> EscapeSites<'a> {
     /// fixture. The 1,504-crate registry A/B is byte-identical either way, so the corpus cannot choose;
     /// the ruling is that a SILENCE against published outranks an over-charge AT published parity.
     fn note_local_macro_template(&mut self, m: &syn::ExprMacro, on_spine: &[bool]) {
-        let name = path_to_string(&m.mac.path);
-        if name.contains("::") || self.macro_expanding.contains(&name) {
+        let full = path_to_string(&m.mac.path);
+        // SOUNDNESS R205 — A PATH IS STILL A NAME. `$crate::mk_h!(..)` is the canonical hygienic spelling
+        // for one exported macro calling a helper in the same crate, and `strip_dollars` renders it
+        // `crate::mk_h` — so this lookup, keyed on the whole path, refused exactly the spelling the
+        // ecosystem uses and the veto went blind to what those templates build. The index (R48's
+        // `local_macros`) is keyed by BARE NAME, so resolve the path's LEAF against it.
+        //
+        // SAY WHICH DIRECTION IT FAILS IN. The leaf is not proof the macro is local: `dep::mk_h!` from
+        // another crate whose leaf happens to collide with a local `macro_rules! mk_h` resolves here too,
+        // and walks the wrong template. That is deliberate and it is the safe direction — this function
+        // only ever adds to `TryExit::interior`, i.e. REFUSES to certify that a leaf escaped, and the
+        // branch it replaces added NOTHING at all, so every outcome of a wrong resolution is an
+        // over-charge. A leaf whose name is in no local index is external and stays R203's residual.
+        // (Which module's template a bare name resolves to is R208's open question, not this one's: the
+        // index is last-writer-wins across the crate, here and for R48's call-edge resolution alike.)
+        let name = if full.contains("::") {
+            let leaf = full.rsplit("::").next().unwrap_or_default().to_string();
+            if !self.local_macros.contains_key(&leaf) {
+                return;
+            }
+            leaf
+        } else {
+            full
+        };
+        if self.macro_expanding.contains(&name) {
             return;
+        }
+        // §E1 counter, printed HERE and not at the resolution above so that it counts templates this
+        // branch actually WALKS. `tokio-util`'s own `macro_rules! trace` invokes the `tracing` crate's
+        // `tracing::trace!` in its template; the leaf rule resolves that back to the local `trace` — the
+        // wrong template, harmlessly — and R48's recursion guard stops it one line up. Counting the
+        // resolution rather than the walk reported that as three hits that do nothing.
+        if name != path_to_string(&m.mac.path) && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            eprintln!("R205PATHTMPL {}", path_to_string(&m.mac.path));
         }
         let Some(body) = self.local_macros.get(&name).cloned() else { return };
         // `macro_template_blocks` returns (total arms, the arms that PARSED). An arm that does not

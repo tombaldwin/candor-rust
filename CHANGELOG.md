@@ -227,6 +227,32 @@ after upgrading; review policies and regenerate baselines with the new build.
   is why no row moves. R194's, R199's and R203's own counters are unchanged at 2,821 / 10 / 46. A
   42-fixture regression battery (the ledger's 40 plus round 5's `r5`/`r5b`) moves only those four cells
   on a full-report wide diff; every other dir is identical.
+- **⚠ SOUNDNESS R205 (cardinal sin, a REGRESSION against published 0.34.0 in the same family, caught by
+  the fifth fix-lens pass) — CLOSED: a crate-local `macro_rules!` template invoked BY PATH is looked up
+  by its leaf instead of being skipped.** The `?`-interior veto asks R48's crate-wide index what a
+  template CONSTRUCTS, and bailed out on any name containing `::` — while `$crate::helper!(..)` is the
+  canonical hygienic spelling for an exported macro calling a helper in its own crate, and
+  `strip_dollars` renders it `crate::helper`. So the lookup refused the shape it most needed to read.
+  Three cells read `['Fs']` on published 0.34.0 and were ABSENT on `5cefa62`/`c22a31d`, `deny Fs`
+  1 → 0: `push_via!` → `$o.push($crate::mk_h!($p))` in statement position, `via!` →
+  `$crate::mk_h!($p)` in expression position, and a user-written `crate::mk_h!("a")`. Executed ground
+  truth: one `H::drop` per frame on the error exit. The same chain with the inner name spelled BARE is
+  charged in every build, so what these rows test is the `::`, not the chaining. SAY WHICH DIRECTION IT
+  FAILS IN: a leaf is not proof the macro is local — a `dep::mk_h!` whose leaf collides with a local
+  `macro_rules! mk_h` now resolves too and walks the wrong template. That is deliberate and it is the
+  safe direction, because this path only ever adds to the `?`-interior veto (a refusal to certify an
+  escape) and the branch it replaces added nothing at all, so every outcome of a wrong resolution is an
+  over-charge; the corpus measures the cost at zero rows. Over-charge control that stays ABSENT
+  (executed: 0 in-frame drops, 1 inside the callee): the same `$crate::`-chained construction as a
+  by-value argument ON the `?` operand's value spine. 1,504-crate A/B vs `c22a31d`, wide key: ADDED 0,
+  REMOVED 0, CHANGED 0 over 257,243 common rows, and published → this build reproduces published →
+  `c22a31d` line for line across all six diff lists. The corpus REACHES the branch: 6 templates walked
+  through a path in 3 of the 1,504 crates — `objc2-foundation` (`crate::ns_string!`,
+  `crate::__ns_string_inner!`), `windows-core` (`crate::s!`) and `mongocrypt` (`error::internal!`,
+  `error::encoding!`) — none of them reaching a leaf with a `Drop` impl, which is why no row moves.
+  A fourth crate, `tokio-util`, is the wrong-resolution case measured rather than argued: its own
+  `macro_rules! trace` invokes the `tracing` CRATE's `tracing::trace!`, the leaf rule resolves that back
+  to the local `trace`, and R48's recursion guard stops it — three reaches, zero walks, zero rows.
 - **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
   refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
   (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same
