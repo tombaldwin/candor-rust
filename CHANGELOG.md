@@ -96,6 +96,53 @@ after upgrading; review policies and regenerate baselines with the new build.
   REMOVED 699, LOST 620), so nothing in it is unattributed to the earlier rows, and the set of rows
   that lost a published `X::drop` edge is IDENTICAL to the candidate's (symmetric difference 0), which
   is the control that the 279 construction-after-the-last-`?` removals stay removed.
+- **⚠ SOUNDNESS R199 (cardinal sin, a REGRESSION against published 0.34.0 introduced by R173 and reached
+  by neither R187 nor R194, caught by a fourth fix-lens pass before release) — CLOSED: a `?` is live for
+  what a MACRO in its own operand built.** A macro's contents are not in the body's AST — the token
+  stream is re-parsed — so the construction-site machinery has a second, separate recorder for them, and
+  that one records the position at the MACRO's own node (inside the operand, hence AFTER the pre-order
+  `?`) and never consulted the open `?` exits at all. R173's positional filter therefore read a
+  macro-borne construction as "not built yet" and R194's operand-interior term could not see it by
+  construction — nor could R194's `R194OPERAND` counter. Six spellings read `['Fs']` on published 0.34.0
+  and were ABSENT on both `70fd624` and `7d9a970`: `{ out.extend(vec![H::new()]); gen(n) }?`,
+  `{ out = vec![..]; gen(n) }?`, `{ let v = vec![..]; out.extend(v); gen(n) }?`,
+  `{ out.append(&mut vec![..]); gen(n) }?`, the same inside a `match` arm's statement, and inside
+  `try_for_each(|it| { it?; out.extend(vec![..]); Ok(()) })?`. `deny Fs` and `pure` both 1 → 0 on all
+  six. Executed ground truth: one `H::drop` runs in each frame on the error path (two for the
+  loop-shaped one). Four further shapes the row did not name are the same defect and are now charged
+  too: a `?` inside the macro's own tokens, a macro construction inside a LOOP inside the operand, the
+  same leaf built both inside and outside the macro, and a `&`-borrowed temporary built inside a macro
+  that IS the operand.
+  THE SPINE TEST HAS TO BE TWO STEPS, and the second is not decoration. A macro node CAN sit on the
+  operand's value spine — `Ok::<Vec<H>, ()>(vec![H::new()])?` puts it there as a by-value argument — and
+  then the value positions INSIDE it are on the spine too. But `idm!(use_h_ref(&H::new(), n))?` is also a
+  macro node on the spine, and the `&` inside its tokens borrows a temporary that lives to the end of the
+  statement and dies on that `?`'s error exit; the escape walk's own macro parse descends `Reference`, so
+  that leaf really is in the escaping set and exempting the macro WHOLE leaves the drop lost. So the same
+  spine enumeration is re-run over the parsed tokens and only the value positions inside them are exempt.
+  Both halves were measured by degrading the code, not reasoned about, and the whole matrix was read
+  rather than the first failing row: neutralising the new veto returns all ELEVEN charged shapes to the
+  candidate's ABSENT, and exempting the macro whole recovers ten of them and leaves the `&` shape ABSENT.
+  Neither degradation moves any over-charge control, so the second step is a pure recall gain.
+  Over-charge controls that stay ABSENT (executed: 0 drops in-frame each): the macro on the spine
+  (`Ok::<Vec<H>, ()>(vec![H::new()])?`, a `match` arm's tail, `idm!(H::try_new(n)?)`), a by-value macro
+  argument (0 here, 1 in the callee's frame, inherited through the call edge), and the no-`?` twins.
+  `m_macro_ctrl` — the same macro straight-line BEFORE the `?` — stays charged in every arm.
+  1,504-crate A/B vs the candidate `7d9a970`, wide key (16 fields, not just `inferred`): ADDED 0,
+  REMOVED 0, CHANGED 0, effects lost 0, call edges lost or gained 0 — byte-identical over 257,243 common
+  rows. The new branch fires 10 times across 9 of the 1,504 crates (mongodb, nkeys, munge_macro,
+  ratatui-termina, sea-orm-macros, tester, ureq), so the zero is measured over a corpus that reaches it —
+  and all 10 were read from source: every one is a genuine off-spine macro construction in a `?` operand
+  (`format!(.. Redact(host) ..)` and `err!(VerifyError, ..)` inside a `map_err` closure,
+  `matches!(p, Ok(PemItem::Certificate(_)))` inside a `find` closure), and none of the eight leaves has a
+  `Drop` impl in its crate, which is why no row moves. Published → this build reproduces published →
+  `7d9a970` LINE FOR LINE, not merely by count: common 252,097, ADDED 5,146, REMOVED 699, LOST 620, with
+  identical member sets and identical per-row lost-effect content, and the set of published `X::drop`
+  edges the build no longer emits is identical too (symmetric difference 0 over 306 edges in 293 rows) —
+  the control that R173's and R194's corpus gains stay gained. A 37-fixture regression battery
+  (`panel-fixes`, `panel-fixes-2/3/4`, the four wave fixture sets, rusqlite 0.40.2 and crossterm 0.29.0)
+  moves only the six `m_macro_*` cells on a full-report wide diff; the R200/R201/R202 cells and all
+  fourteen R194 spine controls are unmoved.
 - **⚠ SOUNDNESS R174 (fabrication) — CLOSED: the return-index construction route now honours the same
   refusals as the path route.** (a) A `std`/`core`/`alloc`-rooted callee is refused for a reason
   (a std path names no local type, and the drop index is leaf-keyed); R165's fallback keyed the same

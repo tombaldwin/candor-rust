@@ -2536,7 +2536,14 @@ pub(crate) fn escaping_ctor_leaves<'a>(
                 // §E1 HIT COUNTER — R194's branch is "position would have KEPT this leaf and the
                 // operand-interior rule removes it". Printed only when it really fires.
                 if sites.first_ctor_seq.get(l).is_some_and(|s| s > p) && t.interior.contains(l) {
-                    eprintln!("R194OPERAND {l}");
+                    // R199's branch is the MACRO half of the same term, and it is disjoint from what
+                    // R194 could ever have printed: before R199 a macro-borne leaf was not in any
+                    // `interior`, so this line firing IS the new code changing the answer.
+                    if sites.macro_interior_leaves.contains(l) {
+                        eprintln!("R199MACRO {l}");
+                    } else {
+                        eprintln!("R194OPERAND {l}");
+                    }
                 }
             }
         }
@@ -2794,6 +2801,13 @@ struct EscapeSites<'a> {
     /// `try_exits`, paired with the ADDRESSES of its operand's value spine. A construction reached
     /// while this is non-empty and not on the spine is recorded in that `?`'s `interior`.
     open_tries: Vec<(usize, std::collections::HashSet<usize>)>,
+    /// SOUNDNESS R199 — the leaves put into some `?`'s `interior` by the MACRO path rather than by
+    /// `note_ctor_site`. Read only by the §E1 counter, so that R194's number stays a count of ITS branch
+    /// and this one gets its own. That the two are disjoint is MEASURED, not argued: over the same
+    /// 1,504-crate registry corpus `R194OPERAND` fires 2,824 times in 427 crates both before and after
+    /// this change, and `R199MACRO` adds 10 hits in 9 crates on top — a leaf counted here would have
+    /// been subtracted there.
+    macro_interior_leaves: std::collections::HashSet<String>,
     /// R187 — how many CLOSURE bodies enclose the expression being walked. A `?` inside a closure is an
     /// exit of the CLOSURE, not of this function, so the loop rewrite must not move it: leaving it where
     /// R173 put it keeps that (pre-existing, over-charging) treatment exactly as shipped.
@@ -2838,6 +2852,7 @@ impl<'a> EscapeSites<'a> {
             seq: 0,
             try_exits: Vec::new(),
             open_tries: Vec::new(),
+            macro_interior_leaves: std::collections::HashSet::new(),
             closure_depth: 0,
             first_ctor_seq: HashMap::new(),
             first_bind_seq: HashMap::new(),
@@ -2878,18 +2893,49 @@ impl<'a> EscapeSites<'a> {
     /// `mark_escape`'s macro handling (parse the tokens as a comma-punctuated expression list) and then
     /// walks the whole parsed subtree, deliberately wider than `mark_escape`'s value-position descent:
     /// over-recording here only widens the set that keeps the SHIPPED answer.
-    fn note_macro_ctor_leaves(&mut self, m: &syn::ExprMacro) {
+    fn note_macro_ctor_leaves(&mut self, m: &syn::ExprMacro, host: &syn::Expr) {
         let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
         let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) else { return };
         let base = m as *const syn::ExprMacro as usize;
+        // SOUNDNESS R199 — SPINE MEMBERSHIP IS DECIDED IN TWO STEPS, because a macro's contents are
+        // parsed out of TOKENS into a FRESH tree whose addresses exist in no spine set and never can:
+        // `value_spine_addrs` walks the real body only.
+        //   1. Is the MACRO NODE itself on this `?`'s value spine? `host` is the `syn::Expr::Macro` in
+        //      the real body, which is what a spine can contain (`Ok(vec![H::new()])?` puts it there as
+        //      a by-value argument). NB `base` is the `ExprMacro` PAYLOAD — a different address, used
+        //      for site ordinals, never a spine key.
+        //   2. If so, the macro's VALUE is on the spine, so the value positions INSIDE it are too — but
+        //      only those. `idm!({ out.push(H::new()); gen(n) })?` is a macro node on the spine whose
+        //      statement still runs before the error exit, so re-running the same spine rule over the
+        //      parsed tree is what keeps that case charged. Judging the macro whole would exempt it.
+        // A macro NOT on the spine gets no inner spine at all: everything it builds is interior.
+        let on_spine: Vec<bool> = {
+            let addr = host as *const syn::Expr as usize;
+            self.open_tries.iter().map(|(_, spine)| spine.contains(&addr)).collect()
+        };
+        let mut inner_spine = std::collections::HashSet::new();
+        if on_spine.iter().any(|b| *b) {
+            for e in &exprs {
+                value_spine_addrs(e, &mut inner_spine);
+            }
+        }
         let mut n = 0usize;
         for e in &exprs {
-            self.note_macro_site(e, base, &mut n);
+            self.note_macro_site(e, base, &on_spine, &inner_spine, &mut n);
         }
     }
     /// The site-recording half of `macro_site_ordinals` — the SAME pre-order, the same stop at a
     /// nested macro, so ordinal `k` here is ordinal `k` in `mark_escape`'s independent parse.
-    fn note_macro_site(&mut self, e: &syn::Expr, base: usize, n: &mut usize) {
+    /// `on_spine[i]` is whether the enclosing macro node sits on the value spine of `open_tries[i]`;
+    /// `inner_spine` is the value spine INSIDE the parsed tokens (empty unless some `on_spine[i]`).
+    fn note_macro_site(
+        &mut self,
+        e: &syn::Expr,
+        base: usize,
+        on_spine: &[bool],
+        inner_spine: &std::collections::HashSet<usize>,
+        n: &mut usize,
+    ) {
         if let syn::Expr::Macro(_) = e {
             self.note_nested_macro_leaves(e);
             return;
@@ -2902,15 +2948,33 @@ impl<'a> EscapeSites<'a> {
             self.skip_sites.insert(&*c.func as *const syn::Expr as usize);
         }
         if self.skip_sites.contains(&(e as *const syn::Expr as usize)) {
-            for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, n));
+            for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, on_spine, inner_spine, n));
             return;
         }
         if let Some(l) = ctor_leaf_of_expr(e, self.uses, self.fields, self.returns) {
             let seq = self.seq; // R173 — the macro's own position; its contents evaluate there
+            // SOUNDNESS R199 — the same insertion `note_ctor_site` makes, which this path never did.
+            // A macro-borne construction inside a `?`'s operand is numbered at the MACRO's position,
+            // which is inside the operand and therefore GREATER than the pre-order `?`, so R173's
+            // positional filter reads it as "not built yet" and keeps it in the escaping set; and
+            // because nothing here ever consulted `open_tries`, R194's operand-interior term — the
+            // whole point of which is that position cannot express this — never saw it either.
+            // `{ out.extend(vec![H::new()]); gen(n) }?` therefore lost the `H::drop` that really runs
+            // when `gen` fails (executed: one drop in that frame), a REGRESSION against published
+            // 0.34.0, which vetoed blanket. Denylist direction: OFF the spine unless the macro node
+            // itself is on it, and `interior` can only ever veto MORE.
+            let exempt = inner_spine.contains(&(e as *const syn::Expr as usize));
+            let (open, exits) = (&self.open_tries, &mut self.try_exits);
+            for ((idx, _), spined) in open.iter().zip(on_spine) {
+                if !(*spined && exempt) {
+                    exits[*idx].interior.insert(l.clone());
+                    self.macro_interior_leaves.insert(l.clone());
+                }
+            }
             self.first_ctor_seq.entry(l.clone()).or_insert(seq);
             self.ctor_sites.entry(l).or_default().push((base, ord));
         }
-        for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, n));
+        for_each_child_expr(e, &mut |c| self.note_macro_site(c, base, on_spine, inner_spine, n));
     }
     /// A macro NESTED inside a macro is where the ordinal numbering stops (its parse would need its
     /// own base), so its constructions keep the shipped leaf-keyed answer.
@@ -2965,7 +3029,7 @@ impl<'a> EscapeSites<'a> {
         self.seq += 1; // R173 — pre-order position, read only for its ORDER
         self.note_ctor_site(e); // R172
         if let syn::Expr::Macro(m) = e {
-            self.note_macro_ctor_leaves(m); // R172 — address-keying cannot reach inside a macro
+            self.note_macro_ctor_leaves(m, e); // R172 — address-keying cannot reach inside a macro
         }
         match e {
             syn::Expr::Return(r) => match &r.expr {
