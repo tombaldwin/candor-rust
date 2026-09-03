@@ -11,6 +11,14 @@ after upgrading; review policies and regenerate baselines with the new build.
 
 ## [0.35.0] — 2026-09-03
 
+- **SOUNDNESS R171 (instrument) — the coverage-gate GENERATOR lost 24 rows in its own renderer** (a
+  render-time `.dedup()` merged distinct entry points that share a crate-root alias and an effect set),
+  diffed on a key it chooses by a different rule in each manifest, made a `pub fn` inside an inline `mod`
+  invisible and an `impl` inside one mis-keyed, and picked a crate's registry version lexicographically
+  (R162). Fixed: an `entry` identity column in both manifests with closed accounting that exits non-zero,
+  inline-mod module paths, a semver version pick, and `generate.py --selftest` on every push — the
+  generator's first test surface. Manifests regenerated in the new format: 1,213 covered and 439 open
+  entry points (1,239 / 451 identity-keyed rows); no regressed row is a scanner regression (`1f24fc9`).
 - **⚠ SOUNDNESS R160 (cardinal sin, PUBLISHED in every release to date) — CLOSED: a sibling call
   qualified with `Self::` now resolves exactly as `<Type>::` does.** `Self` is bound in the ordinary
   import map for the length of each `impl` block, so the one path-expansion routine answers every
