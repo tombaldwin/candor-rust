@@ -19,7 +19,16 @@ pub(crate) struct CallCollector<'a> {
     /// The module path of the function being walked. A bare `CFG` reference names the ENCLOSING module's
     /// static, so the forcing edge must be built with this path — see `lazy_qual`.
     pub(crate) modpath: String,
-    pub(crate) uses: &'a HashMap<String, String>,
+    /// This file's `use` map, with `Self` bound to the ENCLOSING impl's type by `decls::scan_items`.
+    ///
+    /// SOUNDNESS R175 — `Cow`, not `&`, because an impl block NESTED IN A BODY rebinds `Self` and the
+    /// binding has to be restored on the way out. `decls::scan_items` binds `Self` for the length of a
+    /// FILE-LEVEL impl (R160), but a `fn outer() { struct N; impl N { fn go() { Self::eff() } } }` is not
+    /// a file-level item — this collector walks it as part of `outer`'s body, where `Self` still said the
+    /// OUTER type. Measured: `A::outer` charged `A::eff`'s `Fs` through a nested `impl N` whose `eff` is
+    /// pure, i.e. a fabrication R160 introduced. Borrowed for every body that contains no nested impl,
+    /// which is nearly all of them, so the clone is paid only where the rebinding happens.
+    pub(crate) uses: std::borrow::Cow<'a, HashMap<String, String>>,
     /// local variable / param / `self` -> expanded type path, grown as `let`s are visited in order.
     pub(crate) vars: HashMap<String, String>,
     /// local variable / param -> trait bound leaves, for dispatch-typed receivers (`t: &dyn Store`,
@@ -544,7 +553,7 @@ impl<'a> CallCollector<'a> {
                 let upper_no_underscore = name.chars().next().is_some_and(|c| c.is_uppercase())
                     && !name.contains('_');
                 self.vars.get(&name).cloned().or_else(|| {
-                    upper_no_underscore.then(|| expand(&name, self.uses))
+                    upper_no_underscore.then(|| expand(&name, &self.uses))
                 })
             }
             syn::Expr::Field(f) => {
@@ -559,7 +568,7 @@ impl<'a> CallCollector<'a> {
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
-            syn::Expr::Call(_) => ctor_type(expr, self.uses, self.returns),
+            syn::Expr::Call(_) => ctor_type(expr, &self.uses, self.returns),
             // `S {..}.method()` / `for _ in (S {..})` — an inline struct literal names its type directly
             // (the same type a `let x = S{..}` binding already resolves via `ctor_type`). Without this a
             // value CONSTRUCTED INLINE and immediately consumed typed to nothing, so the iterator-forcing
@@ -569,7 +578,7 @@ impl<'a> CallCollector<'a> {
             // resulting `Type::method` link to LOCAL types, so this never fabricates onto a non-local value.
             // (`Expr::Paren`/`Expr::Group` transparent wrappers are unwrapped by the arms above, so a
             // parenthesised `for _ in (S {..})` reaches this Struct arm through them.)
-            syn::Expr::Struct(_) => ctor_type(expr, self.uses, self.returns),
+            syn::Expr::Struct(_) => ctor_type(expr, &self.uses, self.returns),
             // Explicit DEREFERENCE receiver `(*b).method()` — transparent: candor already collapses a
             // smart-pointer/reference binding to its POINTEE (`let b = Box::new(W)` types `b` as `W`, a
             // `&W` param types as `W`), so `*b` has the same resolved type as `b`. Recurse into the operand.
@@ -1298,6 +1307,62 @@ impl<'a> CallCollector<'a> {
     /// return `["Fn"]` (non-empty — the premise that it returns empty for Fn/FnMut/FnOnce does not
     /// hold), `trait_vars["f"]` DOES get set, and `f()` was STILL silently dropped — the binding was
     /// live and simply never consulted by the invoking form.
+    /// SOUNDNESS R175 — rebind `Self` for a nested `impl`/`trait` and hand back what to put back.
+    ///
+    /// `decls::scan_items` owns the FILE-LEVEL binding (R160) and this is the same rule one level in, for
+    /// the items that walk arrives inside a BODY rather than beside: `impl A { fn outer() { struct N;
+    /// impl N { fn eff() {} fn go() { Self::eff() } } } }`. Without it `Self::eff` expanded through the
+    /// outer `A` binding and `A::outer` was charged `A::eff`'s effects — a positive claim about a
+    /// function that is pure, published-absent, and introduced by R160.
+    ///
+    /// `None` for a non-nominal self type (`impl Trait for &[u8]`) REMOVES the binding rather than
+    /// leaving the outer one: `Self` inside that impl is not the outer type either, and an unresolved
+    /// path is the safe direction where a wrong one is not. The return is `None` when nothing changed,
+    /// so a body with no nested impl never clones the map.
+    fn rebind_self(&mut self, bound: Option<String>) -> Option<std::borrow::Cow<'a, HashMap<String, String>>> {
+        if self.uses.get(crate::lang::SELF_KEY) == bound.as_ref() {
+            return None;
+        }
+        let saved = self.uses.clone();
+        // §E1 HIT COUNTER — an unchanged row is not evidence the new code ran, so the corpus A/B has to
+        // be able to prove it REACHES the nested-impl rebinding. Same switch as R160's `SELFALIAS`.
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            eprintln!("R175SELFNEST {:?} -> {:?}", self.uses.get(crate::lang::SELF_KEY), bound);
+        }
+        match bound {
+            Some(v) => {
+                self.uses.to_mut().insert(crate::lang::SELF_KEY.to_string(), v);
+            }
+            None => {
+                self.uses.to_mut().remove(crate::lang::SELF_KEY);
+            }
+        }
+        Some(saved)
+    }
+    /// The other half of `rebind_self`. Separate so every exit path of a visitor restores through ONE
+    /// statement — the R160 arm in `scan_items` removes its binding at a single `uses.remove` for the
+    /// same reason.
+    fn restore_self(&mut self, saved: Option<std::borrow::Cow<'a, HashMap<String, String>>>) {
+        if let Some(u) = saved {
+            self.uses = u;
+        }
+    }
+    /// SOUNDNESS R177 — is this leaf set ONLY the synthetic callable marker?
+    ///
+    /// `"Fn"` is a HEDGE, not a type. It matches no local trait, so the dispatch route can resolve
+    /// nothing through it, while a CONCRETE element type can — and R177 made the two collide for the
+    /// first time: `callable_aliases` is keyed by LEAF, so a `mod a { type H = Box<dyn Fn(&str)> }`
+    /// beside a `mod b { struct H; struct S { hs: Vec<H> } }` gave `S`'s field the `["Fn"]` leaves and
+    /// the dispatch route then DISPLACED the concrete `b::H` element typing: `for h in &self.hs {
+    /// h.run(p) }` went from `["Fs"]` on published 0.34.0 to ABSENT. Measured on an executed fixture
+    /// before this guard existed, which is why it exists.
+    ///
+    /// So where a concrete element type is also available, the hedge does not displace it: the binder
+    /// takes the concrete route AND keeps `fn_typed_vars`, so `h.run()` resolves and `h()` still
+    /// discloses `Unknown`. Both facts, neither traded for the other.
+    fn callable_hedge_only(leaves: &[String]) -> bool {
+        leaves.len() == 1 && leaves[0] == "Fn"
+    }
     fn leaves_are_callable(leaves: &[String]) -> bool {
         crate::lang::leaves_are_callable(leaves)
     }
@@ -1748,10 +1813,10 @@ impl<'a> CallCollector<'a> {
                 } else {
                     self.fn_typed_vars.remove(&name);
                 }
-                if let Some(ty) = type_path(ty_el, self.uses) {
+                if let Some(ty) = type_path(ty_el, &self.uses) {
                     self.vars.insert(name.clone(), ty);
                 }
-                if let Some(e) = elem_type(ty_el, self.uses) {
+                if let Some(e) = elem_type(ty_el, &self.uses) {
                     self.elem_of.insert(name, e);
                 }
             }
@@ -1827,11 +1892,25 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         );
         let outer_q = std::mem::take(&mut self.trait_quals);
         let outer_p = std::mem::take(&mut self.trait_quals_by_param);
+        // SOUNDNESS R175 — …and `Self`, which is the one binding in this list that is NOT empty on entry.
+        let bound = crate::lang::impl_type_name(&node.self_ty).map(|t| crate::lang::expand(&t, &self.uses));
+        let outer_self = self.rebind_self(bound);
         syn::visit::visit_item_impl(self, node);
+        self.restore_self(outer_self);
         self.dyn_sig_traits = outer;
         self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
+    }
+    /// SOUNDNESS R175, the TRAIT half — `fn outer() { trait T { fn go() { Self::h() } fn h() {} } }`.
+    /// `decls::scan_items` binds `Self` to the TRAIT for a file-level trait's default bodies; a trait
+    /// declared inside a body reached this collector with `Self` still naming the enclosing impl's type,
+    /// so a `Self::`-qualified call in a nested trait's default body charged the OUTER type's method.
+    /// Same binding as the file-level arm, from the same authority, restored on exit.
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        let outer_self = self.rebind_self(Some(node.ident.to_string()));
+        syn::visit::visit_item_trait(self, node);
+        self.restore_self(outer_self);
     }
     /// A METHOD of a nested `impl` carries its own generics (`fn m<T: Doer>(&self, d: T)`), which the
     /// impl block's `Generics` do not contain — so without this the impl form of the shadow above stays
@@ -1912,7 +1991,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let mut path = ident
                             .as_ref()
                             .and_then(|n| self.fn_alias.get(n).cloned())
-                            .unwrap_or_else(|| expand(&path_to_string(&p.path), self.uses));
+                            .unwrap_or_else(|| expand(&path_to_string(&p.path), &self.uses));
                         // A QSELF call (`<Type>::assoc()` / `<Type as Trait>::m()`) is an ASSOCIATED-fn call
                         // on the qself receiver TYPE, not a free fn — but `path_to_string(&p.path)` DROPS the
                         // qself type (`p.qself.ty`), so an INHERENT-form `<Vec<u8>>::new()` collapses to the
@@ -1928,7 +2007,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // (`method:true` → resolve_target None): an honest under-report, never a fabrication.
                         let mut method = false;
                         if p.qself.is_some() && !path.contains("::") {
-                            match p.qself.as_ref().and_then(|q| type_path(&q.ty, self.uses)) {
+                            match p.qself.as_ref().and_then(|q| type_path(&q.ty, &self.uses)) {
                                 Some(ty) => path = format!("{ty}::{path}"),
                                 None => method = true,
                             }
@@ -1968,7 +2047,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // `Expr::Call`, so it failed the old `contains("::")` test, and the qualified
                         // spelling's `tail2` head is the MODULE). Read off the RESOLVED path, after
                         // fn-alias and qself restoration, so `<Daemon>::new()` still keys on Daemon.
-                        let ctor = crate::lang::ctor_leaf_from_call_path(&path, self.uses)
+                        let ctor = crate::lang::ctor_leaf_from_call_path(&path, &self.uses)
                             // SOUNDNESS R165 — …and, when the callee path names no type at all, what the
                             // callee's own recorded RETURN type says it produces. A free-function
                             // constructor (`let c = from_handle(p);`) had no route in ANY position after
@@ -1986,7 +2065,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // callee path, exactly what `cross_ctor_leaf_from_call_path` needs to recover the
                         // crate segment `ctor_leaf_from_call_path` discards.
                         self.note_cross_construction(
-                            crate::lang::cross_ctor_leaf_from_call_path(&path, self.uses));
+                            crate::lang::cross_ctor_leaf_from_call_path(&path, &self.uses));
                         self.calls.push(Call { path, leaf, str_arg, typed: false, method,
                                                is_macro: false, path_lits_partial, path_lit2 });
                     }
@@ -2078,7 +2157,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             _ => match peel_recv(&node.receiver) {
                 syn::Expr::Call(c) => match &*c.func {
                     syn::Expr::Path(p) => {
-                        let full = expand(&path_to_string(&p.path), self.uses);
+                        let full = expand(&path_to_string(&p.path), &self.uses);
                         (full.contains("::") && !full.starts_with("::")).then_some(full)
                     }
                     _ => None,
@@ -2234,7 +2313,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     let written = per_param.or_else(|| {
                         self.trait_quals.get(&tr).map(|q| q.as_str()).filter(|q| !q.is_empty())
                     }).unwrap_or(tr.as_str());
-                    let full = crate::lang::expand(written, self.uses);
+                    let full = crate::lang::expand(written, &self.uses);
                     let root = full.split("::").next().unwrap_or("");
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
                         self.calls.push(Call {
@@ -2398,7 +2477,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         };
                         if !two_seg_trait_method {
                             let name = path_to_string(&p.path);
-                            let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, self.uses));
+                            let path = self.fn_alias.get(&name).cloned().unwrap_or_else(|| expand(&name, &self.uses));
                             let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
                             self.calls.push(Call { path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                         }
@@ -2428,7 +2507,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             if Self::leaves_are_callable(&elem_leaves) {
                                 self.fn_typed_vars.insert(name.clone());
                             }
-                            self.scoped_binding(&name, Bound::Traits(elem_leaves.clone()), |s| s.visit_expr(&cl.body));
+                            // R177 — same rule as the for-loop binder: the hedge never displaces a
+                            // concrete element type (`xs.iter().for_each(|h| h.run())`).
+                            if Self::callable_hedge_only(&elem_leaves) && elem_ty.is_some() {
+                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    eprintln!("R177HEDGEKEEP closure {name} : {elem_ty:?}");
+                                }
+                                self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
+                            } else {
+                                self.scoped_binding(&name, Bound::Traits(elem_leaves.clone()), |s| s.visit_expr(&cl.body));
+                            }
                         } else {
                             self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
                         }
@@ -2611,7 +2699,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if Self::leaves_are_callable(&leaves) {
                     self.fn_typed_vars.insert(name.clone());
                 }
-                self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.body));
+                // R177 — the synthetic callable hedge does not displace a concrete element type; see
+                // `callable_hedge_only`. Both the hedge and the concrete typing are installed.
+                if Self::callable_hedge_only(&leaves) && elem.is_some() {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R177HEDGEKEEP for-loop {name} : {elem:?}");
+                    }
+                    self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
+                } else {
+                    self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.body));
+                }
             } else {
                 self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
             }
@@ -2795,14 +2892,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // so the call arm above owns that spelling.
         if node.qself.is_none() && !self.in_pattern {
             let full = path_to_string(&node.path);
-            let ctor = crate::lang::ctor_leaf_from_value_path(&full, self.uses, self.fields);
+            let ctor = crate::lang::ctor_leaf_from_value_path(&full, &self.uses, self.fields);
             self.note_construction(ctor);
             // CROSS-CRATE sibling — R68(1). Before this, this was the ONLY spelling reaching a
             // correctly-keyed cross-crate marker, and only by accident (the lazy-static forcing code's
             // `dep_lazy_keys` shared this same visit and derived the right key purely because a
             // 2-segment written path's "rest" happens to equal the type leaf).
             self.note_cross_construction(
-                crate::lang::cross_ctor_leaf_from_value_path(&full, self.uses, self.fields));
+                crate::lang::cross_ctor_leaf_from_value_path(&full, &self.uses, self.fields));
         }
         syn::visit::visit_expr_path(self, node);
     }
@@ -2813,14 +2910,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
         if node.qself.is_none() {
             let ctor = crate::lang::ctor_leaf_of_expr(
-                &syn::Expr::Struct(node.clone()), self.uses, self.fields, self.returns);
+                &syn::Expr::Struct(node.clone()), &self.uses, self.fields, self.returns);
             self.note_construction(ctor);
             // CROSS-CRATE sibling — R68(1). This spelling had NO route to a cross-crate marker at all
             // before this fix; `deplib::Guard { n: 1 }` read silent-pure regardless of what deplib's own
             // report said.
             let full = path_to_string(&node.path);
             self.note_cross_construction(
-                crate::lang::cross_ctor_leaf_from_struct_path(&full, self.uses));
+                crate::lang::cross_ctor_leaf_from_struct_path(&full, &self.uses));
         }
         syn::visit::visit_expr_struct(self, node);
     }
@@ -2855,7 +2952,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         saved_fn_typed.push((name, was));
                     }
                 }
-                if let (Some(name), Some(ty)) = (single_pat_ident(&pt.pat), type_path(&pt.ty, self.uses)) {
+                if let (Some(name), Some(ty)) = (single_pat_ident(&pt.pat), type_path(&pt.ty, &self.uses)) {
                     let prev = self.vars.insert(name.clone(), ty);
                     saved.push((name, prev));
                 }
@@ -3040,12 +3137,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if !leaves.is_empty() {
                     self.vars.remove(&id.ident.to_string()); // a stale concrete binding must not shadow the rebind
                     self.trait_vars.insert(id.ident.to_string(), leaves);
-                } else if let Some(ty) = type_path(&pt.ty, self.uses) {
+                } else if let Some(ty) = type_path(&pt.ty, &self.uses) {
                     self.vars.insert(id.ident.to_string(), ty);
                 }
                 // A COLLECTION-typed let (`let xs: Vec<Sender> = ..`) — record its element type so a
                 // later `for c in xs`, `xs[0]`, `xs.iter().for_each(..)` resolves the element.
-                if let Some(e) = elem_type(&pt.ty, self.uses) {
+                if let Some(e) = elem_type(&pt.ty, &self.uses) {
                     self.elem_of.insert(id.ident.to_string(), e);
                 }
                 // …and the DISPATCH counterpart, which this site never asked for at all: a
@@ -3057,14 +3154,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // new resolution path. Cleared first, so an annotation that is NOT a dispatch container
                 // cannot leave a previous binding's leaves standing (the stale-rebind defect of `71c2495`).
                 self.elem_trait_of.remove(&id.ident.to_string());
-                let elem_leaves = elem_trait_leaves(&pt.ty, &self.generic_bounds);
+                let elem_leaves = elem_trait_leaves(&pt.ty, &self.generic_bounds, self.callable_aliases);
                 if !elem_leaves.is_empty() {
                     self.elem_trait_of.insert(id.ident.to_string(), elem_leaves);
                 }
                 // A TUPLE-typed let (`let pair: (Sender, usize) = ..`) — record its per-position types
                 // so a later `let (s, _) = pair;` types `s`.
                 self.tuple_of.remove(&id.ident.to_string());
-                if let Some(t) = tuple_types(&pt.ty, self.uses) {
+                if let Some(t) = tuple_types(&pt.ty, &self.uses) {
                     self.tuple_of.insert(id.ident.to_string(), t);
                 }
                 // …and the tuple's per-position DISPATCH leaves, the `tuple_trait_of` twin of the above.
@@ -3080,7 +3177,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // resolved syntactically → skipped (no flood; an `.into()` to a std type lights nothing).
                 if let Some(init) = &node.init {
                     if expr_is_into_call(&init.expr) {
-                        if let Some(tgt) = type_path(&pt.ty, self.uses) {
+                        if let Some(tgt) = type_path(&pt.ty, &self.uses) {
                             let tgt_leaf = tgt.rsplit("::").next().unwrap_or(&tgt).to_string();
                             self.charge_from(&tgt_leaf);
                         }
@@ -3141,7 +3238,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     .and_then(|t| t.get(i).cloned().flatten())
                     .or_else(|| match init {
                         Some(syn::Expr::Tuple(it)) => {
-                            it.elems.iter().nth(i).and_then(|e| ctor_type(e, self.uses, self.returns))
+                            it.elems.iter().nth(i).and_then(|e| ctor_type(e, &self.uses, self.returns))
                         }
                         _ => None,
                     });
@@ -3299,7 +3396,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         self.dep_bound_vars.remove(&id.ident.to_string());
                         if let syn::Expr::Call(c) = peel_recv(&init.expr) {
                             if let syn::Expr::Path(p) = &*c.func {
-                                let full = expand(&path_to_string(&p.path), self.uses);
+                                let full = expand(&path_to_string(&p.path), &self.uses);
                                 // A multi-segment path whose head is a plausible crate root. The head is
                                 // checked against the manifest's declared deps at CONSUMPTION in scan.rs,
                                 // so a local module sharing the shape emits an inert marker.
@@ -3313,7 +3410,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 }
                             }
                         }
-                        if let Some(ty) = ctor_type(&init.expr, self.uses, self.returns) {
+                        if let Some(ty) = ctor_type(&init.expr, &self.uses, self.returns) {
                             self.vars.insert(id.ident.to_string(), ty.clone());
                             // It typed after all — the provenance marker is redundant and must not fire.
                             self.dep_bound_vars.remove(&id.ident.to_string());
@@ -3381,7 +3478,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                         .get_ident()
                                         .and_then(|i| s.fn_alias.get(&i.to_string()).cloned())
                                         .unwrap_or_else(|| {
-                                            expand(&path_to_string(&p.path), s.uses)
+                                            expand(&path_to_string(&p.path), &s.uses)
                                         }),
                                 )
                             });
@@ -3422,7 +3519,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             self.tuple_trait_of.insert(id.ident.to_string(), leaves);
                         }
                         let types: Vec<Option<String>> =
-                            it.elems.iter().map(|e| ctor_type(e, self.uses, self.returns)).collect();
+                            it.elems.iter().map(|e| ctor_type(e, &self.uses, self.returns)).collect();
                         if types.iter().any(|t| t.is_some()) {
                             self.tuple_of.insert(id.ident.to_string(), types);
                         }
@@ -3453,7 +3550,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // SKIPS it (a macro is never a call to a local FUNCTION; without this it would mis-link to a
         // same-named local fn and fabricate that fn's effect onto a pure caller). Classification, the
         // builder table, and κ blind-disclosure still apply (they key on the path/crate, not the edge).
-        let mpath = expand(&path_to_string(&node.path), self.uses);
+        let mpath = expand(&path_to_string(&node.path), &self.uses);
         let mleaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
         // `cfg_if::cfg_if! { if #[cfg(..)] { .. } else if #[cfg(..)] { .. } else { .. } }` (and the bare
         // `cfg_if!` after `use cfg_if::cfg_if`) is a MACRO that syn leaves opaque, so every effectful call
@@ -3732,7 +3829,10 @@ pub(crate) fn reexport_aliases(
     /// Rust in which the explicit import SHADOWS the glob, so when both kinds bring one name into one
     /// module the explicit definitions are the answer and the glob's are not. That is the same
     /// precedence `module_glob_alias` already applies one index over.
-    type ExportClaims = (BTreeSet<usize>, BTreeSet<String>, BTreeSet<String>);
+    /// The fourth member is SOUNDNESS R176: whether ANY edge that brought this name into this module was
+    /// `#[cfg]`-gated (or inherited that taint through a chained re-export). It gates the
+    /// explicit-beats-glob precedence below and nothing else.
+    type ExportClaims = (BTreeSet<usize>, BTreeSet<String>, BTreeSet<String>, bool);
     let mut exported: BTreeMap<String, BTreeMap<String, ExportClaims>> = BTreeMap::new();
     for f in fns {
         // A synthetic lazy-init unit is reachable only through the forcing edge its own qual spells out.
@@ -3748,23 +3848,32 @@ pub(crate) fn reexport_aliases(
         let mut changed = false;
         for (i, ed) in edges.iter().enumerate() {
             let explicit = ed.name != "*";
-            let mut adds: Vec<(String, String)> = Vec::new();
+            // R176 — the edge's own `#[cfg]`, plus whatever taint the SOURCE entry already carries: a
+            // chained re-export of a name that reached its own module through a platform split is still
+            // a platform split when it arrives here. Tainting one level further than strictly needed
+            // costs a union; missing it costs the other arm's definition.
+            let mut adds: Vec<(String, String, bool)> = Vec::new();
             for src in &ed.from {
                 let Some(names) = exported.get(src) else { continue };
                 if ed.name == "*" {
-                    for (n, (_, quals, _)) in names {
-                        adds.extend(quals.iter().map(|q| (n.clone(), q.clone())));
+                    for (n, (_, quals, _, src_cfg)) in names {
+                        adds.extend(quals.iter().map(|q| (n.clone(), q.clone(), ed.cfg_gated || *src_cfg)));
                     }
-                } else if let Some((_, quals, _)) = names.get(&ed.name) {
-                    adds.extend(quals.iter().map(|q| (ed.alias.clone(), q.clone())));
+                } else if let Some((_, quals, _, src_cfg)) = names.get(&ed.name) {
+                    let cfg = ed.cfg_gated || *src_cfg;
+                    adds.extend(quals.iter().map(|q| (ed.alias.clone(), q.clone(), cfg)));
                 }
             }
-            for (n, q) in adds {
+            for (n, q, cfg) in adds {
                 let e = exported.entry(ed.module.clone()).or_default().entry(n).or_default();
                 changed |= e.0.insert(i);
                 changed |= e.1.insert(q.clone());
                 if explicit {
                     changed |= e.2.insert(q);
+                }
+                if cfg && !e.3 {
+                    e.3 = true;
+                    changed = true;
                 }
             }
         }
@@ -3789,7 +3898,7 @@ pub(crate) fn reexport_aliases(
             continue;
         }
         let mlast = module.rsplit("::").next().unwrap_or(module);
-        for (name, (from_edges, _, _)) in names {
+        for (name, (from_edges, _, _, _)) in names {
             // A name the module only DECLARES is not a claim on the alias index: the primary tail2 index
             // holds it, and `reexport_target` steps aside whenever that index has the key at all.
             if from_edges.iter().all(|e| *e == DECLARED_HERE) {
@@ -3813,7 +3922,7 @@ pub(crate) fn reexport_aliases(
             continue;
         }
         let mlast = module.rsplit("::").next().unwrap_or(module);
-        for (name, (from_edges, quals, explicit_quals)) in names {
+        for (name, (from_edges, quals, explicit_quals, cfg_gated)) in names {
             if from_edges.contains(&DECLARED_HERE) {
                 continue;
             }
@@ -3840,7 +3949,43 @@ pub(crate) fn reexport_aliases(
             // when the two edges are a glob and an explicit import rather than `#[cfg]` twins — Rust
             // gives the explicit one precedence, and `explicit_quals` applies exactly that, so the glob's
             // definitions are used only when nothing explicit brought the name in.
-            let effective = if explicit_quals.is_empty() { quals } else { explicit_quals };
+            // SOUNDNESS R176 — explicit-beats-glob is Rust's rule WITHIN ONE CONFIGURATION, and R169
+            // applied it ACROSS `#[cfg]` arms. Measured: `#[cfg(unix)] pub use unix::*` (whose `size`
+            // runs a process) beside `#[cfg(windows)] pub use windows::size` (which reads a file) made
+            // `size` read `['Fs']` ALONE — the unix arm's `Exec` silenced behind a positive claim about
+            // the other platform, on a caller that is absent from published 0.34.0 entirely. The two
+            // arms never coexist in any build, so neither shadows the other; every arm's edge is live
+            // and the answer is the union, which is what this function's own doc comment says it does
+            // for the `#[cfg_attr(path)]` spelling of the same split.
+            //
+            // THE DIRECTION IT FAILS IN, stated before it was written: toward the UNION, i.e. toward
+            // OVER-charging. A `#[cfg]` on either kind of edge disables the narrowing, so a genuine
+            // same-configuration shadow that happens to be gated keeps the glob's definitions too — an
+            // over-approximation, never a withdrawal. The reverse (comparing cfg PREDICATES to decide
+            // which arms coexist) would be a narrowing decided on a property this scanner cannot
+            // evaluate, which is the direction the family's denylist rule refuses.
+            // §E1 HIT COUNTER — this is precisely the branch the R169 precedence used to take the other
+            // way; without it a byte-identical A/B says nothing about whether the corpus reached it.
+            if *cfg_gated && !explicit_quals.is_empty() && explicit_quals != quals
+                && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+            {
+                eprintln!("R176CFGUNION {mlast}::{name} -> {quals:?} (was {explicit_quals:?})");
+            }
+            let mut effective = if explicit_quals.is_empty() || *cfg_gated { quals } else { explicit_quals };
+            // R176 — THE UNION MUST NEVER TURN AN ADMITTED KEY INTO A DROPPED ONE. The fan-out cap is a
+            // never-guess rule, and widening `effective` from the explicit set to the whole union can
+            // push a key OVER it that was comfortably under before: the key is then dropped, the caller
+            // resolves to nothing, and the row goes ABSENT — a silence introduced by a fix for a
+            // silence. MEASURED, not anticipated: thirteen `#[cfg(unix)] pub use gN::*` arms beside one
+            // ungated `pub use expl::pick` made `go` read ['Fs'] on the 0.35.0 candidate and vanish
+            // here, on a fixture that really does spawn a process. So fall back to the explicit set
+            // when the union does not fit and it does — never worse than the pre-R176 answer, in the
+            // one case where R176's own answer is unavailable.
+            if effective.len() > REEXPORT_FANOUT_MAX && !explicit_quals.is_empty()
+                && explicit_quals.len() <= REEXPORT_FANOUT_MAX
+            {
+                effective = explicit_quals;
+            }
             if effective.is_empty() || effective.len() > REEXPORT_FANOUT_MAX {
                 continue;
             }

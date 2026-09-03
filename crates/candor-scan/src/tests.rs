@@ -234,7 +234,7 @@
         let fet = FieldElemTraitIndex::new();
         let mut c = CallCollector {
             modpath: String::new(),
-            uses: &uses,
+            uses: std::borrow::Cow::Borrowed(&uses),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -284,7 +284,7 @@
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
         let mut c = CallCollector {
             modpath: String::new(),
-            uses: &uses,
+            uses: std::borrow::Cow::Borrowed(&uses),
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -612,7 +612,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let consts = std::collections::HashMap::new();
         let macros = std::collections::HashMap::new();
         let mut c = CallCollector {
-            modpath: String::new(), uses: &uses, vars: HashMap::new(), trait_vars: HashMap::new(),
+            modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -4980,7 +4980,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             vars.insert("self".to_string(), "App".to_string());
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: &uses,
+                uses: std::borrow::Cow::Borrowed(&uses),
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
@@ -5037,7 +5037,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -5061,7 +5061,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let blk: syn::Block = syn::parse_str(src).unwrap();
                 let mut c = CallCollector {
             modpath: String::new(),
-                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                    uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -5091,7 +5091,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
         let mut c = CallCollector {
             modpath: String::new(),
-            uses: &uses,
+            uses: std::borrow::Cow::Borrowed(&uses),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -5127,7 +5127,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str(src).unwrap();
             let mut cc = CallCollector {
             modpath: String::new(),
-                uses: &uses,
+                uses: std::borrow::Cow::Borrowed(&uses),
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -8765,7 +8765,7 @@ trait G {
             root_reexports => |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); },
             // `pub use self::platform::*` in a SUBMODULE — a call `imp::doit()` in ANOTHER file resolves
             // through it, so a change to the edge set re-resolves that file's calls.
-            reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into() }); },
+            reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into(), cfg_gated: false }); },
             // R99: `mod facade { pub use std::process::Command; }` / `pub type Cmd = …` — seeded into
             // EVERY file's `use` map, so a change re-resolves `facade::Command::new` in other files.
             mod_aliases => |m| { m.mod_aliases.insert("facade::Command".into(), "std::process::Command".into()); },
@@ -10290,7 +10290,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15"] {
+        // R176 bumped the token to rev18 (and recorded that the R161 bump to rev17 never reached the
+        // string). `rev16` and `rev17` join the stale list rather than replacing an entry: an entry
+        // written by a 0.35.0-dev binary from before the `Reexport::cfg_gated` field must be discarded,
+        // not read as "every re-export in this file is unconditional".
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -10301,7 +10305,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev16/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev18/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -13736,7 +13740,7 @@ pub fn go() {{ imp::doit(); }}
         let consts = std::collections::HashMap::new();
         let macros = std::collections::HashMap::new();
         let mut c = CallCollector {
-            modpath: String::new(), uses: &uses, vars: HashMap::new(), trait_vars: HashMap::new(),
+            modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -13954,6 +13958,326 @@ pub fn go() {{ imp::doit(); }}
         for absent in ["K::read_const", "S::mk"] {
             assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != absent),
                     "`{absent}` performs nothing — an associated const and an enum ctor are not calls:\n{v:#}");
+        }
+    }
+
+    // ================================ SOUNDNESS R177 ================================
+    // `pub type Cb = Box<dyn Fn()>; cb: Option<Cb>` + `if let Some(c) = &self.cb { c() }` was ABSENT
+    // from `functions[]` on PUBLISHED 0.34.0 and on the 0.35.0 candidate alike — an affirmative purity
+    // claim over a caller-installed callback, executed ground truth. R161 closed the bare-fn-pointer
+    // payload and listed the alias-in-a-container spelling as "not established".
+
+    /// R177, the trigger. SILENCE direction. Every unwrap binder over the field must disclose `Unknown`;
+    /// the `.unwrap()` spelling (`fire_direct`) already did, which is what makes the alias the single
+    /// variable. FAILS pre-fix: the four binder rows are absent entirely.
+    #[test]
+    fn a_callable_alias_inside_an_option_field_discloses_at_every_unwrap_binder() {
+        let v = scan_src_to_json("r177field", "\
+            pub type Cb = Box<dyn Fn()>;\n\
+            pub struct H { pub cb: Option<Cb>, pub many: Vec<Cb> }\n\
+            impl H {\n\
+                pub fn fire_if_let(&self) { if let Some(c) = &self.cb { c() } }\n\
+                pub fn fire_match(&self) { match &self.cb { Some(c) => c(), None => {} } }\n\
+                pub fn fire_map(&self) { let _ = self.cb.as_ref().map(|c| c()); }\n\
+                pub fn fire_as_ref(&self) { if let Some(c) = self.cb.as_ref() { c() } }\n\
+                pub fn fire_while(&self) { while let Some(c) = &self.cb { c(); break } }\n\
+                pub fn fire_vec(&self) { for c in &self.many { c() } }\n\
+                pub fn fire_direct(&self) { (self.cb.as_ref().unwrap())() }\n\
+            }\n");
+        for n in ["H::fire_if_let", "H::fire_match", "H::fire_map", "H::fire_as_ref",
+                  "H::fire_while", "H::fire_vec", "H::fire_direct"] {
+            let f = fn_entry(&v, n);
+            assert_eq!(effs(f), vec!["Unknown".to_string()],
+                       "`{n}` invokes a caller-installed callback; silence is a purity claim:\n{v:#}");
+            assert!(f.get("unknownWhy").is_some(), "`{n}` must say WHY it is Unknown:\n{v:#}");
+        }
+    }
+
+    /// R177 — the same alias in a PARAMETER's container, in a `let` annotation, and as a fn's RETURN
+    /// type. The return position is R161's own stated residual ("Pass A has no completed alias index")
+    /// and R181's `via_ret`; the pre-seed pass closes it for a same-file alias. The DOUBLE alias
+    /// (`type Cb2 = Cb`) is R181's `via_b`, closed by the same pre-seed running to a fixpoint.
+    #[test]
+    fn a_callable_alias_discloses_through_a_param_a_let_and_a_return() {
+        let v = scan_src_to_json("r177pos", "\
+            pub type Cb = Box<dyn Fn()>;\n\
+            pub type Cb2 = Cb;\n\
+            pub fn via_param(cb: &Option<Cb>) { if let Some(c) = cb { c() } }\n\
+            pub fn via_let(cb: &Option<Cb>) { let o: &Option<Cb> = cb; if let Some(c) = o { c() } }\n\
+            pub fn via_double(cb: &Option<Cb2>) { if let Some(c) = cb { c() } }\n\
+            pub fn make() -> Cb { Box::new(|| {}) }\n\
+            pub fn via_ret() { let g = make(); g() }\n");
+        for n in ["via_param", "via_let", "via_double", "via_ret"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Unknown".to_string()],
+                       "`{n}` reaches an opaque callback through a `type NAME = <callable>`:\n{v:#}");
+        }
+    }
+
+    /// R177 — DECLARATION ORDER, which is the only thing `seed_callable_aliases` buys and therefore the
+    /// only thing that can protect it. `collect_decls` both builds and consumes `callable_aliases` in
+    /// source order, so an alias written BELOW the struct that uses it (and a CHAIN written in reverse)
+    /// was invisible to the field/return indexes. Every other R177 test here happens to declare the
+    /// alias first — measured by reverting the pre-pass and watching them all stay green, which is what
+    /// this test exists for.
+    #[test]
+    fn a_callable_alias_declared_after_its_use_is_still_seen() {
+        let v = scan_src_to_json("r177order", "\
+            pub struct H { pub cb: Option<Cb2> }\n\
+            impl H { pub fn fire(&self) { if let Some(c) = &self.cb { c() } } }\n\
+            pub fn make() -> Cb2 { Box::new(|| {}) }\n\
+            pub fn via_ret() { let g = make(); g() }\n\
+            pub type Cb2 = Cb;\n\
+            pub type Cb = Box<dyn Fn()>;\n");
+        for n in ["H::fire", "via_ret"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Unknown".to_string()],
+                       "`{n}` uses an alias CHAIN declared below it and in reverse order; source order \
+                        is not a property of the program:\n{v:#}");
+        }
+    }
+
+    /// R177 CONTROL, and the regression this fix ACTUALLY CAUSED before the guard existed.
+    /// `callable_aliases` is keyed by LEAF, so `mod a { type H = Box<dyn Fn(&str)> }` beside
+    /// `mod b { struct H; struct S { hs: Vec<H> } }` gave `S::hs` the synthetic `["Fn"]` element leaves
+    /// — and the dispatch route DISPLACED the concrete `b::H` typing, taking `for h in &self.hs {
+    /// h.run(p) }` from `["Fs"]` on published 0.34.0 to ABSENT. Measured on an executed fixture, not
+    /// reasoned about. `callable_hedge_only` is what keeps both facts; delete it and this goes red.
+    #[test]
+    fn ctrl_a_callable_alias_leaf_does_not_displace_a_same_named_types_element_typing() {
+        let v = scan_src_to_json("r177collide", "\
+            pub mod a { pub type H = Box<dyn Fn(&str)>; pub fn use_it(f: H) { f(\"x\") } }\n\
+            pub mod b {\n\
+                pub struct H;\n\
+                impl H { pub fn run(&self, p: &str) { let _ = std::fs::write(p, \"x\"); } }\n\
+                pub struct S { pub hs: Vec<H> }\n\
+                impl S {\n\
+                    pub fn go_vec(&self, p: &str) { for h in &self.hs { h.run(p) } }\n\
+                    pub fn go_iter(&self, p: &str) { self.hs.iter().for_each(|h| h.run(p)) }\n\
+                    pub fn go_idx(&self, p: &str) { self.hs[0].run(p) }\n\
+                }\n\
+            }\n");
+        for n in ["b::S::go_vec", "b::S::go_iter", "b::S::go_idx"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Fs".to_string()],
+                       "`{n}` iterates CONCRETE `b::H` values; an unrelated module's same-named callable \
+                        alias must not withdraw the edge:\n{v:#}");
+        }
+        assert_eq!(effs(fn_entry(&v, "a::use_it")), vec!["Unknown".to_string()],
+                   "…and the alias's own callable position must still disclose:\n{v:#}");
+    }
+
+    /// R177 CONTROL — the OVER-CHARGE direction. The synthetic `"Fn"` leaf names no local trait, so it
+    /// can never contribute a concrete effect; a pure function holding a container of a NON-callable
+    /// alias must stay absent. Reachable: `CANDOR_ALIAS_DEBUG=1` prints no `R177ELEMALIAS` for it, and
+    /// the callable sibling in the same fixture proves the branch is live in this file.
+    #[test]
+    fn ctrl_a_non_callable_alias_container_gains_nothing() {
+        let v = scan_src_to_json("r177nonfn", "\
+            pub struct Plain;\n\
+            pub type Al = Plain;\n\
+            pub type Cb = Box<dyn Fn()>;\n\
+            pub struct H { pub a: Option<Al>, pub c: Option<Cb> }\n\
+            impl H {\n\
+                pub fn touch_plain(&self) -> bool { self.a.is_some() }\n\
+                pub fn fire(&self) { if let Some(c) = &self.c { c() } }\n\
+            }\n");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "H::touch_plain"),
+                "`Option<Plain>` is not a callback; `touch_plain` performs nothing:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "H::fire")), vec!["Unknown".to_string()],
+                   "the callable sibling proves the new branch is live in this file:\n{v:#}");
+    }
+
+    /// R177 RESIDUAL, stated rather than assumed, and the claim was CHECKED by reverting rather than
+    /// reasoned about. The Pass-A indexes (`field_elem_trait`, the return sentinel) are built per FILE
+    /// and cached per file, so an alias declared in ANOTHER file is not visible to them — `types.rs`
+    /// holding `pub type Cb` and `holder.rs` holding the struct stays silent at the FIELD position.
+    /// Widening that would mean invalidating every file's cache entry whenever any file's aliases
+    /// change.
+    ///
+    /// The PARAMETER position is answered, because `seed_elem_of` runs in Pass B against the MERGED
+    /// index — and that is a gain of this fix, not something R161 already had: R161 put `cb` itself in
+    /// `fn_typed_vars` (so `cb()` disclosed), but the name bound by `if let Some(c) = cb` came from
+    /// `elem_trait_of`, which had no answer for an alias payload. Reverting the new arm makes the second
+    /// assertion here fail, which is how that was established.
+    #[test]
+    fn residual_a_cross_file_callable_alias_is_not_seen_by_the_field_index() {
+        let v = scan_crate_to_json("r177xfile", &[
+            ("src/lib.rs", "pub mod types;\npub mod holder;\n"),
+            ("src/types.rs", "pub type Cb = Box<dyn Fn()>;\n"),
+            ("src/holder.rs", "\
+                use crate::types::Cb;\n\
+                pub struct H { pub cb: Option<Cb> }\n\
+                impl H { pub fn fire(&self) { if let Some(c) = &self.cb { c() } } }\n\
+                pub fn via_param(cb: &Option<Cb>) { if let Some(c) = cb { c() } }\n"),
+        ]);
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "holder::H::fire"),
+                "RESIDUAL, not a guarantee: a cross-FILE alias is invisible to the per-file field \
+                 index, so this really is a silent under-report:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "holder::via_param")), vec!["Unknown".to_string()],
+                   "the PARAMETER position is resolved in Pass B against the MERGED alias index, so \
+                    the unwrap binder inside it does see a cross-file alias:\n{v:#}");
+    }
+
+    // ================================ SOUNDNESS R175 ================================
+    // R160 binds `Self` for the length of a FILE-LEVEL impl block. An impl nested INSIDE a method body
+    // is not a file-level item — `CallCollector` walks it as part of the enclosing method's body — so
+    // `Self` there still named the OUTER impl's type and the nested `Self::eff()` was charged to the
+    // outer type's same-named method. A fabrication introduced by R160; published 0.34.0 is absent.
+
+    /// R175, the trigger. FABRICATION direction: `A::outer` reaches only the nested `N::eff`, which is
+    /// pure, so it must not appear at all. FAILS on the pre-fix binary, where `Self::eff` expanded
+    /// through the enclosing `A` binding and `A::outer` read `["Fs"]`.
+    #[test]
+    fn the_self_binding_does_not_leak_into_an_impl_nested_in_a_body() {
+        let v = scan_src_to_json("r175nested", "\
+            pub struct A;\n\
+            impl A {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/a\"); 1 }\n\
+                pub fn via() -> usize { Self::eff() }\n\
+                pub fn outer() -> usize { struct N; impl N { fn eff() -> usize { 2 } fn go() -> usize { Self::eff() } } N::go() }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "A::via")), vec!["Fs".to_string()],
+                   "the ordinary R160 forwarder must be unaffected");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "A::outer"),
+                "`Self::eff` inside `impl N` is `N::eff`, which is pure — charging A's Fs is a fabrication:\n{v:#}");
+    }
+
+    /// R175 — the same leak through a nested TRAIT's default body, and through a nested impl reached
+    /// via a CLOSURE and via a nested `fn`. All three are the fabrication direction; all three read
+    /// `["Fs"]` pre-fix.
+    #[test]
+    fn the_self_binding_does_not_leak_into_a_nested_trait_closure_or_fn() {
+        let v = scan_src_to_json("r175more", "\
+            pub struct A;\n\
+            impl A {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/a\"); 1 }\n\
+                pub fn in_trait() -> usize { trait T { fn eff() -> usize { 7 } fn go() -> usize { Self::eff() } } struct Z; impl T for Z {} <Z as T>::go() }\n\
+                pub fn in_closure() -> usize { let f = || { struct C; impl C { fn eff() -> usize { 5 } fn go() -> usize { Self::eff() } } C::go() }; f() }\n\
+                pub fn in_fn() -> usize { fn inner() -> usize { struct D; impl D { fn eff() -> usize { 6 } fn go() -> usize { Self::eff() } } D::go() } inner() }\n\
+            }\n");
+        for absent in ["A::in_trait", "A::in_closure", "A::in_fn"] {
+            assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != absent),
+                    "`{absent}` reaches only a pure nested `Self::eff`:\n{v:#}");
+        }
+    }
+
+    /// R175, the UNDER-REPORT direction — the fixture that must STILL be charged. A nested impl of a
+    /// FILE-LEVEL type resolves `Self::` to that type, whose method lives OUTSIDE this body, so the
+    /// rebinding is a gain and not only a removal. Pre-fix this resolved to `A::eff` (the wrong target,
+    /// which happened to be effectful here too) — the assertion is on the EDGE, which tells them apart.
+    #[test]
+    fn a_nested_impl_binds_self_to_its_own_type_and_still_reaches_it() {
+        let v = scan_src_to_json("r175gain", "\
+            pub struct W;\n\
+            impl W { pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/w\"); 1 } }\n\
+            pub struct A;\n\
+            impl A {\n\
+                pub fn eff() -> usize { let _ = std::env::var(\"A\"); 2 }\n\
+                pub fn outer() -> usize { impl W { fn go2() -> usize { Self::eff() } } W::go2() }\n\
+            }\n");
+        let outer = fn_entry(&v, "A::outer");
+        assert_eq!(effs(outer), vec!["Fs".to_string()],
+                   "`Self::eff` inside `impl W` is `W::eff` (Fs), not `A::eff` (Env):\n{v:#}");
+    }
+
+    /// R175 — the RESTORE path. A `Self::` call written AFTER a nested impl in the same body must still
+    /// resolve to the enclosing type; a rebinding that is not undone loses it silently, which is the
+    /// direction a fabrication fix is most likely to fail in.
+    #[test]
+    fn the_outer_self_binding_is_restored_after_a_nested_impl() {
+        let v = scan_src_to_json("r175restore", "\
+            pub struct A;\n\
+            impl A {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/a\"); 1 }\n\
+                pub fn after() -> usize { struct P; impl P { fn q() -> usize { 4 } } let _ = P::q(); Self::eff() }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "A::after")), vec!["Fs".to_string()],
+                   "the enclosing `Self` binding must survive a nested impl:\n{v:#}");
+    }
+
+    /// R175 — a nested impl for a NON-NOMINAL self type (`impl Tr for &[u8]`) has no type to bind
+    /// `Self` to, so the binding is REMOVED rather than left naming the enclosing type. Fabrication
+    /// direction: pre-fix `Self::probe` resolved to the effectful `C2::probe`; the truth is the trait's
+    /// own pure default. An unresolved path is the safe direction where a wrong one is not.
+    #[test]
+    fn a_nested_impl_for_a_non_nominal_type_unbinds_self() {
+        let v = scan_src_to_json("r175nonnominal", "\
+            pub trait Sl { fn probe() -> usize { 14 } fn go() -> usize { 11 } }\n\
+            pub struct C2;\n\
+            impl C2 {\n\
+                pub fn probe() -> usize { let _ = std::fs::read_to_string(\"/p\"); 13 }\n\
+                pub fn outer() -> usize { impl Sl for &[u8] { fn go() -> usize { Self::probe() } } <&[u8] as Sl>::go() }\n\
+            }\n");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "C2::outer"),
+                "`Self` inside `impl Sl for &[u8]` is not `C2`; charging `C2::probe`'s Fs is a fabrication:\n{v:#}");
+    }
+
+    /// R175 — the GENERIC impl the panel left unexamined. `impl<T> Fo<T>`'s own `Self::` forwarder must
+    /// keep resolving (R160's gain), and a nested impl inside one of its methods must not inherit it.
+    #[test]
+    fn a_generic_impl_keeps_its_self_binding_and_a_nested_impl_inside_it_does_not() {
+        let v = scan_src_to_json("r175generic", "\
+            pub struct Fo<T>(pub T);\n\
+            impl<T> Fo<T> {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/f\"); 9 }\n\
+                pub fn via() -> usize { Self::eff() }\n\
+                pub fn outer() -> usize { struct G; impl G { fn eff() -> usize { 10 } fn go() -> usize { Self::eff() } } G::go() }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "Fo::via")), vec!["Fs".to_string()]);
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "Fo::outer"),
+                "the nested `impl G`'s `Self::eff` is pure:\n{v:#}");
+    }
+
+    /// R175 — THE COST, from the corpus A/B's own removal set, kept as a test because the audit of a
+    /// removal is the claim under test (brief §E1). serde_with's `impl DeserializeAs for Iso8601`
+    /// contains `struct Helper; impl Visitor for Helper { fn visit_str(..) { Self::Value::parse(..) } }`.
+    /// On the 0.35.0 CANDIDATE `Self` was the outer `Iso8601`, so `Self::Value::parse` expanded through
+    /// the file's `use ::time_0_3::…::Iso8601` and the row carried `invisible: ["time_0_3"]`. After this
+    /// fix `Self` is `Helper`, a BODY-LOCAL item, so the path becomes `<body-item>Helper::…` and the
+    /// κ-ledger entry goes with it — three rows removed and two more losing that key across 1,504 crates.
+    ///
+    /// That is a real disclosure cost and it is stated as one. It is accepted because the answer after
+    /// the fix is EXACTLY the answer the explicitly-written spelling gives, which is the invariant R160
+    /// and R175 both exist to hold: the two arms below differ in one token and must not differ in the
+    /// report. Published 0.34.0 has no row for either. Charging a dependency because a DIFFERENT type's
+    /// import happened to be in scope is not a disclosure, it is a coincidence.
+    #[test]
+    fn a_nested_impls_self_path_answers_exactly_as_the_written_type_name_does() {
+        let v = scan_src_to_json("r175parity", "\
+            pub mod ext { pub struct Iso; impl Iso { pub fn parse() -> usize { let _ = std::fs::read_to_string(\"/x\"); 1 } } }\n\
+            use ext::Iso;\n\
+            pub trait De { fn de() -> usize; fn de2() -> usize; }\n\
+            impl De for Iso {\n\
+                fn de() -> usize { struct H; impl H { fn go() -> usize { Self::parse() } fn parse() -> usize { 0 } } H::go() }\n\
+                fn de2() -> usize { struct H2; impl H2 { fn go() -> usize { H2::parse() } fn parse() -> usize { 0 } } H2::go() }\n\
+            }\n");
+        let present: Vec<&str> = v["functions"].as_array().unwrap().iter()
+            .filter_map(|f| f["fn"].as_str()).filter(|n| n.starts_with("Iso::de")).collect();
+        assert!(present.is_empty(),
+                "`Self::parse` and `H2::parse` both name a body-local pure fn; neither may inherit \
+                 `ext::Iso::parse`'s Fs:\n{v:#}");
+    }
+
+    /// R175 — MEASURED, NOT FIXED, and recorded so the next reader does not have to re-measure it: a
+    /// crate-local `macro_rules!` expanding to a CALL contributes nothing in any position (tail
+    /// expression, `let` initializer, statement), whether the call is written `Self::eff()` or
+    /// `B::eff()`, and whether the macro is declared at file level or inside the body. So this is NOT a
+    /// `Self` gap and NOT a regression — published 0.34.0, the 0.35.0 candidate and this fix are
+    /// identical on it. `local_macros` exists for `count_ident` (R139), not for call collection. Stated
+    /// as the silent under-report it is; a fix belongs with its own row and its own A/B.
+    #[test]
+    fn residual_a_local_macro_expanding_to_a_call_is_silent_in_every_position() {
+        let v = scan_src_to_json("r175macro", "\
+            macro_rules! fire { () => { B::eff() } }\n\
+            pub struct B;\n\
+            impl B {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/b\"); 8 }\n\
+                pub fn tail() -> usize { fire!() }\n\
+                pub fn in_let() -> usize { let x = fire!(); x }\n\
+                pub fn in_stmt() -> usize { fire!(); 0 }\n\
+                pub fn self_spelling() -> usize { macro_rules! m { () => { Self::eff() } } m!() }\n\
+            }\n");
+        for absent in ["B::tail", "B::in_let", "B::in_stmt", "B::self_spelling"] {
+            assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != absent),
+                    "RESIDUAL, not a guarantee: `{absent}` really does perform Fs and is silent:\n{v:#}");
         }
     }
 
@@ -14360,6 +14684,110 @@ pub fn go() {{ imp::doit(); }}
         assert_eq!(effs(fn_entry(&v, "caller::go")), vec!["Exec".to_string()],
                    "`globmod::pick` IS `explicitm::pick` — an explicit import shadows a glob, so the \
                     glob's `Fs` must not be unioned in:\n{v:#}");
+    }
+
+    // ================================ SOUNDNESS R176 ================================
+
+    /// R176, the trigger. SILENCE direction, and the shape of this family's cardinal sin: R169's
+    /// explicit-beats-glob precedence was applied ACROSS `#[cfg]` arms, where the two imports never
+    /// coexist in any build, so the windows arm's explicit `size` SHADOWED the unix arm's glob and the
+    /// caller published `['Fs']` alone — a positive claim naming the wrong platform's effect while the
+    /// live one (`Exec`) went unmentioned. EXECUTED ground truth on a unix host: `size()` really does
+    /// spawn a process. Pre-fix this reads `["Fs"]`; published 0.34.0 has no row for `size` at all.
+    #[test]
+    fn explicit_beats_glob_does_not_apply_across_cfg_arms() {
+        let v = scan_crate_to_json("r176cfgx", &[
+            ("src/lib.rs", "pub mod sys;\npub fn size() -> usize { sys::size() }\n"),
+            ("src/sys.rs", "\
+                #[cfg(unix)] mod unix;\n\
+                #[cfg(windows)] mod windows;\n\
+                #[cfg(unix)] pub use self::unix::*;\n\
+                #[cfg(windows)] pub use self::windows::size;\n"),
+            ("src/sys/unix.rs",
+                "pub fn size() -> usize { std::process::Command::new(\"true\").status().map(|_| 1).unwrap_or(1) }\n"),
+            ("src/sys/windows.rs",
+                "pub fn size() -> usize { std::fs::read_to_string(\"/etc/hosts\").map(|s| s.len()).unwrap_or(0) }\n"),
+        ]);
+        assert_eq!(effs(fn_entry(&v, "size")), vec!["Exec".to_string(), "Fs".to_string()],
+                   "every `#[cfg]` arm's edge is live to a scanner that analyses every branch; the \
+                    windows import cannot shadow the unix glob because they never coexist:\n{v:#}");
+    }
+
+    /// R176 — the ASYMMETRIC pair, and a deliberate OVER-approximation stated as one. An unconditional
+    /// glob beside a `#[cfg]`-gated explicit import: in the gated build Rust really does give the
+    /// explicit one precedence, in the other build the glob is the only answer, and this index has no
+    /// way to publish two answers. It unions, so the gated build is over-charged by the glob's effect —
+    /// the direction the family's denylist rule requires when the alternative is deciding a narrowing on
+    /// a predicate the scanner cannot evaluate.
+    #[test]
+    fn a_cfg_gated_explicit_import_does_not_shadow_an_unconditional_glob() {
+        let v = scan_crate_to_json("r176asym", &[
+            ("src/lib.rs", "pub mod m;\npub fn go() -> usize { m::pick() }\n"),
+            ("src/m.rs", "\
+                mod globbed;\n\
+                mod only_unix;\n\
+                pub use self::globbed::*;\n\
+                #[cfg(unix)] pub use self::only_unix::pick;\n"),
+            ("src/m/globbed.rs",
+                "pub fn pick() -> usize { std::fs::read_to_string(\"/etc/hosts\").map(|s| s.len()).unwrap_or(0) }\n"),
+            ("src/m/only_unix.rs",
+                "pub fn pick() -> usize { std::process::Command::new(\"true\").status().map(|_| 2).unwrap_or(2) }\n"),
+        ]);
+        assert_eq!(effs(fn_entry(&v, "go")), vec!["Exec".to_string(), "Fs".to_string()],
+                   "OVER-APPROXIMATION, deliberate: the non-unix build reaches only the glob, so its \
+                    definition must stay in the answer:\n{v:#}");
+    }
+
+    /// R176 — the FAN-OUT CAP, and a silence this fix introduced before the fallback existed. Widening
+    /// `effective` from the explicit set to the whole union can push a key past `REEXPORT_FANOUT_MAX`,
+    /// and a key over the cap is DROPPED — so a caller that resolved through the explicit import went
+    /// ABSENT. Measured on this fixture against the 0.35.0 candidate (`['Fs']` there, absent here)
+    /// before the fallback was written, not reasoned about afterwards. The union is a strict superset,
+    /// so this can only ever fire in the direction that loses an answer.
+    #[test]
+    fn the_cfg_union_never_drops_a_key_the_explicit_set_alone_would_have_kept() {
+        let mut files: Vec<(String, String)> = vec![
+            ("src/lib.rs".into(), "pub mod m;\npub fn go() -> usize { m::pick() }\n".into()),
+        ];
+        let mut m = String::new();
+        for i in 0..13 {
+            files.push((format!("src/m/g{i}.rs"), "pub fn pick() -> usize { 1 }\n".into()));
+            m.push_str(&format!("mod g{i};\n#[cfg(unix)] pub use self::g{i}::*;\n"));
+        }
+        files.push(("src/m/expl.rs".into(),
+            "pub fn pick() -> usize { let _ = std::fs::read_to_string(\"/etc/hosts\"); 2 }\n".into()));
+        m.push_str("mod expl;\npub use self::expl::pick;\n");
+        files.push(("src/m.rs".into(), m));
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let v = scan_crate_to_json("r176fanout", &refs);
+        assert_eq!(effs(fn_entry(&v, "go")), vec!["Fs".to_string()],
+                   "fourteen definitions do not fit the fan-out cap, but the explicit set alone does — \
+                    dropping the key outright would lose an answer the candidate had:\n{v:#}");
+    }
+
+    /// R176 CONTROL — the no-`#[cfg]` case must be UNCHANGED, i.e. the narrowing R169 added is still
+    /// there wherever Rust's rule really applies. This is the same claim as
+    /// `an_explicit_reexport_shadows_a_glob_rather_than_unioning_with_it` one row over, asserted again
+    /// here because R176's gate is the only thing standing between them: delete the `cfg_gated` test and
+    /// this passes while the trigger fails, delete the whole precedence and this fails while the trigger
+    /// passes. The pair is what pins the boundary.
+    #[test]
+    fn ctrl_explicit_still_beats_glob_when_neither_is_cfg_gated() {
+        let v = scan_crate_to_json("r176nocfg", &[
+            ("src/lib.rs", "pub mod m;\npub fn go() -> usize { m::pick() }\n"),
+            ("src/m.rs", "\
+                mod globbed;\n\
+                mod explicitm;\n\
+                pub use self::globbed::*;\n\
+                pub use self::explicitm::pick;\n"),
+            ("src/m/globbed.rs",
+                "pub fn pick() -> usize { std::fs::read_to_string(\"/etc/hosts\").map(|s| s.len()).unwrap_or(0) }\n"),
+            ("src/m/explicitm.rs",
+                "pub fn pick() -> usize { std::process::Command::new(\"true\").status().map(|_| 2).unwrap_or(2) }\n"),
+        ]);
+        assert_eq!(effs(fn_entry(&v, "go")), vec!["Exec".to_string()],
+                   "no `#[cfg]` anywhere: Rust's own rule applies and the glob's `Fs` must not be \
+                    unioned in:\n{v:#}");
     }
 
     /// R169 CONTROL — a MIS-ATTRIBUTION the multi-edge union would otherwise import. `imp::create` is
