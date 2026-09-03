@@ -15580,6 +15580,141 @@ pub fn go() {{ imp::doit(); }}
                  index; charging here is published 0.34.0's blanket veto back again:\n{v:#}");
     }
 
+    /// SOUNDNESS R207 (repetition half) — A REPETITION IS THE ORDINARY WAY TO WRITE A TEMPLATE THAT
+    /// PUSHES, and it was as invisible to the `?`-interior veto as an unreadable one. `strip_dollars`
+    /// leaves `$( X ) sep? *` as `( X ) *`, which parses as no statement, so `macro_template_blocks`
+    /// dropped the whole arm and nothing could say what `{{ $( $o.push($crate::H::new($p)); )* }}`
+    /// constructs. `repetition_hole` is published `['Fs']`, ABSENT on `5cefa62`/`c22a31d`, executed
+    /// 2 in-frame drops on the error exit. `macro_template_blocks_flat` reads the repetition as its
+    /// body once.
+    ///
+    /// ONE ITERATION IS AN OVER-APPROXIMATION AND THAT IS WHY IT IS VETO-SIDE ONLY. `$(..)* ` can run
+    /// zero times, so "the body ran once" is a fact about no expansion. Everything this path produces
+    /// lands in `TryExit::interior` — a REFUSAL to certify that a leaf escaped — so the reading can
+    /// over-charge and cannot silence. R48's resolution expands a template to ADD a call edge, where
+    /// the same reading would claim an effect a zero-iteration expansion never has, and it keeps the
+    /// unflattened `macro_template_blocks`. `the_flattening_is_veto_side_only` below asserts that
+    /// boundary directly on the two helpers rather than arguing it.
+    ///
+    /// `repetition_with_q_hole` is the sibling nobody handed us: a repetition whose BODY contains a
+    /// `?`. Flattening must not invent an exit — `note_opaque_block` walks the result for
+    /// constructions only and records no `TryExit` — and the cell executes 2 in-frame drops on the
+    /// error exit of the LAST `?`. `repetition_spine` is the over-charge control (executed: 0 drops in
+    /// the frame, 1 inside `use_h_val`).
+    ///
+    /// WHAT STAYS OPEN, PINNED HERE SO IT CANNOT GO QUIET: `kv_tokens_open` is the maplit shape
+    /// `kv!("a" => H::new("a"))`, whose INVOCATION tokens parse neither as an expression list nor as
+    /// statements AND whose template is a repetition over those unreadable tokens. Nothing reads it,
+    /// this flattening included, so it is silent against published 0.34.0 (which vetoed blanket) and
+    /// ships that way in 0.35.0 by the owner's ruling — measured corpus incidence 0 of 1,504 crates,
+    /// exposure 387 fns in 51 crates, the blanket alternative fabricating 7 jni rows. This assertion
+    /// is a PIN, not a control: absence is also what a broken engine produces, and the cells above are
+    /// what discriminate the fix. If it ever charges, R207's residual has closed — update the row and
+    /// the 0.35.0 advisory rather than deleting the line.
+    #[test]
+    fn a_macro_rules_repetition_template_is_read_by_the_try_interior_veto() {
+        let v = scan_src_to_json("r207rep", r#"
+            pub struct H { pub p: String }
+            impl Drop for H { fn drop(&mut self) { let _ = std::fs::remove_file(&self.p); } }
+            impl H {
+                pub fn new(p: &str) -> H { H { p: p.to_string() } }
+                pub fn try_new(n: u32, p: &str) -> Result<H, ()> { if n == 0 { Err(()) } else { Ok(H::new(p)) } }
+            }
+            pub fn gen(n: u32) -> Result<u32, ()> { if n == 0 { Err(()) } else { Ok(n) } }
+            pub fn use_h_val(h: H, n: u32) -> Result<u32, ()> { drop(h); gen(n) }
+            #[macro_export]
+            macro_rules! push_all { ($o:expr, $($p:expr),*) => {{ $( $o.push($crate::H::new($p)); )* }} }
+            #[macro_export]
+            macro_rules! push_try { ($o:expr, $($p:expr),*) => {{ $( $o.push($crate::H::try_new(1, $p)?); )* }} }
+            #[macro_export]
+            macro_rules! one { ($($p:expr),*) => { $( $crate::H::new($p) )* } }
+            #[macro_export]
+            macro_rules! kv { ($($k:expr => $val:expr),*) => {{ let mut m = Vec::new(); $( m.push(($k, $val)); )* m }} }
+
+            pub fn repetition_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { push_all!(out, "a", "c"); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn repetition_with_q_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { push_try!(out, "a", "c"); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn repetition_value_hole(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(one!("a")); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+            pub fn repetition_spine(n: u32, m: u32) -> Result<H, ()> {
+                let _v = use_h_val(one!("a"), n)?;
+                let b = H::try_new(m, "b")?;
+                Ok(b)
+            }
+            pub fn kv_tokens_open(n: u32, m: u32) -> Result<H, ()> {
+                let mut out = Vec::new();
+                { out.push(kv!("a" => H::new("a"))); gen(n) }?;
+                let h = H::try_new(m, "b")?;
+                let _ = out;
+                Ok(h)
+            }
+"#);
+        for n in ["repetition_hole", "repetition_with_q_hole", "repetition_value_hole"] {
+            assert!(effs(fn_entry(&v, n)).contains(&"Fs".to_string()),
+                    "`{n}` builds an `H` inside its `?`'s operand through a `macro_rules!` template \
+                     whose body is a REPETITION, and builds the same leaf again after the `?`. \
+                     `strip_dollars` leaves `$( X ) sep? *` as `( X ) *`, which parses as no statement, \
+                     so the arm was dropped and nothing put the leaf in `interior`. Published 0.34.0 \
+                     charged all three; `5cefa62`/`c22a31d` left them ABSENT (executed: 2, 2 and 1 \
+                     in-frame drops on the error exit):\n{v:#}");
+        }
+        assert!(!fn_entry(&v, "repetition_spine")["calls"].to_string().contains("H::drop"),
+                "THE OVER-CHARGE CONTROL. A repetition template's value as a by-value ARGUMENT on the \
+                 `?` operand's value spine is moved into the callee and dies in ITS frame (executed: 0 \
+                 drops here, 1 inside `use_h_val`). Flattening must not cost R199's two-step spine \
+                 exemption; charging here is published 0.34.0's blanket veto back again:\n{v:#}");
+        assert!(!v["functions"].as_array().unwrap().iter().any(|f| f["fn"] == "kv_tokens_open"),
+                "THE PIN ON R207's STATED RESIDUAL, not a control. `kv!(\"a\" => H::new(\"a\"))` has \
+                 invocation tokens that parse neither as an expression list nor as statements, and a \
+                 template that is a repetition over those same unreadable tokens — so no reader, this \
+                 flattening included, can see the construction, and the row is silent against \
+                 published 0.34.0. It ships open in 0.35.0 by the owner's ruling (measured corpus \
+                 incidence 0 of 1,504 crates; exposure 387 fns in 51 crates; the blanket alternative \
+                 fabricates 7 jni rows, 6 beyond published parity). If this ever charges the residual \
+                 has CLOSED — update SOUNDNESS R207 and the 0.35.0 advisory:\n{v:#}");
+    }
+
+    /// SOUNDNESS R207 — THE BOUNDARY, ASSERTED RATHER THAN ARGUED. The repetition flattening exists on
+    /// the `?`-interior VETO side only, and the reason is directional: the veto withholds an escape
+    /// certificate (over-charging at worst), while R48's resolution ADDS a call edge, where reading a
+    /// zero-iteration repetition as one iteration would fabricate. The two share the arm-splitting
+    /// walk, so they cannot drift about arm COUNT — the fact R48's single-arm rule turns on — and they
+    /// differ only in the token transform. This test drives both helpers on one body so that a future
+    /// change routing R48 through the flattened form goes red here instead of quietly fabricating.
+    #[test]
+    fn the_flattening_is_veto_side_only() {
+        let body = r#"($o:expr, $($p:expr),*) => {{ $( $o.push(H::new($p)); )* }}"#;
+        let (arms_plain, plain) = crate::collector::macro_template_blocks(body);
+        let (arms_flat, flat) = crate::collector::macro_template_blocks_flat(body);
+        assert_eq!((arms_plain, arms_flat), (1, 1),
+                   "both helpers must agree the body has exactly one arm — the arm walk is shared, and \
+                    R48's single-arm expansion rule is decided by this count");
+        assert!(plain.is_empty(),
+                "R48's transform must still REFUSE a repetition arm: it expands templates to add call \
+                 edges, and one iteration of a `$(..)*` that may run zero times is a fabrication. \
+                 Reading {plain:?} here means the flattening has leaked to the resolution side");
+        assert_eq!(flat.len(), 1,
+                   "the veto-side transform must read the same arm — this is the whole of R207's \
+                    repetition half; got {flat:?}");
+    }
+
+
 
     /// R188, the trigger. R174(b) made a unit-returning twin a conflict by writing its sentinel under the
     /// fn's own LEAF, which withdrew that leaf from every reader of the return index — including `let`
