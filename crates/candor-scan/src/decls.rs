@@ -1044,7 +1044,9 @@ pub(crate) fn collect_reexports(
                         }
                         continue;
                     }
-                    out.push(Reexport { module: modpath.to_string(), from, name, alias });
+                    // R176 — a `#[cfg]`-gated `pub use` is one ARM of a platform split, not a shadow of
+                    // its siblings. Recorded here, applied in `reexport_aliases`.
+                    out.push(Reexport { module: modpath.to_string(), from, name, alias, cfg_gated: has_cfg(&u.attrs) });
                 }
             }
             // R99 (2): a NOMINAL type alias is exactly a `use <target> as <ident>` for path resolution,

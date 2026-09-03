@@ -44,6 +44,16 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev18: `Reexport` gained `cfg_gated` (R176 — whether a `pub use` is one arm of a `#[cfg]` split).
+    // A pre-rev18 entry has no such field, so `#[serde(default)]` reads FALSE — "this re-export is
+    // unconditional" — which is precisely the input that makes explicit-beats-glob silence the other
+    // platform's arm. Same shape as every bump below.
+    //
+    // AND THE STRING SAID `rev16` WHILE THE LADDER BELOW DOCUMENTED `rev17`. The R161 bump was written
+    // in the comment and never applied to the format string, so a rev16 entry and a "rev17" entry share
+    // one key. `CARGO_PKG_VERSION` is also in the key, so entries only ever collided BETWEEN TWO BUILDS
+    // OF THE SAME VERSION — which is exactly what an A/B of a fix against its own pre-image is. Fixed by
+    // moving straight to rev18 rather than reusing rev17, so no key is ever served two meanings.
     // rev17: FileDecls gained `callable_aliases` (R161 — the `type NAME = <callable>` alias leaves). A
     // rev16 entry has none, so it deserializes EMPTY: "this file declares no callable type alias", for a
     // file that does — and the consequence is exactly the silent under-report the field closes, served
@@ -88,7 +98,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev16/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev18/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -846,7 +856,8 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     let mut rx: Vec<String> = m
         .reexports
         .iter()
-        .map(|r| format!("{}<-{}::{} as {}", r.module, r.from.join(","), r.name, r.alias))
+        .map(|r| format!("{}<-{}::{} as {}{}", r.module, r.from.join(","), r.name, r.alias,
+                         if r.cfg_gated { " #[cfg]" } else { "" }))
         .collect();
     rx.sort();
     for r in rx {
