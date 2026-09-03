@@ -8765,7 +8765,7 @@ trait G {
             root_reexports => |m| { m.root_reexports.insert("net".into(), "sqlx_core::driver_prelude::net".into()); },
             // `pub use self::platform::*` in a SUBMODULE — a call `imp::doit()` in ANOTHER file resolves
             // through it, so a change to the edge set re-resolves that file's calls.
-            reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into() }); },
+            reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into(), cfg_gated: false }); },
             // R99: `mod facade { pub use std::process::Command; }` / `pub type Cmd = …` — seeded into
             // EVERY file's `use` map, so a change re-resolves `facade::Command::new` in other files.
             mod_aliases => |m| { m.mod_aliases.insert("facade::Command".into(), "std::process::Command".into()); },
@@ -10290,7 +10290,11 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
     /// consequence a mis-read entry produces, and the same discard covers every field above.)
     #[test]
     fn an_older_schema_cache_entry_is_discarded_rather_than_read_as_analysed() {
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15"] {
+        // R176 bumped the token to rev18 (and recorded that the R161 bump to rev17 never reached the
+        // string). `rev16` and `rev17` join the stale list rather than replacing an entry: an entry
+        // written by a 0.35.0-dev binary from before the `Reexport::cfg_gated` field must be discarded,
+        // not read as "every re-export in this file is unconditional".
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -10301,7 +10305,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev16/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev18/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -14331,6 +14335,110 @@ pub fn go() {{ imp::doit(); }}
         assert_eq!(effs(fn_entry(&v, "caller::go")), vec!["Exec".to_string()],
                    "`globmod::pick` IS `explicitm::pick` — an explicit import shadows a glob, so the \
                     glob's `Fs` must not be unioned in:\n{v:#}");
+    }
+
+    // ================================ SOUNDNESS R176 ================================
+
+    /// R176, the trigger. SILENCE direction, and the shape of this family's cardinal sin: R169's
+    /// explicit-beats-glob precedence was applied ACROSS `#[cfg]` arms, where the two imports never
+    /// coexist in any build, so the windows arm's explicit `size` SHADOWED the unix arm's glob and the
+    /// caller published `['Fs']` alone — a positive claim naming the wrong platform's effect while the
+    /// live one (`Exec`) went unmentioned. EXECUTED ground truth on a unix host: `size()` really does
+    /// spawn a process. Pre-fix this reads `["Fs"]`; published 0.34.0 has no row for `size` at all.
+    #[test]
+    fn explicit_beats_glob_does_not_apply_across_cfg_arms() {
+        let v = scan_crate_to_json("r176cfgx", &[
+            ("src/lib.rs", "pub mod sys;\npub fn size() -> usize { sys::size() }\n"),
+            ("src/sys.rs", "\
+                #[cfg(unix)] mod unix;\n\
+                #[cfg(windows)] mod windows;\n\
+                #[cfg(unix)] pub use self::unix::*;\n\
+                #[cfg(windows)] pub use self::windows::size;\n"),
+            ("src/sys/unix.rs",
+                "pub fn size() -> usize { std::process::Command::new(\"true\").status().map(|_| 1).unwrap_or(1) }\n"),
+            ("src/sys/windows.rs",
+                "pub fn size() -> usize { std::fs::read_to_string(\"/etc/hosts\").map(|s| s.len()).unwrap_or(0) }\n"),
+        ]);
+        assert_eq!(effs(fn_entry(&v, "size")), vec!["Exec".to_string(), "Fs".to_string()],
+                   "every `#[cfg]` arm's edge is live to a scanner that analyses every branch; the \
+                    windows import cannot shadow the unix glob because they never coexist:\n{v:#}");
+    }
+
+    /// R176 — the ASYMMETRIC pair, and a deliberate OVER-approximation stated as one. An unconditional
+    /// glob beside a `#[cfg]`-gated explicit import: in the gated build Rust really does give the
+    /// explicit one precedence, in the other build the glob is the only answer, and this index has no
+    /// way to publish two answers. It unions, so the gated build is over-charged by the glob's effect —
+    /// the direction the family's denylist rule requires when the alternative is deciding a narrowing on
+    /// a predicate the scanner cannot evaluate.
+    #[test]
+    fn a_cfg_gated_explicit_import_does_not_shadow_an_unconditional_glob() {
+        let v = scan_crate_to_json("r176asym", &[
+            ("src/lib.rs", "pub mod m;\npub fn go() -> usize { m::pick() }\n"),
+            ("src/m.rs", "\
+                mod globbed;\n\
+                mod only_unix;\n\
+                pub use self::globbed::*;\n\
+                #[cfg(unix)] pub use self::only_unix::pick;\n"),
+            ("src/m/globbed.rs",
+                "pub fn pick() -> usize { std::fs::read_to_string(\"/etc/hosts\").map(|s| s.len()).unwrap_or(0) }\n"),
+            ("src/m/only_unix.rs",
+                "pub fn pick() -> usize { std::process::Command::new(\"true\").status().map(|_| 2).unwrap_or(2) }\n"),
+        ]);
+        assert_eq!(effs(fn_entry(&v, "go")), vec!["Exec".to_string(), "Fs".to_string()],
+                   "OVER-APPROXIMATION, deliberate: the non-unix build reaches only the glob, so its \
+                    definition must stay in the answer:\n{v:#}");
+    }
+
+    /// R176 — the FAN-OUT CAP, and a silence this fix introduced before the fallback existed. Widening
+    /// `effective` from the explicit set to the whole union can push a key past `REEXPORT_FANOUT_MAX`,
+    /// and a key over the cap is DROPPED — so a caller that resolved through the explicit import went
+    /// ABSENT. Measured on this fixture against the 0.35.0 candidate (`['Fs']` there, absent here)
+    /// before the fallback was written, not reasoned about afterwards. The union is a strict superset,
+    /// so this can only ever fire in the direction that loses an answer.
+    #[test]
+    fn the_cfg_union_never_drops_a_key_the_explicit_set_alone_would_have_kept() {
+        let mut files: Vec<(String, String)> = vec![
+            ("src/lib.rs".into(), "pub mod m;\npub fn go() -> usize { m::pick() }\n".into()),
+        ];
+        let mut m = String::new();
+        for i in 0..13 {
+            files.push((format!("src/m/g{i}.rs"), "pub fn pick() -> usize { 1 }\n".into()));
+            m.push_str(&format!("mod g{i};\n#[cfg(unix)] pub use self::g{i}::*;\n"));
+        }
+        files.push(("src/m/expl.rs".into(),
+            "pub fn pick() -> usize { let _ = std::fs::read_to_string(\"/etc/hosts\"); 2 }\n".into()));
+        m.push_str("mod expl;\npub use self::expl::pick;\n");
+        files.push(("src/m.rs".into(), m));
+        let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let v = scan_crate_to_json("r176fanout", &refs);
+        assert_eq!(effs(fn_entry(&v, "go")), vec!["Fs".to_string()],
+                   "fourteen definitions do not fit the fan-out cap, but the explicit set alone does — \
+                    dropping the key outright would lose an answer the candidate had:\n{v:#}");
+    }
+
+    /// R176 CONTROL — the no-`#[cfg]` case must be UNCHANGED, i.e. the narrowing R169 added is still
+    /// there wherever Rust's rule really applies. This is the same claim as
+    /// `an_explicit_reexport_shadows_a_glob_rather_than_unioning_with_it` one row over, asserted again
+    /// here because R176's gate is the only thing standing between them: delete the `cfg_gated` test and
+    /// this passes while the trigger fails, delete the whole precedence and this fails while the trigger
+    /// passes. The pair is what pins the boundary.
+    #[test]
+    fn ctrl_explicit_still_beats_glob_when_neither_is_cfg_gated() {
+        let v = scan_crate_to_json("r176nocfg", &[
+            ("src/lib.rs", "pub mod m;\npub fn go() -> usize { m::pick() }\n"),
+            ("src/m.rs", "\
+                mod globbed;\n\
+                mod explicitm;\n\
+                pub use self::globbed::*;\n\
+                pub use self::explicitm::pick;\n"),
+            ("src/m/globbed.rs",
+                "pub fn pick() -> usize { std::fs::read_to_string(\"/etc/hosts\").map(|s| s.len()).unwrap_or(0) }\n"),
+            ("src/m/explicitm.rs",
+                "pub fn pick() -> usize { std::process::Command::new(\"true\").status().map(|_| 2).unwrap_or(2) }\n"),
+        ]);
+        assert_eq!(effs(fn_entry(&v, "go")), vec!["Exec".to_string()],
+                   "no `#[cfg]` anywhere: Rust's own rule applies and the glob's `Fs` must not be \
+                    unioned in:\n{v:#}");
     }
 
     /// R169 CONTROL — a MIS-ATTRIBUTION the multi-edge union would otherwise import. `imp::create` is

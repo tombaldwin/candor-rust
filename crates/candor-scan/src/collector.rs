@@ -3795,7 +3795,10 @@ pub(crate) fn reexport_aliases(
     /// Rust in which the explicit import SHADOWS the glob, so when both kinds bring one name into one
     /// module the explicit definitions are the answer and the glob's are not. That is the same
     /// precedence `module_glob_alias` already applies one index over.
-    type ExportClaims = (BTreeSet<usize>, BTreeSet<String>, BTreeSet<String>);
+    /// The fourth member is SOUNDNESS R176: whether ANY edge that brought this name into this module was
+    /// `#[cfg]`-gated (or inherited that taint through a chained re-export). It gates the
+    /// explicit-beats-glob precedence below and nothing else.
+    type ExportClaims = (BTreeSet<usize>, BTreeSet<String>, BTreeSet<String>, bool);
     let mut exported: BTreeMap<String, BTreeMap<String, ExportClaims>> = BTreeMap::new();
     for f in fns {
         // A synthetic lazy-init unit is reachable only through the forcing edge its own qual spells out.
@@ -3811,23 +3814,32 @@ pub(crate) fn reexport_aliases(
         let mut changed = false;
         for (i, ed) in edges.iter().enumerate() {
             let explicit = ed.name != "*";
-            let mut adds: Vec<(String, String)> = Vec::new();
+            // R176 — the edge's own `#[cfg]`, plus whatever taint the SOURCE entry already carries: a
+            // chained re-export of a name that reached its own module through a platform split is still
+            // a platform split when it arrives here. Tainting one level further than strictly needed
+            // costs a union; missing it costs the other arm's definition.
+            let mut adds: Vec<(String, String, bool)> = Vec::new();
             for src in &ed.from {
                 let Some(names) = exported.get(src) else { continue };
                 if ed.name == "*" {
-                    for (n, (_, quals, _)) in names {
-                        adds.extend(quals.iter().map(|q| (n.clone(), q.clone())));
+                    for (n, (_, quals, _, src_cfg)) in names {
+                        adds.extend(quals.iter().map(|q| (n.clone(), q.clone(), ed.cfg_gated || *src_cfg)));
                     }
-                } else if let Some((_, quals, _)) = names.get(&ed.name) {
-                    adds.extend(quals.iter().map(|q| (ed.alias.clone(), q.clone())));
+                } else if let Some((_, quals, _, src_cfg)) = names.get(&ed.name) {
+                    let cfg = ed.cfg_gated || *src_cfg;
+                    adds.extend(quals.iter().map(|q| (ed.alias.clone(), q.clone(), cfg)));
                 }
             }
-            for (n, q) in adds {
+            for (n, q, cfg) in adds {
                 let e = exported.entry(ed.module.clone()).or_default().entry(n).or_default();
                 changed |= e.0.insert(i);
                 changed |= e.1.insert(q.clone());
                 if explicit {
                     changed |= e.2.insert(q);
+                }
+                if cfg && !e.3 {
+                    e.3 = true;
+                    changed = true;
                 }
             }
         }
@@ -3852,7 +3864,7 @@ pub(crate) fn reexport_aliases(
             continue;
         }
         let mlast = module.rsplit("::").next().unwrap_or(module);
-        for (name, (from_edges, _, _)) in names {
+        for (name, (from_edges, _, _, _)) in names {
             // A name the module only DECLARES is not a claim on the alias index: the primary tail2 index
             // holds it, and `reexport_target` steps aside whenever that index has the key at all.
             if from_edges.iter().all(|e| *e == DECLARED_HERE) {
@@ -3876,7 +3888,7 @@ pub(crate) fn reexport_aliases(
             continue;
         }
         let mlast = module.rsplit("::").next().unwrap_or(module);
-        for (name, (from_edges, quals, explicit_quals)) in names {
+        for (name, (from_edges, quals, explicit_quals, cfg_gated)) in names {
             if from_edges.contains(&DECLARED_HERE) {
                 continue;
             }
@@ -3903,7 +3915,43 @@ pub(crate) fn reexport_aliases(
             // when the two edges are a glob and an explicit import rather than `#[cfg]` twins — Rust
             // gives the explicit one precedence, and `explicit_quals` applies exactly that, so the glob's
             // definitions are used only when nothing explicit brought the name in.
-            let effective = if explicit_quals.is_empty() { quals } else { explicit_quals };
+            // SOUNDNESS R176 — explicit-beats-glob is Rust's rule WITHIN ONE CONFIGURATION, and R169
+            // applied it ACROSS `#[cfg]` arms. Measured: `#[cfg(unix)] pub use unix::*` (whose `size`
+            // runs a process) beside `#[cfg(windows)] pub use windows::size` (which reads a file) made
+            // `size` read `['Fs']` ALONE — the unix arm's `Exec` silenced behind a positive claim about
+            // the other platform, on a caller that is absent from published 0.34.0 entirely. The two
+            // arms never coexist in any build, so neither shadows the other; every arm's edge is live
+            // and the answer is the union, which is what this function's own doc comment says it does
+            // for the `#[cfg_attr(path)]` spelling of the same split.
+            //
+            // THE DIRECTION IT FAILS IN, stated before it was written: toward the UNION, i.e. toward
+            // OVER-charging. A `#[cfg]` on either kind of edge disables the narrowing, so a genuine
+            // same-configuration shadow that happens to be gated keeps the glob's definitions too — an
+            // over-approximation, never a withdrawal. The reverse (comparing cfg PREDICATES to decide
+            // which arms coexist) would be a narrowing decided on a property this scanner cannot
+            // evaluate, which is the direction the family's denylist rule refuses.
+            // §E1 HIT COUNTER — this is precisely the branch the R169 precedence used to take the other
+            // way; without it a byte-identical A/B says nothing about whether the corpus reached it.
+            if *cfg_gated && !explicit_quals.is_empty() && explicit_quals != quals
+                && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+            {
+                eprintln!("R176CFGUNION {mlast}::{name} -> {quals:?} (was {explicit_quals:?})");
+            }
+            let mut effective = if explicit_quals.is_empty() || *cfg_gated { quals } else { explicit_quals };
+            // R176 — THE UNION MUST NEVER TURN AN ADMITTED KEY INTO A DROPPED ONE. The fan-out cap is a
+            // never-guess rule, and widening `effective` from the explicit set to the whole union can
+            // push a key OVER it that was comfortably under before: the key is then dropped, the caller
+            // resolves to nothing, and the row goes ABSENT — a silence introduced by a fix for a
+            // silence. MEASURED, not anticipated: thirteen `#[cfg(unix)] pub use gN::*` arms beside one
+            // ungated `pub use expl::pick` made `go` read ['Fs'] on the 0.35.0 candidate and vanish
+            // here, on a fixture that really does spawn a process. So fall back to the explicit set
+            // when the union does not fit and it does — never worse than the pre-R176 answer, in the
+            // one case where R176's own answer is unavailable.
+            if effective.len() > REEXPORT_FANOUT_MAX && !explicit_quals.is_empty()
+                && explicit_quals.len() <= REEXPORT_FANOUT_MAX
+            {
+                effective = explicit_quals;
+            }
             if effective.is_empty() || effective.len() > REEXPORT_FANOUT_MAX {
                 continue;
             }

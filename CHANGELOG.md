@@ -67,6 +67,20 @@ after upgrading; review policies and regenerate baselines with the new build.
   fabricated call edges (hashlink's `Default for …Visitor { fn default() { Self::new() } }` was edging
   to `LinkedHashMap::new`). MEASURED AND NOT FIXED: a crate-local `macro_rules!` expanding to a call is
   silent in every position, unchanged in all three arms.
+- **⚠ SOUNDNESS R176 (cardinal-sin shape introduced by R169, caught before release) — explicit import
+  beats glob WITHIN one configuration, never ACROSS `#[cfg]` arms.** `#[cfg(unix)] pub use unix::*`
+  (whose `size` spawns a process) beside `#[cfg(windows)] pub use windows::size` (which reads a file)
+  made the caller publish `['Fs']` ALONE: the live platform's `Exec` silenced behind a positive claim
+  about the other one, on a function published 0.34.0 has no row for. The two arms never coexist in any
+  build, so neither shadows the other and the answer is their union — the same treatment this index
+  already gives the `#[cfg_attr(path)]` spelling of the split. `Reexport` records whether its `pub use`
+  is `#[cfg]`-gated (cache revision **18**; the rev17 the R161 entry above describes was never applied
+  to the schema string, so two builds of one version could share a key — fixed by skipping to 18). The
+  narrowing now fails toward the UNION, i.e. toward over-charging, never toward silence; the no-`cfg`
+  case is unchanged. The union falls back to the explicit set where it would exceed the re-export
+  fan-out cap, so widening an answer can never DROP one — measured, on a 14-definition fixture where it
+  did. 1,504-crate A/B: 10 unions across 1 crate (`cap-primitives`' `rustix` platform arms), 0 rows
+  removed, 0 effects lost.
 - **⚠ SOUNDNESS R139 (cardinal sin, introduced by R119's own fix) — CLOSED: a crate-local
   `macro_rules!` TEMPLATE now counts toward the body-item shadow, so a nested block's item can no
   longer rebind a name the macro expansion uses.** R119 promotes a nested block's item to a

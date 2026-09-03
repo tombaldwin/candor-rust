@@ -217,6 +217,15 @@ pub(crate) struct Reexport {
     pub(crate) name: String,
     /// The name it is visible AS in `module` — differs from `name` only for `pub use … as …`. `*` for a glob.
     pub(crate) alias: String,
+    /// SOUNDNESS R176 — whether the `pub use` item carries a `#[cfg(..)]`. Explicit-import-beats-glob is
+    /// Rust's rule WITHIN ONE CONFIGURATION; a `#[cfg(unix)] pub use unix::*` and a `#[cfg(windows)]
+    /// pub use windows::size` never coexist in any build, so letting the second SHADOW the first drops
+    /// the unix arm's definition behind the windows arm's positive claim. The scanner analyses every
+    /// `#[cfg]` branch — that is the whole reason `from` is a `Vec` — so the arms must UNION here too.
+    /// Defaults to `false` so a cache entry written before this field reads as "not gated", which is the
+    /// shadowing (narrower) answer; the cache rev is bumped for exactly that reason.
+    #[serde(default)]
+    pub(crate) cfg_gated: bool,
 }
 
 /// Sentinel return-"type" for a fn whose return is a CALLABLE (`-> fn()`/`-> impl Fn`/`-> Box<dyn Fn>`).
