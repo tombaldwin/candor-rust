@@ -892,6 +892,19 @@ pub(crate) fn ctor_leaf_from_call_returns(full: &str, returns: &ReturnIndex) -> 
     if last == "drop" {
         return None;
     }
+    // R174(b)/R188 — a UNIT-returning twin of this leaf makes the call an ambiguity FOR THIS ROUTE.
+    // `c::init()` in statement position is exactly where git2's phantom `Repository::drop` came from,
+    // and this route cannot tell which of the two same-named callees a leaf-keyed lookup answered for.
+    // Read from its own key so the refusal reaches nothing else: R174(b) expressed it by ambiguating
+    // the leaf in `rets` itself, which also withdrew `let`-typing and cost a real `Net` (R188).
+    if returns.contains_key(&unit_twin_key(last)) {
+        // §E1 HIT COUNTER — printed only when the refusal withdraws an answer this route would
+        // otherwise have given, never on every unit fn.
+        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && recorded_return_type(last, returns).is_some() {
+            eprintln!("R174UNIT {last}");
+        }
+        return None;
+    }
     local_type_leaf(&recorded_return_type(last, returns)?)
 }
 

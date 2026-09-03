@@ -1707,21 +1707,20 @@ pub(crate) fn record_return(
         // used to `return` before recording anything, so the ambiguity rule below could not see the
         // commonest collision there is: git2's free `pub fn init()` beside `Repository::init() ->
         // Repository` left the leaf `init` unambiguously typed `Repository`, and every `crate::init()`
-        // call site read as constructing one. Recorded under its own sentinel so a leaf seen BOTH ways
-        // collapses to `None` like any other conflict; `recorded_return_type` filters the sentinel out,
-        // so a leaf that is only ever unit-returning still names no type.
-        let leaf = sig.ident.to_string();
-        match rets.get(&leaf) {
-            None => { rets.insert(leaf, Some(RET_UNIT.to_string())); }
-            Some(Some(prev)) if prev != RET_UNIT => {
-                // §E1 HIT COUNTER — the branch R174(b) adds: a typed leaf withdrawn by a unit twin.
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
-                    eprintln!("R174UNIT {leaf} (was {prev})");
-                }
-                rets.insert(leaf, None);
-            }
-            _ => {}
-        }
+        // call site read as constructing one.
+        //
+        // SOUNDNESS R188 — RECORDED UNDER ITS OWN KEY, NOT UNDER THE LEAF. Writing the sentinel under
+        // the leaf made the twin ambiguate that leaf for every reader of the index, and the `let`-typing
+        // reader is the one that must not be: `net::connect(addr) -> Conn` beside an unrelated unit
+        // `ui::Ui::connect(&mut self)` left `let c = net::connect(addr); c.send(b)` with an untyped `c`
+        // and no receiver — `['Net']` → ABSENT with no `Unknown`, a REGRESSION against published 0.34.0
+        // on a module-qualified call that is not ambiguous at all. `()` has no INHERENT methods, so a
+        // body that resolves `c.send(b)` through this index could not have called the unit twin,
+        // whereas the drop route reads a call in STATEMENT position, where it could have. So the
+        // conflict is filed under `unit_twin_key` and read by `ctor_leaf_from_call_returns` alone; the
+        // leaf's own entry keeps exactly the answer published 0.34.0 gave it — including the stated
+        // limit in `RET_UNIT`'s doc, a blanket TRAIT method called on a `()` binding.
+        rets.insert(unit_twin_key(&sig.ident.to_string()), Some(RET_UNIT.to_string()));
         return;
     };
     // A factory that returns a CALLABLE (`fn make_cb() -> Box<dyn Fn()>` / `-> fn()` / `-> impl Fn()`):
