@@ -13961,6 +13961,161 @@ pub fn go() {{ imp::doit(); }}
         }
     }
 
+    // ================================ SOUNDNESS R177 ================================
+    // `pub type Cb = Box<dyn Fn()>; cb: Option<Cb>` + `if let Some(c) = &self.cb { c() }` was ABSENT
+    // from `functions[]` on PUBLISHED 0.34.0 and on the 0.35.0 candidate alike — an affirmative purity
+    // claim over a caller-installed callback, executed ground truth. R161 closed the bare-fn-pointer
+    // payload and listed the alias-in-a-container spelling as "not established".
+
+    /// R177, the trigger. SILENCE direction. Every unwrap binder over the field must disclose `Unknown`;
+    /// the `.unwrap()` spelling (`fire_direct`) already did, which is what makes the alias the single
+    /// variable. FAILS pre-fix: the four binder rows are absent entirely.
+    #[test]
+    fn a_callable_alias_inside_an_option_field_discloses_at_every_unwrap_binder() {
+        let v = scan_src_to_json("r177field", "\
+            pub type Cb = Box<dyn Fn()>;\n\
+            pub struct H { pub cb: Option<Cb>, pub many: Vec<Cb> }\n\
+            impl H {\n\
+                pub fn fire_if_let(&self) { if let Some(c) = &self.cb { c() } }\n\
+                pub fn fire_match(&self) { match &self.cb { Some(c) => c(), None => {} } }\n\
+                pub fn fire_map(&self) { let _ = self.cb.as_ref().map(|c| c()); }\n\
+                pub fn fire_as_ref(&self) { if let Some(c) = self.cb.as_ref() { c() } }\n\
+                pub fn fire_while(&self) { while let Some(c) = &self.cb { c(); break } }\n\
+                pub fn fire_vec(&self) { for c in &self.many { c() } }\n\
+                pub fn fire_direct(&self) { (self.cb.as_ref().unwrap())() }\n\
+            }\n");
+        for n in ["H::fire_if_let", "H::fire_match", "H::fire_map", "H::fire_as_ref",
+                  "H::fire_while", "H::fire_vec", "H::fire_direct"] {
+            let f = fn_entry(&v, n);
+            assert_eq!(effs(f), vec!["Unknown".to_string()],
+                       "`{n}` invokes a caller-installed callback; silence is a purity claim:\n{v:#}");
+            assert!(f.get("unknownWhy").is_some(), "`{n}` must say WHY it is Unknown:\n{v:#}");
+        }
+    }
+
+    /// R177 — the same alias in a PARAMETER's container, in a `let` annotation, and as a fn's RETURN
+    /// type. The return position is R161's own stated residual ("Pass A has no completed alias index")
+    /// and R181's `via_ret`; the pre-seed pass closes it for a same-file alias. The DOUBLE alias
+    /// (`type Cb2 = Cb`) is R181's `via_b`, closed by the same pre-seed running to a fixpoint.
+    #[test]
+    fn a_callable_alias_discloses_through_a_param_a_let_and_a_return() {
+        let v = scan_src_to_json("r177pos", "\
+            pub type Cb = Box<dyn Fn()>;\n\
+            pub type Cb2 = Cb;\n\
+            pub fn via_param(cb: &Option<Cb>) { if let Some(c) = cb { c() } }\n\
+            pub fn via_let(cb: &Option<Cb>) { let o: &Option<Cb> = cb; if let Some(c) = o { c() } }\n\
+            pub fn via_double(cb: &Option<Cb2>) { if let Some(c) = cb { c() } }\n\
+            pub fn make() -> Cb { Box::new(|| {}) }\n\
+            pub fn via_ret() { let g = make(); g() }\n");
+        for n in ["via_param", "via_let", "via_double", "via_ret"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Unknown".to_string()],
+                       "`{n}` reaches an opaque callback through a `type NAME = <callable>`:\n{v:#}");
+        }
+    }
+
+    /// R177 — DECLARATION ORDER, which is the only thing `seed_callable_aliases` buys and therefore the
+    /// only thing that can protect it. `collect_decls` both builds and consumes `callable_aliases` in
+    /// source order, so an alias written BELOW the struct that uses it (and a CHAIN written in reverse)
+    /// was invisible to the field/return indexes. Every other R177 test here happens to declare the
+    /// alias first — measured by reverting the pre-pass and watching them all stay green, which is what
+    /// this test exists for.
+    #[test]
+    fn a_callable_alias_declared_after_its_use_is_still_seen() {
+        let v = scan_src_to_json("r177order", "\
+            pub struct H { pub cb: Option<Cb2> }\n\
+            impl H { pub fn fire(&self) { if let Some(c) = &self.cb { c() } } }\n\
+            pub fn make() -> Cb2 { Box::new(|| {}) }\n\
+            pub fn via_ret() { let g = make(); g() }\n\
+            pub type Cb2 = Cb;\n\
+            pub type Cb = Box<dyn Fn()>;\n");
+        for n in ["H::fire", "via_ret"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Unknown".to_string()],
+                       "`{n}` uses an alias CHAIN declared below it and in reverse order; source order \
+                        is not a property of the program:\n{v:#}");
+        }
+    }
+
+    /// R177 CONTROL, and the regression this fix ACTUALLY CAUSED before the guard existed.
+    /// `callable_aliases` is keyed by LEAF, so `mod a { type H = Box<dyn Fn(&str)> }` beside
+    /// `mod b { struct H; struct S { hs: Vec<H> } }` gave `S::hs` the synthetic `["Fn"]` element leaves
+    /// — and the dispatch route DISPLACED the concrete `b::H` typing, taking `for h in &self.hs {
+    /// h.run(p) }` from `["Fs"]` on published 0.34.0 to ABSENT. Measured on an executed fixture, not
+    /// reasoned about. `callable_hedge_only` is what keeps both facts; delete it and this goes red.
+    #[test]
+    fn ctrl_a_callable_alias_leaf_does_not_displace_a_same_named_types_element_typing() {
+        let v = scan_src_to_json("r177collide", "\
+            pub mod a { pub type H = Box<dyn Fn(&str)>; pub fn use_it(f: H) { f(\"x\") } }\n\
+            pub mod b {\n\
+                pub struct H;\n\
+                impl H { pub fn run(&self, p: &str) { let _ = std::fs::write(p, \"x\"); } }\n\
+                pub struct S { pub hs: Vec<H> }\n\
+                impl S {\n\
+                    pub fn go_vec(&self, p: &str) { for h in &self.hs { h.run(p) } }\n\
+                    pub fn go_iter(&self, p: &str) { self.hs.iter().for_each(|h| h.run(p)) }\n\
+                    pub fn go_idx(&self, p: &str) { self.hs[0].run(p) }\n\
+                }\n\
+            }\n");
+        for n in ["b::S::go_vec", "b::S::go_iter", "b::S::go_idx"] {
+            assert_eq!(effs(fn_entry(&v, n)), vec!["Fs".to_string()],
+                       "`{n}` iterates CONCRETE `b::H` values; an unrelated module's same-named callable \
+                        alias must not withdraw the edge:\n{v:#}");
+        }
+        assert_eq!(effs(fn_entry(&v, "a::use_it")), vec!["Unknown".to_string()],
+                   "…and the alias's own callable position must still disclose:\n{v:#}");
+    }
+
+    /// R177 CONTROL — the OVER-CHARGE direction. The synthetic `"Fn"` leaf names no local trait, so it
+    /// can never contribute a concrete effect; a pure function holding a container of a NON-callable
+    /// alias must stay absent. Reachable: `CANDOR_ALIAS_DEBUG=1` prints no `R177ELEMALIAS` for it, and
+    /// the callable sibling in the same fixture proves the branch is live in this file.
+    #[test]
+    fn ctrl_a_non_callable_alias_container_gains_nothing() {
+        let v = scan_src_to_json("r177nonfn", "\
+            pub struct Plain;\n\
+            pub type Al = Plain;\n\
+            pub type Cb = Box<dyn Fn()>;\n\
+            pub struct H { pub a: Option<Al>, pub c: Option<Cb> }\n\
+            impl H {\n\
+                pub fn touch_plain(&self) -> bool { self.a.is_some() }\n\
+                pub fn fire(&self) { if let Some(c) = &self.c { c() } }\n\
+            }\n");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "H::touch_plain"),
+                "`Option<Plain>` is not a callback; `touch_plain` performs nothing:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "H::fire")), vec!["Unknown".to_string()],
+                   "the callable sibling proves the new branch is live in this file:\n{v:#}");
+    }
+
+    /// R177 RESIDUAL, stated rather than assumed, and the claim was CHECKED by reverting rather than
+    /// reasoned about. The Pass-A indexes (`field_elem_trait`, the return sentinel) are built per FILE
+    /// and cached per file, so an alias declared in ANOTHER file is not visible to them — `types.rs`
+    /// holding `pub type Cb` and `holder.rs` holding the struct stays silent at the FIELD position.
+    /// Widening that would mean invalidating every file's cache entry whenever any file's aliases
+    /// change.
+    ///
+    /// The PARAMETER position is answered, because `seed_elem_of` runs in Pass B against the MERGED
+    /// index — and that is a gain of this fix, not something R161 already had: R161 put `cb` itself in
+    /// `fn_typed_vars` (so `cb()` disclosed), but the name bound by `if let Some(c) = cb` came from
+    /// `elem_trait_of`, which had no answer for an alias payload. Reverting the new arm makes the second
+    /// assertion here fail, which is how that was established.
+    #[test]
+    fn residual_a_cross_file_callable_alias_is_not_seen_by_the_field_index() {
+        let v = scan_crate_to_json("r177xfile", &[
+            ("src/lib.rs", "pub mod types;\npub mod holder;\n"),
+            ("src/types.rs", "pub type Cb = Box<dyn Fn()>;\n"),
+            ("src/holder.rs", "\
+                use crate::types::Cb;\n\
+                pub struct H { pub cb: Option<Cb> }\n\
+                impl H { pub fn fire(&self) { if let Some(c) = &self.cb { c() } } }\n\
+                pub fn via_param(cb: &Option<Cb>) { if let Some(c) = cb { c() } }\n"),
+        ]);
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "holder::H::fire"),
+                "RESIDUAL, not a guarantee: a cross-FILE alias is invisible to the per-file field \
+                 index, so this really is a silent under-report:\n{v:#}");
+        assert_eq!(effs(fn_entry(&v, "holder::via_param")), vec!["Unknown".to_string()],
+                   "the PARAMETER position is resolved in Pass B against the MERGED alias index, so \
+                    the unwrap binder inside it does see a cross-file alias:\n{v:#}");
+    }
+
     // ================================ SOUNDNESS R175 ================================
     // R160 binds `Self` for the length of a FILE-LEVEL impl block. An impl nested INSIDE a method body
     // is not a file-level item — `CallCollector` walks it as part of the enclosing method's body — so

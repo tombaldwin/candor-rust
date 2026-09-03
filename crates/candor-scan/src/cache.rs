@@ -233,6 +233,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut blanket_methods = HashMap::new();
     let mut callable_statics = std::collections::HashSet::new();
     let mut callable_aliases = std::collections::HashSet::new();
+    // R177 — this file's `type NAME = <callable>` aliases BEFORE the walk that consumes them. See
+    // `seed_callable_aliases` for why it is a separate pass and why its boundary is one file.
+    crate::decls::seed_callable_aliases(items, include_tests, &mut callable_aliases);
     collect_decls(items, include_tests, &mut uses, &mut fields, &mut field_elem, &mut field_elem_trait, &mut rets,
                   &mut enum_tmp, &mut enum_variant_traits, &mut trait_impls, &mut trait_decls, &mut trait_fields, &mut prim_aliases,
                   &mut extern_fns, &mut drop_types, &mut deref_target, &mut lazy_statics, &mut const_strings, &mut local_macros, &mut blanket_methods, &mut callable_statics, &mut callable_aliases);

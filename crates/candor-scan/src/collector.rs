@@ -1347,6 +1347,22 @@ impl<'a> CallCollector<'a> {
             self.uses = u;
         }
     }
+    /// SOUNDNESS R177 — is this leaf set ONLY the synthetic callable marker?
+    ///
+    /// `"Fn"` is a HEDGE, not a type. It matches no local trait, so the dispatch route can resolve
+    /// nothing through it, while a CONCRETE element type can — and R177 made the two collide for the
+    /// first time: `callable_aliases` is keyed by LEAF, so a `mod a { type H = Box<dyn Fn(&str)> }`
+    /// beside a `mod b { struct H; struct S { hs: Vec<H> } }` gave `S`'s field the `["Fn"]` leaves and
+    /// the dispatch route then DISPLACED the concrete `b::H` element typing: `for h in &self.hs {
+    /// h.run(p) }` went from `["Fs"]` on published 0.34.0 to ABSENT. Measured on an executed fixture
+    /// before this guard existed, which is why it exists.
+    ///
+    /// So where a concrete element type is also available, the hedge does not displace it: the binder
+    /// takes the concrete route AND keeps `fn_typed_vars`, so `h.run()` resolves and `h()` still
+    /// discloses `Unknown`. Both facts, neither traded for the other.
+    fn callable_hedge_only(leaves: &[String]) -> bool {
+        leaves.len() == 1 && leaves[0] == "Fn"
+    }
     fn leaves_are_callable(leaves: &[String]) -> bool {
         crate::lang::leaves_are_callable(leaves)
     }
@@ -2491,7 +2507,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             if Self::leaves_are_callable(&elem_leaves) {
                                 self.fn_typed_vars.insert(name.clone());
                             }
-                            self.scoped_binding(&name, Bound::Traits(elem_leaves.clone()), |s| s.visit_expr(&cl.body));
+                            // R177 — same rule as the for-loop binder: the hedge never displaces a
+                            // concrete element type (`xs.iter().for_each(|h| h.run())`).
+                            if Self::callable_hedge_only(&elem_leaves) && elem_ty.is_some() {
+                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    eprintln!("R177HEDGEKEEP closure {name} : {elem_ty:?}");
+                                }
+                                self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
+                            } else {
+                                self.scoped_binding(&name, Bound::Traits(elem_leaves.clone()), |s| s.visit_expr(&cl.body));
+                            }
                         } else {
                             self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
                         }
@@ -2674,7 +2699,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if Self::leaves_are_callable(&leaves) {
                     self.fn_typed_vars.insert(name.clone());
                 }
-                self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.body));
+                // R177 — the synthetic callable hedge does not displace a concrete element type; see
+                // `callable_hedge_only`. Both the hedge and the concrete typing are installed.
+                if Self::callable_hedge_only(&leaves) && elem.is_some() {
+                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        eprintln!("R177HEDGEKEEP for-loop {name} : {elem:?}");
+                    }
+                    self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
+                } else {
+                    self.scoped_binding(&name, Bound::Traits(leaves), |s| s.visit_block(&node.body));
+                }
             } else {
                 self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
             }
@@ -3120,7 +3154,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // new resolution path. Cleared first, so an annotation that is NOT a dispatch container
                 // cannot leave a previous binding's leaves standing (the stale-rebind defect of `71c2495`).
                 self.elem_trait_of.remove(&id.ident.to_string());
-                let elem_leaves = elem_trait_leaves(&pt.ty, &self.generic_bounds);
+                let elem_leaves = elem_trait_leaves(&pt.ty, &self.generic_bounds, self.callable_aliases);
                 if !elem_leaves.is_empty() {
                     self.elem_trait_of.insert(id.ident.to_string(), elem_leaves);
                 }
