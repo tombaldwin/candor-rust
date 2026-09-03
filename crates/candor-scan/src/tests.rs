@@ -234,7 +234,7 @@
         let fet = FieldElemTraitIndex::new();
         let mut c = CallCollector {
             modpath: String::new(),
-            uses: &uses,
+            uses: std::borrow::Cow::Borrowed(&uses),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -284,7 +284,7 @@
             syn::parse_str("{ client.get(url).send(); self.http.execute(req); }").unwrap();
         let mut c = CallCollector {
             modpath: String::new(),
-            uses: &uses,
+            uses: std::borrow::Cow::Borrowed(&uses),
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -612,7 +612,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let consts = std::collections::HashMap::new();
         let macros = std::collections::HashMap::new();
         let mut c = CallCollector {
-            modpath: String::new(), uses: &uses, vars: HashMap::new(), trait_vars: HashMap::new(),
+            modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -4980,7 +4980,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             vars.insert("self".to_string(), "App".to_string());
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: &uses,
+                uses: std::borrow::Cow::Borrowed(&uses),
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
@@ -5037,7 +5037,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str("{ it.next(); }").unwrap();
             let mut c = CallCollector {
             modpath: String::new(),
-                uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                 fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                 calls: Vec::new(),
@@ -5061,7 +5061,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
                 let blk: syn::Block = syn::parse_str(src).unwrap();
                 let mut c = CallCollector {
             modpath: String::new(),
-                    uses: &uses, vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
+                    uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig),
                     fields: &fields, trait_fields: &tf, trait_impls: &ti2, local_traits: &td,
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
                     calls: Vec::new(),
@@ -5091,7 +5091,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             syn::parse_str("{ let p = create_pool()?; p.fetch_one(q); }").unwrap();
         let mut c = CallCollector {
             modpath: String::new(),
-            uses: &uses,
+            uses: std::borrow::Cow::Borrowed(&uses),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -5127,7 +5127,7 @@ impl W { pub fn act(&self) { self.doit(); } pub fn dup(&self) { let _ = self.clo
             let blk: syn::Block = syn::parse_str(src).unwrap();
             let mut cc = CallCollector {
             modpath: String::new(),
-                uses: &uses,
+                uses: std::borrow::Cow::Borrowed(&uses),
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), trait_quals: Default::default(), trait_quals_by_param: Default::default(),
@@ -13736,7 +13736,7 @@ pub fn go() {{ imp::doit(); }}
         let consts = std::collections::HashMap::new();
         let macros = std::collections::HashMap::new();
         let mut c = CallCollector {
-            modpath: String::new(), uses: &uses, vars: HashMap::new(), trait_vars: HashMap::new(),
+            modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(),
             fields: &fields, trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -13954,6 +13954,171 @@ pub fn go() {{ imp::doit(); }}
         for absent in ["K::read_const", "S::mk"] {
             assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != absent),
                     "`{absent}` performs nothing — an associated const and an enum ctor are not calls:\n{v:#}");
+        }
+    }
+
+    // ================================ SOUNDNESS R175 ================================
+    // R160 binds `Self` for the length of a FILE-LEVEL impl block. An impl nested INSIDE a method body
+    // is not a file-level item — `CallCollector` walks it as part of the enclosing method's body — so
+    // `Self` there still named the OUTER impl's type and the nested `Self::eff()` was charged to the
+    // outer type's same-named method. A fabrication introduced by R160; published 0.34.0 is absent.
+
+    /// R175, the trigger. FABRICATION direction: `A::outer` reaches only the nested `N::eff`, which is
+    /// pure, so it must not appear at all. FAILS on the pre-fix binary, where `Self::eff` expanded
+    /// through the enclosing `A` binding and `A::outer` read `["Fs"]`.
+    #[test]
+    fn the_self_binding_does_not_leak_into_an_impl_nested_in_a_body() {
+        let v = scan_src_to_json("r175nested", "\
+            pub struct A;\n\
+            impl A {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/a\"); 1 }\n\
+                pub fn via() -> usize { Self::eff() }\n\
+                pub fn outer() -> usize { struct N; impl N { fn eff() -> usize { 2 } fn go() -> usize { Self::eff() } } N::go() }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "A::via")), vec!["Fs".to_string()],
+                   "the ordinary R160 forwarder must be unaffected");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "A::outer"),
+                "`Self::eff` inside `impl N` is `N::eff`, which is pure — charging A's Fs is a fabrication:\n{v:#}");
+    }
+
+    /// R175 — the same leak through a nested TRAIT's default body, and through a nested impl reached
+    /// via a CLOSURE and via a nested `fn`. All three are the fabrication direction; all three read
+    /// `["Fs"]` pre-fix.
+    #[test]
+    fn the_self_binding_does_not_leak_into_a_nested_trait_closure_or_fn() {
+        let v = scan_src_to_json("r175more", "\
+            pub struct A;\n\
+            impl A {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/a\"); 1 }\n\
+                pub fn in_trait() -> usize { trait T { fn eff() -> usize { 7 } fn go() -> usize { Self::eff() } } struct Z; impl T for Z {} <Z as T>::go() }\n\
+                pub fn in_closure() -> usize { let f = || { struct C; impl C { fn eff() -> usize { 5 } fn go() -> usize { Self::eff() } } C::go() }; f() }\n\
+                pub fn in_fn() -> usize { fn inner() -> usize { struct D; impl D { fn eff() -> usize { 6 } fn go() -> usize { Self::eff() } } D::go() } inner() }\n\
+            }\n");
+        for absent in ["A::in_trait", "A::in_closure", "A::in_fn"] {
+            assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != absent),
+                    "`{absent}` reaches only a pure nested `Self::eff`:\n{v:#}");
+        }
+    }
+
+    /// R175, the UNDER-REPORT direction — the fixture that must STILL be charged. A nested impl of a
+    /// FILE-LEVEL type resolves `Self::` to that type, whose method lives OUTSIDE this body, so the
+    /// rebinding is a gain and not only a removal. Pre-fix this resolved to `A::eff` (the wrong target,
+    /// which happened to be effectful here too) — the assertion is on the EDGE, which tells them apart.
+    #[test]
+    fn a_nested_impl_binds_self_to_its_own_type_and_still_reaches_it() {
+        let v = scan_src_to_json("r175gain", "\
+            pub struct W;\n\
+            impl W { pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/w\"); 1 } }\n\
+            pub struct A;\n\
+            impl A {\n\
+                pub fn eff() -> usize { let _ = std::env::var(\"A\"); 2 }\n\
+                pub fn outer() -> usize { impl W { fn go2() -> usize { Self::eff() } } W::go2() }\n\
+            }\n");
+        let outer = fn_entry(&v, "A::outer");
+        assert_eq!(effs(outer), vec!["Fs".to_string()],
+                   "`Self::eff` inside `impl W` is `W::eff` (Fs), not `A::eff` (Env):\n{v:#}");
+    }
+
+    /// R175 — the RESTORE path. A `Self::` call written AFTER a nested impl in the same body must still
+    /// resolve to the enclosing type; a rebinding that is not undone loses it silently, which is the
+    /// direction a fabrication fix is most likely to fail in.
+    #[test]
+    fn the_outer_self_binding_is_restored_after_a_nested_impl() {
+        let v = scan_src_to_json("r175restore", "\
+            pub struct A;\n\
+            impl A {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/a\"); 1 }\n\
+                pub fn after() -> usize { struct P; impl P { fn q() -> usize { 4 } } let _ = P::q(); Self::eff() }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "A::after")), vec!["Fs".to_string()],
+                   "the enclosing `Self` binding must survive a nested impl:\n{v:#}");
+    }
+
+    /// R175 — a nested impl for a NON-NOMINAL self type (`impl Tr for &[u8]`) has no type to bind
+    /// `Self` to, so the binding is REMOVED rather than left naming the enclosing type. Fabrication
+    /// direction: pre-fix `Self::probe` resolved to the effectful `C2::probe`; the truth is the trait's
+    /// own pure default. An unresolved path is the safe direction where a wrong one is not.
+    #[test]
+    fn a_nested_impl_for_a_non_nominal_type_unbinds_self() {
+        let v = scan_src_to_json("r175nonnominal", "\
+            pub trait Sl { fn probe() -> usize { 14 } fn go() -> usize { 11 } }\n\
+            pub struct C2;\n\
+            impl C2 {\n\
+                pub fn probe() -> usize { let _ = std::fs::read_to_string(\"/p\"); 13 }\n\
+                pub fn outer() -> usize { impl Sl for &[u8] { fn go() -> usize { Self::probe() } } <&[u8] as Sl>::go() }\n\
+            }\n");
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "C2::outer"),
+                "`Self` inside `impl Sl for &[u8]` is not `C2`; charging `C2::probe`'s Fs is a fabrication:\n{v:#}");
+    }
+
+    /// R175 — the GENERIC impl the panel left unexamined. `impl<T> Fo<T>`'s own `Self::` forwarder must
+    /// keep resolving (R160's gain), and a nested impl inside one of its methods must not inherit it.
+    #[test]
+    fn a_generic_impl_keeps_its_self_binding_and_a_nested_impl_inside_it_does_not() {
+        let v = scan_src_to_json("r175generic", "\
+            pub struct Fo<T>(pub T);\n\
+            impl<T> Fo<T> {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/f\"); 9 }\n\
+                pub fn via() -> usize { Self::eff() }\n\
+                pub fn outer() -> usize { struct G; impl G { fn eff() -> usize { 10 } fn go() -> usize { Self::eff() } } G::go() }\n\
+            }\n");
+        assert_eq!(effs(fn_entry(&v, "Fo::via")), vec!["Fs".to_string()]);
+        assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != "Fo::outer"),
+                "the nested `impl G`'s `Self::eff` is pure:\n{v:#}");
+    }
+
+    /// R175 — THE COST, from the corpus A/B's own removal set, kept as a test because the audit of a
+    /// removal is the claim under test (brief §E1). serde_with's `impl DeserializeAs for Iso8601`
+    /// contains `struct Helper; impl Visitor for Helper { fn visit_str(..) { Self::Value::parse(..) } }`.
+    /// On the 0.35.0 CANDIDATE `Self` was the outer `Iso8601`, so `Self::Value::parse` expanded through
+    /// the file's `use ::time_0_3::…::Iso8601` and the row carried `invisible: ["time_0_3"]`. After this
+    /// fix `Self` is `Helper`, a BODY-LOCAL item, so the path becomes `<body-item>Helper::…` and the
+    /// κ-ledger entry goes with it — three rows removed and two more losing that key across 1,504 crates.
+    ///
+    /// That is a real disclosure cost and it is stated as one. It is accepted because the answer after
+    /// the fix is EXACTLY the answer the explicitly-written spelling gives, which is the invariant R160
+    /// and R175 both exist to hold: the two arms below differ in one token and must not differ in the
+    /// report. Published 0.34.0 has no row for either. Charging a dependency because a DIFFERENT type's
+    /// import happened to be in scope is not a disclosure, it is a coincidence.
+    #[test]
+    fn a_nested_impls_self_path_answers_exactly_as_the_written_type_name_does() {
+        let v = scan_src_to_json("r175parity", "\
+            pub mod ext { pub struct Iso; impl Iso { pub fn parse() -> usize { let _ = std::fs::read_to_string(\"/x\"); 1 } } }\n\
+            use ext::Iso;\n\
+            pub trait De { fn de() -> usize; fn de2() -> usize; }\n\
+            impl De for Iso {\n\
+                fn de() -> usize { struct H; impl H { fn go() -> usize { Self::parse() } fn parse() -> usize { 0 } } H::go() }\n\
+                fn de2() -> usize { struct H2; impl H2 { fn go() -> usize { H2::parse() } fn parse() -> usize { 0 } } H2::go() }\n\
+            }\n");
+        let present: Vec<&str> = v["functions"].as_array().unwrap().iter()
+            .filter_map(|f| f["fn"].as_str()).filter(|n| n.starts_with("Iso::de")).collect();
+        assert!(present.is_empty(),
+                "`Self::parse` and `H2::parse` both name a body-local pure fn; neither may inherit \
+                 `ext::Iso::parse`'s Fs:\n{v:#}");
+    }
+
+    /// R175 — MEASURED, NOT FIXED, and recorded so the next reader does not have to re-measure it: a
+    /// crate-local `macro_rules!` expanding to a CALL contributes nothing in any position (tail
+    /// expression, `let` initializer, statement), whether the call is written `Self::eff()` or
+    /// `B::eff()`, and whether the macro is declared at file level or inside the body. So this is NOT a
+    /// `Self` gap and NOT a regression — published 0.34.0, the 0.35.0 candidate and this fix are
+    /// identical on it. `local_macros` exists for `count_ident` (R139), not for call collection. Stated
+    /// as the silent under-report it is; a fix belongs with its own row and its own A/B.
+    #[test]
+    fn residual_a_local_macro_expanding_to_a_call_is_silent_in_every_position() {
+        let v = scan_src_to_json("r175macro", "\
+            macro_rules! fire { () => { B::eff() } }\n\
+            pub struct B;\n\
+            impl B {\n\
+                pub fn eff() -> usize { let _ = std::fs::read_to_string(\"/b\"); 8 }\n\
+                pub fn tail() -> usize { fire!() }\n\
+                pub fn in_let() -> usize { let x = fire!(); x }\n\
+                pub fn in_stmt() -> usize { fire!(); 0 }\n\
+                pub fn self_spelling() -> usize { macro_rules! m { () => { Self::eff() } } m!() }\n\
+            }\n");
+        for absent in ["B::tail", "B::in_let", "B::in_stmt", "B::self_spelling"] {
+            assert!(v["functions"].as_array().unwrap().iter().all(|f| f["fn"] != absent),
+                    "RESIDUAL, not a guarantee: `{absent}` really does perform Fs and is silent:\n{v:#}");
         }
     }
 

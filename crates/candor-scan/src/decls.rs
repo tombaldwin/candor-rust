@@ -1480,7 +1480,8 @@ pub(crate) fn fninfo(
     let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
-        uses,
+        // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.
+        uses: std::borrow::Cow::Borrowed(uses),
         vars,
         trait_vars,
         // The `dyn`-spelled (type-ERASED) subset of the same bounds — the imported-trait CHA (R4) fires

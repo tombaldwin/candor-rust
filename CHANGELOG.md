@@ -54,6 +54,19 @@ after upgrading; review policies and regenerate baselines with the new build.
   platform module's effects. Explicit import beats glob, as in Rust. The union exposed R170 (a module
   whose `pub use` is inside `cfg_if!` cannot contest a key it owns), guarded for the keys the union
   newly admits; the universal guard is open (`c3e1660`).
+- **⚠ SOUNDNESS R175 (fabrication introduced by R160, caught before release) — an `impl` NESTED IN A
+  METHOD BODY now rebinds `Self` to its own type.** R160 bound `Self` for the length of each FILE-LEVEL
+  `impl`; a `fn outer() { struct N; impl N { fn go() { Self::eff() } } }` is walked as part of `outer`'s
+  body, where `Self` still named the OUTER type — so `A::outer` was charged `A::eff`'s `Fs` over a
+  nested `N::eff` that is pure (published 0.34.0 has no row for it at all). The binding is restored on
+  exit, a nested `trait`'s default body gets the same treatment, and a non-nominal `impl Trait for
+  &[u8]` UNBINDS rather than inheriting. 1,504-crate A/B against the 0.35.0 candidate: 3 rows removed,
+  0 effects lost — all three are serde_with's `impl Visitor for Helper { .. Self::Value::parse(..) }`,
+  whose `invisible: ["time_0_3"]` came from expanding `Self` through the OUTER type's import; the
+  answer now matches the explicitly-written spelling exactly, which is the invariant. Also removes 8
+  fabricated call edges (hashlink's `Default for …Visitor { fn default() { Self::new() } }` was edging
+  to `LinkedHashMap::new`). MEASURED AND NOT FIXED: a crate-local `macro_rules!` expanding to a call is
+  silent in every position, unchanged in all three arms.
 - **⚠ SOUNDNESS R139 (cardinal sin, introduced by R119's own fix) — CLOSED: a crate-local
   `macro_rules!` TEMPLATE now counts toward the body-item shadow, so a nested block's item can no
   longer rebind a name the macro expansion uses.** R119 promotes a nested block's item to a
