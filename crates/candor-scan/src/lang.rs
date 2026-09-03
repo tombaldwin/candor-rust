@@ -2451,10 +2451,14 @@ pub(crate) fn escaping_ctor_leaves<'a>(
     uses: &'a HashMap<String, String>,
     fields: &'a FieldIndex,
     returns: &'a ReturnIndex,
+    // SOUNDNESS R203 — the crate-wide `macro_rules!` NAME -> arm-tokens index the collector already
+    // builds for R48. Read ONLY inside a `?`'s operand, and only to decide what a macro CONSTRUCTS; the
+    // expansion never becomes a construction SITE (see `note_local_macro_template_leaves`).
+    local_macros: &'a HashMap<String, String>,
 ) -> Escapes {
     // Every binding/assignment/method-call site in the body, gathered once; each root below re-reads
     // this table (running its own copy of the fixpoint), never re-walks the tree.
-    let mut sites = EscapeSites::new(uses, fields, returns);
+    let mut sites = EscapeSites::new(uses, fields, returns, local_macros);
     sites.walk_block(block, true);
     // A body with NO terminal exit (a `()`-returning fn with no trailing value — `store` below) still
     // has to run the fixpoint: the field/index/deref `assigns` route is UNCONDITIONAL (not gated on any
@@ -2539,8 +2543,15 @@ pub(crate) fn escaping_ctor_leaves<'a>(
                     // R199's branch is the MACRO half of the same term, and it is disjoint from what
                     // R194 could ever have printed: before R199 a macro-borne leaf was not in any
                     // `interior`, so this line firing IS the new code changing the answer.
+                    // ORDER MATTERS AND IS THE POINT. R203's walk deliberately re-covers the tokens
+                    // R199 already walked (it goes deeper — into the blocks `for_each_child_expr` stops
+                    // at), so a leaf can be inserted by both. Asking R199's question FIRST keeps
+                    // `R199MACRO` a count of ITS branch across builds, and leaves `R203OPAQUE` counting
+                    // exactly the leaves NO earlier mechanism could reach — the number §E1 asks for.
                     if sites.macro_interior_leaves.contains(l) {
                         eprintln!("R199MACRO {l}");
+                    } else if sites.opaque_interior_leaves.contains(l) {
+                        eprintln!("R203OPAQUE {l}");
                     } else {
                         eprintln!("R194OPERAND {l}");
                     }
@@ -2808,6 +2819,18 @@ struct EscapeSites<'a> {
     /// this change, and `R199MACRO` adds 10 hits in 9 crates on top — a leaf counted here would have
     /// been subtracted there.
     macro_interior_leaves: std::collections::HashSet<String>,
+    /// SOUNDNESS R203 — the crate-local `macro_rules!` index (R48's `local_macros`), consulted ONLY
+    /// while some `?`'s operand is open. A macro whose TEMPLATE constructs is invisible to the token
+    /// re-parse above — the tokens are the INVOCATION's, and `mk_h!("a")` carries no construction at
+    /// all — so without this the leaf gets no `interior` entry from the operand and, if the same leaf
+    /// is also built somewhere AFTER the `?`, it takes that site's `first_ctor_seq` and survives.
+    local_macros: &'a HashMap<String, String>,
+    /// R203 — local macros being expanded on this path, the same recursion guard R48 uses.
+    macro_expanding: std::collections::HashSet<String>,
+    /// R203 — the leaves put into some `?`'s `interior` by a path that could not address-key the
+    /// construction at all (a `macro_rules!` template, a statement-only token stream, a NESTED macro).
+    /// Read only by the §E1 counter, so `R203OPAQUE` counts ITS branch and not R194's or R199's.
+    opaque_interior_leaves: std::collections::HashSet<String>,
     /// R187 — how many CLOSURE bodies enclose the expression being walked. A `?` inside a closure is an
     /// exit of the CLOSURE, not of this function, so the loop rewrite must not move it: leaving it where
     /// R173 put it keeps that (pre-existing, over-charging) treatment exactly as shipped.
@@ -2841,11 +2864,15 @@ impl<'a> EscapeSites<'a> {
         uses: &'a HashMap<String, String>,
         fields: &'a FieldIndex,
         returns: &'a ReturnIndex,
+        local_macros: &'a HashMap<String, String>,
     ) -> Self {
         EscapeSites {
             uses,
             fields,
             returns,
+            local_macros,
+            macro_expanding: std::collections::HashSet::new(),
+            opaque_interior_leaves: std::collections::HashSet::new(),
             ctor_sites: HashMap::new(),
             macro_ctor_leaves: std::collections::HashSet::new(),
             skip_sites: std::collections::HashSet::new(),
@@ -2894,9 +2921,6 @@ impl<'a> EscapeSites<'a> {
     /// walks the whole parsed subtree, deliberately wider than `mark_escape`'s value-position descent:
     /// over-recording here only widens the set that keeps the SHIPPED answer.
     fn note_macro_ctor_leaves(&mut self, m: &syn::ExprMacro, host: &syn::Expr) {
-        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-        let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) else { return };
-        let base = m as *const syn::ExprMacro as usize;
         // SOUNDNESS R199 — SPINE MEMBERSHIP IS DECIDED IN TWO STEPS, because a macro's contents are
         // parsed out of TOKENS into a FRESH tree whose addresses exist in no spine set and never can:
         // `value_spine_addrs` walks the real body only.
@@ -2913,6 +2937,28 @@ impl<'a> EscapeSites<'a> {
             let addr = host as *const syn::Expr as usize;
             self.open_tries.iter().map(|(_, spine)| spine.contains(&addr)).collect()
         };
+        // SOUNDNESS R203 — TWO THINGS THE TOKEN RE-PARSE BELOW CANNOT SEE, and both of them lose a real
+        // drop when the same LEAF is also built somewhere AFTER the `?`: that other site supplies a
+        // `first_ctor_seq` greater than the `?`, so R173's positional filter keeps the leaf, and nothing
+        // here ever put it in `interior`.
+        //   (a) a crate-local `macro_rules!` whose TEMPLATE constructs. `mk_h!("a")`'s tokens are `"a"`
+        //       — there is no construction in them at all; the construction is in the DEFINITION, which
+        //       only the collector's R48 index has. So ask that authority rather than guessing.
+        //   (b) tokens that are not an expression list — `stmts!(let x = H::new("a"); x)`. The `let`
+        //       makes `parse_terminated` fail and this method used to return, silently.
+        // Both are gated on an OPEN `?`: with none, there is no `interior` to write and no answer can
+        // change, so the extra parsing never runs over the vast majority of macro invocations.
+        if !self.open_tries.is_empty() {
+            self.note_local_macro_template(m, &on_spine);
+        }
+        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        let Ok(exprs) = syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) else {
+            if !self.open_tries.is_empty() {
+                self.note_opaque_stmt_tokens(&m.mac.tokens, &on_spine);
+            }
+            return;
+        };
+        let base = m as *const syn::ExprMacro as usize;
         let mut inner_spine = std::collections::HashSet::new();
         if on_spine.iter().any(|b| *b) {
             for e in &exprs {
@@ -2922,6 +2968,17 @@ impl<'a> EscapeSites<'a> {
         let mut n = 0usize;
         for e in &exprs {
             self.note_macro_site(e, base, &on_spine, &inner_spine, &mut n);
+        }
+        // SOUNDNESS R203 — `note_macro_site` walks with `for_each_child_expr`, which STOPS AT A BLOCK
+        // BOUNDARY, so `idm!({ out.push(H::new("a")); gen(n) })?` recorded nothing for the `H` inside the
+        // braces. On its own that is harmless (a leaf with no recorded position is charged); paired with
+        // a later VISIBLE `H::try_new(..)` it is the same silence as the template case. This second pass
+        // is interior-only over the same spine sets, so it adds no site and no ordinal — the ordinal
+        // numbering above must stay byte-identical to `macro_site_ordinals`, and this cannot touch it.
+        if !self.open_tries.is_empty() {
+            for e in &exprs {
+                self.note_opaque_expr(e, &on_spine, &inner_spine);
+            }
         }
     }
     /// The site-recording half of `macro_site_ordinals` — the SAME pre-order, the same stop at a
@@ -2938,6 +2995,16 @@ impl<'a> EscapeSites<'a> {
     ) {
         if let syn::Expr::Macro(_) = e {
             self.note_nested_macro_leaves(e);
+            // SOUNDNESS R203 — the line above records the nested macro's leaves for the SITE gate only.
+            // It records no `first_ctor_seq` and no `interior`, so `{ out.extend(vec![vec![H::new("a")]
+            // .pop().unwrap()]); gen(n) }?` lost the `H::drop` that really runs on the error exit as
+            // soon as a later `H::try_new(..)` supplied a `first_ctor_seq` past the `?`. The exemption
+            // test for the nested NODE is R199's two-step, one level in.
+            if !self.open_tries.is_empty() {
+                let node_exempt = inner_spine.contains(&(e as *const syn::Expr as usize));
+                let nested: Vec<bool> = on_spine.iter().map(|b| *b && node_exempt).collect();
+                self.note_opaque_macro(e, &nested);
+            }
             return;
         }
         // NUMBERED regardless (the ordinal must stay identical to `macro_site_ordinals`, which numbers
@@ -2994,6 +3061,194 @@ impl<'a> EscapeSites<'a> {
         for_each_child_expr(e, &mut |c| self.note_nested_macro_leaves(c));
     }
 
+    // ─── SOUNDNESS R203 ──────────────────────────────────────────────────────────────────────────
+    // A construction `lang.rs` cannot ADDRESS-KEY still has to reach the open `?`s' `interior`.
+    //
+    // R173 made the `?` veto positional and R194/R199 added `interior` for what the operand builds off
+    // its value spine. Both read a table keyed by the constructions the walk can SEE. Three shapes are
+    // invisible to it — a `macro_rules!` TEMPLATE (the construction is in the definition, not in the
+    // invocation's tokens), a token stream that is not an expression list, and a NESTED macro (where the
+    // ordinal walk deliberately stops) — and each of them, on its own, is harmless: a leaf with NO
+    // recorded position counts as live from the start and is charged. What makes them a CARDINAL SIN is
+    // the pair: build the leaf invisibly inside the operand AND visibly again after the `?`, and the
+    // visible site's `first_ctor_seq` carries the leaf past the filter while nothing put it in
+    // `interior`. `{ out.push(mk_h!("a")); gen(n) }?; let h = H::try_new(m, "b")?;` executed one
+    // in-frame `H::drop` and published 0.34.0 charged it; `e9cdd23` stopped.
+    //
+    // SAY WHICH DIRECTION THIS FAILS IN. Everything below writes ONLY `TryExit::interior`, and
+    // `interior` appears in exactly one place — a `retain` that can only REMOVE a leaf from the escaping
+    // set, i.e. charge a drop that was not charged. It never writes `first_ctor_seq`, `ctor_sites` or
+    // `macro_ctor_leaves`, each of which can LICENSE an escape. So the failure mode of an over-reaching
+    // walk here is an over-charge, never a new silence; the over-charge is what the corpus A/B and the
+    // six ABSENT controls measure. The exemptions are enumerated (the value spine, as everywhere else in
+    // R194) and every shape not enumerated stays charged — denylist, not allowlist.
+
+    /// R203 — the `interior` insertion, for a construction with no address the site tables can hold.
+    fn note_opaque_interior_leaf(&mut self, l: &str, on_spine: &[bool], exempt: bool) {
+        let (open, exits, marks) =
+            (&self.open_tries, &mut self.try_exits, &mut self.opaque_interior_leaves);
+        for ((idx, _), spined) in open.iter().zip(on_spine) {
+            if !(*spined && exempt) {
+                exits[*idx].interior.insert(l.to_string());
+                marks.insert(l.to_string());
+            }
+        }
+    }
+
+    /// R203 — a macro's tokens (or a `macro_rules!` template body) walked for CONSTRUCTIONS only.
+    /// `inner` is the value spine inside this parse, empty unless the macro node itself is on some open
+    /// `?`'s spine. Deliberately deeper than `for_each_child_expr`, which stops at a block boundary: a
+    /// macro that constructs almost always does it inside `{ .. }`, and a wider veto only charges more.
+    fn note_opaque_expr(
+        &mut self,
+        e: &syn::Expr,
+        on_spine: &[bool],
+        inner: &std::collections::HashSet<usize>,
+    ) {
+        if let syn::Expr::Macro(_) = e {
+            let node_exempt = inner.contains(&(e as *const syn::Expr as usize));
+            let nested: Vec<bool> = on_spine.iter().map(|b| *b && node_exempt).collect();
+            self.note_opaque_macro(e, &nested);
+            return;
+        }
+        if let Some(l) = ctor_leaf_of_expr(e, self.uses, self.fields, self.returns) {
+            let exempt = inner.contains(&(e as *const syn::Expr as usize));
+            self.note_opaque_interior_leaf(&l, on_spine, exempt);
+        }
+        match e {
+            // The callee PATH of a call is the constructor's own NAME, not a second construction —
+            // `skip_sites`' reason, applied by not descending into it (these addresses belong to a token
+            // tree that dies with this call, so they cannot go in the persistent set).
+            syn::Expr::Call(c) => c.args.iter().for_each(|a| self.note_opaque_expr(a, on_spine, inner)),
+            syn::Expr::Block(b) => self.note_opaque_block(&b.block, on_spine, inner),
+            syn::Expr::Unsafe(u) => self.note_opaque_block(&u.block, on_spine, inner),
+            syn::Expr::Async(a) => self.note_opaque_block(&a.block, on_spine, inner),
+            syn::Expr::TryBlock(t) => self.note_opaque_block(&t.block, on_spine, inner),
+            syn::Expr::Loop(l) => self.note_opaque_block(&l.body, on_spine, inner),
+            syn::Expr::ForLoop(f) => {
+                self.note_opaque_expr(&f.expr, on_spine, inner);
+                self.note_opaque_block(&f.body, on_spine, inner);
+            }
+            syn::Expr::While(w) => {
+                self.note_opaque_expr(&w.cond, on_spine, inner);
+                self.note_opaque_block(&w.body, on_spine, inner);
+            }
+            syn::Expr::If(i) => {
+                self.note_opaque_expr(&i.cond, on_spine, inner);
+                self.note_opaque_block(&i.then_branch, on_spine, inner);
+                if let Some((_, els)) = &i.else_branch {
+                    self.note_opaque_expr(els, on_spine, inner);
+                }
+            }
+            syn::Expr::Closure(c) => self.note_opaque_expr(&c.body, on_spine, inner),
+            syn::Expr::Const(c) => self.note_opaque_block(&c.block, on_spine, inner),
+            _ => for_each_child_expr(e, &mut |c| self.note_opaque_expr(c, on_spine, inner)),
+        }
+    }
+
+    /// R203 — the statement half of the walk above.
+    fn note_opaque_block(
+        &mut self,
+        b: &syn::Block,
+        on_spine: &[bool],
+        inner: &std::collections::HashSet<usize>,
+    ) {
+        for st in &b.stmts {
+            match st {
+                syn::Stmt::Local(l) => {
+                    if let Some(init) = &l.init {
+                        self.note_opaque_expr(&init.expr, on_spine, inner);
+                        if let Some((_, d)) = &init.diverge {
+                            self.note_opaque_expr(d, on_spine, inner);
+                        }
+                    }
+                }
+                syn::Stmt::Expr(e, _) => self.note_opaque_expr(e, on_spine, inner),
+                // A macro in STATEMENT position: its value is discarded, so nothing in it is exempt.
+                syn::Stmt::Macro(m) => self.note_opaque_stmt_tokens(&m.mac.tokens, on_spine),
+                syn::Stmt::Item(_) => {}
+            }
+        }
+    }
+
+    /// R203 — one macro invocation, walked for constructions: its INVOCATION tokens (as an expression
+    /// list, else as statements) and, for a crate-local `macro_rules!`, its DEFINITION template.
+    fn note_opaque_macro(&mut self, e: &syn::Expr, on_spine: &[bool]) {
+        let syn::Expr::Macro(m) = e else { return };
+        if self.open_tries.is_empty() {
+            return;
+        }
+        self.note_local_macro_template(m, on_spine);
+        let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        match syn::parse::Parser::parse2(parser, m.mac.tokens.clone()) {
+            Ok(exprs) => {
+                let mut inner = std::collections::HashSet::new();
+                if on_spine.iter().any(|b| *b) {
+                    for x in &exprs {
+                        value_spine_addrs(x, &mut inner);
+                    }
+                }
+                for x in &exprs {
+                    self.note_opaque_expr(x, on_spine, &inner);
+                }
+            }
+            Err(_) => self.note_opaque_stmt_tokens(&m.mac.tokens, on_spine),
+        }
+    }
+
+    /// R203(b) — tokens that are not an expression list at all. `syn` will still read them as a
+    /// STATEMENT sequence (`Block::parse_within`), which is what `stmts!(let x = H::new("a"); x)` is;
+    /// ask it rather than treating the macro as empty. NOTHING inside is exempt: a token stream we could
+    /// not read as an expression tells us nothing about which position carries the macro's VALUE, and
+    /// guessing one would be an exemption — the direction that loses drops.
+    fn note_opaque_stmt_tokens(&mut self, tokens: &proc_macro2::TokenStream, on_spine: &[bool]) {
+        let Ok(stmts) = syn::parse::Parser::parse2(syn::Block::parse_within, tokens.clone()) else {
+            return; // genuinely unreadable (`quote!{ #x }`, a `macro_rules!` arm list) — R203's residual
+        };
+        let b = syn::Block { brace_token: Default::default(), stmts };
+        self.note_opaque_block(&b, on_spine, &std::collections::HashSet::new());
+    }
+
+    /// R203(a) — a crate-local `macro_rules!` whose TEMPLATE constructs. ASK THE AUTHORITY: this is the
+    /// same index and the same single-arm rule the collector's R48 inline expansion uses, so the two
+    /// cannot drift about what `NAME!(..)` expands to. A MULTI-ARM macro is skipped for R48's own
+    /// measured reason — an invocation matches exactly one arm and a syntactic scan cannot tell which,
+    /// so walking every arm would charge a non-matching arm's construction — which leaves multi-arm
+    /// templates as this row's honest residual.
+    fn note_local_macro_template(&mut self, m: &syn::ExprMacro, on_spine: &[bool]) {
+        let name = path_to_string(&m.mac.path);
+        if name.contains("::") || self.macro_expanding.contains(&name) {
+            return;
+        }
+        let Some(body) = self.local_macros.get(&name).cloned() else { return };
+        let (arm_count, blocks) = crate::collector::macro_template_blocks(&body);
+        // SINGLE-ARM ONLY, WHICH IS R48'S RULE AND NOT A NEW ONE. R48 refuses a multi-arm template
+        // because an invocation matches exactly ONE arm and a syntactic scan cannot tell which, so
+        // walking every arm charges a NON-matching arm's contents; keeping the same rule here keeps ONE
+        // authority for "what does `NAME!(..)` expand to" instead of two that can drift.
+        // MEASURED, not assumed, because the direction differs and the trade is real: walking every arm
+        // instead CLOSES `r_multiarm_hole` (executed 1 in-frame drop, silent) and FABRICATES
+        // `c_multiarm_pure` (executed 0, charged) — both of them at published-0.34.0 parity, and the
+        // 1,504-crate registry A/B is byte-identical EITHER WAY, so the corpus cannot choose. The tie
+        // goes to the undivided authority, and the multi-arm shape is R203's stated residual with
+        // `r_multiarm_hole` left in the fixture naming it.
+        if arm_count != 1 || blocks.len() != 1 {
+            return;
+        }
+        // The template's VALUE is its tail expression, so when the invocation sits on a `?`'s spine the
+        // tail is on it too and only the tail is exempt — R199's step 2, over the definition instead of
+        // the invocation. Every statement of the template stays interior.
+        let mut inner = std::collections::HashSet::new();
+        if on_spine.iter().any(|x| *x) {
+            if let Some(t) = tail_expr_of(&blocks[0]) {
+                value_spine_addrs(t, &mut inner);
+            }
+        }
+        self.macro_expanding.insert(name.clone());
+        self.note_opaque_block(&blocks[0], on_spine, &inner);
+        self.macro_expanding.remove(&name);
+    }
+
     /// `tail` says whether this block's trailing expression is in RETURN position for the unit.
     fn walk_block(&mut self, b: &'a syn::Block, tail: bool) {
         for (i, st) in b.stmts.iter().enumerate() {
@@ -3021,7 +3276,20 @@ impl<'a> EscapeSites<'a> {
                     }
                     self.walk_expr(e);
                 }
-                syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+                // SOUNDNESS R203 — a macro in STATEMENT position is not an `Expr::Macro`, so the whole
+                // macro machinery above (`note_macro_ctor_leaves` and everything R199 added to it) never
+                // sees it: `{ push_h!(out, "a"); gen(n) }?` was silent for the same reason a
+                // `macro_rules!` template is, one spelling over. Its value is DISCARDED, so nothing in
+                // it is on any spine and everything it builds is interior. Interior only — never a site,
+                // never a `first_ctor_seq`, so this can only charge more.
+                syn::Stmt::Macro(m) => {
+                    if !self.open_tries.is_empty() {
+                        let on_spine = vec![false; self.open_tries.len()];
+                        let host = syn::Expr::Macro(syn::ExprMacro { attrs: Vec::new(), mac: m.mac.clone() });
+                        self.note_opaque_macro(&host, &on_spine);
+                    }
+                }
+                syn::Stmt::Item(_) => {}
             }
         }
     }

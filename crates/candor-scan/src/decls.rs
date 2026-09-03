@@ -1482,7 +1482,7 @@ pub(crate) fn fninfo(
     // Seed element types for COLLECTION params (`fn f(xs: &[Sender])` → `xs`'s element is `Sender`)
     // and bind single-ident elements of a TUPLE param (`fn f((s, _): (Sender, usize))` → `s`).
     let (elem_of, tuple_of, elem_trait_of, tuple_trait_of) = seed_elem_of(sig, &mut vars, sig_uses, elems.callable_aliases);
-    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns);
+    let escapes = crate::lang::escaping_ctor_leaves(block, uses, fields, returns, local_macros);
     let mut c = CallCollector {
         modpath: modpath.to_string(),
         // R175 — borrowed; only a nested `impl`/`trait` in this body ever makes it owned.
